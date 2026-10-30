@@ -2002,7 +2002,11 @@ impl Registry {
     /// their ends and renames, chan windows, the gateway thread. Runs on the
     /// drainer with no registry lock held, since each item takes its own.
     fn perform_tmux_work(&self, session: &Arc<Session>) {
-        for work in session.take_tmux_work() {
+        let work = session.take_tmux_work();
+        if !work.is_empty() {
+            tracing::debug!(session = %session.id, count = work.len(), "performing tmux work");
+        }
+        for work in work {
             match work {
                 tmux_connection::TmuxWork::AddPane { spec, sink } => {
                     let pane = spec.pane.pane;
@@ -2051,6 +2055,7 @@ impl Registry {
                         .lock()
                         .expect("terminal registry poisoned")
                         .clone();
+                    tracing::debug!(window_id, hooked = hook.is_some(), "removing a tmux window");
                     if let Some(hook) = hook {
                         (hook.remove)(&window_id);
                     }
@@ -2077,6 +2082,16 @@ impl Registry {
                         .clone();
                     if let Some(hook) = hook {
                         (hook.attach)(&window_id, &session_id);
+                    }
+                }
+                tmux_connection::TmuxWork::Layout { window_id, layout } => {
+                    let hook = self
+                        .tmux_windows
+                        .lock()
+                        .expect("terminal registry poisoned")
+                        .clone();
+                    if let Some(hook) = hook {
+                        (hook.layout)(&window_id, &layout);
                     }
                 }
                 tmux_connection::TmuxWork::ControlWindow { title } => {
@@ -2130,8 +2145,10 @@ impl Registry {
             .get(id)
             .cloned();
         let Some(session) = session else {
+            tracing::debug!(id, ?request, "tmux request for an unknown session");
             return false;
         };
+        tracing::debug!(id, ?request, pane = ?session.tmux_pane, "tmux request");
         match session.tmux_pane {
             Some(pane) => self.tmux_request_for(&pane, request),
             None => {
@@ -3220,6 +3237,11 @@ impl Registry {
         };
         if let Some(session) = session {
             session.close(reason);
+            // A control session that ends with its tmux (the shell was the
+            // client) queued the connection's last work, the pane ends and
+            // the window removals, which the drainer would skip on a closed
+            // session; perform it now, so no window outlives its connection.
+            self.perform_tmux_work(&session);
             self.notify_roster_change();
             true
         } else {
@@ -3279,6 +3301,10 @@ impl Registry {
             // membership; unpark is take-once, so a prior exit/close already
             // having done it is fine.
             session.unpark_fdstore();
+            // A control session whose process was the tmux client leaves with
+            // its connection's last work queued (the pane ends, the window
+            // removals); the drainer no longer sees it, so perform it here.
+            self.perform_tmux_work(&session);
             self.notify_roster_change();
             true
         } else {
@@ -4093,6 +4119,7 @@ impl Registry {
                     }
                 }
             }
+            tracing::debug!("terminal write drainer stopped on the shutdown signal");
         })
     }
 
@@ -7111,6 +7138,7 @@ impl Session {
                     self.record_plain_output(format!("\r\n[chan] {text}\r\n").as_bytes());
                 }
                 tmux_gate::Action::Work(work) => {
+                    tracing::debug!(session = %self.id, ?work, "tmux work queued");
                     self.tmux_work
                         .lock()
                         .expect("terminal tmux work poisoned")
@@ -7778,6 +7806,10 @@ pub type TmuxWindowAttach = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Tells a chan window (first) to drop its tab for a session (second) that
 /// moved to another window (third), without ending the session.
 pub type TmuxWindowRelease = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// Tells a chan window (first) the pane tree it shows (second): tmux's
+/// layout with each pane's session, delivered to its socket or parked for
+/// its first one, a parked tree replacing an earlier one.
+pub type TmuxWindowLayout = Arc<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
 
 /// How the host mints and drops chan windows for a tmux connection's windows,
 /// and fills them with tabs for the sessions bound to them.
@@ -7787,6 +7819,7 @@ pub struct TmuxWindowHook {
     pub remove: TmuxWindowRemove,
     pub attach: TmuxWindowAttach,
     pub release: TmuxWindowRelease,
+    pub layout: TmuxWindowLayout,
 }
 
 impl std::fmt::Debug for TmuxWindowHook {

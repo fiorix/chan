@@ -1234,7 +1234,7 @@ async fn handle_library_command_launch(
     // A window minted with its content parked for its first socket (a routed
     // open's, a tmux window's tabs) seeds no default terminal, as the desktop
     // tells the windows it opens.
-    if host.is_routed_mint(&record.window_id) {
+    if host.is_routed_mint(&record.window_id) || record.tmux {
         query.append_pair("seed", "0");
     }
     if let Some(holder) = super::ws::holder_tag(raw_query.as_deref()) {

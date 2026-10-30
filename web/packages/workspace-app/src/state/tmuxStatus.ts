@@ -34,11 +34,22 @@ export type TmuxWindowStatus = {
 /// A request of the live connection, sent as a `tmux-request` frame.
 export type TmuxRequest =
   | { request: "open-window"; window: string }
-  /// A new tmux window, whose panes land as tabs in the chan window `window`
-  /// names, or in a chan window of its own without one.
-  | { request: "new-window"; window?: string }
+  /// A new tmux window, which opens in a chan window of its own.
+  | { request: "new-window" }
+  /// Split tmux pane `pane` (`%N`), side by side when `horizontal`; the new
+  /// pane arrives through the window's layout.
+  | { request: "split"; pane: string; horizontal: boolean }
+  /// Make `pane` tmux's active pane, after the page's active pane changed.
+  | { request: "focus"; pane: string }
   | { request: "detach" }
   | { request: "end" };
+
+/// A tmux window's layout as the connection sends it (`tmux_layout`): a pane
+/// names its session once the registry made one, a row lays its children
+/// side by side and a column stacks them; sizes are tmux cells.
+export type TmuxLayoutNode =
+  | { kind: "pane"; session: string | null; w: number; h: number }
+  | { kind: "row" | "column"; children: TmuxLayoutNode[]; w: number; h: number };
 
 /// The tmux pane a terminal session shows, as its `session` frame says.
 export type TmuxPaneRef = { connection: number; pane: string };

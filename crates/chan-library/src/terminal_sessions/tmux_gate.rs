@@ -84,12 +84,14 @@ pub enum TmuxRequest {
     /// Open a tmux window past the cap: its panes get sessions and a chan
     /// window is minted for it. `window` is tmux's id, `@N`.
     OpenWindow { window: String },
-    /// Make a new tmux window. Its panes land as tabs in the chan window
-    /// `window` names, or in a chan window of its own without one.
-    NewWindow {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        window: Option<String>,
-    },
+    /// Make a new tmux window, which opens in a chan window of its own, past
+    /// the cap if need be.
+    NewWindow,
+    /// Split tmux pane `pane` (`%N`), side by side when `horizontal`; the
+    /// new pane arrives through the window's layout.
+    Split { pane: String, horizontal: bool },
+    /// Make `pane` tmux's active pane, after a client's focus moved to it.
+    Focus { pane: String },
     /// Detach the control client; the tmux server and its sessions live on.
     Detach,
     /// End the tmux server with every session it holds.
@@ -246,13 +248,26 @@ impl TmuxGate {
     /// or for a window tmux has not listed.
     pub(super) fn request(&mut self, request: TmuxRequest, now: Instant) -> Vec<Action> {
         let mut actions = Vec::new();
+        tracing::debug!(
+            ?request,
+            connected = matches!(self.phase, Phase::Connected { .. }),
+            "tmux request at the gate"
+        );
         if let Phase::Connected { connection, .. } = &mut self.phase {
             let steps = match request {
                 TmuxRequest::OpenWindow { window } => match WindowId::parse(&window) {
                     Some(window) => connection.open_window(window),
                     None => Vec::new(),
                 },
-                TmuxRequest::NewWindow { window } => connection.request_new_window(window),
+                TmuxRequest::NewWindow => connection.request_new_window(),
+                TmuxRequest::Split { pane, horizontal } => match PaneId::parse(&pane) {
+                    Some(pane) => connection.request_split(pane, horizontal),
+                    None => Vec::new(),
+                },
+                TmuxRequest::Focus { pane } => match PaneId::parse(&pane) {
+                    Some(pane) => connection.request_focus(pane),
+                    None => Vec::new(),
+                },
                 TmuxRequest::Detach => vec![Step::Submit(Command::Detach, Purpose::Fire)],
                 TmuxRequest::End => vec![Step::Submit(Command::KillServer, Purpose::Fire)],
             };
@@ -1160,27 +1175,14 @@ mod tests {
             now,
             tmux,
         );
-        let actions = gate.request(
-            TmuxRequest::NewWindow {
-                window: Some("w-1".into()),
-            },
-            now,
-        );
+        let actions = gate.request(TmuxRequest::NewWindow, now);
         assert_eq!(
             writes(&actions),
             vec![b"new-window -PF '#{window_id}'\n".to_vec()]
         );
-        // The wire form: the affinity is optional.
         assert_eq!(
             serde_json::from_str::<TmuxRequest>(r#"{"request":"new-window"}"#).unwrap(),
-            TmuxRequest::NewWindow { window: None }
-        );
-        assert_eq!(
-            serde_json::from_str::<TmuxRequest>(r#"{"request":"new-window","window":"w-2"}"#)
-                .unwrap(),
-            TmuxRequest::NewWindow {
-                window: Some("w-2".into())
-            }
+            TmuxRequest::NewWindow
         );
     }
 

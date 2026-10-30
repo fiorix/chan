@@ -173,7 +173,7 @@
     builtInChordSuperseded,
     commandIdForChord,
   } from "./state/keymapOverrides.svelte";
-  import { api, openLocalColorWatch, openLocalThemeWatch, sessionWindowId } from "./api/client";
+  import { api, openLocalColorWatch, openLocalThemeWatch } from "./api/client";
   import { errorText } from "./api/errors";
   import {
     applyInitialPageWidth,
@@ -579,10 +579,11 @@
   /// picked shell still gets the rootUnavailable guard, the resolved spawn
   /// cwd, and the session save that every other entry point gets.
   function spawnTerminalFromContext(profile?: string): void {
-    // In a tmux window a new tab is a new tmux window: tmux is asked, and the
-    // window it adds lands here as tabs when the server attaches them. The
-    // tab never exists ahead of tmux.
-    if (requestTmuxWindow(sessionWindowId())) return;
+    // In a tmux window a new terminal is a new tmux window, which opens in a
+    // chan window of its own, since a chan window shows one tmux window as
+    // its pane tree; a split makes a new pane here. Nothing exists ahead of
+    // tmux.
+    if (requestTmuxWindow()) return;
     if (tree.rootUnavailable) {
       setTransientStatus(
         `New terminal failed: ${tree.error ?? "workspace root does not exist"}`,
@@ -594,12 +595,41 @@
     scheduleSessionSave();
   }
 
-  /// Ask the tmux connection this window shows for a new tmux window, whose
-  /// panes land in the chan window `affinity` names, or in a chan window of
-  /// its own without one. False when this is not a tmux window, and nothing
-  /// was asked. The request rides the active pane tab's session when it is
-  /// one, so a window mixing tmux and plain tabs still asks tmux.
-  function requestTmuxWindow(affinity: string | null): boolean {
+  /// In a tmux window a split is tmux's: the active pane's tmux pane is split
+  /// and the new pane arrives through the window's layout, so the pane never
+  /// exists ahead of tmux. False when the active tab is not a tmux pane.
+  function requestTmuxSplit(horizontal: boolean): boolean {
+    const active = activeTabInPane(activePane());
+    if (active?.kind !== "terminal" || !active.tmuxPane || !active.terminalSessionId) return false;
+    void api
+      .tmuxRequest(active.terminalSessionId, { request: "split", pane: active.tmuxPane.pane, horizontal })
+      .catch((error) => setTransientStatus(`tmux split failed: ${errorText(error)}`));
+    return true;
+  }
+
+  // Focus follows the page into tmux: when the active pane changes to one
+  // showing a tmux pane, tmux's active pane follows, so a split or a new
+  // window opens where the user is. Sent once per change.
+  let tmuxFocusSent: string | null = null;
+  $effect(() => {
+    const node = layout.nodes[layout.activePaneId];
+    if (!node || node.kind !== "leaf") return;
+    const active = activeTabInPane(node);
+    if (active?.kind !== "terminal" || !active.tmuxPane || !active.terminalSessionId) return;
+    const key = `${active.terminalSessionId}:${active.tmuxPane.pane}`;
+    if (tmuxFocusSent === key) return;
+    tmuxFocusSent = key;
+    void api
+      .tmuxRequest(active.terminalSessionId, { request: "focus", pane: active.tmuxPane.pane })
+      .catch(() => {});
+  });
+
+  /// Ask the tmux connection this window shows for a new tmux window, which
+  /// opens in a chan window of its own. False when this is not a tmux
+  /// window, and nothing was asked. The request rides the active pane tab's
+  /// session when it is one, so a window mixing tmux and plain tabs still
+  /// asks tmux.
+  function requestTmuxWindow(): boolean {
     const panes = tmuxPaneTabs();
     if (panes.length === 0) return false;
     const active = activeTabInPane(activePane());
@@ -607,7 +637,7 @@
       (active?.kind === "terminal" && active.tmuxPane ? active : null) ?? panes[0]!;
     const sessionId = carrier.terminalSessionId!;
     void api
-      .tmuxRequest(sessionId, affinity ? { request: "new-window", window: affinity } : { request: "new-window" })
+      .tmuxRequest(sessionId, { request: "new-window" })
       .catch((error) => setTransientStatus(`tmux new window failed: ${errorText(error)}`));
     return true;
   }
@@ -1498,10 +1528,10 @@
       // KEY_BRIDGE_JS). row = split right, column = split bottom, matching
       // the Hybrid Nav `/` and `?` keybinds.
       case "app.pane.splitRight":
-        splitActive("row");
+        if (!requestTmuxSplit(true)) splitActive("row");
         return;
       case "app.pane.splitDown":
-        splitActive("column");
+        if (!requestTmuxSplit(false)) splitActive("column");
         return;
       case "app.tab.next":
         selectNextTabInActivePane();
@@ -1540,11 +1570,10 @@
       // the discard cascade removes its row and DELETEs its session blob. Any
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
       // The desktop's New Window on a tmux window: a new tmux window in a chan
-      // window of its own, through the same request Cmd+T makes with an
-      // affinity. The desktop asks here because the page knows which of its
-      // sessions is a pane.
+      // window of its own, the request Cmd+T makes too. The desktop asks here
+      // because the page knows which of its sessions is a pane.
       case "app.tmux.newWindow":
-        if (!requestTmuxWindow(null)) setTransientStatus("not a tmux window");
+        if (!requestTmuxWindow()) setTransientStatus("not a tmux window");
         return;
       case "app.window.confirmClose":
         if (ui.disconnectBlocking || !hasAnyTab()) {

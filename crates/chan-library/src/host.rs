@@ -6618,6 +6618,26 @@ fn window_session_frame(
     .ok()
 }
 
+/// The `tmux_layout` frame: a tmux window's pane tree for the chan window
+/// that shows it. Same prefix rule as [`window_command_frame`].
+fn window_layout_frame(window_id: &str, layout: &serde_json::Value) -> Option<String> {
+    #[derive(serde::Serialize)]
+    struct Frame<'a> {
+        #[serde(rename = "type")]
+        frame_type: &'static str,
+        window_id: &'a str,
+        command: &'static str,
+        layout: &'a serde_json::Value,
+    }
+    serde_json::to_string(&Frame {
+        frame_type: "window_command",
+        window_id,
+        command: "tmux_layout",
+        layout,
+    })
+    .ok()
+}
+
 fn window_command_frame(
     window_id: &str,
     command: &'static str,
@@ -7006,6 +7026,31 @@ impl TmuxWindowDelivery {
         }
     }
 
+    /// Deliver `frame`, a window's pane tree, to its socket, or park it in
+    /// place of any tree parked for the window before: a window that opens
+    /// late needs the newest tree alone, and the park's bound holds.
+    fn deliver_or_replace_parked(&self, window_id: &str, frame: String, tag: &str) {
+        let delivered = self
+            .session_registry
+            .dispatch_if_live(window_id, || self.events_tx.send(frame.clone()))
+            .is_some();
+        if delivered {
+            return;
+        }
+        let kept: Vec<String> = self
+            .pending
+            .take(window_id)
+            .into_iter()
+            .filter(|parked| !parked.contains(tag))
+            .collect();
+        for parked in kept {
+            if let Err(error) = self.pending.park(window_id, parked) {
+                tracing::warn!(window_id, %error, "could not re-park a frame for a tmux window");
+            }
+        }
+        self.deliver_or_park(window_id, frame);
+    }
+
     /// Deliver `frame` to `window_id`'s socket when it has one; a window
     /// with none has nothing to drop.
     fn deliver_if_live(&self, window_id: &str, frame: String) {
@@ -7036,7 +7081,9 @@ fn tmux_window_hook(
         Some(row.window_id)
     };
     let remove = move |window_id: &str| {
-        if registry.remove(window_id) {
+        let removed = registry.remove(window_id);
+        tracing::debug!(window_id, removed, "tmux window row removal");
+        if removed {
             notify.notify_waiters();
         }
     };
@@ -7046,9 +7093,15 @@ fn tmux_window_hook(
             attach_delivery.deliver_or_park(window_id, frame);
         }
     };
+    let release_delivery = delivery.clone();
     let release = move |window_id: &str, session_id: &str, to: &str| {
         if let Some(frame) = window_session_frame(window_id, "release_term", session_id, Some(to)) {
-            delivery.deliver_if_live(window_id, frame);
+            release_delivery.deliver_if_live(window_id, frame);
+        }
+    };
+    let layout = move |window_id: &str, tree: &serde_json::Value| {
+        if let Some(frame) = window_layout_frame(window_id, tree) {
+            delivery.deliver_or_replace_parked(window_id, frame, "\"command\":\"tmux_layout\"");
         }
     };
     crate::terminal_sessions::TmuxWindowHook {
@@ -7056,6 +7109,7 @@ fn tmux_window_hook(
         remove: Arc::new(remove),
         attach: Arc::new(attach),
         release: Arc::new(release),
+        layout: Arc::new(layout),
     }
 }
 
@@ -7104,6 +7158,26 @@ mod tmux_window_hook_tests {
         (hook.release)(&id, "term-7", "w-other");
         assert!(events_rx.try_recv().is_err());
         assert!(pending.take(&id).is_empty(), "a release is never parked");
+        // A layout parks beside other frames and replaces an earlier parked
+        // layout, so a late window gets the newest tree alone.
+        (hook.attach)(&id, "term-8");
+        (hook.layout)(
+            &id,
+            &serde_json::json!({"kind": "pane", "session": null, "w": 80, "h": 24}),
+        );
+        (hook.layout)(
+            &id,
+            &serde_json::json!({"kind": "pane", "session": "term-8", "w": 80, "h": 24}),
+        );
+        let parked = pending.take(&id);
+        assert_eq!(parked.len(), 2, "{parked:?}");
+        assert!(parked[0].contains(r#""command":"open_term_attach","session_id":"term-8""#));
+        assert_eq!(
+            parked[1],
+            format!(
+                r#"{{"type":"window_command","window_id":"{id}","command":"tmux_layout","layout":{{"h":24,"kind":"pane","session":"term-8","w":80}}}}"#
+            )
+        );
         let row = registry
             .snapshot()
             .into_iter()
