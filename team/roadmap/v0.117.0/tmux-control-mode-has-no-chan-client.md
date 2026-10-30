@@ -1,6 +1,6 @@
 # tmux control mode (`tmux -CC`) has no chan client
 
-Status: proposed for v0.116.0 (the open version, chosen for lack of another; the target is the owner's to set); owner accepted the decisions on 2026-10-30, assessed against `a4b5844b9` (main, v0.115.0). Built so far on `v0116/tmux-protocol`: the protocol crate (stage 2), the marker policy, the consent question and the hardening after an allow (stage 3a), and the connection with its pane sessions (stage 3b); the control window's status view, the tab per tmux window and splits are not. Not a roadmap item until accepted for a target version.
+Status: building for v0.117.0 (moved from v0.116.0 at its GA on 2026-10-30; stages 2 to 5 are built, see the stage results below); owner accepted the decisions on 2026-10-30, assessed against `a4b5844b9` (main, v0.115.0). Built so far on `v0116/tmux-protocol`: the protocol crate (stage 2), the marker policy, the consent question and the hardening after an allow (stage 3a), and the connection with its pane sessions (stage 3b); the control window's status view, the tab per tmux window and splits are not. Not a roadmap item until accepted for a target version.
 
 ## Ask
 
