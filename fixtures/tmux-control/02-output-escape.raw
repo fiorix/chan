@@ -1,0 +1,16 @@
+P1000p%begin 1793319936 312 0
+%end 1793319936 312 0
+%sessions-changed
+%session-changed $0 m1
+%output %0 \033]3008;start=0;machineid=0;user=root;hostname=tmuxcc-m1;bootid=0;pid=0;type=shell;cwd=/opt\033\134
+%output %0 \033[?2004h
+%output %0 root@tmuxcc-m1:/opt# 
+%begin 1793319937 314 1
+%end 1793319937 314 1
+%output %0 printf 'A\134\134B\134033[1mC\134000D\134303\134251 \134360\134237\134230\134200 E\134r\134nF\134n'\015\012\033[?2004l\015
+%output %0 \033]3008;start=0;machineid=0;user=root;hostname=tmuxcc-m1;bootid=0;pid=0;type=command;cwd=/opt\033\134A\134B\033[1mC\000Dé 😀 E\015\015\012F\015\012\033]3008;end=159e96aa-5c30-45bc-9ee4-bce1aaa6417d;exit=success\033\134
+%output %0 \033]3008;start=0;machineid=0;user=root;hostname=tmuxcc-m1;bootid=0;pid=0;type=shell;cwd=/opt\033\134
+%output %0 \033[?2004h
+%output %0 root@tmuxcc-m1:/opt# 
+%exit
+\
