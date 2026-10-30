@@ -1,0 +1,62 @@
+# cs tunnel in a local desktop terminal shows its reason only in a toast and times out
+
+Status: accepted for v0.116.0 by the owner's word of 2026-10-30; not started.
+
+## What was asked
+
+The owner's words of 2026-10-30: "the cs tunnel command fails when run locally on chan-desktop, which is expected; however, the command line program does not show an error, and instead, a notification alert is shown on the top right hand side indicating the tunnel failed; this is a bug id like to address as a roadmap item".
+
+## Evidence
+
+Read at `66dff9cf2` on `desktop/terminal-prototypes`; every file below reads the same on `main` at `a4b5844b9` (the branch's only changes to `control_socket.rs` and the desktop's `main.rs` add a terminal-open frame and a handoff request, outside this path). Not reproduced in a real chan-desktop: no test desktop was running, and the owner's own app was not touched. The server half was run: the prebuilt `revtunnel_e2e` binary passed `tunnel_status_retains_refusal_and_no_ack_timeout_until_seen`, whose unanswered case is this path's server side, a window that takes the trigger and never answers.
+
+Why the tunnel cannot open there:
+
+- `cs tunnel` forwards ports of the desktop machine to the devserver host (`crates/chan-shell/src/help.rs:1739`). chan-desktop answers a trigger only for a window backed by a devserver connection: `open_reverse_tunnel` (`desktop/src-tauri/src/revtunnel.rs:156`) takes the dial target and bearer from `conn_for_window` (`:68-74`), which maps a `lib-<hex>::<window>` label through the devserver feed (`desktop/src-tauri/src/main.rs:4248-4260`). A local window is `local::<window>`, and the label test pins that it resolves to no devserver (`main.rs:8191`); a control terminal (`control-terminal-*`) and the default-terminal window (`terminal-exec`) carry no `lib-` label either. On a local desktop both ends of the tunnel would be the same machine.
+
+The path, end to end:
+
+- The CLI (`cmd_shell_tunnel`, `crates/chan-shell/src/cli.rs:2156-2192`) writes one `Tunnel` request on the terminal's control socket without a half-close and blocks in `send_control_request_streaming` (`crates/chan-shell/src/control.rs:599`) for the first response line. It prints nothing while it waits.
+- The control socket hands the request to `handle_tunnel` (`crates/chan-server/src/control_socket.rs:1057-1075`, `:4165`). Its only host check is the unserve scope (`:4188-4207`): a standalone `chan serve` is refused at once, but chan-desktop's embedded host is a `WorkspaceHost` that calls `install_self` (`desktop/src-tauri/src/embedded.rs:110-119`), so its workspace and terminal tenants carry `UnserveScope::Host` (`crates/chan-server/src/lib.rs:859-870`) and pass. The refusal text names "a devserver or chan-desktop host" as where tunnels live, and `a_hostless_server_says_where_tunnels_live` pins that wording (`control_socket.rs:13317`).
+- The server admits the group (`:4217`), mints one id per tunnel and broadcasts one `tunnel_open` window command per tunnel on the tenant `/ws` (`:4233-4255`, `send_window_command` at `:4447-4464`). The send is fire-and-forget: it fails only when no `/ws` subscriber exists. The handler then waits for each listener's report under the 10 s ready window (`READY_TIMEOUT_SECS`, `crates/chan-revtunnel/src/wire.rs:70`; the wait at `control_socket.rs:4257-4325`).
+- Every page whose window id matches the frame acts on it (`web/packages/workspace-app/src/state/store.svelte.ts:2049`) and forwards the trigger to the native host (`:2211-2244`, `openReverseTunnel` at `src/api/desktop.ts:442`). A `local::*` window holds the command (the `workspace` capability grants the `workspace-window` set, `desktop/src-tauri/capabilities/workspace.json`, `desktop/src-tauri/permissions/app.toml:24`), so the IPC runs and `conn_for_window` rejects with "this window is not backed by a devserver" before any dial.
+- The page catches the rejection and calls `setTransientStatus` with `tunnel failed: <reason>` (`store.svelte.ts:2241`). That is the top-right status pill (`src/components/AppStatusBar.svelte`, `position: fixed` at `top: 48px`, `:370-373`), cleared after 3 s (`TRANSIENT_STATUS_DEFAULT_MS`, `store.svelte.ts:593`). Nothing tells the server: the desktop reports on the control WebSocket that `chan_revtunnel::client::open` dials, and this refusal comes before that dial. The desktop's doc comment says so: a refusal before the dial cannot be reported and leaves the blocked `cs tunnel` to its ready timeout (`revtunnel.rs:144-155`).
+- After 10 s the server answers a `Timeout` line from `tunnel_ready_timeout_message` (`control_socket.rs:4141-4152`): `no chan-desktop answered within 10s: window "<id>" must be open in chan-desktop, which is the only client that can host a tunnel (a browser tab cannot)`. The CLI maps it to `ControlTimeout` (`control.rs:433-435`), prints it on stderr and exits 124 (`cli.rs:2175-2187`). The terminal's program-status lease is set to the error "Tunnel could not be opened" (`crates/chan-library/src/terminal_sessions/request_status.rs:92-101`). The e2e test named above pins the timeout line and that status (`crates/chan/tests/revtunnel_e2e.rs:2447`).
+
+So for 10 s the command line shows nothing while the pill names the real reason and disappears after 3 s; then the command line shows a reason that is false here (the window is open in chan-desktop) and exits 124, the status kept for a trigger nobody answered. Whether the owner saw that line or stopped the command inside the ten seconds is not recorded (unverified).
+
+How `cs tunnel` reports elsewhere:
+
+- A standalone `chan serve` terminal: refused before any trigger with one `Error` line, exit 1 (`control_socket.rs:4188-4207`).
+- No window connected at all: refused at the trigger with one `Error` line, exit 1 (`send_window_command`; pinned in `revtunnel_e2e.rs:2512`).
+- A devserver terminal shown in chan-desktop: the desktop dials the control leg before it binds, so a bind failure comes back as `Failed`, and the CLI prints `desktop refused the tunnel (<spec>): <reason>` and exits 1 (`control_socket.rs:4276-4288`; the help's CAUTIONS, `help.rs:1808-1810`); pinned by the refused case at `revtunnel_e2e.rs:2447` and `a_listener_the_desktop_cannot_bind_fails_the_group_and_closes_the_other` (`:2613`).
+- A devserver terminal whose window is open only in a browser tab: the pill says "cs tunnel needs this window open in chan-desktop" (`store.svelte.ts:2224`) and the CLI gets the same timeout line after 10 s, exit 124; there the line is accurate.
+- A devserver window whose native refusal comes before the dial (the devserver behind the window not connected, a gateway session that will not mint) has the local path's shape: pill, then the timeout line. The desktop's doc comment names these two; they are outside this item.
+
+The contract the local path breaks: a failure known before any listener opens is one immediate error line and exit 1; exit 124 and the "no chan-desktop answered" text are for a trigger nobody answered.
+
+The multi-spec change shipped in v0.115.0 ([cs-tunnel-takes-one-spec-per-invocation](../done/cs-tunnel-takes-one-spec-per-invocation.md), commit `2749431a6`) is not the cause: the `conn_for_window` refusal dates from the feature's first commit, `4dfb61ea1`, first tagged in v0.80.0. It changed two things on this path: the ready window's expiry became the `Timeout` line, so the command exits 124 where before v0.115.0 it exited 1 with the same text; and a group of N specs sends N triggers, so the pill is set N times (the last wins) and the timeout line reads "for N of N tunnels".
+
+## Desired contract
+
+On a host that no tunnel client can answer for, which is chan-desktop's embedded host, `cs tunnel` is refused before anything is registered or sent: the server answers one `Error` line at once, the CLI prints it on stderr and exits 1, as the standalone `chan serve` refusal does. The line says why in terms of what the command is for, for example `cs tunnel forwards ports of the desktop machine to a devserver; this terminal runs on chan-desktop's own machine, so there is nothing to forward (run it in a devserver terminal)`. The terminal's program-status mark records the failure as the other refusals do. This holds for every terminal the embedded host serves: local workspace and terminal-only windows, control terminals and the default-terminal window.
+
+The pill goes for this path, because no `tunnel_open` reaches the window. The person who ran the command reads the terminal, and a 3 s pill in a corner is a second copy that vanishes before the command answers. The page's pill code stays for the triggers a window still receives and cannot serve (a browser tab, a native refusal before the dial in a devserver window), where the page is still the only place the reason shows.
+
+The refusal is made on the server, not reported back by the page: the trigger is broadcast on the tenant `/ws` and every page holding the window id acts on it, so a failure report from a page that cannot host (a co-viewing browser tab) could beat the chan-desktop page that can.
+
+The standalone refusal stops naming chan-desktop as a tunnel host. The timeout line and exit 124 keep their meaning.
+
+## What to do
+
+- `crates/chan-library` (`HostControl` in `tenant.rs`, `WorkspaceHost` in `host.rs`): expose whether this host can host tunnels, answered no by chan-desktop's embedded host. `WorkspaceHost::has_desktop_bridge` (`host.rs:1849`) is the existing signal that tells the desktop's host from a devserver's; whether to key the answer on it or on a setting the desktop embedder passes is the build's call. Read before building: whether any client can attach to a desktop's embedded host as a devserver; this read found none (unverified).
+- `crates/chan-server/src/control_socket.rs` `handle_tunnel`: refuse on such a host beside the standalone refusal, before `admit` and before any trigger, with `status.tunnel_failed(false)`; reword the standalone refusal so it names a devserver only, and update `a_hostless_server_says_where_tunnels_live` to the new wording.
+- `desktop/src-tauri/src/revtunnel.rs`: keep the "not backed by a devserver" refusal as the defence for a trigger that still reaches a local window; its doc comment names the server's refusal as the normal path.
+- Docs: the `cs tunnel` long help (`crates/chan-shell/src/help.rs`, CAUTIONS) says the command is refused at once in a terminal of the desktop's own machine; `crates/chan-server/design.md` (the reverse-tunnel legs row), `crates/chan-revtunnel/design.md` and the reverse port forwarding paragraph of `design.md` say which hosts refuse; the dump-skill rendering follows the help.
+
+## Acceptance
+
+- Unit (`control_socket.rs`): on a fake host that hosts no tunnels, `handle_tunnel` answers one `Error` naming the reason, sends no frame on `events_tx`, leaves the registry empty and marks the session's status "Tunnel could not be opened"; on a host that hosts tunnels the existing group, refusal and timeout tests pass unchanged apart from the hostless wording.
+- Unit (`chan-library` or the desktop crate): chan-desktop's embedded host reports that it hosts no tunnels, and a devserver's host reports that it does.
+- The `revtunnel_e2e` suite green as it stands: a devserver still opens, refuses with exit 1 and times out with exit 124.
+- In the macOS desktop, read by eye: `cs tunnel 8080:3000` in a local workspace window's terminal and in a terminal-only window prints the refusal on stderr at once with no ten-second wait, `echo $?` reads 1, no pill appears, and the tab shows the failure mark; in a devserver window, `cs tunnel 8080:3000` against a listening port still opens and forwards.

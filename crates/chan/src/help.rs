@@ -220,8 +220,9 @@ accept `none` to clear them.
 
 Enum values are the lowercase values printed by get. Integers retain
 their live bounds: editor font 10..=32, terminal scrollback 10..=50,
-terminal font 8..=32, and terminal timeout/session/ring values must be
-nonzero. `editor.page_width_ratio` is 0.25..=1.0. Colors accept #rgb or
+terminal font 8..=32, terminal background opacity 80..=100 (percent),
+and terminal timeout/session/ring values must be nonzero.
+`editor.page_width_ratio` is 0.25..=1.0. Colors accept #rgb or
 #rrggbb and are stored as lowercase #rrggbb. Booleans are true or false.
 The legacy line-spacing value `tight` is accepted as `compact`.
 `server.terminal.secret_mask_suffixes` accepts a JSON string array with

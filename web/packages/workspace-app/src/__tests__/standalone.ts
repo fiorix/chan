@@ -34,6 +34,7 @@ export function preferences(over: Partial<Preferences> = {}): Preferences {
       session_cap: 8,
       ring_bytes: 1024,
       font_size: 14,
+      background_opacity: 100,
       ghostty: false,
       scrollback_mb: 20,
       mouse_capture: false,

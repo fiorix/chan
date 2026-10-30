@@ -1,5 +1,21 @@
-import type { IBufferLine, IDecoration, IMarker, Terminal } from "@xterm/xterm";
 import { DEVSERVER_TOKEN_MARKER } from "./snapshotCache";
+
+/// The cell a painter's buffer line hands back: what the span mapping
+/// reads of it. Both xterm.js's IBufferCell and ghostty-web's satisfy it.
+export type MaskCell = {
+  getWidth(): number;
+  getChars(): string;
+};
+
+/// A buffer line as the detection reads it: the text of a column range,
+/// the cell at a column and whether the line continues the one above it.
+/// xterm.js's IBufferLine and ghostty-web's both satisfy it, so the two
+/// painters share one detection over their own buffers.
+export type MaskLine = {
+  readonly isWrapped: boolean;
+  translateToString(trimRight?: boolean, startColumn?: number, endColumn?: number): string;
+  getCell(x: number): MaskCell | undefined;
+};
 
 // Mirrored in crates/chan-library/src/config.rs
 // (DEFAULT_TERMINAL_SECRET_MASK_SUFFIXES), which is authoritative for
@@ -34,9 +50,10 @@ export type SecretMaskSpan = {
   width: number;
 };
 
-type GroupLine = {
+/// One row of a wrapped group, by its absolute buffer row.
+export type MaskGroupLine = {
   row: number;
-  line: IBufferLine;
+  line: MaskLine;
 };
 
 type TextCell = SecretMaskSpan & {
@@ -187,11 +204,11 @@ export class SecretAssignmentMatcher {
   }
 }
 
-function translatedLine(line: IBufferLine, cols: number): string {
+export function translatedLine(line: MaskLine, cols: number): string {
   return line.translateToString(false, 0, cols);
 }
 
-function lineTextCells(line: GroupLine, cols: number, textOffset: number): TextCell[] {
+function lineTextCells(line: MaskGroupLine, cols: number, textOffset: number): TextCell[] {
   const cells: TextCell[] = [];
   let offset = textOffset;
   for (let x = 0; x < cols; x += 1) {
@@ -212,11 +229,11 @@ function lineTextCells(line: GroupLine, cols: number, textOffset: number): TextC
   return cells;
 }
 
-/// Convert matcher string offsets back to xterm cell spans. The matcher sees
+/// Convert matcher string offsets back to cell spans. The matcher sees
 /// joined post-parse buffer rows; this mapping preserves wide and combined
-/// cells while splitting one wrapped value into one decoration per row.
+/// cells while splitting one wrapped value into one span per row.
 export function findSecretMaskSpans(
-  lines: readonly GroupLine[],
+  lines: readonly MaskGroupLine[],
   cols: number,
   matcher: SecretAssignmentMatcher,
 ): SecretMaskSpan[] {
@@ -245,277 +262,4 @@ export function findSecretMaskSpans(
     }
   }
   return spans;
-}
-
-export type SecretMaskWriteSnapshot = {
-  bufferType: "normal" | "alternate";
-  startRow: number;
-  markerLine: number;
-  marker: IMarker | null;
-  rows: Map<number, string>;
-};
-
-type DecorationEntry = {
-  decoration: IDecoration;
-  marker: IMarker;
-};
-
-/// Owns the visual-only xterm decorations for one terminal tab. Every scan
-/// reads translated buffer lines and only decorations are changed; PTY bytes,
-/// buffer cells, selection, copy, replay, and serialization remain untouched.
-export class TerminalSecretMasker {
-  readonly #term: Terminal;
-  readonly #matcher: SecretAssignmentMatcher;
-  readonly #decorations = new Set<DecorationEntry>();
-  readonly #onError: (() => void) | null;
-  #enabled: boolean;
-  #color: string;
-  #disposed = false;
-
-  constructor(
-    term: Terminal,
-    suffixes: readonly string[],
-    color: string,
-    enabled: boolean,
-    onError?: () => void,
-  ) {
-    this.#term = term;
-    this.#matcher = new SecretAssignmentMatcher(suffixes);
-    this.#color = color;
-    this.#enabled = enabled;
-    this.#onError = onError ?? null;
-  }
-
-  get enabled(): boolean {
-    return this.#enabled;
-  }
-
-  get maskCount(): number {
-    return this.#decorations.size;
-  }
-
-  setEnabled(enabled: boolean): void {
-    if (this.#disposed || enabled === this.#enabled) return;
-    this.#enabled = enabled;
-    if (enabled) this.scanAll();
-    else this.clear();
-  }
-
-  setColor(color: string): void {
-    if (this.#disposed || color === this.#color) return;
-    this.#color = color;
-    if (this.#enabled) this.scanAll();
-  }
-
-  captureWrite(): SecretMaskWriteSnapshot | null {
-    try {
-      const buffer = this.#activeBuffer();
-      if (this.#disposed || !this.#enabled || !buffer) {
-        return null;
-      }
-      const startRow = buffer.baseY;
-      const rows = new Map<number, string>();
-      for (let row = startRow; row < buffer.length; row += 1) {
-        const line = buffer.getLine(row);
-        if (line) rows.set(row, this.#lineSignature(line));
-      }
-      const markerLine = buffer.baseY + buffer.cursorY;
-      const marker = this.#term.registerMarker();
-      return { bufferType: buffer.type, startRow, markerLine, marker, rows };
-    } catch (error) {
-      this.#fail("xterm secret masking snapshot failed", error);
-      return null;
-    }
-  }
-
-  scanWrite(snapshot: SecretMaskWriteSnapshot | null): void {
-    if (!snapshot) return;
-    try {
-      const buffer = this.#activeBuffer();
-      if (this.#disposed || !this.#enabled || !buffer) {
-        return;
-      }
-      if (buffer.type !== snapshot.bufferType) {
-        // Buffer switches replace the visible coordinate space. Rebuild from
-        // the now-active buffer so a write that enters or leaves a TUI cannot
-        // inherit stale markers or skip output parsed after the switch.
-        this.scanAll();
-        return;
-      }
-      const marker = snapshot.marker;
-      if (!marker || marker.isDisposed) {
-        // Without a live marker the trim amount cannot be measured (a huge
-        // batch can scroll the captured cursor line itself out of the
-        // buffer), so the snapshot's row keys cannot be re-based. Rebuild
-        // from the current buffer.
-        this.scanAll();
-        return;
-      }
-      // A trim while parsing the batch shifts absolute row indices up by the
-      // trim count. The marker was registered on the pre-write cursor line
-      // and tracks that shift, so its drift re-bases the snapshot's row keys
-      // onto post-write indices: a row whose content only moved compares
-      // equal and keeps its decoration (decoration markers shift with their
-      // content), and only genuinely changed or newly appended rows rescan.
-      // Decorations on rows the trim scrolled away are disposed by xterm
-      // with their markers.
-      const shift = snapshot.markerLine - marker.line;
-      const startRow = Math.max(0, snapshot.startRow - shift);
-      const dirtyRows: number[] = [];
-      for (let row = startRow; row < buffer.length; row += 1) {
-        const line = buffer.getLine(row);
-        if (!line) continue;
-        if (snapshot.rows.get(row + shift) !== this.#lineSignature(line)) {
-          dirtyRows.push(row);
-        }
-      }
-      this.#scanDirtyRows(dirtyRows);
-    } catch (error) {
-      this.#fail("xterm secret masking scan failed", error);
-    } finally {
-      snapshot.marker?.dispose();
-    }
-  }
-
-  scanAll(): void {
-    if (this.#disposed || !this.#enabled) return;
-    try {
-      const buffer = this.#activeBuffer();
-      if (!buffer) return;
-      this.clear();
-      const rows = Array.from({ length: buffer.length }, (_, row) => row);
-      this.#scanDirtyRows(rows);
-    } catch (error) {
-      this.#fail("xterm secret masking scan failed", error);
-    }
-  }
-
-  /// Rescan the visible wrapped groups after a width change. Off-screen
-  /// decorations can remain at old cells until the trailing full scan;
-  /// scrolling during continuous resize can reveal stale coverage.
-  scanViewport(): void {
-    if (this.#disposed || !this.#enabled) return;
-    try {
-      const buffer = this.#activeBuffer();
-      if (!buffer) return;
-      const end = Math.min(buffer.length, buffer.viewportY + this.#term.rows);
-      const rows = Array.from({ length: Math.max(0, end - buffer.viewportY) }, (_, i) => buffer.viewportY + i);
-      this.#scanDirtyRows(rows);
-    } catch (error) {
-      this.#fail("xterm secret masking scan failed", error);
-    }
-  }
-
-  clear(): void {
-    for (const entry of Array.from(this.#decorations)) {
-      this.#disposeEntry(entry);
-    }
-  }
-
-  dispose(): void {
-    if (this.#disposed) return;
-    this.clear();
-    this.#disposed = true;
-  }
-
-  #activeBuffer(): Terminal["buffer"]["active"] | null {
-    return (
-      (this.#term.buffer as Terminal["buffer"] | undefined)?.active ?? null
-    );
-  }
-
-  #lineSignature(line: IBufferLine): string {
-    return `${line.isWrapped ? "1" : "0"}\0${translatedLine(line, this.#term.cols)}`;
-  }
-
-  #scanDirtyRows(dirtyRows: readonly number[]): void {
-    const buffer = this.#activeBuffer();
-    if (!buffer || dirtyRows.length === 0) return;
-    const groupStarts = new Set<number>();
-    for (const dirtyRow of dirtyRows) {
-      if (!buffer.getLine(dirtyRow)) continue;
-      let start = dirtyRow;
-      while (start > 0 && buffer.getLine(start)?.isWrapped) start -= 1;
-      groupStarts.add(start);
-    }
-    for (const start of Array.from(groupStarts).sort((a, b) => a - b)) {
-      let end = start;
-      while (end + 1 < buffer.length && buffer.getLine(end + 1)?.isWrapped) {
-        end += 1;
-      }
-      this.#scanGroup(start, end);
-    }
-  }
-
-  #scanGroup(start: number, end: number): void {
-    const buffer = this.#activeBuffer();
-    if (!buffer) return;
-    for (const entry of Array.from(this.#decorations)) {
-      const row = entry.marker.line;
-      if (row < 0 || (row >= start && row <= end)) this.#disposeEntry(entry);
-    }
-
-    const lines: GroupLine[] = [];
-    for (let row = start; row <= end; row += 1) {
-      const line = buffer.getLine(row);
-      if (line) lines.push({ row, line });
-    }
-    for (const span of findSecretMaskSpans(lines, this.#term.cols, this.#matcher)) {
-      this.#registerSpan(span);
-    }
-  }
-
-  #registerSpan(span: SecretMaskSpan): void {
-    const buffer = this.#activeBuffer();
-    if (!buffer || span.width <= 0 || !this.#enabled) return;
-    const marker = this.#term.registerMarker(
-      span.row - (buffer.baseY + buffer.cursorY),
-    );
-    const decoration = this.#term.registerDecoration({
-      marker,
-      x: span.x,
-      width: span.width,
-      height: 1,
-      backgroundColor: this.#color,
-      foregroundColor: this.#color,
-      layer: "top",
-    });
-    if (!decoration) {
-      marker.dispose();
-      this.#fail("xterm secret masking decoration registration failed");
-      return;
-    }
-    const entry = { decoration, marker };
-    this.#decorations.add(entry);
-    decoration.onDispose(() => {
-      this.#decorations.delete(entry);
-      if (!marker.isDisposed) marker.dispose();
-    });
-    decoration.onRender((element) => {
-      element.classList.add("terminal-secret-mask");
-      // The cell fg/bg recolor is the primary mask; paint the decoration
-      // element itself too, or a renderer that drops decoration cell colors
-      // would show the value through a styled but transparent chip.
-      element.style.backgroundColor = this.#color;
-    });
-  }
-
-  /// Masking that stops silently is the worst failure mode for a visual
-  /// feature, whether the cause is a decoration that cannot register or an
-  /// exception thrown out of a scan. Fail loud to the user, not just the
-  /// console: drop every decoration, switch the masker off, and notify so
-  /// the UI can surface a visible status. Re-enabling (the per-tab toggle)
-  /// retries from a clean scan.
-  #fail(message: string, error?: unknown): void {
-    console.error(message, error ?? "");
-    this.clear();
-    this.#enabled = false;
-    this.#onError?.();
-  }
-
-  #disposeEntry(entry: DecorationEntry): void {
-    this.#decorations.delete(entry);
-    if (!entry.decoration.isDisposed) entry.decoration.dispose();
-    if (!entry.marker.isDisposed) entry.marker.dispose();
-  }
 }

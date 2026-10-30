@@ -7,8 +7,8 @@
   // modifiers, the key/value grid, error lines) is styled once here
   // too, through the same :global descendant trick.
 
-  import { getContext, type Snippet } from "svelte";
-  import { SAVE_STATUS, type SaveStatusLookup } from "./commit";
+  import { getContext, setContext, type Snippet } from "svelte";
+  import { FIELD_SAVE, SAVE_STATUS, type FieldSave, type SaveStatusLookup } from "./commit";
 
   let {
     label,
@@ -29,6 +29,15 @@
   const lookup = getContext<SaveStatusLookup | undefined>(SAVE_STATUS);
   const status = $derived(pref && lookup ? lookup(pref) : "idle");
   const failure = $derived(typeof status === "object" ? status.error : null);
+  // A control that shows its own save acknowledgement claims the note, so
+  // nothing appears beside it while it is in use.
+  let noteClaimed = $state(false);
+  setContext<FieldSave>(FIELD_SAVE, {
+    status: () => status,
+    claimNote: () => {
+      noteClaimed = true;
+    },
+  });
 </script>
 
 <section class="field">
@@ -48,16 +57,19 @@
     {@render children()}
     {#if failure}
       <p class="save-error" role="alert">Not saved: {failure}</p>
-    {:else if status === "saving"}
+    {:else if !noteClaimed && status === "saving"}
       <p class="save-note">Saving...</p>
-    {:else if status === "saved"}
+    {:else if !noteClaimed && status === "saved"}
       <p class="save-note">Saved</p>
     {/if}
   </div>
 </section>
 
 <style>
+  /* A refusal takes a line of its own under the control, so it never
+     narrows the control beside it. */
   .save-error {
+    flex-basis: 100%;
     margin: 4px 0 0;
     color: var(--danger, #ef4444);
     font-size: 12px;

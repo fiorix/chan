@@ -67,6 +67,14 @@ pub struct TerminalConfig {
     /// either terminal backend; existing renderers keep their captured size.
     #[serde(default = "default_terminal_font_size")]
     pub font_size: u32,
+    /// Terminal background opacity in percent, 100 opaque. Below 100 the SPA
+    /// paints the terminal background of the desktop's local terminal-only
+    /// windows at this alpha, so the desktop behind the window shows through
+    /// while text stays opaque. Those windows are always built transparent and
+    /// paint themselves opaque at 100, so a change applies live to every open
+    /// one. Workspace windows, devserver windows and browser tabs stay opaque.
+    #[serde(default = "default_terminal_background_opacity")]
+    pub background_opacity: u32,
     /// The non-team default for whether a newly-spawned terminal
     /// gets the chan MCP discovery env vars (`CHAN_MCP_*`). Off by
     /// default for ALL agents (a stray env descriptor makes codex fail
@@ -210,6 +218,7 @@ impl Default for TerminalConfig {
             default_term: default_terminal_default_term(),
             font: TerminalFontChoice::default(),
             font_size: default_terminal_font_size(),
+            background_opacity: default_terminal_background_opacity(),
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
             program_status: default_terminal_program_status(),
@@ -244,6 +253,10 @@ fn default_terminal_default_term() -> String {
 
 fn default_terminal_font_size() -> u32 {
     14
+}
+
+fn default_terminal_background_opacity() -> u32 {
+    TERMINAL_BACKGROUND_OPACITY_MAX
 }
 
 fn default_terminal_mouse_capture() -> bool {
@@ -411,6 +424,14 @@ pub const TERMINAL_SCROLLBACK_MB_MAX: u32 = 50;
 /// Inclusive terminal renderer font-size bounds mirrored by Settings.
 pub const TERMINAL_FONT_SIZE_MIN: u32 = 8;
 pub const TERMINAL_FONT_SIZE_MAX: u32 = 32;
+
+/// Inclusive terminal background-opacity bounds, in percent: 80 to 100, where
+/// 100, the default, is opaque (transparency off). The floor keeps the range
+/// to the faint end people use. Mirrored in
+/// `web/packages/workspace-app/src/terminal/backgroundOpacity.ts`; keep in
+/// lockstep.
+pub const TERMINAL_BACKGROUND_OPACITY_MIN: u32 = 80;
+pub const TERMINAL_BACKGROUND_OPACITY_MAX: u32 = 100;
 
 #[cfg(test)]
 mod profile_tests {
@@ -706,6 +727,13 @@ mod tests {
     fn an_absent_backend_field_uses_xterm() {
         let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
         assert!(!config.ghostty);
+    }
+
+    #[test]
+    fn an_absent_background_opacity_is_opaque() {
+        let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
+        assert_eq!(config.background_opacity, TERMINAL_BACKGROUND_OPACITY_MAX);
+        assert_eq!(TerminalConfig::default().background_opacity, 100);
     }
 
     #[test]

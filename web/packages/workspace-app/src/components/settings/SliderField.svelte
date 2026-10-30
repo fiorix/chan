@@ -8,6 +8,14 @@
   // The timer is deliberately NOT cleared on destroy, preserving the
   // hand-rolled debounces this replaces: a section switch mid-debounce
   // still lands the commit.
+  //
+  // Nothing beside the slider changes size while it is in use, so a
+  // click lands where it was aimed: the value label keeps the width of
+  // its widest form, and a save flashes the value instead of the field's
+  // Saving / Saved note, which would narrow the slider.
+
+  import { getContext } from "svelte";
+  import { FIELD_SAVE, type FieldSave } from "./commit";
 
   let {
     value,
@@ -36,6 +44,16 @@
     pos = value;
   });
 
+  const field = getContext<FieldSave | undefined>(FIELD_SAVE);
+  $effect(() => {
+    field?.claimNote();
+  });
+  let flashing = $state(false);
+  $effect(() => {
+    if (field?.status() === "saved") flashing = true;
+  });
+  const labelChars = $derived(Math.max(...[min, max, value].map((v) => format(v).length)));
+
   let timer: ReturnType<typeof setTimeout> | null = null;
   function onInput(): void {
     if (timer) clearTimeout(timer);
@@ -56,13 +74,31 @@
   oninput={onInput}
   aria-label={ariaLabel}
 />
-<span class="value">{format(pos)}</span>
+<span
+  class="value"
+  class:saved={flashing}
+  style:width={`${labelChars}ch`}
+  onanimationend={() => (flashing = false)}>{format(pos)}</span
+>
 
 <style>
   .value {
+    flex: none;
     color: var(--text-secondary);
     font-size: 13px;
-    min-width: 4.5em;
+    font-variant-numeric: tabular-nums;
     text-align: right;
+    white-space: nowrap;
+  }
+  .value.saved {
+    animation: slider-saved 1.2s ease-out;
+  }
+  @keyframes slider-saved {
+    from {
+      color: var(--accent);
+    }
+    to {
+      color: var(--text-secondary);
+    }
   }
 </style>

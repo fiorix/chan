@@ -19,7 +19,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { TerminalSecretMasker } from "../terminal/secretMasking";
+import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
 import {
   attach,
   installTerminalDom,

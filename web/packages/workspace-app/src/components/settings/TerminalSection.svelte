@@ -20,6 +20,11 @@
     TERMINAL_FONT_SIZE_MIN,
     TERMINAL_FONT_SIZE_MAX,
   } from "../../terminal/fontSize";
+  import {
+    TERMINAL_BACKGROUND_OPACITY_MIN,
+    TERMINAL_BACKGROUND_OPACITY_MAX,
+    clampBackgroundOpacity,
+  } from "../../terminal/backgroundOpacity";
   import { normalizeHexColor, readStandardTerminalColors } from "../../state/paneColor";
   import { ui } from "../../state/store.svelte";
   import { windowModeSecretMaskingEnabled } from "../../state/windowMode";
@@ -36,9 +41,8 @@
 
   let { prefs, commit }: { prefs: Preferences; commit: CommitFn } = $props();
 
-  // Secret masking is editable here and applies to xterm.js terminals
-  // only; the opt-in ghostty backend offers no masking. The suffix list
-  // stays display-only
+  // Secret masking is editable here and applies on both backends. The
+  // suffix list stays display-only
   // (normalize_terminal_secret_mask_suffixes drops, dedupes and
   // truncates, so a chip editor would have to mirror all three).
   // Absent fields on a pre-field server display the SPA fallback.
@@ -283,7 +287,7 @@
 <SettingField
   label="Ghostty backend"
   pref="terminal.ghostty"
-  hint="Parse and render new terminals with Ghostty's WASM engine instead of xterm.js. Off by default on every platform. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. Secret masking is xterm-only and does nothing here. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. New terminals only."
+  hint="Parse and render terminals with Ghostty's WASM engine instead of xterm.js. Off by default on every platform. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. Reload to apply."
 >
   <PillToggle
     label="Use ghostty-web in new terminals"
@@ -309,7 +313,7 @@
 <SettingField
   label="Secret masking"
   pref="terminal.secret_masking"
-  hint="Masks secret-looking NAME=value values in xterm.js terminals only; under the opt-in ghostty backend it does nothing. The buffer stays copyable. New terminals only. With no choice stored it is on in a control terminal and off in every other window; Use default clears a stored choice. The terminal menu has an ephemeral per-tab toggle."
+  hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. With no choice stored it is on in a control terminal and off in every other window; Use default clears a stored choice. The terminal menu has an ephemeral per-tab toggle."
 >
   <PillToggle
     label="Mask secrets in new terminals"
@@ -360,6 +364,23 @@
       commit((p) => ({ ...p, terminal: { ...p.terminal, font_size: next } }))}
   />
   <span class="value">px</span>
+</SettingField>
+
+<SettingField
+  label="Background opacity"
+  pref="terminal.background_opacity"
+  hint="See-through terminal background in chan-desktop's standalone terminal windows; text stays opaque. From 80% to 100%, the default, which is off. Applies live to every open terminal window. Workspace and devserver windows stay opaque."
+>
+  <SliderField
+    value={clampBackgroundOpacity(prefs.terminal.background_opacity)}
+    min={TERMINAL_BACKGROUND_OPACITY_MIN}
+    max={TERMINAL_BACKGROUND_OPACITY_MAX}
+    step={1}
+    format={(v) => (v >= TERMINAL_BACKGROUND_OPACITY_MAX ? "100% (off)" : `${v}%`)}
+    ariaLabel="Terminal background opacity percent"
+    oncommit={(percent) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, background_opacity: percent } }))}
+  />
 </SettingField>
 
 <SettingField

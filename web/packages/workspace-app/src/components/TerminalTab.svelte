@@ -154,20 +154,19 @@
   } from "../terminal/backend";
   import {
     alignGhosttyRendererToXterm,
-    clearGhosttyRecycledGrid,
     gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
+  import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
-  import {
-    DEFAULT_SECRET_MASK_SUFFIXES,
-    TerminalSecretMasker,
-  } from "../terminal/secretMasking";
+  import { DEFAULT_SECRET_MASK_SUFFIXES } from "../terminal/secretMasking";
+  import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
+  import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Terminal as GhosttyTerminal } from "ghostty-web";
+  import type { Ghostty, Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
@@ -187,6 +186,11 @@
     scrollbackLinesFromMb,
     SCROLLBACK_MB_DEFAULT,
   } from "../terminal/scrollback";
+  import {
+    effectiveBackgroundOpacity,
+    transparentColor,
+    windowIsTransparent,
+  } from "../terminal/backgroundOpacity";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -326,9 +330,10 @@
   let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
-  // Visual-only masking owner for this xterm instance. Null on ghostty and
-  // disposed with the terminal; the enabled bit is session-scoped per tab.
-  let secretMasker: TerminalSecretMasker | null = null;
+  // Visual-only masking owner for this terminal: xterm decorations or a
+  // painter over ghostty's canvas, disposed with the terminal; the enabled
+  // bit is session-scoped per tab.
+  let secretMasker: TerminalSecretMasker | GhosttySecretMasker | null = null;
   let secretMaskingEnabled = $state(false);
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
@@ -423,6 +428,19 @@
   const customTerminalColors = $derived(
     resolveTerminalColors(currentPreferences()?.terminal_colors),
   );
+  // Whether chan-desktop built this window transparent, fixed for the page.
+  // The renderers then paint a transparent default background and the
+  // `.terminal-tab` CSS paints the tint at the live opacity.
+  const transparentWindow = windowIsTransparent();
+  // Whether the desktop shows through this terminal now: a transparent
+  // window with the opacity below 100. At 100 the tint is opaque, so the
+  // terminal reads exactly as in an opaque window.
+  const seeThrough = $derived(
+    effectiveBackgroundOpacity(
+      currentPreferences()?.terminal?.background_opacity,
+      transparentWindow,
+    ) !== null,
+  );
   const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
   // itself (its write callback fires off xterm's own queue). On
@@ -459,6 +477,8 @@
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
+  // Rows built up by wheel input the app owns (see handleGhosttyWheel).
+  const ghosttyWheelRows = new GhosttyWheelRows();
   // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
   // clicks on the content beneath it while it is invisible. Non-null ONLY on
   // the ghostty backend, and only while the gate is installed.
@@ -725,6 +745,7 @@
   $effect(() => {
     effectiveHybridSurfaceTheme("terminal");
     customTerminalColors;
+    seeThrough;
     applyTerminalTheme();
   });
 
@@ -750,7 +771,7 @@
       customTerminalColors?.cursor ??
       (styles.getPropertyValue("--link").trim() || "#58a6ff");
     const base = {
-      background: bg,
+      background: transparentWindow ? transparentColor(bg) : bg,
       foreground: text,
       cursor,
       selectionBackground: "rgba(88, 166, 255, 0.35)",
@@ -810,6 +831,10 @@
   // dark rendering untouched. xterm-only: ghostty-web has no equivalent
   // option.
   function terminalMinimumContrastRatio(): number {
+    // While the desktop shows through, the backdrop is whatever sits behind
+    // the window, so a ratio measured against the theme background would be
+    // wrong. At 100 the tint is the theme background itself.
+    if (seeThrough) return 1;
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 
@@ -1061,17 +1086,18 @@
     }
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
-    // terminals), except in a control terminal whose masking starts on,
-    // which is xterm, the backend that masks. Absent field (older server)
-    // means xterm.js. The ghostty kit lazy-loads ~420KB of WASM + JS only
-    // on this branch; a failed load falls back to xterm.js rather than
-    // breaking the spawn (fail-open, matching the mouse filter's
-    // philosophy).
-    backend = terminalBackendFromPrefs(terminalPrefs, { terminalControl: ui.terminalControl });
+    // terminals). Absent field (older server) means xterm.js. The ghostty
+    // kit lazy-loads ~420KB of WASM + JS only on this branch, and each
+    // terminal gets its own WASM instance (see backend.ts); a failed load
+    // falls back to xterm.js rather than breaking the spawn (fail-open,
+    // matching the mouse filter's philosophy).
+    backend = terminalBackendFromPrefs(terminalPrefs);
     let ghosttyKit: GhosttyKit | null = null;
+    let ghosttyInstance: Ghostty | null = null;
     if (backend === "ghostty") {
       try {
         ghosttyKit = await loadGhosttyKit();
+        ghosttyInstance = await ghosttyKit.instantiate();
       } catch (err) {
         console.warn(
           "[chan] ghostty-web failed to load; falling back to xterm.js:",
@@ -1099,19 +1125,19 @@
       tab,
       !tab.terminalSessionId,
     );
-    if (backend === "ghostty" && ghosttyKit) {
+    if (backend === "ghostty" && ghosttyKit && ghosttyInstance) {
       // Ghostty backend: Ghostty's WASM VT parser + its own canvas
       // renderer (no xterm addons exist for it). Options are limited to
       // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
-        allowTransparency: false,
+        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
         fontSize: rendererFontSize,
-        ghostty: ghosttyKit.ghostty,
+        ghostty: ghosttyInstance,
         scrollback: scrollbackLines,
         // Ghostty's default 100ms smooth scroll keeps a private animation
         // target that scrollToBottom() (called on every write away from
@@ -1198,7 +1224,7 @@
         // find (runFind) throws without it and the find bar matches
         // nothing.
         allowProposedApi: true,
-        allowTransparency: false,
+        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
@@ -1236,10 +1262,6 @@
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
-      // open() created the WASM terminal, which may have come back holding a
-      // disposed terminal's screen (see clearGhosttyRecycledGrid). Erase it
-      // before the metrics alignment repaints and before any PTY byte lands.
-      clearGhosttyRecycledGrid(ghosttyTerm);
       const renderer = ghosttyTerm.renderer;
       const targetCell = measureXtermCellDimensions(
         host,
@@ -1283,20 +1305,19 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
+    // The masker logged and disabled itself; sync the toggle state so the
+    // menu label stays truthful, and tell the user visibly.
+    const onSecretMaskingFailure = () => {
+      secretMaskingEnabled = false;
+      setTransientStatus("Secret masking stopped working in this terminal");
+    };
     if (backend === "xterm") {
       secretMasker = new TerminalSecretMasker(
         term as Terminal,
         secretMaskSuffixes,
         terminalSecretMaskColor(),
         secretMaskingEnabled,
-        () => {
-          // The masker logged and disabled itself; sync the toggle state so
-          // the menu label stays truthful, and tell the user visibly.
-          secretMaskingEnabled = false;
-          setTransientStatus(
-            "Secret masking stopped working in this terminal",
-          );
-        },
+        onSecretMaskingFailure,
       );
       // Hold Shift to force a native selection while a TUI holds mouse
       // tracking, on every platform (xterm.js ignores Shift on macOS).
@@ -1321,11 +1342,21 @@
       // init, then recreate-on-loss (bounded) before settling on the
       // DOM renderer. See the helper for the WKWebView rationale.
       enableWebglRenderer();
-    } else if (!focused) {
-      // ghostty-web's open() auto-focuses its textarea (xterm waits for
-      // the `focused` check at the end of start()). Blur back so a
-      // background pane's spawn can't steal keyboard focus.
-      term.blur();
+    } else {
+      // After open(): the renderer the painter hooks exists from there.
+      secretMasker = new GhosttySecretMasker(
+        term as GhosttyTerminal,
+        secretMaskSuffixes,
+        terminalSecretMaskColor(),
+        secretMaskingEnabled,
+        onSecretMaskingFailure,
+      );
+      if (!focused) {
+        // ghostty-web's open() auto-focuses its textarea (xterm waits for
+        // the `focused` check at the end of start()). Blur back so a
+        // background pane's spawn can't steal keyboard focus.
+        term.blur();
+      }
     }
     refreshTerminalRenderer();
     installHostResumeListeners();
@@ -2188,22 +2219,34 @@
     }
   }
 
-  /// Ghostty-backend wheel reporting. ghostty-web registers its
-  /// viewport scroller capture-phase with an unconditional
-  /// stopPropagation(), so its InputHandler's wheel reporter (SGR
-  /// 64/65) never sees the event; the custom-wheel hook runs before
-  /// the scroller and true claims the event. With mouse tracking
-  /// active, send either encoding as user input to this PTY and the
-  /// broadcast group, X10 as bytes and SGR as text, and claim the event. Without tracking, the viewport controller claims
-  /// only the calibrated macOS pixel-mode primary-buffer case; every
-  /// other event declines so ghostty keeps its native local scroll /
-  /// alt-screen arrow behavior. Coordinates come from
-  /// the canvas rect / live grid size (SGR coords are 1-based cells).
+  /// Ghostty-backend wheel input. ghostty-web registers its viewport
+  /// scroller capture-phase with an unconditional stopPropagation(), so
+  /// its InputHandler's wheel reporter (SGR 64/65) never sees the event;
+  /// the custom-wheel hook runs before the scroller and true claims the
+  /// event. On the primary buffer without mouse tracking the viewport
+  /// controller claims only the calibrated macOS pixel-mode case and
+  /// every other event declines to ghostty's native local scroll. When
+  /// the app owns the wheel (mouse tracking, or the alternate screen
+  /// without it) every event is claimed and paced like xterm.js
+  /// (ghosttyWheel.ts): an event that completes a row sends one wheel
+  /// report, or one up/down arrow, and the rest send nothing. Reports go
+  /// as user input to this PTY and the broadcast group, X10 as bytes and
+  /// SGR as text, with coordinates from the canvas rect / live grid size
+  /// (SGR coords are 1-based cells).
   function handleGhosttyWheel(e: WheelEvent): boolean {
     const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
     if (!t) return false;
-    if (!t.hasMouseTracking()) {
+    const tracking = t.hasMouseTracking();
+    if (!tracking && t.buffer.active !== t.buffer.alternate) {
       return ghosttyViewport?.handleWheel(e) ?? false;
+    }
+    if (!tracking) {
+      const cellHeight = t.renderer?.getMetrics().height ?? 0;
+      if (!(cellHeight > 0)) return false;
+      if (ghosttyWheelRows.consume(e, cellHeight, t.rows) !== 0) {
+        sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)));
+      }
+      return true;
     }
     const canvas = e.target as HTMLElement | null;
     const rect = canvas?.getBoundingClientRect?.();
@@ -2211,11 +2254,12 @@
     const cellW = rect.width / t.cols;
     const cellH = rect.height / t.rows;
     if (!(cellW > 0) || !(cellH > 0)) return false;
+    if (ghosttyWheelRows.consume(e, cellH, t.rows) === 0) return true;
     const col = Math.min(t.cols, Math.max(1, Math.floor((e.clientX - rect.left) / cellW) + 1));
     const row = Math.min(t.rows, Math.max(1, Math.floor((e.clientY - rect.top) / cellH) + 1));
     // Modifier bits mirror xterm/ghostty-web: shift 4, alt 8, ctrl 16.
     const mods = (e.shiftKey ? 4 : 0) + (e.altKey ? 8 : 0) + (e.ctrlKey ? 16 : 0);
-    // Wheel reports are press-only (xterm repeats the press per notch);
+    // Wheel reports are press-only, one per event that completes a row;
     // 64 = up, 65 = down. SGR encoding when mode 1006 is set (and by
     // default, mirroring ghostty-web's hasSgrMouseMode fallback);
     // legacy X10 otherwise.
@@ -2478,11 +2522,6 @@
 
   function toggleSecretMasking(): void {
     closeTabMenu();
-    if (backend !== "xterm") {
-      setTransientStatus("Secret masking unavailable on ghostty backend");
-      focusTerminal();
-      return;
-    }
     secretMaskingEnabled = !secretMaskingEnabled;
     secretMasker?.setEnabled(secretMaskingEnabled);
     setTransientStatus(
@@ -2850,9 +2889,7 @@
               <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">
-              {backend === "xterm"
-                ? `Secret masking: ${secretMaskingEnabled ? "on" : "off"}`
-                : "Secret masking unavailable"}
+              Secret masking: {secretMaskingEnabled ? "on" : "off"}
             </span>
             <span class="mbtn-chord"></span>
           </button>
@@ -3224,6 +3261,20 @@
     visibility: visible;
     pointer-events: auto;
   }
+  /* A transparent window: the tint is painted once, here, at the live
+     opacity, and the layers inside it stay clear so the alpha does not
+     stack. The renderers paint a transparent default background. */
+  :global(:root[data-transparent-window]) .terminal-tab {
+    background: color-mix(
+      in srgb,
+      var(--terminal-background, var(--bg)) var(--terminal-opacity, 100%),
+      transparent
+    );
+  }
+  :global(:root[data-transparent-window]) .terminal-host,
+  :global(:root[data-transparent-window]) .terminal-host :global(.xterm-viewport) {
+    background-color: transparent;
+  }
   /* Marks the composer's subtree for the keyboard's return; the composer
      positions against the terminal tab, so the wrapper adds no box. */
   .terminal-composer {
@@ -3273,6 +3324,11 @@
     padding: 8px;
     background: var(--terminal-background, var(--bg));
     overflow: hidden;
+    /* The terminal draws its own cursor. ghostty-web makes this element
+       contenteditable, and the browser caret it would draw at the start
+       of the host sits under the renderer's canvas, showing wherever the
+       canvas is see-through, as in a transparent window. */
+    caret-color: transparent;
   }
   .cli-reload-notice {
     display: flex;

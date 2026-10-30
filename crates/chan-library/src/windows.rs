@@ -389,6 +389,13 @@ pub struct WindowRegistry {
     /// and re-await is not missed (`Notify` stores no permit for
     /// `notify_waiters`).
     notify: Arc<Notify>,
+    /// Ids of the throwaway terminal windows ([`Self::create_throwaway_terminal`]):
+    /// ordinary rows in the window set that no save writes, so they last only
+    /// as long as this process. An id stays here after its row is removed: a
+    /// save of a snapshot taken before the removal must still leave the row
+    /// out, and ids are random 64-bit values that a later mint will not
+    /// reuse. Locked last, after `windows` when both are held.
+    throwaway: Mutex<HashSet<String>>,
 }
 
 impl WindowRegistry {
@@ -433,6 +440,7 @@ impl WindowRegistry {
             fail_after_save: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(state),
             notify: Arc::new(Notify::new()),
+            throwaway: Mutex::new(HashSet::new()),
         }
     }
 
@@ -515,6 +523,43 @@ impl WindowRegistry {
         self.save_best_effort(&snapshot);
         self.notify.notify_waiters();
         row
+    }
+
+    /// Mint a throwaway terminal window: a native standalone terminal row,
+    /// ordinal and title minted like [`Self::create_with_origin`]'s, that no
+    /// save writes, so a relaunch does not restore it. Unlike every other
+    /// create it does NOT fire the change notification: the caller prepares
+    /// the window's first content under its id first and then fires
+    /// [`Self::change_notify`], so the surface that opens the window already
+    /// sees that content.
+    pub fn create_throwaway_terminal(&self) -> PersistedWindow {
+        let mut windows = self.lock();
+        let window_id = mint_id(&windows, &self.unreadable);
+        let ordinal = next_ordinal(&windows, WindowKind::Terminal, None);
+        let row = PersistedWindow {
+            window_id,
+            kind: WindowKind::Terminal,
+            title: compose_title(WindowKind::Terminal, ordinal, None),
+            ordinal,
+            label: String::new(),
+            workspace_path: None,
+            control: false,
+            library_id: None,
+            hidden: false,
+            origin: WindowOrigin::Native,
+        };
+        self.throwaway_ids().insert(row.window_id.clone());
+        windows.push(row.clone());
+        row
+    }
+
+    /// Whether `window_id` is a throwaway terminal window.
+    pub fn is_throwaway(&self, window_id: &str) -> bool {
+        self.throwaway_ids().contains(window_id)
+    }
+
+    fn throwaway_ids(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.throwaway.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Mint a transient devserver CONTROL terminal row: `kind = Terminal`,
@@ -688,11 +733,18 @@ impl WindowRegistry {
         // A directory-sync error can follow a successful rename. Once a newer
         // save starts, older snapshots must stay excluded even on an error.
         *latest_save = *generation;
-        // Control rows are transient/per-connection (in-memory only): never write
-        // them, so a desktop crash can't strand a stale control window on the
-        // next boot. Every other row is written, and so is every row this build
-        // could not read, so the file never loses what another build wrote.
-        let durable: Vec<&PersistedWindow> = windows.iter().filter(|w| !w.control).collect();
+        // Control rows are transient/per-connection and throwaway terminals last
+        // one process (in-memory only): never write them, so a desktop crash
+        // can't strand a stale window on the next boot. Every other row is
+        // written, and so is every row this build could not read, so the file
+        // never loses what another build wrote.
+        let durable: Vec<&PersistedWindow> = {
+            let throwaway = self.throwaway_ids();
+            windows
+                .iter()
+                .filter(|w| !w.control && !throwaway.contains(&w.window_id))
+                .collect()
+        };
         let result = save_atomic(
             &self.store_path,
             &StoredRows {
@@ -1649,6 +1701,63 @@ mod tests {
             !ids.iter().any(|id| id == "control-terminal-ds1"),
             "control row is never written to disk"
         );
+    }
+
+    #[test]
+    fn throwaway_terminals_live_in_memory_only() {
+        let (reg, dir) = registry();
+        let path = dir.path().join("windows.json");
+        let throwaway = reg.create_throwaway_terminal();
+        assert!(reg.is_throwaway(&throwaway.window_id));
+        assert_eq!(throwaway.kind, WindowKind::Terminal);
+        assert!(!throwaway.control, "an ordinary standalone terminal row");
+        assert!(
+            reg.snapshot()
+                .iter()
+                .any(|w| w.window_id == throwaway.window_id),
+            "the row is in the live window set"
+        );
+        // A durable create saves WHILE the throwaway row is present; the save
+        // leaves it out.
+        let durable = reg.create(WindowKind::Terminal, None);
+        assert_eq!(
+            durable.ordinal,
+            throwaway.ordinal + 1,
+            "the throwaway row takes its place in the window numbering"
+        );
+        let ids: Vec<String> = WindowRegistry::open(path.clone())
+            .snapshot()
+            .into_iter()
+            .map(|w| w.window_id)
+            .collect();
+        assert!(ids.contains(&durable.window_id), "durable row persists");
+        assert!(
+            !ids.contains(&throwaway.window_id),
+            "throwaway row is never written to disk"
+        );
+        // Removed, it stays left out of a save of an older snapshot.
+        assert!(reg.remove(&throwaway.window_id));
+        assert!(reg.is_throwaway(&throwaway.window_id));
+    }
+
+    #[tokio::test]
+    async fn a_throwaway_mint_leaves_the_change_notification_to_its_caller() {
+        let (reg, _dir) = registry();
+        let notify = reg.change_notify();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        reg.create_throwaway_terminal();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), notified.as_mut())
+                .await
+                .is_err(),
+            "the mint itself is silent"
+        );
+        notify.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_millis(50), notified)
+            .await
+            .expect("the caller's notify reaches a waiter registered before the mint");
     }
 
     // --- visibility ---------------------------------------------------------

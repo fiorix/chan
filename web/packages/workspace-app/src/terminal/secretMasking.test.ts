@@ -11,9 +11,9 @@ import { describe, expect, test, vi } from "vitest";
 import {
   DEFAULT_SECRET_MASK_SUFFIXES,
   SecretAssignmentMatcher,
-  TerminalSecretMasker,
   findSecretMaskSpans,
 } from "./secretMasking";
+import { TerminalSecretMasker } from "./secretMaskingXterm";
 
 const CORPUS = [
   "GH_TOKEN",

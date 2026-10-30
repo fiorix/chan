@@ -15,6 +15,7 @@ declare module "*.ts?raw" {
 // just the read helpers we actually call.
 declare module "node:fs" {
   export function readFileSync(path: string, encoding: string): string;
+  export function readFileSync(path: string): Uint8Array<ArrayBuffer>;
 }
 
 // React is a runtime peer of @excalidraw/excalidraw, dynamic-imported

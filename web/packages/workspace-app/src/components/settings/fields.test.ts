@@ -14,6 +14,7 @@ import NumberField from "./NumberField.svelte";
 import ColorField from "./ColorField.svelte";
 import ChipList from "./ChipList.svelte";
 import TestHost from "./fieldsTestHost.svelte";
+import SliderRowHost from "./settingSliderTestHost.svelte";
 
 let target: HTMLDivElement;
 let cleanups: (() => void)[] = [];
@@ -96,6 +97,52 @@ describe("SliderField", () => {
     // The local position is not written back: the prop is still 10
     // until the parent commits.
     expect(target.querySelector(".value")?.textContent).toBe("30 MB");
+  });
+});
+
+describe("a slider in a settings row", () => {
+  function mountRow(withSlider = true) {
+    const cmp = mount(SliderRowHost, { target: host(), props: { withSlider } }) as {
+      setStatus: (status: unknown) => void;
+    };
+    cleanups.push(() => unmount(cmp));
+    return cmp;
+  }
+
+  test("a save flashes the value and shows no Saving or Saved note", async () => {
+    const row = mountRow();
+    await tick();
+    row.setStatus("saving");
+    await tick();
+    expect(target.querySelector(".save-note")).toBeNull();
+    row.setStatus("saved");
+    await tick();
+    expect(target.querySelector(".save-note")).toBeNull();
+    expect(target.querySelector(".value")?.classList.contains("saved")).toBe(true);
+  });
+
+  test("a refusal still shows, on a line of its own", async () => {
+    const row = mountRow();
+    await tick();
+    row.setStatus({ error: "refused" });
+    await tick();
+    expect(target.querySelector(".save-error")?.textContent).toBe("Not saved: refused");
+  });
+
+  test("the value label keeps the width of its widest form", async () => {
+    mountRow();
+    await tick();
+    const label = target.querySelector(".value") as HTMLElement;
+    expect(label.textContent).toBe("95%");
+    expect(label.style.width).toBe("10ch");
+  });
+
+  test("a row without a slider keeps its Saved note", async () => {
+    const row = mountRow(false);
+    await tick();
+    row.setStatus("saved");
+    await tick();
+    expect(target.querySelector(".save-note")?.textContent).toBe("Saved");
   });
 });
 

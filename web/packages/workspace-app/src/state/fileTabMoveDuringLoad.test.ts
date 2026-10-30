@@ -37,7 +37,6 @@ import {
   layout,
   moveTab,
   openInPane,
-  paneModeSetGrab,
   registerTerminalInputSink,
   reopenClosedTab,
   splitPane,
@@ -219,7 +218,6 @@ describe("a file tab that moves mid-load still finishes loading", () => {
     // started against is replaced even though it never left its pane.
     const before = liveTab(tabId);
     enterPaneMode();
-    paneModeSetGrab(PANE_ID);
     commitPaneMode();
     // Non-vacuity: a commit that handed back the same object would make this
     // case a second copy of the plain-load test.

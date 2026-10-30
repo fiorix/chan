@@ -5569,6 +5569,21 @@ impl chan_library::StandaloneFiles for StandaloneFilesResolver {
             path,
         })
     }
+
+    fn term_new_frame(&self, window_id: &str, cwd: &Path) -> Result<String, String> {
+        let cwd = standalone_term_cwd(&self.0, cwd)?;
+        serialize_window_command(
+            window_id,
+            WindowCommand::OpenTermNew {
+                cwd: Some(cwd),
+                tab_name: None,
+                tab_group: None,
+                spawn_command: None,
+                env: BTreeMap::new(),
+                destination: None,
+            },
+        )
+    }
 }
 
 /// Why an absolute path could not be expressed relative to a workspace root.

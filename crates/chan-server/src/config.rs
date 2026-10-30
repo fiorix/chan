@@ -21,7 +21,8 @@ use crate::Error;
 // `crate::config::TerminalConfig` users name it here; the on-disk and
 // `/api/config` wire shape is identical to the registry's own definition.
 pub use chan_library::{
-    TerminalConfig, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_SCROLLBACK_MB_MAX,
+    TerminalConfig, TERMINAL_BACKGROUND_OPACITY_MAX, TERMINAL_BACKGROUND_OPACITY_MIN,
+    TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_SCROLLBACK_MB_MAX,
     TERMINAL_SCROLLBACK_MB_MIN,
 };
 
@@ -311,6 +312,7 @@ mod tests {
                 default_term: "tmux-256color".into(),
                 font: chan_library::TerminalFontChoice::SourceCodePro,
                 font_size: 18,
+                background_opacity: 85,
                 mcp_env: true,
                 mouse_capture: false,
                 program_status: true,

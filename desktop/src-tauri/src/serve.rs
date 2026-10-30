@@ -527,6 +527,34 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
     Ok(crate::window_watcher::native_label(&record))
 }
 
+/// Open a throwaway standalone terminal window whose first terminal starts in
+/// `cwd`: a default-terminal launch handed over by another chan-desktop
+/// process. Like [`spawn_local_terminal_window`] the watcher opens it at the
+/// shared `/terminal` tenant, but its registry row is never saved, so a
+/// relaunch does not restore it. Refused once a shutdown has started: the
+/// updater's relaunch starts the new process while this one still holds the
+/// handoff socket, and that process must boot rather than hand itself back.
+pub async fn spawn_throwaway_terminal_window(
+    state: Arc<AppState>,
+    cwd: std::path::PathBuf,
+) -> Result<String, String> {
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("chan-desktop is shutting down".to_string());
+    }
+    if !cwd.is_absolute() {
+        return Err(format!("{} is not an absolute path", cwd.display()));
+    }
+    let Some(embedded) = state.embedded.get() else {
+        return Err("embedded local server is unavailable".to_string());
+    };
+    embedded.open_terminal().await?;
+    let record = embedded.open_throwaway_terminal_window(&cwd)?;
+    Ok(crate::window_watcher::native_label(&record))
+}
+
 /// A spawned control terminal: its terminal tenant prefix, used to scrape the
 /// token the connect script prints, to mint the control window's chan-library
 /// registry row, and to reap the tenant on disconnect. The window is
@@ -827,6 +855,92 @@ struct WindowSpec<'a> {
 
 pub(crate) type WindowBuildCompletion = Box<dyn FnOnce(Result<(), String>) + Send>;
 
+/// Whether a window is built natively transparent for the terminal background
+/// opacity setting: every local terminal-only window (a standalone terminal
+/// window on the local library, or the default-terminal `terminal-exec`
+/// window), whatever the setting is when the window is built. A window's
+/// transparency cannot change after it is built, and the page paints itself
+/// opaque at 100, so building each of them transparent is what lets every
+/// later change of the setting apply live. Workspace windows, devserver
+/// windows and control terminals stay opaque.
+fn builds_transparent(label: &str, library_id: &str, kind: Option<&str>) -> bool {
+    let local_terminal = library_id == "local" && kind == Some("terminal");
+    let terminal_exec = label == crate::terminal_mode::WINDOW_LABEL;
+    local_terminal || terminal_exec
+}
+
+/// Keep the title bar of a transparent macOS window opaque. A transparent
+/// window clears the native title bar along with the content, so the desktop
+/// shows through it; the terminal background is what should. This gives the
+/// title bar container an opaque layer in the window background colour,
+/// behind the title bar's own material, traffic lights and title, which keep
+/// their layout and dragging; the content stays below the title bar. The
+/// colour is resolved once, for the appearance in effect when the window is
+/// built. Main thread only, like every AppKit call; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+fn keep_title_bar_opaque(window: &tauri::WebviewWindow) {
+    use objc2::encode::{Encoding, RefEncode};
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    /// `CGColorRef`, opaque. Encoded as Core Graphics declares it, so the
+    /// message checks objc2 runs in debug builds accept the call.
+    #[repr(C)]
+    struct CGColor {
+        _private: [u8; 0],
+    }
+    // SAFETY: CGColorRef is a pointer to the CGColor struct, `^{CGColor=}`.
+    unsafe impl RefEncode for CGColor {
+        const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[]));
+    }
+    /// `NSWindowCloseButton`.
+    const CLOSE_BUTTON: usize = 0;
+
+    if objc2::MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let Some(color_class) = AnyClass::get(c"NSColor") else {
+        return;
+    };
+    // SAFETY: on the main thread (checked above). `ns_window` is the live
+    // NSWindow Tauri owns for this window, and each selector is sent to the
+    // AppKit class that declares it, with the argument and return types it
+    // declares. Every returned object is borrowed for this call only.
+    unsafe {
+        let Some(ns_window) = ns_window.cast::<AnyObject>().as_ref() else {
+            return;
+        };
+        let close: *mut AnyObject = msg_send![ns_window, standardWindowButton: CLOSE_BUTTON];
+        let Some(close) = close.as_ref() else {
+            return;
+        };
+        // The button sits in the title bar view, which sits in the title bar
+        // container: the band across the top of the window.
+        let title_bar: *mut AnyObject = msg_send![close, superview];
+        let Some(title_bar) = title_bar.as_ref() else {
+            return;
+        };
+        let container: *mut AnyObject = msg_send![title_bar, superview];
+        let Some(container) = container.as_ref() else {
+            return;
+        };
+        let _: () = msg_send![container, setWantsLayer: Bool::YES];
+        let layer: *mut AnyObject = msg_send![container, layer];
+        let Some(layer) = layer.as_ref() else {
+            return;
+        };
+        let color: *mut AnyObject = msg_send![color_class, windowBackgroundColor];
+        let Some(color) = color.as_ref() else {
+            return;
+        };
+        let cg_color: *const CGColor = msg_send![color, CGColor];
+        let _: () = msg_send![layer, setBackgroundColor: cg_color];
+    }
+}
+
 /// The scheduling result does not describe native window creation. Completion
 /// runs after the main-thread builder has either installed the window or failed.
 fn build_workspace_window_with_completion(
@@ -862,7 +976,7 @@ fn build_workspace_window_with_completion(
             "build_workspace_window_with_completion: ?pane= injection at mint time",
         );
     }
-    let parsed = workspace_window_target_url(
+    let mut parsed = workspace_window_target_url(
         app,
         window_label,
         session_id,
@@ -871,6 +985,13 @@ fn build_workspace_window_with_completion(
         kind,
         desktop_holder_tag(),
     )?;
+    // The page learns the outcome from `?transparent=1` and stays opaque
+    // without it, because a see-through page in an opaque window shows the
+    // window's own background instead of the desktop.
+    let transparent = connecting.is_none() && builds_transparent(window_label, library_id, kind);
+    if transparent {
+        parsed.query_pairs_mut().append_pair("transparent", "1");
+    }
     // The connecting page receives its inputs before any page script runs
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
     // navigate URL (remote + ?w=<label>) so the SPA's per-window state survives
@@ -995,8 +1116,13 @@ fn build_workspace_window_with_completion(
         } else {
             builder
         };
+        let builder = builder.transparent(transparent);
         let result = match builder.build() {
             Ok(window) => {
+                #[cfg(target_os = "macos")]
+                if transparent {
+                    keep_title_bar_opaque(&window);
+                }
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
                 apply_geometry_plan(&window, &label_owned, geometry_plan);
@@ -3820,6 +3946,28 @@ mod tests {
             real_close < silent_hide,
             "a default-terminal window real-closes before any hide or prompt logic"
         );
+    }
+
+    #[test]
+    fn only_local_terminal_windows_build_transparent() {
+        let exec = crate::terminal_mode::WINDOW_LABEL;
+        // A local standalone terminal window and the default-terminal window
+        // are built transparent whatever the setting, so a later change of it
+        // reaches them live.
+        assert!(builds_transparent("local::w-1", "local", Some("terminal")));
+        assert!(builds_transparent(exec, "local", Some("control")));
+        // Workspace windows, devserver windows and control terminals stay opaque.
+        assert!(!builds_transparent("local::w-2", "local", None));
+        assert!(!builds_transparent(
+            "lib-ab::w-3",
+            "lib-ab",
+            Some("terminal")
+        ));
+        assert!(!builds_transparent(
+            "control-terminal-x",
+            "local",
+            Some("control")
+        ));
     }
 
     #[test]

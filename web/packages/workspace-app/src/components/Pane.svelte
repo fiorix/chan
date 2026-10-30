@@ -19,7 +19,6 @@
     closeFileTabAfterMove,
     crossWindowTabSnapshot,
     crossWindowTerminalSnapshot,
-    enterPaneModeTransaction,
     flipHybrid,
     focusColorForWindow,
     isDirty,
@@ -35,14 +34,9 @@
     openMovedTerminalInPane,
     reattachTerminalInPane,
     paneMode,
-    paneModeMoveGrabToEdge,
     paneModeRemoveStagedDraftEditor,
-    paneModeSetGrab,
-    paneModeSetHover,
-    paneModeSetMouseSplit,
     paneModeStagedDraftEditorsFor,
     paneModeStagedTabIds,
-    paneModeSwapWith,
     paneActiveTabId,
     paneSideToggleFlash,
     paneWobble,
@@ -136,10 +130,6 @@
   import { persistedPath, revivedPath } from "../api/fileIdentity";
   import { ApiError } from "../api/errors";
   import { applyNamedFocusColor } from "../state/paneColor";
-  import {
-    classifyMouseSplitZone,
-    edgeSplitAllowed,
-  } from "../state/paneMouseSplit";
   import { onDestroy, onMount } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
@@ -332,172 +322,6 @@
     applyPageWidthToElement(editorWrapEl, editorWrapWidth, pageWidth.ratio);
   });
   onDestroy(() => resizeObs?.disconnect());
-
-  /// Transaction-mode (mouse-driven NAV) handlers.
-  ///
-  /// Two entry paths target the same dead zone on the top bar (the
-  /// stretch between the last tab and the hamburger). Entry A is a
-  /// drag-with-payload: mousedown + drag past the threshold enters
-  /// NAV with the originating pane already grabbed. Entry B is a
-  /// double-click: enter NAV in standby, the next click + drag
-  /// inside any pane sets the grab.
-  ///
-  /// Once in transaction mode: pane-body mousedown sets grab + a
-  /// pending start point; pane-body mouseenter (cursor under grab)
-  /// tracks the drop target; pane-body mouseup commits a swap with
-  /// the current drop target. Enter / Esc / Cmd+. exit through the
-  /// same paths as keyboard NAV (handled at App.svelte).
-  const DEAD_ZONE_DRAG_THRESHOLD_PX = 5;
-  let deadZoneDragStart: { x: number; y: number } | null = null;
-
-  function onDeadZoneMouseDown(e: MouseEvent): void {
-    if (paneMode.stale) return;
-    if (e.button !== 0) return;
-    deadZoneDragStart = { x: e.clientX, y: e.clientY };
-    window.addEventListener("mousemove", onDeadZoneMouseMove);
-    window.addEventListener("mouseup", onDeadZoneMouseUp);
-  }
-
-  function onDeadZoneMouseMove(e: MouseEvent): void {
-    if (!deadZoneDragStart) return;
-    if (paneMode.stale) {
-      onDeadZoneMouseUp();
-      return;
-    }
-    const dx = e.clientX - deadZoneDragStart.x;
-    const dy = e.clientY - deadZoneDragStart.y;
-    if (Math.hypot(dx, dy) < DEAD_ZONE_DRAG_THRESHOLD_PX) return;
-    deadZoneDragStart = null;
-    window.removeEventListener("mousemove", onDeadZoneMouseMove);
-    window.removeEventListener("mouseup", onDeadZoneMouseUp);
-    enterPaneModeTransaction(pane.id);
-  }
-
-  function onDeadZoneMouseUp(): void {
-    deadZoneDragStart = null;
-    window.removeEventListener("mousemove", onDeadZoneMouseMove);
-    window.removeEventListener("mouseup", onDeadZoneMouseUp);
-  }
-  // A mousedown that never reaches mouseup / the drag threshold (e.g. the
-  // pane unmounts mid-press) would leak these window listeners; drop them
-  // unconditionally on teardown.
-  onDestroy(() => {
-    window.removeEventListener("mousemove", onDeadZoneMouseMove);
-    window.removeEventListener("mouseup", onDeadZoneMouseUp);
-  });
-
-  function onDeadZoneDblClick(): void {
-    if (paneMode.stale) return;
-    enterPaneModeTransaction(null);
-  }
-
-  /// Pane-body mousedown while in transaction mode. Two roles:
-  /// (1) if no grab is held, set this pane as the grab (Entry B
-  /// path picks up here when the user clicks + drags into a pane).
-  /// (2) when a grab is held but on a different pane, treat the
-  /// new mousedown as a re-grab (the user changed their mind).
-  /// The hoverPaneId tracking on mouseenter handles the drop side.
-  function onPaneBodyMouseDown(e: MouseEvent): void {
-    if (paneMode.stale) return;
-    if (!paneMode.transactionMode) return;
-    if (e.button !== 0) return;
-    paneModeSetGrab(pane.id);
-  }
-
-  function onPaneBodyMouseEnter(): void {
-    if (paneMode.stale) return;
-    if (!paneMode.transactionMode) return;
-    if (!paneMode.grabPaneId) return;
-    paneModeSetHover(pane.id);
-  }
-
-  function onPaneBodyMouseLeave(): void {
-    if (paneMode.stale) return;
-    if (!paneMode.transactionMode) return;
-    if (paneMode.hoverPaneId === pane.id) paneModeSetHover(null);
-    if (paneMode.mouseSplit?.paneId === pane.id) paneModeSetMouseSplit(null);
-  }
-
-  /// Zone tracking over a hovered pane while a grab is held. The pane
-  /// divides into 25 percent edge zones plus a center: the center keeps
-  /// the swap affordance, an allowed edge arms the split preview, and a
-  /// refused edge (the split would violate the minimum pane size) drops
-  /// the target entirely rather than falling back to a swap.
-  function onPaneBodyMouseMove(e: MouseEvent): void {
-    if (paneMode.stale) return;
-    if (!paneMode.transactionMode) return;
-    const grab = paneMode.grabPaneId;
-    if (!grab) return;
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const zone = classifyMouseSplitZone(
-      e.clientX - rect.left,
-      e.clientY - rect.top,
-      rect.width,
-      rect.height,
-    );
-    if (zone !== "center" && edgeSplitAllowed(zone, rect.width, rect.height)) {
-      paneModeSetHover(pane.id);
-      paneModeSetMouseSplit({ paneId: pane.id, edge: zone });
-      return;
-    }
-    paneModeSetMouseSplit(null);
-    if (zone === "center" && grab !== pane.id) paneModeSetHover(pane.id);
-    else paneModeSetHover(null);
-  }
-
-  /// Pane-body mouseup while in transaction mode with a grab held.
-  /// An armed edge splits this target, including when it is also the
-  /// grabbed pane. Without an edge, a different target keeps the swap
-  /// while the grabbed pane itself releases the grab. A refused edge
-  /// clears the target and preserves the grab for the next attempt.
-  /// Transaction stays active for chained drops until Enter / Esc.
-  function onPaneBodyMouseUp(e: MouseEvent): void {
-    if (paneMode.stale) return;
-    if (!paneMode.transactionMode) return;
-    const grab = paneMode.grabPaneId;
-    if (!grab) return;
-    const preview = paneMode.mouseSplit;
-    if (preview && preview.paneId === pane.id) {
-      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      if (!edgeSplitAllowed(preview.edge, rect.width, rect.height)) {
-        paneModeSetMouseSplit(null);
-        paneModeSetHover(null);
-        return;
-      }
-      paneModeMoveGrabToEdge(grab, pane.id, preview.edge);
-    } else if (grab === pane.id) {
-      paneModeSetGrab(null);
-      return;
-    } else if (paneMode.hoverPaneId !== pane.id) {
-      return;
-    } else {
-      paneModeSwapWith(grab, pane.id);
-    }
-    paneModeSetMouseSplit(null);
-    paneModeSetGrab(null);
-    paneModeSetHover(null);
-  }
-
-  /// True when this pane is the drop target under a held grab. Workspaces
-  /// the outline cue. Distinct from the keyboard-NAV active-pane
-  /// highlight so the user can tell drop-target apart from focus.
-  const isTransactionGrab = $derived(
-    paneMode.transactionMode && paneMode.grabPaneId === pane.id,
-  );
-  /// Edge zone currently previewed on this pane, or null. An armed edge
-  /// replaces the full-pane swap cue with the split-half preview.
-  const transactionSplitEdge = $derived(
-    paneMode.transactionMode && paneMode.mouseSplit?.paneId === pane.id
-      ? paneMode.mouseSplit.edge
-      : null,
-  );
-  const isTransactionDropTarget = $derived(
-    paneMode.transactionMode &&
-      paneMode.grabPaneId !== null &&
-      paneMode.grabPaneId !== pane.id &&
-      paneMode.hoverPaneId === pane.id &&
-      transactionSplitEdge === null,
-  );
 
   /// Ids of tabs added by app-spawn chords during the current
   /// pane-mode session. Each entry is a "ghost tab": visible in the
@@ -1462,13 +1286,6 @@
   class:sideFlipHorizontal={sideFlipAxis === "horizontal"}
   class:sideFlipVertical={sideFlipAxis === "vertical"}
   class:pane-mode-stale={paneMode.stale}
-  class:transaction-active={paneMode.transactionMode}
-  class:transaction-grab={isTransactionGrab}
-  class:transaction-drop-target={isTransactionDropTarget}
-  class:transaction-split-left={transactionSplitEdge === "left"}
-  class:transaction-split-right={transactionSplitEdge === "right"}
-  class:transaction-split-top={transactionSplitEdge === "top"}
-  class:transaction-split-bottom={transactionSplitEdge === "bottom"}
   bind:this={paneEl}
   style:--pane-side-flip-start={sideFlipStartTransform}
   style:--pane-side-flip-back={sideFlipBackTransform}
@@ -1477,12 +1294,7 @@
   onmousedown={(e) => {
     if (paneMode.stale) return;
     if (!(e.button === 0 && pendingTerminalPress)) setActivePane(pane.id);
-    onPaneBodyMouseDown(e);
   }}
-  onmouseenter={onPaneBodyMouseEnter}
-  onmouseleave={onPaneBodyMouseLeave}
-  onmousemove={onPaneBodyMouseMove}
-  onmouseup={onPaneBodyMouseUp}
   onanimationend={(e) => {
     // Svelte scopes keyframe names (svelte-<hash>-pane-wobble-once), so a
     // strict equality against the source name never matches in a real
@@ -1756,19 +1568,10 @@
         >×</button>
       </div>
     {/each}
-    <!-- Top-bar dead zone. The empty stretch between the last tab
-         and the hamburger actions captures
-         mousedown + double-click to enter Hybrid Nav in transaction
-         mode. Manual mousedown + threshold tracking (not HTML5
-         dragstart) avoids stomping the per-tab inter-pane DnD that
-         lives on each .tab; that DnD remains unchanged. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="dead-zone"
-      aria-hidden="true"
-      onmousedown={onDeadZoneMouseDown}
-      ondblclick={onDeadZoneDblClick}
-    ></div>
+    <!-- Top-bar dead zone: the empty stretch between the last tab and
+         the hamburger actions. A spacer only; a press, drag or
+         double-click there does nothing. -->
+    <div class="dead-zone" aria-hidden="true"></div>
     <div class="actions">
       <button
         class="side-toggle"
@@ -2292,6 +2095,11 @@
     -webkit-backface-visibility: hidden;
     backface-visibility: hidden;
   }
+  /* In a transparent window a pane showing a terminal leaves its face clear:
+     the terminal paints the tint itself, so the alpha does not stack. */
+  :global(:root[data-transparent-window]) .pane-card-face:has(:global(.terminal-tab.active)) {
+    background: transparent;
+  }
   .pane-card-face {
     position: relative;
     z-index: 1;
@@ -2627,66 +2435,13 @@
     }
   }
   /* Dead zone on the top bar: the stretch between the last tab and
-     the hamburger. mousedown + drag past 5 px
-     enters transaction-mode NAV (Entry A, drag-with-payload);
-     dblclick enters transaction-mode NAV with no originating grab
-     (Entry B). flex: 1 fills any remaining horizontal space; the
-     min-width guard keeps the affordance hittable even when the
-     tab strip is fully packed. The `grab` cursor advertises the
-     drag-to-rearrange interaction; switches to `grabbing` while
-     a transaction is in flight. */
+     the hamburger. flex: 1 fills any remaining horizontal space and
+     pushes the actions to the end of the strip. */
   .dead-zone {
     flex: 1;
     min-width: 12px;
     align-self: stretch;
-    cursor: grab;
   }
-  .dead-zone:active,
-  .pane.transaction-active .dead-zone {
-    cursor: grabbing;
-  }
-  /* Transaction-mode visual cues. `.transaction-active` is set on
-     every pane while transaction
-     mode is in flight; the body cursor flips to `grabbing` so the
-     mouse-grab affordance reads from anywhere in the pane.
-     `.transaction-grab` outlines the pane currently held; the
-     dashed ring in the focus colour distinguishes the held pane
-     from focus, the solid ring per `.pane.focused`.
-     `.transaction-drop-target` is set on the pane currently under
-     the cursor while a grab is held; a brighter inset overlay
-     signals the drop will land here. */
-  .pane.transaction-active { cursor: grabbing; }
-  .pane.transaction-grab {
-    outline: 2px dashed var(--pane-highlight-color, var(--pane-active-focus));
-    outline-offset: -3px;
-  }
-  .pane.transaction-drop-target::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    border: 2px solid var(--pane-highlight-color, var(--pane-active-focus));
-    background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 8%, transparent);
-    z-index: 5;
-  }
-  /* Edge-split preview: an armed edge replaces the full-pane swap cue
-     and tints the half the moved content would occupy after the 50/50
-     split, so the user sees the resulting geometry before mouseup. */
-  .pane.transaction-split-left::before,
-  .pane.transaction-split-right::before,
-  .pane.transaction-split-top::before,
-  .pane.transaction-split-bottom::before {
-    content: "";
-    position: absolute;
-    pointer-events: none;
-    border: 2px solid var(--pane-highlight-color, var(--pane-active-focus));
-    background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 12%, transparent);
-    z-index: 5;
-  }
-  .pane.transaction-split-left::before { inset: 0 50% 0 0; }
-  .pane.transaction-split-right::before { inset: 0 0 0 50%; }
-  .pane.transaction-split-top::before { inset: 0 0 50% 0; }
-  .pane.transaction-split-bottom::before { inset: 50% 0 0 0; }
   :global(.hamburger-menu .menu-label) {
     display: flex;
     align-items: center;

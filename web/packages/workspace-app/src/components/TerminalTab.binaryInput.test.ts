@@ -93,11 +93,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   }
   return {
     ...(await importOriginal<typeof import("../terminal/backend")>()),
-    loadGhosttyKit: async () => ({ ghostty: {}, Terminal: GhosttyTerminal }),
+    loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
   };
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
-  clearGhosttyRecycledGrid: () => {},
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,
@@ -285,15 +284,16 @@ async function attachedGhostty() {
   return { term: ghostty, socket, received };
 }
 
-function wheel(term: GhosttyStandIn): void {
+/// An 8x16 cell grid: one-based column 151, row 4, down one line unless
+/// `delta` says otherwise.
+function wheel(term: GhosttyStandIn, delta: WheelEventInit = { deltaY: 1, deltaMode: 1 }): void {
   const canvas = document.createElement("canvas");
   canvas.getBoundingClientRect = () => new DOMRect(0, 0, 1760, 384);
   let claimed = false;
   canvas.addEventListener("wheel", (event) => {
     claimed = term.wheelHandler!(event);
   });
-  // An 8x16 cell grid: one-based column 151, row 4, down one notch.
-  canvas.dispatchEvent(new WheelEvent("wheel", { clientX: 1204, clientY: 56, deltaY: 1 }));
+  canvas.dispatchEvent(new WheelEvent("wheel", { clientX: 1204, clientY: 56, ...delta }));
   expect(claimed).toBe(true);
 }
 
@@ -307,6 +307,13 @@ describe("a ghostty mouse report", () => {
       { type: "broadcast-input", data: report, binary: true },
     ]);
     expect.soft(received).toEqual([[report, true]]);
+  });
+
+  test("a trackpad delta under a row is claimed and sends no report", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    wheel(term, { deltaY: 1 });
+    expect.soft(inputFrames(socket)).toEqual([]);
+    expect.soft(received).toEqual([]);
   });
 
   test("sends an SGR wheel report as text to the PTY and group", async () => {

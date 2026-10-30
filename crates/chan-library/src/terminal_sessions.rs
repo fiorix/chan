@@ -1805,7 +1805,8 @@ impl AttachHandle {
     }
 
     /// The child's current directory, `None` when it cannot be read or lies
-    /// outside the workspace root.
+    /// outside both the registry root and the directory the session was
+    /// spawned in.
     pub fn cwd(&self) -> Option<PathBuf> {
         self.session.cwd()
     }
@@ -3136,7 +3137,8 @@ impl Registry {
     /// Snapshot of every live session, for `cs term list`. The control
     /// socket holds a read handle to the registry and groups these by
     /// `tab_group`. `cwd` is the session's current working directory when
-    /// it can be read from the child process.
+    /// it can be read from the child process and lies under the registry
+    /// root or the directory the session was spawned in.
     pub fn session_summaries(&self) -> Vec<TerminalSessionSummary> {
         // Snapshot the live sessions under the lock, then read each cwd AFTER
         // releasing it. `cwd()` shells `lsof` on macOS, so computing it under
@@ -5855,7 +5857,18 @@ impl Session {
         let cwd = process_cwd(self.child_pid?)?;
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::CwdBeforeRootCheck);
-        path_inside_root(&cwd, &self.workspace_root).then_some(cwd)
+        // The directory this session was spawned in bounds the report beside
+        // the registry root: a standalone terminal window's registry root is
+        // the home directory while its spawns may start anywhere on the
+        // machine, and a report that hid such a shell's directory would read
+        // as a shell with no directory at all.
+        let inside = path_inside_root(&cwd, &self.workspace_root)
+            || self
+                .spawn_opts
+                .cwd
+                .as_deref()
+                .is_some_and(|start| path_inside_root(&cwd, start));
+        inside.then_some(cwd)
     }
 
     fn restart_options(&self) -> CreateOptions {
@@ -12016,7 +12029,7 @@ mod tests {
     #[tokio::test]
     async fn tenant_exec_program_starts_in_the_registry_root() {
         // The registry root is the PTY cwd for an exec program, and the cwd
-        // report (which only answers inside the root) sees it there.
+        // report sees it there.
         let config = test_config(4096, 4, 60);
         let root = config.workspace_root.canonicalize().unwrap();
         let registry = Arc::new(Registry::new(config));
@@ -12036,6 +12049,62 @@ mod tests {
             handle.cwd().map(|cwd| cwd.canonicalize().unwrap()),
             Some(root),
             "the cwd report answers inside the root"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cwd_report_answers_inside_the_session_start_directory() {
+        // A standalone terminal window's registry root is the home directory
+        // while a spawn may start anywhere on the machine: the report answers
+        // inside that start directory, and still refuses a directory under
+        // neither it nor the root.
+        let config = test_config(4096, 4, 60);
+        let root = config.workspace_root.canonicalize().unwrap();
+        let start = tempfile::tempdir().unwrap();
+        let start_dir = start.path().canonicalize().unwrap();
+        assert!(
+            !start_dir.starts_with(&root),
+            "the start directory must lie outside the registry root"
+        );
+        let registry = Arc::new(Registry::new(config));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "printf 'START-DONE\\n'; sleep 30",
+            &[],
+        ))));
+        let mut opts = tenant_default_opts();
+        opts.cwd = Some(start_dir.clone());
+        let mut handle = registry.create(opts).unwrap();
+        let out = collect_until(&mut handle, "START-DONE", Duration::from_secs(5)).await;
+        assert!(
+            out.contains("START-DONE"),
+            "exec program did not run: {out:?}"
+        );
+        assert_eq!(
+            handle.cwd().map(|cwd| cwd.canonicalize().unwrap()),
+            Some(start_dir.clone()),
+            "the cwd report answers inside the start directory"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "cd /; printf 'LEFT-DONE\\n'; sleep 30",
+            &[],
+        ))));
+        let mut opts = tenant_default_opts();
+        opts.cwd = Some(start_dir);
+        let mut handle = registry.create(opts).unwrap();
+        let out = collect_until(&mut handle, "LEFT-DONE", Duration::from_secs(5)).await;
+        assert!(
+            out.contains("LEFT-DONE"),
+            "exec program did not run: {out:?}"
+        );
+        assert_eq!(
+            handle.cwd(),
+            None,
+            "a directory under neither root is not reported"
         );
         registry.close(handle.id(), CloseReason::Explicit);
     }

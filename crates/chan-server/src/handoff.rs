@@ -211,6 +211,19 @@ pub enum Request {
         target: String,
         workspace_path: String,
     },
+    /// A default-terminal launch that runs the user's shell (xdg-terminal-exec
+    /// with no command): open a throwaway standalone terminal window whose
+    /// first terminal starts in `cwd`. The window is never saved, so a relaunch
+    /// does not restore it. The desktop answers `TerminalOpened` once the
+    /// window is minted, or `Error` (a shutdown in progress, a `cwd` outside
+    /// its filesystem surface), and the launcher then opens its own window.
+    OpenTerminal {
+        protocol: u32,
+        cli_version: String,
+        /// The absolute start directory. Sent as a string for stable JSON
+        /// across platforms.
+        cwd: String,
+    },
 }
 
 impl Request {
@@ -227,7 +240,8 @@ impl Request {
             | Request::ForgetDevserver { protocol, .. }
             | Request::ServeRemoteWorkspace { protocol, .. }
             | Request::CloseRemoteWorkspace { protocol, .. }
-            | Request::ForgetRemoteWorkspace { protocol, .. } => *protocol,
+            | Request::ForgetRemoteWorkspace { protocol, .. }
+            | Request::OpenTerminal { protocol, .. } => *protocol,
         }
     }
 
@@ -244,7 +258,8 @@ impl Request {
             | Request::ForgetDevserver { cli_version, .. }
             | Request::ServeRemoteWorkspace { cli_version, .. }
             | Request::CloseRemoteWorkspace { cli_version, .. }
-            | Request::ForgetRemoteWorkspace { cli_version, .. } => cli_version,
+            | Request::ForgetRemoteWorkspace { cli_version, .. }
+            | Request::OpenTerminal { cli_version, .. } => cli_version,
         }
     }
 
@@ -346,6 +361,9 @@ pub enum Response {
     },
     /// The devserver dropped the workspace from a `ForgetRemoteWorkspace`.
     RemoteWorkspaceForgotten { desktop_version: String },
+    /// The desktop minted the throwaway terminal window an `OpenTerminal`
+    /// asked for; its window watcher opens it.
+    TerminalOpened { desktop_version: String },
 }
 
 /// One devserver registry row as `chan devserver ls` renders it. A
@@ -1171,6 +1189,7 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
         | Ok(Response::RemoteWorkspaceServed { .. })
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
+        | Ok(Response::TerminalOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1246,6 +1265,7 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
         | Ok(Response::RemoteWorkspaceServed { .. })
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
+        | Ok(Response::TerminalOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1377,6 +1397,7 @@ fn map_close_response(line: &str) -> Outcome {
         | Ok(Response::RemoteWorkspaceServed { .. })
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
+        | Ok(Response::TerminalOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1569,6 +1590,29 @@ pub async fn try_devserver_control(_req: Request) -> DevserverControlOutcome {
     DevserverControlOutcome::NoDesktop
 }
 
+/// Hand a default-terminal launch that runs the user's shell to a running
+/// same-user desktop, as an `OpenTerminal` for `cwd`. `true` only when the
+/// desktop answers `TerminalOpened`. Every other outcome is `false` and the
+/// launcher opens its own window: no desktop, an opt-out
+/// (`CHAN_NO_DESKTOP_HANDOFF`), a refusal, and a desktop that accepted the
+/// connection but did not answer within the reply budget. That last case can
+/// leave two windows if the desktop answers late; a mint takes milliseconds,
+/// so a desktop that misses the budget is more likely wedged than slow.
+pub async fn try_open_terminal(cwd: &str) -> bool {
+    if handoff_opt_out() || !gui_session_present() {
+        return false;
+    }
+    let req = Request::OpenTerminal {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+        cwd: cwd.to_string(),
+    };
+    matches!(
+        try_devserver_control(req).await,
+        DevserverControlOutcome::Reply(Response::TerminalOpened { .. })
+    )
+}
+
 /// Map an `OpenDevserver` reply line to an [`Outcome`]. Shared by the unix +
 /// windows arms so the response handling stays in one place: only
 /// `DevserverRegistered` is a success; a workspace/upgrade reply to a
@@ -1598,6 +1642,7 @@ fn map_devserver_response(line: &str) -> Outcome {
         | Ok(Response::RemoteWorkspaceServed { .. })
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
+        | Ok(Response::TerminalOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1756,6 +1801,7 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
         | Ok(Response::RemoteWorkspaceServed { .. })
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
+        | Ok(Response::TerminalOpened { .. })
         | Err(_) => UpgradeOutcome::NoDesktop,
     }
 }
@@ -2983,6 +3029,9 @@ mod tests {
                     | Request::ForgetRemoteWorkspace { .. } => Response::Error {
                         message: "unexpected devserver control".into(),
                     },
+                    Request::OpenTerminal { .. } => Response::Error {
+                        message: "unexpected open_terminal".into(),
+                    },
                 }
             }
         })
@@ -2996,6 +3045,37 @@ mod tests {
         let resp = request_over(&sock, "/tmp/notes").await;
         assert!(matches!(resp, Response::Opened { .. }));
         assert!(opened.load(Ordering::SeqCst), "handler must have run");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listener_round_trip_terminal_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let _handle = start_listener(sock.clone(), move |req| async move {
+            match req {
+                Request::OpenTerminal { cwd, .. } if cwd == "/tmp/proj" => {
+                    Response::TerminalOpened {
+                        desktop_version: CHAN_VERSION.into(),
+                    }
+                }
+                other => Response::Error {
+                    message: format!("unexpected request {other:?}"),
+                },
+            }
+        })
+        .unwrap();
+        let req = Request::OpenTerminal {
+            protocol: PROTOCOL_VERSION,
+            cli_version: CHAN_VERSION.into(),
+            cwd: "/tmp/proj".into(),
+        };
+        match try_devserver_control_at(&sock, req).await {
+            DevserverControlOutcome::Reply(Response::TerminalOpened { desktop_version }) => {
+                assert_eq!(desktop_version, CHAN_VERSION)
+            }
+            other => panic!("expected TerminalOpened, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
@@ -3186,6 +3266,9 @@ mod tests {
                 | Request::ForgetRemoteWorkspace { .. } => Response::Error {
                     message: "unexpected devserver control".into(),
                 },
+                Request::OpenTerminal { .. } => Response::Error {
+                    message: "unexpected open_terminal".into(),
+                },
             }
         })
         .unwrap();
@@ -3279,6 +3362,9 @@ mod tests {
                 | Request::CloseRemoteWorkspace { .. }
                 | Request::ForgetRemoteWorkspace { .. } => Response::Error {
                     message: "unexpected devserver control".into(),
+                },
+                Request::OpenTerminal { .. } => Response::Error {
+                    message: "unexpected open_terminal".into(),
                 },
             }
         })

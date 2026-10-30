@@ -73,6 +73,7 @@ export const DEMO_PREFERENCES: Preferences = {
     scrollback_mb: 50,
     default_term: "xterm-256color",
     font: "os-default",
+    background_opacity: 100,
     mcp_env: false,
     mouse_capture: true,
     ghostty: false,

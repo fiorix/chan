@@ -46,6 +46,7 @@ function basePrefs(): Record<string, unknown> {
       default_term: "xterm-256color",
       font: "os-default",
       font_size: 14,
+      background_opacity: 100,
       mcp_env: false,
       mouse_capture: true,
     },
@@ -532,13 +533,13 @@ describe("settings surface render", () => {
     });
   });
 
-  test("secret masking PATCHes terminal.secret_masking with the xterm scope stated", async () => {
+  test("secret masking PATCHes terminal.secret_masking with both backends stated", async () => {
     const target = openSurface();
     await flush();
     clickTab(target, "Terminal");
     await flush();
-    // The row states that masking applies only to xterm.js terminals.
-    expect(target.textContent).toContain("xterm.js terminals only");
+    // The row states that masking applies on both backends.
+    expect(target.textContent).toContain("xterm.js and ghostty backends alike");
     const pill = [...target.querySelectorAll("label.pill")].find((e) =>
       e.textContent?.includes("Mask secrets in new terminals"),
     ) as HTMLLabelElement;
