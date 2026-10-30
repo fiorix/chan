@@ -1,0 +1,11 @@
+P1000p%begin 1793319958 312 0
+%end 1793319958 312 0
+%sessions-changed
+%session-changed $0 m1
+%output %0 \033]3008;start=0;machineid=0;user=root;hostname=tmuxcc-m1;bootid=0;pid=0;type=shell;cwd=/opt\033\134
+%output %0 \033[?2004h
+%output %0 root@tmuxcc-m1:/opt# 
+%begin 1793319959 314 1
+%end 1793319959 314 1
+%exit
+\
