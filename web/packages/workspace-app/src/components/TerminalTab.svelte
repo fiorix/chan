@@ -186,7 +186,11 @@
     scrollbackLinesFromMb,
     SCROLLBACK_MB_DEFAULT,
   } from "../terminal/scrollback";
-  import { transparentColor, windowIsTransparent } from "../terminal/backgroundOpacity";
+  import {
+    effectiveBackgroundOpacity,
+    transparentColor,
+    windowIsTransparent,
+  } from "../terminal/backgroundOpacity";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -428,6 +432,15 @@
   // The renderers then paint a transparent default background and the
   // `.terminal-tab` CSS paints the tint at the live opacity.
   const transparentWindow = windowIsTransparent();
+  // Whether the desktop shows through this terminal now: a transparent
+  // window with the opacity below 100. At 100 the tint is opaque, so the
+  // terminal reads exactly as in an opaque window.
+  const seeThrough = $derived(
+    effectiveBackgroundOpacity(
+      currentPreferences()?.terminal?.background_opacity,
+      transparentWindow,
+    ) !== null,
+  );
   const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
   // itself (its write callback fires off xterm's own queue). On
@@ -732,6 +745,7 @@
   $effect(() => {
     effectiveHybridSurfaceTheme("terminal");
     customTerminalColors;
+    seeThrough;
     applyTerminalTheme();
   });
 
@@ -817,9 +831,10 @@
   // dark rendering untouched. xterm-only: ghostty-web has no equivalent
   // option.
   function terminalMinimumContrastRatio(): number {
-    // In a transparent window the backdrop is whatever sits behind it, so a
-    // ratio measured against the theme background would be wrong.
-    if (transparentWindow) return 1;
+    // While the desktop shows through, the backdrop is whatever sits behind
+    // the window, so a ratio measured against the theme background would be
+    // wrong. At 100 the tint is the theme background itself.
+    if (seeThrough) return 1;
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 

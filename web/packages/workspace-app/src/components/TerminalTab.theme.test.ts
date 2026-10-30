@@ -85,6 +85,32 @@ describe("the xterm palette", () => {
     expect(term.options.minimumContrastRatio).toBe(1);
   });
 
+  test("in a transparent window the contrast floor drops only while the desktop shows through", async () => {
+    // chan-desktop builds every local terminal window transparent, so the
+    // window flag alone says nothing about what sits behind the text: at 100
+    // the tint is the theme background and light keeps its floor.
+    const href = window.location.href;
+    window.history.replaceState(null, "", "/?transparent=1");
+    try {
+      hybridSurfaceThemes.terminal = "light";
+      __testSetStandalonePreferences(terminalPreferences({ background_opacity: 100 }));
+      const { term } = await mounted();
+      expect(term.options.minimumContrastRatio, "opaque at 100").toBe(4.5);
+
+      __testSetStandalonePreferences(terminalPreferences({ background_opacity: 90 }));
+      flushSync();
+      await tick();
+      expect(term.options.minimumContrastRatio, "see-through at 90").toBe(1);
+
+      __testSetStandalonePreferences(terminalPreferences({ background_opacity: 100 }));
+      flushSync();
+      await tick();
+      expect(term.options.minimumContrastRatio, "back to opaque").toBe(4.5);
+    } finally {
+      window.history.replaceState(null, "", href);
+    }
+  });
+
   test("a custom palette sets background, foreground and cursor, and its contrast picks the ANSI set", async () => {
     const noTerminalFields = {};
     __testSetStandalonePreferences(

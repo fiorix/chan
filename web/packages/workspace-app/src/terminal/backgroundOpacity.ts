@@ -1,10 +1,10 @@
 // Terminal background opacity.
 //
 // A percent, 100 opaque. It only has an effect in a window that chan-desktop
-// built transparent: an opaque native window (a workspace window, a devserver
-// window, a browser tab, a window built while the value was 100) would show
-// black or its own background through a see-through page, so the page asks
-// the window first and stays opaque otherwise.
+// built transparent, which it does for every local terminal-only window: an
+// opaque native window (a workspace window, a devserver window, a browser tab)
+// would show black or its own background through a see-through page, so the
+// page asks the window first and stays opaque otherwise.
 
 /// Inclusive bounds the Settings slider exposes. Mirrored from the Rust
 /// constants in `crates/chan-library/src/config.rs`

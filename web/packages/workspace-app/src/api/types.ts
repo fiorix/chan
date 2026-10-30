@@ -181,7 +181,7 @@ export type TerminalPreferences = {
   /// Terminal background opacity in percent; 100 is opaque. Takes effect
   /// only in a window chan-desktop built transparent (`?transparent=1`),
   /// where terminal panes paint their background at this alpha. Server
-  /// clamps to [10, 100]; absent means 100.
+  /// clamps to [80, 100]; absent means 100.
   background_opacity?: number;
   /// Whether newly-spawned terminals get the chan MCP discovery env
   /// vars (`CHAN_MCP_*`) so external agent CLIs can find the chan MCP

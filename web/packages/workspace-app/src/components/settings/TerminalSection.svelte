@@ -369,7 +369,7 @@
 <SettingField
   label="Background opacity"
   pref="terminal.background_opacity"
-  hint="See-through terminal background in chan-desktop's standalone terminal windows; text stays opaque. From 80% to 100%, the default, which is off. Applies live to windows opened below 100%; a window opened at 100% stays opaque until it is reopened. Workspace and devserver windows stay opaque."
+  hint="See-through terminal background in chan-desktop's standalone terminal windows; text stays opaque. From 80% to 100%, the default, which is off. Applies live to every open terminal window. Workspace and devserver windows stay opaque."
 >
   <SliderField
     value={clampBackgroundOpacity(prefs.terminal.background_opacity)}

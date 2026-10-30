@@ -67,14 +67,12 @@ pub struct TerminalConfig {
     /// either terminal backend; existing renderers keep their captured size.
     #[serde(default = "default_terminal_font_size")]
     pub font_size: u32,
-    /// Terminal background opacity in percent, 100 opaque. Below 100 the
-    /// desktop builds local terminal-only windows transparent and the SPA
-    /// paints the terminal background at this alpha, so the desktop behind
-    /// the window shows through while text stays opaque. A window decides
-    /// whether it is transparent when it is built: every later change applies
-    /// live to a window built transparent (100 paints it opaque), and a window
-    /// built at 100 stays opaque until it is reopened. Workspace windows,
-    /// devserver windows and browser tabs stay opaque.
+    /// Terminal background opacity in percent, 100 opaque. Below 100 the SPA
+    /// paints the terminal background of the desktop's local terminal-only
+    /// windows at this alpha, so the desktop behind the window shows through
+    /// while text stays opaque. Those windows are always built transparent and
+    /// paint themselves opaque at 100, so a change applies live to every open
+    /// one. Workspace windows, devserver windows and browser tabs stay opaque.
     #[serde(default = "default_terminal_background_opacity")]
     pub background_opacity: u32,
     /// The non-team default for whether a newly-spawned terminal

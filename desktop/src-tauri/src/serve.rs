@@ -856,14 +856,17 @@ struct WindowSpec<'a> {
 pub(crate) type WindowBuildCompletion = Box<dyn FnOnce(Result<(), String>) + Send>;
 
 /// Whether a window is built natively transparent for the terminal background
-/// opacity setting: only a local terminal-only window (a standalone terminal
+/// opacity setting: every local terminal-only window (a standalone terminal
 /// window on the local library, or the default-terminal `terminal-exec`
-/// window), and only while the setting is below opaque. Workspace windows,
-/// devserver windows and control terminals stay opaque.
-fn builds_transparent(label: &str, library_id: &str, kind: Option<&str>, opacity: u32) -> bool {
+/// window), whatever the setting is when the window is built. A window's
+/// transparency cannot change after it is built, and the page paints itself
+/// opaque at 100, so building each of them transparent is what lets every
+/// later change of the setting apply live. Workspace windows, devserver
+/// windows and control terminals stay opaque.
+fn builds_transparent(label: &str, library_id: &str, kind: Option<&str>) -> bool {
     let local_terminal = library_id == "local" && kind == Some("terminal");
     let terminal_exec = label == crate::terminal_mode::WINDOW_LABEL;
-    (local_terminal || terminal_exec) && opacity < chan_server::TERMINAL_BACKGROUND_OPACITY_MAX
+    local_terminal || terminal_exec
 }
 
 /// Keep the title bar of a transparent macOS window opaque. A transparent
@@ -982,20 +985,10 @@ fn build_workspace_window_with_completion(
         kind,
         desktop_holder_tag(),
     )?;
-    // Transparency is fixed when the native window is built, so the setting
-    // is read here, once, from the same `server.toml` the preferences route
-    // writes. The page learns the outcome from `?transparent=1` and stays
-    // opaque without it, because a see-through page in an opaque window
-    // shows the window's own background instead of the desktop.
-    let transparent = connecting.is_none()
-        && builds_transparent(
-            window_label,
-            library_id,
-            kind,
-            chan_server::ServerConfig::load()
-                .map(|config| config.terminal.background_opacity)
-                .unwrap_or(chan_server::TERMINAL_BACKGROUND_OPACITY_MAX),
-        );
+    // The page learns the outcome from `?transparent=1` and stays opaque
+    // without it, because a see-through page in an opaque window shows the
+    // window's own background instead of the desktop.
+    let transparent = connecting.is_none() && builds_transparent(window_label, library_id, kind);
     if transparent {
         parsed.query_pairs_mut().append_pair("transparent", "1");
     }
@@ -3956,38 +3949,24 @@ mod tests {
     }
 
     #[test]
-    fn only_local_terminal_windows_build_transparent_below_opaque() {
+    fn only_local_terminal_windows_build_transparent() {
         let exec = crate::terminal_mode::WINDOW_LABEL;
         // A local standalone terminal window and the default-terminal window
-        // follow the setting.
-        assert!(builds_transparent(
-            "local::w-1",
-            "local",
-            Some("terminal"),
-            80
-        ));
-        assert!(builds_transparent(exec, "local", Some("control"), 80));
-        // Opaque at 100, whatever the window.
-        assert!(!builds_transparent(
-            "local::w-1",
-            "local",
-            Some("terminal"),
-            100
-        ));
-        assert!(!builds_transparent(exec, "local", Some("control"), 100));
+        // are built transparent whatever the setting, so a later change of it
+        // reaches them live.
+        assert!(builds_transparent("local::w-1", "local", Some("terminal")));
+        assert!(builds_transparent(exec, "local", Some("control")));
         // Workspace windows, devserver windows and control terminals stay opaque.
-        assert!(!builds_transparent("local::w-2", "local", None, 50));
+        assert!(!builds_transparent("local::w-2", "local", None));
         assert!(!builds_transparent(
             "lib-ab::w-3",
             "lib-ab",
-            Some("terminal"),
-            50
+            Some("terminal")
         ));
         assert!(!builds_transparent(
             "control-terminal-x",
             "local",
-            Some("control"),
-            50
+            Some("control")
         ));
     }
 
