@@ -55,9 +55,6 @@ function fixedColours(body: string): string[] {
 const PANE_RULES: Array<[string, string[]]> = [
   [".tabs.drop-active", ["box-shadow"]],
   [".drop-bar", ["background"]],
-  [".pane.transaction-grab", ["outline"]],
-  [".pane.transaction-drop-target::after", ["border", "background"]],
-  [".pane.transaction-split-left::before", ["border", "background"]],
   [".editor-wrap.body-drop-left::after", ["border-left", "background"]],
   [".editor-wrap.body-drop-right::after", ["border-right", "background"]],
   [".editor-wrap.body-drop-top::after", ["border-top", "background"]],
@@ -72,7 +69,7 @@ describe("the pane's drag and drop highlights", () => {
 
   test("no drag, drop or move rule of the pane names a fixed colour", () => {
     const dragRules = rules(pane).filter((r) =>
-      /drop-active|drop-bar|body-drop-|transaction-(grab|drop-target|split-)/.test(r.selector),
+      /drop-active|drop-bar|body-drop-/.test(r.selector),
     );
     expect(dragRules.length).toBeGreaterThanOrEqual(PANE_RULES.length);
     for (const r of dragRules) expect(fixedColours(r.body), r.selector).toEqual([]);

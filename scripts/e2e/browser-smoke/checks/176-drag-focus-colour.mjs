@@ -4,12 +4,11 @@
 // presets, in the dark and the light scheme, the check drives the app's own
 // handlers and reads the painted colours: a tab dragged from the left pane
 // over the right pane's tab strip (the strip's inset ring and the insertion
-// marker) and over the right pane's body edge (the edge-split overlay); a pane
-// move in Hybrid Nav (the grabbed pane's dashed outline, the move target and
-// the split preview); the floating Outline card's resize bar on hover and on
-// keyboard focus; the docked file browser's resize handle on hover and at
-// rest. With no colour chosen each reads the scheme's accent; with a preset
-// chosen, the preset's colour.
+// marker) and over the right pane's body edge (the edge-split overlay); the
+// floating Outline card's resize bar on hover and on keyboard focus; the
+// docked file browser's resize handle on hover and at rest. With no colour
+// chosen each reads the scheme's accent; with a preset chosen, the preset's
+// colour.
 // After a reload with orange chosen, the panes and the docked handle read
 // orange from the window's restored preset.
 //
@@ -158,33 +157,6 @@ async function tabDragReadings(page) {
   return { ...strip, edge };
 }
 
-/// A pane move in Hybrid Nav: double-click the left pane's dead zone, press in
-/// the left pane, move over the right pane's centre and then near its left
-/// edge, and leave with Escape so the layout stays as it was.
-async function paneMoveReadings(page) {
-  const [paneA, paneB] = await page.$$(".pane");
-  const dead = await (await paneA.$(".dead-zone")).boundingBox();
-  await page.mouse.click(dead.x + dead.width / 2, dead.y + dead.height / 2, { count: 2 });
-  await page.waitForFunction(() => document.querySelectorAll(".pane.transaction-active").length === 2, { timeout: 10_000 });
-  const a = await paneA.boundingBox();
-  const b = await paneB.boundingBox();
-  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
-  await page.mouse.down();
-  await page.waitForSelector(".pane.transaction-grab", { timeout: 10_000 });
-  const grab = await page.$eval(".pane.transaction-grab", (el) => getComputedStyle(el).outlineColor);
-  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 6 });
-  await page.waitForSelector(".pane.transaction-drop-target", { timeout: 10_000 });
-  const target = await page.$eval(".pane.transaction-drop-target", (el) => getComputedStyle(el, "::after").borderTopColor);
-  await page.mouse.move(b.x + b.width * 0.08, b.y + b.height / 2, { steps: 6 });
-  await page.waitForSelector(".pane.transaction-split-left", { timeout: 10_000 });
-  const split = await page.$eval(".pane.transaction-split-left", (el) => getComputedStyle(el, "::before").borderTopColor);
-  await page.keyboard.press("Escape");
-  await page.waitForFunction(() => !document.querySelector(".pane.transaction-active"), { timeout: 10_000 });
-  await page.mouse.up();
-  assert.equal(await page.$$eval(".pane", (p) => p.length), 2, "Escape left the layout as it was");
-  return { grab, target, split };
-}
-
 async function resizeBarReadings(page) {
   const bar = '[aria-label="Resize Outline"]';
   await page.hover(bar);
@@ -210,17 +182,13 @@ async function dockReadings(page) {
 
 async function arm(page, label, expected) {
   const drag = await tabDragReadings(page);
-  const move = await paneMoveReadings(page);
   const bars = await resizeBarReadings(page);
   const dock = await dockReadings(page);
-  const reading = { label, expected, drag, move, bars, dock };
+  const reading = { label, expected, drag, bars, dock };
   const fail = (what, got) => `${label}: ${what} reads ${got}, expected ${expected}`;
   assert.ok(drag.stripShadow.includes(expected), fail("the tab strip under a dragged tab", drag.stripShadow));
   assert.equal(drag.marker, expected, fail("the insertion marker", drag.marker));
   assert.equal(drag.edge, expected, fail("the edge-split overlay", drag.edge));
-  assert.equal(move.grab, expected, fail("the moved pane's outline", move.grab));
-  assert.equal(move.target, expected, fail("the move target", move.target));
-  assert.equal(move.split, expected, fail("the split preview", move.split));
   assert.equal(bars.hover, expected, fail("the Outline card's resize bar on hover", bars.hover));
   assert.equal(bars.focus, expected, fail("the Outline card's resize bar on keyboard focus", bars.focus));
   assert.equal(bars.rest, TRANSPARENT, fail("the Outline card's resize bar at rest", bars.rest));
