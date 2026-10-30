@@ -1383,6 +1383,10 @@ pub(crate) struct RouteLayer {
     /// terminal tenant this builder mounts. The bound is process-wide, so a
     /// second mounted workspace must not get a second allocation.
     bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
+    /// One config watch for every tenant this builder mounts, so a settings
+    /// write in one tenant's window, or an edit outside chan, reaches the
+    /// windows of all of them.
+    config_watch: config_watch::ConfigWatch,
 }
 
 /// The route layer's tenant constructor, as an `Arc<dyn TenantBuilder>` for a
@@ -1394,6 +1398,7 @@ pub fn route_builder() -> Arc<dyn chan_library::TenantBuilder> {
         extension_catalog: extensions::empty_catalog(),
         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
         client_sessions: chan_library::client_sessions::ClientSessions::new(),
+        config_watch: config_watch::ConfigWatch::new(),
     })
 }
 
@@ -1407,6 +1412,7 @@ pub fn route_builder_with_extensions(
         extension_catalog: runtime.catalog(),
         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
         client_sessions: chan_library::client_sessions::ClientSessions::new(),
+        config_watch: config_watch::ConfigWatch::new(),
     })
 }
 
@@ -1520,6 +1526,7 @@ impl chan_library::TenantBuilder for RouteLayer {
             config,
         )
         .await?;
+        self.config_watch.add(&artifacts.state);
         Ok(into_tenant_artifacts(artifacts))
     }
 
@@ -1558,6 +1565,7 @@ impl chan_library::TenantBuilder for RouteLayer {
         // The tenant's terminals run `program` (when set) rather than the
         // default shell; applied before the SPA can open the first one.
         artifacts.terminal_sessions.set_default_program(program);
+        self.config_watch.add(&artifacts.state);
         Ok(into_tenant_artifacts(artifacts))
     }
 }
@@ -1724,18 +1732,9 @@ pub async fn serve(
     // External / CLI edits to the per-library config (`chan config`, a
     // hand-edit, a synced dotfile) refresh open windows, on top of the
     // PATCH path's push-on-write. Held for serve()'s lifetime; dropping it
-    // stops the watch. A registration failure is non-fatal: external edits
-    // then reconcile on the next reload.
-    let _config_watcher = match config_watch::start(artifacts.state.clone()) {
-        Ok(watcher) => Some(watcher),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "config watch registration failed; external config edits reconcile on reload"
-            );
-            None
-        }
-    };
+    // stops the watch.
+    let config_watch = config_watch::ConfigWatch::new();
+    config_watch.add(&artifacts.state);
     let handle = ServeHandle {
         addr,
         prefix: config.prefix.clone(),
@@ -2438,6 +2437,7 @@ mod bulk_transfer_construction_tests {
                 extension_catalog: extensions::empty_catalog(),
                 bulk_transfer: lane,
                 client_sessions: chan_library::client_sessions::ClientSessions::new(),
+                config_watch: config_watch::ConfigWatch::new(),
             }),
         ));
         install_launcher_root_fallback(&host, None, None);
@@ -2466,6 +2466,7 @@ mod bulk_transfer_construction_tests {
             extension_catalog: extensions::empty_catalog(),
             bulk_transfer: BulkTransferLane::new(),
             client_sessions: chan_library::client_sessions::ClientSessions::new(),
+            config_watch: config_watch::ConfigWatch::new(),
         };
         // Stand in for the two tenants a hosted process mounts; both come
         // from the same field the real constructors read.

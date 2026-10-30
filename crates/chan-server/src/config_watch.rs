@@ -7,6 +7,11 @@
 //! open windows. It reloads the changed store into `AppState` and
 //! re-broadcasts `config_changed`.
 //!
+//! Every tenant keeps its own in-memory copy of the files, so a host that
+//! mounts several (chan-desktop, a devserver) runs one watch for all of
+//! them: a write through one tenant's API is then an external change to
+//! every other, and reaches their windows the same way.
+//!
 //! Self-writes are deduped by CONTENT, not by a time window: after a
 //! notify event the file is reloaded and compared against the in-memory
 //! value, so an identical reload (the server's own save just landed) is a
@@ -16,7 +21,7 @@
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use notify::{RecursiveMode, Watcher};
 
@@ -28,14 +33,65 @@ use crate::state::AppState;
 const SERVER_TOML: &str = "server.toml";
 const PREFERENCES_TOML: &str = "preferences.toml";
 
-/// Watch the per-library config directory (`~/.chan`, or the `CHAN_HOME`
-/// override) and refresh open windows when `server.toml` or
-/// `preferences.toml` changes on disk outside the API. Returns the live
-/// watcher; the caller keeps it alive for the server's lifetime (drop =
-/// stop watching). A registration failure is surfaced to the caller,
-/// which logs and serves without the watch, so external edits reconcile
-/// on the next reload instead of failing the boot.
-pub fn start(state: Arc<AppState>) -> notify::Result<notify::RecommendedWatcher> {
+/// Refresh the windows of every tenant added to it when `server.toml` or
+/// `preferences.toml` in the per-library config directory (`~/.chan`, or
+/// the `CHAN_HOME` override) changes on disk outside that tenant's API.
+/// The owner keeps it for as long as its tenants serve; dropping it stops
+/// the watch.
+pub(crate) struct ConfigWatch {
+    tenants: Arc<Tenants>,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+}
+
+impl ConfigWatch {
+    pub(crate) fn new() -> Self {
+        Self {
+            tenants: Arc::default(),
+            watcher: Mutex::new(None),
+        }
+    }
+
+    /// Add a tenant, starting the watch with the first one so an owner that
+    /// mounts no tenant watches nothing. A registration failure is logged and
+    /// the next tenant tries again; until then external edits reach the
+    /// windows at the next reload instead of failing the tenant's build.
+    pub(crate) fn add(&self, state: &Arc<AppState>) {
+        self.tenants.add(state);
+        let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
+        if watcher.is_some() {
+            return;
+        }
+        match start(Arc::clone(&self.tenants)) {
+            Ok(started) => *watcher = Some(started),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "config watch registration failed; external config edits reconcile on reload"
+            ),
+        }
+    }
+}
+
+/// The tenants one watch refreshes, held weakly so the watch never keeps a
+/// torn-down tenant alive.
+#[derive(Default)]
+struct Tenants(Mutex<Vec<Weak<AppState>>>);
+
+impl Tenants {
+    fn add(&self, state: &Arc<AppState>) {
+        let mut tenants = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        tenants.retain(|tenant| tenant.strong_count() > 0);
+        tenants.push(Arc::downgrade(state));
+    }
+
+    /// The tenants still serving, dropping the rest from the list.
+    fn live(&self) -> Vec<Arc<AppState>> {
+        let mut tenants = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        tenants.retain(|tenant| tenant.strong_count() > 0);
+        tenants.iter().filter_map(Weak::upgrade).collect()
+    }
+}
+
+fn start(tenants: Arc<Tenants>) -> notify::Result<notify::RecommendedWatcher> {
     let dir = chan_workspace::paths::config_dir();
     // The files are written lazily on first save; create the directory so
     // the watch registers even before any config exists on disk.
@@ -43,11 +99,20 @@ pub fn start(state: Arc<AppState>) -> notify::Result<notify::RecommendedWatcher>
     let watch_dir = dir.clone();
     let mut watcher =
         notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-            Ok(event) => handle_event(&watch_dir, &state, &event),
+            Ok(event) => dispatch(&watch_dir, &tenants, &event),
             Err(e) => tracing::warn!(error = %e, "config watch error"),
         })?;
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+/// Hand one event to every live tenant. Each compares the reloaded file with
+/// its own copy, so the tenant whose write caused the event stays quiet and
+/// the others refresh. The list lock is released before any reload runs.
+fn dispatch(dir: &Path, tenants: &Tenants, event: &notify::Event) {
+    for state in tenants.live() {
+        handle_event(dir, &state, event);
+    }
 }
 
 /// Reload whichever config file the event touched and re-broadcast on a
@@ -303,5 +368,59 @@ mod tests {
             chan_workspace::SearchAggression::Conservative
         );
         assert!(rx.try_recv().is_ok(), "server.toml change broadcasts");
+    }
+
+    #[test]
+    fn dispatch_refreshes_every_other_tenant_and_forgets_dropped_ones() {
+        // One host, three tenants. The writer saved through its own API, so
+        // its copy already matches the file; the reader still holds the old
+        // value; the third has been torn down.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SERVER_TOML);
+        let writer = make_test_state(false);
+        let reader = make_test_state(false);
+        let gone = make_test_state(false);
+        {
+            let mut written = writer.server_config.lock().unwrap();
+            written.terminal.background_opacity = 90;
+            written.save_to(&path).unwrap();
+        }
+        let tenants = Tenants::default();
+        tenants.add(&writer);
+        tenants.add(&reader);
+        tenants.add(&gone);
+        drop(gone);
+        let mut writer_rx = writer.events_tx.subscribe();
+        let mut reader_rx = reader.events_tx.subscribe();
+
+        let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path);
+        dispatch(dir.path(), &tenants, &event);
+
+        let reloaded = reader
+            .server_config
+            .lock()
+            .unwrap()
+            .terminal
+            .background_opacity;
+        assert_eq!(reloaded, 90, "the other tenant reloads the write");
+        assert!(reader_rx.try_recv().is_ok(), "and refreshes its windows");
+        assert_eq!(reader.config_revision.load(Ordering::Relaxed), 2);
+        assert!(
+            no_frame_pending(&mut writer_rx),
+            "the writer already pushed its own change"
+        );
+        assert_eq!(writer.config_revision.load(Ordering::Relaxed), 1);
+        assert_eq!(tenants.live().len(), 2, "a dropped tenant leaves the list");
+    }
+
+    #[test]
+    fn tenants_hold_no_tenant_alive() {
+        let tenants = Tenants::default();
+        let state = make_test_state(false);
+        let weak = Arc::downgrade(&state);
+        tenants.add(&state);
+        drop(state);
+        assert!(weak.upgrade().is_none());
+        assert!(tenants.live().is_empty());
     }
 }
