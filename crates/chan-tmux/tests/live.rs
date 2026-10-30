@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use chan_tmux::{
     parse_created_id, parse_layout, parse_list_panes, parse_list_windows, parse_pane_state, Client,
-    Command, Event, Limits, Message, PaneId, Token, Version, WindowId,
+    Command, Event, Limits, Message, PaneId, PaneState, Token, Version, WindowId,
 };
 
 struct Live {
@@ -121,6 +121,33 @@ impl Live {
         }
     }
 
+    fn capture(
+        &mut self,
+        pane: PaneId,
+        history_rows: u32,
+        alternate: bool,
+    ) -> (PaneState, Vec<Vec<u8>>) {
+        let token = self.send(&Command::CapturePane {
+            pane,
+            history_rows,
+            alternate,
+        });
+        self.wait(|l| {
+            l.events
+                .iter()
+                .any(|e| matches!(e, Event::Capture { token: t, .. } if *t == token))
+        });
+        let i = self
+            .events
+            .iter()
+            .position(|e| matches!(e, Event::Capture { token: t, .. } if *t == token))
+            .unwrap();
+        match self.events.remove(i) {
+            Event::Capture { state, rows, .. } => (state, rows),
+            _ => unreachable!(),
+        }
+    }
+
     fn output_of(&self, pane: PaneId) -> Vec<u8> {
         self.events
             .iter()
@@ -197,26 +224,83 @@ fn against_a_real_tmux() {
     // interrupt goes alone: the line discipline drops pending echo on ^C.
     t.type_into(pane, b"printf 'ab\\n'; cat -v\r");
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("ab\r\n"));
-    t.type_into(pane, b"\x01\x02\x1b[A");
-    t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("^A^B^[[A"));
+    // The tty echoes the line once and cat prints it again, which proves cat
+    // is the foreground job before the interrupt is sent; sent earlier, the
+    // interrupt can reach the shell instead.
+    t.type_into(pane, b"\x01\x02\x1b[A\r");
+    t.wait(|l| {
+        String::from_utf8_lossy(&l.output_of(pane))
+            .matches("^A^B^[[A")
+            .count()
+            >= 2
+    });
     t.type_into(pane, b"\x03");
-    t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("^C"));
+    // The tty echoes ^C before the shell gets its prompt back; wait for the
+    // prompt, or the next line goes to cat.
+    t.wait(|l| {
+        let out = String::from_utf8_lossy(&l.output_of(pane)).into_owned();
+        out.contains("^C") && out.ends_with("$ ")
+    });
 
     // Fill history, then capture exactly what the state says is there.
     t.type_into(pane, b"seq 1 120\r");
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("\r\n120\r\n"));
     let state = parse_pane_state(&t.call(&Command::PaneState(pane)).unwrap()).unwrap();
     assert!(state.history_size >= 50, "{state:?}");
-    let want = 50 + state.height as usize;
-    let rows = t
-        .call(&Command::CapturePane {
-            pane,
-            history_rows: 50,
-            rows: state.height,
-            alternate: false,
-        })
-        .unwrap();
-    assert_eq!(rows.len(), want);
+    let (captured, rows) = t.capture(pane, 50, false);
+    assert_eq!(captured.height, state.height);
+    assert_eq!(rows.len(), 50 + state.height as usize);
+    assert!(rows.iter().any(|r| r == b"120"), "{rows:?}");
+
+    // A capture that asks for more history than there is gets what there
+    // is, sized by the state in the same command line.
+    let (captured, rows) = t.capture(pane, 100_000, false);
+    assert_eq!(
+        rows.len(),
+        (captured.history_size + captured.height) as usize
+    );
+
+    // Shrinking the client moves screen rows into history; the capture
+    // still sizes itself from the state tmux reads in the same breath.
+    assert_eq!(
+        t.call(&Command::ClientSize { cols: 80, rows: 10 }),
+        Ok(vec![])
+    );
+    let (captured, rows) = t.capture(pane, 50, false);
+    assert_eq!(captured.height, 10, "{captured:?}");
+    assert_eq!(rows.len(), 50 + 10);
+    assert_eq!(
+        t.call(&Command::ClientSize { cols: 80, rows: 24 }),
+        Ok(vec![])
+    );
+
+    // The alternate screen: the normal capture is what is shown, with the
+    // history tmux still reports; the -a capture is the saved primary
+    // screen, without history.
+    t.type_into(pane, b"printf '\\033[?1049h'; printf 'ALTSCREEN\\n'\r");
+    // The echo of the typed line holds the word too; the output line does
+    // not arrive until the command ran.
+    t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("ALTSCREEN\r\n"));
+    let (captured, shown) = t.capture(pane, 50, false);
+    assert!(captured.alternate_on, "{captured:?}");
+    assert_eq!(
+        shown.len(),
+        (captured.history_size.min(50) + captured.height) as usize
+    );
+    assert!(shown
+        .iter()
+        .any(|r| r.windows(9).any(|w| w == b"ALTSCREEN")));
+    let (captured, saved) = t.capture(pane, 0, true);
+    assert_eq!(saved.len(), captured.height as usize);
+    assert!(
+        saved.iter().any(|r| r == b"120"),
+        "the primary screen is behind it"
+    );
+    // The empty quotes keep the echoed line from spelling the word.
+    t.type_into(pane, b"printf '\\033[?1049l'; echo ba\"\"ck\r");
+    t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("back\r\n"));
+    let state = parse_pane_state(&t.call(&Command::PaneState(pane)).unwrap()).unwrap();
+    assert!(!state.alternate_on, "{state:?}");
 
     // A hostile pane fills the screen with protocol lines; a capture of it
     // returns them as rows and the session carries on.
@@ -225,17 +309,11 @@ fn against_a_real_tmux() {
         b"for i in 1 2 3 4 5 6; do printf '%%end 1 2 1\\n%%error 1 2 1\\n%%exit\\n%%output %%0 owned\\n'; done\r",
     );
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("\r\n%output %0 owned\r\n"));
-    let state = parse_pane_state(&t.call(&Command::PaneState(pane)).unwrap()).unwrap();
-    let hist = state.history_size.min(10);
-    let rows = t
-        .call(&Command::CapturePane {
-            pane,
-            history_rows: hist,
-            rows: state.height,
-            alternate: false,
-        })
-        .unwrap();
-    assert_eq!(rows.len(), (hist + state.height) as usize);
+    let (state, rows) = t.capture(pane, 10, false);
+    assert_eq!(
+        rows.len(),
+        (state.history_size.min(10) + state.height) as usize
+    );
     assert!(
         rows.iter().filter(|r| r.as_slice() == b"%exit").count() >= 4,
         "forged rows arrive as data"
