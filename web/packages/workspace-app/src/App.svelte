@@ -634,9 +634,10 @@
 
   /// Ask the tmux connection this window shows for a new tmux window, which
   /// opens in a chan window of its own. False when this window shows no
-  /// tmux connection, and nothing was asked. The request rides the active
-  /// pane tab's session when it is one, else a pane's, else the control
-  /// session's, so the control window's status view asks too.
+  /// tmux pane, and nothing was asked. The request rides the active pane
+  /// tab's session when it is one, else a pane's; a control window has no
+  /// pane and asks nothing, since the launcher's card is the connection's
+  /// console.
   function requestTmuxWindow(): boolean {
     const carrier = tmuxRequestCarrier();
     if (!carrier) return false;

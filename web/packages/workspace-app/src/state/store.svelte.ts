@@ -337,11 +337,14 @@ export const ui = $state<{
   /// empty layout during boot can't trip the close-when-empty watcher in
   /// App.svelte. Always false in workspace mode.
   terminalArmed: boolean;
-  /// The control-terminal sub-mode (`kind=control`): a singleton terminal-only
-  /// window running a devserver's connect script. Stricter than `terminalOnly`
-  /// -- the tab strip / pane chrome are hidden and Cmd+T / pane splits are
-  /// disabled so it stays one PTY. Set once at bootstrap from the URL, never
-  /// flipped. Implies `terminalOnly`.
+  /// The control-terminal sub-mode (`kind=control`): a terminal-only window
+  /// holding one PTY, a devserver's connect script or the control terminal
+  /// of a tmux connection. Stricter than `terminalOnly` -- the tab strip /
+  /// pane chrome are hidden and Cmd+T / pane splits are disabled so it stays
+  /// one PTY. Set at bootstrap from the URL; the `control_release` window
+  /// command clears it (`releaseControlMode`) when the connection ends, and
+  /// the window is a plain terminal window from then on. Implies
+  /// `terminalOnly`.
   terminalControl: boolean;
 }>({
   status: null,
@@ -459,11 +462,33 @@ export function isTerminalOnlyWindow(): boolean {
 }
 
 /// The control terminal is a stricter sub-mode of terminal-only (`kind=control`,
-/// set by the shell's `spawn_control_terminal_window`): a singleton that hosts
-/// exactly one PTY (the connect script), hides the tab strip / pane chrome, and
-/// disables Cmd+T + pane splits so it can never replicate into Terminal 1/2/3.
+/// set by the shell's `spawn_control_terminal_window` and by the launcher for
+/// a window row marked `control`): a window that hosts exactly one PTY (the
+/// connect script, or a tmux connection's control terminal), hides the tab
+/// strip / pane chrome, and disables Cmd+T + pane splits so it can never
+/// replicate into Terminal 1/2/3. This is the URL's reading at boot;
+/// `ui.terminalControl` is the live bit, which `releaseControlMode` clears.
 export function isControlTerminalWindow(): boolean {
   return windowMode === "control";
+}
+
+/// Leave the control sub-mode while the page lives: the tmux connection the
+/// window's terminal controlled ended, and the library made the window a
+/// plain terminal window. `ui.terminalControl` is the bit every chrome and
+/// command gate reads, so clearing it shows the pane chrome and lifts the
+/// one-PTY rules; the URL's `kind` is rewritten to the plain spelling so a
+/// reload opens the plain window too. The terminal and its session stay.
+export function releaseControlMode(): void {
+  if (!ui.terminalControl) return;
+  ui.terminalControl = false;
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("kind", "terminal");
+    window.history.replaceState({}, "", url.toString());
+  } catch {
+    // The live flip stands, and the launcher opens the row with the plain
+    // kind once the library cleared its `control` mark.
+  }
 }
 
 export const HYBRID_SURFACE_KINDS: readonly HybridSurfaceKind[] = [
@@ -1466,6 +1491,14 @@ type WindowCommandFrame =
   | {
       type: "window_command";
       window_id: string;
+      // The tmux connection this control window's terminal controlled ended
+      // and the library made the window a plain terminal window: the page
+      // leaves control mode and keeps the shell, which draws again.
+      command: "control_release";
+    }
+  | {
+      type: "window_command";
+      window_id: string;
       // A tmux window's layout: the pane tree this window shows, with a
       // terminal tab per pane bound to the pane's session. Applied through
       // the layout reconciler, so tabs already attached move rather than
@@ -2265,6 +2298,10 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
         else setTransientStatus("tmux control window opened in the library");
       })
       .catch(() => setTransientStatus("tmux control window is in the launcher; open it from there"));
+    return;
+  }
+  if (frame.command === "control_release") {
+    releaseControlMode();
     return;
   }
   if (frame.command === "tmux_layout") {

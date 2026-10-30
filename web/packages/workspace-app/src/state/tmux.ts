@@ -1,37 +1,12 @@
-/// The status a terminal session publishes for its tmux control-mode
-/// connection, shown as the control terminal's status view while connected.
-/// Server-owned: the `session` frame carries the attachment's value and
-/// `tmux-status` frames carry each later one; `revision` orders them.
-export type TmuxStatus = { revision: number; connection?: TmuxConnectionStatus };
+// The tmux shapes the terminal socket and the window commands carry: a
+// request of the live connection, a tmux window's layout, and the pane a
+// session shows. The connection's own status is the library's, read by the
+// launcher's card from the window feed; none of it reaches the page.
 
-export type TmuxConnectionStatus = {
-  /// The connected tmux's version, "major.minor".
-  version: string;
-  /// The session the client is attached to, once tmux announced it.
-  session?: TmuxSessionStatus;
-  /// Every window tmux listed, in id order.
-  windows: TmuxWindowStatus[];
-  /// Most windows opened as chan windows at the attach; the rest open on request.
-  window_cap: number;
-  /// The most recent errors, oldest first.
-  errors: string[];
-};
-
-export type TmuxSessionStatus = { id: string; name: string };
-
-export type TmuxWindowStatus = {
-  /// tmux's id, "@N".
-  id: string;
-  name: string;
-  /// Panes tmux reports in it.
-  panes: number;
-  /// Whether its panes have sessions: within the cap, or opened on request.
-  open: boolean;
-  /// The chan window minted for it, once the host answered.
-  chan_window?: string;
-};
-
-/// A request of the live connection, sent as a `tmux-request` frame.
+/// A request of the live connection, the closed set the pane-session POST
+/// (`api.tmuxRequest`) and the terminal socket's `tmux-request` frame take.
+/// The page sends one on a pane's session: Cmd+T, a split, a focus change,
+/// the window size and the close prompt's Detach.
 export type TmuxRequest =
   | { request: "open-window"; window: string }
   /// A new tmux window, which opens in a chan window of its own.

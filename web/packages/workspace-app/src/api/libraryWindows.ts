@@ -347,8 +347,8 @@ export function plainLibraryWindowBridge(): LibraryWindowBridge {
 }
 
 /// Open the library window `windowId` from a fresh snapshot. For a caller
-/// that holds an id alone, such as the tmux status view with the chan window
-/// minted for a tmux window, and not a row. Resolves to `false` when the
+/// that holds an id alone and not a row, such as the `release_term` window
+/// command with the window a session moved to. Resolves to `false` when the
 /// library has no such window.
 export async function openLibraryWindowById(
   bridge: LibraryWindowBridge,

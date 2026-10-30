@@ -79,7 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
-    setTerminalTmuxConsent, setTerminalTmuxHostGrid, setTerminalTmuxPane, setTerminalTmuxStatus,
+    setTerminalTmuxConsent, setTerminalTmuxHostGrid, setTerminalTmuxPane,
     setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -113,9 +113,7 @@
   import Inspector from "./Inspector.svelte";
   import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
   import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
-  import type { TmuxPaneRef, TmuxRequest, TmuxStatus } from "../state/tmuxStatus";
-  import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
-  import TmuxStatusView from "./TmuxStatusView.svelte";
+  import type { TmuxPaneRef } from "../state/tmux";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -241,15 +239,8 @@
   // once the survey clears, the same calls legitimately restore the terminal.
   function focusTerminal(): void {
     if (surveyFor(tab.id)) return;
-    // While a tmux connection's status view covers the terminal, the keyboard
-    // is the view's: the terminal takes no typing until the connection ends.
-    if (tab.tmuxStatus?.connection && tmuxStatusView) {
-      tmuxStatusView.focus();
-      return;
-    }
     term?.focus();
   }
-  let tmuxStatusView = $state<{ focus(): void } | null>(null);
 
   function dismissReloadNotice(): void {
     dismissCliReloadNotice(tab);
@@ -278,9 +269,6 @@
         /// The tmux control-mode consent state, with the question that
         /// stands, if any; the attachment's authoritative value.
         tmux_consent?: TmuxConsent;
-        /// The tmux connection's status, with the connection while one
-        /// runs; the attachment's authoritative value.
-        tmux_status?: TmuxStatus;
         /// Set when this session shows a tmux pane: its connection and tmux's
         /// pane id. A window with such a tab is a tmux window.
         tmux_pane?: TmuxPaneRef;
@@ -305,7 +293,6 @@
     | { type: "activity"; bytes_since_focus: number }
     | { type: "program-status"; id: string; generation: number; program_status: ProgramStatus }
     | { type: "tmux-consent"; id: string; generation: number; tmux_consent: TmuxConsent }
-    | { type: "tmux-status"; id: string; generation: number; tmux_status: TmuxStatus }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
     /// the absolute LOGICAL MESSAGE depth on every change, so a drained batch
     /// of N `cs terminal write` notifications arrives as one N -> 0 step, not
@@ -1697,7 +1684,6 @@
         serverGeneration = frame.generation;
         receivedSeq = frame.seq;
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
-        if (frame.tmux_status) setTerminalTmuxStatus(tab, frame.tmux_status, true);
         setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
         // with the xterm still holding a dead TUI's negotiated input modes.
@@ -1804,10 +1790,6 @@
       } else if (frame.type === "tmux-consent") {
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
           setTerminalTmuxConsent(tab, frame.tmux_consent);
-        }
-      } else if (frame.type === "tmux-status") {
-        if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
-          setTerminalTmuxStatus(tab, frame.tmux_status);
         }
       } else if (frame.type === "queue-details") {
         if (active && tab.inspectorOpen) queuedMessages = frame.messages;
@@ -1993,21 +1975,6 @@
   // attached client shows it and the first answer wins.
   function answerTmux(answer: TmuxAnswer): void {
     send({ type: "tmux-answer", answer });
-  }
-
-  // The status view's requests of the live connection: open a tmux window
-  // past the cap, detach, or end the server. The server answers with the
-  // status frames that follow.
-  function requestTmux(request: TmuxRequest): void {
-    send({ type: "tmux-request", ...request });
-  }
-
-  // Open the chan window minted for a tmux window, by the id the status
-  // carries: the row is read from the library, as the launcher would, and
-  // opened the way this surface opens a library window.
-  async function openTmuxChanWindow(windowId: string): Promise<void> {
-    const found = await openLibraryWindowById(plainLibraryWindowBridge(), windowId);
-    if (!found) throw new Error("that window is no longer in the library");
   }
 
   // Sync this terminal's broadcast toggle to the server whenever it changes
@@ -3283,13 +3250,6 @@
       question={tab.tmuxConsent?.question ?? null}
       program={terminalTabName(tab)}
       onAnswer={answerTmux}
-    />
-    <TmuxStatusView
-      bind:this={tmuxStatusView}
-      status={tab.tmuxStatus?.connection ?? null}
-      program={terminalTabName(tab)}
-      onRequest={requestTmux}
-      onOpen={openTmuxChanWindow}
     />
     {#if tab.inspectorOpen}
       <Inspector

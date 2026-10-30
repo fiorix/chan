@@ -2,8 +2,10 @@
 //
 // The window commands a tmux connection sends its chan windows: `open_term_attach`
 // opens a tab bound to an existing pane session (or focuses the tab that has
-// it), and `release_term` drops the tab for a session that moved to the
-// window minted for it, without ending the session.
+// it), `release_term` drops the tab for a session that moved to the window
+// minted for it, without ending the session, `tmux_layout` lays the window
+// out as tmux has it, and `control_release` returns the control window to a
+// plain terminal window when the connection ends.
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { preferences } from "../__tests__/standalone";
@@ -49,9 +51,14 @@ beforeEach(() => {
   closeTerminal.mockReset();
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete (window as TauriWindow).__TAURI_INTERNALS__;
   vi.restoreAllMocks();
+  const { ui } = await import("./store.svelte");
+  ui.terminalControl = false;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("kind");
+  window.history.replaceState({}, "", url.toString());
 });
 
 function terminals(tabs: Awaited<ReturnType<typeof app>>["tabs"]) {
@@ -144,15 +151,14 @@ test("tmux_layout lays the window out as tmux has it: two panes, each with a tab
   expect(Object.values(tabs.layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(2);
 });
 
-test("a tmux request rides the active pane tab, else a pane, else the control session, and nothing in a plain window", async () => {
-  const { tabs, resetLayout, terminalTab } = await app();
-  const connection = { version: "3.6", windows: [], window_cap: 8, errors: [] };
-  // The control window: its status view is the connection's console, so New
-  // Window and New terminal there ask tmux through the control session.
+test("a tmux request rides the active pane tab, else a pane, and nothing in a control or plain window", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  // The control window shows no pane: the launcher's card is the connection's
+  // console, so the window asks nothing of tmux.
+  store.ui.terminalControl = true;
   resetLayout([terminalTab({ id: "control", title: "tmux", terminalSessionId: "control-1" })]);
   expect(tabs.tmuxRequestCarrier()).toBeNull();
-  tabs.setTerminalTmuxStatus(tabs.allTerminalTabs()[0]!, { revision: 1, connection });
-  expect(tabs.tmuxRequestCarrier()?.terminalSessionId).toBe("control-1");
+  store.ui.terminalControl = false;
   // A tmux window: the active pane tab carries, a plain tab beside it falls back to a pane.
   resetLayout([
     terminalTab({ id: "plain", title: "plain", terminalSessionId: "shell-1" }),
@@ -174,4 +180,30 @@ test("a tmux request rides the active pane tab, else a pane, else the control se
   // A plain window asks nothing.
   resetLayout([terminalTab({ id: "only", title: "shell", terminalSessionId: "shell-2" })]);
   expect(tabs.tmuxRequestCarrier()).toBeNull();
+});
+
+test("control_release leaves control mode: the chrome bit clears, the URL names a plain terminal window, the terminal keeps its session", async () => {
+  const { store, tabs, resetLayout, terminalTab, sessionWindowId } = await app();
+  const url = new URL(window.location.href);
+  url.searchParams.set("kind", "control");
+  url.hash = "kept";
+  window.history.replaceState({}, "", url.toString());
+  store.ui.terminalControl = true;
+  resetLayout([terminalTab({ id: "ctl", title: "tmux", terminalSessionId: "control-1" })]);
+  // A command for another window is not this window's.
+  store.onWatchEvent({ type: "window_command", window_id: "w-other", command: "control_release" });
+  expect(store.ui.terminalControl).toBe(true);
+  expect(new URL(window.location.href).searchParams.get("kind")).toBe("control");
+  store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "control_release" });
+  expect(store.ui.terminalControl, "the pane chrome and the plain command set follow this bit").toBe(false);
+  const after = new URL(window.location.href);
+  expect(after.searchParams.get("kind"), "a reload opens a plain terminal window").toBe("terminal");
+  expect(after.hash, "the rest of the URL stays").toBe("#kept");
+  expect(terminals(tabs), "the shell draws again in the same session").toEqual(["control-1"]);
+  expect(closeTerminal).not.toHaveBeenCalled();
+  // A plain window has nothing to leave: the URL is left alone.
+  window.history.replaceState({}, "", after.toString().replace("kind=terminal", "kind=other"));
+  store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "control_release" });
+  expect(store.ui.terminalControl).toBe(false);
+  expect(new URL(window.location.href).searchParams.get("kind")).toBe("other");
 });

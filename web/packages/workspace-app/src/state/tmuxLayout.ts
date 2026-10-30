@@ -6,7 +6,7 @@
 /// dividers land where tmux's borders are.
 
 import type { SerNode } from "./tabs.svelte";
-import type { TmuxLayoutNode } from "./tmuxStatus";
+import type { TmuxLayoutNode } from "./tmux";
 
 export function tmuxLayoutToSer(node: TmuxLayoutNode): SerNode {
   if (node.kind === "pane") {

@@ -7,7 +7,7 @@
 import { flushSync } from "svelte";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import type { TmuxConsent } from "./tmuxConsent";
-import type { TmuxPaneRef, TmuxStatus } from "./tmuxStatus";
+import type { TmuxPaneRef } from "./tmux";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -506,10 +506,6 @@ export type TerminalTab = {
   /// shown as a banner over the terminal. Server-owned and never
   /// serialized: the `session` frame replaces it for each attachment.
   tmuxConsent?: TmuxConsent;
-  /// The tmux control-mode connection the server holds on this session,
-  /// shown as the control terminal's status view while connected.
-  /// Server-owned and never serialized, like `tmuxConsent`.
-  tmuxStatus?: TmuxStatus;
   /// The tmux pane this terminal shows, when its session is a pane of a
   /// tmux connection; from the `session` frame, never serialized. A window
   /// holding such a tab is a tmux window: Cmd+T asks tmux for a window and
@@ -1588,7 +1584,6 @@ function tabForReopen(src: Tab): Tab {
     tab.richPromptDraftPath = undefined;
     tab.richPromptCaret = undefined;
     tab.tmuxConsent = undefined;
-    tab.tmuxStatus = undefined;
     tab.tmuxPane = undefined;
     tab.tmuxHostGrid = undefined;
     tab.pendingPrompt = undefined;
@@ -2594,12 +2589,6 @@ export function setTerminalTmuxConsent(tab: TerminalTab, consent: TmuxConsent, a
   if (attach || !tab.tmuxConsent || consent.revision > tab.tmuxConsent.revision) tab.tmuxConsent = consent;
 }
 
-/// Take a tmux connection status: a `session` frame's (`attach`) replaces
-/// whatever stands, a `tmux-status` frame's only when newer.
-export function setTerminalTmuxStatus(tab: TerminalTab, status: TmuxStatus, attach = false): void {
-  if (attach || !tab.tmuxStatus || status.revision > tab.tmuxStatus.revision) tab.tmuxStatus = status;
-}
-
 /// Record whether the attached session shows a tmux pane; each `session`
 /// frame says, so a fresh shell in the same tab clears it.
 export function setTerminalTmuxPane(tab: TerminalTab, pane: TmuxPaneRef | null): void {
@@ -2628,15 +2617,13 @@ export function tmuxPaneTabs(): TerminalTab[] {
 
 /// The terminal tab a tmux request of this window rides: the active tab when
 /// it shows a tmux pane (so a window mixing tmux and plain tabs still asks
-/// tmux), else the first pane tab, else the control terminal whose connection
-/// this window shows, since the status view is the connection's console. Null
-/// when the window shows no tmux connection, and nothing is to be asked.
+/// tmux), else the first pane tab. Null when the window shows no tmux pane,
+/// and nothing is to be asked: a control window asks nothing of tmux, since
+/// the launcher's card for the connection is its console.
 export function tmuxRequestCarrier(): TerminalTab | null {
   const active = activeTabInPane(activePane());
   if (active?.kind === "terminal" && active.tmuxPane && active.terminalSessionId) return active;
-  const pane = tmuxPaneTabs()[0];
-  if (pane) return pane;
-  return allTerminalTabs().find((tab) => tab.tmuxStatus?.connection && tab.terminalSessionId) ?? null;
+  return tmuxPaneTabs()[0] ?? null;
 }
 
 /// Whether a fresh terminal still waits for the server's next name before it
@@ -2751,7 +2738,6 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
   tab.cliCommandPending = undefined;
   if (!retainProgramStatus) tab.programStatus = undefined;
   tab.tmuxConsent = undefined;
-  tab.tmuxStatus = undefined;
   tab.tmuxPane = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;
@@ -4523,7 +4509,6 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   queueDepth: "carry",
   programStatus: "carry",
   tmuxConsent: "carry",
-  tmuxStatus: "carry",
   tmuxPane: "carry",
   tmuxHostGrid: "carry",
   readMode: "carry",
@@ -4618,22 +4603,6 @@ function cloneTab(src: Tab): Tab {
       };
     }
     if (clone.tmuxPane) clone.tmuxPane = { ...clone.tmuxPane };
-    if (clone.tmuxStatus) {
-      const connection = clone.tmuxStatus.connection;
-      clone.tmuxStatus = {
-        ...clone.tmuxStatus,
-        ...(connection
-          ? {
-              connection: {
-                ...connection,
-                ...(connection.session ? { session: { ...connection.session } } : {}),
-                windows: connection.windows.map((window) => ({ ...window })),
-                errors: [...connection.errors],
-              },
-            }
-          : {}),
-      };
-    }
     if (clone.terminalMetadataDraft) {
       clone.terminalMetadataDraft = { ...clone.terminalMetadataDraft };
     }
@@ -7809,7 +7778,6 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   queueDepth: "drop",
   programStatus: "drop",
   tmuxConsent: "drop",
-  tmuxStatus: "drop",
   tmuxPane: "drop",
   tmuxHostGrid: "drop",
   submitAgent: "drop",

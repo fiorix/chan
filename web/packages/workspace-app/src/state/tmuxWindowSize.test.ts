@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { foldWindowGrid } from "./tmuxWindowSize.svelte";
-import type { TmuxLayoutNode } from "./tmuxStatus";
+import type { TmuxLayoutNode } from "./tmux";
 
 const pane = (session: string | null, w = 10, h = 10): TmuxLayoutNode => ({ kind: "pane", session, w, h });
 

@@ -5,7 +5,7 @@
 /// size from the layout, which the pane's renderer adopts.
 
 import { tmuxPaneTabs } from "./tabs.svelte";
-import type { TmuxLayoutNode } from "./tmuxStatus";
+import type { TmuxLayoutNode } from "./tmux";
 
 export type TerminalGrid = { cols: number; rows: number };
 

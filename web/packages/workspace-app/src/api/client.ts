@@ -4,7 +4,7 @@
 // reach the same in-process server over loopback HTTP+WS, so there
 // is one transport implementation rather than platform-specific clients.
 
-import type { TmuxRequest } from "../state/tmuxStatus";
+import type { TmuxRequest } from "../state/tmux";
 import { holderTagOf } from "@chan/web-shared/window-holder";
 import type {
   BuildInfo,
