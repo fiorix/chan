@@ -3857,6 +3857,13 @@ impl WorkspaceHost {
         if let Some(changed) = changed {
             if hidden {
                 self.emit_window_teardown(window_id, "window_hidden");
+                if let Some(connection) = last_tmux_window_hidden(&registry.snapshot(), window_id) {
+                    // The connection's last shown window went: the user is done
+                    // with it, so the connection detaches, which brings the
+                    // control terminal back as a plain window; tmux keeps the
+                    // session for the next attach.
+                    self.tmux_request(&connection, TmuxRequest::Detach);
+                }
             } else if changed {
                 self.emit_window_command(window_id, "window_shown", None);
             }
@@ -7104,6 +7111,71 @@ type TmuxControls = Arc<Mutex<HashMap<String, TmuxControl>>>;
 /// One tenant's [`TmuxWindowHook`]: the windows a tmux connection in that
 /// tenant's terminals gets are rows of `kind` for `workspace_path`, and
 /// its records and control handle go to the host's shared stores.
+/// The connection whose last shown window is `window_id`, once it is hidden:
+/// a tmux window's row (not the control's) with no other shown, non-control
+/// row of the same connection left. `None` for any other row.
+fn last_tmux_window_hidden(rows: &[PersistedWindow], window_id: &str) -> Option<String> {
+    let hidden = rows.iter().find(|w| w.window_id == window_id)?;
+    let mark = hidden.tmux.as_ref().filter(|mark| !mark.control)?;
+    let another_shown = rows.iter().any(|w| {
+        w.window_id != window_id
+            && !w.hidden
+            && w.tmux
+                .as_ref()
+                .is_some_and(|m| !m.control && m.connection == mark.connection)
+    });
+    (!another_shown).then(|| mark.connection.clone())
+}
+
+#[cfg(test)]
+mod last_tmux_window_hidden_tests {
+    use super::last_tmux_window_hidden;
+    use crate::windows::{PersistedWindow, TmuxWindowMark, WindowKind, WindowOrigin};
+
+    fn row(window_id: &str, tmux: Option<(&str, bool)>, hidden: bool) -> PersistedWindow {
+        PersistedWindow {
+            window_id: window_id.into(),
+            kind: WindowKind::Terminal,
+            title: window_id.into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            control: tmux.is_some_and(|(_, control)| control),
+            tmux: tmux.map(|(connection, control)| TmuxWindowMark {
+                connection: connection.into(),
+                control,
+            }),
+            library_id: None,
+            hidden,
+            origin: WindowOrigin::default(),
+        }
+    }
+
+    #[test]
+    fn the_last_shown_window_of_a_connection_names_it_and_nothing_else_does() {
+        let rows = vec![
+            row("plain", None, true),
+            row("ctl", Some(("c1", true)), true),
+            row("w1", Some(("c1", false)), true),
+            row("w2", Some(("c1", false)), false),
+            row("other", Some(("c2", false)), true),
+        ];
+        // w2 still shows, so hiding w1 detaches nothing.
+        assert_eq!(last_tmux_window_hidden(&rows, "w1"), None);
+        // Hiding w2 leaves no shown window of c1: the connection is named. The
+        // hidden control row does not count as a window.
+        let mut rows2 = rows.clone();
+        rows2[3].hidden = true;
+        assert_eq!(last_tmux_window_hidden(&rows2, "w2"), Some("c1".into()));
+        // The lone window of c2 names c2; a plain row, the control row and an
+        // unknown id name nothing.
+        assert_eq!(last_tmux_window_hidden(&rows, "other"), Some("c2".into()));
+        assert_eq!(last_tmux_window_hidden(&rows, "plain"), None);
+        assert_eq!(last_tmux_window_hidden(&rows, "ctl"), None);
+        assert_eq!(last_tmux_window_hidden(&rows, "nope"), None);
+    }
+}
+
 struct HostTmuxWindows {
     registry: Arc<WindowRegistry>,
     notify: Arc<Notify>,

@@ -187,18 +187,6 @@ export async function detachTmux(connection: string): Promise<void> {
   await requestTmux(connection, { request: "detach" });
 }
 
-/** End the tmux server behind a connection, after asking: every session it
- * holds dies with it, so the card's power toggle confirms where a detach
- * does not. */
-export async function endTmux(connection: string): Promise<void> {
-  requestConfirm({
-    title: "End tmux server?",
-    message: "End the tmux server and every session it holds?",
-    confirmLabel: "End",
-    onConfirm: () => runAndReport(requestTmux(connection, { request: "end" })),
-  });
-}
-
 /** Open a tmux window past the cap: the show action of a card row that has
  * no chan window yet. */
 export async function openTmuxWindow(connection: string, window: TmuxWindowEntry): Promise<void> {

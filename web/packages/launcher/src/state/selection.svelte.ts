@@ -1,8 +1,8 @@
-// Gmail-style multi-select for the registry lists. ONE selection spans four
+// Gmail-style multi-select for the registry lists. ONE selection spans five
 // kinds -- local workspaces, served (devserver-mounted) workspaces,
-// devservers, and gateways (selected on the Gateways screen; flipping screens
-// clears the selection) -- feeding ONE global bulk bar (rendered App-level
-// above the lists). Bulk turn on/off loops the per-kind singular op (the ops
+// devservers, tmux control-mode connections, and gateways (selected on the
+// Gateways screen; flipping screens clears the selection) -- feeding ONE
+// global bulk bar (rendered App-level above the lists). Bulk turn on/off loops the per-kind singular op (the ops
 // are independent + idempotent, so no bulk endpoints are needed); bulk remove
 // runs an ORDERED cross-kind delete (remove local -> forget served -> remove
 // devservers -> remove gateways LAST, so a gateway's synthesized rows are
@@ -24,12 +24,20 @@ import {
   removeDevserver,
   removeGateway,
   removeWorkspace,
+  requestTmux,
   setDevserverWorkspaceOn,
   toggleWorkspace,
 } from "./library.svelte";
 
-/** The four selectable registry kinds, all feeding the one global bulk bar. */
-export type SelKind = "workspace" | "served" | "devserver" | "gateway";
+/** The five selectable registry kinds, all feeding the one global bulk bar. A
+ * tmux connection has one lifecycle op, ending its server, which both turn
+ * off and remove perform; turn on leaves it alone. */
+export type SelKind = "workspace" | "served" | "devserver" | "tmux" | "gateway";
+/** End the tmux server behind a selected connection: every session it holds
+ * dies with it, and the card goes with the connection. */
+function endTmuxConnection(connection: string): Promise<void> {
+  return requestTmux(connection, { request: "end" });
+}
 
 /** A selected row, keyed by (kind, id, devserverId) so ids never collide across
  * kinds (a local workspace_id, a served prefix, and a devserver id), and two
@@ -226,11 +234,19 @@ export async function bulkSetOnAll(on: boolean): Promise<void> {
         return setDevserverWorkspaceOn(item.devserverId!, item.id, on);
       case "devserver":
         return on ? connectDevserver(item.id) : disconnectDevserver(item.id);
+      case "tmux":
+        return on ? Promise.resolve() : endTmuxConnection(item.id);
       case "gateway":
         return on ? connectGateway(item.id) : disconnectGateway(item.id);
     }
   });
   selection.busy = false;
+  // An ended connection's card is gone, so its selection goes with it.
+  if (!on) {
+    selection.selected = selection.selected.filter(
+      (s) => s.kind !== "tmux" || failures.includes(s),
+    );
+  }
   const verb = on ? "turn on" : "turn off";
   selection.note = bulkNote(
     verb,
@@ -266,7 +282,8 @@ export async function confirmBulkDelete(): Promise<void> {
   const devservers = selection.selected.filter((s) => s.kind === "devserver");
   const locals = selection.selected.filter((s) => s.kind === "workspace");
   const gateways = selection.selected.filter((s) => s.kind === "gateway");
-  const total = served.length + devservers.length + locals.length + gateways.length;
+  const tmuxes = selection.selected.filter((s) => s.kind === "tmux");
+  const total = served.length + devservers.length + locals.length + gateways.length + tmuxes.length;
   if (total === 0) {
     selection.confirmingDelete = false;
     return;
@@ -288,6 +305,7 @@ export async function confirmBulkDelete(): Promise<void> {
     }
   }
   async function removeServers(): Promise<void> {
+    failures.push(...(await runBulk(tmuxes, (s) => endTmuxConnection(s.id))));
     failures.push(...(await runBulk(devservers, (s) => removeDevserver(s.id))));
     failures.push(...(await runBulk(gateways, (s) => removeGateway(s.id))));
   }

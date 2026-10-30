@@ -317,6 +317,79 @@ describe("devserver multi-select", () => {
   });
 });
 
+describe("tmux multi-select", () => {
+  const connection = "tm-sel";
+  function tmuxRow(window_id: string, control: boolean, ordinal: number) {
+    return {
+      window_id,
+      library_id: "local",
+      kind: "terminal" as const,
+      title: control ? "Control terminal" : `Terminal Window ${ordinal}`,
+      ordinal,
+      workspace_path: null,
+      prefix: "t/tmux",
+      token: "",
+      persisted: false,
+      connected: true,
+      active_transfer: false,
+      control,
+      hidden: control,
+      tmux: { connection, control },
+    };
+  }
+  beforeEach(async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    setMockTmuxConnections(
+      [{
+        connection,
+        library_id: "local",
+        origin: { program: "tmux", command: "tmux -CC", local: true },
+        version: "3.5a",
+        session: { id: "$0", name: "main" },
+        windows: [{ id: "@0", name: "zsh", panes: 1, open: true, chan_window: "tm-sel-w1" }],
+        window_cap: 8,
+        errors: [],
+        control_window: "tm-sel-control",
+      }],
+      [tmuxRow("tm-sel-control", true, 0), tmuxRow("tm-sel-w1", false, 1)],
+    );
+    await loadLibrary();
+  });
+  afterEach(async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    setMockTmuxConnections([], []);
+  });
+
+  it("bulk turn off ends the selected connection and drops it from the selection", async () => {
+    expect(library.tmuxConnections.some((c) => c.connection === connection)).toBe(true);
+    toggleSelected("tmux", connection);
+    expect(selectedCount("tmux")).toBe(1);
+    await bulkSetOnAll(false);
+    await settle();
+    expect(library.tmuxConnections.some((c) => c.connection === connection)).toBe(false);
+    expect(selectedCount("tmux")).toBe(0);
+    expect(selection.note).toBeNull();
+  });
+
+  it("bulk turn on leaves a selected connection alone", async () => {
+    toggleSelected("tmux", connection);
+    await bulkSetOnAll(true);
+    await settle();
+    expect(library.tmuxConnections.some((c) => c.connection === connection)).toBe(true);
+    expect(selectedCount("tmux")).toBe(1);
+  });
+
+  it("confirmed bulk remove ends the selected connection", async () => {
+    toggleSelected("tmux", connection);
+    requestBulkDelete();
+    expect(selection.confirmingDelete).toBe(true);
+    await confirmBulkDelete();
+    await settle();
+    expect(library.tmuxConnections.some((c) => c.connection === connection)).toBe(false);
+    expect(selectedCount()).toBe(0);
+  });
+});
+
 describe("gateway multi-select", () => {
   afterEach(async () => {
     const { resetMockGateways } = await import("../api/mock");

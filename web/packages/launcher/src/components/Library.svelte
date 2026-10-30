@@ -52,7 +52,6 @@
     connectComputer,
     canOpenWorkspaceWindow,
     detachTmux,
-    endTmux,
     newTerminal,
     newTmuxWindow,
     newWorkspaceWindow,
@@ -561,11 +560,20 @@
            exists only while the connection does; the identity block names
            where tmux runs over its session and version, with a mark for the
            errors tmux reported. The actions mirror a connected devserver's:
-           t asks for a new tmux window, c detaches in the disconnect slot,
-           and the power toggle is End behind a confirmation. A node whose
-           record has not arrived yet has nothing to ask of, so it carries
-           its rows alone until the next push. -->
+           t asks for a new tmux window and c detaches in the disconnect
+           slot; ending the server is the selection's turn off or remove,
+           through the same check the other cards carry. A node whose record
+           has not arrived yet has nothing to ask of, so it carries its rows
+           alone until the next push. -->
       <div class="card-header machine-header" data-deck-row tabindex="-1">
+        {#if entry && !readOnly && checksVisible()}
+          <input
+            class="row-check"
+            type="checkbox"
+            checked={isSelected("tmux", entry.connection)}
+            aria-label={`Select ${title}`}
+            onchange={() => toggleSelected("tmux", entry.connection)} />
+        {/if}
         <span class="machine-icon live" title="Connected">
           <Columns3 size={16} />
         </span>
@@ -604,14 +612,6 @@
               aria-label={`Detach ${title}`}
               onclick={() => run(detachTmux(entry.connection))}>
               <Unplug size={16} />
-            </button>
-            <button
-              class="icon-btn on"
-              type="button"
-              title="End the tmux server"
-              aria-label={`End ${title}`}
-              onclick={() => run(endTmux(entry.connection))}>
-              <Power size={16} />
             </button>
           {/if}
         </div>

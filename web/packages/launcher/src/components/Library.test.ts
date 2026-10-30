@@ -933,7 +933,6 @@ describe("Library: demo mode", () => {
 describe("Library: tmux connection cards", () => {
   const LOCAL_TITLE = "tmux -CC on this machine";
   const REMOTE_TITLE = "tmux -CC from ssh geekom";
-  const END_MESSAGE = "End the tmux server and every session it holds?";
 
   function entry(
     over: Partial<TmuxConnectionEntry> & Pick<TmuxConnectionEntry, "connection">,
@@ -1071,28 +1070,32 @@ describe("Library: tmux connection cards", () => {
     }
   });
 
-  it("asks before ending the tmux server, and ends only on confirm", async () => {
+  it("carries the selection check like the other cards, and the selection's turn off ends the server", async () => {
+    const { setSelectMode, isSelected, bulkSetOnAll, selectedCount } = await import("../state/selection.svelte");
     const { backend } = await import("../api/backend");
     const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
     try {
       mountList();
-      const end = byAria(`End ${LOCAL_TITLE}`)!;
-      // The power toggle has no letter: the keys stay the other cards' set.
-      expect(end.hasAttribute("data-deck-key")).toBe(false);
-      end.click();
+      // No power toggle on the card: ending is the selection's, as elsewhere.
+      expect(byAria(`End ${LOCAL_TITLE}`)).toBeUndefined();
+      expect(target!.querySelector(`input[aria-label="Select ${LOCAL_TITLE}"]`)).toBeNull();
+      setSelectMode(true);
       await settle();
       flushSync();
-      expect(confirm.open).toBe(true);
-      expect(confirm.message).toBe(END_MESSAGE);
-      expect(request).not.toHaveBeenCalled();
-      cancelConfirm();
-      expect(request).not.toHaveBeenCalled();
-      end.click();
+      const check = target!.querySelector<HTMLInputElement>(`input[aria-label="Select ${LOCAL_TITLE}"]`)!;
+      expect(check).not.toBeNull();
+      check.click();
       await settle();
-      await resolveConfirm();
+      expect(isSelected("tmux", "tm-local")).toBe(true);
+      expect(selectedCount("tmux")).toBe(1);
+      await bulkSetOnAll(false);
       expect(request).toHaveBeenCalledExactlyOnceWith("tm-local", { request: "end" });
+      // The card goes with the connection, and so does its selection.
+      expect(selectedCount("tmux")).toBe(0);
     } finally {
       request.mockRestore();
+      const { clearSelection } = await import("../state/selection.svelte");
+      clearSelection();
     }
   });
 
@@ -1124,10 +1127,12 @@ describe("Library: tmux connection cards", () => {
   });
 
   it("drops the card when the connection ends and returns its control terminal to This machine", async () => {
+    const { setSelectMode, toggleSelected, bulkSetOnAll, clearSelection } = await import("../state/selection.svelte");
     mountList();
-    byAria(`End ${LOCAL_TITLE}`)!.click();
-    await settle();
-    await resolveConfirm();
+    setSelectMode(true);
+    toggleSelected("tmux", "tm-local");
+    await bulkSetOnAll(false);
+    clearSelection();
     await settle();
     flushSync();
     expect(library.error).toBeNull();
