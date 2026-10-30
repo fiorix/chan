@@ -19,32 +19,23 @@ describe("terminalBackendFromPrefs", () => {
   });
 });
 
-describe("the backend of a terminal by its window and its masking", () => {
-  // A control terminal whose masking starts on is xterm, the one backend
-  // that masks; every other cell is the configured backend.
+describe("the backend of a terminal and its masking", () => {
+  // Masking exists on both backends, so the masking preference never
+  // moves a terminal off the configured backend.
   test.each([
-    [true, undefined, true, "xterm"],
-    [true, undefined, false, "xterm"],
-    [true, true, true, "xterm"],
-    [true, true, false, "xterm"],
-    [true, false, true, "ghostty"],
-    [true, false, false, "xterm"],
-    [false, undefined, true, "ghostty"],
-    [false, undefined, false, "xterm"],
-    [false, true, true, "ghostty"],
-    [false, true, false, "xterm"],
-    [false, false, true, "ghostty"],
-    [false, false, false, "xterm"],
-  ] as const)(
-    "control window %s, secret_masking %s, ghostty %s: %s",
-    (terminalControl, secretMasking, ghostty, backend) => {
-      const prefs = {
-        ghostty,
-        ...(secretMasking === undefined ? {} : { secret_masking: secretMasking }),
-      } as TerminalPreferences;
-      expect(terminalBackendFromPrefs(prefs, { terminalControl })).toBe<TerminalBackend>(backend);
-    },
-  );
+    [undefined, true, "ghostty"],
+    [true, true, "ghostty"],
+    [false, true, "ghostty"],
+    [undefined, false, "xterm"],
+    [true, false, "xterm"],
+    [false, false, "xterm"],
+  ] as const)("secret_masking %s, ghostty %s: %s", (secretMasking, ghostty, backend) => {
+    const prefs = {
+      ghostty,
+      ...(secretMasking === undefined ? {} : { secret_masking: secretMasking }),
+    } as TerminalPreferences;
+    expect(terminalBackendFromPrefs(prefs)).toBe<TerminalBackend>(backend);
+  });
 });
 
 describe("ghostty kit instances", () => {

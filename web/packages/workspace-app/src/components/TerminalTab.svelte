@@ -162,10 +162,9 @@
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
-  import {
-    DEFAULT_SECRET_MASK_SUFFIXES,
-    TerminalSecretMasker,
-  } from "../terminal/secretMasking";
+  import { DEFAULT_SECRET_MASK_SUFFIXES } from "../terminal/secretMasking";
+  import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
+  import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
   import type { Ghostty, Terminal as GhosttyTerminal } from "ghostty-web";
   import {
@@ -327,9 +326,10 @@
   let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
-  // Visual-only masking owner for this xterm instance. Null on ghostty and
-  // disposed with the terminal; the enabled bit is session-scoped per tab.
-  let secretMasker: TerminalSecretMasker | null = null;
+  // Visual-only masking owner for this terminal: xterm decorations or a
+  // painter over ghostty's canvas, disposed with the terminal; the enabled
+  // bit is session-scoped per tab.
+  let secretMasker: TerminalSecretMasker | GhosttySecretMasker | null = null;
   let secretMaskingEnabled = $state(false);
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
@@ -1071,14 +1071,12 @@
     }
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
-    // terminals), except in a control terminal whose masking starts on,
-    // which is xterm, the backend that masks. Absent field (older server)
-    // means xterm.js. The ghostty kit lazy-loads ~420KB of WASM + JS only
-    // on this branch, and each terminal gets its own WASM instance (see
-    // backend.ts); a failed load falls back to xterm.js rather than
-    // breaking the spawn (fail-open, matching the mouse filter's
-    // philosophy).
-    backend = terminalBackendFromPrefs(terminalPrefs, { terminalControl: ui.terminalControl });
+    // terminals). Absent field (older server) means xterm.js. The ghostty
+    // kit lazy-loads ~420KB of WASM + JS only on this branch, and each
+    // terminal gets its own WASM instance (see backend.ts); a failed load
+    // falls back to xterm.js rather than breaking the spawn (fail-open,
+    // matching the mouse filter's philosophy).
+    backend = terminalBackendFromPrefs(terminalPrefs);
     let ghosttyKit: GhosttyKit | null = null;
     let ghosttyInstance: Ghostty | null = null;
     if (backend === "ghostty") {
@@ -1292,20 +1290,19 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
+    // The masker logged and disabled itself; sync the toggle state so the
+    // menu label stays truthful, and tell the user visibly.
+    const onSecretMaskingFailure = () => {
+      secretMaskingEnabled = false;
+      setTransientStatus("Secret masking stopped working in this terminal");
+    };
     if (backend === "xterm") {
       secretMasker = new TerminalSecretMasker(
         term as Terminal,
         secretMaskSuffixes,
         terminalSecretMaskColor(),
         secretMaskingEnabled,
-        () => {
-          // The masker logged and disabled itself; sync the toggle state so
-          // the menu label stays truthful, and tell the user visibly.
-          secretMaskingEnabled = false;
-          setTransientStatus(
-            "Secret masking stopped working in this terminal",
-          );
-        },
+        onSecretMaskingFailure,
       );
       // Hold Shift to force a native selection while a TUI holds mouse
       // tracking, on every platform (xterm.js ignores Shift on macOS).
@@ -1330,11 +1327,21 @@
       // init, then recreate-on-loss (bounded) before settling on the
       // DOM renderer. See the helper for the WKWebView rationale.
       enableWebglRenderer();
-    } else if (!focused) {
-      // ghostty-web's open() auto-focuses its textarea (xterm waits for
-      // the `focused` check at the end of start()). Blur back so a
-      // background pane's spawn can't steal keyboard focus.
-      term.blur();
+    } else {
+      // After open(): the renderer the painter hooks exists from there.
+      secretMasker = new GhosttySecretMasker(
+        term as GhosttyTerminal,
+        secretMaskSuffixes,
+        terminalSecretMaskColor(),
+        secretMaskingEnabled,
+        onSecretMaskingFailure,
+      );
+      if (!focused) {
+        // ghostty-web's open() auto-focuses its textarea (xterm waits for
+        // the `focused` check at the end of start()). Blur back so a
+        // background pane's spawn can't steal keyboard focus.
+        term.blur();
+      }
     }
     refreshTerminalRenderer();
     installHostResumeListeners();
@@ -2500,11 +2507,6 @@
 
   function toggleSecretMasking(): void {
     closeTabMenu();
-    if (backend !== "xterm") {
-      setTransientStatus("Secret masking unavailable on ghostty backend");
-      focusTerminal();
-      return;
-    }
     secretMaskingEnabled = !secretMaskingEnabled;
     secretMasker?.setEnabled(secretMaskingEnabled);
     setTransientStatus(
@@ -2872,9 +2874,7 @@
               <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">
-              {backend === "xterm"
-                ? `Secret masking: ${secretMaskingEnabled ? "on" : "off"}`
-                : "Secret masking unavailable"}
+              Secret masking: {secretMaskingEnabled ? "on" : "off"}
             </span>
             <span class="mbtn-chord"></span>
           </button>

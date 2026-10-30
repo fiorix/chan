@@ -28,7 +28,7 @@ Opened 2026-10-29 at the v0.115.0 GA, which carries one row into it unbuilt: bro
 | Item | State | Next |
 | --- | --- | --- |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
-| [Ghostty masks no secrets][ghmask] | accepted | build |
+| [Ghostty masks no secrets][ghmask] | built | review |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 
 [chk95]: v0.116.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md

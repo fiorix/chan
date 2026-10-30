@@ -2,7 +2,7 @@
 
 import type { Terminal as XtermTerminal } from "@xterm/xterm";
 import { expect, test, vi } from "vitest";
-import { TerminalSecretMasker } from "./secretMasking";
+import { TerminalSecretMasker } from "./secretMaskingXterm";
 
 test("real xterm masks wrapped ANSI assignments across buffer switches", async () => {
   // xterm initializes its color parser through a scratch canvas at import
