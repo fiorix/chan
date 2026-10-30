@@ -2606,6 +2606,19 @@ export function tmuxPaneTabs(): TerminalTab[] {
   return allTerminalTabs().filter((tab) => tab.tmuxPane && tab.terminalSessionId);
 }
 
+/// The terminal tab a tmux request of this window rides: the active tab when
+/// it shows a tmux pane (so a window mixing tmux and plain tabs still asks
+/// tmux), else the first pane tab, else the control terminal whose connection
+/// this window shows, since the status view is the connection's console. Null
+/// when the window shows no tmux connection, and nothing is to be asked.
+export function tmuxRequestCarrier(): TerminalTab | null {
+  const active = activeTabInPane(activePane());
+  if (active?.kind === "terminal" && active.tmuxPane && active.terminalSessionId) return active;
+  const pane = tmuxPaneTabs()[0];
+  if (pane) return pane;
+  return allTerminalTabs().find((tab) => tab.tmuxStatus?.connection && tab.terminalSessionId) ?? null;
+}
+
 /// Whether a fresh terminal still waits for the server's next name before it
 /// dials. The terminal clears it before the fetch, so a reconnect during the
 /// fetch does not fetch again.

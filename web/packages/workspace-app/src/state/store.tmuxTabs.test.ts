@@ -143,3 +143,35 @@ test("tmux_layout lays the window out as tmux has it: two panes, each with a tab
   store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "tmux_layout", layout: { kind: "row" } });
   expect(Object.values(tabs.layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(2);
 });
+
+test("a tmux request rides the active pane tab, else a pane, else the control session, and nothing in a plain window", async () => {
+  const { tabs, resetLayout, terminalTab } = await app();
+  const connection = { version: "3.6", windows: [], window_cap: 8, errors: [] };
+  // The control window: its status view is the connection's console, so New
+  // Window and New terminal there ask tmux through the control session.
+  resetLayout([terminalTab({ id: "control", title: "tmux", terminalSessionId: "control-1" })]);
+  expect(tabs.tmuxRequestCarrier()).toBeNull();
+  tabs.setTerminalTmuxStatus(tabs.allTerminalTabs()[0]!, { revision: 1, connection });
+  expect(tabs.tmuxRequestCarrier()?.terminalSessionId).toBe("control-1");
+  // A tmux window: the active pane tab carries, a plain tab beside it falls back to a pane.
+  resetLayout([
+    terminalTab({ id: "plain", title: "plain", terminalSessionId: "shell-1" }),
+    terminalTab({ id: "pane", title: "pane", terminalSessionId: "pane-a" }),
+  ]);
+  const pane = tabs.allTerminalTabs().find((tab) => tab.terminalSessionId === "pane-a")!;
+  tabs.setTerminalTmuxPane(pane, { connection: 1, pane: "%0" });
+  expect(tabs.activeTabInPane(tabs.activePane())?.id).toBe("plain");
+  expect(tabs.tmuxRequestCarrier()?.terminalSessionId).toBe("pane-a");
+  resetLayout(
+    [
+      terminalTab({ id: "plain", title: "plain", terminalSessionId: "shell-1" }),
+      terminalTab({ id: "pane", title: "pane", terminalSessionId: "pane-a", tmuxPane: { connection: 1, pane: "%0" } }),
+    ],
+    { activeTabId: "pane" },
+  );
+  expect(tabs.activeTabInPane(tabs.activePane())?.id).toBe("pane");
+  expect(tabs.tmuxRequestCarrier()?.id).toBe("pane");
+  // A plain window asks nothing.
+  resetLayout([terminalTab({ id: "only", title: "shell", terminalSessionId: "shell-2" })]);
+  expect(tabs.tmuxRequestCarrier()).toBeNull();
+});
