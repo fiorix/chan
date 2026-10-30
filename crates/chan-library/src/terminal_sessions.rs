@@ -44,6 +44,7 @@ mod redraw;
 mod request_status;
 mod ring;
 pub mod shell_profiles;
+mod tmux_connection;
 mod tmux_gate;
 
 use bytes::{contains_subslice, VisibleScan};
@@ -488,6 +489,9 @@ pub struct Registry {
     /// [`Registry::set_tmux`]; read once for each PTY spawn and by every live
     /// session's gate on a change.
     tmux: Mutex<TerminalTmuxConfig>,
+    /// How the host mints and drops chan windows for a tmux connection's
+    /// windows; absent, a connection's panes belong to no window.
+    tmux_windows: Mutex<Option<TmuxWindowHook>>,
     /// Optional spawn-time preference pull for a terminal-only tenant. Kept
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
@@ -1900,6 +1904,7 @@ impl Registry {
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
             program_status: AtomicBool::new(program_status),
             tmux: Mutex::new(tmux),
+            tmux_windows: Mutex::new(None),
             terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
@@ -1957,6 +1962,79 @@ impl Registry {
         *self.tmux.lock().expect("terminal registry poisoned") = config.clone();
         for session in sessions.values() {
             session.apply_tmux_policy(config);
+        }
+    }
+
+    /// Install how chan windows are minted and dropped for a tmux
+    /// connection's windows. A later install replaces the prior hook.
+    pub fn install_tmux_windows(&self, hook: TmuxWindowHook) {
+        *self
+            .tmux_windows
+            .lock()
+            .expect("terminal registry poisoned") = Some(hook);
+    }
+
+    /// Perform the work a session's tmux connection queued: pane sessions,
+    /// their ends and renames, chan windows, the gateway thread. Runs on the
+    /// drainer with no registry lock held, since each item takes its own.
+    fn perform_tmux_work(&self, session: &Arc<Session>) {
+        for work in session.take_tmux_work() {
+            match work {
+                tmux_connection::TmuxWork::AddPane { spec, sink } => {
+                    let pane = spec.pane.pane;
+                    let done = match self.add_tmux_pane(spec, sink) {
+                        Ok(added) => tmux_connection::WorkDone::PaneAdded {
+                            pane,
+                            session: added,
+                        },
+                        Err(error) => {
+                            tracing::warn!(pane = %pane, ?error, "no session for a tmux pane");
+                            tmux_connection::WorkDone::PaneRefused { pane }
+                        }
+                    };
+                    session.tmux_work_done(done);
+                }
+                tmux_connection::TmuxWork::EndPane { id, exit } => {
+                    let target = self
+                        .sessions
+                        .lock()
+                        .expect("terminal registry poisoned")
+                        .get(&id)
+                        .cloned();
+                    if let Some(target) = target.filter(|target| target.is_tmux_pane()) {
+                        target.record_tmux_pane_exit(exit);
+                        self.close(&id, CloseReason::Explicit);
+                    }
+                }
+                tmux_connection::TmuxWork::RenamePanes { ids, name } => {
+                    for id in ids {
+                        self.update_live_metadata(&id, name.clone(), None);
+                    }
+                }
+                tmux_connection::TmuxWork::MintWindow { key, title } => {
+                    let hook = self
+                        .tmux_windows
+                        .lock()
+                        .expect("terminal registry poisoned")
+                        .clone();
+                    let window_id = hook.as_ref().and_then(|hook| (hook.mint)(&title));
+                    session
+                        .tmux_work_done(tmux_connection::WorkDone::WindowMinted { key, window_id });
+                }
+                tmux_connection::TmuxWork::RemoveWindow { window_id } => {
+                    let hook = self
+                        .tmux_windows
+                        .lock()
+                        .expect("terminal registry poisoned")
+                        .clone();
+                    if let Some(hook) = hook {
+                        (hook.remove)(&window_id);
+                    }
+                }
+                tmux_connection::TmuxWork::StartGateway { rx } => {
+                    spawn_tmux_gateway(Arc::downgrade(session), rx);
+                }
+            }
         }
     }
 
@@ -2585,9 +2663,6 @@ impl Registry {
     /// Add a session for one pane of a tmux connection, under the pane cap
     /// rather than `terminal.session_cap`, with its tab name settled against
     /// the live ones. The connection's channel receives its commands.
-    // Reached by a tmux connection's gateway; this build has none, and the
-    // tests are the only caller.
-    #[allow(dead_code)]
     fn add_tmux_pane(
         &self,
         spec: TmuxPaneSpec,
@@ -3874,6 +3949,7 @@ impl Registry {
         for session in sessions {
             session.prune_program_groups();
             session.tick_tmux(std::time::Instant::now());
+            self.perform_tmux_work(&session);
             session.try_drain_batch(now);
         }
     }
@@ -4500,6 +4576,9 @@ struct Session {
     /// sees it. Taken alone or after the registry's sessions lock, never
     /// while the output lock is held.
     tmux: Mutex<tmux_gate::TmuxGate>,
+    /// Work the gate's connection asked the registry for, performed by the
+    /// drainer off the gate lock.
+    tmux_work: Mutex<VecDeque<tmux_connection::TmuxWork>>,
     /// The foreground a test declares in place of the PTY's.
     #[cfg(test)]
     tmux_foreground: Mutex<Option<tmux_gate::Foreground>>,
@@ -4860,7 +4939,11 @@ impl Session {
             // treated as instantly idle before it has rendered anything.
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
-            tmux: Mutex::new(tmux_gate::TmuxGate::new(config.terminal.tmux.clone())),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(
+                config.terminal.tmux.clone(),
+                config.terminal.scrollback_mb,
+            )),
+            tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
             write_queue,
@@ -5281,7 +5364,11 @@ impl Session {
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
-            tmux: Mutex::new(tmux_gate::TmuxGate::new(config.terminal.tmux.clone())),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(
+                config.terminal.tmux.clone(),
+                config.terminal.scrollback_mb,
+            )),
+            tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
             write_queue,
@@ -5993,9 +6080,6 @@ impl Session {
     /// connection's channel. Program status is on, since a program in the
     /// pane can report it; the gate is off, so a marker printed inside the
     /// pane is pane bytes and not a nested session.
-    // Reached through `Registry::add_tmux_pane`, which this build calls from
-    // tests alone.
-    #[allow(dead_code)]
     fn for_tmux_pane(
         id: String,
         config: &RegistryConfig,
@@ -6059,10 +6143,14 @@ impl Session {
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
-            tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig {
-                enabled: false,
-                trust: Vec::new(),
-            })),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(
+                TerminalTmuxConfig {
+                    enabled: false,
+                    trust: Vec::new(),
+                },
+                config.terminal.scrollback_mb,
+            )),
+            tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
             write_queue,
@@ -6600,9 +6688,6 @@ impl Session {
     /// The exit of a tmux pane session: its connection ended, or tmux closed
     /// the pane. The registry's last-exit copy is for a tenant's one PTY and
     /// is left alone.
-    // Reached by a tmux connection's gateway; this build has none, and the
-    // tests are the only caller.
-    #[allow(dead_code)]
     fn record_tmux_pane_exit(&self, exit: TerminalExit) {
         self.record_exit(exit, None);
         self.ended.record(true);
@@ -6616,6 +6701,14 @@ impl Session {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
+        // A tmux connection this session carried ends with its process,
+        // whatever tmux managed to say first.
+        let connection_actions = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .control_exited();
+        self.perform_tmux_actions(connection_actions);
         // Remove the stored master before waiting, so a restart cannot import
         // a dead child while its reader drains. The parker runs without the
         // exit lock, since a parker may inspect the registry's exit state.
@@ -6846,8 +6939,55 @@ impl Session {
                 tmux_gate::Action::Notice(text) => {
                     self.record_plain_output(format!("\r\n[chan] {text}\r\n").as_bytes());
                 }
+                tmux_gate::Action::Work(work) => {
+                    self.tmux_work
+                        .lock()
+                        .expect("terminal tmux work poisoned")
+                        .push_back(work);
+                }
             }
         }
+    }
+
+    /// The connection's work queued since the last drain.
+    fn take_tmux_work(&self) -> Vec<tmux_connection::TmuxWork> {
+        self.tmux_work
+            .lock()
+            .expect("terminal tmux work poisoned")
+            .drain(..)
+            .collect()
+    }
+
+    /// The registry answered a piece of the connection's work.
+    fn tmux_work_done(&self, done: tmux_connection::WorkDone) {
+        let actions = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .work_done(done, std::time::Instant::now());
+        self.perform_tmux_actions(actions);
+    }
+
+    /// A pane session's command, delivered by the connection's gateway
+    /// thread to the control session that holds the connection.
+    fn tmux_pane_command(&self, pane: chan_tmux::PaneId, command: PtyCommand) {
+        let actions = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .pane_command(pane, command, std::time::Instant::now());
+        self.perform_tmux_actions(actions);
+    }
+
+    /// The size tmux gave a pane: a pane session's size is tmux's, not a
+    /// client's, so it is set here and told to the clients.
+    fn note_tmux_pane_size(&self, size: PtySize) {
+        *self.winsize.lock().expect("terminal winsize poisoned") = size;
+        self.requested_size
+            .lock()
+            .expect("terminal requested size poisoned")
+            .size = size;
+        self.broadcast(SessionEvent::Resize(size));
     }
 
     /// What runs in the PTY's foreground, for the gate's marker policy: the
@@ -7426,9 +7566,6 @@ type PaneCommand = (chan_tmux::PaneId, PtyCommand);
 #[derive(Debug, Clone)]
 enum CommandSink {
     Pty(std::sync::mpsc::Sender<PtyCommand>),
-    // Built by `Session::for_tmux_pane`, which this build calls from tests
-    // alone.
-    #[allow(dead_code)]
     TmuxPane {
         pane: chan_tmux::PaneId,
         tx: std::sync::mpsc::Sender<PaneCommand>,
@@ -7453,6 +7590,46 @@ impl CommandSink {
 /// Numbers a tmux connection within one process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TmuxConnectionId(pub u64);
+
+/// Mints a chan window for a tmux window's title and answers its id.
+pub type TmuxWindowMint = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Drops a chan window by id.
+pub type TmuxWindowRemove = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// How the host mints and drops chan windows for a tmux connection's windows.
+#[derive(Clone)]
+pub struct TmuxWindowHook {
+    pub mint: TmuxWindowMint,
+    pub remove: TmuxWindowRemove,
+}
+
+impl std::fmt::Debug for TmuxWindowHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TmuxWindowHook")
+    }
+}
+
+/// The thread that reads a connection's pane commands and hands each to the
+/// control session that holds the connection. It ends with the channel, or
+/// with the control session.
+fn spawn_tmux_gateway(
+    control: std::sync::Weak<Session>,
+    rx: std::sync::mpsc::Receiver<PaneCommand>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("chan-tmux-gateway".into())
+        .spawn(move || {
+            while let Ok((pane, command)) = rx.recv() {
+                let Some(session) = control.upgrade() else {
+                    break;
+                };
+                session.tmux_pane_command(pane, command);
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "tmux gateway thread did not start");
+    }
+}
 
 /// The tmux connection a pane session belongs to and its pane there. A
 /// session with one has no PTY: its output is what tmux reports for the pane
@@ -7550,6 +7727,7 @@ fn random_session_id() -> String {
 mod tests {
     mod control_socket_env_tests;
     mod program_status_tests;
+    mod tmux_connection_tests;
     mod tmux_gate_session_tests;
     mod tmux_pane_session_tests;
     use super::*;
@@ -7854,7 +8032,8 @@ mod tests {
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
-            tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig::default())),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig::default(), 10)),
+            tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
             write_queue,

@@ -131,6 +131,7 @@ fn commands_render() {
         r(Command::NewWindow { cwd: None }),
         "new-window -PF '#{window_id}'"
     );
+    assert_eq!(r(Command::KillPane(PaneId(4))), "kill-pane -t %4");
 }
 
 #[test]
@@ -239,12 +240,19 @@ fn versions() {
 fn reply_parsers() {
     let l = |s: &str| vec![s.as_bytes().to_vec()];
     let w = parse_list_windows(&[
-        b"@0 95e4,10x10,0,0,0 95e4,10x10,0,0,0 -".to_vec(),
-        b"@1 aa,1x1,0,0,3 aa,1x1,0,0,3 ".to_vec(),
+        b"@0 95e4,10x10,0,0,0 95e4,10x10,0,0,0 - my shell".to_vec(),
+        b"@1 aa,1x1,0,0,3 aa,1x1,0,0,3  ".to_vec(),
+        b"@2 aa,1x1,0,0,3 aa,1x1,0,0,3 *".to_vec(),
     ])
     .unwrap();
     assert_eq!((w[0].id, w[0].flags.as_str()), (WindowId(0), "-"));
-    assert_eq!(w[1].flags, "", "empty flags are a field");
+    assert_eq!(w[0].name, "my shell", "the name is the rest of the line");
+    assert_eq!(
+        (w[1].flags.as_str(), w[1].name.as_str()),
+        ("", ""),
+        "empty flags are a field"
+    );
+    assert_eq!(w[2].name, "", "a name may be absent");
     assert!(parse_list_windows(&l("@0 only three")).is_err());
     assert!(parse_list_windows(&l("x0 a b c")).is_err());
 

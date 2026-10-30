@@ -46,6 +46,16 @@ impl Drop for Reply {
     }
 }
 
+impl Reply {
+    /// The answer as bytes, with the terminator the query used.
+    pub(super) fn query_bytes(&self) -> &'static [u8] {
+        match self.terminator {
+            Terminator::Bell => b"\x1b]7501;?\x07",
+            Terminator::Escape => b"\x1b]7501;?\x1b\\",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ReplyWriter {
     written: VecDeque<Instant>,
@@ -73,10 +83,7 @@ impl ReplyWriter {
         if self.written.len() == MAX_PER_SECOND {
             return Ok(());
         }
-        let bytes: &[u8] = match reply.terminator {
-            Terminator::Bell => b"\x1b]7501;?\x07",
-            Terminator::Escape => b"\x1b]7501;?\x1b\\",
-        };
+        let bytes = reply.query_bytes();
         writer.write_all(bytes)?;
         writer.flush()?;
         // A write can block until a child reads; count its completion time.

@@ -336,10 +336,15 @@ fn against_a_real_tmux() {
     assert_eq!(windows.len(), 2);
     let new = windows.iter().find(|i| i.id == w).unwrap();
     assert_eq!(parse_layout(&new.layout).unwrap().panes().len(), 2);
+    assert!(!new.name.is_empty(), "{new:?}");
     let panes = parse_list_panes(&t.call(&Command::ListPanes(w)).unwrap()).unwrap();
     assert_eq!(panes.len(), 2);
     assert_eq!(panes.iter().filter(|p| p.active).count(), 1);
     assert_eq!(t.call(&Command::SelectWindow(WindowId(0))), Ok(vec![]));
+    let second = PaneId::parse(&p).unwrap();
+    assert_eq!(t.call(&Command::KillPane(second)), Ok(vec![]));
+    let panes = parse_list_panes(&t.call(&Command::ListPanes(w)).unwrap()).unwrap();
+    assert_eq!(panes.len(), 1, "the split pane is gone");
     assert_eq!(t.call(&Command::KillWindow(w)), Ok(vec![]));
 
     // A failing command is an %error reply, not a dead stream.

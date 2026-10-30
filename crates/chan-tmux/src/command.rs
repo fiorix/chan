@@ -19,8 +19,10 @@ pub(crate) const MAX_SIZE: u32 = 10_000;
 const MAX_TEXT: usize = 1024;
 
 const LIST_SESSIONS_FORMAT: &str = "#{session_id}";
+// The name comes last and may hold spaces; the parser reads the four fixed
+// fields and takes the rest as the name.
 const LIST_WINDOWS_FORMAT: &str =
-    "#{window_id} #{window_layout} #{window_visible_layout} #{window_flags}";
+    "#{window_id} #{window_layout} #{window_visible_layout} #{window_flags} #{window_name}";
 const LIST_PANES_FORMAT: &str = "#{pane_id} #{pane_active}";
 const PANE_STATE_FORMAT: &str = "#{pane_id} #{cursor_x} #{cursor_y} #{pane_in_mode} #{alternate_on} #{scroll_region_upper} #{scroll_region_lower} #{pane_width} #{pane_height} #{history_size}";
 
@@ -83,6 +85,7 @@ pub enum Command {
         horizontal: bool,
     },
     KillWindow(WindowId),
+    KillPane(PaneId),
     SelectWindow(WindowId),
     SelectPane(PaneId),
     RenameWindow {
@@ -157,6 +160,7 @@ impl Command {
                 format!("split-window {dir} -t {pane} -PF '#{{pane_id}}'")
             }
             Command::KillWindow(window) => format!("kill-window -t {window}"),
+            Command::KillPane(pane) => format!("kill-pane -t {pane}"),
             Command::SelectWindow(window) => format!("select-window -t {window}"),
             Command::SelectPane(pane) => format!("select-pane -t {pane}"),
             // tmux reads a quoted word that starts with `-` as flags, so the
@@ -241,6 +245,9 @@ pub struct WindowInfo {
     pub layout: String,
     pub visible_layout: String,
     pub flags: String,
+    /// The window's name, untrusted text that tmux keeps free of control
+    /// characters; empty when the window has none.
+    pub name: String,
 }
 
 pub fn parse_list_windows(lines: &[Vec<u8>]) -> Result<Vec<WindowInfo>, Error> {
@@ -248,13 +255,14 @@ pub fn parse_list_windows(lines: &[Vec<u8>]) -> Result<Vec<WindowInfo>, Error> {
         .iter()
         .map(|line| {
             let text = std::str::from_utf8(line).map_err(|_| Error::Malformed("list-windows"))?;
-            let f: Vec<&str> = text.split(' ').collect();
+            let f: Vec<&str> = text.splitn(5, ' ').collect();
             match f.as_slice() {
-                [id, layout, visible, flags] => Ok(WindowInfo {
+                [id, layout, visible, flags, rest @ ..] => Ok(WindowInfo {
                     id: WindowId::parse(id).ok_or(Error::Malformed("list-windows"))?,
                     layout: (*layout).to_owned(),
                     visible_layout: (*visible).to_owned(),
                     flags: (*flags).to_owned(),
+                    name: rest.first().map(|n| (*n).to_owned()).unwrap_or_default(),
                 }),
                 _ => Err(Error::Malformed("list-windows")),
             }
