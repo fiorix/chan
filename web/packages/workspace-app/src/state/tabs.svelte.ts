@@ -7,6 +7,7 @@
 import { flushSync } from "svelte";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import type { TmuxConsent } from "./tmuxConsent";
+import type { TmuxStatus } from "./tmuxStatus";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -505,6 +506,10 @@ export type TerminalTab = {
   /// shown as a banner over the terminal. Server-owned and never
   /// serialized: the `session` frame replaces it for each attachment.
   tmuxConsent?: TmuxConsent;
+  /// The tmux control-mode connection the server holds on this session,
+  /// shown as the control terminal's status view while connected.
+  /// Server-owned and never serialized, like `tmuxConsent`.
+  tmuxStatus?: TmuxStatus;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1574,6 +1579,7 @@ function tabForReopen(src: Tab): Tab {
     tab.richPromptDraftPath = undefined;
     tab.richPromptCaret = undefined;
     tab.tmuxConsent = undefined;
+    tab.tmuxStatus = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -2577,6 +2583,12 @@ export function setTerminalTmuxConsent(tab: TerminalTab, consent: TmuxConsent, a
   if (attach || !tab.tmuxConsent || consent.revision > tab.tmuxConsent.revision) tab.tmuxConsent = consent;
 }
 
+/// Take a tmux connection status: a `session` frame's (`attach`) replaces
+/// whatever stands, a `tmux-status` frame's only when newer.
+export function setTerminalTmuxStatus(tab: TerminalTab, status: TmuxStatus, attach = false): void {
+  if (attach || !tab.tmuxStatus || status.revision > tab.tmuxStatus.revision) tab.tmuxStatus = status;
+}
+
 /// Whether a fresh terminal still waits for the server's next name before it
 /// dials. The terminal clears it before the fetch, so a reconnect during the
 /// fetch does not fetch again.
@@ -2689,6 +2701,7 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
   tab.cliCommandPending = undefined;
   if (!retainProgramStatus) tab.programStatus = undefined;
   tab.tmuxConsent = undefined;
+  tab.tmuxStatus = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
@@ -4459,6 +4472,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   queueDepth: "carry",
   programStatus: "carry",
   tmuxConsent: "carry",
+  tmuxStatus: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -4547,6 +4561,22 @@ function cloneTab(src: Tab): Tab {
       clone.tmuxConsent = {
         ...clone.tmuxConsent,
         ...(clone.tmuxConsent.question ? { question: { ...clone.tmuxConsent.question } } : {}),
+      };
+    }
+    if (clone.tmuxStatus) {
+      const connection = clone.tmuxStatus.connection;
+      clone.tmuxStatus = {
+        ...clone.tmuxStatus,
+        ...(connection
+          ? {
+              connection: {
+                ...connection,
+                ...(connection.session ? { session: { ...connection.session } } : {}),
+                windows: connection.windows.map((window) => ({ ...window })),
+                errors: [...connection.errors],
+              },
+            }
+          : {}),
       };
     }
     if (clone.terminalMetadataDraft) {
@@ -7724,6 +7754,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   queueDepth: "drop",
   programStatus: "drop",
   tmuxConsent: "drop",
+  tmuxStatus: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
   terminalActivityPulsing: "drop",

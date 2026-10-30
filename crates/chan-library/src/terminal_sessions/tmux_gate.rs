@@ -7,11 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chan_tmux::{Client, Command, Event, Limits, Message, PaneId, Token, Version};
+use chan_tmux::{
+    Client, Command, Event, Limits, Message, PaneId, SessionId, Token, Version, WindowId,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use super::tmux_connection::{self, Step, TmuxConnection, TmuxWork, WorkDone};
+use super::tmux_connection::{
+    self, Purpose, Step, TmuxConnection, TmuxConnectionStatus, TmuxWork, WorkDone,
+};
 use super::{PtyCommand, TerminalExit, TmuxConnectionId};
 use crate::config::TerminalTmuxConfig;
 
@@ -62,6 +66,30 @@ pub struct TmuxConsentSnapshot {
     pub question: Option<TmuxQuestion>,
 }
 
+/// The connection state a session publishes for the control terminal's
+/// status view. `revision` orders snapshots; `connection` is set while
+/// connected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct TmuxStatus {
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<TmuxConnectionStatus>,
+}
+
+/// A client's request of a live connection, from the status view. One with
+/// no connection changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "request", rename_all = "kebab-case")]
+pub enum TmuxRequest {
+    /// Open a tmux window past the cap: its panes get sessions and a chan
+    /// window is minted for it. `window` is tmux's id, `@N`.
+    OpenWindow { window: String },
+    /// Detach the control client; the tmux server and its sessions live on.
+    Detach,
+    /// End the tmux server with every session it holds.
+    End,
+}
+
 /// A client's answer to the question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -107,6 +135,8 @@ enum Phase {
     Probing {
         deadline: Instant,
         probe: Option<Token>,
+        /// The session the peer announced, for the connection's status.
+        session: Option<(SessionId, String)>,
     },
     /// Connected to a tmux at or past the floor: the connection keeps its
     /// windows and panes.
@@ -131,6 +161,8 @@ pub(super) struct TmuxGate {
     allow_for_tab: bool,
     published: watch::Sender<Arc<TmuxConsentSnapshot>>,
     revision: u64,
+    status: watch::Sender<Arc<TmuxStatus>>,
+    status_revision: u64,
 }
 
 impl TmuxGate {
@@ -138,6 +170,7 @@ impl TmuxGate {
         let mut client = Client::new(Limits::default());
         client.arm(policy.enabled);
         let (published, _) = watch::channel(Arc::new(TmuxConsentSnapshot::default()));
+        let (status, _) = watch::channel(Arc::new(TmuxStatus::default()));
         Self {
             client,
             policy,
@@ -146,6 +179,8 @@ impl TmuxGate {
             allow_for_tab: false,
             published,
             revision: 0,
+            status,
+            status_revision: 0,
         }
     }
 
@@ -194,6 +229,32 @@ impl TmuxGate {
                 );
             }
         }
+        self.publish_status_if_dirty();
+        actions
+    }
+
+    /// A client's request of the connection. Nothing happens without one,
+    /// or for a window tmux has not listed.
+    pub(super) fn request(&mut self, request: TmuxRequest, now: Instant) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if let Phase::Connected { connection, .. } = &mut self.phase {
+            let steps = match request {
+                TmuxRequest::OpenWindow { window } => match WindowId::parse(&window) {
+                    Some(window) => connection.open_window(window),
+                    None => Vec::new(),
+                },
+                TmuxRequest::Detach => vec![Step::Submit(Command::Detach, Purpose::Fire)],
+                TmuxRequest::End => vec![Step::Submit(Command::KillServer, Purpose::Fire)],
+            };
+            if let Err(error) = drive(&mut self.client, connection, steps, &mut actions) {
+                self.end_control(
+                    &format!("tmux control mode ended: {error}"),
+                    &mut actions,
+                    now,
+                );
+            }
+        }
+        self.publish_status_if_dirty();
         actions
     }
 
@@ -215,6 +276,7 @@ impl TmuxGate {
                 );
             }
         }
+        self.publish_status_if_dirty();
         actions
     }
 
@@ -237,6 +299,7 @@ impl TmuxGate {
                     actions.push(action);
                 }
             }
+            self.publish_status(None);
         }
     }
 
@@ -262,6 +325,13 @@ impl TmuxGate {
         watch::Receiver<Arc<TmuxConsentSnapshot>>,
     ) {
         let mut rx = self.published.subscribe();
+        let current = rx.borrow_and_update().clone();
+        (current, rx)
+    }
+
+    /// The current connection status and a receiver of the ones to come.
+    pub(super) fn subscribe_status(&self) -> (Arc<TmuxStatus>, watch::Receiver<Arc<TmuxStatus>>) {
+        let mut rx = self.status.subscribe();
         let current = rx.borrow_and_update().clone();
         (current, rx)
     }
@@ -311,6 +381,7 @@ impl TmuxGate {
                 event => self.event(event, now, &mut fed.actions),
             }
         }
+        self.publish_status_if_dirty();
         fed
     }
 
@@ -334,6 +405,7 @@ impl TmuxGate {
                 self.phase = Phase::Probing {
                     deadline: now + PROBE_TIMEOUT,
                     probe: None,
+                    session: None,
                 };
                 for event in held {
                     self.event(event, now, &mut actions);
@@ -350,7 +422,9 @@ impl TmuxGate {
             Phase::Asking { deadline, .. } if now >= *deadline => {
                 self.deny("denied: no answer", now, &mut actions);
             }
-            Phase::Probing { deadline, probe } if now >= *deadline => {
+            Phase::Probing {
+                deadline, probe, ..
+            } if now >= *deadline => {
                 if probe.is_some() {
                     self.end_control(
                         "tmux control mode ended: no version reply",
@@ -386,6 +460,7 @@ impl TmuxGate {
             self.phase = Phase::Probing {
                 deadline: now + PROBE_TIMEOUT,
                 probe: None,
+                session: None,
             };
             return;
         }
@@ -406,22 +481,23 @@ impl TmuxGate {
         match &mut self.phase {
             Phase::Plain => {}
             Phase::Asking { held, .. } => held.push(event),
-            Phase::Probing { probe, .. } => match event {
-                Event::Message(Message::SessionChanged { .. }) if probe.is_none() => {
-                    match self.submit_probe(actions) {
-                        Ok(token) => {
-                            if let Phase::Probing { probe, .. } = &mut self.phase {
-                                *probe = Some(token);
-                            }
+            Phase::Probing { probe, session, .. } => match event {
+                Event::Message(Message::SessionChanged {
+                    session: announced,
+                    name,
+                }) if probe.is_none() => match self.submit_probe(actions) {
+                    Ok(token) => {
+                        if let Phase::Probing { probe, session, .. } = &mut self.phase {
+                            *probe = Some(token);
+                            *session = Some((announced, name));
                         }
-                        Err(error) => self.end_control(
-                            &format!("tmux control mode ended: {error}"),
-                            actions,
-                            now,
-                        ),
                     }
-                }
+                    Err(error) => {
+                        self.end_control(&format!("tmux control mode ended: {error}"), actions, now)
+                    }
+                },
                 Event::Reply { token, result } if Some(token) == *probe => {
+                    let announced = session.take();
                     let version = result
                         .ok()
                         .and_then(|rows| rows.into_iter().next())
@@ -432,7 +508,7 @@ impl TmuxGate {
                             let id =
                                 TmuxConnectionId(NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed));
                             let (mut connection, rx) =
-                                TmuxConnection::new(id, version, self.scrollback_mb);
+                                TmuxConnection::new(id, version, self.scrollback_mb, announced);
                             actions.push(Action::Notice(format!(
                                 "tmux {}.{} control mode",
                                 version.major, version.minor
@@ -453,6 +529,7 @@ impl TmuxGate {
                                 version,
                                 connection: Box::new(connection),
                             };
+                            self.publish_status_if_dirty();
                         }
                         Some(version) => self.end_control(
                             &format!(
@@ -559,6 +636,26 @@ impl TmuxGate {
         self.published.send_replace(Arc::new(TmuxConsentSnapshot {
             revision: self.revision,
             question,
+        }));
+    }
+
+    /// Publish the connection's status when it changed since the last one.
+    fn publish_status_if_dirty(&mut self) {
+        let Phase::Connected { connection, .. } = &mut self.phase else {
+            return;
+        };
+        if !connection.take_dirty() {
+            return;
+        }
+        let snapshot = connection.status();
+        self.publish_status(Some(snapshot));
+    }
+
+    fn publish_status(&mut self, connection: Option<TmuxConnectionStatus>) {
+        self.status_revision += 1;
+        self.status.send_replace(Arc::new(TmuxStatus {
+            revision: self.status_revision,
+            connection,
         }));
     }
 }
@@ -934,6 +1031,157 @@ mod tests {
         let fed = gate.feed(&entry(), now, tmux);
         assert_eq!(fed.passthrough, entry());
         assert!(fed.actions.is_empty() && question(&gate).is_none());
+    }
+
+    #[test]
+    fn a_connected_gate_publishes_its_status_and_its_end() {
+        let now = Instant::now();
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        let (initial, mut status_rx) = gate.subscribe_status();
+        assert_eq!(initial.revision, 0);
+        assert!(initial.connection.is_none());
+        gate.feed(&entry(), now, tmux);
+        assert!(
+            !status_rx.has_changed().unwrap(),
+            "probing publishes nothing"
+        );
+        gate.feed(
+            b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
+            now,
+            tmux,
+        );
+        let status = status_rx.borrow_and_update().clone();
+        let connection = status.connection.as_ref().expect("connected");
+        assert_eq!(connection.version, "3.8");
+        assert_eq!(
+            connection.session,
+            Some(tmux_connection::TmuxSessionStatus {
+                id: "$0".into(),
+                name: "main".into(),
+            })
+        );
+        assert!(connection.windows.is_empty());
+        assert_eq!(connection.window_cap, tmux_connection::WINDOW_CAP);
+        assert!(connection.errors.is_empty());
+        // A window tmux adds is listed open, with no chan window yet.
+        gate.feed(b"%window-add @5\r\n", now, tmux);
+        let status = status_rx.borrow_and_update().clone();
+        assert_eq!(
+            status.connection.as_ref().unwrap().windows,
+            vec![tmux_connection::TmuxWindowStatus {
+                id: "@5".into(),
+                name: String::new(),
+                panes: 0,
+                open: true,
+                chan_window: None,
+            }]
+        );
+        // The host's answer and a rename land in it.
+        gate.work_done(
+            WorkDone::WindowMinted {
+                key: WindowId(5),
+                window_id: Some("w-1".into()),
+            },
+            now,
+        );
+        let status = status_rx.borrow_and_update().clone();
+        assert_eq!(
+            status.connection.as_ref().unwrap().windows[0]
+                .chan_window
+                .as_deref(),
+            Some("w-1")
+        );
+        gate.feed(b"%window-renamed @5 logs\r\n", now, tmux);
+        let status = status_rx.borrow_and_update().clone();
+        assert_eq!(status.connection.as_ref().unwrap().windows[0].name, "logs");
+        // Output alone is not a status change.
+        gate.feed(b"%output %0 hi\r\n", now, tmux);
+        assert!(!status_rx.has_changed().unwrap());
+        // The end clears the connection.
+        gate.feed(b"%exit\r\n\x1b\\", now, tmux);
+        let status = status_rx.borrow_and_update().clone();
+        assert!(status.connection.is_none());
+        assert!(status.revision > initial.revision);
+    }
+
+    #[test]
+    fn requests_open_a_window_past_the_cap_detach_and_end() {
+        let now = Instant::now();
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        assert!(
+            gate.request(TmuxRequest::Detach, now).is_empty(),
+            "nothing without a connection"
+        );
+        gate.feed(&entry(), now, tmux);
+        gate.feed(
+            b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
+            now,
+            tmux,
+        );
+        let (_, mut status_rx) = gate.subscribe_status();
+        let cap = tmux_connection::WINDOW_CAP;
+        for n in 1..=(cap + 1) {
+            gate.feed(format!("%window-add @{n}\r\n").as_bytes(), now, tmux);
+        }
+        let status = status_rx.borrow_and_update().clone();
+        let windows = status.connection.as_ref().unwrap().windows.clone();
+        assert_eq!(windows.len(), cap + 1);
+        assert!(windows[..cap].iter().all(|w| w.open));
+        assert!(
+            !windows[cap].open,
+            "the window past the cap is listed closed"
+        );
+        let past = windows[cap].id.clone();
+        let actions = gate.request(
+            TmuxRequest::OpenWindow {
+                window: past.clone(),
+            },
+            now,
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::Work(TmuxWork::MintWindow { key, .. }) if key.to_string() == past
+            )),
+            "a chan window is asked for"
+        );
+        let written = writes(&actions);
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].starts_with(format!("list-panes -t {past}").as_bytes()),
+            "its panes are listed: {:?}",
+            String::from_utf8_lossy(&written[0])
+        );
+        let status = status_rx.borrow_and_update().clone();
+        assert!(status.connection.as_ref().unwrap().windows[cap].open);
+        // Again, for a window tmux has not listed, or for a bad id: nothing.
+        assert!(gate
+            .request(TmuxRequest::OpenWindow { window: past }, now)
+            .is_empty());
+        assert!(gate
+            .request(
+                TmuxRequest::OpenWindow {
+                    window: "@77".into()
+                },
+                now
+            )
+            .is_empty());
+        assert!(gate
+            .request(
+                TmuxRequest::OpenWindow {
+                    window: "nine".into()
+                },
+                now
+            )
+            .is_empty());
+        assert_eq!(
+            writes(&gate.request(TmuxRequest::Detach, now)),
+            vec![b"detach-client\n".to_vec()]
+        );
+        assert_eq!(
+            writes(&gate.request(TmuxRequest::End, now)),
+            vec![b"kill-server\n".to_vec()]
+        );
     }
 
     #[test]

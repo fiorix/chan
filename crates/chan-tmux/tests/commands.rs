@@ -148,6 +148,7 @@ fn only_a_capture_promises_rows() {
         Command::Version,
         Command::ListWindows,
         Command::Detach,
+        Command::KillServer,
         Command::KillWindow(WindowId(1)),
     ] {
         assert_eq!(c.expects(), vec![Expect::Any]);

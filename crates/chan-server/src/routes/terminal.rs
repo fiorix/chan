@@ -22,7 +22,8 @@ use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot,
     QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalExit, TerminalPlacement,
-    TmuxAnswer, TmuxConsentSnapshot, ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
+    TmuxAnswer, TmuxConsentSnapshot, TmuxRequest, TmuxStatus, ALT_SCREEN_ATTACH_PRELUDE,
+    DEFAULT_TERMINAL_GROUP,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -248,6 +249,15 @@ enum ClientFrame {
     /// question standing changes nothing.
     #[serde(rename = "tmux-answer")]
     TmuxAnswer { answer: TmuxAnswer },
+    /// A request of the session's live tmux connection, from the control
+    /// terminal's status view: `{"type":"tmux-request","request":
+    /// "open-window","window":"@3"}`, `"detach"` or `"end"`. One with no
+    /// connection changes nothing.
+    #[serde(rename = "tmux-request")]
+    TmuxRequest {
+        #[serde(flatten)]
+        request: TmuxRequest,
+    },
 }
 
 /// Returns `None` for non-input or refused frames; its sole caller passes only input frames.
@@ -305,6 +315,10 @@ enum ServerFrame {
         /// The tmux control-mode consent state, with the question that
         /// stands, if any, so a client joining mid-question shows it.
         tmux_consent: Arc<TmuxConsentSnapshot>,
+        /// The tmux connection's status, with the connection while one
+        /// runs, so a client joining a connected control terminal shows its
+        /// status view.
+        tmux_status: Arc<TmuxStatus>,
         /// Submit encoding derived from this PTY incarnation's stored spawn
         /// command and `CHAN_AGENT`. Omitted for shells and unknown commands.
         /// Recomputed for every attach prelude, including after restart.
@@ -324,6 +338,14 @@ enum ServerFrame {
         id: String,
         generation: u64,
         tmux_consent: Arc<TmuxConsentSnapshot>,
+    },
+    /// The tmux connection's status changed: a connection started or ended,
+    /// a window came, went, was renamed or opened, or an error was kept.
+    #[serde(rename = "tmux-status")]
+    TmuxStatus {
+        id: String,
+        generation: u64,
+        tmux_status: Arc<TmuxStatus>,
     },
     #[serde(rename = "renamed")]
     Renamed { name: String, group: String },
@@ -932,6 +954,14 @@ fn program_status_frame(
     }
 }
 
+fn tmux_status_frame(session: &AttachHandle, tmux_status: Arc<TmuxStatus>) -> ServerFrame {
+    ServerFrame::TmuxStatus {
+        id: session.id().to_string(),
+        generation: session.generation,
+        tmux_status,
+    }
+}
+
 fn tmux_consent_frame(
     session: &AttachHandle,
     tmux_consent: Arc<TmuxConsentSnapshot>,
@@ -1139,6 +1169,7 @@ async fn terminal_ws(
     );
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
     let mut tmux_consent_rx = session.tmux_consent_rx.clone();
+    let mut tmux_status_rx = session.tmux_status_rx.clone();
     if let Some(exit) = &session.exit {
         send_exit(&mut socket, &state, &session, &mut program_status, exit).await;
         finish_socket(socket, 1000, "exit".into()).await;
@@ -1176,6 +1207,13 @@ async fn terminal_ws(
                 let Ok(()) = changed else { break };
                 let snapshot = tmux_consent_rx.borrow_and_update().clone();
                 if send_frame(&mut socket, tmux_consent_frame(&session, snapshot)).await.is_err() {
+                    break;
+                }
+            }
+            changed = tmux_status_rx.changed() => {
+                let Ok(()) = changed else { break };
+                let snapshot = tmux_status_rx.borrow_and_update().clone();
+                if send_frame(&mut socket, tmux_status_frame(&session, snapshot)).await.is_err() {
                     break;
                 }
             }
@@ -1228,6 +1266,9 @@ async fn terminal_ws(
                             Ok(ClientFrame::Focus { focused }) => {
                                 socket_focus = session.set_focused(focused);
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
+                            }
+                            Ok(ClientFrame::TmuxRequest { request }) => {
+                                session.tmux_request(request);
                             }
                             Ok(ClientFrame::TmuxAnswer { answer }) => {
                                 session.answer_tmux(answer);
@@ -1452,6 +1493,7 @@ async fn terminal_ws(
                                 };
                                 program_status = ProgramStatusFeed::new(&session, attached_at);
                                 tmux_consent_rx = session.tmux_consent_rx.clone();
+                                tmux_status_rx = session.tmux_status_rx.clone();
                                 if let Some(exit) = &session.exit {
                                     send_exit(&mut socket, &state, &session, &mut program_status, exit)
                                         .await;
@@ -1606,6 +1648,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         queued_prompt_ids: session.queued_prompt_ids(),
         program_status: session.initial_program_status.clone(),
         tmux_consent: session.initial_tmux_consent.clone(),
+        tmux_status: session.initial_tmux_status.clone(),
         submit_agent,
     }
 }
@@ -2612,11 +2655,12 @@ mod tests {
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
+            tmux_status: Arc::new(TmuxStatus::default()),
             submit_agent: Some("opencode"),
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"tmux_status":{"revision":0},"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
@@ -2635,11 +2679,12 @@ mod tests {
             queued_prompt_ids: vec![],
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
+            tmux_status: Arc::new(TmuxStatus::default()),
             submit_agent: None,
         };
         assert_eq!(
             serde_json::to_string(&session_empty).unwrap(),
-            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[],"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0}}"#
+            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[],"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"tmux_status":{"revision":0}}"#
         );
         // cancel-prompt decode (client→server) -- pin the tag + field so a
         // rename can't silently break the SPA wire with a green build.

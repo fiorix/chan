@@ -93,6 +93,9 @@ pub enum Command {
         name: String,
     },
     Detach,
+    /// End the tmux server the client is attached to, with every session it
+    /// holds; tmux answers with `%exit`.
+    KillServer,
 }
 
 impl Command {
@@ -169,6 +172,7 @@ impl Command {
                 format!("rename-window -t {window} -- {}", quote(name)?)
             }
             Command::Detach => "detach-client".into(),
+            Command::KillServer => "kill-server".into(),
         })
     }
 
