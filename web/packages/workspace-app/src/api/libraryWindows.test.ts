@@ -124,6 +124,7 @@ function scopedWindow(overrides: Partial<ScopedLibraryWindow> = {}): ScopedLibra
     connected: true,
     hidden: false,
     control: false,
+    tmux: false,
     origin: "browser",
     launch_path: "/api/library/command-capabilities/cap/windows/w-other/launch",
     ...overrides,

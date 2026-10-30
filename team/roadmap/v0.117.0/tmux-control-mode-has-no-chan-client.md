@@ -75,6 +75,10 @@ Built on `v0116/tmux-protocol` after its rebase onto `desktop/terminal-prototype
 5. Verification across the three commits: 8 pane session tests, 11 connection tests, 2 for the hook and the process table, the gate's tests, 24 guards mutated and each caught by a named test on real rebuilds; the library's whole suite (813), the crate's live run against tmux 3.8, fmt, clippy -D warnings, rustdoc -D warnings, the Nix hash re-pinned for the `sysinfo` dependency.
 6. Not run: macOS, FreeBSD, ssh; those are the hand tests of decision 17.
 
+## Stage 4a results (2026-10-30)
+
+The rows a crash would leave, from stage 3b's point 4. The window registry already holds a class of rows no save writes (control rows and throwaway terminals, filtered in `save_best_effort`), so the sweep the design note proposed is replaced by construction: a tmux-minted row carries `tmux: true` (`PersistedWindow`, `WindowRecord`, the scoped launcher row), `WindowRegistry::create_tmux_window` mints it native, buried and labelled, and the save filter leaves it out, so `windows.json` never carries one and a crash strands nothing. Nothing is read back and dropped: a row no build writes needs no sweep. Rows minted by the stage 3b builds before this change were written as plain hidden rows with no mark, so they cannot be told apart; the owner removes any such leftover by hand. Tests: the row lives in memory only across a durable save and a reload, the mark is on the wire and omitted when false, the mint notifies the window feed, and the host hook's row carries the mark and is absent from the store.
+
 ## Stage 3 decisions (2026-10-30)
 
 Settled by the owner on 2026-10-30, after reading iTerm2's handling of the marker (see Evidence below):

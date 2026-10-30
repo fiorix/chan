@@ -39,9 +39,7 @@ use crate::terminal_sessions::{
     FdStoreManifestEntry, FdStoreParker, FdStoreRestoreReport, FdStoreSessionImport,
     FdStoreSkippedSession,
 };
-use crate::windows::{
-    PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry, MAX_WINDOW_LABEL_CHARS,
-};
+use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
 use crate::{
     sanitize_prefix, workspace_prefix_for, DevserverRegistry, Error, GatewayRegistry, ServeConfig,
     ServeHandle, WorkspaceOverlay,
@@ -6942,15 +6940,10 @@ fn tmux_window_hook(
     let mint_registry = Arc::clone(&registry);
     let mint_notify = Arc::clone(&notify);
     let mint = move |title: &str| {
-        let row =
-            mint_registry.create_with_origin(kind, workspace_path.clone(), WindowOrigin::Native);
-        let label: String = title.chars().take(MAX_WINDOW_LABEL_CHARS).collect();
-        if !label.is_empty() {
-            mint_registry.set_label(&row.window_id, label);
-        }
-        // The row holds none of the tmux window's tabs, so it is minted
-        // buried: a client opens it from the launcher when it wants it.
-        mint_registry.set_hidden(&row.window_id, true);
+        // Buried, since the row holds none of the tmux window's tabs: a
+        // client opens it from the launcher when it wants it. Never saved:
+        // the window lasts its connection, so a crash leaves no row behind.
+        let row = mint_registry.create_tmux_window(kind, workspace_path.clone(), title);
         mint_notify.notify_waiters();
         Some(row.window_id)
     };
@@ -6968,6 +6961,7 @@ fn tmux_window_hook(
 #[cfg(test)]
 mod tmux_window_hook_tests {
     use super::*;
+    use crate::windows::MAX_WINDOW_LABEL_CHARS;
 
     #[test]
     fn the_hook_mints_a_labelled_row_of_the_kind_and_drops_it() {
@@ -6995,8 +6989,19 @@ mod tmux_window_hook_tests {
             "the name is cut to the label bound"
         );
         assert!(!row.control);
+        assert!(row.tmux, "marked as a tmux window");
         assert_eq!(row.origin, WindowOrigin::Native);
         assert!(row.hidden, "minted buried: it holds no tabs");
+        // A durable create saves while the tmux row lives; the file carries
+        // the durable row and not the tmux one, so a crash strands nothing.
+        let durable = registry.create(WindowKind::Workspace, Some("/work/other".to_owned()));
+        let stored = std::fs::read_to_string(store.path().join("windows.json")).unwrap();
+        assert!(stored.contains(&durable.window_id));
+        assert!(
+            !stored.contains(&id),
+            "a tmux window is never written to disk"
+        );
+        assert!(registry.remove(&durable.window_id));
         let unnamed = (hook.mint)("").expect("a window id");
         let row = registry
             .snapshot()

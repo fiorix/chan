@@ -111,7 +111,7 @@ describe("scoped command rejection destinations", () => {
       library_id: "lib-test", workspaces: [], windows: [{
         window_id: "w-other", kind: "workspace", title: "Notes", ordinal: 2,
         label: "Notes", workspace_path: "/work/notes", connected: true, hidden: false,
-        control: false, launch_path: "/cap/windows/w-other/launch",
+        control: false, tmux: false, launch_path: "/cap/windows/w-other/launch",
       }],
     };
     const pending = deferred<void>();
