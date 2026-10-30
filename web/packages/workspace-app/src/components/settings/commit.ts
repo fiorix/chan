@@ -33,3 +33,11 @@ export type CommitFn = (
 export const SAVE_STATUS = Symbol("settings-save-status");
 
 export type SaveStatusLookup = (pref: string) => SaveStatus;
+
+/// What a settings field hands the control inside it: the field's save
+/// status, and a way for a control that acknowledges a save itself (a
+/// slider flashes its value) to take over the field's Saving / Saved
+/// note. A refusal stays the field's to show.
+export const FIELD_SAVE = Symbol("settings-field-save");
+
+export type FieldSave = { status(): SaveStatus; claimNote(): void };
