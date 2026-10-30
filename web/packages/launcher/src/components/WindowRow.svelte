@@ -44,6 +44,12 @@
   // A control terminal by either mark: the devserver's flag, or the tmux
   // connection's, which the library clears when the connection ends.
   const isControl = $derived(w.control === true || w.tmux?.control === true);
+  // A tmux connection's control terminal stays buried while the connection
+  // runs: the desktop opens no window for a control row, so a show would
+  // flip the flag and open nothing. The row lists it and offers no action;
+  // the library shows it again, as a plain window, when the connection ends.
+  const buried = $derived(w.tmux?.control === true);
+  const BURIED_NOTE = "The control terminal stays buried while the connection runs; it returns as a plain window when the connection ends.";
   let editingLabel = $state(false);
   let labelDraft = $state("");
   let labelInput: HTMLInputElement | undefined = $state();
@@ -156,6 +162,9 @@
       </span>
     {/if}
     {@render windowName()}
+    {#if buried}
+      <span class="row-sub row-buried" title={BURIED_NOTE}>buried</span>
+    {:else}
     <div class="row-actions">
       <button
         class="icon-btn"
@@ -190,6 +199,7 @@
         {#if w.hidden}<EyeOff size={16} />{:else}<Eye size={16} />{/if}
       </button>
     </div>
+    {/if}
   </div>
 {:else if selfManagedWindows}
   <!-- Self-managed (devserver/PWA): no desktop bridge, so [OPEN] opens the
@@ -202,6 +212,9 @@
       </span>
     {/if}
     {@render windowName()}
+    {#if buried}
+      <span class="row-sub row-buried" title={BURIED_NOTE}>buried</span>
+    {:else}
     <div class="row-actions">
       <!-- SHOW repairs a disconnected browser window before unhiding it.
            Both visibility actions are leader-gated, so followers cannot run
@@ -232,6 +245,7 @@
         <ExternalLink size={16} />
       </button>
     </div>
+    {/if}
   </div>
 {:else}
   <!-- Readonly surface (gateway): the dot shows the connection state but can't

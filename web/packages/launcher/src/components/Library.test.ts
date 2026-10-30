@@ -1027,6 +1027,14 @@ describe("Library: tmux connection cards", () => {
     expect(localCard.querySelector(".section-label")?.textContent).toBe("Windows");
     expect(rowNames(localCard)).toEqual(["Control terminal", "Terminal Window 1"]);
     expect(rowNames(remoteCard)).toEqual(["Control terminal", "Terminal Window 1", "logs"]);
+    // The control terminal stays buried while the connection runs: its row
+    // offers no action, while the connection's window keeps its buttons.
+    const localRows = [...localCard.querySelectorAll<HTMLElement>(".row")];
+    const controlRow = localRows.find((r) => r.textContent?.includes("Control terminal"))!;
+    expect(controlRow.querySelector("button")).toBeNull();
+    expect(controlRow.textContent).toContain("buried");
+    const windowRow = localRows.find((r) => r.textContent?.includes("Terminal Window 1"))!;
+    expect(windowRow.querySelector("button")).not.toBeNull();
     // This machine lists neither the control terminals nor the tmux windows.
     const thisMachine = card("This machine");
     expect(thisMachine.textContent).not.toContain("Control terminal");
