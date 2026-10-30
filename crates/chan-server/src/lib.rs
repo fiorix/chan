@@ -148,10 +148,10 @@ use routes::{
     api_screensaver_patch, api_screensaver_set_pin, api_screensaver_state, api_screensaver_verify,
     api_search_content, api_search_files, api_search_workspace, api_session_handover_reply,
     api_set_terminal_broadcast, api_storage_reset, api_survey_reply, api_team_config_read,
-    api_team_config_write, api_terminal_next_name, api_terminal_shells, api_terminal_ws,
-    api_terminals_roster, api_upload_file, api_window_reply, api_workspace_bootstrap,
-    api_write_file, extension_response_policy, proxy_extension, proxy_extension_root,
-    spawn_roster_broadcaster, ws_upgrade,
+    api_team_config_write, api_terminal_next_name, api_terminal_shells, api_terminal_tmux_request,
+    api_terminal_ws, api_terminals_roster, api_upload_file, api_window_reply,
+    api_workspace_bootstrap, api_write_file, extension_response_policy, proxy_extension,
+    proxy_extension_root, spawn_roster_broadcaster, ws_upgrade,
 };
 #[cfg(feature = "embeddings")]
 use routes::{
@@ -1227,6 +1227,10 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             "/api/terminals/{session}/broadcast",
             post(api_set_terminal_broadcast),
         )
+        .route(
+            "/api/terminals/{session}/tmux-request",
+            post(api_terminal_tmux_request),
+        )
         // Standalone-terminal file transfer: `cs upload` / `cs download` from a
         // workspace-less terminal land here (cwd / shell-uid scoped). The
         // handlers re-root the path at `/` and pre-flight read/write access.
@@ -2087,6 +2091,10 @@ fn router_with_extensions(
         .route(
             "/api/terminals/{session}/broadcast",
             post(api_set_terminal_broadcast),
+        )
+        .route(
+            "/api/terminals/{session}/tmux-request",
+            post(api_terminal_tmux_request),
         )
         .route("/ws", get(ws_upgrade));
     // Read-only semantic-search state. Gated on

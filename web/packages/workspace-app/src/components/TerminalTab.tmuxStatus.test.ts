@@ -143,3 +143,12 @@ test("the view goes when the connection ends, and a stale or foreign frame is ig
   await receive(socket, { type: "session", id: "ctl", generation: 2, seq: 0, tmux_status: { revision: 1, connection: CONNECTED.connection } });
   expect(view()).not.toBeNull();
 });
+
+test("the session frame marks a tab that shows a tmux pane, and a fresh shell clears it", async () => {
+  const { socket, tab } = await mounted();
+  expect(tab.tmuxPane).toBeUndefined();
+  await receive(socket, { type: "session", id: "pane-1", generation: 3, seq: 0, tmux_pane: { connection: 2, pane: "%7" } });
+  expect(tab.tmuxPane).toEqual({ connection: 2, pane: "%7" });
+  await receive(socket, { type: "session", id: "shell-2", generation: 4, seq: 0 });
+  expect(tab.tmuxPane).toBeUndefined();
+});

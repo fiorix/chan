@@ -91,41 +91,33 @@
   import { windowModeAllowsCommand } from "./state/windowMode";
   import { initWindowTitle } from "./state/windowTitle";
   import {
-    focusColorForWindow,
-    activeTabInPane,
     activeFileTab,
     activePane,
+    activeTabInPane,
     activeTerminalTab,
     allPaneTabs,
-    flushEditsToRecovery,
-    hasAnyTab,
+    cancelPaneMode,
     closeFind,
     closePane,
     closeTab,
     closeTabsInPane,
-    consumeLastMovedOutSession,
-    cancelPaneMode,
     commitPaneMode,
-    enterPaneMode,
-    isWindowFullyReadOnly,
-    layout,
+    consumeLastMovedOutSession,
     createTeamWorkLeadTerminal,
     defaultBrowserInspectorOpen,
-    openBrowserInActivePane,
-    toggleActiveTerminalBroadcastSelectAll,
+    enterPaneMode,
+    flipHybrid,
+    flushEditsToRecovery,
+    focusColorForWindow,
+    hasAnyTab,
     isDocSavePaused,
+    isWindowFullyReadOnly,
+    layout,
+    openBrowserInActivePane,
+    openDashboardInActivePane,
     openFind,
     openInActivePane,
-    openDashboardInActivePane,
     openInPane,
-    scheduleAutosave,
-    flipHybrid,
-    selectNextPane,
-    selectNextTabInActivePane,
-    selectPrevPane,
-    selectPrevTabInActivePane,
-    selectTabAtIndexInActivePane,
-    setActivePane,
     openTerminalInActivePane,
     paneActiveTabId,
     paneMode,
@@ -143,9 +135,18 @@
     paneTabs,
     requestPaneSideToggleFlash,
     resolveTabDestination,
+    scheduleAutosave,
+    selectNextPane,
+    selectNextTabInActivePane,
+    selectPrevPane,
+    selectPrevTabInActivePane,
+    selectTabAtIndexInActivePane,
+    setActivePane,
     setWindowFocusColor,
     splitActive,
+    tmuxPaneTabs,
     toggleActiveFileTabMode,
+    toggleActiveTerminalBroadcastSelectAll,
     type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
@@ -172,7 +173,8 @@
     builtInChordSuperseded,
     commandIdForChord,
   } from "./state/keymapOverrides.svelte";
-  import { api, openLocalColorWatch, openLocalThemeWatch } from "./api/client";
+  import { api, openLocalColorWatch, openLocalThemeWatch, sessionWindowId } from "./api/client";
+  import { errorText } from "./api/errors";
   import {
     applyInitialPageWidth,
     watchPageWidth,
@@ -577,6 +579,10 @@
   /// picked shell still gets the rootUnavailable guard, the resolved spawn
   /// cwd, and the session save that every other entry point gets.
   function spawnTerminalFromContext(profile?: string): void {
+    // In a tmux window a new tab is a new tmux window: tmux is asked, and the
+    // window it adds lands here as tabs when the server attaches them. The
+    // tab never exists ahead of tmux.
+    if (requestTmuxWindow(sessionWindowId())) return;
     if (tree.rootUnavailable) {
       setTransientStatus(
         `New terminal failed: ${tree.error ?? "workspace root does not exist"}`,
@@ -586,6 +592,24 @@
     const ctx = resolveSpawnContext();
     openTerminalInActivePane({ cwd: ctx.dir, profile });
     scheduleSessionSave();
+  }
+
+  /// Ask the tmux connection this window shows for a new tmux window, whose
+  /// panes land in the chan window `affinity` names, or in a chan window of
+  /// its own without one. False when this is not a tmux window, and nothing
+  /// was asked. The request rides the active pane tab's session when it is
+  /// one, so a window mixing tmux and plain tabs still asks tmux.
+  function requestTmuxWindow(affinity: string | null): boolean {
+    const panes = tmuxPaneTabs();
+    if (panes.length === 0) return false;
+    const active = activeTabInPane(activePane());
+    const carrier =
+      (active?.kind === "terminal" && active.tmuxPane ? active : null) ?? panes[0]!;
+    const sessionId = carrier.terminalSessionId!;
+    void api
+      .tmuxRequest(sessionId, affinity ? { request: "new-window", window: affinity } : { request: "new-window" })
+      .catch((error) => setTransientStatus(`tmux new window failed: ${errorText(error)}`));
+    return true;
   }
   function spawnBrowserFromContext(): void {
     // A window whose tenant serves no filesystem has no browser surface
@@ -1515,6 +1539,13 @@
       // interacting with, and an empty window (no tabs) must never be recorded --
       // the discard cascade removes its row and DELETEs its session blob. Any
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
+      // The desktop's New Window on a tmux window: a new tmux window in a chan
+      // window of its own, through the same request Cmd+T makes with an
+      // affinity. The desktop asks here because the page knows which of its
+      // sessions is a pane.
+      case "app.tmux.newWindow":
+        if (!requestTmuxWindow(null)) setTransientStatus("not a tmux window");
+        return;
       case "app.window.confirmClose":
         if (ui.disconnectBlocking || !hasAnyTab()) {
           discardWindowSession({ reap: true });

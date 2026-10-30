@@ -387,3 +387,221 @@ fn a_layout_change_sizes_the_pane_session_and_adds_a_new_pane() {
     let second = rig.pane(1);
     assert_eq!(second.winsize.lock().unwrap().cols, 39);
 }
+
+/// A recording window hook: mints `w-<n>` ids, and keeps every call.
+struct RecordingHook {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingHook {
+    fn install(registry: &Registry) -> Arc<Mutex<Vec<String>>> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let minted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook = RecordingHook {
+            calls: calls.clone(),
+        };
+        let mint_calls = hook.calls.clone();
+        let remove_calls = hook.calls.clone();
+        let attach_calls = hook.calls.clone();
+        let release_calls = hook.calls.clone();
+        registry.install_tmux_windows(TmuxWindowHook {
+            mint: Arc::new(move |title: &str| {
+                let n = minted.fetch_add(1, Ordering::Relaxed) + 1;
+                mint_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("mint {title} -> w-{n}"));
+                Some(format!("w-{n}"))
+            }),
+            remove: Arc::new(move |id: &str| {
+                remove_calls.lock().unwrap().push(format!("remove {id}"));
+            }),
+            attach: Arc::new(move |window: &str, session: &str| {
+                attach_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("attach {window} {session}"));
+            }),
+            release: Arc::new(move |window: &str, session: &str, to: &str| {
+                release_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("release {window} {session} -> {to}"));
+            }),
+        });
+        calls
+    }
+}
+
+fn calls(calls: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    std::mem::take(&mut *calls.lock().unwrap())
+}
+
+#[test]
+fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
+    let registry = Registry::new(test_config(1 << 16, 4, 10));
+    let hook = RecordingHook::install(&registry);
+    let (control, _commands) = test_session_with_commands(1 << 16);
+    register_session(&registry, &control);
+    control.set_window_id(Some("w-source".into()));
+    *control
+        .tmux_foreground
+        .lock()
+        .expect("terminal tmux foreground poisoned") = Some(Foreground {
+        name: Some("tmux".into()),
+        command: Some("tmux -CC".into()),
+    });
+    control.record_output(&[MARKER, ENTRY].concat());
+    control.record_output(VERSION_REPLY);
+    registry.perform_tmux_work(&control);
+    assert_eq!(
+        calls(&hook),
+        vec![
+            "mint tmux main -> w-1".to_owned(),
+            format!("attach w-1 {}", control.id),
+            format!("release w-source {} -> w-1", control.id),
+        ],
+        "the control window is minted, the tab parked for it, the source told"
+    );
+    assert_eq!(
+        control.window_id().as_deref(),
+        Some("w-1"),
+        "the session now belongs to its control window"
+    );
+    // The connection ends and a second run in the same terminal re-enters:
+    // the session still sits in its control window, so nothing is minted.
+    control.record_output(b"%exit\r\n\x1b\\");
+    registry.perform_tmux_work(&control);
+    calls(&hook);
+    control.record_output(&[MARKER, ENTRY].concat());
+    control.record_output(VERSION_REPLY);
+    registry.perform_tmux_work(&control);
+    assert!(
+        calls(&hook).is_empty(),
+        "a second connection in the control window mints nothing"
+    );
+}
+
+#[test]
+fn a_pane_session_attaches_as_a_tab_of_its_minted_window() {
+    let mut rig = Rig::connected();
+    let hook = RecordingHook::install(&rig.registry);
+    rig.feed(ONE_WINDOW);
+    rig.work();
+    let pane = rig.pane(0);
+    let panes_reply = rig.reply(&[b"%0 1"]);
+    rig.feed(&panes_reply);
+    rig.work();
+    let recorded = calls(&hook);
+    assert!(
+        recorded.iter().any(|c| c == "mint shell -> w-1"),
+        "the window is minted for the tmux window: {recorded:?}"
+    );
+    assert!(
+        recorded.contains(&format!("attach w-1 {}", pane.id)),
+        "the pane session is attached as a tab: {recorded:?}"
+    );
+    assert_eq!(pane.window_id().as_deref(), Some("w-1"));
+}
+
+/// The rig after the attach with a recording hook installed before the
+/// window was minted, every reply answered and every write and call drained.
+fn attached_with_hook() -> (Rig, Arc<Session>, Arc<Mutex<Vec<String>>>) {
+    let mut rig = Rig::connected();
+    let hook = RecordingHook::install(&rig.registry);
+    rig.feed(ONE_WINDOW);
+    rig.work();
+    let pane = rig.pane(0);
+    let panes_reply = rig.reply(&[b"%0 1"]);
+    rig.feed(&panes_reply);
+    let capture = rig.capture(0, 0, 24, &[b"$ "]);
+    rig.feed(&capture);
+    rig.work();
+    rig.inputs();
+    let recorded = calls(&hook);
+    assert!(
+        recorded.contains(&format!("attach w-1 {}", pane.id)),
+        "{recorded:?}"
+    );
+    (rig, pane, hook)
+}
+
+#[test]
+fn a_requested_window_lands_in_its_affinity_and_one_without_gets_its_own() {
+    let (mut rig, pane, hook) = attached_with_hook();
+    // A pane session's request reaches the control session through the
+    // registry: Cmd+T in the window that holds the pane.
+    let reached = rig.registry.tmux_request_for(
+        &pane.tmux_pane.expect("a pane"),
+        TmuxRequest::NewWindow {
+            window: Some("w-1".into()),
+        },
+    );
+    assert!(reached);
+    assert_eq!(
+        rig.inputs(),
+        vec![b"new-window -PF '#{window_id}'\n".to_vec()]
+    );
+    rig.feed(b"%window-add @1\r\n");
+    rig.work();
+    let after_add = rig.inputs();
+    assert_eq!(after_add.len(), 1, "{after_add:?}");
+    assert!(after_add[0].starts_with(b"list-panes -t @1 "));
+    assert!(
+        calls(&hook).is_empty(),
+        "a window with an affinity mints no chan window"
+    );
+    let new_window_reply = rig.reply(&[b"@1"]);
+    rig.feed(&new_window_reply);
+    let panes_reply = rig.reply(&[b"%5 1"]);
+    rig.feed(&panes_reply);
+    rig.work();
+    rig.work();
+    let recorded = calls(&hook);
+    assert_eq!(
+        recorded,
+        vec![format!("attach w-1 {}", rig.pane(5).id)],
+        "its pane lands as a tab of the affinity window"
+    );
+    assert_eq!(rig.pane(5).window_id().as_deref(), Some("w-1"));
+    // One without an affinity gets a chan window of its own.
+    rig.registry.tmux_request_for(
+        &pane.tmux_pane.expect("a pane"),
+        TmuxRequest::NewWindow { window: None },
+    );
+    rig.inputs();
+    rig.feed(b"%window-add @2\r\n");
+    rig.work();
+    assert_eq!(calls(&hook), vec!["mint tmux @2 -> w-2"]);
+    // An unknown connection reaches nothing.
+    assert!(!rig.registry.tmux_request_for(
+        &TmuxPaneRef {
+            connection: TmuxConnectionId(999),
+            pane: chan_tmux::PaneId(0),
+        },
+        TmuxRequest::Detach,
+    ));
+}
+
+#[test]
+fn a_refused_new_window_frees_the_next_added_window_for_the_cap_rule() {
+    let (mut rig, pane, hook) = attached_with_hook();
+    rig.registry.tmux_request_for(
+        &pane.tmux_pane.expect("a pane"),
+        TmuxRequest::NewWindow {
+            window: Some("w-1".into()),
+        },
+    );
+    rig.inputs();
+    let refused = {
+        rig.number += 1;
+        let header = format!("2 {} 1", rig.number);
+        format!("%begin {header}\r\nno more windows\r\n%error {header}\r\n").into_bytes()
+    };
+    rig.feed(&refused);
+    // A window another client adds now is nobody's request: it is minted
+    // under the cap rule, not bound to the stale affinity.
+    rig.feed(b"%window-add @3\r\n");
+    rig.work();
+    assert_eq!(calls(&hook), vec!["mint tmux @3 -> w-2"]);
+}

@@ -84,6 +84,12 @@ pub enum TmuxRequest {
     /// Open a tmux window past the cap: its panes get sessions and a chan
     /// window is minted for it. `window` is tmux's id, `@N`.
     OpenWindow { window: String },
+    /// Make a new tmux window. Its panes land as tabs in the chan window
+    /// `window` names, or in a chan window of its own without one.
+    NewWindow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
+    },
     /// Detach the control client; the tmux server and its sessions live on.
     Detach,
     /// End the tmux server with every session it holds.
@@ -109,6 +115,9 @@ pub(super) enum Action {
     Notice(String),
     /// Something the registry does for the connection, off the gate lock.
     Work(TmuxWork),
+    /// The connection is made: give the control session a window of its
+    /// own, titled `title`.
+    ControlWindow { title: String },
 }
 
 /// What a feed hands back: the bytes that go on to the ring, and the
@@ -243,6 +252,7 @@ impl TmuxGate {
                     Some(window) => connection.open_window(window),
                     None => Vec::new(),
                 },
+                TmuxRequest::NewWindow { window } => connection.request_new_window(window),
                 TmuxRequest::Detach => vec![Step::Submit(Command::Detach, Purpose::Fire)],
                 TmuxRequest::End => vec![Step::Submit(Command::KillServer, Purpose::Fire)],
             };
@@ -498,6 +508,10 @@ impl TmuxGate {
                 },
                 Event::Reply { token, result } if Some(token) == *probe => {
                     let announced = session.take();
+                    let control_title = match &announced {
+                        Some((_, name)) if !name.is_empty() => format!("tmux {name}"),
+                        _ => "tmux".to_owned(),
+                    };
                     let version = result
                         .ok()
                         .and_then(|rows| rows.into_iter().next())
@@ -513,7 +527,11 @@ impl TmuxGate {
                                 "tmux {}.{} control mode",
                                 version.major, version.minor
                             )));
-                            actions.push(Action::Work(TmuxWork::StartGateway { rx }));
+                            actions
+                                .push(Action::Work(TmuxWork::StartGateway { connection: id, rx }));
+                            actions.push(Action::ControlWindow {
+                                title: control_title,
+                            });
                             let steps = connection.start();
                             if let Err(error) =
                                 drive(&mut self.client, &mut connection, steps, actions)
@@ -807,7 +825,7 @@ mod tests {
             .iter()
             .filter_map(|a| match a {
                 Action::Write(bytes) => Some(bytes.clone()),
-                Action::Notice(_) | Action::Work(_) => None,
+                Action::Notice(_) | Action::Work(_) | Action::ControlWindow { .. } => None,
             })
             .collect()
     }
@@ -817,7 +835,7 @@ mod tests {
             .iter()
             .filter_map(|a| match a {
                 Action::Notice(text) => Some(text.clone()),
-                Action::Write(_) | Action::Work(_) => None,
+                Action::Write(_) | Action::Work(_) | Action::ControlWindow { .. } => None,
             })
             .collect()
     }
@@ -1102,6 +1120,68 @@ mod tests {
         let status = status_rx.borrow_and_update().clone();
         assert!(status.connection.is_none());
         assert!(status.revision > initial.revision);
+    }
+
+    #[test]
+    fn connecting_asks_for_a_control_window_titled_by_the_session() {
+        let now = Instant::now();
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        gate.feed(&entry(), now, tmux);
+        let fed = gate.feed(
+            b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
+            now,
+            tmux,
+        );
+        let titles: Vec<&str> = fed
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::ControlWindow { title } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, vec!["tmux main"]);
+        assert!(
+            fed.actions.iter().any(|a| matches!(
+                a,
+                Action::Work(TmuxWork::StartGateway { connection, .. }) if connection.0 > 0
+            )),
+            "the gateway starts with the connection's id"
+        );
+    }
+
+    #[test]
+    fn a_new_window_request_submits_new_window() {
+        let now = Instant::now();
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        gate.feed(&entry(), now, tmux);
+        gate.feed(
+            b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
+            now,
+            tmux,
+        );
+        let actions = gate.request(
+            TmuxRequest::NewWindow {
+                window: Some("w-1".into()),
+            },
+            now,
+        );
+        assert_eq!(
+            writes(&actions),
+            vec![b"new-window -PF '#{window_id}'\n".to_vec()]
+        );
+        // The wire form: the affinity is optional.
+        assert_eq!(
+            serde_json::from_str::<TmuxRequest>(r#"{"request":"new-window"}"#).unwrap(),
+            TmuxRequest::NewWindow { window: None }
+        );
+        assert_eq!(
+            serde_json::from_str::<TmuxRequest>(r#"{"request":"new-window","window":"w-2"}"#)
+                .unwrap(),
+            TmuxRequest::NewWindow {
+                window: Some("w-2".into())
+            }
+        );
     }
 
     #[test]

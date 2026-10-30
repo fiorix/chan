@@ -22,8 +22,8 @@ use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot,
     QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalExit, TerminalPlacement,
-    TmuxAnswer, TmuxConsentSnapshot, TmuxRequest, TmuxStatus, ALT_SCREEN_ATTACH_PRELUDE,
-    DEFAULT_TERMINAL_GROUP,
+    TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest, TmuxStatus,
+    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -319,6 +319,12 @@ enum ServerFrame {
         /// runs, so a client joining a connected control terminal shows its
         /// status view.
         tmux_status: Arc<TmuxStatus>,
+        /// Set when the session shows a tmux pane: the connection's number
+        /// and tmux's pane id. A window holding such a tab is a tmux window,
+        /// where Cmd+T asks tmux for a window and the close prompt offers
+        /// Detach.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tmux_pane: Option<Box<TmuxPaneWire>>,
         /// Submit encoding derived from this PTY incarnation's stored spawn
         /// command and `CHAN_AGENT`. Omitted for shells and unknown commands.
         /// Recomputed for every attach prelude, including after restart.
@@ -612,6 +618,30 @@ pub async fn api_create_terminal(
                 .into_response()
         }
         Err(e) => create_error_response(e, "start"),
+    }
+}
+
+/// `POST /api/terminals/{session}/tmux-request`: a request of the tmux
+/// connection `session` belongs to, from a client with no socket to it at
+/// hand: Cmd+T in a tmux window asks for a new window, the close prompt's
+/// Detach drops the connection. A pane session's request reaches the control
+/// session that holds its connection; a request with no connection changes
+/// nothing. `404` for an unknown session.
+pub async fn api_terminal_tmux_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(session): AxumPath<String>,
+    body: Option<Json<TmuxRequest>>,
+) -> Response {
+    let Some(Json(request)) = body else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid tmux request: a JSON body with a request is required".into(),
+        );
+    };
+    if state.terminal_sessions.tmux_request(&session, request) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        err(StatusCode::NOT_FOUND, "terminal session not found".into())
     }
 }
 
@@ -954,6 +984,22 @@ fn program_status_frame(
     }
 }
 
+/// A tmux pane reference on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TmuxPaneWire {
+    connection: u64,
+    pane: String,
+}
+
+impl From<TmuxPaneRef> for TmuxPaneWire {
+    fn from(pane: TmuxPaneRef) -> Self {
+        Self {
+            connection: pane.connection.0,
+            pane: pane.pane.to_string(),
+        }
+    }
+}
+
 fn tmux_status_frame(session: &AttachHandle, tmux_status: Arc<TmuxStatus>) -> ServerFrame {
     ServerFrame::TmuxStatus {
         id: session.id().to_string(),
@@ -1268,7 +1314,14 @@ async fn terminal_ws(
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::TmuxRequest { request }) => {
-                                session.tmux_request(request);
+                                // A pane session's request goes to the control
+                                // session that holds its connection.
+                                let hopped = session.tmux_pane().is_some_and(|pane| {
+                                    state.terminal_sessions.tmux_request_for(&pane, request.clone())
+                                });
+                                if !hopped {
+                                    session.tmux_request(request);
+                                }
                             }
                             Ok(ClientFrame::TmuxAnswer { answer }) => {
                                 session.answer_tmux(answer);
@@ -1649,6 +1702,9 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         program_status: session.initial_program_status.clone(),
         tmux_consent: session.initial_tmux_consent.clone(),
         tmux_status: session.initial_tmux_status.clone(),
+        tmux_pane: session
+            .tmux_pane()
+            .map(|pane| Box::new(TmuxPaneWire::from(pane))),
         submit_agent,
     }
 }
@@ -2029,6 +2085,20 @@ mod tests {
                 "POST",
                 "/api/terminals/missing/broadcast",
                 r#"{"on":true}"#,
+                StatusCode::NOT_FOUND,
+                "terminal session not found",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/tmux-request",
+                "{",
+                StatusCode::BAD_REQUEST,
+                "the request body is not valid JSON",
+            ),
+            (
+                "POST",
+                "/api/terminals/missing/tmux-request",
+                r#"{"request":"detach"}"#,
                 StatusCode::NOT_FOUND,
                 "terminal session not found",
             ),
@@ -2656,6 +2726,7 @@ mod tests {
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_status: Arc::new(TmuxStatus::default()),
+            tmux_pane: None,
             submit_agent: Some("opencode"),
         };
         assert_eq!(
@@ -2680,6 +2751,7 @@ mod tests {
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_status: Arc::new(TmuxStatus::default()),
+            tmux_pane: None,
             submit_agent: None,
         };
         assert_eq!(

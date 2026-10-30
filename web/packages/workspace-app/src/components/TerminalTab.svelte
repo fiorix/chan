@@ -79,7 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
-    setTerminalTmuxConsent, setTerminalTmuxStatus,
+    setTerminalTmuxConsent, setTerminalTmuxPane, setTerminalTmuxStatus,
     setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -113,9 +113,8 @@
   import Inspector from "./Inspector.svelte";
   import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
   import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
-  import type { TmuxRequest, TmuxStatus } from "../state/tmuxStatus";
-  import { openLibraryWindowById, type LibraryWindowBridge } from "../api/libraryWindows";
-  import { checkScopedWindowPage, loadScopedLibrarySnapshot, runScopedLibraryAction } from "../api/libraryCommand";
+  import type { TmuxPaneRef, TmuxRequest, TmuxStatus } from "../state/tmuxStatus";
+  import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
   import TmuxStatusView from "./TmuxStatusView.svelte";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
@@ -273,6 +272,9 @@
         /// The tmux connection's status, with the connection while one
         /// runs; the attachment's authoritative value.
         tmux_status?: TmuxStatus;
+        /// Set when this session shows a tmux pane: its connection and tmux's
+        /// pane id. A window with such a tab is a tmux window.
+        tmux_pane?: TmuxPaneRef;
         /// The `prompt_id`s still in THIS session's write queue, FIFO order,
         /// one per tail-bearing message. Lets a reloaded SPA re-prove its
         /// restored pending Rich Prompt message is still queued at position
@@ -1675,6 +1677,7 @@
         receivedSeq = frame.seq;
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
         if (frame.tmux_status) setTerminalTmuxStatus(tab, frame.tmux_status, true);
+        setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
         // with the xterm still holding a dead TUI's negotiated input modes.
         // Reset mouse tracking (including the 1015 urxvt format), exit the
@@ -1981,15 +1984,8 @@
   // Open the chan window minted for a tmux window, by the id the status
   // carries: the row is read from the library, as the launcher would, and
   // opened the way this surface opens a library window.
-  const tmuxWindowBridge: LibraryWindowBridge = {
-    checkPage: checkScopedWindowPage,
-    runAction: runScopedLibraryAction,
-    refresh: async () => {},
-    readSnapshot: loadScopedLibrarySnapshot,
-    currentWindowId: sessionWindowId,
-  };
   async function openTmuxChanWindow(windowId: string): Promise<void> {
-    const found = await openLibraryWindowById(tmuxWindowBridge, windowId);
+    const found = await openLibraryWindowById(plainLibraryWindowBridge(), windowId);
     if (!found) throw new Error("that window is no longer in the library");
   }
 

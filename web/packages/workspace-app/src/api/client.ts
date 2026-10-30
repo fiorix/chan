@@ -4,6 +4,7 @@
 // reach the same in-process server over loopback HTTP+WS, so there
 // is one transport implementation rather than platform-specific clients.
 
+import type { TmuxRequest } from "../state/tmuxStatus";
 import { holderTagOf } from "@chan/web-shared/window-holder";
 import type {
   BuildInfo,
@@ -1533,6 +1534,12 @@ const calls = {
     req<void>("POST", `/api/terminals/${encodeURIComponent(sessionId)}/restart`, body),
   closeTerminal: (sessionId: string) =>
     req<void>("DELETE", `/api/terminals/${encodeURIComponent(sessionId)}`),
+  /// A request of the tmux connection a session belongs to: a pane session's
+  /// reaches the control session that holds its connection. Used where no
+  /// terminal socket is at hand: Cmd+T in a tmux window, the close prompt's
+  /// Detach.
+  tmuxRequest: (sessionId: string, request: TmuxRequest) =>
+    req<void>("POST", `/api/terminals/${encodeURIComponent(sessionId)}/tmux-request`, request),
   /// Set a terminal's broadcast toggle from another window. The server routes
   /// a `terminal_broadcast` window-command to the session's owning window,
   /// which flips its tab (re-syncing the flag + lighting the sign). Backs the

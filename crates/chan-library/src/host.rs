@@ -2690,6 +2690,7 @@ impl WorkspaceHost {
                     Arc::clone(&self.library_change_notify),
                     WindowKind::Workspace,
                     Some(root.to_string_lossy().into_owned()),
+                    TmuxWindowDelivery::from_artifacts(&artifacts),
                 ));
         }
         let handle = ServeHandle {
@@ -2985,6 +2986,7 @@ impl WorkspaceHost {
                         Arc::clone(&self.library_change_notify),
                         WindowKind::Terminal,
                         None,
+                        TmuxWindowDelivery::from_artifacts(&artifacts),
                     ));
             }
         }
@@ -6586,6 +6588,36 @@ fn hosted_from_runtime(runtime: &HostedWorkspaceRuntime) -> HostedWorkspace {
 /// unreachable; the byte shape is pinned by `window_command_frame_matches_pump_prefix`.
 /// `command` is `"window_discarded"`, `"window_hidden"`, `"window_shown"`, or
 /// `"window_labeled"`.
+/// A `window_command` frame about one terminal session: `open_term_attach`
+/// (open a tab bound to `session_id`) or `release_term` (drop the tab for
+/// `session_id`, which moved to `window`). Same prefix rule as
+/// [`window_command_frame`].
+fn window_session_frame(
+    window_id: &str,
+    command: &'static str,
+    session_id: &str,
+    window: Option<&str>,
+) -> Option<String> {
+    #[derive(serde::Serialize)]
+    struct Frame<'a> {
+        #[serde(rename = "type")]
+        frame_type: &'static str,
+        window_id: &'a str,
+        command: &'static str,
+        session_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window: Option<&'a str>,
+    }
+    serde_json::to_string(&Frame {
+        frame_type: "window_command",
+        window_id,
+        command,
+        session_id,
+        window,
+    })
+    .ok()
+}
+
 fn window_command_frame(
     window_id: &str,
     command: &'static str,
@@ -6931,19 +6963,75 @@ fn lock_is_anothers(lock_dir: &Path) -> bool {
 /// the desktop watcher open it, and dropped by id when the tmux window closes
 /// or the connection ends. The feed is nudged directly, as the reaper does,
 /// so the push does not hinge on the registry-bridge task's scheduling.
+/// The tenant handles the tmux window hook delivers tabs through: the park
+/// for a window with no socket yet, the registry that knows which window has
+/// one, and the tenant's `/ws` bus.
+#[derive(Clone)]
+struct TmuxWindowDelivery {
+    pending: Arc<crate::pending_window_commands::PendingWindowCommands>,
+    session_registry: Arc<crate::session_presence::SessionRegistry>,
+    events_tx: tokio::sync::broadcast::Sender<String>,
+}
+
+impl TmuxWindowDelivery {
+    fn from_artifacts(artifacts: &TenantArtifacts) -> Self {
+        Self {
+            pending: Arc::clone(&artifacts.pending_window_commands),
+            session_registry: Arc::clone(&artifacts.session_registry),
+            events_tx: artifacts.events_tx.clone(),
+        }
+    }
+
+    /// Deliver `frame` to `window_id`'s socket, or park it for the window's
+    /// first one. The re-check after the park closes the window between the
+    /// liveness test and the park, as the routed open's does.
+    fn deliver_or_park(&self, window_id: &str, frame: String) {
+        let delivered = self
+            .session_registry
+            .dispatch_if_live(window_id, || self.events_tx.send(frame.clone()))
+            .is_some();
+        if delivered {
+            return;
+        }
+        if let Err(error) = self.pending.park(window_id, frame.clone()) {
+            tracing::warn!(window_id, %error, "could not park a tmux tab for its window");
+            return;
+        }
+        if self
+            .session_registry
+            .dispatch_if_live(window_id, || self.events_tx.send(frame))
+            .is_some()
+        {
+            let _ = self.pending.take(window_id);
+        }
+    }
+
+    /// Deliver `frame` to `window_id`'s socket when it has one; a window
+    /// with none has nothing to drop.
+    fn deliver_if_live(&self, window_id: &str, frame: String) {
+        let _ = self
+            .session_registry
+            .dispatch_if_live(window_id, || self.events_tx.send(frame));
+    }
+}
+
 fn tmux_window_hook(
     registry: Arc<WindowRegistry>,
     notify: Arc<Notify>,
     kind: WindowKind,
     workspace_path: Option<String>,
+    delivery: TmuxWindowDelivery,
 ) -> crate::terminal_sessions::TmuxWindowHook {
     let mint_registry = Arc::clone(&registry);
     let mint_notify = Arc::clone(&notify);
+    let mint_pending = Arc::clone(&delivery.pending);
     let mint = move |title: &str| {
-        // Buried, since the row holds none of the tmux window's tabs: a
-        // client opens it from the launcher when it wants it. Never saved:
-        // the window lasts its connection, so a crash leaves no row behind.
+        // Shown, since its tabs are parked for its first socket; marked as a
+        // routed mint so the surface that opens it seeds no default
+        // terminal beside them. Never saved: the window lasts its
+        // connection, so a crash leaves no row behind.
         let row = mint_registry.create_tmux_window(kind, workspace_path.clone(), title);
+        mint_pending.mark_routed(&row.window_id);
         mint_notify.notify_waiters();
         Some(row.window_id)
     };
@@ -6952,9 +7040,22 @@ fn tmux_window_hook(
             notify.notify_waiters();
         }
     };
+    let attach_delivery = delivery.clone();
+    let attach = move |window_id: &str, session_id: &str| {
+        if let Some(frame) = window_session_frame(window_id, "open_term_attach", session_id, None) {
+            attach_delivery.deliver_or_park(window_id, frame);
+        }
+    };
+    let release = move |window_id: &str, session_id: &str, to: &str| {
+        if let Some(frame) = window_session_frame(window_id, "release_term", session_id, Some(to)) {
+            delivery.deliver_if_live(window_id, frame);
+        }
+    };
     crate::terminal_sessions::TmuxWindowHook {
         mint: Arc::new(mint),
         remove: Arc::new(remove),
+        attach: Arc::new(attach),
+        release: Arc::new(release),
     }
 }
 
@@ -6968,14 +7069,41 @@ mod tmux_window_hook_tests {
         let store = tempfile::tempdir().unwrap();
         let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
         let notify = Arc::new(Notify::new());
+        let pending = Arc::new(crate::pending_window_commands::PendingWindowCommands::new());
+        let session_registry = Arc::new(crate::session_presence::SessionRegistry::new());
+        let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(16);
         let hook = tmux_window_hook(
             Arc::clone(&registry),
             Arc::clone(&notify),
             WindowKind::Workspace,
             Some("/work/repo".to_owned()),
+            TmuxWindowDelivery {
+                pending: Arc::clone(&pending),
+                session_registry: Arc::clone(&session_registry),
+                events_tx: events_tx.clone(),
+            },
         );
         let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 20);
         let id = (hook.mint)(&long).expect("a window id");
+        assert!(
+            pending.is_routed(&id),
+            "a minted window seeds no default terminal: its tabs are parked"
+        );
+        // A tab for a session is parked while the window has no socket, as
+        // the frame the window's first attach drains.
+        (hook.attach)(&id, "term-7");
+        assert_eq!(
+            pending.take(&id),
+            vec![format!(
+                r#"{{"type":"window_command","window_id":"{id}","command":"open_term_attach","session_id":"term-7"}}"#
+            )]
+        );
+        assert!(events_rx.try_recv().is_err(), "nothing went to the bus");
+        // A release reaches a live window alone; one with no socket has no
+        // tab to drop.
+        (hook.release)(&id, "term-7", "w-other");
+        assert!(events_rx.try_recv().is_err());
+        assert!(pending.take(&id).is_empty(), "a release is never parked");
         let row = registry
             .snapshot()
             .into_iter()
@@ -6991,7 +7119,7 @@ mod tmux_window_hook_tests {
         assert!(!row.control);
         assert!(row.tmux, "marked as a tmux window");
         assert_eq!(row.origin, WindowOrigin::Native);
-        assert!(row.hidden, "minted buried: it holds no tabs");
+        assert!(!row.hidden, "minted shown: its tabs are parked for it");
         // A durable create saves while the tmux row lives; the file carries
         // the durable row and not the tmux one, so a crash strands nothing.
         let durable = registry.create(WindowKind::Workspace, Some("/work/other".to_owned()));

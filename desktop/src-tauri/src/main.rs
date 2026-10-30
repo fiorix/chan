@@ -6682,6 +6682,12 @@ fn mint_workspace_window_copy(
 /// With nothing focused (or the About window), Cmd/Ctrl+Shift+N opens a
 /// standalone terminal window instead, as it does when a focused window's
 /// backing connection can't be resolved.
+/// Dispatched into a tmux window's page on New Window: the page asks its tmux
+/// connection for a new tmux window with no affinity, so it opens in a chan
+/// window of its own, the same request Cmd+T makes with the window as
+/// affinity.
+const TMUX_NEW_WINDOW_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.tmux.newWindow' } }));";
+
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(focused) = app
         .webview_windows()
@@ -6714,6 +6720,17 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
                 .find(|r| crate::window_watcher::native_label(r) == focused_label)
         });
         return match record {
+            // A tmux window: a new window is a new tmux window in a chan
+            // window of its own, which only the page can ask for, since it
+            // knows which of its sessions is a pane of the connection.
+            Some(r) if r.kind == chan_server::WindowKind::Terminal && r.tmux => {
+                let window = app
+                    .get_webview_window(focused_label)
+                    .ok_or_else(|| format!("no webview window {focused_label}"))?;
+                window
+                    .eval(TMUX_NEW_WINDOW_DISPATCH_JS)
+                    .map_err(|e| format!("asking the tmux window for a new window: {e}"))
+            }
             Some(r) if r.kind == chan_server::WindowKind::Terminal => {
                 spawn_terminal_window(app);
                 Ok(())

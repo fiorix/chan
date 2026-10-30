@@ -7,7 +7,7 @@
 import { flushSync } from "svelte";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import type { TmuxConsent } from "./tmuxConsent";
-import type { TmuxStatus } from "./tmuxStatus";
+import type { TmuxPaneRef, TmuxStatus } from "./tmuxStatus";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -510,6 +510,11 @@ export type TerminalTab = {
   /// shown as the control terminal's status view while connected.
   /// Server-owned and never serialized, like `tmuxConsent`.
   tmuxStatus?: TmuxStatus;
+  /// The tmux pane this terminal shows, when its session is a pane of a
+  /// tmux connection; from the `session` frame, never serialized. A window
+  /// holding such a tab is a tmux window: Cmd+T asks tmux for a window and
+  /// the close prompt offers Detach.
+  tmuxPane?: TmuxPaneRef;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1580,6 +1585,7 @@ function tabForReopen(src: Tab): Tab {
     tab.richPromptCaret = undefined;
     tab.tmuxConsent = undefined;
     tab.tmuxStatus = undefined;
+    tab.tmuxPane = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -2589,6 +2595,17 @@ export function setTerminalTmuxStatus(tab: TerminalTab, status: TmuxStatus, atta
   if (attach || !tab.tmuxStatus || status.revision > tab.tmuxStatus.revision) tab.tmuxStatus = status;
 }
 
+/// Record whether the attached session shows a tmux pane; each `session`
+/// frame says, so a fresh shell in the same tab clears it.
+export function setTerminalTmuxPane(tab: TerminalTab, pane: TmuxPaneRef | null): void {
+  tab.tmuxPane = pane ?? undefined;
+}
+
+/// The terminal tabs of this window that show tmux panes.
+export function tmuxPaneTabs(): TerminalTab[] {
+  return allTerminalTabs().filter((tab) => tab.tmuxPane && tab.terminalSessionId);
+}
+
 /// Whether a fresh terminal still waits for the server's next name before it
 /// dials. The terminal clears it before the fetch, so a reconnect during the
 /// fetch does not fetch again.
@@ -2702,6 +2719,7 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
   if (!retainProgramStatus) tab.programStatus = undefined;
   tab.tmuxConsent = undefined;
   tab.tmuxStatus = undefined;
+  tab.tmuxPane = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
@@ -4473,6 +4491,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   programStatus: "carry",
   tmuxConsent: "carry",
   tmuxStatus: "carry",
+  tmuxPane: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -4563,6 +4582,7 @@ function cloneTab(src: Tab): Tab {
         ...(clone.tmuxConsent.question ? { question: { ...clone.tmuxConsent.question } } : {}),
       };
     }
+    if (clone.tmuxPane) clone.tmuxPane = { ...clone.tmuxPane };
     if (clone.tmuxStatus) {
       const connection = clone.tmuxStatus.connection;
       clone.tmuxStatus = {
@@ -7755,6 +7775,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   programStatus: "drop",
   tmuxConsent: "drop",
   tmuxStatus: "drop",
+  tmuxPane: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
   terminalActivityPulsing: "drop",
