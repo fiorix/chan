@@ -53,7 +53,19 @@ Settled by the owner on 2026-10-30, after reading iTerm2's handling of the marke
 3. Settings. `terminal.tmux.enabled` (default on) is the master switch, set from `chan config`, `PATCH /api/config` and Settings, Terminal, in the way `terminal.program_status` is: a registry-level switch that applies to live sessions. Off, the marker is not honored and passes through as ordinary bytes. `terminal.tmux.trust` is a list of foreground program names treated like a local `tmux` (default empty, for `ssh` and `mosh` users who do not want the question); it is config-file only and not surfaced in Settings. Both rows go into `docs/config-reference.md` in the commit that adds them.
 4. Hardening carried over from iTerm2 and kept after an Allow: a leading ^C before the first write, a first command that is harmless to a shell, an abort when the peer does not answer like tmux within a timeout, a window cap, and a 3.2 version floor with a clear message and a clean detach below it. Chan's own commands are already a closed set of typed ids and quoted text, which iTerm2's are not.
 
-Proposed in conversation and not yet confirmed: pane sessions as registry sessions with no PTY and a gateway thread consuming `PtyCommand`; size authority as last resize wins, sent per window with `refresh-client -C @id:WxH` on tmux 3.4 and later; on `%exit` or server death the pane sessions and chan windows of that connect close and the control terminal stays; a control session is not restored after a devserver restart; history restored as `min(history_size, the terminal scrollback setting)` with live output held until the capture lands; window cap default 8; `cs tmux` deferred to the control-window stage. What turning `terminal.tmux.enabled` off does to a live connection is a detail to settle (recommended: it stops honoring new markers and a live connection runs until it ends).
+Settled by the owner's answers of 2026-10-30:
+
+5. Turning `terminal.tmux.enabled` off changes nothing for a live connection, which runs until it ends; it only stops honoring new markers.
+6. Size: last resize wins, sent per window with `refresh-client -C @id:WxH` on tmux 3.4 and later and client-wide below that.
+7. When tmux ends (detach, `%exit`, server death, a dropped connection) the chan windows and tabs opened for that connection close by themselves; the control terminal stays.
+8. A live connection is not restored after a devserver or desktop restart; the user runs `tmux -CC attach` again. Re-syncing after a graceful restart is a later option, not v1.
+9. History: per pane, `min(history_size, the terminal scrollback setting)`, normal screen first and the alternate screen only when `alternate_on`; live output is held until the capture lands.
+10. Window cap: 8 chan windows opened at connect; the rest are listed in the control terminal to open on demand. Each open pane costs one WebSocket, which counts against a gateway tunnel's 120 substreams.
+11. The control terminal shows a small status view: the tmux sessions and windows (those past the cap with an Open button), errors, the tmux version, and Detach and End.
+12. No `cs tmux` in v1.
+13. Typing into a pane session follows the same rule as an ordinary terminal; the exact rule is read when the pane session is built and recorded here.
+
+Agreed as the build approach and not a user-facing choice: pane sessions are registry sessions with no PTY, with a gateway thread consuming `PtyCommand`.
 
 Open stage 3 measurements for gateways and shared devservers, none done: whether a window minted on the devserver opens by itself on a desktop connected through a gateway; whether a quiet tmux pane survives the gateway's 300 second WebSocket idle window; whether background tabs keep their terminal WebSocket open, which sets how many of the tunnel's 120 substreams one connect uses; and who may type into a pane session on a shared devserver under the existing leader and follower rules.
 
