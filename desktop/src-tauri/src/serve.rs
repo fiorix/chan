@@ -866,6 +866,78 @@ fn builds_transparent(label: &str, library_id: &str, kind: Option<&str>, opacity
     (local_terminal || terminal_exec) && opacity < chan_server::TERMINAL_BACKGROUND_OPACITY_MAX
 }
 
+/// Keep the title bar of a transparent macOS window opaque. A transparent
+/// window clears the native title bar along with the content, so the desktop
+/// shows through it; the terminal background is what should. This gives the
+/// title bar container an opaque layer in the window background colour,
+/// behind the title bar's own material, traffic lights and title, which keep
+/// their layout and dragging; the content stays below the title bar. The
+/// colour is resolved once, for the appearance in effect when the window is
+/// built. Main thread only, like every AppKit call; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+fn keep_title_bar_opaque(window: &tauri::WebviewWindow) {
+    use objc2::encode::{Encoding, RefEncode};
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    /// `CGColorRef`, opaque. Encoded as Core Graphics declares it, so the
+    /// message checks objc2 runs in debug builds accept the call.
+    #[repr(C)]
+    struct CGColor {
+        _private: [u8; 0],
+    }
+    // SAFETY: CGColorRef is a pointer to the CGColor struct, `^{CGColor=}`.
+    unsafe impl RefEncode for CGColor {
+        const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[]));
+    }
+    /// `NSWindowCloseButton`.
+    const CLOSE_BUTTON: usize = 0;
+
+    if objc2::MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let Some(color_class) = AnyClass::get(c"NSColor") else {
+        return;
+    };
+    // SAFETY: on the main thread (checked above). `ns_window` is the live
+    // NSWindow Tauri owns for this window, and each selector is sent to the
+    // AppKit class that declares it, with the argument and return types it
+    // declares. Every returned object is borrowed for this call only.
+    unsafe {
+        let Some(ns_window) = ns_window.cast::<AnyObject>().as_ref() else {
+            return;
+        };
+        let close: *mut AnyObject = msg_send![ns_window, standardWindowButton: CLOSE_BUTTON];
+        let Some(close) = close.as_ref() else {
+            return;
+        };
+        // The button sits in the title bar view, which sits in the title bar
+        // container: the band across the top of the window.
+        let title_bar: *mut AnyObject = msg_send![close, superview];
+        let Some(title_bar) = title_bar.as_ref() else {
+            return;
+        };
+        let container: *mut AnyObject = msg_send![title_bar, superview];
+        let Some(container) = container.as_ref() else {
+            return;
+        };
+        let _: () = msg_send![container, setWantsLayer: Bool::YES];
+        let layer: *mut AnyObject = msg_send![container, layer];
+        let Some(layer) = layer.as_ref() else {
+            return;
+        };
+        let color: *mut AnyObject = msg_send![color_class, windowBackgroundColor];
+        let Some(color) = color.as_ref() else {
+            return;
+        };
+        let cg_color: *const CGColor = msg_send![color, CGColor];
+        let _: () = msg_send![layer, setBackgroundColor: cg_color];
+    }
+}
+
 /// The scheduling result does not describe native window creation. Completion
 /// runs after the main-thread builder has either installed the window or failed.
 fn build_workspace_window_with_completion(
@@ -1054,6 +1126,10 @@ fn build_workspace_window_with_completion(
         let builder = builder.transparent(transparent);
         let result = match builder.build() {
             Ok(window) => {
+                #[cfg(target_os = "macos")]
+                if transparent {
+                    keep_title_bar_opaque(&window);
+                }
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
                 apply_geometry_plan(&window, &label_owned, geometry_plan);

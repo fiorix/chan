@@ -20,7 +20,12 @@
   import TeamDialog from "./components/TeamDialog.svelte";
   import { teamDialogState, openTeamDialog } from "./state/teamDialog.svelte";
   import { currentPreferences } from "./state/store.svelte";
-  import { markTerminalOpacityRoot, windowIsTransparent } from "./terminal/backgroundOpacity";
+  import {
+    effectiveBackgroundOpacity,
+    markTerminalOpacityRoot,
+    windowIsTransparent,
+  } from "./terminal/backgroundOpacity";
+  import { installSeeThroughBackdrop } from "./terminal/seeThroughBackdrop";
   import { installFileDropGuard } from "./state/fileDropGuard";
   import { refreshDrafts } from "./state/drafts.svelte";
   import { reportUncertainOutcome } from "./state/mutationReport";
@@ -348,6 +353,19 @@
       transparentWindow,
       currentPreferences()?.terminal?.background_opacity,
     );
+  });
+  // Below 100 the workspace backdrop keeps painting, with a hole behind each
+  // pane showing a terminal (see seeThroughBackdrop.ts).
+  let workspaceBackdrop: HTMLElement | undefined = $state();
+  const terminalSeeThrough = $derived(
+    effectiveBackgroundOpacity(
+      currentPreferences()?.terminal?.background_opacity,
+      transparentWindow,
+    ) !== null,
+  );
+  $effect(() => {
+    if (!terminalSeeThrough || !workspaceBackdrop) return;
+    return installSeeThroughBackdrop(workspaceBackdrop);
   });
 
   // Single-writer bridge from per-tab read mode to the window-level
@@ -1670,7 +1688,7 @@
   {#if windowCaps.files && browserSidePanes.left}
     <FileBrowserSidePane side="left" />
   {/if}
-  <main>
+  <main bind:this={workspaceBackdrop}>
     <Workspace />
   </main>
   {#if windowCaps.files && browserSidePanes.right}
@@ -1984,11 +2002,31 @@
     overflow: hidden;
   }
   /* Below 100% terminal opacity in a transparent window the page itself is
-     clear; terminals paint their own tint and every other surface keeps its
-     own background. */
+     clear and the workspace backdrop moves to `main::before`, masked with a
+     hole behind each pane showing a terminal, so only the terminals are
+     see-through: they paint their own tint, and the gutters and frames around
+     panes and splits stay as they are. */
   :global(:root[data-terminal-see-through]),
   :global(:root[data-terminal-see-through] body) {
     background: transparent;
+  }
+  :global(:root[data-terminal-see-through]) main {
+    background: transparent;
+    isolation: isolate;
+  }
+  :global(:root[data-terminal-see-through]) main::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: var(--bg-card);
+    -webkit-mask-image: var(--see-through-mask, none);
+    mask-image: var(--see-through-mask, none);
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
   }
   :global(.md-bubble .md-bubble-status.md-bubble-status-empty) {
     border-top: 0;
