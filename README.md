@@ -22,6 +22,7 @@ Core:
 - [crates/chan-shell](crates/chan-shell/design.md) - `cs`: the control-socket wire contract and the client that speaks it.
 - [crates/chan-llm](crates/chan-llm/design.md) - the MCP tool sandbox exposed to external agent CLIs.
 - [crates/chan-systemd](crates/chan-systemd/design.md) - the systemd boundary: notify, watchdog, fdstore, unit render and classification.
+- [crates/chan-tmux](crates/chan-tmux/design.md) - the tmux control-mode protocol: stream framing, notifications, commands, layouts.
 - [crates/chan-report](crates/chan-report/design.md) - repository reports: the walker, the JSONL schema, the COCOMO model.
 - [crates/fetch-models](crates/fetch-models/design.md) - build-only helper that produces the embedded-model tarball.
 
