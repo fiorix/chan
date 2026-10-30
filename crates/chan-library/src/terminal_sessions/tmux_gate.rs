@@ -606,10 +606,48 @@ pub(super) fn process_foreground(pid: u32) -> Foreground {
     Foreground { name, command }
 }
 
+/// The name and command line of a process where there is no `/proc` to
+/// read, through the process table.
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+pub(super) fn process_foreground(pid: u32) -> Foreground {
+    process_foreground_from_table(pid)
+}
+
 /// Not read on this platform: an unknown foreground, which asks.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 pub(super) fn process_foreground(_pid: u32) -> Foreground {
     Foreground::default()
+}
+
+/// The process table's word on `pid`: its name and its arguments. Linux
+/// reads `/proc` instead and compiles this for its test alone, so the shared
+/// path is run on every platform the gate reads a foreground on.
+#[cfg(any(target_os = "macos", target_os = "freebsd", test))]
+fn process_foreground_from_table(pid: u32) -> Foreground {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let Ok(mut system) = System::new() else {
+        return Foreground::default();
+    };
+    let pid = Pid::from_u32(pid);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    let Some(process) = system.process(pid) else {
+        return Foreground::default();
+    };
+    let name = process.name().to_string_lossy().into_owned();
+    let command = process
+        .cmd()
+        .iter()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Foreground {
+        name: (!name.is_empty()).then_some(name),
+        command: (!command.is_empty()).then(|| command.chars().take(240).collect()),
+    }
 }
 
 #[cfg(test)]
@@ -977,6 +1015,34 @@ mod tests {
         );
         assert!(!gate.in_control_mode());
         assert_eq!(gate.feed(b"$ ", now, tmux).passthrough, b"$ ");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn the_process_table_names_this_process_and_its_arguments() {
+        let me = std::process::id();
+        let read = process_foreground_from_table(me);
+        let name = read.name.expect("a name");
+        let exe = std::env::current_exe().unwrap();
+        let file = exe.file_name().unwrap().to_string_lossy().into_owned();
+        // The table's name is the executable's, whole or cut as the OS keeps
+        // it (Linux keeps 15 bytes of it).
+        assert!(
+            file.starts_with(&name) || name.starts_with(&file),
+            "{name:?} vs {file:?}"
+        );
+        let command = read.command.expect("arguments");
+        assert!(command.contains(&name), "{command:?}");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            process_foreground(me).name,
+            Some(name),
+            "the /proc read agrees"
+        );
+        assert_eq!(
+            process_foreground_from_table(u32::MAX - 1),
+            Foreground::default()
+        );
     }
 
     #[test]

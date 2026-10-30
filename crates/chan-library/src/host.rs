@@ -39,7 +39,9 @@ use crate::terminal_sessions::{
     FdStoreManifestEntry, FdStoreParker, FdStoreRestoreReport, FdStoreSessionImport,
     FdStoreSkippedSession,
 };
-use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
+use crate::windows::{
+    PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry, MAX_WINDOW_LABEL_CHARS,
+};
 use crate::{
     sanitize_prefix, workspace_prefix_for, DevserverRegistry, Error, GatewayRegistry, ServeConfig,
     ServeHandle, WorkspaceOverlay,
@@ -2680,6 +2682,18 @@ impl WorkspaceHost {
             )
             .await?;
         self.wire_tenant_signals(&artifacts);
+        // A tmux run in a workspace terminal opens windows of that workspace:
+        // their tabs attach to this tenant, where the pane sessions live.
+        if let Some(window_registry) = self.window_registry().cloned() {
+            artifacts
+                .terminal_sessions
+                .install_tmux_windows(tmux_window_hook(
+                    window_registry,
+                    Arc::clone(&self.library_change_notify),
+                    WindowKind::Workspace,
+                    Some(root.to_string_lossy().into_owned()),
+                ));
+        }
         let handle = ServeHandle {
             addr: config.addr,
             prefix: prefix.clone(),
@@ -2952,9 +2966,10 @@ impl WorkspaceHost {
         if shared {
             if let Some(window_registry) = self.window_registry().cloned() {
                 let notify = Arc::clone(&self.library_change_notify);
+                let reaper_registry = Arc::clone(&window_registry);
                 artifacts.terminal_sessions.install_window_reaper(
                     crate::terminal_sessions::WindowReaper::new(move |window_id: &str| {
-                        if window_registry.remove_terminal(window_id) {
+                        if reaper_registry.remove_terminal(window_id) {
                             // Fire the feed change directly too, so the push does
                             // not hinge on the registry-bridge task's scheduling
                             // (mirrors `mint_window`).
@@ -2962,6 +2977,17 @@ impl WorkspaceHost {
                         }
                     }),
                 );
+                // A tmux run in a standalone terminal window opens terminal
+                // windows: their tabs attach to this tenant, where the pane
+                // sessions live.
+                artifacts
+                    .terminal_sessions
+                    .install_tmux_windows(tmux_window_hook(
+                        window_registry,
+                        Arc::clone(&self.library_change_notify),
+                        WindowKind::Terminal,
+                        None,
+                    ));
             }
         }
         // Root reported for diagnostics / desktop correlation: the PTY cwd,
@@ -6899,6 +6925,85 @@ fn wait_for_late_release(weak: &Weak<Workspace>, lock_dir: &Path, hold: &Teardow
 fn lock_is_anothers(lock_dir: &Path) -> bool {
     chan_workspace::lock::read_lock_record(lock_dir)
         .is_some_and(|record| record.pid != std::process::id())
+}
+
+/// How a tmux connection in one of this library's terminal tenants gets chan
+/// windows: a row of `kind` for `workspace_path` minted in the window
+/// registry with the tmux window's name as its label, so the window feed and
+/// the desktop watcher open it, and dropped by id when the tmux window closes
+/// or the connection ends. The feed is nudged directly, as the reaper does,
+/// so the push does not hinge on the registry-bridge task's scheduling.
+fn tmux_window_hook(
+    registry: Arc<WindowRegistry>,
+    notify: Arc<Notify>,
+    kind: WindowKind,
+    workspace_path: Option<String>,
+) -> crate::terminal_sessions::TmuxWindowHook {
+    let mint_registry = Arc::clone(&registry);
+    let mint_notify = Arc::clone(&notify);
+    let mint = move |title: &str| {
+        let row =
+            mint_registry.create_with_origin(kind, workspace_path.clone(), WindowOrigin::Native);
+        let label: String = title.chars().take(MAX_WINDOW_LABEL_CHARS).collect();
+        if !label.is_empty() {
+            mint_registry.set_label(&row.window_id, label);
+        }
+        mint_notify.notify_waiters();
+        Some(row.window_id)
+    };
+    let remove = move |window_id: &str| {
+        if registry.remove(window_id) {
+            notify.notify_waiters();
+        }
+    };
+    crate::terminal_sessions::TmuxWindowHook {
+        mint: Arc::new(mint),
+        remove: Arc::new(remove),
+    }
+}
+
+#[cfg(test)]
+mod tmux_window_hook_tests {
+    use super::*;
+
+    #[test]
+    fn the_hook_mints_a_labelled_row_of_the_kind_and_drops_it() {
+        let store = tempfile::tempdir().unwrap();
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        let notify = Arc::new(Notify::new());
+        let hook = tmux_window_hook(
+            Arc::clone(&registry),
+            Arc::clone(&notify),
+            WindowKind::Workspace,
+            Some("/work/repo".to_owned()),
+        );
+        let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 20);
+        let id = (hook.mint)(&long).expect("a window id");
+        let row = registry
+            .snapshot()
+            .into_iter()
+            .find(|w| w.window_id == id)
+            .expect("the row is in the registry");
+        assert_eq!(row.kind, WindowKind::Workspace);
+        assert_eq!(row.workspace_path.as_deref(), Some("/work/repo"));
+        assert_eq!(
+            row.label.chars().count(),
+            MAX_WINDOW_LABEL_CHARS,
+            "the name is cut to the label bound"
+        );
+        assert!(!row.control);
+        assert_eq!(row.origin, WindowOrigin::Native);
+        let unnamed = (hook.mint)("").expect("a window id");
+        let row = registry
+            .snapshot()
+            .into_iter()
+            .find(|w| w.window_id == unnamed)
+            .unwrap();
+        assert_eq!(row.label, "", "no name keeps the generated title");
+        (hook.remove)(&id);
+        assert!(registry.snapshot().iter().all(|w| w.window_id != id));
+        assert_eq!(registry.snapshot().len(), 1);
+    }
 }
 
 #[cfg(test)]
