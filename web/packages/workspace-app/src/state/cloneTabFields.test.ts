@@ -74,6 +74,7 @@ function loadedTerminalTab(): TerminalTab {
       ],
     },
     tmuxConsent: { revision: 2, question: { program: "ssh", command: "ssh host tmux -CC", timeout_secs: 60 } },
+    tmuxStatus: { revision: 3, connection: { version: "3.8", session: { id: "$0", name: "main" }, windows: [{ id: "@1", name: "shell", panes: 2, open: true, chan_window: "w-1" }], window_cap: 8, errors: ["list-panes reply for @2: bad"] } },
     pendingPrompt: { id: "prompt-1", phase: "queued", depth: 1 },
     cwd: "/work",
     seedInput: "echo hi",
@@ -416,17 +417,22 @@ test("program status is copied by value but stays out of a saved layout and a re
   const before = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
   expect(JSON.stringify(serializeLayout({ terminalSessions: true }))).not.toContain("programStatus");
   expect(JSON.stringify(serializeLayout({ terminalSessions: true }))).not.toContain("tmuxConsent");
+  expect(JSON.stringify(serializeLayout({ terminalSessions: true }))).not.toContain("tmuxStatus");
   reorderTab(PANE_ID, source.id, 1);
   const moved = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
   expect(moved.programStatus).toEqual(before.programStatus);
   expect(moved.programStatus).not.toBe(before.programStatus);
   expect(moved.programStatus?.records[0]).not.toBe(before.programStatus?.records[0]);
   expect(moved.tmuxConsent).toEqual(before.tmuxConsent);
+  expect(moved.tmuxStatus).toEqual(before.tmuxStatus);
+  expect(moved.tmuxStatus).not.toBe(before.tmuxStatus);
+  expect(moved.tmuxStatus?.connection?.windows[0]).not.toBe(before.tmuxStatus?.connection?.windows[0]);
   await closeTab(PANE_ID, source.id, { force: true });
   expect(reopenClosedTab()).toBe(true);
   const reopened = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
   expect(reopened.programStatus).toBeUndefined();
   expect(reopened.tmuxConsent).toBeUndefined();
+  expect(reopened.tmuxStatus).toBeUndefined();
 });
 
 function serializedFile(): SerTab {

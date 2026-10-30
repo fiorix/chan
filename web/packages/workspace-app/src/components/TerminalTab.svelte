@@ -79,7 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
-    setTerminalTmuxConsent,
+    setTerminalTmuxConsent, setTerminalTmuxStatus,
     setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -113,6 +113,10 @@
   import Inspector from "./Inspector.svelte";
   import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
   import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
+  import type { TmuxRequest, TmuxStatus } from "../state/tmuxStatus";
+  import { openLibraryWindowById, type LibraryWindowBridge } from "../api/libraryWindows";
+  import { checkScopedWindowPage, loadScopedLibrarySnapshot, runScopedLibraryAction } from "../api/libraryCommand";
+  import TmuxStatusView from "./TmuxStatusView.svelte";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -266,6 +270,9 @@
         /// The tmux control-mode consent state, with the question that
         /// stands, if any; the attachment's authoritative value.
         tmux_consent?: TmuxConsent;
+        /// The tmux connection's status, with the connection while one
+        /// runs; the attachment's authoritative value.
+        tmux_status?: TmuxStatus;
         /// The `prompt_id`s still in THIS session's write queue, FIFO order,
         /// one per tail-bearing message. Lets a reloaded SPA re-prove its
         /// restored pending Rich Prompt message is still queued at position
@@ -287,6 +294,7 @@
     | { type: "activity"; bytes_since_focus: number }
     | { type: "program-status"; id: string; generation: number; program_status: ProgramStatus }
     | { type: "tmux-consent"; id: string; generation: number; tmux_consent: TmuxConsent }
+    | { type: "tmux-status"; id: string; generation: number; tmux_status: TmuxStatus }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
     /// the absolute LOGICAL MESSAGE depth on every change, so a drained batch
     /// of N `cs terminal write` notifications arrives as one N -> 0 step, not
@@ -1666,6 +1674,7 @@
         serverGeneration = frame.generation;
         receivedSeq = frame.seq;
         if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
+        if (frame.tmux_status) setTerminalTmuxStatus(tab, frame.tmux_status, true);
         // A fresh shell replacing this tab's session (frame.id changed) starts
         // with the xterm still holding a dead TUI's negotiated input modes.
         // Reset mouse tracking (including the 1015 urxvt format), exit the
@@ -1771,6 +1780,10 @@
       } else if (frame.type === "tmux-consent") {
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
           setTerminalTmuxConsent(tab, frame.tmux_consent);
+        }
+      } else if (frame.type === "tmux-status") {
+        if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
+          setTerminalTmuxStatus(tab, frame.tmux_status);
         }
       } else if (frame.type === "queue-details") {
         if (active && tab.inspectorOpen) queuedMessages = frame.messages;
@@ -1956,6 +1969,28 @@
   // attached client shows it and the first answer wins.
   function answerTmux(answer: TmuxAnswer): void {
     send({ type: "tmux-answer", answer });
+  }
+
+  // The status view's requests of the live connection: open a tmux window
+  // past the cap, detach, or end the server. The server answers with the
+  // status frames that follow.
+  function requestTmux(request: TmuxRequest): void {
+    send({ type: "tmux-request", ...request });
+  }
+
+  // Open the chan window minted for a tmux window, by the id the status
+  // carries: the row is read from the library, as the launcher would, and
+  // opened the way this surface opens a library window.
+  const tmuxWindowBridge: LibraryWindowBridge = {
+    checkPage: checkScopedWindowPage,
+    runAction: runScopedLibraryAction,
+    refresh: async () => {},
+    readSnapshot: loadScopedLibrarySnapshot,
+    currentWindowId: sessionWindowId,
+  };
+  async function openTmuxChanWindow(windowId: string): Promise<void> {
+    const found = await openLibraryWindowById(tmuxWindowBridge, windowId);
+    if (!found) throw new Error("that window is no longer in the library");
   }
 
   // Sync this terminal's broadcast toggle to the server whenever it changes
@@ -3193,6 +3228,12 @@
       question={tab.tmuxConsent?.question ?? null}
       program={terminalTabName(tab)}
       onAnswer={answerTmux}
+    />
+    <TmuxStatusView
+      status={tab.tmuxStatus?.connection ?? null}
+      program={terminalTabName(tab)}
+      onRequest={requestTmux}
+      onOpen={openTmuxChanWindow}
     />
     {#if tab.inspectorOpen}
       <Inspector

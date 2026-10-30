@@ -75,7 +75,8 @@ pub use request_status::{ChanRequestStatus, ChanStatusLease};
 use ring::RingBuffer;
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
-pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion};
+pub use tmux_connection::{TmuxConnectionStatus, TmuxSessionStatus, TmuxWindowStatus};
+pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest, TmuxStatus};
 
 const BROADCAST_CAP: usize = 1024;
 
@@ -1611,6 +1612,11 @@ pub struct AttachHandle {
     pub initial_tmux_consent: Arc<TmuxConsentSnapshot>,
     /// Consent snapshots after `initial_tmux_consent`.
     pub tmux_consent_rx: watch::Receiver<Arc<TmuxConsentSnapshot>>,
+    /// The tmux connection status captured with the subscription, so a
+    /// client joining a connected control terminal shows its status view.
+    pub initial_tmux_status: Arc<TmuxStatus>,
+    /// Status snapshots after `initial_tmux_status`.
+    pub tmux_status_rx: watch::Receiver<Arc<TmuxStatus>>,
     pub replay: Vec<Vec<u8>>,
     pub seq: u64,
     /// This session incarnation's epoch, sent in the attach prelude so the
@@ -1641,6 +1647,13 @@ impl AttachHandle {
     /// first answer wins.
     pub fn answer_tmux(&self, answer: TmuxAnswer) {
         self.session.answer_tmux(answer);
+    }
+
+    /// A request of the session's live tmux connection, from a status view:
+    /// open a window past the cap, detach, or end the server. One with no
+    /// connection changes nothing.
+    pub fn tmux_request(&self, request: TmuxRequest) {
+        self.session.tmux_request(request);
     }
 
     /// The command stored for this PTY incarnation. A restart handle reads
@@ -5720,11 +5733,12 @@ impl Session {
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         let generation = self.generation;
         let mode_reassert = self.private_mode_prelude();
-        let (initial_tmux_consent, tmux_consent_rx) = self
-            .tmux
-            .lock()
-            .expect("terminal tmux gate poisoned")
-            .subscribe();
+        let (initial_tmux_consent, tmux_consent_rx, initial_tmux_status, tmux_status_rx) = {
+            let gate = self.tmux.lock().expect("terminal tmux gate poisoned");
+            let (consent, consent_rx) = gate.subscribe();
+            let (status, status_rx) = gate.subscribe_status();
+            (consent, consent_rx, status, status_rx)
+        };
         AttachHandle {
             id: self.id.clone(),
             session: self,
@@ -5734,6 +5748,8 @@ impl Session {
             program_status_rx,
             initial_tmux_consent,
             tmux_consent_rx,
+            initial_tmux_status,
+            tmux_status_rx,
             replay,
             seq,
             generation,
@@ -6931,6 +6947,16 @@ impl Session {
             .lock()
             .expect("terminal tmux gate poisoned")
             .answer(answer, std::time::Instant::now());
+        self.perform_tmux_actions(actions);
+    }
+
+    /// A client's request of the live connection.
+    fn tmux_request(&self, request: TmuxRequest) {
+        let actions = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .request(request, std::time::Instant::now());
         self.perform_tmux_actions(actions);
     }
 

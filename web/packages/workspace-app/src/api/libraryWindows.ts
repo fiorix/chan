@@ -329,6 +329,21 @@ export async function openLibraryWindow(
 }
 
 /// Hide a library window, or close it outright.
+/// Open the library window `windowId` from a fresh snapshot. For a caller
+/// that holds an id alone, such as the tmux status view with the chan window
+/// minted for a tmux window, and not a row. Resolves to `false` when the
+/// library has no such window.
+export async function openLibraryWindowById(
+  bridge: LibraryWindowBridge,
+  windowId: string,
+): Promise<boolean> {
+  const snapshot = await bridge.readSnapshot(new AbortController().signal);
+  const row = snapshot.windows.find((window) => window.window_id === windowId);
+  if (!row) return false;
+  await openLibraryWindow(bridge, row);
+  return true;
+}
+
 export async function buryLibraryWindow(
   bridge: LibraryWindowBridge,
   window: ScopedLibraryWindow,
