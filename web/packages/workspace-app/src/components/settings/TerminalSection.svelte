@@ -317,7 +317,7 @@
 <SettingField
   label="Ghostty backend"
   pref="terminal.ghostty"
-  hint="Parse and render terminals with Ghostty's WASM engine instead of xterm.js. Off by default on every platform. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. Reload to apply."
+  hint="Parse and render terminals with Ghostty's WASM engine instead of xterm.js. On by default on every platform; turn it off to use xterm.js. On Linux desktops using xterm.js's DOM renderer, box drawing and block characters can show gaps at cell boundaries; Ghostty draws those characters itself. The engine loads from this server the first time a ghostty terminal opens, and falls back to xterm.js if it cannot. Reload to apply."
 >
   <PillToggle
     label="Use ghostty-web in new terminals"

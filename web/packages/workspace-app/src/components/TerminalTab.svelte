@@ -458,7 +458,7 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Terminal backend (Settings: terminal.ghostty, default xterm.js).
+  // Terminal backend (Settings: terminal.ghostty, on by default).
   // Read once in start() under the same spawn-time-only contract as the
   // scrollback / mouse_capture settings above it. The ghostty backend
   // swaps the parser/renderer for Ghostty's WASM engine; xterm-only
@@ -1086,7 +1086,8 @@
     }
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
-    // terminals). Absent field (older server) means xterm.js. The ghostty
+    // terminals). An absent field (a server older than the key) means
+    // xterm.js, which such a server can still drive. The ghostty
     // kit lazy-loads ~420KB of WASM + JS only on this branch, and each
     // terminal gets its own WASM instance (see backend.ts); a failed load
     // falls back to xterm.js rather than breaking the spawn (fail-open,

@@ -33,7 +33,7 @@
 //               SELECTS and neither click nor wheel reports.
 //   RESTORE  -- set terminal.ghostty=false, open another terminal, and
 //               assert its xterm DOM. The check then restores the
-//               preferences found at entry; xterm.js is the default everywhere.
+//               preferences found at entry; ghostty is the default everywhere.
 //
 // The OSC52/mouse drives go through the PTY like a real program: `cs
 // terminal write` of a printf whose FORMAT string carries the escape

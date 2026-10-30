@@ -23,17 +23,19 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.117.0
 
-Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a second time, and a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), raised 2026-10-30 and not started. A third row was raised by the owner the same day, after the tag: the terminal opacity setting reaches only the terminal-only windows and not the terminal tabs of workspace, devserver and control windows ([opaall]), accepted and built the same day on `v0117/terminal-opacity`; its Linux pixel reading and the owner's macOS reading are pending.
+Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a second time, and a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), raised 2026-10-30 and not started. A third row was raised by the owner the same day, after the tag: the terminal opacity setting reaches only the terminal-only windows and not the terminal tabs of workspace, devserver and control windows ([opaall]), accepted and built the same day on `v0117/terminal-opacity` and read by pixel on Linux; the owner's macOS reading is pending. A fourth row was raised by the owner the same evening, after that build: ghostty becomes the default terminal backend on every platform, control terminals included ([ghdef]), built on the same branch.
 
 | Item | State | Next |
 | --- | --- | --- |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 | [Terminal opacity only in terminal windows][opaall] | built | review |
+| [ghostty is not the default backend][ghdef] | built | review |
 
 [chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
 [opaall]: v0.117.0/terminal-opacity-applies-only-to-standalone-terminal-windows.md
+[ghdef]: v0.117.0/ghostty-is-not-the-default-terminal-backend.md
 
 ## Completed
 

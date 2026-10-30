@@ -105,14 +105,13 @@ pub struct TerminalConfig {
     /// Whether newly opened terminals use the ghostty-web backend
     /// (Ghostty's WASM VT parser) instead of xterm.js. Consumed by the
     /// SPA at terminal start time; the server only persists the value.
-    /// Applies to newly opened terminals.
+    /// Applies to newly opened terminals, control terminals included.
     ///
-    /// Off by default on every platform. Ghostty is an opt-in for Linux
-    /// desktops whose xterm.js DOM renderer leaves one unpainted scanline at
-    /// cell boundaries in box drawings and block elements (96.0% rule
-    /// continuity and 95.2% block coverage). Ghostty draws those characters
-    /// itself. The Linux AppImage uses xterm.js WebGL when dma-buf is available;
-    /// other Linux packages use DOM.
+    /// On by default on every platform; `false` keeps xterm.js. Ghostty
+    /// draws box drawings and block elements itself, where the xterm.js DOM
+    /// renderer of the Linux desktop leaves one unpainted scanline at cell
+    /// boundaries (96.0% rule continuity and 95.2% block coverage), and both
+    /// engines mask secrets, so nothing keeps a window kind on xterm.js.
     #[serde(default = "default_terminal_ghostty")]
     pub ghostty: bool,
     /// Whether xterm.js terminals visually obscure the values of
@@ -270,7 +269,7 @@ fn default_terminal_program_status() -> bool {
 }
 
 fn default_terminal_ghostty() -> bool {
-    false
+    true
 }
 
 fn default_terminal_secret_mask_suffixes() -> Vec<String> {
@@ -721,14 +720,14 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_backend_defaults_to_xterm_on_every_platform() {
-        assert!(!TerminalConfig::default().ghostty);
+    fn the_terminal_backend_defaults_to_ghostty_on_every_platform() {
+        assert!(TerminalConfig::default().ghostty);
     }
 
     #[test]
-    fn an_absent_backend_field_uses_xterm() {
+    fn an_absent_backend_field_uses_ghostty() {
         let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
-        assert!(!config.ghostty);
+        assert!(config.ghostty);
     }
 
     #[test]
@@ -741,8 +740,8 @@ mod tests {
     #[test]
     fn an_explicit_backend_choice_survives_the_default() {
         let config: TerminalConfig =
-            serde_json::from_value(json!({ "ghostty": true })).expect("deserialize");
-        assert!(config.ghostty);
+            serde_json::from_value(json!({ "ghostty": false })).expect("deserialize");
+        assert!(!config.ghostty);
     }
 
     #[test]
