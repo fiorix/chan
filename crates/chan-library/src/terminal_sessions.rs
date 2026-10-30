@@ -496,6 +496,12 @@ pub struct Registry {
     /// The control session of each live tmux connection, so a pane session's
     /// request of the connection reaches the session that holds it.
     tmux_controls: Mutex<HashMap<TmuxConnectionId, Weak<Session>>>,
+    /// Per control session, the window its tab came from and the control
+    /// window it moved to, until the source is told to drop the tab: after
+    /// the connection's first tmux window is minted, or at its end, so a
+    /// desktop whose only window ran `tmux -CC` has a window to show before
+    /// that one empties and closes.
+    tmux_pending_releases: Mutex<HashMap<String, (String, String)>>,
     /// Optional spawn-time preference pull for a terminal-only tenant. Kept
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
@@ -1934,6 +1940,7 @@ impl Registry {
             tmux: Mutex::new(tmux),
             tmux_windows: Mutex::new(None),
             tmux_controls: Mutex::new(HashMap::new()),
+            tmux_pending_releases: Mutex::new(HashMap::new()),
             terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
@@ -2050,6 +2057,11 @@ impl Registry {
                     let window_id = hook
                         .as_ref()
                         .and_then(|hook| hook.mint(&session.id, &title));
+                    if let (Some(hook), Some(_)) = (hook.as_ref(), window_id.as_ref()) {
+                        // The connection has a window of its own now: the
+                        // window the control tab came from may let it go.
+                        self.flush_tmux_release(session, hook.as_ref());
+                    }
                     session
                         .tmux_work_done(tmux_connection::WorkDone::WindowMinted { key, window_id });
                 }
@@ -2080,6 +2092,10 @@ impl Registry {
                 }
                 tmux_connection::TmuxWork::Ended => {
                     if let Some(hook) = self.tmux_window_hook() {
+                        // A connection that minted no window still moved the
+                        // tab: the source lets go now, and the released control
+                        // window shows the session.
+                        self.flush_tmux_release(session, hook.as_ref());
                         hook.ended(&session.id, session.tmux_control_window().as_deref());
                     }
                 }
@@ -2126,7 +2142,9 @@ impl Registry {
     /// connection it just made: a hidden control row minted through the
     /// hook, the session rebound to it, a tab for the session parked for the
     /// window's first socket, and the window it came from told to drop its
-    /// tab. A session that still sits in the control window an earlier
+    /// tab once the connection's first tmux window is minted, or when the
+    /// connection ends, so a desktop whose only window ran `tmux -CC` keeps
+    /// a window on screen. A session that still sits in the control window an earlier
     /// connection minted and released keeps it: the hook marks that row as
     /// the control window again, so a second `tmux -CC` in that terminal
     /// opens no second window. Nothing happens on a registry with no hook.
@@ -2150,7 +2168,24 @@ impl Registry {
         self.rebind_session_window(&session.id, Some(window_id.clone()));
         hook.attach(&window_id, &session.id);
         if let Some(from) = from.filter(|from| *from != window_id) {
-            hook.release(&from, &session.id, &window_id);
+            self.tmux_pending_releases
+                .lock()
+                .expect("terminal registry poisoned")
+                .insert(session.id.clone(), (from, window_id));
+        }
+    }
+
+    /// Tell the window a control session's tab came from to drop it, if that
+    /// is still owed: once per connection, after its first tmux window is
+    /// minted or at its end.
+    fn flush_tmux_release(&self, session: &Arc<Session>, hook: &dyn TmuxWindowHook) {
+        let pending = self
+            .tmux_pending_releases
+            .lock()
+            .expect("terminal registry poisoned")
+            .remove(&session.id);
+        if let Some((from, to)) = pending {
+            hook.release(&from, &session.id, &to);
         }
     }
 

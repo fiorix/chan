@@ -554,24 +554,28 @@ fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
         vec![
             "control tmux -CC on this machine -> w-1".to_owned(),
             format!("attach w-1 {}", control.id),
-            format!("release w-source {} -> w-1", control.id),
         ],
-        "the control window is minted, the tab parked for it, the source told"
+        "the control window is minted and the tab parked for it; the source keeps its tab until the connection has a window"
     );
     assert_eq!(
         control.window_id().as_deref(),
         Some("w-1"),
         "the session now belongs to its control window"
     );
-    // The connection ends: the host is told after the windows went, with
-    // the control window to release. A second run in the same terminal
-    // re-enters: the session still sits in its control window, so that row
-    // is marked as the control window again and nothing is minted or moved.
+    // The connection ends before any tmux window was minted: the source is
+    // told to drop the tab now, since the released control window shows the
+    // session, and the host is told after the windows went, with the control
+    // window to release. A second run in the same terminal re-enters: the
+    // session still sits in its control window, so that row is marked as the
+    // control window again and nothing is minted or moved.
     control.record_output(b"%exit\r\n\x1b\\");
     registry.perform_tmux_work(&control);
     assert_eq!(
         calls(&hook),
-        vec![format!("ended {} Some(\"w-1\")", control.id)]
+        vec![
+            format!("release w-source {} -> w-1", control.id),
+            format!("ended {} Some(\"w-1\")", control.id),
+        ]
     );
     control.record_output(&[MARKER, ENTRY].concat());
     control.record_output(VERSION_REPLY);
@@ -582,6 +586,55 @@ fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
         "a second connection in the control window re-marks it and mints nothing"
     );
     assert_eq!(control.window_id().as_deref(), Some("w-1"));
+}
+
+/// A desktop whose only window ran `tmux -CC` must have a window to show
+/// before that one empties and closes: the source is told to drop the control
+/// tab only once the connection's first tmux window is minted.
+#[test]
+fn the_source_window_lets_the_control_tab_go_after_the_first_window_is_minted() {
+    let registry = Registry::new(test_config(1 << 16, 4, 10));
+    let hook = RecordingHook::install(&registry);
+    let (control, _commands) = test_session_with_commands(1 << 16);
+    register_session(&registry, &control);
+    control.set_window_id(Some("w-source".into()));
+    *control
+        .tmux_foreground
+        .lock()
+        .expect("terminal tmux foreground poisoned") = Some(Foreground {
+        name: Some("tmux".into()),
+        command: Some("tmux -CC".into()),
+    });
+    control.record_output(&[MARKER, ENTRY].concat());
+    control.record_output(VERSION_REPLY);
+    control.record_output(FLAGS_REPLIES);
+    registry.perform_tmux_work(&control);
+    let at_connect = calls(&hook);
+    assert!(
+        !at_connect.iter().any(|c| c.starts_with("release ")),
+        "no release before a window exists: {at_connect:?}"
+    );
+    control.record_output(ONE_WINDOW);
+    registry.perform_tmux_work(&control);
+    registry.perform_tmux_work(&control);
+    let after_list = calls(&hook);
+    let mint = after_list.iter().position(|c| c == "mint shell -> w-2");
+    let release = after_list
+        .iter()
+        .position(|c| *c == format!("release w-source {} -> w-1", control.id));
+    assert!(
+        matches!((mint, release), (Some(m), Some(r)) if m < r),
+        "the tmux window is minted, then the source lets go: {after_list:?}"
+    );
+    // Once owed and paid, the release is not repeated at the end.
+    control.record_output(b"%exit\r\n\x1b\\");
+    registry.perform_tmux_work(&control);
+    registry.perform_tmux_work(&control);
+    let at_end = calls(&hook);
+    assert!(
+        !at_end.iter().any(|c| c.starts_with("release ")),
+        "{at_end:?}"
+    );
 }
 
 #[test]

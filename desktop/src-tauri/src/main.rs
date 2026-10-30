@@ -5888,6 +5888,16 @@ fn main() {
                     .count();
                 if open == 0 {
                     api.prevent_exit();
+                    // A window of the library is on its way: the watcher opens
+                    // every shown record, and a tmux connection opens its
+                    // windows while the window its tab came from closes, then
+                    // shows its control window again when it ends. The process
+                    // stays for such a window, and exits shortly after when
+                    // none opened.
+                    if window_on_its_way(_app) {
+                        schedule_exit_when_nothing_opened(_app.clone());
+                        return;
+                    }
                     let _ = begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0));
                     return;
                 }
@@ -7047,6 +7057,43 @@ async fn restore_on_workspaces<R: tauri::Runtime>(
 /// remaining state. A second request while a drain is in flight is refused and
 /// handed back, so a caller holding something valuable (the Windows staged
 /// installer) can keep it rather than lose it silently.
+/// Whether the embedded library holds a shown record the window watcher has
+/// not opened yet (`window_watcher::awaiting_native_window`).
+fn window_on_its_way(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<Arc<AppState>>();
+    let Some(records) = state
+        .embedded()
+        .map(|embedded| embedded.assemble_window_records())
+    else {
+        return false;
+    };
+    let open: std::collections::HashSet<String> = app.webview_windows().into_keys().collect();
+    let buried = state
+        .devserver_feed
+        .buried
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    window_watcher::awaiting_native_window(&records, &open, &buried)
+}
+
+/// After an exit held back for a window on its way: give it time to open,
+/// then run the normal shutdown when the process still shows nothing, so a
+/// window that never opened does not leave a process with no window.
+fn schedule_exit_when_nothing_opened(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let open = app
+            .webview_windows()
+            .into_keys()
+            .filter(|l| serve::is_workspace_webview_label(l))
+            .count();
+        if open == 0 {
+            let _ = begin_normal_shutdown(app.clone(), ShutdownAction::Exit(0));
+        }
+    });
+}
+
 fn begin_normal_shutdown(
     app: tauri::AppHandle,
     action: ShutdownAction,
@@ -9601,6 +9648,9 @@ mod tests {
         );
         assert!(exit_arm.contains("if open == 0 {"));
         assert!(exit_arm.contains("begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0))"));
+        // A shown record the watcher has not opened yet holds the exit back.
+        assert!(exit_arm.contains("if window_on_its_way(_app) {"));
+        assert!(exit_arm.contains("schedule_exit_when_nothing_opened(_app.clone());"));
     }
 
     #[cfg(not(target_os = "macos"))]
