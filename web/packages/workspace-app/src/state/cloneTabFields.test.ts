@@ -75,6 +75,7 @@ function loadedTerminalTab(): TerminalTab {
     },
     tmuxConsent: { revision: 2, question: { program: "ssh", command: "ssh host tmux -CC", timeout_secs: 60 } },
     tmuxStatus: { revision: 3, connection: { version: "3.8", session: { id: "$0", name: "main" }, windows: [{ id: "@1", name: "shell", panes: 2, open: true, chan_window: "w-1" }], window_cap: 8, errors: ["list-panes reply for @2: bad"] } },
+    tmuxPane: { connection: 1, pane: "%0" },
     pendingPrompt: { id: "prompt-1", phase: "queued", depth: 1 },
     cwd: "/work",
     seedInput: "echo hi",
@@ -427,12 +428,15 @@ test("program status is copied by value but stays out of a saved layout and a re
   expect(moved.tmuxStatus).toEqual(before.tmuxStatus);
   expect(moved.tmuxStatus).not.toBe(before.tmuxStatus);
   expect(moved.tmuxStatus?.connection?.windows[0]).not.toBe(before.tmuxStatus?.connection?.windows[0]);
+  expect(moved.tmuxPane).toEqual(before.tmuxPane);
+  expect(moved.tmuxPane).not.toBe(before.tmuxPane);
   await closeTab(PANE_ID, source.id, { force: true });
   expect(reopenClosedTab()).toBe(true);
   const reopened = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
   expect(reopened.programStatus).toBeUndefined();
   expect(reopened.tmuxConsent).toBeUndefined();
   expect(reopened.tmuxStatus).toBeUndefined();
+  expect(reopened.tmuxPane).toBeUndefined();
 });
 
 function serializedFile(): SerTab {

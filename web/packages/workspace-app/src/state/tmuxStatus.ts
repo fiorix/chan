@@ -34,5 +34,11 @@ export type TmuxWindowStatus = {
 /// A request of the live connection, sent as a `tmux-request` frame.
 export type TmuxRequest =
   | { request: "open-window"; window: string }
+  /// A new tmux window, whose panes land as tabs in the chan window `window`
+  /// names, or in a chan window of its own without one.
+  | { request: "new-window"; window?: string }
   | { request: "detach" }
   | { request: "end" };
+
+/// The tmux pane a terminal session shows, as its `session` frame says.
+export type TmuxPaneRef = { connection: number; pane: string };

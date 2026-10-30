@@ -190,6 +190,7 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (Delete, "/api/terminals/{session}", NonOwner),
     (Post, "/api/terminals/{session}/restart", NonOwner),
     (Post, "/api/terminals/{session}/broadcast", NonOwner),
+    (Post, "/api/terminals/{session}/tmux-request", NonOwner),
     (Get, "/ws", NonOwner),
     #[cfg(feature = "embeddings")]
     (Get, "/api/index/semantic/state", NonOwner),
@@ -256,6 +257,7 @@ pub(crate) static TERMINAL_TENANT: RouteTable = &[
     (Delete, "/api/terminals/{session}", NonOwner),
     (Post, "/api/terminals/{session}/restart", NonOwner),
     (Post, "/api/terminals/{session}/broadcast", NonOwner),
+    (Post, "/api/terminals/{session}/tmux-request", NonOwner),
     (Post, "/api/fs/upload", NonOwner),
     (Post, "/api/transfers/cancel", NonOwner),
     (Get, "/api/fs/{*path}", NonOwner),

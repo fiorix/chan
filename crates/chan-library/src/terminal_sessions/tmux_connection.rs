@@ -100,10 +100,20 @@ pub(super) enum TmuxWork {
     /// Ask the host for a chan window for a tmux window; answered with
     /// [`WorkDone::WindowMinted`].
     MintWindow { key: WindowId, title: String },
+    /// Tell a chan window to open a tab for a pane session bound to it.
+    AttachTab {
+        window_id: String,
+        session_id: String,
+    },
+    /// Give the control session a window of its own, titled `title`.
+    ControlWindow { title: String },
     /// Drop a chan window the host minted.
     RemoveWindow { window_id: String },
     /// Start the gateway thread that reads the panes' commands.
-    StartGateway { rx: Receiver<PaneCommand> },
+    StartGateway {
+        connection: TmuxConnectionId,
+        rx: Receiver<PaneCommand>,
+    },
 }
 
 /// The registry's answer to a piece of work.
@@ -130,6 +140,9 @@ pub(super) enum Purpose {
     ListWindows,
     ListPanes(WindowId),
     Capture(PaneId),
+    /// A `new-window` a client asked for; the window it adds is bound by
+    /// `pending_new_windows`, not the reply.
+    NewWindow,
 }
 
 /// One thing the gate does for the connection: submit a command through the
@@ -181,6 +194,10 @@ pub(super) struct TmuxConnection {
     resize_wanted: BTreeMap<WindowId, (u32, u32)>,
     /// The attached session, as tmux announced it.
     session: Option<(SessionId, String)>,
+    /// The chan window each `new-window` a client asked for should land in,
+    /// oldest first; `None` asks for a chan window of its own. tmux runs
+    /// commands in order, so the next window it adds is the oldest request's.
+    pending_new_windows: VecDeque<Option<String>>,
     /// The status changed since the gate last published it.
     dirty: bool,
     /// The most recent errors, oldest first, for the status.
@@ -213,6 +230,7 @@ impl TmuxConnection {
                 backlog_bytes: 0,
                 resize_wanted: BTreeMap::new(),
                 session,
+                pending_new_windows: VecDeque::new(),
                 dirty: true,
                 errors: VecDeque::new(),
                 ending: Vec::new(),
@@ -277,6 +295,17 @@ impl TmuxConnection {
             Purpose::ListPanes(window),
         ));
         steps
+    }
+
+    /// A client asked for a new tmux window: `affinity` is the chan window
+    /// its panes should land in as tabs, or `None` for a chan window of its
+    /// own, past the cap if need be.
+    pub(super) fn request_new_window(&mut self, affinity: Option<String>) -> Vec<Step> {
+        self.pending_new_windows.push_back(affinity);
+        vec![Step::Submit(
+            Command::NewWindow { cwd: None },
+            Purpose::NewWindow,
+        )]
     }
 
     /// Keep an error for the status, dropping the oldest past the bound.
@@ -397,13 +426,18 @@ impl TmuxConnection {
                     // The pane is gone; tmux says so with a notification too.
                     self.pane_gone(pane, &mut steps);
                 } else {
+                    if purpose == Purpose::NewWindow {
+                        // No window came of it, so the next one tmux adds is
+                        // not this request's.
+                        self.pending_new_windows.pop_front();
+                    }
                     self.note_error(format!("tmux refused a command: {message}"));
                 }
                 return steps;
             }
         };
         match purpose {
-            Purpose::Fire | Purpose::Capture(_) => {}
+            Purpose::Fire | Purpose::Capture(_) | Purpose::NewWindow => {}
             Purpose::ListWindows => match parse_list_windows(&rows) {
                 Ok(windows) => {
                     for info in windows {
@@ -502,7 +536,11 @@ impl TmuxConnection {
                 pane.requested = false;
                 let window = self.windows.get(&pane.window);
                 if let Some(chan_window) = window.and_then(|w| w.chan_window.clone()) {
-                    session.set_window_id(Some(chan_window));
+                    session.set_window_id(Some(chan_window.clone()));
+                    steps.push(Step::Action(Action::Work(TmuxWork::AttachTab {
+                        window_id: chan_window,
+                        session_id: session.id.clone(),
+                    })));
                 }
                 let size = window
                     .and_then(|w| w.sizes.get(&pane_id).copied())
@@ -532,6 +570,10 @@ impl TmuxConnection {
                                 self.panes.get(pane).and_then(|p| p.session.as_ref())
                             {
                                 session.set_window_id(Some(window_id.clone()));
+                                steps.push(Step::Action(Action::Work(TmuxWork::AttachTab {
+                                    window_id: window_id.clone(),
+                                    session_id: session.id.clone(),
+                                })));
                             }
                         }
                     }
@@ -706,7 +748,12 @@ impl TmuxConnection {
             }
             return;
         }
-        let materialized = self.windows.values().filter(|w| w.materialized).count() < WINDOW_CAP;
+        // A window a client asked for lands where it asked: in the chan
+        // window named as its affinity, or in one of its own past the cap.
+        let requested = self.pending_new_windows.pop_front();
+        let affinity = requested.clone().flatten();
+        let materialized = requested.is_some()
+            || self.windows.values().filter(|w| w.materialized).count() < WINDOW_CAP;
         let title = if name.is_empty() {
             format!("tmux {window}")
         } else {
@@ -719,15 +766,17 @@ impl TmuxConnection {
                 name,
                 panes: Vec::new(),
                 sizes: HashMap::new(),
-                chan_window: None,
+                chan_window: affinity.clone(),
                 materialized,
             },
         );
         if materialized {
-            steps.push(Step::Action(Action::Work(TmuxWork::MintWindow {
-                key: window,
-                title,
-            })));
+            if affinity.is_none() {
+                steps.push(Step::Action(Action::Work(TmuxWork::MintWindow {
+                    key: window,
+                    title,
+                })));
+            }
             steps.push(Step::Submit(
                 Command::ListPanes(window),
                 Purpose::ListPanes(window),

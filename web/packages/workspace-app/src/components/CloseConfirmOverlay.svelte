@@ -21,14 +21,22 @@
     flushAndHideWindow,
     resolveCloseConfirm,
   } from "../state/closeConfirm.svelte";
-  import { discardWindowSession, ui } from "../state/store.svelte";
+  import { discardWindowSession, setTransientStatus, ui } from "../state/store.svelte";
+  import { tmuxPaneTabs } from "../state/tabs.svelte";
+  import { api } from "../api/client";
+  import { errorText } from "../api/errors";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let cancelBtn: HTMLButtonElement | null = $state(null);
   let hideBtn: HTMLButtonElement | null = $state(null);
   let closeBtn: HTMLButtonElement | null = $state(null);
+  let detachBtn: HTMLButtonElement | null = $state(null);
 
   const open = $derived(closeConfirmState.open);
+  // A tmux window offers Detach: the connection ends and tmux keeps running,
+  // so every chan window of the connection goes while the control terminal
+  // stays. Read when the prompt opens; the tabs do not change under it.
+  const tmuxWindow = $derived(open && tmuxPaneTabs().length > 0);
 
   // A connection transition invalidates the native close request that opened
   // this prompt. Cancel immediately on both drop and recovery, before another
@@ -64,6 +72,19 @@
     resolveCloseConfirm("cancel");
   }
 
+  // Detach: ask the connection to detach through one of this window's pane
+  // sessions. The server ends the connection, which closes its windows; this
+  // prompt only goes, since the window's own close follows from the server.
+  function detach(): void {
+    const carrier = tmuxPaneTabs()[0];
+    if (carrier?.terminalSessionId) {
+      void api
+        .tmuxRequest(carrier.terminalSessionId, { request: "detach" })
+        .catch((error) => setTransientStatus(`tmux detach failed: ${errorText(error)}`));
+    }
+    resolveCloseConfirm("cancel");
+  }
+
   // Steal focus onto Cancel when the overlay appears: the backdrop stops clicks
   // but keystrokes still flow to whatever was focused (a terminal / editor), so
   // park focus on the safe default and trap Tab over the three buttons below.
@@ -83,7 +104,7 @@
     }
     if (e.key !== "Tab") return;
     e.preventDefault();
-    const order = [hideBtn, closeBtn, cancelBtn].filter(
+    const order = [hideBtn, closeBtn, detachBtn, cancelBtn].filter(
       (b): b is HTMLButtonElement => b !== null,
     );
     if (order.length === 0) {
@@ -111,11 +132,18 @@
     <div class="card">
       <div class="title">close this window?</div>
       <div class="subline">
-        Hide it to keep its tabs and terminals warm, or close to discard
+        {#if tmuxWindow}
+          Hide keeps the tmux window running, Close kills it, Detach drops the whole tmux connection and leaves tmux running
+        {:else}
+          Hide it to keep its tabs and terminals warm, or close to discard
+        {/if}
       </div>
       <div class="actions">
         <button class="hide" bind:this={hideBtn} onclick={hide}> Hide </button>
         <button class="close" bind:this={closeBtn} onclick={close}> Close </button>
+        {#if tmuxWindow}
+          <button class="detach" bind:this={detachBtn} onclick={detach}> Detach </button>
+        {/if}
         <button class="cancel" bind:this={cancelBtn} onclick={cancel}> Cancel </button>
       </div>
     </div>
@@ -166,6 +194,7 @@
   }
   .hide,
   .close,
+  .detach,
   .cancel {
     background: transparent;
     color: var(--text-secondary);
@@ -176,6 +205,7 @@
     cursor: pointer;
   }
   .hide:hover,
+  .detach:hover,
   .cancel:hover {
     border-color: var(--link);
     color: var(--link);

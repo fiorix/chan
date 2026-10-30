@@ -65,46 +65,49 @@ import {
   activeTabInPane,
   allPaneTabs,
   buildSplitGrid,
+  cancelMissingFileCheck,
   closePane,
   closeTab,
   conflictDialog,
   draftCloseState,
+  equalizePane,
   flushTabEdits,
+  focusPane,
   hasAnyTab,
   hasBrowserTab,
-  cancelMissingFileCheck,
   hasGraphTab,
   layout,
-  markTabFileMissing,
-  openBrowserInActivePane,
-  openBrowserInPane,
-  scheduleMissingFileCheck,
-  openGraphInActivePane,
-  openGraphInPane,
-  parseGraphLink,
-  paneActiveTabId,
-  paneSide,
-  paneTabs,
-  openInActivePane,
-  openInPane,
-  openTerminalInPane,
-  openTerminalInActivePane,
-  openDashboardInPane,
-  equalizePane,
-  focusPane,
   layoutHasDurableContent,
   layoutHasPersistableStructure,
   layoutHasReattachableTerminal,
+  markTabFileMissing,
+  markTerminalMovingOut,
+  openBrowserInActivePane,
+  openBrowserInPane,
+  openDashboardInPane,
+  openGraphInActivePane,
+  openGraphInPane,
+  openInActivePane,
+  openInPane,
+  openTerminalInActivePane,
+  openTerminalInPane,
+  paneActiveTabId,
   paneMode,
   paneModeDeferRemoteLayout,
+  paneSide,
+  paneTabs,
+  parseGraphLink,
   reconcileLayout,
-  registerPaneModeSettledSink,
   registerDraftPromotionSink,
+  registerPaneModeSettledSink,
   registerSavedStatSink,
   resizePane,
   resolveTabDestination,
   restoreLayout,
+  scheduleMissingFileCheck,
+  selectTabInPane,
   serializeLayout,
+  setTerminalPendingGlobalName,
   setWindowFocusColor,
   splitPane,
   swapPanes,
@@ -120,6 +123,7 @@ import {
   type TerminalGraft,
   type TerminalTab,
 } from "./tabs.svelte";
+import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
 import {
@@ -1441,6 +1445,25 @@ type WindowCommandFrame =
   | ({
       type: "window_command";
       window_id: string;
+      // Open a terminal tab bound to an existing session: a tmux pane
+      // session the connection bound to this window. A tab that already
+      // shows the session is focused instead.
+      command: "open_term_attach";
+      session_id: string;
+    } & DestinationWindowCommand)
+  | {
+      type: "window_command";
+      window_id: string;
+      // Drop the tab that shows `session_id`, which now belongs to `window`,
+      // without ending the session: the control session moved into the
+      // window minted for it.
+      command: "release_term";
+      session_id: string;
+      window: string;
+    }
+  | ({
+      type: "window_command";
+      window_id: string;
       command: "open_dashboard";
       carousel_index?: number | null;
       carousel_off?: boolean;
@@ -2044,6 +2067,19 @@ async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
   }
 }
 
+/// The terminal tab of this window attached to `sessionId`, with its pane.
+function locateTerminalBySession(sessionId: string): { paneId: string; tab: TerminalTab } | null {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const tab of allPaneTabs(node)) {
+      if (tab.kind === "terminal" && tab.terminalSessionId === sessionId) {
+        return { paneId: node.id, tab };
+      }
+    }
+  }
+  return null;
+}
+
 async function handleWindowCommand(raw: unknown): Promise<void> {
   const frame = raw as Partial<WindowCommandFrame> | null;
   if (!frame || frame.window_id !== sessionWindowId()) return;
@@ -2173,6 +2209,49 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     persistStateToHash();
     setTransientStatus("opened terminal");
     scheduleSessionSave();
+    return;
+  }
+  if (frame.command === "open_term_attach") {
+    const sessionId = typeof frame.session_id === "string" ? frame.session_id : "";
+    if (!sessionId) return;
+    const existing = locateTerminalBySession(sessionId);
+    if (existing) {
+      selectTabInPane(existing.paneId, existing.tab.id);
+      return;
+    }
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
+    const tab = openTerminalInPane(destination.paneId, { sessionId, side: destination.side });
+    // A bound tab takes its name from the session's frame; it waits for no
+    // minted one.
+    if (tab) setTerminalPendingGlobalName(tab, false);
+    scheduleSessionSave();
+    return;
+  }
+  if (frame.command === "release_term") {
+    const sessionId = typeof frame.session_id === "string" ? frame.session_id : "";
+    const target = typeof frame.window === "string" ? frame.window : "";
+    if (!sessionId) return;
+    const found = locateTerminalBySession(sessionId);
+    if (!found) return;
+    const drop = () => {
+      // The target window holds the session now; the source lets go of the
+      // tab the way a cross-window drag does, killing nothing.
+      markTerminalMovingOut(found.tab.id);
+      void closeTab(found.paneId, found.tab.id, { force: true });
+    };
+    if (isTauriDesktop()) {
+      drop();
+      return;
+    }
+    // A browser opens the window itself; a refused popup keeps the tab, and
+    // the launcher lists the window for a later gesture.
+    void openLibraryWindowById(plainLibraryWindowBridge(), target)
+      .then((found) => {
+        if (found) drop();
+        else setTransientStatus("tmux control window opened in the library");
+      })
+      .catch(() => setTransientStatus("tmux control window is in the launcher; open it from there"));
     return;
   }
   if (frame.command === "open_dashboard") {

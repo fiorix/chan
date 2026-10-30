@@ -614,10 +614,10 @@ impl WindowRegistry {
     }
 
     /// Mint a window for a tmux control-mode connection's tmux window: a row
-    /// of `kind` for `workspace_path`, native, labelled with the tmux window's
-    /// name cut to the label bound, buried since it holds none of the tmux
-    /// window's tabs, and marked `tmux`, which keeps it out of every save:
-    /// the connection ends with the process, so a crash leaves no row behind.
+    /// of `kind` for `workspace_path`, native, shown, labelled with the tmux
+    /// window's name cut to the label bound, and marked `tmux`, which keeps
+    /// it out of every save: the connection ends with the process, so a
+    /// crash leaves no row behind.
     /// Ordinal and title are minted like [`Self::create_with_origin`]'s, and
     /// a save of the durable rows made while the row lives leaves it out.
     /// Fires the change notification.
@@ -642,7 +642,7 @@ impl WindowRegistry {
                 control: false,
                 tmux: true,
                 library_id: None,
-                hidden: true,
+                hidden: false,
                 origin: WindowOrigin::Native,
             };
             windows.push(row.clone());
@@ -1810,10 +1810,7 @@ mod tests {
         let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 5);
         let tmux = reg.create_tmux_window(WindowKind::Workspace, Some("/w".into()), &long);
         assert!(tmux.tmux);
-        assert!(
-            tmux.hidden,
-            "minted buried: it holds none of the tmux window's tabs"
-        );
+        assert!(!tmux.hidden, "minted shown: its tabs are parked for it");
         assert!(!tmux.control);
         assert_eq!(tmux.kind, WindowKind::Workspace);
         assert_eq!(tmux.workspace_path.as_deref(), Some("/w"));

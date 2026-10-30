@@ -20,6 +20,7 @@ import {
   type WindowPageCheck,
 } from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
+import { sessionWindowId } from "./client";
 import { clientHolder } from "./clientSession";
 import {
   blockedWindowMessage,
@@ -29,11 +30,14 @@ import {
 } from "./desktop";
 import { errorText } from "./errors";
 import { hostVocabulary, isAclRefusal } from "./nativeVocabulary";
-import type {
-  ScopedLibraryAction,
-  ScopedLibraryActionResult,
-  ScopedLibrarySnapshot,
-  ScopedLibraryWindow,
+import {
+  checkScopedWindowPage,
+  loadScopedLibrarySnapshot,
+  runScopedLibraryAction,
+  type ScopedLibraryAction,
+  type ScopedLibraryActionResult,
+  type ScopedLibrarySnapshot,
+  type ScopedLibraryWindow,
 } from "./libraryCommand";
 
 /// The two actions that bring a new library window into being.
@@ -329,6 +333,19 @@ export async function openLibraryWindow(
 }
 
 /// Hide a library window, or close it outright.
+/// A bridge for a surface that keeps no scoped snapshot of its own, such as
+/// a terminal tab opening a tmux window's chan window: the deck's transport
+/// and refusal reader, no display to refresh.
+export function plainLibraryWindowBridge(): LibraryWindowBridge {
+  return {
+    checkPage: checkScopedWindowPage,
+    runAction: runScopedLibraryAction,
+    refresh: async () => {},
+    readSnapshot: loadScopedLibrarySnapshot,
+    currentWindowId: sessionWindowId,
+  };
+}
+
 /// Open the library window `windowId` from a fresh snapshot. For a caller
 /// that holds an id alone, such as the tmux status view with the chan window
 /// minted for a tmux window, and not a row. Resolves to `false` when the

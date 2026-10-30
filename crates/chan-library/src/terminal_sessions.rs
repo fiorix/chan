@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use portable_pty::{native_pty_system, Child, PtySize};
@@ -493,6 +493,9 @@ pub struct Registry {
     /// How the host mints and drops chan windows for a tmux connection's
     /// windows; absent, a connection's panes belong to no window.
     tmux_windows: Mutex<Option<TmuxWindowHook>>,
+    /// The control session of each live tmux connection, so a pane session's
+    /// request of the connection reaches the session that holds it.
+    tmux_controls: Mutex<HashMap<TmuxConnectionId, Weak<Session>>>,
     /// Optional spawn-time preference pull for a terminal-only tenant. Kept
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
@@ -1656,6 +1659,13 @@ impl AttachHandle {
         self.session.tmux_request(request);
     }
 
+    /// The tmux pane this session shows, when it is a pane session. A
+    /// request of the connection from such a session goes to the control
+    /// session that holds it ([`Registry::tmux_request_for`]).
+    pub fn tmux_pane(&self) -> Option<TmuxPaneRef> {
+        self.session.tmux_pane
+    }
+
     /// The command stored for this PTY incarnation. A restart handle reads
     /// from the replacement session, so callers never retain stale launch
     /// identity after command overrides.
@@ -1918,6 +1928,7 @@ impl Registry {
             program_status: AtomicBool::new(program_status),
             tmux: Mutex::new(tmux),
             tmux_windows: Mutex::new(None),
+            tmux_controls: Mutex::new(HashMap::new()),
             terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
@@ -2044,10 +2055,108 @@ impl Registry {
                         (hook.remove)(&window_id);
                     }
                 }
-                tmux_connection::TmuxWork::StartGateway { rx } => {
+                tmux_connection::TmuxWork::StartGateway { connection, rx } => {
+                    {
+                        let mut controls = self
+                            .tmux_controls
+                            .lock()
+                            .expect("terminal registry poisoned");
+                        controls.retain(|_, control| control.strong_count() > 0);
+                        controls.insert(connection, Arc::downgrade(session));
+                    }
                     spawn_tmux_gateway(Arc::downgrade(session), rx);
                 }
+                tmux_connection::TmuxWork::AttachTab {
+                    window_id,
+                    session_id,
+                } => {
+                    let hook = self
+                        .tmux_windows
+                        .lock()
+                        .expect("terminal registry poisoned")
+                        .clone();
+                    if let Some(hook) = hook {
+                        (hook.attach)(&window_id, &session_id);
+                    }
+                }
+                tmux_connection::TmuxWork::ControlWindow { title } => {
+                    self.open_tmux_control_window(session, &title);
+                }
             }
+        }
+    }
+
+    /// Give the control session `session` a window of its own for the
+    /// connection it just made: a tmux row minted through the hook, the
+    /// session rebound to it, a tab for the session parked for the window's
+    /// first socket, and the window it came from told to drop its tab. A
+    /// session that still sits in the control window an earlier connection
+    /// minted keeps it, so a second `tmux -CC` in that terminal opens no
+    /// second window. Nothing happens on a registry with no hook.
+    fn open_tmux_control_window(&self, session: &Arc<Session>, title: &str) {
+        let hook = self
+            .tmux_windows
+            .lock()
+            .expect("terminal registry poisoned")
+            .clone();
+        let Some(hook) = hook else {
+            return;
+        };
+        let from = session.window_id();
+        let minted = session.tmux_control_window();
+        if minted.is_some() && minted == from {
+            return;
+        }
+        let Some(window_id) = (hook.mint)(title) else {
+            return;
+        };
+        session.set_tmux_control_window(Some(window_id.clone()));
+        self.rebind_session_window(&session.id, Some(window_id.clone()));
+        (hook.attach)(&window_id, &session.id);
+        if let Some(from) = from.filter(|from| *from != window_id) {
+            (hook.release)(&from, &session.id, &window_id);
+        }
+    }
+
+    /// A client's request of the tmux connection session `id` belongs to: a
+    /// pane session's goes to the control session that holds its connection,
+    /// a control session's to its own gate. `false` when `id` names no
+    /// session, or a pane whose connection is gone, and nothing was asked.
+    pub fn tmux_request(&self, id: &str, request: TmuxRequest) -> bool {
+        let session = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(id)
+            .cloned();
+        let Some(session) = session else {
+            return false;
+        };
+        match session.tmux_pane {
+            Some(pane) => self.tmux_request_for(&pane, request),
+            None => {
+                session.tmux_request(request);
+                true
+            }
+        }
+    }
+
+    /// Hand a pane session's request of its tmux connection to the control
+    /// session that holds the connection. `false` when the connection is
+    /// gone, and nothing was asked.
+    pub fn tmux_request_for(&self, pane: &TmuxPaneRef, request: TmuxRequest) -> bool {
+        let control = self
+            .tmux_controls
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(&pane.connection)
+            .and_then(Weak::upgrade);
+        match control {
+            Some(control) => {
+                control.tmux_request(request);
+                true
+            }
+            None => false,
         }
     }
 
@@ -4566,6 +4675,9 @@ struct Session {
     exec_argv: Option<Vec<OsString>>,
     /// Set on a tmux pane session, which has no PTY; see [`TmuxPaneRef`].
     tmux_pane: Option<TmuxPaneRef>,
+    /// The control window minted for this session's tmux connection, while
+    /// the session sits in it; see `Registry::open_tmux_control_window`.
+    tmux_control_window: Mutex<Option<String>>,
     child_pid: Option<u32>,
     #[cfg(target_os = "linux")]
     child_start_time: Option<u64>,
@@ -4938,6 +5050,7 @@ impl Session {
             },
             exec_argv,
             tmux_pane: None,
+            tmux_control_window: Mutex::new(None),
             child_pid,
             #[cfg(target_os = "linux")]
             child_start_time,
@@ -5368,6 +5481,7 @@ impl Session {
             // reach it, so an adopted session is always a shell session.
             exec_argv: None,
             tmux_pane: None,
+            tmux_control_window: Mutex::new(None),
             child_pid: meta.child_pid,
             child_start_time: child_identity.start_time,
             master_fd: Some(master_fd),
@@ -6148,6 +6262,7 @@ impl Session {
             spawn_opts,
             exec_argv: None,
             tmux_pane: Some(pane),
+            tmux_control_window: Mutex::new(None),
             child_pid: None,
             #[cfg(target_os = "linux")]
             child_start_time: None,
@@ -6621,6 +6736,20 @@ impl Session {
             .clone()
     }
 
+    fn tmux_control_window(&self) -> Option<String> {
+        self.tmux_control_window
+            .lock()
+            .expect("terminal tmux control window poisoned")
+            .clone()
+    }
+
+    fn set_tmux_control_window(&self, window_id: Option<String>) {
+        *self
+            .tmux_control_window
+            .lock()
+            .expect("terminal tmux control window poisoned") = window_id;
+    }
+
     /// This session incarnation's epoch. Stable for the PTY's life; a restart
     /// mints a new session under the same id with a higher value.
     fn generation(&self) -> u64 {
@@ -6986,6 +7115,12 @@ impl Session {
                         .lock()
                         .expect("terminal tmux work poisoned")
                         .push_back(work);
+                }
+                tmux_gate::Action::ControlWindow { title } => {
+                    self.tmux_work
+                        .lock()
+                        .expect("terminal tmux work poisoned")
+                        .push_back(tmux_connection::TmuxWork::ControlWindow { title });
                 }
             }
         }
@@ -7637,12 +7772,21 @@ pub struct TmuxConnectionId(pub u64);
 pub type TmuxWindowMint = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Drops a chan window by id.
 pub type TmuxWindowRemove = Arc<dyn Fn(&str) + Send + Sync>;
+/// Tells a chan window (first argument) to open a tab bound to a session
+/// (second argument): delivered to its socket, or parked for its first one.
+pub type TmuxWindowAttach = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// Tells a chan window (first) to drop its tab for a session (second) that
+/// moved to another window (third), without ending the session.
+pub type TmuxWindowRelease = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
-/// How the host mints and drops chan windows for a tmux connection's windows.
+/// How the host mints and drops chan windows for a tmux connection's windows,
+/// and fills them with tabs for the sessions bound to them.
 #[derive(Clone)]
 pub struct TmuxWindowHook {
     pub mint: TmuxWindowMint,
     pub remove: TmuxWindowRemove,
+    pub attach: TmuxWindowAttach,
+    pub release: TmuxWindowRelease,
 }
 
 impl std::fmt::Debug for TmuxWindowHook {
@@ -8063,6 +8207,7 @@ mod tests {
             },
             exec_argv: None,
             tmux_pane: None,
+            tmux_control_window: Mutex::new(None),
             child_pid: None,
             #[cfg(target_os = "linux")]
             child_start_time: None,
