@@ -15,7 +15,8 @@ use chan_workspace::SearchAggression;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    TerminalConfig, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_SCROLLBACK_MB_MAX,
+    TerminalConfig, TERMINAL_BACKGROUND_OPACITY_MAX, TERMINAL_BACKGROUND_OPACITY_MIN,
+    TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, TERMINAL_SCROLLBACK_MB_MAX,
     TERMINAL_SCROLLBACK_MB_MIN,
 };
 use crate::error::{err, Error};
@@ -509,6 +510,10 @@ fn sanitize_terminal_config(mut cfg: TerminalConfig) -> TerminalConfig {
     cfg.font_size = cfg
         .font_size
         .clamp(TERMINAL_FONT_SIZE_MIN, TERMINAL_FONT_SIZE_MAX);
+    cfg.background_opacity = cfg.background_opacity.clamp(
+        TERMINAL_BACKGROUND_OPACITY_MIN,
+        TERMINAL_BACKGROUND_OPACITY_MAX,
+    );
     // Scrollback clamps to the Settings slider
     // bounds. A literal 0 (legacy / cleared field) snaps to the
     // default so an over-eager wipe can't strand new terminals with
@@ -860,27 +865,33 @@ mod tests {
         let too_high = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 9_999,
             font_size: 9_999,
+            background_opacity: 9_999,
             default_term: "  xterm  ".into(),
             ..TerminalConfig::default()
         });
         assert_eq!(too_high.scrollback_mb, TERMINAL_SCROLLBACK_MB_MAX);
         assert_eq!(too_high.font_size, TERMINAL_FONT_SIZE_MAX);
+        assert_eq!(too_high.background_opacity, TERMINAL_BACKGROUND_OPACITY_MAX);
         assert_eq!(too_high.default_term, "xterm");
 
         let too_low = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 1,
             font_size: 1,
+            background_opacity: 0,
             ..TerminalConfig::default()
         });
         assert_eq!(too_low.scrollback_mb, TERMINAL_SCROLLBACK_MB_MIN);
         assert_eq!(too_low.font_size, TERMINAL_FONT_SIZE_MIN);
+        assert_eq!(too_low.background_opacity, TERMINAL_BACKGROUND_OPACITY_MIN);
 
         let in_range = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 25,
+            background_opacity: 80,
             default_term: "tmux-256color".into(),
             ..TerminalConfig::default()
         });
         assert_eq!(in_range.scrollback_mb, 25);
+        assert_eq!(in_range.background_opacity, 80);
         assert_eq!(in_range.default_term, "tmux-256color");
     }
 

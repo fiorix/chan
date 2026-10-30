@@ -2292,6 +2292,11 @@
     -webkit-backface-visibility: hidden;
     backface-visibility: hidden;
   }
+  /* In a transparent window a pane showing a terminal leaves its face clear:
+     the terminal paints the tint itself, so the alpha does not stack. */
+  :global(:root[data-transparent-window]) .pane-card-face:has(:global(.terminal-tab.active)) {
+    background: transparent;
+  }
   .pane-card-face {
     position: relative;
     z-index: 1;

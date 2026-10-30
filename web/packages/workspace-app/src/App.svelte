@@ -20,6 +20,7 @@
   import TeamDialog from "./components/TeamDialog.svelte";
   import { teamDialogState, openTeamDialog } from "./state/teamDialog.svelte";
   import { currentPreferences } from "./state/store.svelte";
+  import { markTerminalOpacityRoot, windowIsTransparent } from "./terminal/backgroundOpacity";
   import { installFileDropGuard } from "./state/fileDropGuard";
   import { refreshDrafts } from "./state/drafts.svelte";
   import { reportUncertainOutcome } from "./state/mutationReport";
@@ -335,6 +336,18 @@
   $effect(() => {
     const theme = currentPreferences()?.editor_theme;
     applyEditorTheme(theme ?? DEFAULT_EDITOR_THEME);
+  });
+
+  // Terminal background opacity. Only a window chan-desktop built
+  // transparent (`?transparent=1`, fixed for the page) is marked; the root
+  // markers and `--terminal-opacity` follow the preference live.
+  const transparentWindow = windowIsTransparent();
+  $effect(() => {
+    markTerminalOpacityRoot(
+      document.documentElement,
+      transparentWindow,
+      currentPreferences()?.terminal?.background_opacity,
+    );
   });
 
   // Single-writer bridge from per-tab read mode to the window-level
@@ -1969,6 +1982,13 @@
     color: var(--text);
     background: var(--bg);
     overflow: hidden;
+  }
+  /* Below 100% terminal opacity in a transparent window the page itself is
+     clear; terminals paint their own tint and every other surface keeps its
+     own background. */
+  :global(:root[data-terminal-see-through]),
+  :global(:root[data-terminal-see-through] body) {
+    background: transparent;
   }
   :global(.md-bubble .md-bubble-status.md-bubble-status-empty) {
     border-top: 0;

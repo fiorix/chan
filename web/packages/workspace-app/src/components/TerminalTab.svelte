@@ -187,6 +187,7 @@
     scrollbackLinesFromMb,
     SCROLLBACK_MB_DEFAULT,
   } from "../terminal/scrollback";
+  import { transparentColor, windowIsTransparent } from "../terminal/backgroundOpacity";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -423,6 +424,10 @@
   const customTerminalColors = $derived(
     resolveTerminalColors(currentPreferences()?.terminal_colors),
   );
+  // Whether chan-desktop built this window transparent, fixed for the page.
+  // The renderers then paint a transparent default background and the
+  // `.terminal-tab` CSS paints the tint at the live opacity.
+  const transparentWindow = windowIsTransparent();
   const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
   // itself (its write callback fires off xterm's own queue). On
@@ -750,7 +755,7 @@
       customTerminalColors?.cursor ??
       (styles.getPropertyValue("--link").trim() || "#58a6ff");
     const base = {
-      background: bg,
+      background: transparentWindow ? transparentColor(bg) : bg,
       foreground: text,
       cursor,
       selectionBackground: "rgba(88, 166, 255, 0.35)",
@@ -810,6 +815,9 @@
   // dark rendering untouched. xterm-only: ghostty-web has no equivalent
   // option.
   function terminalMinimumContrastRatio(): number {
+    // In a transparent window the backdrop is whatever sits behind it, so a
+    // ratio measured against the theme background would be wrong.
+    if (transparentWindow) return 1;
     return effectiveTerminalTheme() === "light" ? 4.5 : 1;
   }
 
@@ -1106,7 +1114,7 @@
       // uses its own metrics), no macOptionIsMeta / tabStopWidth.
       const terminalHost = host;
       const ghosttyTerm = new ghosttyKit.Terminal({
-        allowTransparency: false,
+        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
@@ -1198,7 +1206,7 @@
         // find (runFind) throws without it and the find bar matches
         // nothing.
         allowProposedApi: true,
-        allowTransparency: false,
+        allowTransparency: transparentWindow,
         cursorBlink: false,
         cursorStyle: "block",
         fontFamily,
@@ -3223,6 +3231,20 @@
   .terminal-tab.active {
     visibility: visible;
     pointer-events: auto;
+  }
+  /* A transparent window: the tint is painted once, here, at the live
+     opacity, and the layers inside it stay clear so the alpha does not
+     stack. The renderers paint a transparent default background. */
+  :global(:root[data-transparent-window]) .terminal-tab {
+    background: color-mix(
+      in srgb,
+      var(--terminal-background, var(--bg)) var(--terminal-opacity, 100%),
+      transparent
+    );
+  }
+  :global(:root[data-transparent-window]) .terminal-host,
+  :global(:root[data-transparent-window]) .terminal-host :global(.xterm-viewport) {
+    background-color: transparent;
   }
   /* Marks the composer's subtree for the keyboard's return; the composer
      positions against the terminal tab, so the wrapper adds no box. */

@@ -20,6 +20,11 @@
     TERMINAL_FONT_SIZE_MIN,
     TERMINAL_FONT_SIZE_MAX,
   } from "../../terminal/fontSize";
+  import {
+    TERMINAL_BACKGROUND_OPACITY_MIN,
+    TERMINAL_BACKGROUND_OPACITY_MAX,
+    clampBackgroundOpacity,
+  } from "../../terminal/backgroundOpacity";
   import { normalizeHexColor, readStandardTerminalColors } from "../../state/paneColor";
   import { ui } from "../../state/store.svelte";
   import { windowModeSecretMaskingEnabled } from "../../state/windowMode";
@@ -360,6 +365,23 @@
       commit((p) => ({ ...p, terminal: { ...p.terminal, font_size: next } }))}
   />
   <span class="value">px</span>
+</SettingField>
+
+<SettingField
+  label="Background opacity"
+  pref="terminal.background_opacity"
+  hint="See-through terminal background in chan-desktop's standalone terminal windows; text stays opaque. Applies live to windows opened below 100%; a window opened at 100% stays opaque until it is reopened. Workspace and devserver windows stay opaque."
+>
+  <SliderField
+    value={clampBackgroundOpacity(prefs.terminal.background_opacity)}
+    min={TERMINAL_BACKGROUND_OPACITY_MIN}
+    max={TERMINAL_BACKGROUND_OPACITY_MAX}
+    step={5}
+    format={(v) => `${v}%`}
+    ariaLabel="Terminal background opacity percent"
+    oncommit={(percent) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, background_opacity: percent } }))}
+  />
 </SettingField>
 
 <SettingField

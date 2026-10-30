@@ -46,6 +46,7 @@ function basePrefs(): Record<string, unknown> {
       default_term: "xterm-256color",
       font: "os-default",
       font_size: 14,
+      background_opacity: 100,
       mcp_env: false,
       mouse_capture: true,
     },

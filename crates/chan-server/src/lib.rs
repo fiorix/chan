@@ -77,7 +77,7 @@ mod tunnel_guard;
 mod util;
 mod window_bus;
 
-pub use config::ServerConfig;
+pub use config::{ServerConfig, TERMINAL_BACKGROUND_OPACITY_MAX};
 // Desktop window-ops, window presence, and the title map live in chan-library.
 // chan-desktop depends on chan-server and not on chan-library, so the public
 // types are reachable here; the modules are re-exported crate-wide so the
