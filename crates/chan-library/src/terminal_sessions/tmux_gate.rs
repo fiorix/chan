@@ -240,6 +240,14 @@ impl TmuxGate {
         }
     }
 
+    /// Whether a client's typed bytes may reach the PTY: only while the
+    /// stream is plain. From the marker on, the PTY's input is the protocol,
+    /// and a byte typed into it would be a command the client never paired
+    /// (or, while the question stands, a write the answer has not allowed).
+    pub(super) fn accepts_input(&self) -> bool {
+        matches!(self.phase, Phase::Plain)
+    }
+
     /// Whether a question stands.
     #[cfg(test)]
     pub(super) fn asking(&self) -> bool {
@@ -369,9 +377,11 @@ impl TmuxGate {
     }
 
     fn entered(&mut self, foreground: Foreground, now: Instant, actions: &mut Vec<Action>) {
-        let trusted = foreground.name.as_deref().is_some_and(|name| {
-            name == "tmux" || self.policy.trust.iter().any(|trusted| trusted == name)
-        });
+        let trusted = foreground
+            .name
+            .as_deref()
+            .map(program_word)
+            .is_some_and(|word| word == "tmux" || self.policy.trust.iter().any(|t| t == word));
         if trusted || self.allow_for_tab {
             self.phase = Phase::Probing {
                 deadline: now + PROBE_TIMEOUT,
@@ -586,6 +596,13 @@ fn drive(
         }
     }
     Ok(())
+}
+
+/// The program a process name names: its first word, since a program that
+/// titles itself, as tmux does with `tmux: client`, changes the name the OS
+/// reports.
+fn program_word(name: &str) -> &str {
+    name.split([':', ' ']).next().unwrap_or("")
 }
 
 /// The name and command line of a process, read from `/proc`.
@@ -855,6 +872,42 @@ mod tests {
         let fed = gate.feed(&entry(), now, ssh);
         assert!(question(&gate).is_none());
         assert_eq!(writes(&fed.actions).len(), 2, "probed at once: {fed:?}");
+    }
+
+    #[test]
+    fn a_retitled_tmux_enters_at_once() {
+        // tmux titles its processes, so Linux reports the client as this.
+        let now = Instant::now();
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        let fed = gate.feed(&entry(), now, || Foreground {
+            name: Some("tmux: client".into()),
+            command: Some("tmux: client".into()),
+        });
+        assert!(question(&gate).is_none());
+        assert_eq!(writes(&fed.actions).len(), 2);
+        assert_eq!(program_word("tmux: client"), "tmux");
+        assert_eq!(program_word("sshd: alex [priv]"), "sshd");
+        assert_eq!(program_word("ssh"), "ssh");
+        assert_eq!(program_word(""), "");
+    }
+
+    #[test]
+    fn typed_input_is_refused_from_the_marker_until_the_stream_is_plain_again() {
+        let now = Instant::now();
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        assert!(gate.accepts_input());
+        gate.feed(&entry(), now, ssh);
+        assert!(!gate.accepts_input(), "not while the question stands");
+        gate.answer(TmuxAnswer::Allow, now);
+        assert!(!gate.accepts_input(), "not while probing");
+        gate.feed(
+            b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
+            now,
+            ssh,
+        );
+        assert!(!gate.accepts_input(), "not while connected");
+        gate.feed(b"%exit\r\n\x1b\\", now, ssh);
+        assert!(gate.accepts_input(), "plain again after the exit");
     }
 
     #[test]

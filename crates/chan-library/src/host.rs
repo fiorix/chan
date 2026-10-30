@@ -6948,6 +6948,9 @@ fn tmux_window_hook(
         if !label.is_empty() {
             mint_registry.set_label(&row.window_id, label);
         }
+        // The row holds none of the tmux window's tabs, so it is minted
+        // buried: a client opens it from the launcher when it wants it.
+        mint_registry.set_hidden(&row.window_id, true);
         mint_notify.notify_waiters();
         Some(row.window_id)
     };
@@ -6993,6 +6996,7 @@ mod tmux_window_hook_tests {
         );
         assert!(!row.control);
         assert_eq!(row.origin, WindowOrigin::Native);
+        assert!(row.hidden, "minted buried: it holds no tabs");
         let unnamed = (hook.mint)("").expect("a window id");
         let row = registry
             .snapshot()
