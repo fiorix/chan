@@ -1,6 +1,6 @@
 # A local terminal window cannot show the desktop behind it
 
-Status: built on `desktop/terminal-prototypes` by 2026-10-30 (commits `1b66ab60f`, `fc97aef28`, `cff4cb0a1`, `25165529a`, `e63b637f1`); read by eye on macOS by the owner and measured on Linux under a compositor on 2026-10-30 (the section Built and verified); no item was written while it was built, so this record is written from the commits and the readings; closes at the GA.
+Status: built on `desktop/terminal-prototypes` by 2026-10-30 (commits `1b66ab60f`, `fc97aef28`, `cff4cb0a1`, `25165529a`, `e63b637f1`); read by eye on macOS by the owner and measured on Linux under a compositor on 2026-10-30 (the section Built and verified); no item was written while it was built, so this record is written from the commits and the readings; the owner then found a macOS window opaque at a setting below 100, and every local terminal window is now built transparent (the section Every local terminal window is built transparent); closes at the GA.
 
 ## What was asked
 
@@ -41,3 +41,30 @@ Linux, 2026-10-30, on a CachyOS host under Hyprland 0.57.0 (an unattended 1920x1
 The captures, the rig and the readers are in the `chan-dev` repository under `releases/v0116/terminal-prototypes-linux/`.
 
 Not read: the light theme in a transparent window; FreeBSD and Windows.
+
+## Every local terminal window is built transparent, 2026-10-30
+
+The owner's words of 2026-10-30, after reading the ghostty masking build on the macOS desktop: "what's not working is the actualy transparency of the terminal, again.. perhaps something got lost in the rebase?"
+
+Nothing was lost: every piece of the contract above is present at `7856e8f6c`, and the rebase touched only the web masking files and `terminal_sessions.rs`. Read on the macOS desktop with the debug build of `7856e8f6c` in an isolated `CHAN_HOME`, through `screencapture -l` of each window and the alpha of its pixels (a capture keeps the window's alpha: the rounded corners read 0):
+
+- The first window opened while the value was the default 100, so it was built opaque, and it stays opaque whatever the slider says afterwards. This is the contract as written, and it is the trap: the slider moves, the open window cannot follow.
+- `chan config set terminal.background_opacity 90` with the desktop running, then a new window: the terminal body read alpha 255 on xterm.js and on ghostty. The window was built transparent (the build reads `server.toml` from disk), but the page read 100 from its tenant's in-memory config, which only a `PATCH /api/config` through that tenant or a restart refreshed: `config_watch::start` ran for a standalone `chan serve` alone. The same gap kept a Settings write in one tenant's window (a workspace) away from another tenant's windows (the terminal windows).
+- The same value written through `PATCH /api/config`: the two windows built transparent read alpha 229 (90%) at once and a new window the same; the tab strip and the title bar stayed at 255.
+
+What changed:
+
+- `builds_transparent` (`desktop/src-tauri/src/serve.rs`) no longer takes the setting: every local standalone terminal window and the default-terminal window is built transparent and carries `transparent=1`, and the page paints itself opaque at 100, so a change in either direction applies live to every open terminal window and nothing has to be reopened. Workspace windows, devserver windows and control terminals stay opaque. `chan_server::TERMINAL_BACKGROUND_OPACITY_MAX`, exported only for that build-time read, is gone.
+- The light-theme contrast floor (xterm.js `minimumContrastRatio` 4.5) now drops to 1 only while the desktop shows through (a transparent window below 100), not in every transparent window, so building them all transparent does not take it from a light terminal at 100. ghostty-web skips a cell background of exactly black and fills the row with the theme background first in any window, so a transparent window at 100 paints what an opaque one does.
+- `config_watch::ConfigWatch` (`crates/chan-server/src/config_watch.rs`) is one watch on the config directory for many tenants, held weakly and started with the first. `chan serve` keeps one for its tenant; the route layer behind chan-desktop and the devserver holds one for every tenant it mounts. On an event each tenant reloads and compares with its own copy, so the writer stays quiet and every other tenant refreshes its windows.
+- The known gap "a transparent macOS window loses automatic window tabbing" was not a cost of transparency: Tauri turns automatic tabbing off for every window built without a tabbing identifier (`tauri-runtime-wry` 2.12.2, `lib.rs` 4436), chan sets none, and tao applies it app-wide through `NSWindow.setAllowsAutomaticWindowTabbing(false)` (`tao` 0.37.2, `platform_impl/macos/window.rs` 307). The desktop design no longer lists it; the known-gaps line above keeps it as it was written at the build.
+- The Settings hint, `desktop/design.md`, `docs/config-reference.md`, the `TerminalConfig` doc comment and the page comments say the setting applies live to every open terminal window; `crates/chan-server/design.md` describes the config refresh.
+
+Checks, 2026-10-30, macOS:
+
+- Unit tests: `config_watch` gains `dispatch_refreshes_every_other_tenant_and_forgets_dropped_ones` (the writer stays quiet, the other tenant reloads 90 and pushes `config_changed`, a dropped tenant leaves the list) and `tenants_hold_no_tenant_alive`; `only_local_terminal_windows_build_transparent` pins the window kinds without a setting; `TerminalTab.theme.test.ts` pins the light floor in a transparent window at 4.5 at 100, 1 at 90 and 4.5 again live, and fails against the window-flag rule it replaces.
+- The scoped gate after the last edit, with `RUSTFLAGS="-D warnings"`: `cargo fmt --check`, clippy with `-D warnings` and rustdoc for chan-server, chan-desktop and chan-library; `cargo test --all-targets` for the three, 3752 passed and 0 failed; `make web-check` green (workspace app 608 files, 7899 tests; launcher 64 files, 696; shared 8 files, 234; profile 5 files, 20; both production builds).
+- In the debug desktop built from the change, in a fresh isolated `CHAN_HOME` with `terminal.ghostty = true`: the first window, built at the default 100, reads alpha 255 over its terminal body; `chan config set terminal.background_opacity 90` with the desktop running takes the same window to 229 without reopening it, and `chan config set terminal.background_opacity 100` back to 255; the tab strip and the title bar read 255 throughout.
+- The owner moved the Settings slider in that build's open terminal window on the macOS desktop and read it working ("done testing, it works").
+
+Not read: a Settings write in a workspace window reaching an open terminal window by eye (the dispatch test covers the mechanism); the light theme by eye; Linux, FreeBSD and Windows, where every local terminal window is now also built transparent and paints itself opaque at 100.
