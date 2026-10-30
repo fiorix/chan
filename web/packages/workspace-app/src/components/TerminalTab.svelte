@@ -3293,6 +3293,11 @@
     padding: 8px;
     background: var(--terminal-background, var(--bg));
     overflow: hidden;
+    /* The terminal draws its own cursor. ghostty-web makes this element
+       contenteditable, and the browser caret it would draw at the start
+       of the host sits under the renderer's canvas, showing wherever the
+       canvas is see-through, as in a transparent window. */
+    caret-color: transparent;
   }
   .cli-reload-notice {
     display: flex;
