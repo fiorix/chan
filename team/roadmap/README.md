@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.117.0
 
-Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a second time, and a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), raised 2026-10-30 and not started. A third row was raised by the owner the same day, after the tag: the terminal opacity setting reaches only the terminal-only windows and not the terminal tabs of workspace, devserver and control windows ([opaall]), accepted and built the same day on `v0117/terminal-opacity` and read by pixel on Linux; the owner's macOS reading is pending. A fourth row was raised by the owner the same evening, after that build: ghostty becomes the default terminal backend on every platform, control terminals included ([ghdef]), built on the same branch; reading that build the owner found that ghostty drops an image paste and swallows Ctrl+V ([ghpaste]), fixed on the same branch, and, on the Linux desktop, that a select's drop-down paints light inside the dark theme off macOS ([selscheme]), fixed on the same branch too.
+Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a second time, and a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), raised 2026-10-30 and not started. A third row was raised by the owner the same day, after the tag: the terminal opacity setting reaches only the terminal-only windows and not the terminal tabs of workspace, devserver and control windows ([opaall]), accepted and built the same day on `v0117/terminal-opacity` and read by pixel on Linux; the owner's macOS reading is pending. A fourth row was raised by the owner the same evening, after that build: ghostty becomes the default terminal backend on every platform, control terminals included ([ghdef]), built on the same branch; reading that build the owner found that ghostty drops an image paste and swallows Ctrl+V ([ghpaste]), fixed on the same branch, and, on the Linux desktop, that a select's drop-down paints light inside the dark theme off macOS ([selscheme]), fixed on the same branch too. The owner also reported that a ghostty terminal in a gateway-served window stops taking keys after idle until it is clicked ([ghidle]); traced in code without a reproduction, proposed, to be captured at the next occurrence.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -33,6 +33,7 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 | [ghostty is not the default backend][ghdef] | built | review |
 | [ghostty drops an image paste][ghpaste] | built | review |
 | [Select popups paint light off macOS][selscheme] | built | review |
+| [ghostty stops taking keys after idle][ghidle] | proposed | measure |
 
 [chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
@@ -40,6 +41,7 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 [ghdef]: v0.117.0/ghostty-is-not-the-default-terminal-backend.md
 [ghpaste]: v0.117.0/ghostty-drops-an-image-paste-and-swallows-control-v.md
 [selscheme]: v0.117.0/select-popups-paint-light-in-the-dark-theme-off-macos.md
+[ghidle]: v0.117.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
 
 ## Completed
 
