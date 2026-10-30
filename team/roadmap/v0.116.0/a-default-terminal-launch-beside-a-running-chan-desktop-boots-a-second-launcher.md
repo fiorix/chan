@@ -39,4 +39,4 @@ The launcher and desktop logs, the rig and the compositor captures are in the `c
 
 Not read: the shutdown refusal (the updater relaunch path), the `CHAN_NO_DESKTOP_HANDOFF` opt-out beside a running desktop, a handoff refused by the desktop.
 
-Open: the sessions the handoff opens list `cwd: null` in `cs terminal list --json`, where the window's seeded default terminal lists its directory, although the shells start where asked; raised as its own item.
+Open: the sessions the handoff opens list `cwd: null` in `cs terminal list --json`, where the window's seeded default terminal lists its directory, although the shells start where asked; raised and fixed as [cs terminal list hides the directory of a standalone terminal outside the home](cs-terminal-list-hides-the-directory-of-a-standalone-terminal-outside-the-home.md).
