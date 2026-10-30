@@ -30,10 +30,12 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 | [Terminal opacity only in terminal windows][opaall] | accepted | build |
+| [tmux control mode has no chan client][tmuxcc] | proposed | decision |
 
 [chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
 [opaall]: v0.117.0/terminal-opacity-applies-only-to-standalone-terminal-windows.md
+[tmuxcc]: v0.117.0/tmux-control-mode-has-no-chan-client.md
 
 ## Completed
 
