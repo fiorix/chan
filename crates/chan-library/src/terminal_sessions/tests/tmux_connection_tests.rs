@@ -273,6 +273,22 @@ fn input_resize_and_kill_reach_tmux_through_the_gateway_thread() {
 }
 
 #[test]
+fn typing_into_the_control_terminal_reaches_nothing_while_connected() {
+    let (mut rig, _pane) = attached();
+    rig.control.send_input(b"detach-client\n");
+    rig.control.send_input_plan(vec![b"x".to_vec()]);
+    assert!(rig.inputs().is_empty(), "the PTY's input is the protocol's");
+    rig.feed(b"%exit\r\n\x1b\\$ ");
+    rig.work();
+    rig.control.send_input(b"ls\r");
+    assert_eq!(
+        rig.inputs(),
+        vec![b"ls\r".to_vec()],
+        "plain again, typing flows"
+    );
+}
+
+#[test]
 fn a_pause_is_answered_and_a_window_close_ends_its_panes() {
     let (mut rig, pane) = attached();
     rig.feed(b"%pause %0\r\n");

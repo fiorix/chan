@@ -5747,6 +5747,9 @@ impl Session {
     fn send_input(&self, data: &[u8]) {
         self.last_activity
             .store(now_unix_secs() as i64, Ordering::Relaxed);
+        if !self.accepts_tmux_input() {
+            return;
+        }
         // An attached frontend answering a DSR stands the library's fallback
         // down; see `take_due_dsr_answer`.
         if contains_cursor_position_report(data) {
@@ -5757,6 +5760,9 @@ impl Session {
     }
 
     fn send_input_plan(&self, parts: Vec<Vec<u8>>) {
+        if !self.accepts_tmux_input() {
+            return;
+        }
         self.last_activity
             .store(now_unix_secs() as i64, Ordering::Relaxed);
         let command = if parts.len() == 1 {
@@ -6897,6 +6903,16 @@ impl Session {
 
     fn broadcast(&self, event: SessionEvent) {
         let _ = self.output_tx.send(event);
+    }
+
+    /// Whether typed bytes may reach this session's PTY: not from a tmux
+    /// marker until the stream is plain again, since the PTY's input is then
+    /// the protocol's and the gate alone writes it.
+    fn accepts_tmux_input(&self) -> bool {
+        self.tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .accepts_input()
     }
 
     /// Follow a tmux policy change; see [`Registry::set_tmux`].
