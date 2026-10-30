@@ -426,55 +426,105 @@ fn a_layout_change_sizes_the_pane_session_and_adds_a_new_pane() {
     assert_eq!(second.winsize.lock().unwrap().cols, 39);
 }
 
-/// A recording window hook: mints `w-<n>` ids, and keeps every call.
+/// A recording window hook: mints `w-<n>` ids, keeps every window call in
+/// `calls` and every status in `statuses`, and hands out the last control
+/// handle it was given.
 struct RecordingHook {
     calls: Arc<Mutex<Vec<String>>>,
+    statuses: Arc<Mutex<Vec<String>>>,
+    control: Arc<Mutex<Option<TmuxControl>>>,
+    minted: std::sync::atomic::AtomicUsize,
 }
 
 impl RecordingHook {
     fn install(registry: &Registry) -> Arc<Mutex<Vec<String>>> {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let minted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let hook = RecordingHook {
-            calls: calls.clone(),
-        };
-        let mint_calls = hook.calls.clone();
-        let remove_calls = hook.calls.clone();
-        let attach_calls = hook.calls.clone();
-        let release_calls = hook.calls.clone();
-        let layout_calls = hook.calls.clone();
-        registry.install_tmux_windows(TmuxWindowHook {
-            mint: Arc::new(move |title: &str| {
-                let n = minted.fetch_add(1, Ordering::Relaxed) + 1;
-                mint_calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("mint {title} -> w-{n}"));
-                Some(format!("w-{n}"))
-            }),
-            remove: Arc::new(move |id: &str| {
-                remove_calls.lock().unwrap().push(format!("remove {id}"));
-            }),
-            attach: Arc::new(move |window: &str, session: &str| {
-                attach_calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("attach {window} {session}"));
-            }),
-            release: Arc::new(move |window: &str, session: &str, to: &str| {
-                release_calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("release {window} {session} -> {to}"));
-            }),
-            layout: Arc::new(move |window: &str, layout: &serde_json::Value| {
-                layout_calls
-                    .lock()
-                    .unwrap()
-                    .push(format!("layout {window} {layout}"));
-            }),
+        Self::install_recording(registry).calls
+    }
+
+    fn install_recording(registry: &Registry) -> Recorded {
+        let hook = Arc::new(RecordingHook {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            statuses: Arc::new(Mutex::new(Vec::new())),
+            control: Arc::new(Mutex::new(None)),
+            minted: std::sync::atomic::AtomicUsize::new(0),
         });
-        calls
+        let recorded = Recorded {
+            calls: hook.calls.clone(),
+            statuses: hook.statuses.clone(),
+            control: hook.control.clone(),
+        };
+        registry.install_tmux_windows(hook);
+        recorded
+    }
+
+    fn next_id(&self) -> String {
+        let n = self.minted.fetch_add(1, Ordering::Relaxed) + 1;
+        format!("w-{n}")
+    }
+
+    fn record(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+}
+
+/// What a [`RecordingHook`] recorded, by kind.
+struct Recorded {
+    calls: Arc<Mutex<Vec<String>>>,
+    statuses: Arc<Mutex<Vec<String>>>,
+    control: Arc<Mutex<Option<TmuxControl>>>,
+}
+
+impl TmuxWindowHook for RecordingHook {
+    fn mint(&self, _connection: &str, name: &str) -> Option<String> {
+        let id = self.next_id();
+        self.record(format!("mint {name} -> {id}"));
+        Some(id)
+    }
+
+    fn control(&self, _connection: &str, title: &str, existing: Option<&str>) -> Option<String> {
+        if let Some(existing) = existing {
+            self.record(format!("control {title} again {existing}"));
+            return Some(existing.to_owned());
+        }
+        let id = self.next_id();
+        self.record(format!("control {title} -> {id}"));
+        Some(id)
+    }
+
+    fn remove(&self, window_id: &str) {
+        self.record(format!("remove {window_id}"));
+    }
+
+    fn attach(&self, window_id: &str, session_id: &str) {
+        self.record(format!("attach {window_id} {session_id}"));
+    }
+
+    fn release(&self, window_id: &str, session_id: &str, to: &str) {
+        self.record(format!("release {window_id} {session_id} -> {to}"));
+    }
+
+    fn layout(&self, window_id: &str, layout: &serde_json::Value) {
+        self.record(format!("layout {window_id} {layout}"));
+    }
+
+    fn status(
+        &self,
+        connection: &str,
+        control_window: &str,
+        status: TmuxConnectionStatus,
+        control: TmuxControl,
+    ) {
+        self.statuses.lock().unwrap().push(format!(
+            "status {connection} {control_window} {} windows={} local={}",
+            status.version,
+            status.windows.len(),
+            status.origin.local
+        ));
+        *self.control.lock().unwrap() = Some(control);
+    }
+
+    fn ended(&self, connection: &str, control_window: Option<&str>) {
+        self.record(format!("ended {connection} {control_window:?}"));
     }
 }
 
@@ -502,7 +552,7 @@ fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
     assert_eq!(
         calls(&hook),
         vec![
-            "mint tmux main -> w-1".to_owned(),
+            "control tmux -CC on this machine -> w-1".to_owned(),
             format!("attach w-1 {}", control.id),
             format!("release w-source {} -> w-1", control.id),
         ],
@@ -513,18 +563,25 @@ fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
         Some("w-1"),
         "the session now belongs to its control window"
     );
-    // The connection ends and a second run in the same terminal re-enters:
-    // the session still sits in its control window, so nothing is minted.
+    // The connection ends: the host is told after the windows went, with
+    // the control window to release. A second run in the same terminal
+    // re-enters: the session still sits in its control window, so that row
+    // is marked as the control window again and nothing is minted or moved.
     control.record_output(b"%exit\r\n\x1b\\");
     registry.perform_tmux_work(&control);
-    calls(&hook);
+    assert_eq!(
+        calls(&hook),
+        vec![format!("ended {} Some(\"w-1\")", control.id)]
+    );
     control.record_output(&[MARKER, ENTRY].concat());
     control.record_output(VERSION_REPLY);
     registry.perform_tmux_work(&control);
-    assert!(
-        calls(&hook).is_empty(),
-        "a second connection in the control window mints nothing"
+    assert_eq!(
+        calls(&hook),
+        vec!["control tmux -CC on this machine again w-1".to_owned()],
+        "a second connection in the control window re-marks it and mints nothing"
     );
+    assert_eq!(control.window_id().as_deref(), Some("w-1"));
 }
 
 #[test]
@@ -787,6 +844,7 @@ fn the_exit_removes_every_minted_window_through_the_hook() {
         recorded.iter().any(|c| c == "remove w-1"),
         "the tmux window's chan window goes with the connection: {recorded:?}"
     );
+    assert_ended_after_remove(&recorded, &rig.control.id);
 }
 
 #[test]
@@ -801,6 +859,7 @@ fn a_control_session_closed_right_after_the_exit_still_removes_its_windows() {
         recorded.iter().any(|c| c == "remove w-1"),
         "the close performs the exit's work: {recorded:?}"
     );
+    assert_ended_after_remove(&recorded, &rig.control.id);
 }
 
 #[test]
@@ -816,6 +875,7 @@ fn the_control_process_ending_removes_the_windows_on_the_next_drain() {
         recorded.iter().any(|c| c == "remove w-1"),
         "the process's end removes the window: {recorded:?}"
     );
+    assert_ended_after_remove(&recorded, &rig.control.id);
 }
 
 #[test]
@@ -832,4 +892,104 @@ fn a_control_process_exit_that_removes_the_session_still_removes_its_windows() {
         recorded.iter().any(|c| c == "remove w-1"),
         "the removal performs the exit's work: {recorded:?}"
     );
+    assert_ended_after_remove(&recorded, &rig.control.id);
+}
+
+/// The host is told of the end once, after the window's removal, with the
+/// control window the connection had: none here, since the hook was
+/// installed after the connection was made, so no control window was minted.
+fn assert_ended_after_remove(recorded: &[String], connection: &str) {
+    let removed = recorded
+        .iter()
+        .position(|c| c == "remove w-1")
+        .expect("the window is removed");
+    let ended = recorded
+        .iter()
+        .position(|c| c.starts_with("ended "))
+        .expect("the end is handed to the host");
+    assert!(removed < ended, "{recorded:?}");
+    assert_eq!(recorded[ended], format!("ended {connection} None"));
+    assert_eq!(
+        recorded.iter().filter(|c| c.starts_with("ended ")).count(),
+        1,
+        "once: {recorded:?}"
+    );
+}
+
+#[test]
+fn the_status_names_the_control_window_and_requests_go_through_the_handle() {
+    let registry = Registry::new(test_config(1 << 16, 4, 10));
+    let recorded = RecordingHook::install_recording(&registry);
+    let (control, commands) = test_session_with_commands(1 << 16);
+    register_session(&registry, &control);
+    *control
+        .tmux_foreground
+        .lock()
+        .expect("terminal tmux foreground poisoned") = Some(Foreground {
+        name: Some("tmux".into()),
+        command: Some("tmux -CC".into()),
+    });
+    control.record_output(&[MARKER, ENTRY].concat());
+    control.record_output(VERSION_REPLY);
+    registry.perform_tmux_work(&control);
+    assert_eq!(
+        calls(&recorded.statuses),
+        vec![format!(
+            "status {} w-1 3.8 windows=0 local=true",
+            control.id
+        )],
+        "the first status names the control window minted ahead of it"
+    );
+    while commands.try_recv().is_ok() {}
+    // The handle the status came with asks the connection from outside the
+    // registry: the library's request route.
+    let handle = recorded
+        .control
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a control handle");
+    assert!(handle.request(TmuxRequest::NewWindow));
+    let written = match commands.try_recv() {
+        Ok(PtyCommand::Input(bytes)) => bytes,
+        _ => panic!("the request wrote nothing to the control PTY"),
+    };
+    assert_eq!(written, b"new-window -PF '#{window_id}'\n".to_vec());
+    // A window tmux adds is a status change.
+    control.record_output(b"%window-add @1\r\n");
+    registry.perform_tmux_work(&control);
+    assert_eq!(
+        calls(&recorded.statuses),
+        vec![format!(
+            "status {} w-1 3.8 windows=1 local=true",
+            control.id
+        )]
+    );
+    // The end is handed over last, after the window's removal, with no
+    // status of its own.
+    control.record_output(b"%exit\r\n\x1b\\");
+    registry.perform_tmux_work(&control);
+    let ended = calls(&recorded.calls);
+    assert_eq!(
+        ended.last().map(String::as_str),
+        Some(format!("ended {} Some(\"w-1\")", control.id).as_str()),
+        "{ended:?}"
+    );
+    assert!(
+        ended.iter().any(|c| c == "remove w-2"),
+        "the tmux window went first: {ended:?}"
+    );
+    // A status the mint's answer queued before the end may land in the
+    // same drain; nothing follows the end.
+    calls(&recorded.statuses);
+    registry.perform_tmux_work(&control);
+    assert!(
+        calls(&recorded.statuses).is_empty(),
+        "no status after the end"
+    );
+    assert!(calls(&recorded.calls).is_empty(), "no work after the end");
+    // A handle on a session that is gone asks nothing.
+    assert!(registry.close(&control.id, CloseReason::Explicit));
+    drop(control);
+    assert!(!handle.request(TmuxRequest::Detach));
 }

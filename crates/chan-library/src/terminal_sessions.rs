@@ -75,8 +75,8 @@ pub use request_status::{ChanRequestStatus, ChanStatusLease};
 use ring::RingBuffer;
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
-pub use tmux_connection::{TmuxConnectionStatus, TmuxSessionStatus, TmuxWindowStatus};
-pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest, TmuxStatus};
+pub use tmux_connection::{TmuxConnectionStatus, TmuxOrigin, TmuxSessionStatus, TmuxWindowStatus};
+pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest};
 
 const BROADCAST_CAP: usize = 1024;
 
@@ -492,7 +492,7 @@ pub struct Registry {
     tmux: Mutex<TerminalTmuxConfig>,
     /// How the host mints and drops chan windows for a tmux connection's
     /// windows; absent, a connection's panes belong to no window.
-    tmux_windows: Mutex<Option<TmuxWindowHook>>,
+    tmux_windows: Mutex<Option<Arc<dyn TmuxWindowHook>>>,
     /// The control session of each live tmux connection, so a pane session's
     /// request of the connection reaches the session that holds it.
     tmux_controls: Mutex<HashMap<TmuxConnectionId, Weak<Session>>>,
@@ -1615,11 +1615,6 @@ pub struct AttachHandle {
     pub initial_tmux_consent: Arc<TmuxConsentSnapshot>,
     /// Consent snapshots after `initial_tmux_consent`.
     pub tmux_consent_rx: watch::Receiver<Arc<TmuxConsentSnapshot>>,
-    /// The tmux connection status captured with the subscription, so a
-    /// client joining a connected control terminal shows its status view.
-    pub initial_tmux_status: Arc<TmuxStatus>,
-    /// Status snapshots after `initial_tmux_status`.
-    pub tmux_status_rx: watch::Receiver<Arc<TmuxStatus>>,
     pub replay: Vec<Vec<u8>>,
     pub seq: u64,
     /// This session incarnation's epoch, sent in the attach prelude so the
@@ -2000,8 +1995,9 @@ impl Registry {
     }
 
     /// Install how chan windows are minted and dropped for a tmux
-    /// connection's windows. A later install replaces the prior hook.
-    pub fn install_tmux_windows(&self, hook: TmuxWindowHook) {
+    /// connection's windows, and where its records go. A later install
+    /// replaces the prior hook.
+    pub fn install_tmux_windows(&self, hook: Arc<dyn TmuxWindowHook>) {
         *self
             .tmux_windows
             .lock()
@@ -2050,24 +2046,41 @@ impl Registry {
                     }
                 }
                 tmux_connection::TmuxWork::MintWindow { key, title } => {
-                    let hook = self
-                        .tmux_windows
-                        .lock()
-                        .expect("terminal registry poisoned")
-                        .clone();
-                    let window_id = hook.as_ref().and_then(|hook| (hook.mint)(&title));
+                    let hook = self.tmux_window_hook();
+                    let window_id = hook
+                        .as_ref()
+                        .and_then(|hook| hook.mint(&session.id, &title));
                     session
                         .tmux_work_done(tmux_connection::WorkDone::WindowMinted { key, window_id });
                 }
                 tmux_connection::TmuxWork::RemoveWindow { window_id } => {
-                    let hook = self
-                        .tmux_windows
-                        .lock()
-                        .expect("terminal registry poisoned")
-                        .clone();
+                    let hook = self.tmux_window_hook();
                     tracing::debug!(window_id, hooked = hook.is_some(), "removing a tmux window");
                     if let Some(hook) = hook {
-                        (hook.remove)(&window_id);
+                        hook.remove(&window_id);
+                    }
+                }
+                tmux_connection::TmuxWork::Status { status } => {
+                    // The connection is the control session's; its record
+                    // names the control window minted for it, which the
+                    // work ahead of this item minted, or the window the
+                    // session sits in where no hook minted one.
+                    if let Some(hook) = self.tmux_window_hook() {
+                        let control_window = session
+                            .tmux_control_window()
+                            .or_else(|| session.window_id())
+                            .unwrap_or_default();
+                        hook.status(
+                            &session.id,
+                            &control_window,
+                            status,
+                            TmuxControl(Arc::downgrade(session)),
+                        );
+                    }
+                }
+                tmux_connection::TmuxWork::Ended => {
+                    if let Some(hook) = self.tmux_window_hook() {
+                        hook.ended(&session.id, session.tmux_control_window().as_deref());
                     }
                 }
                 tmux_connection::TmuxWork::StartGateway { connection, rx } => {
@@ -2085,23 +2098,13 @@ impl Registry {
                     window_id,
                     session_id,
                 } => {
-                    let hook = self
-                        .tmux_windows
-                        .lock()
-                        .expect("terminal registry poisoned")
-                        .clone();
-                    if let Some(hook) = hook {
-                        (hook.attach)(&window_id, &session_id);
+                    if let Some(hook) = self.tmux_window_hook() {
+                        hook.attach(&window_id, &session_id);
                     }
                 }
                 tmux_connection::TmuxWork::Layout { window_id, layout } => {
-                    let hook = self
-                        .tmux_windows
-                        .lock()
-                        .expect("terminal registry poisoned")
-                        .clone();
-                    if let Some(hook) = hook {
-                        (hook.layout)(&window_id, &layout);
+                    if let Some(hook) = self.tmux_window_hook() {
+                        hook.layout(&window_id, &layout);
                     }
                 }
                 tmux_connection::TmuxWork::ControlWindow { title } => {
@@ -2111,35 +2114,43 @@ impl Registry {
         }
     }
 
-    /// Give the control session `session` a window of its own for the
-    /// connection it just made: a tmux row minted through the hook, the
-    /// session rebound to it, a tab for the session parked for the window's
-    /// first socket, and the window it came from told to drop its tab. A
-    /// session that still sits in the control window an earlier connection
-    /// minted keeps it, so a second `tmux -CC` in that terminal opens no
-    /// second window. Nothing happens on a registry with no hook.
-    fn open_tmux_control_window(&self, session: &Arc<Session>, title: &str) {
-        let hook = self
-            .tmux_windows
+    /// The installed tmux window hook, cloned out from under its lock.
+    fn tmux_window_hook(&self) -> Option<Arc<dyn TmuxWindowHook>> {
+        self.tmux_windows
             .lock()
             .expect("terminal registry poisoned")
-            .clone();
-        let Some(hook) = hook else {
+            .clone()
+    }
+
+    /// Give the control session `session` a window of its own for the
+    /// connection it just made: a hidden control row minted through the
+    /// hook, the session rebound to it, a tab for the session parked for the
+    /// window's first socket, and the window it came from told to drop its
+    /// tab. A session that still sits in the control window an earlier
+    /// connection minted and released keeps it: the hook marks that row as
+    /// the control window again, so a second `tmux -CC` in that terminal
+    /// opens no second window. Nothing happens on a registry with no hook.
+    fn open_tmux_control_window(&self, session: &Arc<Session>, title: &str) {
+        let Some(hook) = self.tmux_window_hook() else {
             return;
         };
         let from = session.window_id();
         let minted = session.tmux_control_window();
-        if minted.is_some() && minted == from {
-            return;
-        }
-        let Some(window_id) = (hook.mint)(title) else {
+        let existing = minted.filter(|minted| Some(minted) == from.as_ref());
+        let Some(window_id) = hook.control(&session.id, title, existing.as_deref()) else {
             return;
         };
+        if existing.as_deref() == Some(window_id.as_str()) {
+            // Marked in place: the session already sits in it. A window the
+            // hook could not mark again (its row is gone) is minted afresh
+            // and the session moves there as on a first connection.
+            return;
+        }
         session.set_tmux_control_window(Some(window_id.clone()));
         self.rebind_session_window(&session.id, Some(window_id.clone()));
-        (hook.attach)(&window_id, &session.id);
+        hook.attach(&window_id, &session.id);
         if let Some(from) = from.filter(|from| *from != window_id) {
-            (hook.release)(&from, &session.id, &window_id);
+            hook.release(&from, &session.id, &window_id);
         }
     }
 
@@ -5884,12 +5895,11 @@ impl Session {
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         let generation = self.generation;
         let mode_reassert = self.private_mode_prelude();
-        let (initial_tmux_consent, tmux_consent_rx, initial_tmux_status, tmux_status_rx) = {
-            let gate = self.tmux.lock().expect("terminal tmux gate poisoned");
-            let (consent, consent_rx) = gate.subscribe();
-            let (status, status_rx) = gate.subscribe_status();
-            (consent, consent_rx, status, status_rx)
-        };
+        let (initial_tmux_consent, tmux_consent_rx) = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .subscribe();
         AttachHandle {
             id: self.id.clone(),
             session: self,
@@ -5899,8 +5909,6 @@ impl Session {
             program_status_rx,
             initial_tmux_consent,
             tmux_consent_rx,
-            initial_tmux_status,
-            tmux_status_rx,
             replay,
             seq,
             generation,
@@ -7806,35 +7814,77 @@ impl CommandSink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TmuxConnectionId(pub u64);
 
-/// Mints a chan window for a tmux window's title and answers its id.
-pub type TmuxWindowMint = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-/// Drops a chan window by id.
-pub type TmuxWindowRemove = Arc<dyn Fn(&str) + Send + Sync>;
-/// Tells a chan window (first argument) to open a tab bound to a session
-/// (second argument): delivered to its socket, or parked for its first one.
-pub type TmuxWindowAttach = Arc<dyn Fn(&str, &str) + Send + Sync>;
-/// Tells a chan window (first) to drop its tab for a session (second) that
-/// moved to another window (third), without ending the session.
-pub type TmuxWindowRelease = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
-/// Tells a chan window (first) the pane tree it shows (second): tmux's
-/// layout with each pane's session, delivered to its socket or parked for
-/// its first one, a parked tree replacing an earlier one.
-pub type TmuxWindowLayout = Arc<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
-
-/// How the host mints and drops chan windows for a tmux connection's windows,
-/// and fills them with tabs for the sessions bound to them.
-#[derive(Clone)]
-pub struct TmuxWindowHook {
-    pub mint: TmuxWindowMint,
-    pub remove: TmuxWindowRemove,
-    pub attach: TmuxWindowAttach,
-    pub release: TmuxWindowRelease,
-    pub layout: TmuxWindowLayout,
+/// How the host mints and drops chan windows for a tmux connection's
+/// windows, fills them with tabs for the sessions bound to them, and keeps
+/// the connection's record. A connection is named by its control session's
+/// id throughout. Every method runs on the registry's drainer with no
+/// registry lock held.
+pub trait TmuxWindowHook: Send + Sync {
+    /// Mint a chan window for a tmux window of `connection`, labelled
+    /// `name` (the tmux window's name), and answer its id.
+    fn mint(&self, connection: &str, name: &str) -> Option<String>;
+    /// Give `connection` its control window, titled `title`: mint one,
+    /// hidden, or mark `existing` as the control window again when the
+    /// control session still sits in the window an earlier connection
+    /// released. Answers the window's id.
+    fn control(&self, connection: &str, title: &str, existing: Option<&str>) -> Option<String>;
+    /// Drop a chan window by id.
+    fn remove(&self, window_id: &str);
+    /// Tell chan window `window_id` to open a tab bound to `session_id`:
+    /// delivered to its socket, or parked for its first one.
+    fn attach(&self, window_id: &str, session_id: &str);
+    /// Tell chan window `window_id` to drop its tab for `session_id`, which
+    /// moved to window `to`, without ending the session.
+    fn release(&self, window_id: &str, session_id: &str, to: &str);
+    /// Tell chan window `window_id` the pane tree it shows: tmux's layout
+    /// with each pane's session, delivered to its socket or parked for its
+    /// first one, a parked tree replacing an earlier one.
+    fn layout(&self, window_id: &str, layout: &serde_json::Value);
+    /// The status of `connection`, whose control window is `control_window`,
+    /// changed; `control` takes requests of it from outside the registry.
+    fn status(
+        &self,
+        connection: &str,
+        control_window: &str,
+        status: TmuxConnectionStatus,
+        control: TmuxControl,
+    );
+    /// `connection` ended, its panes ended and its windows removed: its
+    /// record goes, and `control_window`, when it has one, is a plain
+    /// window again.
+    fn ended(&self, connection: &str, control_window: Option<&str>);
 }
 
-impl std::fmt::Debug for TmuxWindowHook {
+impl std::fmt::Debug for dyn TmuxWindowHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("TmuxWindowHook")
+    }
+}
+
+/// A handle on a tmux connection's control session for requests from
+/// outside the terminal registry (the library's tmux routes). It holds the
+/// session weakly, so it never keeps a closed session alive.
+#[derive(Clone, Debug)]
+pub struct TmuxControl(Weak<Session>);
+
+impl TmuxControl {
+    /// A client's request of the connection. `false` when the control
+    /// session is gone, and nothing was asked.
+    pub fn request(&self, request: TmuxRequest) -> bool {
+        match self.0.upgrade() {
+            Some(session) => {
+                session.tmux_request(request);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A handle on a session that is gone, for a host test of the stores
+    /// a handle is kept in.
+    #[cfg(test)]
+    pub(crate) fn gone() -> Self {
+        Self(Weak::new())
     }
 }
 

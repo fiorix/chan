@@ -13,7 +13,7 @@ use chan_tmux::{
     parse_layout, parse_list_panes, parse_list_windows, Command, Event, Message, PaneId, PaneState,
     SessionId, Token, Version, WindowId,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::tmux_gate::Action;
 use super::{
@@ -42,9 +42,39 @@ const REPLY_BYTES_MAX: usize = 64 << 20;
 /// Most recent error texts a connection keeps for its status.
 const ERRORS_MAX: usize = 8;
 
-/// A connection as the control terminal's status view shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Where a connection came from: the foreground the gate read when the
+/// marker arrived. It titles the connection's card and its control window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxOrigin {
+    /// The foreground program's name, or `unknown`.
+    pub program: String,
+    /// Its command line where the OS let it be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The foreground was tmux itself: a `tmux -CC` on this machine, as
+    /// against one reached through `ssh` or another carrier.
+    pub local: bool,
+}
+
+impl TmuxOrigin {
+    /// The title of the connection and of its control window: `tmux -CC on
+    /// this machine` for a local run, else `tmux -CC from <command>`, the
+    /// program's name standing in where no command line was read.
+    pub fn control_title(&self) -> String {
+        if self.local {
+            return "tmux -CC on this machine".to_owned();
+        }
+        let from = self.command.as_deref().unwrap_or(&self.program);
+        format!("tmux -CC from {from}")
+    }
+}
+
+/// A connection as the gate publishes it on each structural change, for the
+/// record the window registry keeps of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxConnectionStatus {
+    /// Where the connection came from.
+    pub origin: TmuxOrigin,
     /// The connected tmux's version, `major.minor`.
     pub version: String,
     /// The session the client is attached to, once tmux announced it.
@@ -60,14 +90,14 @@ pub struct TmuxConnectionStatus {
 }
 
 /// A tmux session, by its id and name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxSessionStatus {
     pub id: String,
     pub name: String,
 }
 
-/// A tmux window as the status view lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A tmux window as the connection's record lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxWindowStatus {
     /// tmux's id, `@N`.
     pub id: String,
@@ -111,6 +141,12 @@ pub(super) enum TmuxWork {
     },
     /// Give the control session a window of its own, titled `title`.
     ControlWindow { title: String },
+    /// The connection's status changed: hand it to the host for the
+    /// connection's record.
+    Status { status: TmuxConnectionStatus },
+    /// The connection ended, after its panes' ends and its windows'
+    /// removals: the host drops its record and releases its control window.
+    Ended,
     /// Drop a chan window the host minted.
     RemoveWindow { window_id: String },
     /// Start the gateway thread that reads the panes' commands.
@@ -189,6 +225,8 @@ struct Pane {
 pub(super) struct TmuxConnection {
     id: TmuxConnectionId,
     version: Version,
+    /// The foreground that printed the marker.
+    origin: TmuxOrigin,
     sink: Sender<PaneCommand>,
     scrollback_mb: u32,
     windows: BTreeMap<WindowId, Window>,
@@ -220,6 +258,7 @@ impl TmuxConnection {
     pub(super) fn new(
         id: TmuxConnectionId,
         version: Version,
+        origin: TmuxOrigin,
         scrollback_mb: u32,
         session: Option<(SessionId, String)>,
     ) -> (Self, Receiver<PaneCommand>) {
@@ -228,6 +267,7 @@ impl TmuxConnection {
             Self {
                 id,
                 version,
+                origin,
                 sink,
                 scrollback_mb,
                 windows: BTreeMap::new(),
@@ -246,9 +286,10 @@ impl TmuxConnection {
         )
     }
 
-    /// The connection as the status view shows it.
+    /// The connection as the gate publishes it.
     pub(super) fn status(&self) -> TmuxConnectionStatus {
         TmuxConnectionStatus {
+            origin: self.origin.clone(),
             version: format!("{}.{}", self.version.major, self.version.minor),
             session: self.session.as_ref().map(|(id, name)| TmuxSessionStatus {
                 id: id.to_string(),
@@ -1062,6 +1103,11 @@ mod tests {
         let (mut c, _rx) = TmuxConnection::new(
             TmuxConnectionId(1),
             Version { major: 3, minor: 8 },
+            TmuxOrigin {
+                program: "tmux".into(),
+                command: None,
+                local: true,
+            },
             10,
             Some((SessionId(0), "main".into())),
         );

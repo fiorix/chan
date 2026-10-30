@@ -92,13 +92,19 @@ pub use chan_library::desktop_window_ops::{
     NO_DESKTOP,
 };
 pub use chan_library::terminal_sessions::TerminalExit;
+pub use chan_library::terminal_sessions::{
+    TmuxOrigin, TmuxRequest, TmuxSessionStatus, TmuxWindowStatus,
+};
 /// Re-export the single-sourced shell resolver so the desktop (which deps
 /// chan-server, not chan-library directly) can call `chan_server::user_shell()`
 /// for its PATH-harvest helper. Unix-only, matching the chan-library gate.
 #[cfg(unix)]
 pub use chan_library::user_shell;
 pub use chan_library::window_titles::{SharedWindowTitles, WindowMeta, WindowTitles};
-pub use chan_library::windows::{CreateWindow, WindowKind, WindowOrigin, WindowRecord, WindowSet};
+pub use chan_library::windows::{
+    CreateWindow, TmuxConnectionRecord, TmuxWindowMark, WindowKind, WindowOrigin, WindowRecord,
+    WindowSet,
+};
 pub use chan_library::TenantProgram;
 pub(crate) use chan_library::{
     desktop_window_ops, session_presence, window_presence, window_titles, window_transfers,

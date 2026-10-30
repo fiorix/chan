@@ -6735,8 +6735,10 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
         return match record {
             // A tmux window: a new window is a new tmux window in a chan
             // window of its own, which only the page can ask for, since it
-            // knows which of its sessions is a pane of the connection.
-            Some(r) if r.kind == chan_server::WindowKind::Terminal && r.tmux => {
+            // knows which of its sessions is a pane of the connection. The
+            // connection's control window is a terminal, not a tmux window,
+            // so it takes the plain branches below.
+            Some(r) if r.tmux.as_ref().is_some_and(|mark| !mark.control) => {
                 let window = app
                     .get_webview_window(focused_label)
                     .ok_or_else(|| format!("no webview window {focused_label}"))?;
@@ -8044,7 +8046,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };
@@ -8541,7 +8543,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8578,7 +8580,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8618,7 +8620,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8738,7 +8740,7 @@ mod tests {
                 holders: None,
                 active_transfer: false,
                 control: false,
-                tmux: false,
+                tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
             };
@@ -9396,7 +9398,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -9455,7 +9457,7 @@ mod tests {
             holders: Some(vec!["desktop-a".into()]),
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };

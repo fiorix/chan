@@ -315,6 +315,8 @@ pub(crate) static LAUNCHER: RouteTable = &[
         "/api/library/windows/{window_id}/visibility",
         NonOwner,
     ),
+    (Get, "/api/library/tmux", NonOwner),
+    (Post, "/api/library/tmux/{connection}/request", NonOwner),
     (Post, "/api/library/devservers/{id}/connect", NonOwner),
     (Post, "/api/library/devservers/{id}/disconnect", NonOwner),
     (Put, "/api/library/devservers/{id}/native-trust", NonOwner),

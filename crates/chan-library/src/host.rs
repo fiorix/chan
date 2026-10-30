@@ -33,13 +33,17 @@ use crate::tenant::{
     terminal_tenant_root, BrowserWindowTarget, HostControl, OpenOutsideAck, TenantArtifacts,
     TenantBuilder, TerminalTenantOptions, UnserveMode,
 };
-use crate::terminal_sessions::{CloseReason, TerminalExit};
+use crate::terminal_sessions::{
+    CloseReason, TerminalExit, TmuxConnectionStatus, TmuxControl, TmuxRequest, TmuxWindowHook,
+};
 #[cfg(target_os = "linux")]
 use crate::terminal_sessions::{
     FdStoreManifestEntry, FdStoreParker, FdStoreRestoreReport, FdStoreSessionImport,
     FdStoreSkippedSession,
 };
-use crate::windows::{PersistedWindow, WindowKind, WindowOrigin, WindowRecord, WindowRegistry};
+use crate::windows::{
+    PersistedWindow, TmuxConnectionRecord, WindowKind, WindowOrigin, WindowRecord, WindowRegistry,
+};
 use crate::{
     sanitize_prefix, workspace_prefix_for, DevserverRegistry, Error, GatewayRegistry, ServeConfig,
     ServeHandle, WorkspaceOverlay,
@@ -538,6 +542,10 @@ pub struct WorkspaceHost {
     /// `lib-<hex>` for a devserver. Stamped on every window record. Set with the
     /// registry; defaults to `"local"` when unset.
     library_id: OnceLock<String>,
+    /// The control handles of the live tmux connections in this host's
+    /// terminal tenants, by connection id, filled through each tenant's
+    /// [`TmuxWindowHook`] and read by the library's tmux request route.
+    tmux_controls: TmuxControls,
     /// Stable control-socket identity, installed only by a server whose
     /// tenants must stay reachable across restarts (the devserver, via
     /// [`install_control_identity`](Self::install_control_identity)). When
@@ -1569,6 +1577,7 @@ impl WorkspaceHost {
             local_color: OnceLock::new(),
             local_theme: OnceLock::new(),
             library_id: OnceLock::new(),
+            tmux_controls: Arc::new(Mutex::new(HashMap::new())),
             control_identity: OnceLock::new(),
             #[cfg(target_os = "linux")]
             terminal_fd_parker: OnceLock::new(),
@@ -1662,6 +1671,28 @@ impl WorkspaceHost {
     /// This library's persisted window registry, once installed.
     pub fn window_registry(&self) -> Option<&Arc<WindowRegistry>> {
         self.window_registry.get()
+    }
+
+    /// The live tmux control-mode connections in this library's terminals,
+    /// as the window feed and `GET /api/library/tmux` list them. Empty with
+    /// no registry installed.
+    pub fn tmux_connections(&self) -> Vec<TmuxConnectionRecord> {
+        self.window_registry()
+            .map(|registry| registry.tmux_connections())
+            .unwrap_or_default()
+    }
+
+    /// A client's request of the live tmux connection `connection` (a
+    /// control session's id). `false` when no such connection is live, and
+    /// nothing was asked.
+    pub fn tmux_request(&self, connection: &str, request: TmuxRequest) -> bool {
+        let control = self
+            .tmux_controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(connection)
+            .cloned();
+        control.is_some_and(|control| control.request(request))
     }
 
     /// Install this library's persisted workspace on/off overlay. Idempotent
@@ -2691,6 +2722,8 @@ impl WorkspaceHost {
                     WindowKind::Workspace,
                     Some(root.to_string_lossy().into_owned()),
                     TmuxWindowDelivery::from_artifacts(&artifacts),
+                    self.library_id().to_owned(),
+                    Arc::clone(&self.tmux_controls),
                 ));
         }
         let handle = ServeHandle {
@@ -2987,6 +3020,8 @@ impl WorkspaceHost {
                         WindowKind::Terminal,
                         None,
                         TmuxWindowDelivery::from_artifacts(&artifacts),
+                        self.library_id().to_owned(),
+                        Arc::clone(&self.tmux_controls),
                     ));
             }
         }
@@ -7060,116 +7095,263 @@ impl TmuxWindowDelivery {
     }
 }
 
+/// The control handles of this host's live tmux connections by connection
+/// id, shared by every tenant's hook and read by the library's tmux request
+/// route. A handle is put in with the connection's first status and taken
+/// out when the connection ends.
+type TmuxControls = Arc<Mutex<HashMap<String, TmuxControl>>>;
+
+/// One tenant's [`TmuxWindowHook`]: the windows a tmux connection in that
+/// tenant's terminals gets are rows of `kind` for `workspace_path`, and
+/// its records and control handle go to the host's shared stores.
+struct HostTmuxWindows {
+    registry: Arc<WindowRegistry>,
+    notify: Arc<Notify>,
+    kind: WindowKind,
+    workspace_path: Option<String>,
+    delivery: TmuxWindowDelivery,
+    library_id: String,
+    controls: TmuxControls,
+}
+
+impl TmuxWindowHook for HostTmuxWindows {
+    fn mint(&self, connection: &str, name: &str) -> Option<String> {
+        // Shown, since its tabs are parked for its first socket; marked as a
+        // routed mint so the surface that opens it seeds no default
+        // terminal beside them. Never saved: the window lasts its
+        // connection, so a crash leaves no row behind.
+        let row = self.registry.create_tmux_window(
+            self.kind,
+            self.workspace_path.clone(),
+            connection,
+            name,
+        );
+        self.delivery.pending.mark_routed(&row.window_id);
+        self.notify.notify_waiters();
+        Some(row.window_id)
+    }
+
+    fn control(&self, connection: &str, title: &str, existing: Option<&str>) -> Option<String> {
+        if let Some(window_id) = existing {
+            if self
+                .registry
+                .mark_tmux_control(window_id, connection, title)
+            {
+                self.notify.notify_waiters();
+                return Some(window_id.to_owned());
+            }
+        }
+        // Hidden: the launcher lists it as the connection's card's control
+        // row and shows it on request. Its tab is parked for its first
+        // socket, so it is a routed mint like a tmux window.
+        let row = self.registry.create_tmux_control_window(
+            self.kind,
+            self.workspace_path.clone(),
+            connection,
+            title,
+        );
+        self.delivery.pending.mark_routed(&row.window_id);
+        self.notify.notify_waiters();
+        Some(row.window_id)
+    }
+
+    fn remove(&self, window_id: &str) {
+        let removed = self.registry.remove(window_id);
+        tracing::debug!(window_id, removed, "tmux window row removal");
+        if removed {
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn attach(&self, window_id: &str, session_id: &str) {
+        if let Some(frame) = window_session_frame(window_id, "open_term_attach", session_id, None) {
+            self.delivery.deliver_or_park(window_id, frame);
+        }
+    }
+
+    fn release(&self, window_id: &str, session_id: &str, to: &str) {
+        if let Some(frame) = window_session_frame(window_id, "release_term", session_id, Some(to)) {
+            self.delivery.deliver_if_live(window_id, frame);
+        }
+    }
+
+    fn layout(&self, window_id: &str, tree: &serde_json::Value) {
+        if let Some(frame) = window_layout_frame(window_id, tree) {
+            self.delivery.deliver_or_replace_parked(
+                window_id,
+                frame,
+                "\"command\":\"tmux_layout\"",
+            );
+        }
+    }
+
+    fn status(
+        &self,
+        connection: &str,
+        control_window: &str,
+        status: TmuxConnectionStatus,
+        control: TmuxControl,
+    ) {
+        self.controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(connection.to_owned(), control);
+        self.registry.set_tmux_connection(TmuxConnectionRecord::new(
+            connection,
+            &self.library_id,
+            control_window,
+            status,
+        ));
+        self.notify.notify_waiters();
+    }
+
+    fn ended(&self, connection: &str, control_window: Option<&str>) {
+        self.controls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(connection);
+        let removed = self.registry.remove_tmux_connection(connection);
+        // The control window is a plain window from here: the row says so,
+        // and the page it shows is told to leave control mode, now or when
+        // it first opens.
+        let released = control_window.is_some_and(|window_id| {
+            let released = self.registry.release_tmux_control(window_id).is_some();
+            if released {
+                if let Some(frame) = window_command_frame(window_id, "control_release", None) {
+                    self.delivery.deliver_or_park(window_id, frame);
+                }
+            }
+            released
+        });
+        tracing::debug!(connection, removed, released, "tmux connection ended");
+        if removed || released {
+            self.notify.notify_waiters();
+        }
+    }
+}
+
 fn tmux_window_hook(
     registry: Arc<WindowRegistry>,
     notify: Arc<Notify>,
     kind: WindowKind,
     workspace_path: Option<String>,
     delivery: TmuxWindowDelivery,
-) -> crate::terminal_sessions::TmuxWindowHook {
-    let mint_registry = Arc::clone(&registry);
-    let mint_notify = Arc::clone(&notify);
-    let mint_pending = Arc::clone(&delivery.pending);
-    let mint = move |title: &str| {
-        // Shown, since its tabs are parked for its first socket; marked as a
-        // routed mint so the surface that opens it seeds no default
-        // terminal beside them. Never saved: the window lasts its
-        // connection, so a crash leaves no row behind.
-        let row = mint_registry.create_tmux_window(kind, workspace_path.clone(), title);
-        mint_pending.mark_routed(&row.window_id);
-        mint_notify.notify_waiters();
-        Some(row.window_id)
-    };
-    let remove = move |window_id: &str| {
-        let removed = registry.remove(window_id);
-        tracing::debug!(window_id, removed, "tmux window row removal");
-        if removed {
-            notify.notify_waiters();
-        }
-    };
-    let attach_delivery = delivery.clone();
-    let attach = move |window_id: &str, session_id: &str| {
-        if let Some(frame) = window_session_frame(window_id, "open_term_attach", session_id, None) {
-            attach_delivery.deliver_or_park(window_id, frame);
-        }
-    };
-    let release_delivery = delivery.clone();
-    let release = move |window_id: &str, session_id: &str, to: &str| {
-        if let Some(frame) = window_session_frame(window_id, "release_term", session_id, Some(to)) {
-            release_delivery.deliver_if_live(window_id, frame);
-        }
-    };
-    let layout = move |window_id: &str, tree: &serde_json::Value| {
-        if let Some(frame) = window_layout_frame(window_id, tree) {
-            delivery.deliver_or_replace_parked(window_id, frame, "\"command\":\"tmux_layout\"");
-        }
-    };
-    crate::terminal_sessions::TmuxWindowHook {
-        mint: Arc::new(mint),
-        remove: Arc::new(remove),
-        attach: Arc::new(attach),
-        release: Arc::new(release),
-        layout: Arc::new(layout),
-    }
+    library_id: String,
+    controls: TmuxControls,
+) -> Arc<dyn TmuxWindowHook> {
+    Arc::new(HostTmuxWindows {
+        registry,
+        notify,
+        kind,
+        workspace_path,
+        delivery,
+        library_id,
+        controls,
+    })
 }
 
 #[cfg(test)]
 mod tmux_window_hook_tests {
     use super::*;
-    use crate::windows::MAX_WINDOW_LABEL_CHARS;
+    use crate::terminal_sessions::{TmuxOrigin, TmuxSessionStatus, TmuxWindowStatus};
+    use crate::windows::{TmuxWindowMark, MAX_WINDOW_LABEL_CHARS};
+
+    struct Rig {
+        store: tempfile::TempDir,
+        registry: Arc<WindowRegistry>,
+        pending: Arc<crate::pending_window_commands::PendingWindowCommands>,
+        events_rx: tokio::sync::broadcast::Receiver<String>,
+        controls: TmuxControls,
+        hook: Arc<dyn TmuxWindowHook>,
+    }
+
+    fn rig(kind: WindowKind, workspace_path: Option<&str>) -> Rig {
+        let store = tempfile::tempdir().unwrap();
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        let pending = Arc::new(crate::pending_window_commands::PendingWindowCommands::new());
+        let session_registry = Arc::new(crate::session_presence::SessionRegistry::new());
+        let (events_tx, events_rx) = tokio::sync::broadcast::channel(16);
+        let controls: TmuxControls = Arc::new(Mutex::new(HashMap::new()));
+        let hook = tmux_window_hook(
+            Arc::clone(&registry),
+            Arc::new(Notify::new()),
+            kind,
+            workspace_path.map(str::to_owned),
+            TmuxWindowDelivery {
+                pending: Arc::clone(&pending),
+                session_registry,
+                events_tx,
+            },
+            "lib-test".to_owned(),
+            Arc::clone(&controls),
+        );
+        Rig {
+            store,
+            registry,
+            pending,
+            events_rx,
+            controls,
+            hook,
+        }
+    }
+
+    fn status(windows: Vec<TmuxWindowStatus>) -> TmuxConnectionStatus {
+        TmuxConnectionStatus {
+            origin: TmuxOrigin {
+                program: "tmux".into(),
+                command: Some("tmux -CC".into()),
+                local: true,
+            },
+            version: "3.8".into(),
+            session: Some(TmuxSessionStatus {
+                id: "$0".into(),
+                name: "main".into(),
+            }),
+            windows,
+            window_cap: 8,
+            errors: Vec::new(),
+        }
+    }
 
     #[test]
     fn the_hook_mints_a_labelled_row_of_the_kind_and_drops_it() {
-        let store = tempfile::tempdir().unwrap();
-        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
-        let notify = Arc::new(Notify::new());
-        let pending = Arc::new(crate::pending_window_commands::PendingWindowCommands::new());
-        let session_registry = Arc::new(crate::session_presence::SessionRegistry::new());
-        let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(16);
-        let hook = tmux_window_hook(
-            Arc::clone(&registry),
-            Arc::clone(&notify),
-            WindowKind::Workspace,
-            Some("/work/repo".to_owned()),
-            TmuxWindowDelivery {
-                pending: Arc::clone(&pending),
-                session_registry: Arc::clone(&session_registry),
-                events_tx: events_tx.clone(),
-            },
-        );
+        let mut rig = rig(WindowKind::Workspace, Some("/work/repo"));
         let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 20);
-        let id = (hook.mint)(&long).expect("a window id");
+        let id = rig.hook.mint("term-1", &long).expect("a window id");
         assert!(
-            pending.is_routed(&id),
+            rig.pending.is_routed(&id),
             "a minted window seeds no default terminal: its tabs are parked"
         );
         // A tab for a session is parked while the window has no socket, as
         // the frame the window's first attach drains.
-        (hook.attach)(&id, "term-7");
+        rig.hook.attach(&id, "term-7");
         assert_eq!(
-            pending.take(&id),
+            rig.pending.take(&id),
             vec![format!(
                 r#"{{"type":"window_command","window_id":"{id}","command":"open_term_attach","session_id":"term-7"}}"#
             )]
         );
-        assert!(events_rx.try_recv().is_err(), "nothing went to the bus");
+        assert!(rig.events_rx.try_recv().is_err(), "nothing went to the bus");
         // A release reaches a live window alone; one with no socket has no
         // tab to drop.
-        (hook.release)(&id, "term-7", "w-other");
-        assert!(events_rx.try_recv().is_err());
-        assert!(pending.take(&id).is_empty(), "a release is never parked");
+        rig.hook.release(&id, "term-7", "w-other");
+        assert!(rig.events_rx.try_recv().is_err());
+        assert!(
+            rig.pending.take(&id).is_empty(),
+            "a release is never parked"
+        );
         // A layout parks beside other frames and replaces an earlier parked
         // layout, so a late window gets the newest tree alone.
-        (hook.attach)(&id, "term-8");
-        (hook.layout)(
+        rig.hook.attach(&id, "term-8");
+        rig.hook.layout(
             &id,
             &serde_json::json!({"kind": "pane", "session": null, "w": 80, "h": 24}),
         );
-        (hook.layout)(
+        rig.hook.layout(
             &id,
             &serde_json::json!({"kind": "pane", "session": "term-8", "w": 80, "h": 24}),
         );
-        let parked = pending.take(&id);
+        let parked = rig.pending.take(&id);
         assert_eq!(parked.len(), 2, "{parked:?}");
         assert!(parked[0].contains(r#""command":"open_term_attach","session_id":"term-8""#));
         assert_eq!(
@@ -7178,7 +7360,8 @@ mod tmux_window_hook_tests {
                 r#"{{"type":"window_command","window_id":"{id}","command":"tmux_layout","layout":{{"h":24,"kind":"pane","session":"term-8","w":80}}}}"#
             )
         );
-        let row = registry
+        let row = rig
+            .registry
             .snapshot()
             .into_iter()
             .find(|w| w.window_id == id)
@@ -7191,29 +7374,158 @@ mod tmux_window_hook_tests {
             "the name is cut to the label bound"
         );
         assert!(!row.control);
-        assert!(row.tmux, "marked as a tmux window");
+        assert_eq!(
+            row.tmux,
+            Some(TmuxWindowMark {
+                connection: "term-1".into(),
+                control: false,
+            }),
+            "marked as a tmux window of the connection"
+        );
         assert_eq!(row.origin, WindowOrigin::Native);
         assert!(!row.hidden, "minted shown: its tabs are parked for it");
         // A durable create saves while the tmux row lives; the file carries
         // the durable row and not the tmux one, so a crash strands nothing.
-        let durable = registry.create(WindowKind::Workspace, Some("/work/other".to_owned()));
-        let stored = std::fs::read_to_string(store.path().join("windows.json")).unwrap();
+        let durable = rig
+            .registry
+            .create(WindowKind::Workspace, Some("/work/other".to_owned()));
+        let stored = std::fs::read_to_string(rig.store.path().join("windows.json")).unwrap();
         assert!(stored.contains(&durable.window_id));
         assert!(
             !stored.contains(&id),
             "a tmux window is never written to disk"
         );
-        assert!(registry.remove(&durable.window_id));
-        let unnamed = (hook.mint)("").expect("a window id");
-        let row = registry
+        assert!(rig.registry.remove(&durable.window_id));
+        let unnamed = rig.hook.mint("term-1", "").expect("a window id");
+        let row = rig
+            .registry
             .snapshot()
             .into_iter()
             .find(|w| w.window_id == unnamed)
             .unwrap();
         assert_eq!(row.label, "", "no name keeps the generated title");
-        (hook.remove)(&id);
-        assert!(registry.snapshot().iter().all(|w| w.window_id != id));
-        assert_eq!(registry.snapshot().len(), 1);
+        rig.hook.remove(&id);
+        assert!(rig.registry.snapshot().iter().all(|w| w.window_id != id));
+        assert_eq!(rig.registry.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn the_control_window_is_hidden_the_record_rides_the_registry_and_the_end_releases_both() {
+        let rig = rig(WindowKind::Terminal, None);
+        let id = rig
+            .hook
+            .control("term-1", "tmux -CC on this machine", None)
+            .expect("a control window");
+        assert!(
+            rig.pending.is_routed(&id),
+            "its tab is parked, so it seeds nothing"
+        );
+        let row = rig
+            .registry
+            .snapshot()
+            .into_iter()
+            .find(|w| w.window_id == id)
+            .expect("the row is in the registry");
+        assert!(row.control);
+        assert!(row.hidden, "minted hidden: the card's control row");
+        assert_eq!(row.title, "tmux -CC on this machine");
+        assert_eq!(
+            row.tmux,
+            Some(TmuxWindowMark {
+                connection: "term-1".into(),
+                control: true,
+            })
+        );
+        rig.hook.attach(&id, "term-1");
+        // The status becomes the connection's record, under this library's
+        // id and naming the control window, and its control handle is kept
+        // for the request route.
+        rig.hook.status(
+            "term-1",
+            &id,
+            status(vec![TmuxWindowStatus {
+                id: "@0".into(),
+                name: "shell".into(),
+                panes: 1,
+                open: true,
+                chan_window: Some("w-9".into()),
+            }]),
+            TmuxControl::gone(),
+        );
+        let records = rig.registry.tmux_connections();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].connection, "term-1");
+        assert_eq!(records[0].library_id, "lib-test");
+        assert_eq!(records[0].control_window, id);
+        assert_eq!(records[0].version, "3.8");
+        assert_eq!(records[0].windows[0].chan_window.as_deref(), Some("w-9"));
+        assert!(rig.controls.lock().unwrap().contains_key("term-1"));
+        // A later status replaces the record.
+        rig.hook
+            .status("term-1", &id, status(Vec::new()), TmuxControl::gone());
+        let records = rig.registry.tmux_connections();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].windows.is_empty());
+        // The end: the record and the handle go, the control window is a
+        // plain terminal window of its ordinal, saved, and the page is told
+        // after the tab parked for it.
+        rig.hook.ended("term-1", Some(&id));
+        assert!(rig.registry.tmux_connections().is_empty());
+        assert!(!rig.controls.lock().unwrap().contains_key("term-1"));
+        let row = rig
+            .registry
+            .snapshot()
+            .into_iter()
+            .find(|w| w.window_id == id)
+            .expect("the row stays");
+        assert!(!row.control);
+        assert!(row.tmux.is_none());
+        assert_eq!(row.title, "⌂ Terminal Window 1");
+        let stored = std::fs::read_to_string(rig.store.path().join("windows.json")).unwrap();
+        assert!(stored.contains(&id), "a released control window is saved");
+        let parked = rig.pending.take(&id);
+        assert_eq!(parked.len(), 2, "{parked:?}");
+        assert!(parked[0].contains(r#""command":"open_term_attach","session_id":"term-1""#));
+        assert_eq!(
+            parked[1],
+            format!(
+                r#"{{"type":"window_command","window_id":"{id}","command":"control_release"}}"#
+            )
+        );
+        // Ending again, or with no control window, changes nothing.
+        rig.hook.ended("term-1", Some(&id));
+        rig.hook.ended("term-1", None);
+        assert!(rig.pending.take(&id).is_empty());
+        // The same terminal runs `tmux -CC` again from the released window:
+        // the row is the control window once more, in place, keeping its id.
+        let again = rig
+            .hook
+            .control("term-1", "tmux -CC from ssh box", Some(&id))
+            .expect("a control window");
+        assert_eq!(again, id);
+        let row = rig
+            .registry
+            .snapshot()
+            .into_iter()
+            .find(|w| w.window_id == id)
+            .unwrap();
+        assert!(row.control);
+        assert_eq!(row.title, "tmux -CC from ssh box");
+        assert_eq!(
+            row.tmux,
+            Some(TmuxWindowMark {
+                connection: "term-1".into(),
+                control: true,
+            })
+        );
+        assert_eq!(rig.registry.snapshot().len(), 1, "no second window");
+        // A window that is gone cannot be marked: a fresh one is minted.
+        let fresh = rig
+            .hook
+            .control("term-2", "tmux -CC on this machine", Some("w-gone"))
+            .expect("a control window");
+        assert_ne!(fresh, id);
+        assert_eq!(rig.registry.snapshot().len(), 2);
     }
 }
 

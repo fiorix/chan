@@ -40,8 +40,9 @@ use crate::extract::{Bytes, Json, Path as AxumPath, Query};
 use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
-    LauncherWorkspace, SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WindowSet,
-    WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
+    LauncherWorkspace, SetWorkspaceOnOutcome, TmuxRequest, TmuxWindowMark, WindowKind,
+    WindowOrigin, WindowRecord, WindowSet, WorkspaceHost, WorkspaceLifecycleOutcome,
+    WorkspaceStatus,
 };
 
 /// State shared by the `/api/library/workspaces` handlers: a host handle plus
@@ -395,6 +396,15 @@ fn build_launcher_router(
         .route(
             "/api/library/windows/{window_id}/visibility",
             post(handle_set_library_window_visibility),
+        )
+        // The tmux control-mode connections: the list the window feed also
+        // carries, and a request of one, both the authority of the window
+        // routes above, since a connection is a view over this library's
+        // terminals as a window is.
+        .route("/api/library/tmux", get(handle_list_tmux_connections))
+        .route(
+            "/api/library/tmux/{connection}/request",
+            post(handle_tmux_connection_request),
         )
         // Devserver connect is a desktop-bridge dispatch (like window open/hide),
         // not registry CRUD, so it lives here on the host-stated router rather
@@ -775,9 +785,11 @@ struct ScopedLibraryWindow {
     holders: Option<Vec<String>>,
     hidden: bool,
     control: bool,
-    /// A window of a tmux control-mode connection, minted buried and never
-    /// saved. Never omitted, for the same reason as `origin`.
-    tmux: bool,
+    /// The mark of a window of a tmux control-mode connection (its
+    /// connection, and whether this is the control window), never saved
+    /// while it stands. `null` on a plain row rather than omitted, for the
+    /// same reason as `origin`.
+    tmux: Option<TmuxWindowMark>,
     /// The surface that minted the record, in the record's own wire tags.
     /// Never omitted, unlike the full record's, which leaves a native origin
     /// off the wire: a client reads a row without the member as one from a
@@ -1234,7 +1246,7 @@ async fn handle_library_command_launch(
     // A window minted with its content parked for its first socket (a routed
     // open's, a tmux window's tabs) seeds no default terminal, as the desktop
     // tells the windows it opens.
-    if host.is_routed_mint(&record.window_id) || record.tmux {
+    if host.is_routed_mint(&record.window_id) || record.tmux.is_some() {
         query.append_pair("seed", "0");
     }
     if let Some(holder) = super::ws::holder_tag(raw_query.as_deref()) {
@@ -1410,6 +1422,9 @@ async fn watch_library_windows(
             // Per-tenant leaders so a launcher gates leader-only affordances; the
             // registry change bridge nudges this same feed on a leader change.
             leaders: host.tenant_leaders(),
+            // The live tmux connections, for the launcher's card per
+            // connection; the registry fires the same feed on each change.
+            tmux_connections: host.tmux_connections(),
         };
         #[cfg(test)]
         window_feed_probe::run(host, window_feed_probe::Point::AfterAssembly);
@@ -1791,6 +1806,37 @@ async fn handle_library_window_live_terminals(
         count: local.then(|| host.live_terminal_count(&window_id)),
     })
     .into_response()
+}
+
+/// `GET /api/library/tmux`: the live tmux control-mode connections in this
+/// library's terminals, the same records the window feed's snapshot carries
+/// as `tmux_connections`. `[]` with none.
+async fn handle_list_tmux_connections(Host(host): Host) -> Response {
+    Json(host.tmux_connections()).into_response()
+}
+
+/// `POST /api/library/tmux/{connection}/request`: a request of the live
+/// connection `connection` (a control session's id), with the closed
+/// `TmuxRequest` object the terminal socket takes (`new-window`, `detach`,
+/// `end`, `open-window` with `window`, and the pane-addressed `split`,
+/// `focus` and `window-size`). 204 once asked; 404 when no such connection
+/// is live; 400 without a body.
+async fn handle_tmux_connection_request(
+    Host(host): Host,
+    AxumPath(connection): AxumPath<String>,
+    body: Option<Json<TmuxRequest>>,
+) -> Response {
+    let Some(Json(request)) = body else {
+        return crate::error::err(
+            StatusCode::BAD_REQUEST,
+            "invalid tmux request: a JSON body with a request is required".into(),
+        );
+    };
+    if host.tmux_request(&connection, request) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        crate::error::err(StatusCode::NOT_FOUND, "tmux connection not found".into())
+    }
 }
 
 /// `POST /api/library/windows/{window_id}/close`: close a native window through
@@ -5136,6 +5182,80 @@ mod devserver_route_tests {
     }
 
     #[tokio::test]
+    async fn tmux_routes_list_the_registry_records_and_refuse_an_unknown_connection() {
+        let cfg = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+        host.install_window_registry(Arc::clone(&registry), "local".to_string());
+        let router = launcher_router(host.clone(), None, None);
+        let (status, listed) = request(&router, "GET", "/api/library/tmux", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            listed,
+            serde_json::json!([]),
+            "no connection lists as an empty array"
+        );
+        // A record the host's hook put in the registry is what the route
+        // lists, as the window feed's snapshot carries it.
+        let record = chan_library::windows::TmuxConnectionRecord {
+            connection: "term-7".into(),
+            library_id: "local".into(),
+            origin: chan_library::terminal_sessions::TmuxOrigin {
+                program: "tmux".into(),
+                command: Some("tmux -CC".into()),
+                local: true,
+            },
+            version: "3.8".into(),
+            session: None,
+            windows: Vec::new(),
+            window_cap: 8,
+            errors: Vec::new(),
+            control_window: "w-control".into(),
+        };
+        registry.set_tmux_connection(record.clone());
+        let (status, listed) = request(&router, "GET", "/api/library/tmux", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed, serde_json::to_value(vec![record]).unwrap());
+        assert_eq!(
+            listed[0]["origin"],
+            serde_json::json!({"program": "tmux", "command": "tmux -CC", "local": true})
+        );
+        assert!(
+            listed[0].get("session").is_none(),
+            "no session until announced"
+        );
+        // A request names a connection by its control session's id; a
+        // record with no live control session behind it is unknown to the
+        // request route, as a connection nobody has is.
+        let (status, body) = request(
+            &router,
+            "POST",
+            "/api/library/tmux/term-7/request",
+            Some(r#"{"request":"new-window"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "tmux connection not found"})
+        );
+        let (status, _) = request(
+            &router,
+            "POST",
+            "/api/library/tmux/term-7/request",
+            Some(r#"{"request":"open-window"}"#),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a request outside the closed set is refused before the lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn workspace_window_label_route_persists_trimmed_text_and_clears_it() {
         let cfg = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
@@ -6480,7 +6600,7 @@ mod window_op_route_tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
         })));
@@ -6545,7 +6665,7 @@ mod window_op_route_tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
         })));

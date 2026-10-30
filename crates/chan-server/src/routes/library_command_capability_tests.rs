@@ -32,7 +32,7 @@ impl DevserverFeedSource for RemoteFeed {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
         }]

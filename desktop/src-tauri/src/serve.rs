@@ -2594,7 +2594,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Browser,
         };

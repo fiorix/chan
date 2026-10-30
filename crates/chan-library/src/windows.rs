@@ -34,6 +34,9 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use crate::terminal_sessions::{
+    TmuxConnectionStatus, TmuxOrigin, TmuxSessionStatus, TmuxWindowStatus,
+};
 use crate::workspace_persist::save_atomic;
 
 /// House glyph (⌂) for a local workspace under `$HOME`, mirroring the launcher's
@@ -149,17 +152,20 @@ pub struct WindowRecord {
     /// close. `#[serde(default)]`: a record without the field reads `false`.
     #[serde(default)]
     pub active_transfer: bool,
-    /// This is a devserver's script-connection CONTROL terminal -- the window
-    /// running the connect script. The desktop surfaces it in that devserver's
-    /// feed (tagged with the devserver's `library_id`), and the launcher renders
-    /// it FIRST in the devserver's window list. Omitted from the wire when false
-    /// (the common case), so only a control window carries it.
+    /// This is a CONTROL terminal: a devserver's script-connection window
+    /// (running the connect script; the desktop surfaces it in that
+    /// devserver's feed, tagged with the devserver's `library_id`, and the
+    /// launcher renders it FIRST in the devserver's window list), or a tmux
+    /// control-mode connection's control window while the connection runs
+    /// (`tmux` then says which). Omitted from the wire when false (the common
+    /// case), so only a control window carries it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub control: bool,
-    /// Minted for a window of a tmux control-mode connection; it lasts the
-    /// connection and is never written to disk.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub tmux: bool,
+    /// Set on a window of a tmux control-mode connection: which connection,
+    /// and whether this is its control window. It lasts the connection and
+    /// is never written to disk; omitted from the wire on a plain row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<TmuxWindowMark>,
     /// Server-persisted visibility: `true` ⇒ the window is BURIED/hidden (the
     /// desktop keeps it closed on connect; the launcher renders it as hidden).
     /// The server is the source of truth (set via `POST …/visibility`), so a
@@ -194,6 +200,7 @@ impl std::fmt::Debug for WindowRecord {
             .field("holders", &self.holders)
             .field("active_transfer", &self.active_transfer)
             .field("control", &self.control)
+            .field("tmux", &self.tmux)
             .field("hidden", &self.hidden)
             .field("origin", &self.origin)
             .finish()
@@ -216,6 +223,78 @@ pub struct WindowSet {
     /// live leader, and a client that ignores it still reconciles windows.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub leaders: BTreeMap<String, String>,
+    /// The live tmux control-mode connections, one record each, for the
+    /// launcher's card per connection. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tmux_connections: Vec<TmuxConnectionRecord>,
+}
+
+/// The mark a window of a tmux control-mode connection carries: which
+/// connection it belongs to, and whether it is the connection's control
+/// window (the terminal `tmux -CC` ran in) or one of its tmux windows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxWindowMark {
+    /// The connection's id: its control session's id, unique across the host
+    /// for the connection's life.
+    pub connection: String,
+    /// The connection's control window, as against a tmux window of it.
+    pub control: bool,
+}
+
+/// One live tmux control-mode connection, as the window feed and
+/// `GET /api/library/tmux` list it: the launcher's card. Assembled by the
+/// host from the status the connection's gate publishes on each structural
+/// change, kept in the window registry for the connection's life.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxConnectionRecord {
+    /// The connection's id: its control session's id. Requests go to
+    /// `POST /api/library/tmux/{connection}/request`.
+    pub connection: String,
+    /// The library whose terminal the connection runs in; the card groups
+    /// under it.
+    pub library_id: String,
+    /// The foreground that printed the marker, which titles the card.
+    pub origin: TmuxOrigin,
+    /// The connected tmux's version, `major.minor`.
+    pub version: String,
+    /// The tmux session the client is attached to, once announced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<TmuxSessionStatus>,
+    /// Every window tmux listed, in id order, with the chan window minted
+    /// for each that has one.
+    pub windows: Vec<TmuxWindowStatus>,
+    /// Most tmux windows opened as chan windows at the attach; the rest open
+    /// on request.
+    pub window_cap: usize,
+    /// The most recent errors, oldest first.
+    pub errors: Vec<String>,
+    /// The connection's control window: the row marked
+    /// `tmux: {connection, control: true}`.
+    pub control_window: String,
+}
+
+impl TmuxConnectionRecord {
+    /// The record of `connection`, whose control session's terminal belongs
+    /// to `library_id` and whose control window is `control_window`, from the
+    /// status its gate published.
+    pub fn new(
+        connection: &str,
+        library_id: &str,
+        control_window: &str,
+        status: TmuxConnectionStatus,
+    ) -> Self {
+        Self {
+            connection: connection.to_owned(),
+            library_id: library_id.to_owned(),
+            origin: status.origin,
+            version: status.version,
+            session: status.session,
+            windows: status.windows,
+            window_cap: status.window_cap,
+            errors: status.errors,
+            control_window: control_window.to_owned(),
+        }
+    }
 }
 
 /// Body of `POST /api/library/windows`, the mint request. The client supplies
@@ -261,20 +340,24 @@ pub struct PersistedWindow {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
-    /// A devserver control terminal (runs the connect script). True only for the
-    /// transient control row minted via [`WindowRegistry::create_control`]; it is
-    /// NEVER written to disk (see `WindowRegistry::save_best_effort`) -- the
-    /// control terminal is per-connection, desktop-driven, and reaped on PTY
-    /// exit. `skip_serializing_if` default keeps a normal row's on-disk shape
-    /// unchanged.
+    /// A control terminal: a devserver's connect-script window, the transient
+    /// row minted via [`WindowRegistry::create_control`] (per-connection,
+    /// desktop-driven, reaped on PTY exit), or a tmux connection's control
+    /// window while the connection runs
+    /// ([`WindowRegistry::create_tmux_control_window`]; released to a plain
+    /// row when it ends). A control row is NEVER written to disk (see
+    /// `WindowRegistry::save_best_effort`). `skip_serializing_if` default
+    /// keeps a normal row's on-disk shape unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub control: bool,
-    /// A window of a tmux control-mode connection. The connection does not
-    /// survive the process, so no save writes the row: a crash leaves no
-    /// buried window behind. Like `control`, the flag is on the wire for the
-    /// readers of the window set, not in the store.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub tmux: bool,
+    /// Set on a window of a tmux control-mode connection: the connection
+    /// and whether this is its control window. The connection does not
+    /// survive the process, so no save writes a marked row: a crash leaves
+    /// no buried window behind. Like `control`, the mark is on the wire for
+    /// the readers of the window set, not in the store; the control window
+    /// loses it when the connection ends and is saved from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<TmuxWindowMark>,
     /// Owning library override. `None` ⇒ this row belongs to the host's own
     /// library (the common case; assembly stamps the host's `library_id`).
     /// `Some(id)` ⇒ a FOREIGN library_id, used by the control row: it is minted
@@ -333,7 +416,7 @@ impl PersistedWindow {
             // transfer state; a freshly assembled/minted record defaults off.
             active_transfer: false,
             control: self.control,
-            tmux: self.tmux,
+            tmux: self.tmux.clone(),
             hidden: self.hidden,
             origin: self.origin,
         }
@@ -407,6 +490,10 @@ pub struct WindowRegistry {
     /// out, and ids are random 64-bit values that a later mint will not
     /// reuse. Locked last, after `windows` when both are held.
     throwaway: Mutex<HashSet<String>>,
+    /// The live tmux control-mode connections by id, as the host reports
+    /// them from each gate's status: in memory only, since a connection
+    /// ends with the process. Locked alone.
+    tmux_connections: Mutex<BTreeMap<String, TmuxConnectionRecord>>,
 }
 
 impl WindowRegistry {
@@ -452,6 +539,7 @@ impl WindowRegistry {
             state: Mutex::new(state),
             notify: Arc::new(Notify::new()),
             throwaway: Mutex::new(HashSet::new()),
+            tmux_connections: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -524,7 +612,7 @@ impl WindowRegistry {
                 label: String::new(),
                 workspace_path,
                 control: false,
-                tmux: false,
+                tmux: None,
                 library_id: None,
                 hidden: false,
                 origin,
@@ -556,7 +644,7 @@ impl WindowRegistry {
             label: String::new(),
             workspace_path: None,
             control: false,
-            tmux: false,
+            tmux: None,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -594,7 +682,7 @@ impl WindowRegistry {
             label: String::new(),
             workspace_path: None,
             control: true,
-            tmux: false,
+            tmux: None,
             library_id: Some(library_id),
             hidden: false,
             // A control terminal is a desktop-native window.
@@ -615,9 +703,9 @@ impl WindowRegistry {
 
     /// Mint a window for a tmux control-mode connection's tmux window: a row
     /// of `kind` for `workspace_path`, native, shown, labelled with the tmux
-    /// window's name cut to the label bound, and marked `tmux`, which keeps
-    /// it out of every save: the connection ends with the process, so a
-    /// crash leaves no row behind.
+    /// window's name cut to the label bound, and marked with `connection`,
+    /// which keeps it out of every save: the connection ends with the
+    /// process, so a crash leaves no row behind.
     /// Ordinal and title are minted like [`Self::create_with_origin`]'s, and
     /// a save of the durable rows made while the row lives leaves it out.
     /// Fires the change notification.
@@ -625,13 +713,54 @@ impl WindowRegistry {
         &self,
         kind: WindowKind,
         workspace_path: Option<String>,
+        connection: &str,
         label: &str,
+    ) -> PersistedWindow {
+        let mark = TmuxWindowMark {
+            connection: connection.to_owned(),
+            control: false,
+        };
+        self.mint_tmux_row(kind, workspace_path, mark, None, label, false)
+    }
+
+    /// Mint the control window of the tmux control-mode connection
+    /// `connection`: a row of `kind` for `workspace_path` that is `control`,
+    /// hidden (the launcher shows it as the connection's card's control row,
+    /// shown on request) and marked as the connection's control window,
+    /// titled `title` (from the connection's origin) over the ordinal a
+    /// plain window of the family would take, which titles it again when
+    /// the connection ends ([`Self::release_tmux_control`]). Never saved
+    /// while marked. Fires the change notification.
+    pub fn create_tmux_control_window(
+        &self,
+        kind: WindowKind,
+        workspace_path: Option<String>,
+        connection: &str,
+        title: &str,
+    ) -> PersistedWindow {
+        let mark = TmuxWindowMark {
+            connection: connection.to_owned(),
+            control: true,
+        };
+        self.mint_tmux_row(kind, workspace_path, mark, Some(title), "", true)
+    }
+
+    fn mint_tmux_row(
+        &self,
+        kind: WindowKind,
+        workspace_path: Option<String>,
+        mark: TmuxWindowMark,
+        title: Option<&str>,
+        label: &str,
+        hidden: bool,
     ) -> PersistedWindow {
         let row = {
             let mut windows = self.lock();
             let window_id = mint_id(&windows, &self.unreadable);
             let ordinal = next_ordinal(&windows, kind, workspace_path.as_deref());
-            let title = compose_title(kind, ordinal, workspace_path.as_deref());
+            let title = title
+                .map(str::to_owned)
+                .unwrap_or_else(|| compose_title(kind, ordinal, workspace_path.as_deref()));
             let row = PersistedWindow {
                 window_id,
                 kind,
@@ -639,10 +768,10 @@ impl WindowRegistry {
                 ordinal,
                 label: label.chars().take(MAX_WINDOW_LABEL_CHARS).collect(),
                 workspace_path,
-                control: false,
-                tmux: true,
+                control: mark.control,
+                tmux: Some(mark),
                 library_id: None,
-                hidden: false,
+                hidden,
                 origin: WindowOrigin::Native,
             };
             windows.push(row.clone());
@@ -650,6 +779,96 @@ impl WindowRegistry {
         };
         self.notify.notify_waiters();
         row
+    }
+
+    /// Make the existing row `window_id` the control window of `connection`
+    /// again, titled `title`: a control window released by an earlier
+    /// connection whose terminal ran `tmux -CC` once more. The row keeps its
+    /// ordinal and visibility and leaves the save set while marked. Returns
+    /// whether a row matched; fires the change notification when so.
+    pub fn mark_tmux_control(&self, window_id: &str, connection: &str, title: &str) -> bool {
+        let (matched, snapshot) = {
+            let mut windows = self.lock();
+            let matched = match windows.iter_mut().find(|w| w.window_id == window_id) {
+                Some(w) => {
+                    w.control = true;
+                    w.tmux = Some(TmuxWindowMark {
+                        connection: connection.to_owned(),
+                        control: true,
+                    });
+                    w.title = title.to_owned();
+                    true
+                }
+                None => false,
+            };
+            (matched, self.save_snapshot(&windows))
+        };
+        if matched {
+            // The row leaves the store with the mark, as a fresh control
+            // window never enters it.
+            self.save_best_effort(&snapshot);
+            self.notify.notify_waiters();
+        }
+        matched
+    }
+
+    /// The connection of control window `window_id` ended: the row becomes a
+    /// plain window of its family, with `control` and the mark cleared, the
+    /// title its ordinal composes and shown, so the shell that drew again is
+    /// in front, saved from now on like any other. Returns the row as it now
+    /// reads, or `None` when `window_id` names no marked control window;
+    /// fires the change notification on a release.
+    pub fn release_tmux_control(&self, window_id: &str) -> Option<PersistedWindow> {
+        let (released, snapshot) = {
+            let mut windows = self.lock();
+            let released = windows
+                .iter_mut()
+                .find(|w| {
+                    w.window_id == window_id && w.tmux.as_ref().is_some_and(|mark| mark.control)
+                })
+                .map(|w| {
+                    w.control = false;
+                    w.tmux = None;
+                    w.hidden = false;
+                    w.title = compose_title(w.kind, w.ordinal, w.workspace_path.as_deref());
+                    w.clone()
+                });
+            (released, self.save_snapshot(&windows))
+        };
+        if released.is_some() {
+            self.save_best_effort(&snapshot);
+            self.notify.notify_waiters();
+        }
+        released
+    }
+
+    /// Record or replace the live connection `record.connection`. Fires the
+    /// change notification, so the feed's next frame carries it.
+    pub fn set_tmux_connection(&self, record: TmuxConnectionRecord) {
+        self.tmux_connections_lock()
+            .insert(record.connection.clone(), record);
+        self.notify.notify_waiters();
+    }
+
+    /// Drop the live connection `connection`. Returns whether one was held;
+    /// fires the change notification when so.
+    pub fn remove_tmux_connection(&self, connection: &str) -> bool {
+        let removed = self.tmux_connections_lock().remove(connection).is_some();
+        if removed {
+            self.notify.notify_waiters();
+        }
+        removed
+    }
+
+    /// The live connections, in id order.
+    pub fn tmux_connections(&self) -> Vec<TmuxConnectionRecord> {
+        self.tmux_connections_lock().values().cloned().collect()
+    }
+
+    fn tmux_connections_lock(&self) -> MutexGuard<'_, BTreeMap<String, TmuxConnectionRecord>> {
+        self.tmux_connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Drop the window `window_id` from the durable set: the discard mechanism.
@@ -786,17 +1005,18 @@ impl WindowRegistry {
         // A directory-sync error can follow a successful rename. Once a newer
         // save starts, older snapshots must stay excluded even on an error.
         *latest_save = *generation;
-        // Control rows are transient/per-connection, tmux windows last their
-        // connection and throwaway terminals last one process (in-memory
-        // only): never write them, so a desktop crash can't strand a stale
-        // window on the next boot. Every other row is written, and so is
-        // every row this build could not read, so the file never loses what
-        // another build wrote.
+        // Control rows are transient/per-connection, tmux-marked windows
+        // last their connection and throwaway terminals last one process
+        // (in-memory only): never write them, so a desktop crash can't
+        // strand a stale window on the next boot. Every other row is
+        // written, a tmux control window once its connection released it
+        // included, and so is every row this build could not read, so the
+        // file never loses what another build wrote.
         let durable: Vec<&PersistedWindow> = {
             let throwaway = self.throwaway_ids();
             windows
                 .iter()
-                .filter(|w| !w.control && !w.tmux && !throwaway.contains(&w.window_id))
+                .filter(|w| !w.control && w.tmux.is_none() && !throwaway.contains(&w.window_id))
                 .collect()
         };
         let result = save_atomic(
@@ -1299,7 +1519,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
         };
@@ -1344,7 +1564,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
-            tmux: false,
+            tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
         };
@@ -1457,22 +1677,35 @@ mod tests {
                 holders: None,
                 active_transfer: true,
                 control: false,
-                tmux: false,
+                tmux: None,
                 hidden: false,
                 origin: WindowOrigin::Native,
             }],
             leaders: BTreeMap::new(),
+            tmux_connections: Vec::new(),
         };
         let v = serde_json::to_value(&set).unwrap();
         assert_eq!(v["windows"][0]["window_id"], "w-1a2b3c4d5e6f7081");
         assert_eq!(v["windows"][0]["active_transfer"], true);
-        // A non-control, visible window omits `control` AND `hidden` from the wire.
+        // A non-control, visible window omits `control`, `tmux` AND `hidden`
+        // from the wire.
         assert!(v["windows"][0].get("control").is_none());
+        assert!(v["windows"][0].get("tmux").is_none());
         assert!(v["windows"][0].get("hidden").is_none());
         assert_eq!(v["windows"].as_array().unwrap().len(), 1);
-        // An empty leaders map is skip-if-empty: absent on the wire.
+        // An empty leaders map and an empty connection list are
+        // skip-if-empty: absent on the wire.
         assert!(v.get("leaders").is_none());
+        assert!(v.get("tmux_connections").is_none());
         assert_eq!(set, serde_json::from_value(v).unwrap());
+
+        // A live connection rides the frame as one record.
+        let mut with_connection = set.clone();
+        with_connection.tmux_connections = vec![connection_record("term-a")];
+        let v = serde_json::to_value(&with_connection).unwrap();
+        assert_eq!(v["tmux_connections"][0]["connection"], "term-a");
+        assert_eq!(v["tmux_connections"][0]["control_window"], "w-0");
+        assert_eq!(with_connection, serde_json::from_value(v).unwrap());
 
         // A populated leaders map serializes as tenant `prefix` -> leader
         // `window_id`, keyed by the prefix a launcher reads off each record.
@@ -1484,6 +1717,7 @@ mod tests {
         let with_leaders = WindowSet {
             windows: vec![],
             leaders,
+            tmux_connections: Vec::new(),
         };
         let v = serde_json::to_value(&with_leaders).unwrap();
         assert_eq!(v["leaders"]["/api/notes-1a2b3c"], "w-leaderwindow0001");
@@ -1502,7 +1736,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: true,
-            tmux: false,
+            tmux: None,
             library_id: Some("lib-0f1e2d3c4b5a6978".into()),
             hidden: true,
             origin: WindowOrigin::Native,
@@ -1593,7 +1827,7 @@ mod tests {
             label: String::new(),
             workspace_path: Some("/n".into()),
             control: false,
-            tmux: false,
+            tmux: None,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Browser,
@@ -1627,7 +1861,7 @@ mod tests {
             label: String::new(),
             workspace_path: Some("/n".into()),
             control: false,
-            tmux: false,
+            tmux: None,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -1659,7 +1893,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: false,
-            tmux: false,
+            tmux: None,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -1678,7 +1912,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: true,
-            tmux: false,
+            tmux: None,
             library_id: Some("lib-f81913a8ca0a6ff6".into()),
             hidden: false,
             origin: WindowOrigin::Native,
@@ -1706,7 +1940,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: false,
-            tmux: false,
+            tmux: None,
             library_id: None,
             hidden: true,
             origin: WindowOrigin::Native,
@@ -1808,8 +2042,15 @@ mod tests {
         let (reg, dir) = registry();
         let path = dir.path().join("windows.json");
         let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 5);
-        let tmux = reg.create_tmux_window(WindowKind::Workspace, Some("/w".into()), &long);
-        assert!(tmux.tmux);
+        let tmux =
+            reg.create_tmux_window(WindowKind::Workspace, Some("/w".into()), "term-1", &long);
+        assert_eq!(
+            tmux.tmux,
+            Some(TmuxWindowMark {
+                connection: "term-1".into(),
+                control: false,
+            })
+        );
         assert!(!tmux.hidden, "minted shown: its tabs are parked for it");
         assert!(!tmux.control);
         assert_eq!(tmux.kind, WindowKind::Workspace);
@@ -1850,19 +2091,184 @@ mod tests {
     }
 
     #[test]
-    fn tmux_mark_is_on_the_wire_and_omitted_when_false() {
+    fn tmux_mark_is_an_object_on_the_wire_and_omitted_on_a_plain_row() {
         let (reg, _dir) = registry();
-        let row = reg.create_tmux_window(WindowKind::Terminal, None, "shell");
+        let row = reg.create_tmux_window(WindowKind::Terminal, None, "term-9", "shell");
         let json = serde_json::to_value(&row).unwrap();
-        assert_eq!(json["tmux"], json!(true));
+        assert_eq!(
+            json["tmux"],
+            json!({"connection": "term-9", "control": false})
+        );
         assert_eq!(json["label"], json!("shell"));
         let plain = serde_json::to_value(reg.create(WindowKind::Terminal, None)).unwrap();
         assert!(
             plain.get("tmux").is_none(),
-            "false is omitted, as a row an older build wrote"
+            "a plain row carries no mark, as a row an older build wrote"
         );
         let read: PersistedWindow = serde_json::from_value(plain).unwrap();
-        assert!(!read.tmux);
+        assert!(read.tmux.is_none());
+    }
+
+    #[test]
+    fn a_tmux_control_window_is_minted_hidden_and_released_to_a_plain_terminal_window() {
+        let (reg, dir) = registry();
+        let path = dir.path().join("windows.json");
+        let control = reg.create_tmux_control_window(
+            WindowKind::Terminal,
+            None,
+            "term-3",
+            "tmux -CC on this machine",
+        );
+        assert!(control.control);
+        assert!(control.hidden, "minted hidden: the card's control row");
+        assert_eq!(control.title, "tmux -CC on this machine");
+        assert_eq!(control.ordinal, 1, "numbered like a plain window");
+        assert_eq!(
+            serde_json::to_value(&control).unwrap()["tmux"],
+            json!({"connection": "term-3", "control": true})
+        );
+        let record = control.to_record("local".into(), "/t".into(), "tok".into(), false, vec![]);
+        assert!(
+            !record.persisted,
+            "not saved while it is the control window"
+        );
+        assert!(!path.exists(), "the mint writes nothing");
+        // A tmux window of the same connection numbers after it.
+        let window = reg.create_tmux_window(WindowKind::Terminal, None, "term-3", "shell");
+        assert_eq!(window.ordinal, 2);
+        // Releasing a tmux window, or an unknown id, does nothing.
+        assert!(reg.release_tmux_control(&window.window_id).is_none());
+        assert!(reg.release_tmux_control("w-missing").is_none());
+        // The release: a plain terminal window of its ordinal, saved.
+        let released = reg
+            .release_tmux_control(&control.window_id)
+            .expect("the control window is released");
+        assert!(!released.control);
+        assert!(released.tmux.is_none());
+        assert_eq!(released.title, "⌂ Terminal Window 1");
+        assert!(
+            !released.hidden,
+            "the released window is shown, so the shell that drew again is in front"
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            stored.contains(&control.window_id),
+            "a released control window is a durable row: {stored}"
+        );
+        assert!(!stored.contains(&window.window_id));
+        assert!(
+            reg.release_tmux_control(&control.window_id).is_none(),
+            "released once"
+        );
+        // The same terminal runs `tmux -CC` again: the row is the control
+        // window once more, in place, and leaves the store.
+        assert!(reg.mark_tmux_control(&control.window_id, "term-3", "tmux -CC from ssh box"));
+        assert!(!reg.mark_tmux_control("w-missing", "term-3", "x"));
+        let marked = reg
+            .snapshot()
+            .into_iter()
+            .find(|w| w.window_id == control.window_id)
+            .unwrap();
+        assert!(marked.control);
+        assert_eq!(marked.title, "tmux -CC from ssh box");
+        assert_eq!(
+            marked.tmux,
+            Some(TmuxWindowMark {
+                connection: "term-3".into(),
+                control: true,
+            })
+        );
+        assert_eq!(marked.ordinal, 1, "the ordinal is kept across the marks");
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(!stored.contains(&control.window_id), "{stored}");
+    }
+
+    fn connection_record(connection: &str) -> TmuxConnectionRecord {
+        TmuxConnectionRecord {
+            connection: connection.into(),
+            library_id: "local".into(),
+            origin: TmuxOrigin {
+                program: "ssh".into(),
+                command: Some("ssh geekom".into()),
+                local: false,
+            },
+            version: "3.8".into(),
+            session: Some(TmuxSessionStatus {
+                id: "$0".into(),
+                name: "main".into(),
+            }),
+            windows: vec![TmuxWindowStatus {
+                id: "@1".into(),
+                name: "shell".into(),
+                panes: 2,
+                open: true,
+                chan_window: Some("w-1".into()),
+            }],
+            window_cap: 8,
+            errors: vec!["no such window".into()],
+            control_window: "w-0".into(),
+        }
+    }
+
+    #[test]
+    fn tmux_connection_records_are_kept_by_id_and_pin_their_wire() {
+        let (reg, _dir) = registry();
+        assert!(reg.tmux_connections().is_empty());
+        reg.set_tmux_connection(connection_record("term-b"));
+        reg.set_tmux_connection(connection_record("term-a"));
+        let mut replaced = connection_record("term-b");
+        replaced.windows.clear();
+        reg.set_tmux_connection(replaced.clone());
+        let listed = reg.tmux_connections();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|r| r.connection.as_str())
+                .collect::<Vec<_>>(),
+            vec!["term-a", "term-b"],
+            "in id order, one record per connection"
+        );
+        assert_eq!(listed[1], replaced, "a later record replaces the earlier");
+        assert!(reg.remove_tmux_connection("term-b"));
+        assert!(!reg.remove_tmux_connection("term-b"));
+        assert_eq!(reg.tmux_connections().len(), 1);
+        let wire = serde_json::to_value(connection_record("term-a")).unwrap();
+        assert_eq!(
+            wire,
+            json!({
+                "connection": "term-a",
+                "library_id": "local",
+                "origin": {"program": "ssh", "command": "ssh geekom", "local": false},
+                "version": "3.8",
+                "session": {"id": "$0", "name": "main"},
+                "windows": [{"id": "@1", "name": "shell", "panes": 2, "open": true, "chan_window": "w-1"}],
+                "window_cap": 8,
+                "errors": ["no such window"],
+                "control_window": "w-0",
+            })
+        );
+        let read: TmuxConnectionRecord = serde_json::from_value(wire).unwrap();
+        assert_eq!(read, connection_record("term-a"));
+    }
+
+    #[tokio::test]
+    async fn a_connection_record_fires_the_change_notification() {
+        let (reg, _dir) = registry();
+        let notify = reg.change_notify();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        reg.set_tmux_connection(connection_record("term-a"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("the record notifies the window feed");
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        assert!(reg.remove_tmux_connection("term-a"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("the removal notifies the window feed");
     }
 
     #[tokio::test]
@@ -1872,7 +2278,7 @@ mod tests {
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        reg.create_tmux_window(WindowKind::Terminal, None, "shell");
+        reg.create_tmux_window(WindowKind::Terminal, None, "term-1", "shell");
         tokio::time::timeout(std::time::Duration::from_secs(5), notified)
             .await
             .expect("the mint notifies the window feed");
@@ -2394,7 +2800,7 @@ mod tests {
             label: "release checks".into(),
             workspace_path: Some("/n".into()),
             control: false,
-            tmux: false,
+            tmux: None,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -2436,7 +2842,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: true,
-            tmux: false,
+            tmux: None,
             library_id: Some("lib-remote".into()),
             hidden: false,
             origin: WindowOrigin::Native,

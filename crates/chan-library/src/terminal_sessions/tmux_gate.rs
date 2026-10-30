@@ -13,9 +13,7 @@ use chan_tmux::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use super::tmux_connection::{
-    self, Purpose, Step, TmuxConnection, TmuxConnectionStatus, TmuxWork, WorkDone,
-};
+use super::tmux_connection::{self, Purpose, Step, TmuxConnection, TmuxOrigin, TmuxWork, WorkDone};
 use super::{PtyCommand, TerminalExit, TmuxConnectionId};
 use crate::config::TerminalTmuxConfig;
 
@@ -66,18 +64,9 @@ pub struct TmuxConsentSnapshot {
     pub question: Option<TmuxQuestion>,
 }
 
-/// The connection state a session publishes for the control terminal's
-/// status view. `revision` orders snapshots; `connection` is set while
-/// connected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
-pub struct TmuxStatus {
-    pub revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection: Option<TmuxConnectionStatus>,
-}
-
-/// A client's request of a live connection, from the status view. One with
-/// no connection changes nothing.
+/// A client's request of a live connection: from the launcher's card for
+/// the connection, or from a tmux window of it. One with no connection
+/// changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "kebab-case")]
 pub enum TmuxRequest {
@@ -145,6 +134,9 @@ enum Phase {
         deadline: Instant,
         held: Vec<Event>,
         held_bytes: usize,
+        /// The foreground that printed the marker, kept for the connection
+        /// an allow makes.
+        origin: TmuxOrigin,
     },
     /// Allowed: waiting for the peer to announce a session, then to answer
     /// the version probe.
@@ -153,6 +145,8 @@ enum Phase {
         probe: Option<Token>,
         /// The session the peer announced, for the connection's status.
         session: Option<(SessionId, String)>,
+        /// The foreground that printed the marker.
+        origin: TmuxOrigin,
     },
     /// Connected to a tmux at or past the floor: the connection keeps its
     /// windows and panes.
@@ -177,8 +171,6 @@ pub(super) struct TmuxGate {
     allow_for_tab: bool,
     published: watch::Sender<Arc<TmuxConsentSnapshot>>,
     revision: u64,
-    status: watch::Sender<Arc<TmuxStatus>>,
-    status_revision: u64,
 }
 
 impl TmuxGate {
@@ -186,7 +178,6 @@ impl TmuxGate {
         let mut client = Client::new(Limits::default());
         client.arm(policy.enabled);
         let (published, _) = watch::channel(Arc::new(TmuxConsentSnapshot::default()));
-        let (status, _) = watch::channel(Arc::new(TmuxStatus::default()));
         Self {
             client,
             policy,
@@ -195,8 +186,6 @@ impl TmuxGate {
             allow_for_tab: false,
             published,
             revision: 0,
-            status,
-            status_revision: 0,
         }
     }
 
@@ -245,7 +234,7 @@ impl TmuxGate {
                 );
             }
         }
-        self.publish_status_if_dirty();
+        self.publish_status_if_dirty(&mut actions);
         actions
     }
 
@@ -288,7 +277,7 @@ impl TmuxGate {
                 );
             }
         }
-        self.publish_status_if_dirty();
+        self.publish_status_if_dirty(&mut actions);
         actions
     }
 
@@ -310,7 +299,7 @@ impl TmuxGate {
                 );
             }
         }
-        self.publish_status_if_dirty();
+        self.publish_status_if_dirty(&mut actions);
         actions
     }
 
@@ -325,7 +314,9 @@ impl TmuxGate {
         actions
     }
 
-    /// End the connection's panes and windows, if there is one.
+    /// End the connection's panes and windows, if there is one, and tell
+    /// the host it ended, after them, so its record and its control window
+    /// go once nothing of it is left.
     fn end_connection(&mut self, exit: TerminalExit, actions: &mut Vec<Action>) {
         if let Phase::Connected { connection, .. } = &mut self.phase {
             for step in connection.on_end(exit) {
@@ -333,7 +324,7 @@ impl TmuxGate {
                     actions.push(action);
                 }
             }
-            self.publish_status(None);
+            actions.push(Action::Work(TmuxWork::Ended));
         }
     }
 
@@ -359,13 +350,6 @@ impl TmuxGate {
         watch::Receiver<Arc<TmuxConsentSnapshot>>,
     ) {
         let mut rx = self.published.subscribe();
-        let current = rx.borrow_and_update().clone();
-        (current, rx)
-    }
-
-    /// The current connection status and a receiver of the ones to come.
-    pub(super) fn subscribe_status(&self) -> (Arc<TmuxStatus>, watch::Receiver<Arc<TmuxStatus>>) {
-        let mut rx = self.status.subscribe();
         let current = rx.borrow_and_update().clone();
         (current, rx)
     }
@@ -415,7 +399,7 @@ impl TmuxGate {
                 event => self.event(event, now, &mut fed.actions),
             }
         }
-        self.publish_status_if_dirty();
+        self.publish_status_if_dirty(&mut fed.actions);
         fed
     }
 
@@ -423,10 +407,11 @@ impl TmuxGate {
     /// standing is ignored.
     pub(super) fn answer(&mut self, answer: TmuxAnswer, now: Instant) -> Vec<Action> {
         let mut actions = Vec::new();
-        let Phase::Asking { held, .. } = &mut self.phase else {
+        let Phase::Asking { held, origin, .. } = &mut self.phase else {
             return actions;
         };
         let held = std::mem::take(held);
+        let origin = origin.clone();
         match answer {
             TmuxAnswer::Deny => {
                 self.deny("denied", now, &mut actions);
@@ -440,6 +425,7 @@ impl TmuxGate {
                     deadline: now + PROBE_TIMEOUT,
                     probe: None,
                     session: None,
+                    origin,
                 };
                 for event in held {
                     self.event(event, now, &mut actions);
@@ -485,29 +471,38 @@ impl TmuxGate {
     }
 
     fn entered(&mut self, foreground: Foreground, now: Instant, actions: &mut Vec<Action>) {
-        let trusted = foreground
-            .name
-            .as_deref()
-            .map(program_word)
-            .is_some_and(|word| word == "tmux" || self.policy.trust.iter().any(|t| t == word));
+        let word = foreground.name.as_deref().map(program_word);
+        let local = word == Some("tmux");
+        let trusted = local || word.is_some_and(|word| self.policy.trust.iter().any(|t| t == word));
+        let origin = TmuxOrigin {
+            program: foreground
+                .name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            command: foreground.command,
+            local,
+        };
         if trusted || self.allow_for_tab {
             self.phase = Phase::Probing {
                 deadline: now + PROBE_TIMEOUT,
                 probe: None,
                 session: None,
+                origin,
             };
             return;
         }
+        let question = TmuxQuestion {
+            program: origin.program.clone(),
+            command: origin.command.clone(),
+            timeout_secs: QUESTION_TIMEOUT.as_secs(),
+        };
         self.phase = Phase::Asking {
             deadline: now + QUESTION_TIMEOUT,
             held: Vec::new(),
             held_bytes: 0,
+            origin,
         };
-        self.publish(Some(TmuxQuestion {
-            program: foreground.name.unwrap_or_else(|| "unknown".to_owned()),
-            command: foreground.command,
-            timeout_secs: QUESTION_TIMEOUT.as_secs(),
-        }));
+        self.publish(Some(question));
         let _ = actions;
     }
 
@@ -515,7 +510,12 @@ impl TmuxGate {
         match &mut self.phase {
             Phase::Plain => {}
             Phase::Asking { held, .. } => held.push(event),
-            Phase::Probing { probe, session, .. } => match event {
+            Phase::Probing {
+                probe,
+                session,
+                origin,
+                ..
+            } => match event {
                 Event::Message(Message::SessionChanged {
                     session: announced,
                     name,
@@ -532,10 +532,7 @@ impl TmuxGate {
                 },
                 Event::Reply { token, result } if Some(token) == *probe => {
                     let announced = session.take();
-                    let control_title = match &announced {
-                        Some((_, name)) if !name.is_empty() => format!("tmux {name}"),
-                        _ => "tmux".to_owned(),
-                    };
+                    let origin = origin.clone();
                     let version = result
                         .ok()
                         .and_then(|rows| rows.into_iter().next())
@@ -545,17 +542,21 @@ impl TmuxGate {
                         Some(version) if version >= VERSION_FLOOR => {
                             let id =
                                 TmuxConnectionId(NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed));
-                            let (mut connection, rx) =
-                                TmuxConnection::new(id, version, self.scrollback_mb, announced);
+                            let title = origin.control_title();
+                            let (mut connection, rx) = TmuxConnection::new(
+                                id,
+                                version,
+                                origin,
+                                self.scrollback_mb,
+                                announced,
+                            );
                             actions.push(Action::Notice(format!(
                                 "tmux {}.{} control mode",
                                 version.major, version.minor
                             )));
                             actions
                                 .push(Action::Work(TmuxWork::StartGateway { connection: id, rx }));
-                            actions.push(Action::ControlWindow {
-                                title: control_title,
-                            });
+                            actions.push(Action::ControlWindow { title });
                             let steps = connection.start();
                             if let Err(error) =
                                 drive(&mut self.client, &mut connection, steps, actions)
@@ -571,7 +572,7 @@ impl TmuxGate {
                                 version,
                                 connection: Box::new(connection),
                             };
-                            self.publish_status_if_dirty();
+                            self.publish_status_if_dirty(actions);
                         }
                         Some(version) => self.end_control(
                             &format!(
@@ -681,23 +682,18 @@ impl TmuxGate {
         }));
     }
 
-    /// Publish the connection's status when it changed since the last one.
-    fn publish_status_if_dirty(&mut self) {
+    /// Hand the host the connection's status when it changed since the last
+    /// one, as work the registry performs after the work queued before it,
+    /// so the control window the status names is minted by then.
+    fn publish_status_if_dirty(&mut self, actions: &mut Vec<Action>) {
         let Phase::Connected { connection, .. } = &mut self.phase else {
             return;
         };
         if !connection.take_dirty() {
             return;
         }
-        let snapshot = connection.status();
-        self.publish_status(Some(snapshot));
-    }
-
-    fn publish_status(&mut self, connection: Option<TmuxConnectionStatus>) {
-        self.status_revision += 1;
-        self.status.send_replace(Arc::new(TmuxStatus {
-            revision: self.status_revision,
-            connection,
+        actions.push(Action::Work(TmuxWork::Status {
+            status: connection.status(),
         }));
     }
 }
@@ -1075,26 +1071,45 @@ mod tests {
         assert!(fed.actions.is_empty() && question(&gate).is_none());
     }
 
+    /// The status the host is handed last among `actions`, if any.
+    fn last_status(actions: &[Action]) -> Option<tmux_connection::TmuxConnectionStatus> {
+        actions.iter().rev().find_map(|a| match a {
+            Action::Work(TmuxWork::Status { status }) => Some(status.clone()),
+            _ => None,
+        })
+    }
+
+    /// Where `actions` tells the host the connection ended, if it does.
+    fn ended_at(actions: &[Action]) -> Option<usize> {
+        actions
+            .iter()
+            .position(|a| matches!(a, Action::Work(TmuxWork::Ended)))
+    }
+
     #[test]
-    fn a_connected_gate_publishes_its_status_and_its_end() {
+    fn a_connected_gate_hands_the_host_its_status_and_its_end() {
         let now = Instant::now();
         let mut gate = TmuxGate::new(policy(true, &[]), 10);
-        let (initial, mut status_rx) = gate.subscribe_status();
-        assert_eq!(initial.revision, 0);
-        assert!(initial.connection.is_none());
-        gate.feed(&entry(), now, tmux);
+        let fed = gate.feed(&entry(), now, tmux);
         assert!(
-            !status_rx.has_changed().unwrap(),
+            last_status(&fed.actions).is_none(),
             "probing publishes nothing"
         );
-        gate.feed(
+        let fed = gate.feed(
             b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
             now,
             tmux,
         );
-        let status = status_rx.borrow_and_update().clone();
-        let connection = status.connection.as_ref().expect("connected");
+        let connection = last_status(&fed.actions).expect("connected");
         assert_eq!(connection.version, "3.8");
+        assert_eq!(
+            connection.origin,
+            TmuxOrigin {
+                program: "tmux".into(),
+                command: Some("tmux -CC".into()),
+                local: true,
+            }
+        );
         assert_eq!(
             connection.session,
             Some(tmux_connection::TmuxSessionStatus {
@@ -1105,11 +1120,27 @@ mod tests {
         assert!(connection.windows.is_empty());
         assert_eq!(connection.window_cap, tmux_connection::WINDOW_CAP);
         assert!(connection.errors.is_empty());
+        let control_at = fed
+            .actions
+            .iter()
+            .position(|a| matches!(a, Action::ControlWindow { .. }))
+            .expect("the control window is asked for");
+        let status_at = fed
+            .actions
+            .iter()
+            .position(|a| matches!(a, Action::Work(TmuxWork::Status { .. })))
+            .expect("the status is handed over");
+        assert!(
+            control_at < status_at,
+            "the control window is asked for ahead of the status that names it: {:?}",
+            fed.actions
+        );
         // A window tmux adds is listed open, with no chan window yet.
-        gate.feed(b"%window-add @5\r\n", now, tmux);
-        let status = status_rx.borrow_and_update().clone();
+        let fed = gate.feed(b"%window-add @5\r\n", now, tmux);
         assert_eq!(
-            status.connection.as_ref().unwrap().windows,
+            last_status(&fed.actions)
+                .expect("a window is a change")
+                .windows,
             vec![tmux_connection::TmuxWindowStatus {
                 id: "@5".into(),
                 name: String::new(),
@@ -1119,52 +1150,62 @@ mod tests {
             }]
         );
         // The host's answer and a rename land in it.
-        gate.work_done(
+        let actions = gate.work_done(
             WorkDone::WindowMinted {
                 key: WindowId(5),
                 window_id: Some("w-1".into()),
             },
             now,
         );
-        let status = status_rx.borrow_and_update().clone();
         assert_eq!(
-            status.connection.as_ref().unwrap().windows[0]
+            last_status(&actions).expect("a mint is a change").windows[0]
                 .chan_window
                 .as_deref(),
             Some("w-1")
         );
-        gate.feed(b"%window-renamed @5 logs\r\n", now, tmux);
-        let status = status_rx.borrow_and_update().clone();
-        assert_eq!(status.connection.as_ref().unwrap().windows[0].name, "logs");
+        let fed = gate.feed(b"%window-renamed @5 logs\r\n", now, tmux);
+        assert_eq!(
+            last_status(&fed.actions)
+                .expect("a rename is a change")
+                .windows[0]
+                .name,
+            "logs"
+        );
         // Output alone is not a status change.
-        gate.feed(b"%output %0 hi\r\n", now, tmux);
-        assert!(!status_rx.has_changed().unwrap());
-        // The end clears the connection.
-        gate.feed(b"%exit\r\n\x1b\\", now, tmux);
-        let status = status_rx.borrow_and_update().clone();
-        assert!(status.connection.is_none());
-        assert!(status.revision > initial.revision);
+        let fed = gate.feed(b"%output %0 hi\r\n", now, tmux);
+        assert!(last_status(&fed.actions).is_none());
+        assert!(ended_at(&fed.actions).is_none());
+        // The end is handed to the host after the window's removal, with no
+        // status of its own.
+        let fed = gate.feed(b"%exit\r\n\x1b\\", now, tmux);
+        let removed = fed
+            .actions
+            .iter()
+            .position(|a| matches!(a, Action::Work(TmuxWork::RemoveWindow { .. })))
+            .expect("the minted window is removed");
+        let ended = ended_at(&fed.actions).expect("the end is handed to the host");
+        assert!(removed < ended, "{:?}", fed.actions);
+        assert!(last_status(&fed.actions).is_none());
     }
 
     #[test]
-    fn connecting_asks_for_a_control_window_titled_by_the_session() {
+    fn connecting_asks_for_a_control_window_titled_by_the_origin() {
         let now = Instant::now();
+        let titles = |fed: &Fed| -> Vec<String> {
+            fed.actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::ControlWindow { title } => Some(title.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let version = b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n";
+        // tmux itself in the foreground: a run on this machine.
         let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, tmux);
-        let fed = gate.feed(
-            b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
-            now,
-            tmux,
-        );
-        let titles: Vec<&str> = fed
-            .actions
-            .iter()
-            .filter_map(|a| match a {
-                Action::ControlWindow { title } => Some(title.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(titles, vec!["tmux main"]);
+        let fed = gate.feed(version, now, tmux);
+        assert_eq!(titles(&fed), vec!["tmux -CC on this machine"]);
         assert!(
             fed.actions.iter().any(|a| matches!(
                 a,
@@ -1172,6 +1213,39 @@ mod tests {
             )),
             "the gateway starts with the connection's id"
         );
+        // A trusted carrier: titled by its command line, and not local.
+        let mut gate = TmuxGate::new(policy(true, &["ssh"]), 10);
+        let ssh = || Foreground {
+            name: Some("ssh".into()),
+            command: Some("ssh geekom".into()),
+        };
+        gate.feed(&entry(), now, ssh);
+        let fed = gate.feed(version, now, ssh);
+        assert_eq!(titles(&fed), vec!["tmux -CC from ssh geekom"]);
+        assert_eq!(
+            last_status(&fed.actions).expect("connected").origin,
+            TmuxOrigin {
+                program: "ssh".into(),
+                command: Some("ssh geekom".into()),
+                local: false,
+            }
+        );
+        // A carrier whose command line could not be read: its name stands in.
+        let mut gate = TmuxGate::new(policy(true, &["mosh"]), 10);
+        let mosh = || Foreground {
+            name: Some("mosh".into()),
+            command: None,
+        };
+        gate.feed(&entry(), now, mosh);
+        let fed = gate.feed(version, now, mosh);
+        assert_eq!(titles(&fed), vec!["tmux -CC from mosh"]);
+        // An allowed question keeps the origin it was asked about.
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
+        gate.feed(&[MARKER, ENTRY].concat(), now, ssh);
+        assert!(gate.asking());
+        gate.answer(TmuxAnswer::Allow, now);
+        let fed = gate.feed(version, now, ssh);
+        assert_eq!(titles(&fed), vec!["tmux -CC from ssh geekom"]);
     }
 
     #[test]
@@ -1220,13 +1294,13 @@ mod tests {
             now,
             tmux,
         );
-        let (_, mut status_rx) = gate.subscribe_status();
         let cap = tmux_connection::WINDOW_CAP;
+        let mut status = None;
         for n in 1..=(cap + 1) {
-            gate.feed(format!("%window-add @{n}\r\n").as_bytes(), now, tmux);
+            let fed = gate.feed(format!("%window-add @{n}\r\n").as_bytes(), now, tmux);
+            status = last_status(&fed.actions).or(status);
         }
-        let status = status_rx.borrow_and_update().clone();
-        let windows = status.connection.as_ref().unwrap().windows.clone();
+        let windows = status.expect("each window is a change").windows;
         assert_eq!(windows.len(), cap + 1);
         assert!(windows[..cap].iter().all(|w| w.open));
         assert!(
@@ -1254,8 +1328,7 @@ mod tests {
             "its panes are listed: {:?}",
             String::from_utf8_lossy(&written[0])
         );
-        let status = status_rx.borrow_and_update().clone();
-        assert!(status.connection.as_ref().unwrap().windows[cap].open);
+        assert!(last_status(&actions).expect("the open is a change").windows[cap].open);
         // Again, for a window tmux has not listed, or for a bad id: nothing.
         assert!(gate
             .request(TmuxRequest::OpenWindow { window: past }, now)
