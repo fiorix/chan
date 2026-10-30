@@ -213,40 +213,32 @@ fn the_attach_sequence_makes_a_pane_session_and_replays_its_capture() {
     assert!(rig.ring(&pane).ends_with(b"\x1b[32mhi\r\n"));
 }
 
+/// A fresh pane's shell prints its prompt before the capture's reply lands,
+/// and the capture's rows carry that prompt: writing the early output after
+/// the capture drew the prompt twice, the second copy at the cursor cell.
 #[test]
-fn output_before_the_capture_is_held_and_follows_it() {
+fn output_before_the_capture_is_dropped_since_the_capture_shows_it() {
     let (mut rig, pane) = attached();
-    rig.feed(b"%output %0 early\r\n");
-    assert!(rig.ring(&pane).is_empty(), "held, not shown");
-    let capture = rig.capture(0, 0, 24, &[b"$ "]);
+    rig.feed(b"%output %0 $ early\r\n");
+    assert!(
+        rig.ring(&pane).is_empty(),
+        "nothing shown before the capture"
+    );
+    let capture = rig.capture(0, 0, 8, &[b"$ early"]);
     rig.feed(&capture);
     let text = String::from_utf8_lossy(&rig.ring(&pane)).into_owned();
-    let screen = text.find("$ ").unwrap();
-    let early = text.find("early").unwrap();
-    assert!(
-        screen < early,
-        "the capture first, then what was held: {text:?}"
+    assert_eq!(
+        text.matches("$ early").count(),
+        1,
+        "the prompt once, from the capture alone: {text:?}"
     );
-}
-
-#[test]
-fn a_hold_past_its_bound_makes_the_pane_lossy_and_the_capture_its_history() {
-    let (mut rig, pane) = attached();
-    let line = [b"%output %0 ".as_slice(), &[b'x'; 4000], b"\r\n"].concat();
-    for _ in 0..300 {
-        rig.feed(&line);
-    }
-    let capture = rig.capture(0, 0, 24, &[b"$ "]);
-    rig.feed(&capture);
-    let ring = rig.ring(&pane);
     assert!(
-        !ring.windows(4000).any(|w| w.iter().all(|b| *b == b'x')),
-        "the hold was dropped"
+        text.ends_with("\x1b[0m\x1b[8;1H"),
+        "the cursor is tmux's, with nothing written past it: {text:?}"
     );
     rig.feed(b"%output %0 after\r\n");
-    let ring = rig.ring(&pane);
     assert!(
-        ring.ends_with(b"after"),
+        rig.ring(&pane).ends_with(b"after"),
         "live output flows after the capture"
     );
 }

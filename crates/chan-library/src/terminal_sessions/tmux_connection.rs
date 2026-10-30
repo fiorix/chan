@@ -26,9 +26,6 @@ use super::{
 pub(super) const WINDOW_CAP: usize = 8;
 /// Most panes one connection holds sessions for.
 pub(super) const PANE_CAP: usize = 96;
-/// Most bytes of a pane's output held while its capture is on the way; past
-/// it the pane is lossy, and the capture alone is its history.
-const HOLD_MAX: usize = 1 << 20;
 /// Most bytes of a pane's typed input kept while the client's queue is full.
 const INPUT_BACKLOG_MAX: usize = 64 << 10;
 /// Seconds of unread output after which tmux pauses a pane. Chan reads as
@@ -177,10 +174,11 @@ struct Window {
 struct Pane {
     window: WindowId,
     session: Option<Arc<Session>>,
-    /// Output read before the capture landed.
-    hold: Vec<u8>,
-    /// The hold overflowed: the capture alone is the history.
-    lossy: bool,
+    /// The capture landed, and output is the session's from here. Output
+    /// read before it is dropped: tmux writes a pane's `%output` and its
+    /// command replies in one order, so what arrives ahead of the capture's
+    /// reply was on the screen the capture read, and writing it again would
+    /// draw it twice.
     captured: bool,
     /// A session was asked for and not yet answered.
     requested: bool,
@@ -542,7 +540,7 @@ impl TmuxConnection {
     }
 
     /// A capture: the pane's state and rows, written as the pane's first
-    /// bytes, then whatever was held.
+    /// bytes.
     pub(super) fn on_capture(
         &mut self,
         token: Token,
@@ -585,12 +583,8 @@ impl TmuxConnection {
         bytes.extend_from_slice(
             format!("\x1b[{};{}H", state.cursor_y + 1, state.cursor_x + 1).as_bytes(),
         );
-        let held = std::mem::take(&mut pane.hold);
         pane.captured = true;
         session.record_output(&bytes);
-        if !held.is_empty() {
-            session.record_output(&held);
-        }
         steps
     }
 
@@ -780,25 +774,12 @@ impl TmuxConnection {
             // past the cap, or one not yet listed.
             return;
         };
-        if pane.captured {
-            if let Some(session) = &pane.session {
-                session.record_output(data);
-            }
+        if !pane.captured {
             return;
         }
-        if pane.lossy {
-            return;
+        if let Some(session) = &pane.session {
+            session.record_output(data);
         }
-        if pane.hold.len() + data.len() > HOLD_MAX {
-            pane.hold.clear();
-            pane.lossy = true;
-            tracing::info!(connection = self.id.0, pane = %pane_id, "tmux pane output held past its bound; the capture alone is its history");
-            self.note_error(format!(
-                "pane {pane_id} wrote more than the hold before its capture; its history is the capture alone"
-            ));
-            return;
-        }
-        pane.hold.extend_from_slice(data);
         let _ = steps;
     }
 
@@ -988,8 +969,6 @@ impl TmuxConnection {
                 Pane {
                     window,
                     session: None,
-                    hold: Vec::new(),
-                    lossy: false,
                     captured: false,
                     requested: true,
                 },
