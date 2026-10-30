@@ -515,6 +515,10 @@ export type TerminalTab = {
   /// holding such a tab is a tmux window: Cmd+T asks tmux for a window and
   /// the close prompt offers Detach.
   tmuxPane?: TmuxPaneRef;
+  /// The grid this tmux pane's host box can show, measured by its renderer
+  /// and folded with the others over tmux's layout into the window size the
+  /// page asks tmux for. Local to this window and never serialized.
+  tmuxHostGrid?: { cols: number; rows: number };
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1586,6 +1590,7 @@ function tabForReopen(src: Tab): Tab {
     tab.tmuxConsent = undefined;
     tab.tmuxStatus = undefined;
     tab.tmuxPane = undefined;
+    tab.tmuxHostGrid = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -2599,6 +2604,21 @@ export function setTerminalTmuxStatus(tab: TerminalTab, status: TmuxStatus, atta
 /// frame says, so a fresh shell in the same tab clears it.
 export function setTerminalTmuxPane(tab: TerminalTab, pane: TmuxPaneRef | null): void {
   tab.tmuxPane = pane ?? undefined;
+}
+
+/// Record the grid a tmux pane's host box can show, as its renderer measured
+/// it; the window grid asked of tmux folds these over the layout.
+export function setTerminalTmuxHostGrid(
+  tab: TerminalTab,
+  grid: { cols: number; rows: number } | null,
+): void {
+  const current = tab.tmuxHostGrid;
+  if (!grid) {
+    if (current) tab.tmuxHostGrid = undefined;
+    return;
+  }
+  if (current && current.cols === grid.cols && current.rows === grid.rows) return;
+  tab.tmuxHostGrid = { cols: grid.cols, rows: grid.rows };
 }
 
 /// The terminal tabs of this window that show tmux panes.
@@ -4505,6 +4525,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   tmuxConsent: "carry",
   tmuxStatus: "carry",
   tmuxPane: "carry",
+  tmuxHostGrid: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -4589,6 +4610,7 @@ function cloneTab(src: Tab): Tab {
     if (clone.programStatus) {
       clone.programStatus = { ...clone.programStatus, records: clone.programStatus.records.map((record) => ({ ...record })) };
     }
+    if (clone.tmuxHostGrid) clone.tmuxHostGrid = { ...clone.tmuxHostGrid };
     if (clone.tmuxConsent) {
       clone.tmuxConsent = {
         ...clone.tmuxConsent,
@@ -7789,6 +7811,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   tmuxConsent: "drop",
   tmuxStatus: "drop",
   tmuxPane: "drop",
+  tmuxHostGrid: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
   terminalActivityPulsing: "drop",

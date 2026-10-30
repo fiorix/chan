@@ -92,6 +92,11 @@ pub enum TmuxRequest {
     Split { pane: String, horizontal: bool },
     /// Make `pane` tmux's active pane, after a client's focus moved to it.
     Focus { pane: String },
+    /// Size the tmux window that holds `pane` (`%N`) to `cols` by `rows`:
+    /// the grid a chan window's panes can show together, dividers counted
+    /// as tmux draws them. tmux lays its panes out inside and tells each
+    /// pane session its size.
+    WindowSize { pane: String, cols: u32, rows: u32 },
     /// Detach the control client; the tmux server and its sessions live on.
     Detach,
     /// End the tmux server with every session it holds.
@@ -266,6 +271,10 @@ impl TmuxGate {
                 },
                 TmuxRequest::Focus { pane } => match PaneId::parse(&pane) {
                     Some(pane) => connection.request_focus(pane),
+                    None => Vec::new(),
+                },
+                TmuxRequest::WindowSize { pane, cols, rows } => match PaneId::parse(&pane) {
+                    Some(pane) => connection.request_window_size(pane, cols, rows),
                     None => Vec::new(),
                 },
                 TmuxRequest::Detach => vec![Step::Submit(Command::Detach, Purpose::Fire)],
@@ -1183,6 +1192,17 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<TmuxRequest>(r#"{"request":"new-window"}"#).unwrap(),
             TmuxRequest::NewWindow
+        );
+        assert_eq!(
+            serde_json::from_str::<TmuxRequest>(
+                r#"{"request":"window-size","pane":"%0","cols":120,"rows":40}"#
+            )
+            .unwrap(),
+            TmuxRequest::WindowSize {
+                pane: "%0".into(),
+                cols: 120,
+                rows: 40
+            }
         );
     }
 

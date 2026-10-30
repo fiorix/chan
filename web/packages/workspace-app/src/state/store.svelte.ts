@@ -124,6 +124,7 @@ import {
   type TerminalTab,
 } from "./tabs.svelte";
 import { isTmuxLayoutNode, tmuxLayoutToSer } from "./tmuxLayout";
+import { setTmuxLayout } from "./tmuxWindowSize.svelte";
 import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
@@ -2268,6 +2269,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
   }
   if (frame.command === "tmux_layout") {
     if (!isTmuxLayoutNode(frame.layout)) return;
+    setTmuxLayout(frame.layout);
     reconcileLayout(tmuxLayoutToSer(frame.layout));
     scheduleSessionSave();
     return;

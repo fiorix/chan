@@ -244,24 +244,70 @@ fn output_before_the_capture_is_dropped_since_the_capture_shows_it() {
 }
 
 #[test]
-fn input_resize_and_kill_reach_tmux_through_the_gateway_thread() {
+fn input_and_kill_reach_tmux_through_the_gateway_thread_and_a_pane_resize_moves_nothing() {
     let (mut rig, pane) = attached();
     let capture = rig.capture(0, 0, 24, &[b"$ "]);
     rig.feed(&capture);
     pane.send_input(b"ls\r");
     let keys = rig.wait_input(|b| b.starts_with(b"send-keys"));
     assert_eq!(keys, b"send-keys -t %0 -H 6c 73 0d\n");
+    // tmux owns the pane's size: a client's box for one pane asks nothing.
     pane.resize(PtySize {
         cols: 100,
         rows: 30,
         pixel_width: 0,
         pixel_height: 0,
     });
-    let size = rig.wait_input(|b| b.starts_with(b"refresh-client -C"));
-    assert_eq!(size, b"refresh-client -C @0:100x30\n");
     assert!(rig.registry.close(&pane.id, CloseReason::Explicit));
     let kill = rig.wait_input(|b| b.starts_with(b"kill-pane"));
     assert_eq!(kill, b"kill-pane -t %0\n");
+    assert!(
+        !rig.inputs()
+            .iter()
+            .any(|b| b.starts_with(b"refresh-client -C")),
+        "a pane resize sized nothing"
+    );
+}
+
+/// A chan window asks for its tmux window's size as a whole, naming one of
+/// its panes; tmux lays the panes out inside it. An unknown pane or an empty
+/// grid asks nothing.
+#[test]
+fn a_window_size_request_sizes_the_tmux_window_of_its_pane() {
+    let (rig, pane, _hook) = attached_with_hook();
+    let pane_ref = pane.tmux_pane.expect("a pane");
+    assert!(rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::WindowSize {
+            pane: "%0".into(),
+            cols: 120,
+            rows: 40,
+        },
+    ));
+    assert_eq!(
+        rig.inputs(),
+        vec![b"refresh-client -C @0:120x40\n".to_vec()]
+    );
+    rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::WindowSize {
+            pane: "%9".into(),
+            cols: 120,
+            rows: 40,
+        },
+    );
+    rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::WindowSize {
+            pane: "%0".into(),
+            cols: 0,
+            rows: 40,
+        },
+    );
+    assert!(
+        rig.inputs().is_empty(),
+        "nothing for an unknown pane or an empty grid"
+    );
 }
 
 #[test]
@@ -636,8 +682,8 @@ fn a_split_window_reaches_its_chan_window_as_a_tree_with_each_pane_session() {
         !recorded.iter().any(|c| c.starts_with("attach ")),
         "a tmux window's tabs come with its layout, not one by one: {recorded:?}"
     );
-    // A pane's resize in a split window leaves tmux's window size alone; in
-    // a single-pane window it still sets it.
+    // A pane's resize never sizes tmux's window: tmux owns the panes, and a
+    // chan window asks for the window's size as a whole.
     rig.inputs();
     rig.pane(0).command_tx.send(PtyCommand::Resize(PtySize {
         cols: 50,
@@ -652,7 +698,7 @@ fn a_split_window_reaches_its_chan_window_as_a_tree_with_each_pane_session() {
             .all(|w| !w.starts_with(b"refresh-client -C")),
         "a split window's pane resize reached tmux"
     );
-    // The pane goes: the tree shrinks to one pane and the resize rule flips.
+    // The pane goes: the tree shrinks to one pane, which sizes nothing either.
     rig.feed(b"%layout-change @0 ");
     let one = layout_with_checksum("160x24,0,0,0");
     rig.feed(format!("{one} {one} *\r\n").as_bytes());
@@ -676,6 +722,22 @@ fn a_split_window_reaches_its_chan_window_as_a_tree_with_each_pane_session() {
         pixel_width: 0,
         pixel_height: 0,
     }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        rig.inputs()
+            .iter()
+            .all(|w| !w.starts_with(b"refresh-client -C")),
+        "a lone pane's resize reached tmux"
+    );
+    let pane_ref = rig.pane(0).tmux_pane.expect("a pane");
+    rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::WindowSize {
+            pane: "%0".into(),
+            cols: 50,
+            rows: 10,
+        },
+    );
     let resize = rig.wait_input(|w| w.starts_with(b"refresh-client -C"));
     assert_eq!(resize, b"refresh-client -C @0:50x10\n".to_vec());
 }

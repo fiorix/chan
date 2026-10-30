@@ -148,11 +148,13 @@
     setActivePane,
     setWindowFocusColor,
     splitActive,
+    tmuxPaneTabs,
     tmuxRequestCarrier,
     toggleActiveFileTabMode,
     toggleActiveTerminalBroadcastSelectAll,
     type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
+  import { tmuxWindowGrid } from "./state/tmuxWindowSize.svelte";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
@@ -643,6 +645,31 @@
       .catch((error) => setTransientStatus(`tmux new window failed: ${errorText(error)}`));
     return true;
   }
+
+  // tmux owns a tmux window's geometry: this window tells it the grid its
+  // panes can show together, each pane's host folded over tmux's layout with
+  // a cell per divider, once per change and shortly after the last one, so a
+  // window drag asks once; tmux lays the panes out inside it and each pane
+  // session learns its size from the layout, which its renderer adopts.
+  let tmuxWindowSizeSent: string | null = null;
+  let tmuxWindowSizeTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const grid = tmuxWindowGrid();
+    const carrier = tmuxPaneTabs()[0];
+    if (!grid || !carrier?.tmuxPane || !carrier.terminalSessionId) return;
+    const sessionId = carrier.terminalSessionId;
+    const pane = carrier.tmuxPane.pane;
+    const key = `${sessionId}:${grid.cols}x${grid.rows}`;
+    if (tmuxWindowSizeSent === key) return;
+    if (tmuxWindowSizeTimer) clearTimeout(tmuxWindowSizeTimer);
+    tmuxWindowSizeTimer = setTimeout(() => {
+      tmuxWindowSizeTimer = null;
+      tmuxWindowSizeSent = key;
+      void api
+        .tmuxRequest(sessionId, { request: "window-size", pane, cols: grid.cols, rows: grid.rows })
+        .catch(() => {});
+    }, 150);
+  });
   function spawnBrowserFromContext(): void {
     // A window whose tenant serves no filesystem has no browser surface
     // (there is no /api/fs to list); the spawn is a no-op.

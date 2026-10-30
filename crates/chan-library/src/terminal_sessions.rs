@@ -1666,6 +1666,16 @@ impl AttachHandle {
         self.session.tmux_pane
     }
 
+    /// The session's current grid: a PTY's size, or the size tmux's layout
+    /// gave a pane session.
+    pub fn size(&self) -> PtySize {
+        *self
+            .session
+            .winsize
+            .lock()
+            .expect("terminal winsize poisoned")
+    }
+
     /// The command stored for this PTY incarnation. A restart handle reads
     /// from the replacement session, so callers never retain stale launch
     /// identity after command overrides.

@@ -188,6 +188,13 @@
   const visibleActiveTabId = $derived(paneActiveTabId(pane, visibleSide));
   const active = $derived(activeTabInPane(pane, visibleSide));
   const everyTab = $derived(uniqueTabs(allPaneTabs(pane)));
+  // A pane showing a tmux pane is tmux's: its one tab is the pane, so the
+  // strip with its drag handle is hidden, nothing is dropped into it and
+  // nothing is dragged out of it; the window's splits are tmux's layout and
+  // its content stays in the window.
+  const tmuxPaneHere = $derived(
+    everyTab.some((tab) => tab.kind === "terminal" && Boolean(tab.tmuxPane)),
+  );
   type PaneFlipAxis = "horizontal" | "vertical";
 
   function isVisibleTab(tab: Tab): boolean {
@@ -680,6 +687,10 @@
     clearPendingTerminalPress();
     draggedTerminalPress = null;
     if (paneMode.stale) return;
+    if (tmuxPaneHere) {
+      e.preventDefault();
+      return;
+    }
     if (!e.dataTransfer) return;
     // Keep the native drag stable: selecting here doubled Chrome's focus
     // report; dragend selects a source that is still in this pane.
@@ -957,7 +968,7 @@
   }
 
   function onDragOver(e: DragEvent): void {
-    if (!isAcceptedDrag(e)) return;
+    if (tmuxPaneHere || !isAcceptedDrag(e)) return;
     // Disallowed cross-window tab move (different kind / workspace): leave it
     // un-prevented so the browser shows the no-drop cursor. File drags pass.
     if (isTabMoveDrag(e) && !isTabDragScopeCompatible(e)) {
@@ -1029,6 +1040,7 @@
   }
 
   function onBodyDragOver(e: DragEvent): void {
+    if (tmuxPaneHere) return;
     if (
       !localTabDrag ||
       !isTabMoveDrag(e) ||
@@ -1053,6 +1065,7 @@
   }
 
   function onBodyDrop(e: DragEvent): void {
+    if (tmuxPaneHere) return;
     const payload = tabDragPayload(e);
     const edge = bodyDropEdge ?? edgeForBodyDrop(e);
     bodyDropEdge = null;
@@ -1096,7 +1109,7 @@
   }
 
   function onTabDragOver(e: DragEvent, tabIdx: number): void {
-    if (!isAcceptedDrag(e)) return;
+    if (tmuxPaneHere || !isAcceptedDrag(e)) return;
     // Disallowed cross-window tab move: bail before preventDefault so the
     // browser shows the no-drop cursor and no insertion indicator appears.
     // Returning before stopPropagation lets the strip-level handler also
@@ -1131,7 +1144,7 @@
 
   function onTabDrop(e: DragEvent, tabIdx: number): void {
     const dt = e.dataTransfer;
-    if (!dt) return;
+    if (!dt || tmuxPaneHere) return;
     dropActive = false;
     dropIndicator = -1;
     const tabRaw = dt.getData(TAB_DRAG_MIME);
@@ -1192,7 +1205,7 @@
     dropActive = false;
     dropIndicator = -1;
     const dt = e.dataTransfer;
-    if (!dt) return;
+    if (!dt || tmuxPaneHere) return;
     // Tab move takes precedence over file open if both are present.
     const tabRaw = dt.getData(TAB_DRAG_MIME);
     if (tabRaw) {
@@ -1313,7 +1326,7 @@
   <div
     class="tabs"
     class:drop-active={dropActive}
-    class:control-hidden={ui.terminalControl}
+    class:control-hidden={ui.terminalControl || tmuxPaneHere}
     role="tablist"
     ondragover={onDragOver}
     ondragleave={onDragLeave}

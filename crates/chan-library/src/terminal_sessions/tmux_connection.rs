@@ -335,6 +335,23 @@ impl TmuxConnection {
         vec![Step::Submit(Command::SelectPane(pane), Purpose::Fire)]
     }
 
+    /// Size the window that holds `pane` to the grid a client's window shows:
+    /// tmux lays the panes out inside it and each pane session learns its
+    /// size from the layout. A pane tmux has not shown here asks nothing, as
+    /// does a size the protocol refuses.
+    pub(super) fn request_window_size(&mut self, pane: PaneId, cols: u32, rows: u32) -> Vec<Step> {
+        let mut steps = Vec::new();
+        let Some(window) = self.panes.get(&pane).map(|p| p.window) else {
+            return steps;
+        };
+        if cols == 0 || rows == 0 {
+            return steps;
+        }
+        self.resize_wanted.insert(window, (cols, rows));
+        self.send_resizes(&mut steps);
+        steps
+    }
+
     /// Queue the pane tree of `window` for its chan window, when it has both
     /// a layout and a chan window: each pane with its session, or none while
     /// the registry still makes one.
@@ -675,19 +692,11 @@ impl TmuxConnection {
                     self.input(pane, part, &mut steps);
                 }
             }
-            PtyCommand::Resize(size) => {
-                // tmux owns a split window's geometry: one pane's box says
-                // nothing about the window's size, so only a window with a
-                // single pane follows a client's resize.
-                let window = self.panes.get(&pane).map(|p| p.window);
-                let single = window
-                    .and_then(|w| self.windows.get(&w))
-                    .is_none_or(|w| w.panes.len() <= 1);
-                if let (Some(window), true) = (window, single) {
-                    self.resize_wanted
-                        .insert(window, (u32::from(size.cols), u32::from(size.rows)));
-                    self.send_resizes(&mut steps);
-                }
+            PtyCommand::Resize(_) => {
+                // tmux owns a pane's size: the layout sets it, and a client's
+                // window asks for the window's size as a whole
+                // (`TmuxRequest::WindowSize`), so one pane's box moves
+                // nothing.
             }
             PtyCommand::Redraw => {
                 // The ring replays what the pane showed; a program on the

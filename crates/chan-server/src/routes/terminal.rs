@@ -1630,6 +1630,27 @@ async fn send_attach_prelude(
         return Err(());
     }
     let attached_at = tokio::time::Instant::now();
+    // A tmux pane's grid is tmux's, not this client's: it goes out ahead of
+    // the replay, so the renderer takes it before bytes drawn for it, and
+    // the Ready frame says the same size.
+    let size = if session.tmux_pane().is_some() {
+        let size = session.size();
+        if send_frame(
+            socket,
+            ServerFrame::Resize {
+                cols: size.cols,
+                rows: size.rows,
+            },
+        )
+        .await
+        .is_err()
+        {
+            return Err(());
+        }
+        size
+    } else {
+        size
+    };
     for chunk in &session.replay {
         if socket.send(Message::binary(chunk.clone())).await.is_err() {
             return Err(());

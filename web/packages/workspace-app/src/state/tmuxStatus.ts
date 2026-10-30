@@ -41,6 +41,10 @@ export type TmuxRequest =
   | { request: "split"; pane: string; horizontal: boolean }
   /// Make `pane` tmux's active pane, after the page's active pane changed.
   | { request: "focus"; pane: string }
+  /// Size the tmux window holding `pane` to the grid this window's panes can
+  /// show together, dividers counted as tmux draws them; tmux lays the panes
+  /// out inside it and each pane session learns its size from the layout.
+  | { request: "window-size"; pane: string; cols: number; rows: number }
   | { request: "detach" }
   | { request: "end" };
 

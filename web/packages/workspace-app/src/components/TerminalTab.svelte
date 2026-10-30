@@ -79,7 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
-    setTerminalTmuxConsent, setTerminalTmuxPane, setTerminalTmuxStatus,
+    setTerminalTmuxConsent, setTerminalTmuxHostGrid, setTerminalTmuxPane, setTerminalTmuxStatus,
     setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -397,6 +397,12 @@
   // A covered redial with a known host grid declares the last shown fit. A
   // host resize while covered leaves that fit stale until the reveal.
   let hostGridKnown = false;
+  // A tmux pane's grid is tmux's: the layout sizes the pane session and the
+  // server says so in resize frames, which this renderer adopts whether or
+  // not it is active; it fits nothing to its host, publishes no size and
+  // reclaims none. Its host's grid goes to the tab instead, for the window
+  // size the page asks tmux for.
+  const tmuxSized = $derived(Boolean(tab.tmuxPane));
   let sentGrid: { cols: number; rows: number } | null = null;
   let broadcastGrid: { cols: number; rows: number } | null = null;
   // A reveal takes back the PTY even when the local grid has not changed.
@@ -696,7 +702,7 @@
     untrack(() => {
       gridMeasured = false;
       revealPending = true;
-      if (!active) adoptBroadcastGrid();
+      if (!active || tmuxSized) adoptBroadcastGrid();
     });
   });
   $effect(() => {
@@ -1417,9 +1423,11 @@
     // This empty renderer needs its host's grid before parsing replay, even
     // when born hidden. There is no socket to publish to at this one fit.
     broadcastGrid = null;
-    gridMeasured = runTerminalFit(fit, term, (detail) => {
-      statusDetail = detail;
-    });
+    gridMeasured = tmuxSized
+      ? measureTmuxHost()
+      : runTerminalFit(fit, term, (detail) => {
+          statusDetail = detail;
+        });
     hostGridKnown = gridMeasured;
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
@@ -1555,8 +1563,8 @@
     const declareGrid = active && reattaching ? gridMeasured : hostGridKnown;
     const path = withTokenQuery(
       terminalWsPath({
-        cols: declareGrid ? term.cols : undefined,
-        rows: declareGrid ? term.rows : undefined,
+        cols: declareGrid && !tmuxSized ? term.cols : undefined,
+        rows: declareGrid && !tmuxSized ? term.rows : undefined,
         sizeIfUnset: !active,
         tabName: terminalTabName(tab),
         tabGroup: terminalTabGroup(tab),
@@ -1641,6 +1649,10 @@
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
+        if (tmuxSized) {
+          broadcastGrid = { cols: frame.cols, rows: frame.rows };
+          adoptBroadcastGrid();
+        }
         terminalCwdAbs = frame.cwd ?? null;
         terminalCwdVirtual = frame.cwd_rel ?? null;
         recoverTerminalRendererAfterHostResume();
@@ -1770,7 +1782,7 @@
         }
       } else if (frame.type === "resize" || frame.type === "resize_other") {
         broadcastGrid = { cols: frame.cols, rows: frame.rows };
-        if (!active) adoptBroadcastGrid();
+        if (!active || tmuxSized) adoptBroadcastGrid();
         statusDetail = `${frame.cols}x${frame.rows}`;
       } else if (frame.type === "cwd") {
         terminalCwdAbs = frame.cwd ?? null;
@@ -2332,7 +2344,7 @@
   }
 
   function publishLocalSize(cols: number, rows: number, reclaim = false): void {
-    if (!active || !gridMeasured) return;
+    if (tmuxSized || !active || !gridMeasured) return;
     if (!reclaim && !revealPending && sentGrid?.cols === cols && sentGrid.rows === rows) return;
     if (send({ type: "resize", cols, rows })) {
       sentGrid = { cols, rows };
@@ -2351,7 +2363,7 @@
   // listens in the capture phase, so the resize frame goes out before the
   // renderer turns the same key or paste into input.
   function reclaimPtySize(event: Event): void {
-    if (term && shouldReclaimPtySize(event, term, broadcastGrid)) {
+    if (!tmuxSized && term && shouldReclaimPtySize(event, term, broadcastGrid)) {
       publishLocalSize(term.cols, term.rows, true);
     }
   }
@@ -2368,8 +2380,32 @@
     handleGhosttyEmptyPaste(event, term as GhosttyTerminal | null);
   }
 
+  /// Measure what a tmux pane's host can show without fitting the renderer
+  /// to it: the grid goes to the tab, and the renderer keeps tmux's size,
+  /// adopted from the server's last word. True once the host is measurable.
+  function measureTmuxHost(): boolean {
+    let proposed: { cols: number; rows: number } | null | undefined = null;
+    try {
+      proposed = fit?.proposeDimensions();
+    } catch {
+      proposed = null;
+    }
+    const measured = Boolean(
+      proposed && Number.isFinite(proposed.cols) && Number.isFinite(proposed.rows) && proposed.cols > 0 && proposed.rows > 0,
+    );
+    setTerminalTmuxHostGrid(tab, measured ? proposed! : null);
+    adoptBroadcastGrid();
+    if (term) statusDetail = `${term.cols}x${term.rows}`;
+    return measured;
+  }
+
   function fitToHost(): void {
     if (!active) return;
+    if (tmuxSized) {
+      gridMeasured = measureTmuxHost();
+      if (gridMeasured) hostGridKnown = true;
+      return;
+    }
     gridMeasured = runTerminalFit(fit, term, (detail) => {
       statusDetail = detail;
     });
