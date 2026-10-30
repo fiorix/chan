@@ -126,11 +126,11 @@ pub struct Decoder {
     limits: Limits,
     state: State,
     armed: bool,
-    /// Bytes of [`MARKER`] matched so far while plain.
+    /// Bytes of [`MARKER`] matched so far while plain. They have already
+    /// passed through: nothing is held back from the terminal, so a read
+    /// that ends inside the marker costs no delay and a parked session
+    /// loses nothing.
     matched: usize,
-    /// A half-matched marker released by a disarm, passed through ahead of
-    /// the next read.
-    released: Vec<u8>,
     line: Vec<u8>,
     open: Option<Open>,
     expect: VecDeque<Expect>,
@@ -149,7 +149,6 @@ impl Decoder {
             state: State::Plain,
             armed: false,
             matched: 0,
-            released: Vec::new(),
             line: Vec::new(),
             open: None,
             expect: VecDeque::new(),
@@ -170,10 +169,10 @@ impl Decoder {
     /// decoder only when the user asked for control mode.
     pub fn arm(&mut self, armed: bool) {
         self.armed = armed;
-        if !armed && self.matched > 0 {
-            // A half-matched marker is ordinary bytes now, even if the
-            // decoder is armed again before the next read.
-            self.released.extend_from_slice(&MARKER[..self.matched]);
+        if !armed {
+            // A half-matched marker was ordinary bytes all along; it is
+            // not continued even if the decoder is armed again before the
+            // next read.
             self.matched = 0;
         }
     }
@@ -214,7 +213,7 @@ impl Decoder {
     }
 
     fn feed_inner(&mut self, input: &[u8], out: &mut Vec<Frame>) -> Result<(), Error> {
-        let mut pass: Vec<u8> = std::mem::take(&mut self.released);
+        let mut pass: Vec<u8> = Vec::new();
         let mut i = 0;
         while i < input.len() {
             match self.state {
@@ -278,7 +277,11 @@ impl Decoder {
         Ok(())
     }
 
+    /// Every plain byte passes, the marker's own included: the terminal is
+    /// shown an empty `DCS 1000 p`, which the caller closes with `ESC \\`
+    /// on [`Frame::Entered`], and nothing waits on a later read.
     fn plain_byte(&mut self, b: u8, pass: &mut Vec<u8>, out: &mut Vec<Frame>) {
+        pass.push(b);
         if self.armed && b == MARKER[self.matched] {
             self.matched += 1;
             if self.matched == MARKER.len() {
@@ -292,15 +295,9 @@ impl Decoder {
             }
             return;
         }
-        if self.matched > 0 {
-            pass.extend_from_slice(&MARKER[..self.matched]);
-            self.matched = 0;
-            if self.armed && b == MARKER[0] {
-                self.matched = 1;
-                return;
-            }
-        }
-        pass.push(b);
+        // The marker has no self-overlap, so a mismatch restarts at most at
+        // its first byte.
+        self.matched = usize::from(self.armed && b == MARKER[0]);
     }
 
     fn push_line_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {

@@ -163,9 +163,22 @@ fn a_marker_split_across_reads_and_near_misses() {
     ] {
         d.feed(part, &mut out).unwrap();
     }
-    assert_eq!(out[0], Frame::Passthrough(b"x".to_vec()));
-    assert_eq!(out[1], Frame::Entered);
-    assert!(matches!(out[2], Frame::Block(_)));
+    let entered = out
+        .iter()
+        .position(|f| *f == Frame::Entered)
+        .expect("entered");
+    let shown: Vec<u8> = out[..entered]
+        .iter()
+        .flat_map(|f| match f {
+            Frame::Passthrough(b) => b.clone(),
+            other => panic!("{other:?} before entry"),
+        })
+        .collect();
+    assert_eq!(
+        shown, b"x\x1bP1000p",
+        "the marker's bytes pass as they come, ahead of the entry"
+    );
+    assert!(matches!(out[entered + 1], Frame::Block(_)));
 
     let mut d = Decoder::new(Limits::default());
     d.arm(true);
@@ -174,7 +187,7 @@ fn a_marker_split_across_reads_and_near_misses() {
         .unwrap();
     assert_eq!(
         out[0],
-        Frame::Passthrough(b"\x1bP100\x1bP1000q\x1b".to_vec())
+        Frame::Passthrough(b"\x1bP100\x1bP1000q\x1b\x1bP1000p".to_vec())
     );
     assert_eq!(out[1], Frame::Entered);
 }
@@ -436,19 +449,20 @@ fn a_capture_row_of_the_widest_pane_fits_the_line_bound() {
 }
 
 #[test]
-fn disarming_then_rearming_between_reads_still_releases_the_bytes() {
+fn disarming_then_rearming_between_reads_does_not_continue_the_marker() {
     let mut d = Decoder::new(Limits::default());
     d.arm(true);
     let mut out = Vec::new();
     d.feed(b"\x1bP10", &mut out).unwrap();
+    assert_eq!(
+        out,
+        vec![Frame::Passthrough(b"\x1bP10".to_vec())],
+        "nothing waits on the next read"
+    );
     d.arm(false);
     d.arm(true);
     d.feed(b"00p%begin 1 1 0\r\n", &mut out).unwrap();
-    assert_eq!(
-        out,
-        vec![Frame::Passthrough(b"\x1bP1000p%begin 1 1 0\r\n".to_vec())],
-        "the released half is plain, and so is the rest of the marker"
-    );
+    assert_eq!(out[1], Frame::Passthrough(b"00p%begin 1 1 0\r\n".to_vec()));
     assert!(!d.in_control_mode());
 }
 

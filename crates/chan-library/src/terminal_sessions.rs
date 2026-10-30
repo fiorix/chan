@@ -31,7 +31,7 @@ use chan_shell::{
     MAX_TERMINAL_WRITE_BYTES,
 };
 
-use crate::config::{TerminalConfig, TerminalProfile};
+use crate::config::{TerminalConfig, TerminalProfile, TerminalTmuxConfig};
 use crate::time::{now_unix_millis, now_unix_secs};
 
 mod bytes;
@@ -44,6 +44,7 @@ mod redraw;
 mod request_status;
 mod ring;
 pub mod shell_profiles;
+mod tmux_gate;
 
 use bytes::{contains_subslice, VisibleScan};
 #[cfg(target_os = "linux")]
@@ -73,6 +74,7 @@ pub use request_status::{ChanRequestStatus, ChanStatusLease};
 use ring::RingBuffer;
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
+pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion};
 
 const BROADCAST_CAP: usize = 1024;
 
@@ -481,6 +483,11 @@ pub struct Registry {
     /// Starts from the config and follows [`Registry::set_program_status`].
     /// Each session carries the word under its own output lock.
     program_status: AtomicBool,
+    /// The tmux control-mode policy: the master switch and the trusted
+    /// foreground names. Starts from the config and follows
+    /// [`Registry::set_tmux`]; read once for each PTY spawn and by every live
+    /// session's gate on a change.
+    tmux: Mutex<TerminalTmuxConfig>,
     /// Optional spawn-time preference pull for a terminal-only tenant. Kept
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
@@ -1595,6 +1602,11 @@ pub struct AttachHandle {
     pub initial_program_status: Arc<ProgramStatusSnapshot>,
     /// Publications after `initial_program_status`, independent of output lag.
     pub program_status_rx: watch::Receiver<Arc<ProgramStatusSnapshot>>,
+    /// The tmux consent state captured with the subscription, so a client
+    /// that joins while a question stands sees it.
+    pub initial_tmux_consent: Arc<TmuxConsentSnapshot>,
+    /// Consent snapshots after `initial_tmux_consent`.
+    pub tmux_consent_rx: watch::Receiver<Arc<TmuxConsentSnapshot>>,
     pub replay: Vec<Vec<u8>>,
     pub seq: u64,
     /// This session incarnation's epoch, sent in the attach prelude so the
@@ -1619,6 +1631,12 @@ impl AttachHandle {
     /// The session id.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Answer the session's open tmux question. Any attached client may; the
+    /// first answer wins.
+    pub fn answer_tmux(&self, answer: TmuxAnswer) {
+        self.session.answer_tmux(answer);
     }
 
     /// The command stored for this PTY incarnation. A restart handle reads
@@ -1871,6 +1889,7 @@ impl Registry {
     pub fn new(config: RegistryConfig) -> Self {
         let terminal_ghostty = config.terminal.ghostty;
         let program_status = config.terminal.program_status;
+        let tmux = config.terminal.tmux.clone();
         let terminal_profiles = TerminalProfilePrefs {
             profiles: config.terminal.profiles.clone(),
             default_profile: config.terminal.default_profile.clone(),
@@ -1880,6 +1899,7 @@ impl Registry {
             library_id: OnceLock::new(),
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
             program_status: AtomicBool::new(program_status),
+            tmux: Mutex::new(tmux),
             terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
@@ -1927,6 +1947,25 @@ impl Registry {
     /// Whether this registry takes part in OSC 7501 program status.
     pub fn program_status_enabled(&self) -> bool {
         self.program_status.load(Ordering::Relaxed)
+    }
+
+    /// Set the tmux control-mode policy for this registry: sessions made
+    /// after this call, and new markers in the live ones. A connection
+    /// already in control mode runs on until it ends.
+    pub fn set_tmux(&self, config: &TerminalTmuxConfig) {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        *self.tmux.lock().expect("terminal registry poisoned") = config.clone();
+        for session in sessions.values() {
+            session.apply_tmux_policy(config);
+        }
+    }
+
+    /// The tmux control-mode policy in force.
+    pub fn tmux_config(&self) -> TerminalTmuxConfig {
+        self.tmux
+            .lock()
+            .expect("terminal registry poisoned")
+            .clone()
     }
 
     /// Gives a session the registry's current word. Called with the
@@ -1977,6 +2016,7 @@ impl Registry {
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
         config.terminal.program_status = self.program_status_enabled();
+        config.terminal.tmux = self.tmux_config();
         let profiles = self.resolve_terminal_profiles();
         config.terminal.profiles = profiles.profiles;
         config.terminal.default_profile = profiles.default_profile;
@@ -3771,6 +3811,7 @@ impl Registry {
             .collect();
         for session in sessions {
             session.prune_program_groups();
+            session.tick_tmux(std::time::Instant::now());
             session.try_drain_batch(now);
         }
     }
@@ -3897,6 +3938,7 @@ impl Registry {
             let had_ring_file = import.ring_fd.is_some();
             let mut config = self.config.clone();
             config.terminal.program_status = self.program_status_enabled();
+            config.terminal.tmux = self.tmux_config();
             let session = match Session::from_imported(
                 config,
                 import,
@@ -4389,6 +4431,14 @@ struct Session {
     /// Escape-sequence position carried across PTY reads for the visible-byte
     /// count behind `last_output_at` and the tab activity dot.
     visible_scan: Mutex<VisibleScan>,
+    /// The tmux control-mode gate: the marker policy, the consent question
+    /// and the connection's framing, fed every PTY byte before the ring
+    /// sees it. Taken alone or after the registry's sessions lock, never
+    /// while the output lock is held.
+    tmux: Mutex<tmux_gate::TmuxGate>,
+    /// The foreground a test declares in place of the PTY's.
+    #[cfg(test)]
+    tmux_foreground: Mutex<Option<tmux_gate::Foreground>>,
     /// FIFO of pending logical messages for this session -- `cs terminal
     /// write` pokes and Rich Prompt messages share it -- drained when the
     /// agent is idle. Bounded at `WRITE_QUEUE_CAP` entries; dropped on session
@@ -4745,6 +4795,9 @@ impl Session {
             // treated as instantly idle before it has rendered anything.
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(config.terminal.tmux.clone())),
+            #[cfg(test)]
+            tmux_foreground: Mutex::new(None),
             write_queue,
             last_deliver_at,
             awaiting_gen,
@@ -5161,6 +5214,9 @@ impl Session {
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(config.terminal.tmux.clone())),
+            #[cfg(test)]
+            tmux_foreground: Mutex::new(None),
             write_queue,
             last_deliver_at,
             awaiting_gen,
@@ -5510,6 +5566,11 @@ impl Session {
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         let generation = self.generation;
         let mode_reassert = self.private_mode_prelude();
+        let (initial_tmux_consent, tmux_consent_rx) = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .subscribe();
         AttachHandle {
             id: self.id.clone(),
             session: self,
@@ -5517,6 +5578,8 @@ impl Session {
             rx,
             initial_program_status,
             program_status_rx,
+            initial_tmux_consent,
+            tmux_consent_rx,
             replay,
             seq,
             generation,
@@ -6448,10 +6511,27 @@ impl Session {
             .remove_gone_groups(&gone);
     }
 
+    /// Output the PTY produced. The tmux gate reads it first: outside control
+    /// mode the bytes go on to the ring as they are; inside it they are the
+    /// protocol, which never draws.
     fn record_output(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
+        let fed = self.tmux.lock().expect("terminal tmux gate poisoned").feed(
+            bytes,
+            std::time::Instant::now(),
+            || self.foreground_for_tmux(),
+        );
+        self.perform_tmux_actions(fed.actions);
+        if !fed.passthrough.is_empty() {
+            self.record_plain_output(&fed.passthrough);
+        }
+    }
+
+    /// Output as the terminal shows it: counted, scanned, pushed to the ring
+    /// and broadcast.
+    fn record_plain_output(&self, bytes: &[u8]) {
         self.last_activity
             .store(now_unix_secs() as i64, Ordering::Relaxed);
         let visible = self
@@ -6523,6 +6603,82 @@ impl Session {
 
     fn broadcast(&self, event: SessionEvent) {
         let _ = self.output_tx.send(event);
+    }
+
+    /// Follow a tmux policy change; see [`Registry::set_tmux`].
+    fn apply_tmux_policy(&self, config: &TerminalTmuxConfig) {
+        self.tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .set_policy(config.clone());
+    }
+
+    /// A client's answer to the session's open tmux question. The first
+    /// answer wins; one with no question standing changes nothing.
+    fn answer_tmux(&self, answer: TmuxAnswer) {
+        let actions = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .answer(answer, std::time::Instant::now());
+        self.perform_tmux_actions(actions);
+    }
+
+    /// The gate's deadlines, from the registry's drainer.
+    fn tick_tmux(&self, now: std::time::Instant) {
+        let actions = self
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .tick(now);
+        self.perform_tmux_actions(actions);
+    }
+
+    /// Writes go to the PTY through its controller, as a client's input
+    /// does; a notice is chan's own line in the terminal.
+    fn perform_tmux_actions(&self, actions: Vec<tmux_gate::Action>) {
+        for action in actions {
+            match action {
+                tmux_gate::Action::Write(bytes) => {
+                    let _ = self.command_tx.send(PtyCommand::Input(bytes));
+                }
+                tmux_gate::Action::Notice(text) => {
+                    self.record_plain_output(format!("\r\n[chan] {text}\r\n").as_bytes());
+                }
+            }
+        }
+    }
+
+    /// What runs in the PTY's foreground, for the gate's marker policy: the
+    /// group that holds the terminal, read when the marker arrives. Unknown
+    /// where the OS does not say, which asks.
+    fn foreground_for_tmux(&self) -> tmux_gate::Foreground {
+        #[cfg(test)]
+        if let Some(foreground) = self
+            .tmux_foreground
+            .lock()
+            .expect("terminal tmux foreground poisoned")
+            .clone()
+        {
+            return foreground;
+        }
+        #[cfg(unix)]
+        {
+            let Some(master) = self.master_fd.as_ref() else {
+                return tmux_gate::Foreground::default();
+            };
+            let Ok(group) = rustix::termios::tcgetpgrp(master) else {
+                return tmux_gate::Foreground::default();
+            };
+            match u32::try_from(group.as_raw_nonzero().get()) {
+                Ok(pid) => tmux_gate::process_foreground(pid),
+                Err(_) => tmux_gate::Foreground::default(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tmux_gate::Foreground::default()
+        }
     }
 
     fn write_status_reply<W: Write + ?Sized>(
@@ -7129,6 +7285,7 @@ fn random_session_id() -> String {
 mod tests {
     mod control_socket_env_tests;
     mod program_status_tests;
+    mod tmux_gate_session_tests;
     use super::*;
     use chan_shell::{SubmitAgent, SubmitTemplateSource};
     use std::process::Command;
@@ -7430,6 +7587,9 @@ mod tests {
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig::default())),
+            #[cfg(test)]
+            tmux_foreground: Mutex::new(None),
             write_queue,
             last_deliver_at,
             awaiting_gen,

@@ -1,6 +1,6 @@
 # tmux control mode (`tmux -CC`) has no chan client
 
-Status: proposed for v0.116.0 (the open version, chosen for lack of another; the target is the owner's to set); owner accepted the decisions on 2026-10-30, assessed against `a4b5844b9` (main, v0.115.0). Nothing is built. Not a roadmap item until accepted for a target version.
+Status: proposed for v0.116.0 (the open version, chosen for lack of another; the target is the owner's to set); owner accepted the decisions on 2026-10-30, assessed against `a4b5844b9` (main, v0.115.0). Built so far on `v0116/tmux-protocol`: the protocol crate (stage 2) and the marker policy, the consent question and the hardening after an allow (stage 3a); the gateway, pane sessions, windows and tabs are not. Not a roadmap item until accepted for a target version.
 
 ## Ask
 
@@ -43,6 +43,26 @@ Run inside a throwaway sdme guest (2 GiB, 2 CPUs, private network, no host binds
 5. A failed `capture-pane` (its pane closed mid-flight) is an `%error` block whose rows differ from the promise, so it ends the stream with `Error::ReplyShape`; the gateway reconnects. This is the cost of not believing a terminator pane content can forge.
 6. The entry marker is recognized only while the decoder is armed. The gateway must arm it only when the user ran `tmux -CC`; a program that prints `ESC P 1000 p` into an ordinary terminal otherwise starts a session. How the library knows the user ran it (the foreground process, or an explicit command) is a stage 3 decision.
 7. Not covered by the live run: `pause-after` flow control (needs a client that does not read), the reconnect after a failed capture, and a `tmux -CC` PTY (the live run uses `tmux -C` over pipes; the `-CC` marker path is covered by the captures).
+
+## Stage 2 hardening (2026-10-30)
+
+A second pass over `crates/chan-tmux`, with an independent read of the crate against tmux 3.8 (eleven findings, in the commit messages `028e7d299` and `fe3ad52b5`):
+
+1. A capture was sized by a pane state read in an earlier command, so a resize from another tmux client or a shrunken history between the two left the reply short and ended the stream. `CapturePane` is now one command line of two commands, the state and then the rows with `-S -N -E -`, which tmux runs back to back; the decoder sizes the rows from the state just before them, and the client answers both as one `Event::Capture`. A capture whose pane is gone fails at its state and ends the stream (`NoPaneState`): the one benign event the framing still cannot absorb, since its rows cannot be sized.
+2. `capture-pane -a` is the screen tmux keeps under an alternate screen, not the alternate screen: one row when none is on, and its old height after a resize. It is never asked for; the one capture is the screen the pane shows, with the history tmux still reports above it.
+3. tmux reads a quoted positional that starts with `-` as flags, so a window name goes after `--` (live: `-x`, `--` and `-t @0; kill-server` stored verbatim).
+4. A `-e` capture row carries each cell's escapes, and a cell can hold a hyperlink of about 1 KiB, so the line bound is 12 MiB, a row of the widest pane a size command may ask for; the block byte bound is 64 MiB; a capture whose rows could exceed the block's line bound is refused at `submit`, which queues nothing on a refusal.
+5. An armed decoder passes everything up to the next `ESC` in one piece; release build, 64 MiB in 16 KiB reads: plain text 388 to 4,509 MiB/s, two escapes per 60-byte line 376 to 1,524 MiB/s, against about 19 GiB/s disarmed. A PTY delivers far less, so the gate is not where a terminal's output time goes.
+6. Every plain byte passes as it arrives, the marker's own included, so a read that ends inside the marker holds nothing back and a parked session loses nothing; the terminal is shown an empty `DCS 1000 p`, which the gate closes with `ESC \` on entry (found by the fd-store framing tests, which saw bytes reach the program status framer late).
+7. Recorded, not changed: a reply tmux generates for a user's hook carries no promise, and `%exit` is believed only outside a block, so the owner of the tmux process ends the session on its exit or the PTY's end, never on the decoder alone.
+
+## Stage 3a results (2026-10-30)
+
+Built on `v0116/tmux-protocol`: decisions 1 to 5 and the hardening of decision 4, as `terminal_sessions/tmux_gate.rs` in chan-library over the crate's client, the consent frames on the terminal WebSocket, the banner in the SPA, the `terminal.tmux` table (`enabled`, `trust`) through `chan config`, `PATCH /api/config` and Settings, and the design docs and manual. What a connected session does in this stage is swallow the protocol and show chan's notices (the version on entry, the reason on exit); the gateway thread, pane sessions, windows and tabs are stage 3b and later.
+
+1. The foreground is read as the PTY's process group from `tcgetpgrp` and its name from `/proc` on Linux; macOS and Windows read nothing and ask, since no dependency was added for a process name there (libproc on macOS is the candidate when the question becomes a habit).
+2. The interrupt line is a command through the client (`Command::Interrupt`, a line holding only `^C`), paired with the parse error tmux answers, and goes out with the version probe only once the peer has announced a session; a `tmux -CC` client on a PTY is in raw mode and reads a bare `^C` as part of the next command line (probed on the host), so a peer that never announces gets the bare `^C` at the five-second abort instead, which cancels a shell's held line.
+3. Verification: 27 library tests (the gate's state machine and the session's ring, controller and attach handle), 4 server tests (the frames and the PATCH keeping a stored table), 2 CLI tests, 8 SPA tests (the Settings toggle and the banner); nine guards mutated and each caught by a named test, rebuilt from fresh mtimes after the loop; the library's terminal session suite (403), workspace clippy, rustdoc, `make web-check` and the Nix hash pin. Not run: a real `tmux -CC` through chan's server path (the live crate test drives `tmux -C` over pipes), macOS and Windows.
 
 ## Stage 3 decisions (2026-10-30)
 
@@ -125,7 +145,7 @@ Each stage lands behind its own check and leaves chan working.
 
 1. Measure (no feature). Done 2026-10-30 in part: protocol captures, the re-homing question and the session seam are answered in the measurement section; the ConPTY and chan-server-path runs remain, and the forged-terminator finding adds a stage 2 design item. Run `tmux -CC` under chan today and under `script`, capture real traffic in `fixtures/`, read how much of `Session` assumes a child, and answer observation 7: re-homing a session, the browser window path, ghostty-web and ConPTY with DCS 1000p. Output: a short measurement note and a go or reshape call on virtual pane sessions.
 2. Protocol crate. Done 2026-10-30: `crates/chan-tmux`, see the stage 2 results above. A new `chan-tmux` crate (pure parser and command encoder, no I/O, `#![forbid(unsafe_code)]`): line framing, octal unescape, reply correlation, layout string parser. Tested against the stage 1 captures (`fixtures/tmux-control/`) including the hostile-pane run, fuzzed on random bytes (`%output` with partial escapes, split reads, huge lines), and differentially against `tmux 3.8` output.
-3. Gateway in the library. DCS detection in the byte walk, gateway state machine, virtual pane sessions, history restore, `send-keys -H` input, resize, exit back to bytes. Tests drive a real `tmux -CC` on a PTY on Linux and macOS; Windows has no tmux and skips with a named reason.
+3. Gateway in the library. Done 2026-10-30 in part (3a): the marker in the byte walk, the policy, the question and the hardening after an allow, see the stage 3a results. Still to build (3b): the gateway state machine, virtual pane sessions, history restore, `send-keys -H` input, resize, exit back to bytes. Tests drive a real `tmux -CC` on a PTY on Linux and macOS; Windows has no tmux and skips with a named reason.
 4. Control window. The record minted from a session, not reaped on exit, End and Close semantics, `cs window list` shows it, launcher rows for it. Desktop path first; the browser path follows the stage 1 answer.
 5. Windows and tabs. One window per attach, tab per tmux window, notifications as the single source of structure, Cmd+Shift+N and Cmd+T routing, close semantics.
 6. Panes. Layout tab kind with splits; resize; pane focus sync with `select-pane`.

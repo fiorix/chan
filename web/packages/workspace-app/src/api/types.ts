@@ -207,6 +207,13 @@ export type TerminalPreferences = {
   /// Whether OSC 7501 program and chan status reports are enabled for all
   /// terminal sessions. On by default; changes apply to existing sessions.
   program_status?: boolean;
+  /// tmux control mode: whether a terminal honors the marker `tmux -CC`
+  /// prints (on by default; a change applies to new markers in every
+  /// terminal and leaves a running connection alone) and the foreground
+  /// program names trusted to enter without a question, which Settings does
+  /// not edit. Optional on the wire so older servers (no field) deserialize
+  /// cleanly; the SPA treats an absent `enabled` as true.
+  tmux?: { enabled?: boolean; trust?: string[] };
   /// Whether xterm.js terminals visually obscure values whose assignment
   /// names end in a configured secret suffix. When absent, control terminals
   /// seed masking on and other windows seed it off. Per-tab toggles do not

@@ -94,6 +94,7 @@ fn commands_render() {
         }),
         "refresh-client -C 120,40"
     );
+    assert_eq!(r(Command::Interrupt), "\u{3}");
     assert_eq!(
         r(Command::ContinuePane(PaneId(3))),
         "refresh-client -A '%3:continue'"

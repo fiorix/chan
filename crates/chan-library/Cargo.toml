@@ -38,6 +38,9 @@ chan-shell = { workspace = true }
 # (the desktop-side dialing client stays out of the server stack).
 chan-revtunnel = { workspace = true }
 chan-systemd = { workspace = true }
+# The tmux control-mode protocol, a state machine with no I/O; the gate in
+# terminal_sessions feeds it a session's output.
+chan-tmux = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

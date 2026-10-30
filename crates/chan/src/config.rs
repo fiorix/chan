@@ -31,6 +31,9 @@ enum ConfigValueKind {
     /// `get` reads it as null, and `none` clears it. `Bool`'s optional form.
     OptionalBool,
     StringList(usize),
+    /// A list of process names as the OS reports them, `[A-Za-z0-9._-]+`
+    /// and at most 64 bytes each, with no repeats.
+    ProgramList(usize),
     Color,
     Collection(&'static str),
 }
@@ -279,6 +282,14 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     ConfigKeySpec {
         key: "server.terminal.program_status",
         kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.tmux.enabled",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
+        key: "server.terminal.tmux.trust",
+        kind: ConfigValueKind::ProgramList(32),
     },
     ConfigKeySpec {
         key: "server.terminal.ghostty",
@@ -671,6 +682,34 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
             }) {
                 anyhow::bail!("{}: `{invalid}` is outside [A-Za-z0-9_]+", spec.key);
+            }
+            let mut seen = std::collections::HashSet::new();
+            if let Some(duplicate) = entries.iter().find(|entry| !seen.insert((*entry).clone())) {
+                anyhow::bail!("{}: duplicate entry `{duplicate}`", spec.key);
+            }
+            serde_json::to_value(entries)?
+        }
+        ConfigValueKind::ProgramList(max) => {
+            let entries: Vec<String> = serde_json::from_str(raw).with_context(|| {
+                format!(
+                    "{}: expected a JSON string array, for example [\"ssh\",\"mosh-client\"]",
+                    spec.key
+                )
+            })?;
+            if entries.len() > max {
+                anyhow::bail!("{} accepts at most {max} entries", spec.key);
+            }
+            if let Some(invalid) = entries.iter().find(|entry| {
+                entry.is_empty()
+                    || entry.len() > 64
+                    || !entry.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+            }) {
+                anyhow::bail!(
+                    "{}: `{invalid}` is outside [A-Za-z0-9._-]+ or over 64 bytes",
+                    spec.key
+                );
             }
             let mut seen = std::collections::HashSet::new();
             if let Some(duplicate) = entries.iter().find(|entry| !seen.insert((*entry).clone())) {
@@ -1179,6 +1218,49 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("future_leaf"), "{message}");
         assert!(message.contains("no CLI policy"), "{message}");
+    }
+
+    #[test]
+    fn config_tmux_keys_read_their_defaults_and_write_the_table() {
+        let editor = EditorPrefs::default();
+        let mut server = ServerConfig::default();
+        assert_eq!(
+            read_config_key(&editor, &server, "server.terminal.tmux.enabled").unwrap(),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            read_config_key(&editor, &server, "terminal.tmux.trust").unwrap(),
+            serde_json::json!([])
+        );
+        write_server_config_key(&mut server, "terminal.tmux.enabled", "false").unwrap();
+        assert!(!server.terminal.tmux.enabled);
+        write_server_config_key(
+            &mut server,
+            "terminal.tmux.trust",
+            "[\"ssh\",\"mosh-client\",\"et.v2\"]",
+        )
+        .unwrap();
+        assert_eq!(
+            server.terminal.tmux.trust,
+            vec!["ssh", "mosh-client", "et.v2"]
+        );
+        assert!(
+            !server.terminal.tmux.enabled,
+            "the list write keeps the switch"
+        );
+        for (raw, word) in [
+            ("ssh", "JSON string array"),
+            ("[\"a b\"]", "outside"),
+            ("[\"ssh\",\"ssh\"]", "duplicate"),
+            ("[\"\"]", "outside"),
+        ] {
+            let error =
+                write_server_config_key(&mut server, "terminal.tmux.trust", raw).unwrap_err();
+            assert!(error.to_string().contains(word), "{raw}: {error:#}");
+        }
+        let long = format!("[\"{}\"]", "x".repeat(65));
+        let error = write_server_config_key(&mut server, "terminal.tmux.trust", &long).unwrap_err();
+        assert!(error.to_string().contains("64 bytes"), "{error:#}");
     }
 
     #[test]

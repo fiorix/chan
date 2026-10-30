@@ -79,6 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
+    setTerminalTmuxConsent,
     setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -110,6 +111,8 @@
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
   import Inspector from "./Inspector.svelte";
+  import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
+  import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -262,6 +265,9 @@
         /// (re)attach re-syncs the badge (the tab field is never persisted).
         queue_depth?: number;
         program_status?: ProgramStatus;
+        /// The tmux control-mode consent state, with the question that
+        /// stands, if any; the attachment's authoritative value.
+        tmux_consent?: TmuxConsent;
         /// The `prompt_id`s still in THIS session's write queue, FIFO order,
         /// one per tail-bearing message. Lets a reloaded SPA re-prove its
         /// restored pending Rich Prompt message is still queued at position
@@ -282,6 +288,7 @@
     | { type: "rename_failed"; message: string }
     | { type: "activity"; bytes_since_focus: number }
     | { type: "program-status"; id: string; generation: number; program_status: ProgramStatus }
+    | { type: "tmux-consent"; id: string; generation: number; tmux_consent: TmuxConsent }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
     /// the absolute LOGICAL MESSAGE depth on every change, so a drained batch
     /// of N `cs terminal write` notifications arrives as one N -> 0 step, not
@@ -1660,6 +1667,7 @@
         // suppressed (see attachPtyWriteOrigin / connection.ts).
         serverGeneration = frame.generation;
         receivedSeq = frame.seq;
+        if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
         // A fresh shell replacing this tab's session (frame.id changed) starts
         // with the xterm still holding a dead TUI's negotiated input modes.
         // Reset mouse tracking (including the 1015 urxvt format), exit the
@@ -1761,6 +1769,10 @@
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
           showProgramStatus(applyProgramStatus(tab.programStatus, frame.program_status));
           if (focused) markProgramCompletionsSeen(tab.programStatus);
+        }
+      } else if (frame.type === "tmux-consent") {
+        if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
+          setTerminalTmuxConsent(tab, frame.tmux_consent);
         }
       } else if (frame.type === "queue-details") {
         if (active && tab.inspectorOpen) queuedMessages = frame.messages;
@@ -1940,6 +1952,12 @@
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(frame));
     return true;
+  }
+
+  // The banner stays until the server says the question is closed: every
+  // attached client shows it and the first answer wins.
+  function answerTmux(answer: TmuxAnswer): void {
+    send({ type: "tmux-answer", answer });
   }
 
   // Sync this terminal's broadcast toggle to the server whenever it changes
@@ -3187,6 +3205,11 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
+    <TmuxConsentBanner
+      question={tab.tmuxConsent?.question ?? null}
+      program={terminalTabName(tab)}
+      onAnswer={answerTmux}
+    />
     {#if tab.inspectorOpen}
       <Inspector
         title="Details"
