@@ -77,6 +77,11 @@ pub trait StandaloneFiles: Send + Sync {
     /// the root, unresolvable, non-UTF-8) -- the caller refuses rather than
     /// opening something other than what was named.
     fn open_frame(&self, window_id: &str, requested: &Path) -> Result<StandaloneOpenFrame, String>;
+
+    /// The serialized `/ws` frame that opens a terminal tab in `window_id`
+    /// starting in `cwd`, an absolute directory resolved against this tenant's
+    /// capability root. `Err` when `cwd` is not a real directory there.
+    fn term_new_frame(&self, window_id: &str, cwd: &Path) -> Result<String, String>;
 }
 
 /// What [`StandaloneFiles::open_frame`] hands back: the wire frame to deliver

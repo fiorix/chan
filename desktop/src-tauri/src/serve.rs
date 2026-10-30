@@ -527,6 +527,34 @@ pub async fn spawn_local_terminal_window(state: Arc<AppState>) -> Result<String,
     Ok(crate::window_watcher::native_label(&record))
 }
 
+/// Open a throwaway standalone terminal window whose first terminal starts in
+/// `cwd`: a default-terminal launch handed over by another chan-desktop
+/// process. Like [`spawn_local_terminal_window`] the watcher opens it at the
+/// shared `/terminal` tenant, but its registry row is never saved, so a
+/// relaunch does not restore it. Refused once a shutdown has started: the
+/// updater's relaunch starts the new process while this one still holds the
+/// handoff socket, and that process must boot rather than hand itself back.
+pub async fn spawn_throwaway_terminal_window(
+    state: Arc<AppState>,
+    cwd: std::path::PathBuf,
+) -> Result<String, String> {
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("chan-desktop is shutting down".to_string());
+    }
+    if !cwd.is_absolute() {
+        return Err(format!("{} is not an absolute path", cwd.display()));
+    }
+    let Some(embedded) = state.embedded.get() else {
+        return Err("embedded local server is unavailable".to_string());
+    };
+    embedded.open_terminal().await?;
+    let record = embedded.open_throwaway_terminal_window(&cwd)?;
+    Ok(crate::window_watcher::native_label(&record))
+}
+
 /// A spawned control terminal: its terminal tenant prefix, used to scrape the
 /// token the connect script prints, to mint the control window's chan-library
 /// registry row, and to reap the tenant on disconnect. The window is

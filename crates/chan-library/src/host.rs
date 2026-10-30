@@ -3895,6 +3895,58 @@ impl WorkspaceHost {
         }
     }
 
+    /// Open a throwaway standalone terminal window whose first terminal starts
+    /// in `cwd`, an absolute directory: the window a default-terminal launch
+    /// hands to a running desktop. Its registry row is never saved
+    /// ([`WindowRegistry::create_throwaway_terminal`]), so a relaunch does not
+    /// restore it, and it seeds no default terminal: its first tab is the
+    /// `open_term_new` frame parked for its first `/ws` attach. The change is
+    /// announced only once the window is marked and its frame parked, so the
+    /// surface that opens it already reads it as a routed mint. Needs the
+    /// shared terminal tenant mounted, with its standalone filesystem.
+    pub fn open_throwaway_terminal_window(&self, cwd: &Path) -> Result<WindowRecord, Error> {
+        let registry = self
+            .window_registry()
+            .ok_or_else(|| Error::Config("window registry not installed".into()))?;
+        let no_surface = || Error::Config("this host serves no standalone terminal".into());
+        // Cloned out so the read guard is dropped before the persist and the
+        // assembly below take `self.workspaces` again.
+        let (files, pending) = {
+            let prefix = self.terminal_tenant_prefix.get().ok_or_else(no_surface)?;
+            let workspaces = self
+                .workspaces
+                .read()
+                .map_err(|_| Error::Config("workspace map poisoned".into()))?;
+            let runtime = workspaces.get(prefix).ok_or_else(no_surface)?;
+            let files = runtime
+                .artifacts
+                .standalone_files
+                .clone()
+                .ok_or_else(no_surface)?;
+            (files, runtime.artifacts.pending_window_commands.clone())
+        };
+        let row = registry.create_throwaway_terminal();
+        let parked = files
+            .term_new_frame(&row.window_id, cwd)
+            .and_then(|frame| pending.park(&row.window_id, frame));
+        if let Err(message) = parked {
+            registry.remove(&row.window_id);
+            return Err(Error::BadRequest(message));
+        }
+        pending.mark_routed(&row.window_id);
+        self.persist_terminal_window(&row.window_id);
+        registry.change_notify().notify_waiters();
+        self.notify_window_change();
+        let library_id = self.library_id().to_string();
+        let WindowLive {
+            prefix,
+            token,
+            connected,
+            holders,
+        } = self.window_live_state(&row);
+        Ok(row.to_record(library_id, prefix, token, connected, holders))
+    }
+
     /// Open an absolute path that lies OUTSIDE the calling workspace, in a
     /// standalone window of this host. The workspace tenant routes here instead
     /// of refusing; the path is resolved by the tenant that mounted a

@@ -5774,6 +5774,19 @@ fn main() {
                                     },
                                     Err(message) => Response::Error { message },
                                 },
+                                Request::OpenTerminal { cwd, .. } => {
+                                    match serve::spawn_throwaway_terminal_window(
+                                        state,
+                                        PathBuf::from(cwd),
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => Response::TerminalOpened {
+                                            desktop_version: CHAN_VERSION.into(),
+                                        },
+                                        Err(message) => Response::Error { message },
+                                    }
+                                }
                             }
                         }
                     })

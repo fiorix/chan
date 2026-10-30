@@ -814,6 +814,15 @@ impl EmbeddedServer {
             .map_err(|e| format!("minting a window: {e}"))
     }
 
+    /// Mint a throwaway standalone terminal window whose first terminal starts
+    /// in `cwd`; see the host's `open_throwaway_terminal_window`. The shared
+    /// terminal tenant must be mounted first ([`Self::open_terminal`]).
+    pub fn open_throwaway_terminal_window(&self, cwd: &Path) -> Result<WindowRecord, String> {
+        self.host
+            .open_throwaway_terminal_window(cwd)
+            .map_err(|e| format!("opening a terminal window: {e}"))
+    }
+
     /// Mint a native window of the workspace whose runtime `key` names, by
     /// its canonical root or by the root it was opened at. The record stores
     /// the root the runtime was opened at, the registry row's, which is the

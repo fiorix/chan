@@ -5,6 +5,13 @@
 //! process, with none of the launcher's boot (shims, library stores, the
 //! handoff listener, the window watcher, gateways, the update check), so a
 //! launch beside a running chan-desktop leaves it alone.
+//!
+//! The exception is a launch that only runs the user's shell: a bare
+//! `chan-desktop` or one with `--dir` alone. With a chan-desktop already
+//! running it is handed over the handoff socket, and that desktop opens a
+//! throwaway local terminal window in the directory (never saved, so a
+//! relaunch does not restore it). With none running, a `--dir` launch opens
+//! its own window and a bare launch boots the launcher, as before.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -282,14 +289,72 @@ pub(crate) struct TerminalMode {
     exit_code: Mutex<Option<i32>>,
 }
 
+/// Whether a launch may be handed to a running chan-desktop instead of
+/// opening its own window. Only a launch that runs the user's shell with no
+/// per-process contract: a command must end the process with its exit code,
+/// `--hold` keeps a window this process owns, and the running desktop can
+/// honor neither a per-process `--app-id` (GTK takes it from the program name)
+/// nor a fixed `--title`. `None` is a bare launch.
+pub fn hands_off(launch: Option<&TerminalLaunch>) -> bool {
+    launch.is_none_or(|launch| {
+        launch.command.is_none()
+            && !launch.hold
+            && launch.app_id.is_none()
+            && launch.title.is_none()
+    })
+}
+
 /// Run as a default terminal when argv asks for it. `Ok(true)` means the
-/// launch was handled (the event loop ends the process); `Ok(false)` means a
-/// plain GUI launch; `Err` is a usage error.
+/// launch was handled (the event loop ends the process, or a running desktop
+/// took it); `Ok(false)` means a plain GUI launch; `Err` is a usage error.
 pub fn run_if_requested() -> Result<bool, String> {
-    let Some(launch) = parse_terminal_launch(std::env::args_os().skip(1))? else {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let bare = args.is_empty();
+    let launch = parse_terminal_launch(args)?;
+    if launch.is_none() && !bare {
         return Ok(false);
+    }
+    let cwd = start_dir(launch.as_ref());
+    if hands_off(launch.as_ref()) && hand_off(&cwd) {
+        return Ok(true);
+    }
+    match launch {
+        Some(launch) => run(launch, cwd),
+        None => Ok(false),
+    }
+}
+
+/// The launch's start directory (see [`resolve_working_dir`]), logging the
+/// fallback when `--dir` names no directory.
+fn start_dir(launch: Option<&TerminalLaunch>) -> PathBuf {
+    let home = dirs::home_dir();
+    let process_cwd = std::env::current_dir()
+        .ok()
+        .or_else(|| home.clone())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let (cwd, warning) = resolve_working_dir(
+        launch.and_then(|launch| launch.dir.as_deref()),
+        &process_cwd,
+        home.as_deref(),
+        |dir| dir.is_dir(),
+    );
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
+    cwd
+}
+
+/// Ask a running chan-desktop to open the window. A `cwd` that is not UTF-8
+/// cannot ride the JSON request, so that launch keeps its own window.
+fn hand_off(cwd: &Path) -> bool {
+    let Some(cwd_text) = cwd.to_str() else {
+        return false;
     };
-    run(launch)
+    let opened = tauri::async_runtime::block_on(chan_server::handoff::try_open_terminal(cwd_text));
+    if opened {
+        tracing::info!(cwd = %cwd.display(), "the running chan-desktop opened the terminal window");
+    }
+    opened
 }
 
 fn fatal(code: i32, message: &str) -> ! {
@@ -297,24 +362,10 @@ fn fatal(code: i32, message: &str) -> ! {
     std::process::exit(code)
 }
 
-fn run(launch: TerminalLaunch) -> Result<bool, String> {
+fn run(launch: TerminalLaunch, cwd: PathBuf) -> Result<bool, String> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     if let Some(app_id) = &launch.app_id {
         set_gtk_program_name(app_id);
-    }
-    let home = dirs::home_dir();
-    let process_cwd = std::env::current_dir()
-        .ok()
-        .or_else(|| home.clone())
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let (cwd, warning) = resolve_working_dir(
-        launch.dir.as_deref(),
-        &process_cwd,
-        home.as_deref(),
-        |dir| dir.is_dir(),
-    );
-    if let Some(warning) = warning {
-        tracing::warn!("{warning}");
     }
     if let Some(argv) = &launch.command {
         if let Err(e) = preflight_command(
@@ -874,6 +925,29 @@ mod tests {
         assert!(
             !production.contains("generate_handler!"),
             "one command table, in main.rs"
+        );
+    }
+
+    #[test]
+    fn only_a_shell_launch_with_no_per_process_contract_hands_off() {
+        let launch = |items: &[&str]| parse_terminal_launch(args(items)).unwrap().unwrap();
+        assert!(hands_off(None), "a bare launch");
+        assert!(hands_off(Some(&launch(&["--dir=/tmp"]))));
+        assert!(
+            !hands_off(Some(&launch(&["-e", "htop"]))),
+            "a command owns the exit code"
+        );
+        assert!(
+            !hands_off(Some(&launch(&["--hold"]))),
+            "--hold keeps a window this process owns"
+        );
+        assert!(
+            !hands_off(Some(&launch(&["--dir=/tmp", "--app-id=floating"]))),
+            "the app id is per process"
+        );
+        assert!(
+            !hands_off(Some(&launch(&["--title=Logs"]))),
+            "the running desktop composes its own titles"
         );
     }
 }
