@@ -18,6 +18,9 @@
    the update footer adds only its icon alignment and spacing. */
 
 :root {
+  /* The engine's own controls (a select's popup, scrollbars) paint in this
+     scheme on WebKitGTK and WebView2; WKWebView followed the OS alone. */
+  color-scheme: dark;
   --bg: #1c1c1e;
   --bg-card: #232325;
   --bg-elev: #2a2a2c;
@@ -36,6 +39,7 @@
 }
 
 :root[data-theme="light"] {
+  color-scheme: light;
   --bg: #faf9f7;
   --bg-card: #ffffff;
   --bg-elev: #ffffff;

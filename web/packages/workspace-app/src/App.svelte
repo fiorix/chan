@@ -1784,6 +1784,12 @@
      through that surface subtree without touching the root. */
   :global(:root),
   :global([data-theme="dark"]) {
+    /* Tells the engine the scheme its own controls paint in: a select's
+       popup list, scrollbars, number spinners and the colour swatch are
+       native on WebKitGTK and WebView2 and follow this, not the page's
+       colours; WKWebView followed the OS appearance alone. Inherited, so
+       a Hybrid surface's own data-theme carries it. */
+    color-scheme: dark;
     --bg: #1c1c1e;
     --bg-card: #232325;
     --bg-elev: #2a2a2c;
@@ -1905,6 +1911,7 @@
     --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
   }
   :global([data-theme="light"]) {
+    color-scheme: light;
     --bg: #ffffff;
     --bg-card: #f5f5f7;
     --bg-elev: #ffffff;
