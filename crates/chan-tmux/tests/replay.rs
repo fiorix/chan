@@ -1,8 +1,8 @@
 //! Replays the captures in `fixtures/tmux-control/` (real tmux 3.8 output).
 
 use chan_tmux::{
-    parse_layout, parse_message, Client, Command, Decoder, Event, Frame, Kind, Limits, Message,
-    PaneId, WindowId,
+    parse_layout, parse_message, Client, Command, Decoder, Event, Expect, Frame, Kind, Limits,
+    Message, PaneId, WindowId,
 };
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -18,7 +18,7 @@ fn frames(bytes: &[u8], chunk: usize, solicited: usize) -> Vec<Frame> {
     let mut d = Decoder::new(Limits::default());
     d.arm(true);
     for _ in 0..solicited {
-        d.expect_next(None);
+        d.expect_next(Expect::Any);
     }
     let mut out = Vec::new();
     for c in bytes.chunks(chunk) {

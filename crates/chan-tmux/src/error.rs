@@ -14,6 +14,8 @@ pub enum Error {
     UnexpectedReply,
     /// A reply did not have the row count its command promised.
     ReplyShape,
+    /// A capture arrived with no pane state to size it: the pane is gone.
+    NoPaneState,
     /// A notification the decoder knows by name did not parse.
     Malformed(&'static str),
     /// More commands are waiting for a reply than the bound allows.
@@ -33,6 +35,7 @@ impl fmt::Display for Error {
             Error::BlockTooLarge => f.write_str("tmux reply block exceeds its size bound"),
             Error::UnexpectedReply => f.write_str("tmux sent a reply no command was waiting for"),
             Error::ReplyShape => f.write_str("tmux reply does not have the promised row count"),
+            Error::NoPaneState => f.write_str("tmux capture has no pane state to size it"),
             Error::Malformed(what) => write!(f, "malformed tmux notification: {what}"),
             Error::TooManyPending => f.write_str("too many tmux commands waiting for a reply"),
             Error::NotReady => f.write_str("tmux has not announced a session yet"),

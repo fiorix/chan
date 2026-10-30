@@ -3,15 +3,15 @@
 
 use std::collections::VecDeque;
 
-use crate::command::Command;
-use crate::decode::{Decoder, Frame, Limits};
+use crate::command::{parse_pane_state, Command, PaneState, MAX_SIZE};
+use crate::decode::{Decoder, Expect, Frame, Limits};
 use crate::error::Error;
 use crate::message::{parse_message, Message};
 
-/// Most commands waiting for a reply at once.
+/// Most reply blocks waiting at once.
 const MAX_PENDING: usize = 256;
 
-/// Names a submitted command in the [`Event::Reply`] that answers it.
+/// Names a submitted command in the [`Event`] that answers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token(pub u64);
 
@@ -29,6 +29,13 @@ pub enum Event {
         token: Token,
         result: Result<Vec<Vec<u8>>, Vec<Vec<u8>>>,
     },
+    /// The reply to a [`Command::CapturePane`]: the pane's state and the
+    /// rows it promised, read in one go.
+    Capture {
+        token: Token,
+        state: PaneState,
+        rows: Vec<Vec<u8>>,
+    },
     /// A reply to a command the server issued itself.
     Unsolicited {
         ok: bool,
@@ -44,10 +51,23 @@ pub enum Event {
     },
 }
 
+/// Which reply block of a command a pending entry waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// The command's one reply.
+    Whole,
+    /// The pane state that opens a capture.
+    CaptureState,
+    /// The rows that close a capture.
+    CaptureRows,
+}
+
 #[derive(Debug)]
 pub struct Client {
     decoder: Decoder,
-    pending: VecDeque<Token>,
+    pending: VecDeque<(Token, Part)>,
+    /// The state half of the capture whose rows are next.
+    capture: Option<(Token, PaneState)>,
     next: u64,
     ready: bool,
     failed: bool,
@@ -68,6 +88,7 @@ impl Client {
         Self {
             decoder,
             pending: VecDeque::new(),
+            capture: None,
             next: 0,
             ready: false,
             failed: false,
@@ -77,6 +98,11 @@ impl Client {
     /// Allow the entry marker. See [`Decoder::new`].
     pub fn arm(&mut self, armed: bool) {
         self.decoder.arm(armed);
+    }
+
+    /// Whether the entry marker is recognized.
+    pub fn armed(&self) -> bool {
+        self.decoder.armed()
     }
 
     pub fn in_control_mode(&self) -> bool {
@@ -89,11 +115,15 @@ impl Client {
         self.ready
     }
 
+    /// Reply blocks still to come. A capture counts two.
     pub fn pending(&self) -> usize {
         self.pending.len()
     }
 
     /// Queue a command and return the bytes to write to tmux.
+    ///
+    /// A refusal leaves the client as it was: the command was not queued and
+    /// nothing is owed. Only [`feed`](Self::feed) can end the client.
     pub fn submit(&mut self, command: &Command) -> Result<(Token, Vec<u8>), Error> {
         if self.failed {
             return Err(Error::Poisoned);
@@ -101,15 +131,31 @@ impl Client {
         if !self.decoder.in_control_mode() || !self.ready {
             return Err(Error::NotReady);
         }
-        if self.pending.len() >= MAX_PENDING {
+        let expects = command.expects();
+        if self.pending.len() + expects.len() > MAX_PENDING {
             return Err(Error::TooManyPending);
+        }
+        if let Command::CapturePane { history_rows, .. } = command {
+            // The promise must fit the block bound at any pane height, or
+            // the reply would end the stream instead of being refused here.
+            let worst = *history_rows as usize + MAX_SIZE as usize;
+            if worst > self.decoder.limits().max_block_lines {
+                return Err(Error::BadArgument("capture exceeds the block bound"));
+            }
         }
         let mut line = command.render()?.into_bytes();
         line.push(b'\n');
         let token = Token(self.next);
         self.next += 1;
-        self.pending.push_back(token);
-        self.decoder.expect_next(command.expect());
+        for expect in expects {
+            let part = match expect {
+                Expect::PaneState => Part::CaptureState,
+                Expect::Capture { .. } => Part::CaptureRows,
+                Expect::Any | Expect::Rows(_) => Part::Whole,
+            };
+            self.pending.push_back((token, part));
+            self.decoder.expect_next(expect);
+        }
         Ok((token, line))
     }
 
@@ -144,6 +190,7 @@ impl Client {
             Frame::Entered => {
                 self.ready = false;
                 self.pending.clear();
+                self.capture = None;
                 out.push(Event::Entered);
             }
             Frame::Line(line) => match parse_message(&line) {
@@ -157,29 +204,51 @@ impl Client {
                 Err(e) => return Err(e),
             },
             Frame::Block(block) => {
-                if block.solicited {
-                    let token = self.pending.pop_front().ok_or(Error::UnexpectedReply)?;
-                    out.push(Event::Reply {
-                        token,
-                        result: if block.ok {
-                            Ok(block.lines)
-                        } else {
-                            Err(block.lines)
-                        },
-                    });
-                } else {
+                if !block.solicited {
                     out.push(Event::Unsolicited {
                         ok: block.ok,
                         lines: block.lines,
                     });
+                    return Ok(());
+                }
+                let (token, part) = self.pending.pop_front().ok_or(Error::UnexpectedReply)?;
+                let result = if block.ok {
+                    Ok(block.lines)
+                } else {
+                    Err(block.lines)
+                };
+                match (part, result) {
+                    (Part::Whole, result) => out.push(Event::Reply { token, result }),
+                    (Part::CaptureState, Ok(lines)) => {
+                        self.capture = Some((token, parse_pane_state(&lines)?));
+                    }
+                    (Part::CaptureRows, Ok(rows)) => match self.capture.take() {
+                        Some((t, state)) if t == token => {
+                            out.push(Event::Capture { token, state, rows });
+                        }
+                        _ => return Err(Error::NoPaneState),
+                    },
+                    // A failed half fails the capture; the decoder ends the
+                    // stream at the rows of a capture whose state failed.
+                    (Part::CaptureState | Part::CaptureRows, Err(lines)) => {
+                        self.capture = None;
+                        out.push(Event::Reply {
+                            token,
+                            result: Err(lines),
+                        });
+                    }
                 }
             }
             Frame::Exit { reason } => {
                 self.ready = false;
-                out.push(Event::Exited {
-                    reason,
-                    dropped: self.pending.drain(..).collect(),
-                });
+                self.capture = None;
+                let mut dropped: Vec<Token> = Vec::new();
+                for (token, _) in self.pending.drain(..) {
+                    if dropped.last() != Some(&token) {
+                        dropped.push(token);
+                    }
+                }
+                out.push(Event::Exited { reason, dropped });
             }
         }
         Ok(())

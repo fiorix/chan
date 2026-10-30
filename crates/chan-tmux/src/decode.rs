@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 
+use crate::command::{parse_pane_state, PaneState};
 use crate::error::Error;
 
 /// `DCS 1000 p`, which `tmux -CC` prints once on entry.
@@ -34,14 +35,30 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_line: 256 * 1024,
-            max_block_bytes: 16 * 1024 * 1024,
+            max_block_bytes: 64 * 1024 * 1024,
             max_block_lines: 200_000,
         }
     }
 }
 
-/// What a command's reply must look like to be believed.
-pub type Expect = Option<usize>;
+/// What a command's reply must look like for its terminator to be believed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expect {
+    /// Any rows: the terminator is believed on its header alone. For a reply
+    /// tmux generates from numbers and symbols, which holds no pane content.
+    Any,
+    /// Exactly this many rows.
+    Rows(usize),
+    /// One line of pane state, which sizes the [`Expect::Capture`] that
+    /// follows it in the same command line.
+    PaneState,
+    /// Pane rows: `min(history_rows, history_size) + pane_height` of them as
+    /// the pane state just before it reported, or `pane_height` alone for a
+    /// capture of the saved screen, which asks for no history. A capture
+    /// with no pane state before it, or whose pane state failed, ends the
+    /// stream: the pane is gone and its reply cannot be sized.
+    Capture { history_rows: u32, alternate: bool },
+}
 
 /// One unit of decoded stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +108,11 @@ struct Open {
     time: u64,
     number: u64,
     solicited: bool,
-    expect: Expect,
+    /// The row count promised, if any.
+    rows: Option<usize>,
+    /// Whether the block's one line is a pane state to keep for the capture
+    /// that follows.
+    pane_state: bool,
     lines: Vec<Vec<u8>>,
     bytes: usize,
 }
@@ -107,6 +128,8 @@ pub struct Decoder {
     line: Vec<u8>,
     open: Option<Open>,
     expect: VecDeque<Expect>,
+    /// The pane state reply just completed, for the capture that follows it.
+    pane_state: Option<PaneState>,
     poisoned: bool,
 }
 
@@ -123,6 +146,7 @@ impl Decoder {
             line: Vec::new(),
             open: None,
             expect: VecDeque::new(),
+            pane_state: None,
             poisoned: false,
         }
     }
@@ -146,9 +170,18 @@ impl Decoder {
         }
     }
 
+    /// Whether the entry marker is recognized.
+    pub fn armed(&self) -> bool {
+        self.armed
+    }
+
     /// Whether the stream is inside control mode.
     pub fn in_control_mode(&self) -> bool {
         !matches!(self.state, State::Plain)
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// Register what the next solicited reply must look like. Replies come
@@ -182,6 +215,21 @@ impl Decoder {
                     i = input.len();
                 }
                 State::Plain => {
+                    if self.matched == 0 {
+                        // Only the marker's first byte can start a match, so
+                        // everything before the next ESC passes in one piece.
+                        match input[i..].iter().position(|&b| b == ESC) {
+                            Some(n) => {
+                                pass.extend_from_slice(&input[i..i + n]);
+                                i += n;
+                            }
+                            None => {
+                                pass.extend_from_slice(&input[i..]);
+                                i = input.len();
+                                continue;
+                            }
+                        }
+                    }
                     self.plain_byte(input[i], &mut pass, out);
                     i += 1;
                 }
@@ -231,6 +279,7 @@ impl Decoder {
                 self.state = State::Control;
                 self.line.clear();
                 self.open = None;
+                self.pane_state = None;
                 out.push(Frame::Entered);
             }
             return;
@@ -271,14 +320,35 @@ impl Decoder {
             let expect = if solicited {
                 self.expect.pop_front().ok_or(Error::UnexpectedReply)?
             } else {
-                None
+                Expect::Any
+            };
+            // A pane state sizes only the capture right after it.
+            let pane_state = self.pane_state.take();
+            let (rows, records_state) = match expect {
+                Expect::Any => (None, false),
+                Expect::Rows(n) => (Some(n), false),
+                Expect::PaneState => (None, true),
+                Expect::Capture {
+                    history_rows,
+                    alternate,
+                } => {
+                    let state = pane_state.ok_or(Error::NoPaneState)?;
+                    let height = state.height as usize;
+                    let history = if alternate {
+                        0
+                    } else {
+                        history_rows.min(state.history_size) as usize
+                    };
+                    (Some(history + height), false)
+                }
             };
             self.open = Some(Open {
                 header: rest.to_vec(),
                 time,
                 number,
                 solicited,
-                expect,
+                rows,
+                pane_state: records_state,
                 lines: Vec::new(),
                 bytes: 0,
             });
@@ -291,6 +361,7 @@ impl Decoder {
                 .map(|r| String::from_utf8_lossy(r).into_owned());
             self.state = State::AwaitSt { esc: false };
             self.expect.clear();
+            self.pane_state = None;
             out.push(Frame::Exit { reason });
             return Ok(());
         }
@@ -299,15 +370,26 @@ impl Decoder {
     }
 
     fn block_line(&mut self, line: Vec<u8>, out: &mut Vec<Frame>) -> Result<(), Error> {
-        let open = self.open.as_mut().expect("checked by caller");
+        let Some(open) = self.open.as_mut() else {
+            return Err(Error::Malformed("block"));
+        };
         let terminator = line
             .strip_prefix(b"%end ")
             .map(|h| (h, true))
             .or_else(|| line.strip_prefix(b"%error ").map(|h| (h, false)))
             .filter(|(h, _)| *h == open.header.as_slice());
         if let Some((_, ok)) = terminator {
-            if open.expect.is_none_or(|n| n == open.lines.len()) {
-                let open = self.open.take().expect("checked by caller");
+            if open.rows.is_none_or(|n| n == open.lines.len()) {
+                let Some(open) = self.open.take() else {
+                    return Err(Error::Malformed("block"));
+                };
+                if open.pane_state {
+                    self.pane_state = if ok {
+                        Some(parse_pane_state(&open.lines)?)
+                    } else {
+                        None
+                    };
+                }
                 out.push(Frame::Block(Block {
                     time: open.time,
                     number: open.number,
@@ -318,7 +400,7 @@ impl Decoder {
                 return Ok(());
             }
         }
-        if let Some(n) = open.expect {
+        if let Some(n) = open.rows {
             if open.lines.len() >= n {
                 return Err(Error::ReplyShape);
             }

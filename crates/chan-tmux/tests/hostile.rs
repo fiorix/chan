@@ -1,8 +1,8 @@
 //! Streams built to confuse the framing.
 
-use chan_tmux::{Client, Command, Decoder, Error, Event, Frame, Limits, PaneId};
+use chan_tmux::{Client, Command, Decoder, Error, Event, Expect, Frame, Limits, PaneId};
 
-fn control(expect: &[Option<usize>]) -> Decoder {
+fn control(expect: &[Expect]) -> Decoder {
     let mut d = Decoder::in_control(Limits::default());
     for e in expect {
         d.expect_next(*e);
@@ -30,7 +30,7 @@ fn a_forged_terminator_ends_a_block_that_promised_nothing() {
     // The hazard that row counts exist to remove: with no promise, an exact
     // copy of the header inside the pane's content closes the reply early and
     // the rest of the pane parses as protocol.
-    let mut d = control(&[None]);
+    let mut d = control(&[Expect::Any]);
     let (f, r) = feed(&mut d, FORGED_CAPTURE);
     r.unwrap();
     let Frame::Block(b) = &f[0] else {
@@ -49,7 +49,7 @@ fn a_forged_terminator_ends_a_block_that_promised_nothing() {
 
 #[test]
 fn a_promised_row_count_makes_the_same_stream_data() {
-    let mut d = control(&[Some(5)]);
+    let mut d = control(&[Expect::Rows(5)]);
     let (f, r) = feed(&mut d, FORGED_CAPTURE);
     r.unwrap();
     assert_eq!(f.len(), 1);
@@ -63,7 +63,7 @@ fn a_promised_row_count_makes_the_same_stream_data() {
 
 #[test]
 fn too_many_rows_for_the_promise_fails_closed() {
-    let mut d = control(&[Some(2)]);
+    let mut d = control(&[Expect::Rows(2)]);
     let (_, r) = feed(&mut d, b"%begin 1 1 1\r\na\r\nb\r\nc\r\n");
     assert_eq!(r, Err(Error::ReplyShape));
     assert_eq!(feed(&mut d, b"x\r\n").1, Err(Error::Poisoned));
@@ -73,7 +73,7 @@ fn too_many_rows_for_the_promise_fails_closed() {
 fn a_short_reply_never_closes_and_runs_into_the_bound() {
     // The real terminator arriving early looks forged, so it is data; the
     // next row then exceeds the promise.
-    let mut d = control(&[Some(3)]);
+    let mut d = control(&[Expect::Rows(3)]);
     let (_, r) = feed(
         &mut d,
         b"%begin 1 1 1\r\na\r\n%end 1 1 1\r\n%output %0 x\r\n%output %0 y\r\n",
@@ -83,7 +83,7 @@ fn a_short_reply_never_closes_and_runs_into_the_bound() {
 
 #[test]
 fn a_terminator_for_another_header_is_data() {
-    let mut d = control(&[None]);
+    let mut d = control(&[Expect::Any]);
     let (f, r) = feed(
         &mut d,
         b"%begin 5 9 1\r\n%end 5 9 0\r\n%end 5 8 1\r\n%end 6 9 1\r\n%end 5 9 1\r\n",
@@ -118,7 +118,7 @@ fn lines_and_blocks_are_bounded() {
         max_block_bytes: 64,
         max_block_lines: 3,
     });
-    d.expect_next(None);
+    d.expect_next(Expect::Any);
     assert_eq!(
         feed(&mut d, b"%begin 1 1 1\r\na\r\nb\r\nc\r\nd\r\n").1,
         Err(Error::BlockTooLarge)
@@ -129,7 +129,7 @@ fn lines_and_blocks_are_bounded() {
         max_block_bytes: 64,
         max_block_lines: 100,
     });
-    d.expect_next(None);
+    d.expect_next(Expect::Any);
     let mut s = b"%begin 1 1 1\r\n".to_vec();
     s.extend(std::iter::repeat_n(b"0123456789012345678901234567890\r\n".as_slice(), 4).flatten());
     assert_eq!(feed(&mut d, &s).1, Err(Error::BlockTooLarge));
@@ -291,6 +291,154 @@ fn random_streams_never_panic() {
             failed |= r.is_err();
         }
     }
+}
+
+/// A pane state line as `Command::PaneState` asks for it: `history_size`
+/// is the last field and `pane_height` the one before.
+fn state_block(hdr: &str, history_size: u32, height: u32) -> Vec<u8> {
+    format!(
+        "%begin {hdr}\r\n%7 0 0 0 0 0 {} 80 {height} {history_size}\r\n%end {hdr}\r\n",
+        height - 1
+    )
+    .into_bytes()
+}
+
+const CAPTURE: Expect = Expect::Capture {
+    history_rows: 50,
+    alternate: false,
+};
+
+#[test]
+fn a_capture_is_sized_by_the_state_before_it() {
+    // History 20 of the 50 asked for, height 3: the capture holds exactly 23
+    // rows, and a forged terminator at row 5 is one of them.
+    let mut d = control(&[Expect::PaneState, CAPTURE]);
+    let mut s = state_block("100 7 1", 20, 3);
+    s.extend_from_slice(b"%begin 100 8 1\r\n");
+    for i in 0..23 {
+        if i == 5 {
+            s.extend_from_slice(b"%end 100 8 1\r\n");
+        } else {
+            s.extend_from_slice(format!("row {i}\r\n").as_bytes());
+        }
+    }
+    s.extend_from_slice(b"%end 100 8 1\r\n%output %7 after\r\n");
+    let (f, r) = feed(&mut d, &s);
+    r.unwrap();
+    assert_eq!(f.len(), 3, "{f:?}");
+    let Frame::Block(b) = &f[1] else {
+        panic!("{f:?}")
+    };
+    assert_eq!(b.lines.len(), 23);
+    assert_eq!(b.lines[5], b"%end 100 8 1");
+    assert!(matches!(&f[2], Frame::Line(l) if l == b"%output %7 after"));
+}
+
+#[test]
+fn an_alternate_capture_is_the_pane_height_alone() {
+    let mut d = control(&[
+        Expect::PaneState,
+        Expect::Capture {
+            history_rows: 50,
+            alternate: true,
+        },
+    ]);
+    let mut s = state_block("1 1 1", 500, 4);
+    s.extend_from_slice(b"%begin 1 2 1\r\na\r\nb\r\nc\r\nd\r\n%end 1 2 1\r\n");
+    let (f, r) = feed(&mut d, &s);
+    r.unwrap();
+    let Frame::Block(b) = &f[1] else {
+        panic!("{f:?}")
+    };
+    assert_eq!(b.lines.len(), 4);
+}
+
+#[test]
+fn a_capture_whose_state_failed_ends_the_stream() {
+    // The pane is gone: its state is an %error and the rows that follow
+    // cannot be sized, so they are not believed either.
+    let mut d = control(&[Expect::PaneState, CAPTURE]);
+    let (f, r) = feed(
+        &mut d,
+        b"%begin 1 1 1\r\ncan't find pane: %7\r\n%error 1 1 1\r\n%begin 1 2 1\r\n",
+    );
+    assert_eq!(r, Err(Error::NoPaneState));
+    assert!(matches!(&f[0], Frame::Block(b) if !b.ok));
+}
+
+#[test]
+fn a_capture_with_no_state_before_it_ends_the_stream() {
+    let mut d = control(&[CAPTURE]);
+    assert_eq!(feed(&mut d, b"%begin 1 1 1\r\n").1, Err(Error::NoPaneState));
+
+    // A state sizes only the capture right after it.
+    let mut d = control(&[Expect::PaneState, Expect::Any, CAPTURE]);
+    let mut s = state_block("1 1 1", 0, 2);
+    s.extend_from_slice(b"%begin 1 2 1\r\n%end 1 2 1\r\n%begin 1 3 1\r\n");
+    assert_eq!(feed(&mut d, &s).1, Err(Error::NoPaneState));
+}
+
+#[test]
+fn a_malformed_state_line_is_an_error_without_the_bytes() {
+    let mut d = control(&[Expect::PaneState, CAPTURE]);
+    let e = feed(&mut d, b"%begin 1 1 1\r\nsecret 1 2\r\n%end 1 1 1\r\n")
+        .1
+        .unwrap_err();
+    assert_eq!(e, Error::Malformed("pane state"));
+    assert!(!e.to_string().contains("secret"));
+}
+
+#[test]
+fn a_capture_past_the_block_bound_is_refused_not_fatal() {
+    let mut c = Client::in_control(Limits::default());
+    c.feed(b"%session-changed $1 x\r\n").unwrap();
+    let big = Command::CapturePane {
+        pane: PaneId(0),
+        history_rows: 195_000,
+        alternate: false,
+    };
+    assert_eq!(
+        c.submit(&big).unwrap_err(),
+        Error::BadArgument("capture exceeds the block bound")
+    );
+    assert_eq!(c.pending(), 0, "a refused command owes nothing");
+    assert!(c.submit(&Command::Version).is_ok(), "the client is intact");
+}
+
+#[test]
+fn a_client_pairs_a_capture_with_its_state() {
+    let mut c = Client::in_control(Limits::default());
+    c.feed(b"%session-changed $1 x\r\n").unwrap();
+    let (token, line) = c
+        .submit(&Command::CapturePane {
+            pane: PaneId(7),
+            history_rows: 50,
+            alternate: false,
+        })
+        .unwrap();
+    assert!(
+        line.starts_with(b"display-message -p -t %7 '") && line.ends_with(b" -S -50 -E -\n"),
+        "{}",
+        String::from_utf8_lossy(&line)
+    );
+    assert_eq!(c.pending(), 2);
+    let mut s = state_block("9 1 1", 1, 2);
+    s.extend_from_slice(b"%begin 9 2 1\r\nh\r\na\r\nb\r\n%end 9 2 1\r\n");
+    let ev = c.feed(&s).unwrap();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    match &ev[0] {
+        Event::Capture {
+            token: t,
+            state,
+            rows,
+        } => {
+            assert_eq!(*t, token);
+            assert_eq!((state.history_size, state.height), (1, 2));
+            assert_eq!(rows.len(), 3);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(c.pending(), 0);
 }
 
 #[test]

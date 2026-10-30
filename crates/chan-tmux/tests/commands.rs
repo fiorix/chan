@@ -2,7 +2,7 @@ use chan_tmux::escape::{escape_output, unescape_output};
 use chan_tmux::layout::checksum;
 use chan_tmux::{
     parse_created_id, parse_layout, parse_list_panes, parse_list_windows, parse_pane_state,
-    Command, Error, LayoutError, PaneId, Version, WindowId, MAX_KEY_BYTES,
+    Command, Error, Expect, LayoutError, PaneId, Version, WindowId, MAX_KEY_BYTES,
 };
 
 #[test]
@@ -105,24 +105,22 @@ fn commands_render() {
         }),
         "send-keys -t %2 -H 1b 61 00"
     );
-    assert_eq!(
-        r(Command::CapturePane {
-            pane: PaneId(0),
-            history_rows: 50,
-            rows: 24,
-            alternate: false
-        }),
-        "capture-pane -p -e -q -t %0 -S -50 -E 23"
+    let capture = r(Command::CapturePane {
+        pane: PaneId(0),
+        history_rows: 50,
+        alternate: false,
+    });
+    assert!(
+        capture.starts_with("display-message -p -t %0 '#{pane_id} ")
+            && capture.ends_with("#{history_size}' ; capture-pane -p -e -q -t %0 -S -50 -E -"),
+        "{capture}"
     );
-    assert_eq!(
-        r(Command::CapturePane {
-            pane: PaneId(0),
-            history_rows: 0,
-            rows: 24,
-            alternate: true
-        }),
-        "capture-pane -p -e -q -a -t %0 -S 0 -E 23"
-    );
+    assert!(r(Command::CapturePane {
+        pane: PaneId(0),
+        history_rows: 0,
+        alternate: true,
+    })
+    .ends_with(" ; capture-pane -p -e -q -a -t %0 -S 0 -E -"));
     assert_eq!(
         r(Command::SplitWindow {
             pane: PaneId(1),
@@ -141,17 +139,25 @@ fn only_a_capture_promises_rows() {
     let c = Command::CapturePane {
         pane: PaneId(0),
         history_rows: 50,
-        rows: 24,
         alternate: false,
     };
-    assert_eq!(c.expect(), Some(74));
+    assert_eq!(
+        c.expects(),
+        vec![
+            Expect::PaneState,
+            Expect::Capture {
+                history_rows: 50,
+                alternate: false
+            }
+        ]
+    );
     for c in [
         Command::Version,
         Command::ListWindows,
         Command::Detach,
         Command::KillWindow(WindowId(1)),
     ] {
-        assert_eq!(c.expect(), None);
+        assert_eq!(c.expects(), vec![Expect::Any]);
     }
 }
 
@@ -198,8 +204,7 @@ fn sizes_and_ranges_are_checked() {
     .is_err());
     assert!(Command::CapturePane {
         pane: PaneId(0),
-        history_rows: 0,
-        rows: 0,
+        history_rows: 1_000_001,
         alternate: false
     }
     .render()
@@ -207,7 +212,6 @@ fn sizes_and_ranges_are_checked() {
     assert!(Command::CapturePane {
         pane: PaneId(0),
         history_rows: 5,
-        rows: 24,
         alternate: true
     }
     .render()
