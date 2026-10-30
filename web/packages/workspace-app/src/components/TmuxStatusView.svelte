@@ -7,8 +7,9 @@
 
      The view holds the keyboard while it stands, as the consent banner does:
      the arrows (or j and k) choose a window, Enter or Space opens it, a digit
-     opens the window at that position, d detaches, e asks to end and Enter
-     confirms while Escape cancels; Tab still walks the buttons. -->
+     opens the window at that position, t asks tmux for a new window, d
+     detaches, e asks to end and Enter confirms while Escape cancels; Tab
+     still walks the buttons. -->
 <script lang="ts">
   import type { TmuxConnectionStatus, TmuxRequest, TmuxWindowStatus } from "../state/tmuxStatus";
   import { errorText } from "../api/errors";
@@ -130,6 +131,8 @@
     } else if (/^[1-9]$/.test(e.key) && Number(e.key) <= count) {
       selected = Number(e.key) - 1;
       openSelected();
+    } else if (e.key === "t" && !confirmEnd) {
+      onRequest({ request: "new-window" });
     } else if (e.key === "d" && !confirmEnd) {
       onRequest({ request: "detach" });
     } else if (e.key === "e" && !confirmEnd) {
@@ -201,7 +204,7 @@
     {#if failure}
       <p class="ts-failure" role="alert">{failure}</p>
     {/if}
-    <p class="ts-keys">↑ ↓ choose a window, Enter opens it, a digit opens that one, <kbd>d</kbd> detaches, <kbd>e</kbd> ends.</p>
+    <p class="ts-keys">↑ ↓ choose a window, Enter opens it, a digit opens that one, <kbd>t</kbd> makes a new one, <kbd>d</kbd> detaches, <kbd>e</kbd> ends.</p>
     <div class="ts-actions">
       {#if confirmEnd}
         <span class="ts-confirm">End the tmux server and every session it holds? Enter ends, Escape keeps it.</span>

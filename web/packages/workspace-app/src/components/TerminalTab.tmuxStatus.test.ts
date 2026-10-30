@@ -127,7 +127,7 @@ test("Detach sends its request; End asks first and sends on confirm", async () =
   expect(requests(socket)).toEqual([{ request: "detach" }, { request: "end" }]);
 });
 
-test("the view holds the keyboard: arrows and digits choose a window, Enter opens it, d detaches, e asks and Enter ends", async () => {
+test("the view holds the keyboard: arrows and digits choose a window, Enter opens it, t makes one, d detaches, e asks and Enter ends", async () => {
   const { socket } = await mounted(CONNECTED);
   const shown = view()!;
   expect(document.activeElement, "the view takes the keyboard when the connection shows").toBe(shown);
@@ -162,9 +162,12 @@ test("the view holds the keyboard: arrows and digits choose a window, Enter open
   await tick();
   expect(shown.textContent).not.toContain("End the tmux server");
   expect(requests(socket)).toHaveLength(1);
+  key("t");
+  await tick();
+  expect(requests(socket).at(-1)).toEqual({ request: "new-window" });
   key("d");
   await tick();
-  expect(requests(socket)).toEqual([{ request: "open-window", window: "@9" }, { request: "detach" }]);
+  expect(requests(socket)).toEqual([{ request: "open-window", window: "@9" }, { request: "new-window" }, { request: "detach" }]);
   key("e");
   key("Enter");
   await tick();
