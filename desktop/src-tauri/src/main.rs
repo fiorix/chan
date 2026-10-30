@@ -19,6 +19,7 @@ mod revtunnel;
 mod runtime_capability;
 mod serve;
 mod terminal_mode;
+mod terminal_opacity;
 mod upload;
 mod watcher;
 mod window_ops;
@@ -270,6 +271,11 @@ pub struct AppState {
     /// AppImage), so a handoff `chan upgrade` that arrives afterwards relaunches
     /// into it instead of downloading the same payload again.
     pub update_installed_version: Mutex<Option<String>>,
+    /// The terminal background opacity the windows were last told, so the
+    /// config hook's call for the desktop's own write (already announced by
+    /// the command that wrote it) sends nothing again. `None` until the first
+    /// announcement; a window reads its first value through the command.
+    pub terminal_background_opacity: Mutex<Option<u32>>,
 }
 
 impl AppState {
@@ -317,6 +323,7 @@ impl AppState {
             pending_update: Mutex::new(None),
             update_gate: tokio::sync::Mutex::new(()),
             update_installed_version: Mutex::new(None),
+            terminal_background_opacity: Mutex::new(None),
         }
     }
 
@@ -5239,6 +5246,11 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         zoom_reset,
         probe_url,
         devserver::gateway_csrf_token,
+        // The desktop's terminal background opacity: a page reads it at load
+        // and the Settings slider writes it; later changes reach every window
+        // as the terminal_opacity::EVENT event.
+        terminal_opacity::terminal_background_opacity,
+        terminal_opacity::set_terminal_background_opacity,
     ]
 }
 
@@ -5420,6 +5432,7 @@ fn main() {
                 devserver_conns: Arc::clone(&state_for_setup.devservers),
                 devserver_connecting: Arc::clone(&state_for_setup.devserver_connecting),
                 devserver_feed: Arc::clone(&state_for_setup.devserver_feed),
+                server_config_hook: terminal_opacity::config_hook(app.handle().clone()),
             };
             match tauri::async_runtime::block_on(embedded::EmbeddedServer::start(registry_deps)) {
                 Ok(server) => {

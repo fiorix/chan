@@ -47,12 +47,16 @@ export function backdropMask(width: number, height: number, holes: BackdropHole[
 }
 
 /// The holes for `backdrop`: one per pane card face showing a terminal, with
-/// the face's own corner radius.
+/// the face's own corner radius. A pane mid side flip gets no hole: the card
+/// turns under a transform the rect does not follow, so a hole cut for its
+/// resting rect would show the desktop around the turning card; the flip's
+/// end drops the class, and that mutation rebuilds the mask with the hole.
 export function terminalHoles(backdrop: HTMLElement): BackdropHole[] {
   const origin = backdrop.getBoundingClientRect();
   const holes: BackdropHole[] = [];
   for (const face of backdrop.querySelectorAll<HTMLElement>(".pane-card-face")) {
     if (!face.querySelector(".terminal-tab.active")) continue;
+    if (face.closest(".pane.sideFlipActive")) continue;
     const rect = face.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
     holes.push({

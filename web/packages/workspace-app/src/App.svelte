@@ -25,6 +25,10 @@
     markTerminalOpacityRoot,
     windowIsTransparent,
   } from "./terminal/backgroundOpacity";
+  import {
+    desktopTerminalOpacity,
+    startDesktopTerminalOpacity,
+  } from "./terminal/desktopTerminalOpacity.svelte";
   import { installSeeThroughBackdrop } from "./terminal/seeThroughBackdrop";
   import { installFileDropGuard } from "./state/fileDropGuard";
   import { refreshDrafts } from "./state/drafts.svelte";
@@ -344,24 +348,23 @@
   });
 
   // Terminal background opacity. Only a window chan-desktop built
-  // transparent (`?transparent=1`, fixed for the page) is marked; the root
-  // markers and `--terminal-opacity` follow the preference live.
+  // transparent (`?transparent=1`, fixed for the page, and every window the
+  // desktop builds) is marked; the root markers and `--terminal-opacity`
+  // follow the desktop's own value live, never this window's tenant
+  // preference, which a devserver window would otherwise paint with.
   const transparentWindow = windowIsTransparent();
   $effect(() => {
     markTerminalOpacityRoot(
       document.documentElement,
       transparentWindow,
-      currentPreferences()?.terminal?.background_opacity,
+      desktopTerminalOpacity(),
     );
   });
   // Below 100 the workspace backdrop keeps painting, with a hole behind each
   // pane showing a terminal (see seeThroughBackdrop.ts).
   let workspaceBackdrop: HTMLElement | undefined = $state();
   const terminalSeeThrough = $derived(
-    effectiveBackgroundOpacity(
-      currentPreferences()?.terminal?.background_opacity,
-      transparentWindow,
-    ) !== null,
+    effectiveBackgroundOpacity(desktopTerminalOpacity(), transparentWindow) !== null,
   );
   $effect(() => {
     if (!terminalSeeThrough || !workspaceBackdrop) return;
@@ -426,6 +429,9 @@
     // forget: it needs a library capability, and a window that cannot mint one
     // simply keeps the document's static title.
     void initWindowTitle();
+    // Follow chan-desktop's terminal background opacity for the life of the
+    // page. A no-op in a browser tab, where the terminals stay opaque.
+    void startDesktopTerminalOpacity();
     // Live per-library focus-colour broadcast. Subscribe ONCE PER
     // WINDOW (the var is per-document; <Pane> is per leaf node, so per-pane would
     // open redundant sockets) to this library's colour watch and recolour

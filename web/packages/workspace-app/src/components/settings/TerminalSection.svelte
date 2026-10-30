@@ -25,6 +25,11 @@
     TERMINAL_BACKGROUND_OPACITY_MAX,
     clampBackgroundOpacity,
   } from "../../terminal/backgroundOpacity";
+  import {
+    desktopTerminalOpacity,
+    setDesktopTerminalOpacity,
+  } from "../../terminal/desktopTerminalOpacity.svelte";
+  import { isTauriDesktop } from "../../api/desktop";
   import { normalizeHexColor, readStandardTerminalColors } from "../../state/paneColor";
   import { ui } from "../../state/store.svelte";
   import { windowModeSecretMaskingEnabled } from "../../state/windowMode";
@@ -80,6 +85,31 @@
   }
 
   const SCROLLBACK_STEP = 10;
+
+  // Background opacity is chan-desktop's setting. In a desktop window the
+  // slider shows the desktop's value and writes it through the host,
+  // whatever tenant this window shows; the buffer key is still mutated so
+  // the field's status lights for the write. In a browser tab, which never
+  // paints it, the row writes the tenant's preference: a server on the
+  // desktop's machine shares that file with chan-desktop, which follows it.
+  const desktopWindow = isTauriDesktop();
+  const backgroundOpacity = $derived(
+    desktopWindow
+      ? (desktopTerminalOpacity() ?? TERMINAL_BACKGROUND_OPACITY_MAX)
+      : clampBackgroundOpacity(prefs.terminal.background_opacity),
+  );
+  const BACKGROUND_OPACITY_HINT = desktopWindow
+    ? "See-through terminal background in every chan-desktop window: below 100 a terminal tab shows the desktop behind the window; text and everything that is not a terminal stay opaque. From 80% to 100%, the default, which is off. This is chan-desktop's own setting and applies live to every open window."
+    : "Applies in chan-desktop, where the desktop's own setting governs every terminal tab; a browser tab stays opaque. From 80% to 100%, the default, which is off.";
+
+  function commitBackgroundOpacity(percent: number): void {
+    const mutate = (p: Preferences): Preferences => ({
+      ...p,
+      terminal: { ...p.terminal, background_opacity: percent },
+    });
+    if (desktopWindow) commit(mutate, () => setDesktopTerminalOpacity(percent));
+    else commit(mutate);
+  }
 
   // Terminal font. The Source Code Pro face ships inside the SPA bundle,
   // so picking it is a plain preference write with nothing to fetch and
@@ -369,17 +399,16 @@
 <SettingField
   label="Background opacity"
   pref="terminal.background_opacity"
-  hint="See-through terminal background in chan-desktop's standalone terminal windows; text stays opaque. From 80% to 100%, the default, which is off. Applies live to every open terminal window. Workspace and devserver windows stay opaque."
+  hint={BACKGROUND_OPACITY_HINT}
 >
   <SliderField
-    value={clampBackgroundOpacity(prefs.terminal.background_opacity)}
+    value={backgroundOpacity}
     min={TERMINAL_BACKGROUND_OPACITY_MIN}
     max={TERMINAL_BACKGROUND_OPACITY_MAX}
     step={1}
     format={(v) => (v >= TERMINAL_BACKGROUND_OPACITY_MAX ? "100% (off)" : `${v}%`)}
     ariaLabel="Terminal background opacity percent"
-    oncommit={(percent) =>
-      commit((p) => ({ ...p, terminal: { ...p.terminal, background_opacity: percent } }))}
+    oncommit={commitBackgroundOpacity}
   />
 </SettingField>
 

@@ -78,6 +78,11 @@ mod util;
 mod window_bus;
 
 pub use config::ServerConfig;
+/// The bounds of `terminal.background_opacity`, for an embedder that writes
+/// the file the way `chan config set` does and clamps as the settings route
+/// clamps.
+pub use config::{TERMINAL_BACKGROUND_OPACITY_MAX, TERMINAL_BACKGROUND_OPACITY_MIN};
+pub use config_watch::ServerConfigHook;
 // Desktop window-ops, window presence, and the title map live in chan-library.
 // chan-desktop depends on chan-server and not on chan-library, so the public
 // types are reachable here; the modules are re-exported crate-wide so the
@@ -1413,6 +1418,25 @@ pub fn route_builder_with_extensions(
         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
         client_sessions: chan_library::client_sessions::ClientSessions::new(),
         config_watch: config_watch::ConfigWatch::new(),
+    })
+}
+
+/// Build tenants as [`route_builder_with_extensions`] does over `runtime`, or
+/// as [`route_builder`] does without one, and hand every change of
+/// `server.toml` on disk to `hook` as well. The watch starts with the builder
+/// rather than with its first tenant, so chan-desktop sees a `chan config
+/// set` made before any window is open.
+pub fn route_builder_with_config_hook(
+    runtime: Option<&ExtensionRuntime>,
+    hook: ServerConfigHook,
+) -> Arc<dyn chan_library::TenantBuilder> {
+    Arc::new(RouteLayer {
+        extension_catalog: runtime
+            .map(ExtensionRuntime::catalog)
+            .unwrap_or_else(extensions::empty_catalog),
+        bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+        client_sessions: chan_library::client_sessions::ClientSessions::new(),
+        config_watch: config_watch::ConfigWatch::with_server_config_hook(hook),
     })
 }
 

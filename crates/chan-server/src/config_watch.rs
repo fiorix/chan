@@ -18,6 +18,12 @@
 //! no-op and the API PATCH path's own broadcast is not doubled. Only a
 //! genuine external change reaches the bus. The same comparison absorbs
 //! notify's habit of emitting several events per logical write.
+//!
+//! A host that owns a `server.toml` value of its own (chan-desktop and its
+//! terminal background opacity) sees every change of the file through a
+//! [`ServerConfigHook`], after the tenants have reloaded it. The hook gets the
+//! file as reloaded and keeps its own dedupe, since it knows the value it last
+//! applied; the tenants' comparison says nothing about a key no tenant paints.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -33,6 +39,13 @@ use crate::state::AppState;
 const SERVER_TOML: &str = "server.toml";
 const PREFERENCES_TOML: &str = "preferences.toml";
 
+/// What a host runs on every change of `server.toml` on disk, with the file as
+/// reloaded: an edit through a tenant's API, `chan config set` or a hand-edit
+/// alike. A host with no tenant mounted still sees the change, so a value the
+/// host itself owns follows the file from the start. `preferences.toml` events
+/// never reach it, and a file that fails to load is logged and skipped.
+pub type ServerConfigHook = Arc<dyn Fn(&ServerConfig) + Send + Sync>;
+
 /// Refresh the windows of every tenant added to it when `server.toml` or
 /// `preferences.toml` in the per-library config directory (`~/.chan`, or
 /// the `CHAN_HOME` override) changes on disk outside that tenant's API.
@@ -40,6 +53,8 @@ const PREFERENCES_TOML: &str = "preferences.toml";
 /// the watch.
 pub(crate) struct ConfigWatch {
     tenants: Arc<Tenants>,
+    /// Runs after the tenants on every `server.toml` event.
+    hook: Option<ServerConfigHook>,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
@@ -47,21 +62,41 @@ impl ConfigWatch {
     pub(crate) fn new() -> Self {
         Self {
             tenants: Arc::default(),
+            hook: None,
             watcher: Mutex::new(None),
         }
     }
 
-    /// Add a tenant, starting the watch with the first one so an owner that
-    /// mounts no tenant watches nothing. A registration failure is logged and
-    /// the next tenant tries again; until then external edits reach the
-    /// windows at the next reload instead of failing the tenant's build.
+    /// A watch that also hands every `server.toml` change to `hook`. It
+    /// starts at once rather than with the first tenant: the hook's owner
+    /// has a value of its own in the file, and an edit made before any tenant
+    /// is mounted would otherwise go unseen.
+    pub(crate) fn with_server_config_hook(hook: ServerConfigHook) -> Self {
+        let watch = Self {
+            tenants: Arc::default(),
+            hook: Some(hook),
+            watcher: Mutex::new(None),
+        };
+        watch.ensure_started();
+        watch
+    }
+
+    /// Add a tenant, starting a hookless watch with the first one so an
+    /// owner that mounts no tenant watches nothing.
     pub(crate) fn add(&self, state: &Arc<AppState>) {
         self.tenants.add(state);
+        self.ensure_started();
+    }
+
+    /// Register the directory watch once. A registration failure is logged
+    /// and the next call tries again; until then external edits reach the
+    /// windows at the next reload instead of failing the tenant's build.
+    fn ensure_started(&self) {
         let mut watcher = self.watcher.lock().unwrap_or_else(PoisonError::into_inner);
         if watcher.is_some() {
             return;
         }
-        match start(Arc::clone(&self.tenants)) {
+        match start(Arc::clone(&self.tenants), self.hook.clone()) {
             Ok(started) => *watcher = Some(started),
             Err(e) => tracing::warn!(
                 error = %e,
@@ -91,7 +126,10 @@ impl Tenants {
     }
 }
 
-fn start(tenants: Arc<Tenants>) -> notify::Result<notify::RecommendedWatcher> {
+fn start(
+    tenants: Arc<Tenants>,
+    hook: Option<ServerConfigHook>,
+) -> notify::Result<notify::RecommendedWatcher> {
     let dir = chan_workspace::paths::config_dir();
     // The files are written lazily on first save; create the directory so
     // the watch registers even before any config exists on disk.
@@ -99,19 +137,40 @@ fn start(tenants: Arc<Tenants>) -> notify::Result<notify::RecommendedWatcher> {
     let watch_dir = dir.clone();
     let mut watcher =
         notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-            Ok(event) => dispatch(&watch_dir, &tenants, &event),
+            Ok(event) => dispatch(&watch_dir, &tenants, hook.as_ref(), &event),
             Err(e) => tracing::warn!(error = %e, "config watch error"),
         })?;
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     Ok(watcher)
 }
 
-/// Hand one event to every live tenant. Each compares the reloaded file with
-/// its own copy, so the tenant whose write caused the event stays quiet and
-/// the others refresh. The list lock is released before any reload runs.
-fn dispatch(dir: &Path, tenants: &Tenants, event: &notify::Event) {
+/// Hand one event to every live tenant, then a `server.toml` event to the
+/// hook. Each tenant compares the reloaded file with its own copy, so the
+/// tenant whose write caused the event stays quiet and the others refresh.
+/// The hook sees every `server.toml` event, the file loaded once more for
+/// it: a tenant's silence means the tenant already holds the value, not that
+/// the hook's owner does. The list lock is released before any reload runs.
+fn dispatch(dir: &Path, tenants: &Tenants, hook: Option<&ServerConfigHook>, event: &notify::Event) {
     for state in tenants.live() {
         handle_event(dir, &state, event);
+    }
+    let Some(hook) = hook else {
+        return;
+    };
+    if event_touches(event, SERVER_TOML) {
+        run_server_config_hook(dir, hook);
+    }
+}
+
+/// A load error keeps the hook's owner on the value it last applied, as a
+/// tenant keeps its in-memory config: a half-written file is not a change.
+fn run_server_config_hook(dir: &Path, hook: &ServerConfigHook) {
+    match ServerConfig::load_from(&dir.join(SERVER_TOML)) {
+        Ok(cfg) => hook(&cfg),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "reloading server.toml for the config hook failed; keeping its last value"
+        ),
     }
 }
 
@@ -394,7 +453,7 @@ mod tests {
         let mut reader_rx = reader.events_tx.subscribe();
 
         let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path);
-        dispatch(dir.path(), &tenants, &event);
+        dispatch(dir.path(), &tenants, None, &event);
 
         let reloaded = reader
             .server_config
@@ -411,6 +470,110 @@ mod tests {
         );
         assert_eq!(writer.config_revision.load(Ordering::Relaxed), 1);
         assert_eq!(tenants.live().len(), 2, "a dropped tenant leaves the list");
+    }
+
+    /// A hook that records every value it is called with.
+    fn recording_hook() -> (ServerConfigHook, Arc<Mutex<Vec<u32>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let hook: ServerConfigHook = Arc::new(move |cfg: &ServerConfig| {
+            sink.lock().unwrap().push(cfg.terminal.background_opacity);
+        });
+        (hook, seen)
+    }
+
+    #[test]
+    fn dispatch_hands_a_server_toml_change_to_the_hook_once() {
+        // The writer saved through its own API and stays quiet; the reader
+        // refreshes; the hook is called once, with the reloaded value, whatever
+        // the tenants' dedupe decided.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SERVER_TOML);
+        let writer = make_test_state(false);
+        let reader = make_test_state(false);
+        {
+            let mut written = writer.server_config.lock().unwrap();
+            written.terminal.background_opacity = 90;
+            written.save_to(&path).unwrap();
+        }
+        let tenants = Tenants::default();
+        tenants.add(&writer);
+        tenants.add(&reader);
+        let mut writer_rx = writer.events_tx.subscribe();
+        let mut reader_rx = reader.events_tx.subscribe();
+        let (hook, seen) = recording_hook();
+
+        let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path);
+        dispatch(dir.path(), &tenants, Some(&hook), &event);
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![90],
+            "the hook sees the reloaded value once"
+        );
+        assert_eq!(
+            reader
+                .server_config
+                .lock()
+                .unwrap()
+                .terminal
+                .background_opacity,
+            90
+        );
+        assert!(reader_rx.try_recv().is_ok(), "the reader refreshes");
+        assert!(
+            no_frame_pending(&mut writer_rx),
+            "the writer already pushed its own change"
+        );
+    }
+
+    #[test]
+    fn dispatch_keeps_a_preferences_change_from_the_hook() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(PREFERENCES_TOML);
+        std::fs::write(&path, "theme = \"dark\"\n").unwrap();
+        let reader = make_test_state(false);
+        let tenants = Tenants::default();
+        tenants.add(&reader);
+        let (hook, seen) = recording_hook();
+
+        let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path);
+        dispatch(dir.path(), &tenants, Some(&hook), &event);
+
+        assert_eq!(
+            reader.editor_prefs.lock().unwrap().theme,
+            crate::preferences::ThemeChoice::Dark,
+            "the tenant reloads the preferences"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a preferences.toml event never reaches the hook"
+        );
+    }
+
+    #[test]
+    fn dispatch_skips_the_hook_on_a_malformed_server_toml() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(SERVER_TOML);
+        std::fs::write(&path, "search = = =\n").unwrap();
+        let reader = make_test_state(false);
+        let before = reader.server_config.lock().unwrap().clone();
+        let tenants = Tenants::default();
+        tenants.add(&reader);
+        let (hook, seen) = recording_hook();
+
+        let event = Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path);
+        dispatch(dir.path(), &tenants, Some(&hook), &event);
+
+        assert_eq!(
+            *reader.server_config.lock().unwrap(),
+            before,
+            "a malformed reload keeps the in-memory config"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a malformed reload does not reach the hook"
+        );
     }
 
     #[test]

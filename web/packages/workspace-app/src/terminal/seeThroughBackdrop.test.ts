@@ -97,6 +97,17 @@ describe("terminalHoles", () => {
     terminalFace.getBoundingClientRect = () => rect(0, 0, 0, 0);
     expect(terminalHoles(backdrop)).toEqual([]);
   });
+
+  it("skips a face whose pane is mid side flip, and cuts it again when the flip ends", () => {
+    const { backdrop, terminalFace } = buildBackdrop();
+    const pane = document.createElement("div");
+    pane.className = "pane sideFlipActive";
+    backdrop.insertBefore(pane, terminalFace);
+    pane.append(terminalFace);
+    expect(terminalHoles(backdrop)).toEqual([]);
+    pane.classList.remove("sideFlipActive");
+    expect(terminalHoles(backdrop)).toEqual([{ x: 5, y: 5, width: 390, height: 590, radius: 6 }]);
+  });
 });
 
 describe("installSeeThroughBackdrop", () => {

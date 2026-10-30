@@ -402,8 +402,10 @@ fn run(launch: TerminalLaunch, cwd: PathBuf) -> Result<bool, String> {
             crate::install_app_menu(app.handle())?;
             #[cfg(target_os = "macos")]
             crate::fix_macos_login_path();
-            let embedded = tauri::async_runtime::block_on(EmbeddedServer::start_terminal_only())
-                .unwrap_or_else(|e| fatal(126, &format!("starting the terminal host: {e}")));
+            let embedded = tauri::async_runtime::block_on(EmbeddedServer::start_terminal_only(
+                crate::terminal_opacity::config_hook(app.handle().clone()),
+            ))
+            .unwrap_or_else(|e| fatal(126, &format!("starting the terminal host: {e}")));
             let _ = state_for_setup.embedded.set(embedded);
             let embedded = state_for_setup
                 .embedded()

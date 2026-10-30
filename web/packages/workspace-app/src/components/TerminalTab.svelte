@@ -191,6 +191,7 @@
     transparentColor,
     windowIsTransparent,
   } from "../terminal/backgroundOpacity";
+  import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -433,13 +434,12 @@
   // `.terminal-tab` CSS paints the tint at the live opacity.
   const transparentWindow = windowIsTransparent();
   // Whether the desktop shows through this terminal now: a transparent
-  // window with the opacity below 100. At 100 the tint is opaque, so the
+  // window with the desktop's own opacity below 100. The value is the
+  // desktop's, not this window's tenant preference, so a devserver's 100
+  // never paints a desktop window opaque. At 100 the tint is opaque, so the
   // terminal reads exactly as in an opaque window.
   const seeThrough = $derived(
-    effectiveBackgroundOpacity(
-      currentPreferences()?.terminal?.background_opacity,
-      transparentWindow,
-    ) !== null,
+    effectiveBackgroundOpacity(desktopTerminalOpacity(), transparentWindow) !== null,
   );
   const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal

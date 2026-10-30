@@ -1,10 +1,12 @@
 // Terminal background opacity.
 //
-// A percent, 100 opaque. It only has an effect in a window that chan-desktop
-// built transparent, which it does for every local terminal-only window: an
-// opaque native window (a workspace window, a devserver window, a browser tab)
-// would show black or its own background through a see-through page, so the
-// page asks the window first and stays opaque otherwise.
+// A percent, 100 opaque. The value is chan-desktop's own setting, which a
+// desktop window takes from the desktop (desktopTerminalOpacity.svelte.ts)
+// and never from its tenant's preferences. It only has an effect in a window
+// that chan-desktop built transparent, which it does for every window it
+// builds: an opaque native window (a browser tab) would show black or its
+// own background through a see-through page, so the page asks the window
+// first and stays opaque otherwise.
 
 /// Inclusive bounds the Settings slider exposes. Mirrored from the Rust
 /// constants in `crates/chan-library/src/config.rs`

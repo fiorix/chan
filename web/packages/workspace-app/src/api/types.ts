@@ -178,10 +178,11 @@ export type TerminalPreferences = {
   /// constructed; mounted renderers keep their current value. Optional for
   /// older servers; absent means 14.
   font_size?: number;
-  /// Terminal background opacity in percent; 100 is opaque. Takes effect
-  /// only in a window chan-desktop built transparent (`?transparent=1`),
-  /// where terminal panes paint their background at this alpha. Server
-  /// clamps to [80, 100]; absent means 100.
+  /// Terminal background opacity in percent; 100 is opaque. The server
+  /// clamps to [80, 100]; absent means 100. It is chan-desktop's setting: a
+  /// desktop window paints every terminal tab with the desktop's own value,
+  /// read through the host, not with this tenant's; a browser tab never
+  /// paints it. The Settings row shows this value in a browser tab only.
   background_opacity?: number;
   /// Whether newly-spawned terminals get the chan MCP discovery env
   /// vars (`CHAN_MCP_*`) so external agent CLIs can find the chan MCP

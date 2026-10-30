@@ -20,6 +20,10 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
+import {
+  applyDesktopTerminalOpacity,
+  resetDesktopTerminalOpacityForTests,
+} from "../terminal/desktopTerminalOpacity.svelte";
 import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -46,6 +50,7 @@ afterEach(() => {
   resetTerminals();
   delete hybridSurfaceThemes.terminal;
   __testSetStandalonePreferences(null);
+  resetDesktopTerminalOpacityForTests();
   ui.theme = startTheme;
 });
 
@@ -86,23 +91,25 @@ describe("the xterm palette", () => {
   });
 
   test("in a transparent window the contrast floor drops only while the desktop shows through", async () => {
-    // chan-desktop builds every local terminal window transparent, so the
-    // window flag alone says nothing about what sits behind the text: at 100
-    // the tint is the theme background and light keeps its floor.
+    // chan-desktop builds every window transparent, so the window flag alone
+    // says nothing about what sits behind the text: at 100 the tint is the
+    // theme background and light keeps its floor. The value is the desktop's
+    // own; the tenant's preference, 90 throughout here, plays no part.
     const href = window.location.href;
     window.history.replaceState(null, "", "/?transparent=1");
     try {
       hybridSurfaceThemes.terminal = "light";
-      __testSetStandalonePreferences(terminalPreferences({ background_opacity: 100 }));
-      const { term } = await mounted();
-      expect(term.options.minimumContrastRatio, "opaque at 100").toBe(4.5);
-
       __testSetStandalonePreferences(terminalPreferences({ background_opacity: 90 }));
+      applyDesktopTerminalOpacity(100);
+      const { term } = await mounted();
+      expect(term.options.minimumContrastRatio, "opaque at the desktop's 100").toBe(4.5);
+
+      applyDesktopTerminalOpacity(90);
       flushSync();
       await tick();
       expect(term.options.minimumContrastRatio, "see-through at 90").toBe(1);
 
-      __testSetStandalonePreferences(terminalPreferences({ background_opacity: 100 }));
+      applyDesktopTerminalOpacity(100);
       flushSync();
       await tick();
       expect(term.options.minimumContrastRatio, "back to opaque").toBe(4.5);
