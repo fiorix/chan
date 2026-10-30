@@ -8853,6 +8853,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control,
+            tmux: false,
             hidden: false,
             origin: crate::WindowOrigin::Native,
         }

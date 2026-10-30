@@ -156,6 +156,10 @@ pub struct WindowRecord {
     /// (the common case), so only a control window carries it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub control: bool,
+    /// Minted for a window of a tmux control-mode connection; it lasts the
+    /// connection and is never written to disk.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tmux: bool,
     /// Server-persisted visibility: `true` ⇒ the window is BURIED/hidden (the
     /// desktop keeps it closed on connect; the launcher renders it as hidden).
     /// The server is the source of truth (set via `POST …/visibility`), so a
@@ -265,6 +269,12 @@ pub struct PersistedWindow {
     /// unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub control: bool,
+    /// A window of a tmux control-mode connection. The connection does not
+    /// survive the process, so no save writes the row: a crash leaves no
+    /// buried window behind. Like `control`, the flag is on the wire for the
+    /// readers of the window set, not in the store.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tmux: bool,
     /// Owning library override. `None` ⇒ this row belongs to the host's own
     /// library (the common case; assembly stamps the host's `library_id`).
     /// `Some(id)` ⇒ a FOREIGN library_id, used by the control row: it is minted
@@ -323,6 +333,7 @@ impl PersistedWindow {
             // transfer state; a freshly assembled/minted record defaults off.
             active_transfer: false,
             control: self.control,
+            tmux: self.tmux,
             hidden: self.hidden,
             origin: self.origin,
         }
@@ -513,6 +524,7 @@ impl WindowRegistry {
                 label: String::new(),
                 workspace_path,
                 control: false,
+                tmux: false,
                 library_id: None,
                 hidden: false,
                 origin,
@@ -544,6 +556,7 @@ impl WindowRegistry {
             label: String::new(),
             workspace_path: None,
             control: false,
+            tmux: false,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -581,6 +594,7 @@ impl WindowRegistry {
             label: String::new(),
             workspace_path: None,
             control: true,
+            tmux: false,
             library_id: Some(library_id),
             hidden: false,
             // A control terminal is a desktop-native window.
@@ -595,6 +609,45 @@ impl WindowRegistry {
         }
         // No persist: control rows are in-memory only (save_best_effort filters
         // them anyway); just signal the feed.
+        self.notify.notify_waiters();
+        row
+    }
+
+    /// Mint a window for a tmux control-mode connection's tmux window: a row
+    /// of `kind` for `workspace_path`, native, labelled with the tmux window's
+    /// name cut to the label bound, buried since it holds none of the tmux
+    /// window's tabs, and marked `tmux`, which keeps it out of every save:
+    /// the connection ends with the process, so a crash leaves no row behind.
+    /// Ordinal and title are minted like [`Self::create_with_origin`]'s, and
+    /// a save of the durable rows made while the row lives leaves it out.
+    /// Fires the change notification.
+    pub fn create_tmux_window(
+        &self,
+        kind: WindowKind,
+        workspace_path: Option<String>,
+        label: &str,
+    ) -> PersistedWindow {
+        let row = {
+            let mut windows = self.lock();
+            let window_id = mint_id(&windows, &self.unreadable);
+            let ordinal = next_ordinal(&windows, kind, workspace_path.as_deref());
+            let title = compose_title(kind, ordinal, workspace_path.as_deref());
+            let row = PersistedWindow {
+                window_id,
+                kind,
+                title,
+                ordinal,
+                label: label.chars().take(MAX_WINDOW_LABEL_CHARS).collect(),
+                workspace_path,
+                control: false,
+                tmux: true,
+                library_id: None,
+                hidden: true,
+                origin: WindowOrigin::Native,
+            };
+            windows.push(row.clone());
+            row
+        };
         self.notify.notify_waiters();
         row
     }
@@ -733,16 +786,17 @@ impl WindowRegistry {
         // A directory-sync error can follow a successful rename. Once a newer
         // save starts, older snapshots must stay excluded even on an error.
         *latest_save = *generation;
-        // Control rows are transient/per-connection and throwaway terminals last
-        // one process (in-memory only): never write them, so a desktop crash
-        // can't strand a stale window on the next boot. Every other row is
-        // written, and so is every row this build could not read, so the file
-        // never loses what another build wrote.
+        // Control rows are transient/per-connection, tmux windows last their
+        // connection and throwaway terminals last one process (in-memory
+        // only): never write them, so a desktop crash can't strand a stale
+        // window on the next boot. Every other row is written, and so is
+        // every row this build could not read, so the file never loses what
+        // another build wrote.
         let durable: Vec<&PersistedWindow> = {
             let throwaway = self.throwaway_ids();
             windows
                 .iter()
-                .filter(|w| !w.control && !throwaway.contains(&w.window_id))
+                .filter(|w| !w.control && !w.tmux && !throwaway.contains(&w.window_id))
                 .collect()
         };
         let result = save_atomic(
@@ -1245,6 +1299,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: WindowOrigin::Native,
         };
@@ -1289,6 +1344,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: WindowOrigin::Native,
         };
@@ -1401,6 +1457,7 @@ mod tests {
                 holders: None,
                 active_transfer: true,
                 control: false,
+                tmux: false,
                 hidden: false,
                 origin: WindowOrigin::Native,
             }],
@@ -1445,6 +1502,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: true,
+            tmux: false,
             library_id: Some("lib-0f1e2d3c4b5a6978".into()),
             hidden: true,
             origin: WindowOrigin::Native,
@@ -1535,6 +1593,7 @@ mod tests {
             label: String::new(),
             workspace_path: Some("/n".into()),
             control: false,
+            tmux: false,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Browser,
@@ -1568,6 +1627,7 @@ mod tests {
             label: String::new(),
             workspace_path: Some("/n".into()),
             control: false,
+            tmux: false,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -1599,6 +1659,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: false,
+            tmux: false,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -1617,6 +1678,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: true,
+            tmux: false,
             library_id: Some("lib-f81913a8ca0a6ff6".into()),
             hidden: false,
             origin: WindowOrigin::Native,
@@ -1644,6 +1706,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: false,
+            tmux: false,
             library_id: None,
             hidden: true,
             origin: WindowOrigin::Native,
@@ -1738,6 +1801,84 @@ mod tests {
         // Removed, it stays left out of a save of an older snapshot.
         assert!(reg.remove(&throwaway.window_id));
         assert!(reg.is_throwaway(&throwaway.window_id));
+    }
+
+    #[test]
+    fn tmux_windows_live_in_memory_only() {
+        let (reg, dir) = registry();
+        let path = dir.path().join("windows.json");
+        let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 5);
+        let tmux = reg.create_tmux_window(WindowKind::Workspace, Some("/w".into()), &long);
+        assert!(tmux.tmux);
+        assert!(
+            tmux.hidden,
+            "minted buried: it holds none of the tmux window's tabs"
+        );
+        assert!(!tmux.control);
+        assert_eq!(tmux.kind, WindowKind::Workspace);
+        assert_eq!(tmux.workspace_path.as_deref(), Some("/w"));
+        assert_eq!(tmux.origin, WindowOrigin::Native);
+        assert_eq!(
+            tmux.label.chars().count(),
+            MAX_WINDOW_LABEL_CHARS,
+            "the name is cut to the label bound"
+        );
+        assert!(
+            reg.snapshot().iter().any(|w| w.window_id == tmux.window_id),
+            "the set holds the row while the connection lives"
+        );
+        assert!(!path.exists(), "the mint writes nothing");
+        // A durable create saves while the tmux row is present; the save
+        // leaves the tmux row out.
+        let durable = reg.create(WindowKind::Workspace, Some("/w".into()));
+        assert_eq!(
+            durable.ordinal,
+            tmux.ordinal + 1,
+            "the tmux row takes its place in the window numbering"
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(stored.contains(&durable.window_id));
+        assert!(
+            !stored.contains(&tmux.window_id),
+            "a tmux window is never written to disk, so a crash strands none"
+        );
+        let ids: Vec<String> = WindowRegistry::open(path)
+            .snapshot()
+            .into_iter()
+            .map(|w| w.window_id)
+            .collect();
+        assert_eq!(ids, vec![durable.window_id.clone()]);
+        assert!(reg.remove(&tmux.window_id));
+        assert!(reg.snapshot().iter().all(|w| w.window_id != tmux.window_id));
+    }
+
+    #[test]
+    fn tmux_mark_is_on_the_wire_and_omitted_when_false() {
+        let (reg, _dir) = registry();
+        let row = reg.create_tmux_window(WindowKind::Terminal, None, "shell");
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["tmux"], json!(true));
+        assert_eq!(json["label"], json!("shell"));
+        let plain = serde_json::to_value(reg.create(WindowKind::Terminal, None)).unwrap();
+        assert!(
+            plain.get("tmux").is_none(),
+            "false is omitted, as a row an older build wrote"
+        );
+        let read: PersistedWindow = serde_json::from_value(plain).unwrap();
+        assert!(!read.tmux);
+    }
+
+    #[tokio::test]
+    async fn a_tmux_mint_fires_the_change_notification() {
+        let (reg, _dir) = registry();
+        let notify = reg.change_notify();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        reg.create_tmux_window(WindowKind::Terminal, None, "shell");
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("the mint notifies the window feed");
     }
 
     #[tokio::test]
@@ -2256,6 +2397,7 @@ mod tests {
             label: "release checks".into(),
             workspace_path: Some("/n".into()),
             control: false,
+            tmux: false,
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
@@ -2297,6 +2439,7 @@ mod tests {
             label: String::new(),
             workspace_path: None,
             control: true,
+            tmux: false,
             library_id: Some("lib-remote".into()),
             hidden: false,
             origin: WindowOrigin::Native,

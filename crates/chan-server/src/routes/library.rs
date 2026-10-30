@@ -775,6 +775,9 @@ struct ScopedLibraryWindow {
     holders: Option<Vec<String>>,
     hidden: bool,
     control: bool,
+    /// A window of a tmux control-mode connection, minted buried and never
+    /// saved. Never omitted, for the same reason as `origin`.
+    tmux: bool,
     /// The surface that minted the record, in the record's own wire tags.
     /// Never omitted, unlike the full record's, which leaves a native origin
     /// off the wire: a client reads a row without the member as one from a
@@ -881,6 +884,7 @@ fn scoped_window(
         holders: record.holders,
         hidden: record.hidden,
         control: record.control,
+        tmux: record.tmux,
         origin: record.origin,
         managed,
     }
@@ -6470,6 +6474,7 @@ mod window_op_route_tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: WindowOrigin::Native,
         })));
@@ -6534,6 +6539,7 @@ mod window_op_route_tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: WindowOrigin::Native,
         })));

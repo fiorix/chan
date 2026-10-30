@@ -8027,6 +8027,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };
@@ -8523,6 +8524,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8559,6 +8561,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8598,6 +8601,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8717,6 +8721,7 @@ mod tests {
                 holders: None,
                 active_transfer: false,
                 control: false,
+                tmux: false,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
             };
@@ -9374,6 +9379,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -9432,6 +9438,7 @@ mod tests {
             holders: Some(vec!["desktop-a".into()]),
             active_transfer: false,
             control: false,
+            tmux: false,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };
