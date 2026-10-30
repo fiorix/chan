@@ -241,8 +241,15 @@
   // once the survey clears, the same calls legitimately restore the terminal.
   function focusTerminal(): void {
     if (surveyFor(tab.id)) return;
+    // While a tmux connection's status view covers the terminal, the keyboard
+    // is the view's: the terminal takes no typing until the connection ends.
+    if (tab.tmuxStatus?.connection && tmuxStatusView) {
+      tmuxStatusView.focus();
+      return;
+    }
     term?.focus();
   }
+  let tmuxStatusView = $state<{ focus(): void } | null>(null);
 
   function dismissReloadNotice(): void {
     dismissCliReloadNotice(tab);
@@ -3278,6 +3285,7 @@
       onAnswer={answerTmux}
     />
     <TmuxStatusView
+      bind:this={tmuxStatusView}
       status={tab.tmuxStatus?.connection ?? null}
       program={terminalTabName(tab)}
       onRequest={requestTmux}

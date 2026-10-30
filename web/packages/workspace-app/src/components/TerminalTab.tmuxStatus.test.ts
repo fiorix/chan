@@ -127,6 +127,54 @@ test("Detach sends its request; End asks first and sends on confirm", async () =
   expect(requests(socket)).toEqual([{ request: "detach" }, { request: "end" }]);
 });
 
+test("the view holds the keyboard: arrows and digits choose a window, Enter opens it, d detaches, e asks and Enter ends", async () => {
+  const { socket } = await mounted(CONNECTED);
+  const shown = view()!;
+  expect(document.activeElement, "the view takes the keyboard when the connection shows").toBe(shown);
+  const key = (k: string) => {
+    shown.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  };
+  const selectedRow = () => shown.querySelector("tr.selected")?.textContent ?? "";
+  expect(selectedRow()).toContain("@1");
+  key("ArrowDown");
+  key("ArrowDown");
+  key("ArrowDown");
+  await tick();
+  expect(selectedRow(), "the choice stops at the last window").toContain("@9");
+  key("Enter");
+  await tick();
+  expect(requests(socket)).toEqual([{ request: "open-window", window: "@9" }]);
+  key("k");
+  key("k");
+  await tick();
+  expect(selectedRow()).toContain("@1");
+  key(" ");
+  await tick();
+  expect(openLibraryWindowById).toHaveBeenCalledWith(expect.anything(), "w-1");
+  expect(openLibraryWindowById).toHaveBeenCalledTimes(1);
+  key("1");
+  await tick();
+  expect(openLibraryWindowById).toHaveBeenCalledTimes(2);
+  key("e");
+  await tick();
+  expect(shown.textContent).toContain("End the tmux server");
+  key("Escape");
+  await tick();
+  expect(shown.textContent).not.toContain("End the tmux server");
+  expect(requests(socket)).toHaveLength(1);
+  key("d");
+  await tick();
+  expect(requests(socket)).toEqual([{ request: "open-window", window: "@9" }, { request: "detach" }]);
+  key("e");
+  key("Enter");
+  await tick();
+  expect(requests(socket).at(-1)).toEqual({ request: "end" });
+  await receive(socket, { type: "tmux-status", id: "ctl", generation: 2, tmux_status: ENDED });
+  await tick();
+  expect(view()).toBeNull();
+  expect(document.activeElement, "the keyboard leaves with the view").not.toBe(shown);
+});
+
 test("the view goes when the connection ends, and a stale or foreign frame is ignored", async () => {
   const { socket, tab } = await mounted();
   expect(view()).toBeNull();

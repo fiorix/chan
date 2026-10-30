@@ -3,10 +3,16 @@
      listed with an Open action, the errors the connection kept, and Detach
      and End. It covers the terminal, which shows chan's notices alone while
      connected and takes no typing; it goes when the connection ends and the
-     terminal draws again. Every attached client shows the same view. -->
+     terminal draws again. Every attached client shows the same view.
+
+     The view holds the keyboard while it stands, as the consent banner does:
+     the arrows (or j and k) choose a window, Enter or Space opens it, a digit
+     opens the window at that position, d detaches, e asks to end and Enter
+     confirms while Escape cancels; Tab still walks the buttons. -->
 <script lang="ts">
   import type { TmuxConnectionStatus, TmuxRequest, TmuxWindowStatus } from "../state/tmuxStatus";
   import { errorText } from "../api/errors";
+  import { createCardFocus } from "./cardFocus";
 
   let {
     status,
@@ -28,13 +34,33 @@
   let awaiting = $state(new Set<string>());
   let confirmEnd = $state(false);
   let failure = $state<string | null>(null);
+  // The window the keyboard is on: an index into the status's window list,
+  // kept within it as the list changes.
+  let selected = $state(0);
+  let root = $state<HTMLDivElement | null>(null);
+  const focusHold = createCardFocus();
+
+  // Take the keyboard while the connection stands and give it back when it
+  // ends, so the keys land here and not in the terminal, which takes no
+  // typing meanwhile.
+  $effect(() => {
+    if (status && root) focusHold.take(root);
+    else if (!status) focusHold.release();
+  });
+
+  /// Put the keyboard on the view, for the terminal's own focus paths.
+  export function focus(): void {
+    root?.focus({ preventScroll: true });
+  }
 
   $effect(() => {
     if (!status) {
       awaiting = new Set();
       confirmEnd = false;
+      selected = 0;
       return;
     }
+    if (selected >= status.windows.length) selected = Math.max(0, status.windows.length - 1);
     for (const window of status.windows) {
       if (awaiting.has(window.id) && window.chan_window) {
         awaiting.delete(window.id);
@@ -65,10 +91,70 @@
   function label(window: TmuxWindowStatus): string {
     return window.name || window.id;
   }
+
+  function rowId(window: TmuxWindowStatus): string {
+    return `tmux-window-${window.id.replace(/[^A-Za-z0-9_-]/g, "")}`;
+  }
+
+  function move(delta: number): void {
+    const count = status?.windows.length ?? 0;
+    if (count === 0) return;
+    selected = Math.min(count - 1, Math.max(0, selected + delta));
+  }
+
+  function openSelected(): void {
+    const window = status?.windows[selected];
+    if (window && !(awaiting.has(window.id) && !window.chan_window)) open(window);
+  }
+
+  function onKeydown(e: KeyboardEvent): void {
+    if (!status || e.metaKey || e.ctrlKey || e.altKey) return;
+    const onRoot = e.target === root;
+    const count = status.windows.length;
+    let handled = true;
+    if (confirmEnd && (e.key === "Escape" || e.key === "n")) {
+      confirmEnd = false;
+    } else if (confirmEnd && (e.key === "Enter" || e.key === "y") && onRoot) {
+      confirmEnd = false;
+      onRequest({ request: "end" });
+    } else if (e.key === "ArrowDown" || e.key === "j") {
+      move(1);
+    } else if (e.key === "ArrowUp" || e.key === "k") {
+      move(-1);
+    } else if (e.key === "Home") {
+      selected = 0;
+    } else if (e.key === "End") {
+      selected = Math.max(0, count - 1);
+    } else if ((e.key === "Enter" || e.key === " " || e.key === "o") && onRoot && !confirmEnd) {
+      openSelected();
+    } else if (/^[1-9]$/.test(e.key) && Number(e.key) <= count) {
+      selected = Number(e.key) - 1;
+      openSelected();
+    } else if (e.key === "d" && !confirmEnd) {
+      onRequest({ request: "detach" });
+    } else if (e.key === "e" && !confirmEnd) {
+      confirmEnd = true;
+    } else {
+      handled = false;
+    }
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
 </script>
 
 {#if status}
-  <div class="tmux-status" role="region" aria-label={`tmux control mode status for ${program}`}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="tmux-status"
+    role="region"
+    aria-label={`tmux control mode status for ${program}`}
+    tabindex="-1"
+    bind:this={root}
+    onkeydown={onKeydown}
+  >
     <div class="ts-head">
       <strong>tmux {status.version}</strong> control mode
       {#if status.session}
@@ -83,9 +169,10 @@
           <tr><th>Window</th><th class="ts-num">Panes</th><th></th></tr>
         </thead>
         <tbody>
-          {#each status.windows as window (window.id)}
-            <tr>
-              <td><span class="ts-name">{label(window)}</span> <span class="ts-id">{window.id}</span></td>
+          {#each status.windows as window, i (window.id)}
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <tr id={rowId(window)} class:selected={i === selected} aria-current={i === selected ? "true" : undefined} onclick={() => (selected = i)}>
+              <td><span class="ts-key">{i + 1}</span> <span class="ts-name">{label(window)}</span> <span class="ts-id">{window.id}</span></td>
               <td class="ts-num">{window.panes}</td>
               <td class="ts-act">
                 {#if awaiting.has(window.id) && !window.chan_window}
@@ -114,9 +201,10 @@
     {#if failure}
       <p class="ts-failure" role="alert">{failure}</p>
     {/if}
+    <p class="ts-keys">↑ ↓ choose a window, Enter opens it, a digit opens that one, <kbd>d</kbd> detaches, <kbd>e</kbd> ends.</p>
     <div class="ts-actions">
       {#if confirmEnd}
-        <span class="ts-confirm">End the tmux server and every session it holds?</span>
+        <span class="ts-confirm">End the tmux server and every session it holds? Enter ends, Escape keeps it.</span>
         <button class="ts-button ts-danger" type="button" onclick={() => { confirmEnd = false; onRequest({ request: "end" }); }}>End server</button>
         <button class="ts-button" type="button" onclick={() => (confirmEnd = false)}>Cancel</button>
       {:else}
@@ -138,6 +226,32 @@
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     font-size: 0.85rem;
+    outline: none;
+  }
+  .ts-windows tr.selected td {
+    background: var(--bg-card);
+    box-shadow: inset 2px 0 0 var(--pane-active-focus, var(--text-secondary));
+  }
+  .tmux-status:focus-visible .ts-windows tr.selected td {
+    box-shadow: inset 2px 0 0 var(--pane-active-focus, var(--text));
+  }
+  .ts-key {
+    display: inline-block;
+    min-width: 1.1em;
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+  }
+  .ts-keys {
+    margin: 0.6rem 0 0;
+    color: var(--text-secondary);
+  }
+  .ts-keys kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    padding: 0 0.25em;
+    border: 1px solid var(--border);
+    border-radius: 4px;
   }
   .ts-head {
     margin-bottom: 0.6rem;
