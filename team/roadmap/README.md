@@ -29,11 +29,12 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 | --- | --- | --- |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
-| [Terminal opacity only in terminal windows][opaall] | built | review |
+| [Terminal opacity only in terminal windows][opaall] | accepted | build |
 | [ghostty is not the default backend][ghdef] | built | review |
 | [ghostty drops an image paste][ghpaste] | built | review |
 | [Select popups paint light off macOS][selscheme] | built | review |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
+| [tmux control mode has no chan client][tmuxcc] | proposed | decision |
 
 [chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
@@ -42,6 +43,7 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 [ghpaste]: v0.117.0/ghostty-drops-an-image-paste-and-swallows-control-v.md
 [selscheme]: v0.117.0/select-popups-paint-light-in-the-dark-theme-off-macos.md
 [ghidle]: v0.117.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
+[tmuxcc]: v0.117.0/tmux-control-mode-has-no-chan-client.md
 
 ## Completed
 
