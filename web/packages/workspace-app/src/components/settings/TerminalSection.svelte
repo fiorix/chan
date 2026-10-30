@@ -311,6 +311,22 @@
 </SettingField>
 
 <SettingField
+  label="tmux control mode"
+  pref="terminal.tmux"
+  hint="Honor the marker tmux -CC prints. A local tmux enters at once; any other foreground program asks first. Applies to new markers in every terminal; a connection already running is left alone."
+>
+  <PillToggle
+    label="tmux control mode (tmux -CC)"
+    checked={prefs.terminal.tmux?.enabled ?? true}
+    ontoggle={(on) =>
+      commit((p) => ({
+        ...p,
+        terminal: { ...p.terminal, tmux: { ...(p.terminal.tmux ?? {}), enabled: on } },
+      }))}
+  />
+</SettingField>
+
+<SettingField
   label="Secret masking"
   pref="terminal.secret_masking"
   hint="Masks secret-looking NAME=value values on screen, on the xterm.js and ghostty backends alike. The buffer stays copyable. New terminals only. With no choice stored it is on in a control terminal and off in every other window; Use default clears a stored choice. The terminal menu has an ephemeral per-tab toggle."

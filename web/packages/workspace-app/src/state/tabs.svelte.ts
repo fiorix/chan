@@ -6,6 +6,7 @@
 
 import { flushSync } from "svelte";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
+import type { TmuxConsent } from "./tmuxConsent";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -500,6 +501,10 @@ export type TerminalTab = {
   inspectorWidth?: number;
   /// Current server snapshot for this attached page. Never serialized.
   programStatus?: ProgramStatus;
+  /// The tmux control-mode question the server has open on this session,
+  /// shown as a banner over the terminal. Server-owned and never
+  /// serialized: the `session` frame replaces it for each attachment.
+  tmuxConsent?: TmuxConsent;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1568,6 +1573,7 @@ function tabForReopen(src: Tab): Tab {
     tab.terminalMetadataError = undefined;
     tab.richPromptDraftPath = undefined;
     tab.richPromptCaret = undefined;
+    tab.tmuxConsent = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -2564,6 +2570,13 @@ export function setTerminalProgramStatus(tab: TerminalTab, status: ProgramStatus
   tab.programStatus = status;
 }
 
+/// The server's tmux consent state for the attached page, applied for the
+/// `session` frame of each attachment and for a later snapshot with a
+/// greater revision.
+export function setTerminalTmuxConsent(tab: TerminalTab, consent: TmuxConsent, attach = false): void {
+  if (attach || !tab.tmuxConsent || consent.revision > tab.tmuxConsent.revision) tab.tmuxConsent = consent;
+}
+
 /// Whether a fresh terminal still waits for the server's next name before it
 /// dials. The terminal clears it before the fetch, so a reconnect during the
 /// fetch does not fetch again.
@@ -2675,6 +2688,7 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
   tab.terminalSessionId = undefined;
   tab.cliCommandPending = undefined;
   if (!retainProgramStatus) tab.programStatus = undefined;
+  tab.tmuxConsent = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
@@ -4444,6 +4458,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   profile: "carry",
   queueDepth: "carry",
   programStatus: "carry",
+  tmuxConsent: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -4527,6 +4542,12 @@ function cloneTab(src: Tab): Tab {
     clone.broadcastTargetIds = [...clone.broadcastTargetIds];
     if (clone.programStatus) {
       clone.programStatus = { ...clone.programStatus, records: clone.programStatus.records.map((record) => ({ ...record })) };
+    }
+    if (clone.tmuxConsent) {
+      clone.tmuxConsent = {
+        ...clone.tmuxConsent,
+        ...(clone.tmuxConsent.question ? { question: { ...clone.tmuxConsent.question } } : {}),
+      };
     }
     if (clone.terminalMetadataDraft) {
       clone.terminalMetadataDraft = { ...clone.terminalMetadataDraft };
@@ -7702,6 +7723,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   // the first frame to arrive.
   queueDepth: "drop",
   programStatus: "drop",
+  tmuxConsent: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
   terminalActivityPulsing: "drop",

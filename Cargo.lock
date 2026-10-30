@@ -1040,6 +1040,7 @@ dependencies = [
  "chan-revtunnel",
  "chan-shell",
  "chan-systemd",
+ "chan-tmux",
  "chan-workspace",
  "dirs 5.0.1",
  "filedescriptor",

@@ -26,6 +26,12 @@ const PANE_STATE_FORMAT: &str = "#{pane_id} #{cursor_x} #{cursor_y} #{pane_in_mo
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// A line holding only `^C`, the first thing written after entry. tmux
+    /// answers it with a parse error, which the caller ignores; a shell that
+    /// was left holding a line when a program printed the marker and exited
+    /// cancels that line instead of running it with the newline that
+    /// follows.
+    Interrupt,
     /// `#{version}`.
     Version,
     /// The size of the whole client.
@@ -101,6 +107,7 @@ impl Command {
     /// The command line, without its line break.
     pub fn render(&self) -> Result<String, Error> {
         Ok(match self {
+            Command::Interrupt => "\u{3}".into(),
             Command::Version => "display-message -p '#{version}'".into(),
             Command::ClientSize { cols, rows } => {
                 check_size(*cols, *rows)?;

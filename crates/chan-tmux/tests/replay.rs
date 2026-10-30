@@ -53,9 +53,14 @@ fn messages(name: &str) -> Vec<Message> {
 #[test]
 fn entry_and_detach() {
     let f = frames(&fixture("01-entry-detach.raw"), usize::MAX, 2);
-    assert_eq!(f[0], Frame::Entered);
-    let Frame::Block(first) = &f[1] else {
-        panic!("{:?}", f[1])
+    assert_eq!(
+        f[0],
+        Frame::Passthrough(b"\x1bP1000p".to_vec()),
+        "the marker passes, then entry"
+    );
+    assert_eq!(f[1], Frame::Entered);
+    let Frame::Block(first) = &f[2] else {
+        panic!("{:?}", f[2])
     };
     assert!(!first.solicited, "the first reply is the server's own");
     assert!(first.ok && first.lines.is_empty());
@@ -102,8 +107,8 @@ fn exits_in_every_way() {
     );
     assert_eq!(reason("12-after-exit.raw"), None);
     let f = frames(&fixture("10-attach-missing.raw"), usize::MAX, 1);
-    let Frame::Block(b) = &f[1] else {
-        panic!("{:?}", f[1])
+    let Frame::Block(b) = &f[2] else {
+        panic!("{:?}", f[2])
     };
     assert!(!b.ok && b.lines == vec![b"no sessions".to_vec()]);
 }

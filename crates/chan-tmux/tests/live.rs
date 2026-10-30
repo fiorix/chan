@@ -178,6 +178,13 @@ fn against_a_real_tmux() {
     let mut t = Live::start(&bin);
     let pane = PaneId(0);
 
+    // The interrupt line is a command tmux refuses and nothing more.
+    let refused = t.call(&Command::Interrupt).unwrap_err();
+    assert!(
+        refused.iter().any(|r| r.starts_with(b"parse error")),
+        "{refused:?}"
+    );
+
     // Version.
     let rows = t.call(&Command::Version).unwrap();
     let version = Version::parse(std::str::from_utf8(&rows[0]).unwrap()).expect("version");

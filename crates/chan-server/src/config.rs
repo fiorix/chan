@@ -316,6 +316,10 @@ mod tests {
                 mcp_env: true,
                 mouse_capture: false,
                 program_status: true,
+                tmux: chan_library::TerminalTmuxConfig {
+                    enabled: false,
+                    trust: vec!["ssh".into()],
+                },
                 ghostty: true,
                 secret_masking: Some(false),
                 secret_mask_suffixes: vec!["TOKEN".into(), "PRIVATE_KEY".into()],
