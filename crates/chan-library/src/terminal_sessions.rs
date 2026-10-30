@@ -2582,6 +2582,58 @@ impl Registry {
         Ok(session.attach(Some(0)))
     }
 
+    /// Add a session for one pane of a tmux connection, under the pane cap
+    /// rather than `terminal.session_cap`, with its tab name settled against
+    /// the live ones. The connection's channel receives its commands.
+    // Reached by a tmux connection's gateway; this build has none, and the
+    // tests are the only caller.
+    #[allow(dead_code)]
+    fn add_tmux_pane(
+        &self,
+        spec: TmuxPaneSpec,
+        sink: std::sync::mpsc::Sender<PaneCommand>,
+    ) -> Result<Arc<Session>, CreateError> {
+        let id = {
+            let sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let panes = sessions
+                .values()
+                .filter(|session| session.is_tmux_pane())
+                .count();
+            if panes >= TMUX_PANE_SESSION_CAP {
+                return Err(CreateError::Capped);
+            }
+            self.unused_id(&sessions)
+        };
+        let mut spec = spec;
+        let mut reservation =
+            self.reserve_metadata(spec.name.take(), Some(spec.group.clone()), None);
+        spec.name = reservation.metadata.name.clone();
+        spec.group = reservation.metadata.group.clone();
+        let session = Session::for_tmux_pane(
+            id.clone(),
+            &self.config,
+            spec,
+            sink,
+            self.generation_counter.fetch_add(1, Ordering::Relaxed),
+        );
+        {
+            let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+            let mut reservations = self
+                .name_reservations
+                .lock()
+                .expect("terminal name reservations poisoned");
+            if sessions.contains_key(&id) {
+                reservation.release_locked(&mut reservations);
+                return Err(CreateError::Capped);
+            }
+            sessions.insert(id, session.clone());
+            self.apply_program_status(&session);
+            reservation.release_locked(&mut reservations);
+        }
+        self.notify_roster_change();
+        Ok(session)
+    }
+
     /// Relaunch session `id` in place under the same id, applying `overrides`
     /// to its spawn options. `Ok(false)` when the id is unknown or closed, or
     /// when a concurrent operation replaced the session during the spawn;
@@ -2605,6 +2657,11 @@ impl Registry {
             return Ok(false);
         };
         if old.closed.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        if old.is_tmux_pane() {
+            // There is no process to run again: the pane is tmux's.
+            tracing::info!(session = %id, "a tmux pane session is not restarted");
             return Ok(false);
         }
         reject_terminal_spawn_if_fd_pressure()?;
@@ -3729,6 +3786,11 @@ impl Registry {
                     if session.attach_count.load(Ordering::Relaxed) != 0 {
                         return None; // a client is attached
                     }
+                    if session.is_tmux_pane() {
+                        // A pane nobody has opened is still tmux's; its
+                        // connection ends it, never the clock.
+                        return None;
+                    }
                     match session.window_id() {
                         // Persisted window: kept until an explicit discard.
                         Some(window_id) if persisted.contains(&window_id) => None,
@@ -4413,12 +4475,14 @@ struct Session {
     /// The argv an exec session runs, kept beside `spawn_opts` (whose
     /// `command` is `None` for it) so a restart re-execs the same program.
     exec_argv: Option<Vec<OsString>>,
+    /// Set on a tmux pane session, which has no PTY; see [`TmuxPaneRef`].
+    tmux_pane: Option<TmuxPaneRef>,
     child_pid: Option<u32>,
     #[cfg(target_os = "linux")]
     child_start_time: Option<u64>,
     #[cfg(unix)]
     master_fd: Option<OwnedFd>,
-    command_tx: std::sync::mpsc::Sender<PtyCommand>,
+    command_tx: CommandSink,
     output_tx: broadcast::Sender<SessionEvent>,
     output: Mutex<SessionOutput>,
     last_activity: AtomicI64,
@@ -4781,10 +4845,11 @@ impl Session {
                 profile: opts.profile,
             },
             exec_argv,
+            tmux_pane: None,
             child_pid,
             #[cfg(target_os = "linux")]
             child_start_time,
-            command_tx,
+            command_tx: CommandSink::Pty(command_tx),
             output_tx,
             output: Mutex::new(SessionOutput::new(
                 RingBuffer::new(config.terminal.ring_bytes),
@@ -5020,6 +5085,7 @@ impl Session {
         if self.closed.load(Ordering::Relaxed) {
             return None;
         }
+        // A tmux pane session is never parked, so it has no entry here.
         let (fd_name, ring_fd_name) = {
             let parked = self
                 .fdstore_parked
@@ -5205,10 +5271,11 @@ impl Session {
             // sessions, and exec tenants are desktop launches that never
             // reach it, so an adopted session is always a shell session.
             exec_argv: None,
+            tmux_pane: None,
             child_pid: meta.child_pid,
             child_start_time: child_identity.start_time,
             master_fd: Some(master_fd),
-            command_tx,
+            command_tx: CommandSink::Pty(command_tx),
             output_tx,
             output: Mutex::new(output),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
@@ -5599,7 +5666,7 @@ impl Session {
             self.reply_forwarded_at
                 .store(now_unix_millis(), Ordering::Relaxed);
         }
-        let _ = self.command_tx.send(PtyCommand::Input(data.to_vec()));
+        self.command_tx.send(PtyCommand::Input(data.to_vec()));
     }
 
     fn send_input_plan(&self, parts: Vec<Vec<u8>>) {
@@ -5613,7 +5680,7 @@ impl Session {
                 gap: write_queue_input_gap(),
             }
         };
-        let _ = self.command_tx.send(command);
+        self.command_tx.send(command);
     }
 
     /// One drainer step for this session's logical input queue. At one safe
@@ -5859,7 +5926,7 @@ impl Session {
             .expect("terminal requested size poisoned");
         requested.client_sized = true;
         requested.size = size;
-        let _ = self.command_tx.send(PtyCommand::Resize(size));
+        self.command_tx.send(PtyCommand::Resize(size));
     }
 
     fn fit(&self, size: PtySize, only_if_unsized: bool) -> bool {
@@ -5875,7 +5942,7 @@ impl Session {
             return false;
         }
         requested.size = size;
-        let _ = self.command_tx.send(PtyCommand::Resize(size));
+        self.command_tx.send(PtyCommand::Resize(size));
         true
     }
 
@@ -5913,7 +5980,120 @@ impl Session {
     }
 
     fn request_redraw(&self) {
-        let _ = self.command_tx.send(PtyCommand::Redraw);
+        self.command_tx.send(PtyCommand::Redraw);
+    }
+
+    /// Whether this session is a tmux pane, with no PTY of its own.
+    fn is_tmux_pane(&self) -> bool {
+        self.tmux_pane.is_some()
+    }
+
+    /// A session for one pane of a tmux connection: no PTY and no threads of
+    /// its own, its ring fed by the connection and its commands sent to the
+    /// connection's channel. Program status is on, since a program in the
+    /// pane can report it; the gate is off, so a marker printed inside the
+    /// pane is pane bytes and not a nested session.
+    // Reached through `Registry::add_tmux_pane`, which this build calls from
+    // tests alone.
+    #[allow(dead_code)]
+    fn for_tmux_pane(
+        id: String,
+        config: &RegistryConfig,
+        spec: TmuxPaneSpec,
+        sink: std::sync::mpsc::Sender<PaneCommand>,
+        generation: u64,
+    ) -> Arc<Self> {
+        let (output_tx, _) = broadcast::channel(BROADCAST_CAP);
+        let (write_queue, last_deliver_at, awaiting_gen) = fresh_queue_state();
+        let TmuxPaneSpec {
+            pane,
+            name,
+            group,
+            window_id,
+            size,
+        } = spec;
+        let spawn_opts = CreateOptions {
+            size,
+            tab_name: name.clone(),
+            tab_group: Some(group.clone()),
+            window_id: window_id.clone(),
+            mcp_env: false,
+            cwd: None,
+            command: None,
+            profile: None,
+            env: BTreeMap::new(),
+        };
+        Arc::new(Session {
+            id,
+            live_metadata: Mutex::new(LiveTerminalMetadata {
+                name: name.clone(),
+                group: group.clone(),
+            }),
+            spawn_name: name,
+            spawn_group: Some(group),
+            window_id: Mutex::new(window_id),
+            pane_id: Mutex::new(None),
+            side: Mutex::new(None),
+            tab_id: Mutex::new(None),
+            generation,
+            #[cfg(target_os = "linux")]
+            lossy_restore: None,
+            workspace_root: config.workspace_root.clone(),
+            spawn_opts,
+            exec_argv: None,
+            tmux_pane: Some(pane),
+            child_pid: None,
+            #[cfg(target_os = "linux")]
+            child_start_time: None,
+            #[cfg(unix)]
+            master_fd: None,
+            command_tx: CommandSink::TmuxPane {
+                pane: pane.pane,
+                tx: sink,
+            },
+            output_tx,
+            output: Mutex::new(SessionOutput::new(
+                RingBuffer::new(config.terminal.ring_bytes),
+                config.terminal.program_status,
+            )),
+            last_activity: AtomicI64::new(now_unix_secs() as i64),
+            last_output_at: AtomicI64::new(now_unix_millis()),
+            visible_scan: Mutex::new(VisibleScan::default()),
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig {
+                enabled: false,
+                trust: Vec::new(),
+            })),
+            #[cfg(test)]
+            tmux_foreground: Mutex::new(None),
+            write_queue,
+            last_deliver_at,
+            awaiting_gen,
+            attach_count: AtomicUsize::new(0),
+            detached_at: AtomicI64::new(now_unix_secs() as i64),
+            winsize: Mutex::new(size),
+            requested_size: Mutex::new(RequestedSize {
+                size,
+                client_sized: false,
+            }),
+            focus_epoch: AtomicU64::new(0),
+            bytes_since_focus: AtomicU64::new(0),
+            in_alt_screen: AtomicBool::new(false),
+            alt_screen_tail: Mutex::new(Vec::new()),
+            private_modes: Mutex::new(BTreeSet::new()),
+            private_mode_tail: Mutex::new(Vec::new()),
+            dsr_query_at: AtomicI64::new(0),
+            reply_forwarded_at: AtomicI64::new(0),
+            dsr_tail: Mutex::new(Vec::new()),
+            broadcast: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            fdstore_parked: Mutex::new(None),
+            reader_stop: ReaderStop::default(),
+            #[cfg(target_os = "linux")]
+            reader_wake: Arc::new(ReaderWake::new()),
+            exit: Mutex::new(None),
+            ended: ChildEnded::default(),
+        })
     }
 
     fn cwd(&self) -> Option<PathBuf> {
@@ -5958,7 +6138,7 @@ impl Session {
         // close() on it returns above without unparking.
         self.unpark_fdstore();
         self.broadcast(SessionEvent::Closed(reason));
-        let _ = self.command_tx.send(PtyCommand::Kill);
+        self.command_tx.send(PtyCommand::Kill);
     }
 
     /// Reserve the parked state, then store the fds and durably commit the
@@ -6320,7 +6500,7 @@ impl Session {
         // (the pid differs), so removing this one's entry cannot touch it.
         self.unpark_fdstore();
         self.broadcast(SessionEvent::Restarted);
-        let _ = self.command_tx.send(PtyCommand::Kill);
+        self.command_tx.send(PtyCommand::Kill);
     }
 
     /// The window (`?w=` label) this session currently belongs to.
@@ -6414,6 +6594,25 @@ impl Session {
         exit: TerminalExit,
         registry_last_exit: &Arc<Mutex<Option<TerminalExit>>>,
     ) {
+        self.record_exit(exit, Some(registry_last_exit));
+    }
+
+    /// The exit of a tmux pane session: its connection ended, or tmux closed
+    /// the pane. The registry's last-exit copy is for a tenant's one PTY and
+    /// is left alone.
+    // Reached by a tmux connection's gateway; this build has none, and the
+    // tests are the only caller.
+    #[allow(dead_code)]
+    fn record_tmux_pane_exit(&self, exit: TerminalExit) {
+        self.record_exit(exit, None);
+        self.ended.record(true);
+    }
+
+    fn record_exit(
+        &self,
+        exit: TerminalExit,
+        registry_last_exit: Option<&Arc<Mutex<Option<TerminalExit>>>>,
+    ) {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
@@ -6445,9 +6644,11 @@ impl Session {
         // it runs the moment the lock is released. `Registry::last_exit`
         // lets go of the registry's copy before it takes a session's exit,
         // which keeps this nesting free of a cycle.
-        *registry_last_exit
-            .lock()
-            .expect("terminal registry poisoned") = Some(exit.clone());
+        if let Some(registry_last_exit) = registry_last_exit {
+            *registry_last_exit
+                .lock()
+                .expect("terminal registry poisoned") = Some(exit.clone());
+        }
         drop(stored);
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::ExitReadable);
@@ -6566,7 +6767,7 @@ impl Session {
             || self.foreground_program_group(),
             |end| {
                 if let Some(reply) = replies.reserve(end) {
-                    let _ = self.command_tx.send(PtyCommand::ProgramStatusReply(reply));
+                    self.command_tx.send(PtyCommand::ProgramStatusReply(reply));
                 }
             },
         );
@@ -6640,7 +6841,7 @@ impl Session {
         for action in actions {
             match action {
                 tmux_gate::Action::Write(bytes) => {
-                    let _ = self.command_tx.send(PtyCommand::Input(bytes));
+                    self.command_tx.send(PtyCommand::Input(bytes));
                 }
                 tmux_gate::Action::Notice(text) => {
                     self.record_plain_output(format!("\r\n[chan] {text}\r\n").as_bytes());
@@ -7215,6 +7416,70 @@ enum PtyCommand {
     Kill,
 }
 
+/// A tmux pane session's command on its connection's one channel, with the
+/// pane it is for.
+type PaneCommand = (chan_tmux::PaneId, PtyCommand);
+
+/// Where a session's commands go: the controller thread that owns its PTY,
+/// or the gateway thread of the tmux connection whose pane it is, which reads
+/// one channel for every pane of the connection.
+#[derive(Debug, Clone)]
+enum CommandSink {
+    Pty(std::sync::mpsc::Sender<PtyCommand>),
+    // Built by `Session::for_tmux_pane`, which this build calls from tests
+    // alone.
+    #[allow(dead_code)]
+    TmuxPane {
+        pane: chan_tmux::PaneId,
+        tx: std::sync::mpsc::Sender<PaneCommand>,
+    },
+}
+
+impl CommandSink {
+    /// Deliver `command`. A sink whose reader is gone drops it, as a
+    /// controller that has returned does.
+    fn send(&self, command: PtyCommand) {
+        match self {
+            CommandSink::Pty(tx) => {
+                let _ = tx.send(command);
+            }
+            CommandSink::TmuxPane { pane, tx } => {
+                let _ = tx.send((*pane, command));
+            }
+        }
+    }
+}
+
+/// Numbers a tmux connection within one process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TmuxConnectionId(pub u64);
+
+/// The tmux connection a pane session belongs to and its pane there. A
+/// session with one has no PTY: its output is what tmux reports for the pane
+/// and its commands go to the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TmuxPaneRef {
+    pub connection: TmuxConnectionId,
+    pub pane: chan_tmux::PaneId,
+}
+
+/// What a tmux connection gives the registry for a pane session.
+#[derive(Debug, Clone)]
+pub struct TmuxPaneSpec {
+    pub pane: TmuxPaneRef,
+    /// The tab name, from the tmux window's name.
+    pub name: Option<String>,
+    pub group: String,
+    pub window_id: Option<String>,
+    pub size: PtySize,
+}
+
+/// Most pane sessions one registry holds across its tmux connections. Pane
+/// sessions have no PTY, so `terminal.session_cap`, which bounds PTYs, does
+/// not count them; this bound keeps a connection with many panes from
+/// growing the registry without limit.
+pub const TMUX_PANE_SESSION_CAP: usize = 256;
+
 /// Terminate and reap a child through the owning handle. A cloned killer can
 /// signal from another thread, but only the owner can consume the exit status
 /// and release the process-table entry.
@@ -7286,6 +7551,7 @@ mod tests {
     mod control_socket_env_tests;
     mod program_status_tests;
     mod tmux_gate_session_tests;
+    mod tmux_pane_session_tests;
     use super::*;
     use chan_shell::{SubmitAgent, SubmitTemplateSource};
     use std::process::Command;
@@ -7576,12 +7842,13 @@ mod tests {
                     .collect(),
             },
             exec_argv: None,
+            tmux_pane: None,
             child_pid: None,
             #[cfg(target_os = "linux")]
             child_start_time: None,
             #[cfg(unix)]
             master_fd: None,
-            command_tx,
+            command_tx: CommandSink::Pty(command_tx),
             output_tx,
             output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes), true)),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
