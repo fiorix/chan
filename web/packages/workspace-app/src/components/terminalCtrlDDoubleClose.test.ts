@@ -204,7 +204,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     ...actual,
     terminalBackendFromPrefs: () => (rendererPrefs.ghostty ? "ghostty" : "xterm"),
     loadGhosttyKit: async () => ({
-      ghostty: {} as never,
+      instantiate: async () => ({}) as never,
       Terminal: GhosttyTerminal as never,
     }),
   };

@@ -154,7 +154,6 @@
   } from "../terminal/backend";
   import {
     alignGhosttyRendererToXterm,
-    clearGhosttyRecycledGrid,
     gateGhosttyScrollbarClicks,
     installGhosttyCustomGlyphs,
     installGhosttyOverlayScrollbar,
@@ -167,7 +166,7 @@
     TerminalSecretMasker,
   } from "../terminal/secretMasking";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Terminal as GhosttyTerminal } from "ghostty-web";
+  import type { Ghostty, Terminal as GhosttyTerminal } from "ghostty-web";
   import {
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
@@ -1072,14 +1071,17 @@
     // terminals), except in a control terminal whose masking starts on,
     // which is xterm, the backend that masks. Absent field (older server)
     // means xterm.js. The ghostty kit lazy-loads ~420KB of WASM + JS only
-    // on this branch; a failed load falls back to xterm.js rather than
+    // on this branch, and each terminal gets its own WASM instance (see
+    // backend.ts); a failed load falls back to xterm.js rather than
     // breaking the spawn (fail-open, matching the mouse filter's
     // philosophy).
     backend = terminalBackendFromPrefs(terminalPrefs, { terminalControl: ui.terminalControl });
     let ghosttyKit: GhosttyKit | null = null;
+    let ghosttyInstance: Ghostty | null = null;
     if (backend === "ghostty") {
       try {
         ghosttyKit = await loadGhosttyKit();
+        ghosttyInstance = await ghosttyKit.instantiate();
       } catch (err) {
         console.warn(
           "[chan] ghostty-web failed to load; falling back to xterm.js:",
@@ -1107,7 +1109,7 @@
       tab,
       !tab.terminalSessionId,
     );
-    if (backend === "ghostty" && ghosttyKit) {
+    if (backend === "ghostty" && ghosttyKit && ghosttyInstance) {
       // Ghostty backend: Ghostty's WASM VT parser + its own canvas
       // renderer (no xterm addons exist for it). Options are limited to
       // ghostty-web's ITerminalOptions -- no lineHeight (its renderer
@@ -1119,7 +1121,7 @@
         cursorStyle: "block",
         fontFamily,
         fontSize: rendererFontSize,
-        ghostty: ghosttyKit.ghostty,
+        ghostty: ghosttyInstance,
         scrollback: scrollbackLines,
         // Ghostty's default 100ms smooth scroll keeps a private animation
         // target that scrollToBottom() (called on every write away from
@@ -1244,10 +1246,6 @@
     term.open(host);
     if (backend === "ghostty") {
       const ghosttyTerm = term as GhosttyTerminal;
-      // open() created the WASM terminal, which may have come back holding a
-      // disposed terminal's screen (see clearGhosttyRecycledGrid). Erase it
-      // before the metrics alignment repaints and before any PTY byte lands.
-      clearGhosttyRecycledGrid(ghosttyTerm);
       const renderer = ghosttyTerm.renderer;
       const targetCell = measureXtermCellDimensions(
         host,

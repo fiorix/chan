@@ -57,11 +57,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
   }
   return {
     ...(await importOriginal<typeof import("../terminal/backend")>()),
-    loadGhosttyKit: async () => ({ ghostty: {}, Terminal: GhosttyTerminal }),
+    loadGhosttyKit: async () => ({ instantiate: async () => ({}), Terminal: GhosttyTerminal }),
   };
 });
 vi.mock("../terminal/ghosttyCompat", () => ({
-  clearGhosttyRecycledGrid() {},
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
   alignGhosttyRendererToXterm: () => true,
   installGhosttyCustomGlyphs: () => true,

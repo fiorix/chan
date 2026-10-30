@@ -14,6 +14,7 @@ const ghostty = vi.hoisted(() => {
     events: [] as string[],
     kitFails: false,
     kitLoads: 0,
+    instances: 0,
     alignOk: true,
     hostOwned: false,
     terminals: [] as Array<Record<string, any>>,
@@ -95,11 +96,17 @@ vi.mock("../terminal/backend", async (importOriginal) => ({
   loadGhosttyKit: vi.fn(async () => {
     ghostty.record.kitLoads += 1;
     if (ghostty.record.kitFails) throw new Error("wasm fetch failed");
-    return { ghostty: { kit: true }, Terminal: ghostty.FakeGhosttyTerminal };
+    return {
+      instantiate: async () => {
+        ghostty.record.instances += 1;
+        ghostty.record.events.push("instantiate");
+        return { instance: ghostty.record.instances };
+      },
+      Terminal: ghostty.FakeGhosttyTerminal,
+    };
   }),
 }));
 vi.mock("../terminal/ghosttyCompat", () => ({
-  clearGhosttyRecycledGrid: () => ghostty.record.events.push("scrub"),
   measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
   alignGhosttyRendererToXterm: () => {
     ghostty.record.events.push("align");
@@ -178,6 +185,7 @@ beforeEach(() => {
     events: [],
     kitFails: false,
     kitLoads: 0,
+    instances: 0,
     alignOk: true,
     hostOwned: false,
     terminals: [],
@@ -314,18 +322,24 @@ describe("choosing the backend", () => {
 });
 
 describe("the mount", () => {
-  test("after open: scrub the grid, align to xterm's cell, install the hooks, then dial", async () => {
+  test("instantiate its own wasm, open, align to xterm's cell, install the hooks, then dial", async () => {
     await mountGhostty();
     expect(ghostty.record.events.slice(0, 8)).toEqual([
+      "instantiate",
       "construct",
       "open",
-      "scrub",
       "align",
       "glyphs",
       "scrollbar",
       "gate",
       "dial",
     ]);
+  });
+
+  test("the terminal is built on the wasm instance its own spawn created", async () => {
+    await mountGhostty();
+    expect(ghostty.record.instances).toBe(1);
+    expect(ghostty.record.terminals[0].options.ghostty).toEqual({ instance: 1 });
   });
 
   test("a renderer without the alignment hook is kept, with a warning", async () => {
