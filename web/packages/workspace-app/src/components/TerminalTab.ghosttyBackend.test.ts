@@ -36,6 +36,7 @@ const ghostty = vi.hoisted(() => {
     resized: Array<[number, number]> = [];
     renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
     buffer = { active: {}, alternate: {} };
+    applicationCursorKeys = false;
     constructor(options: Record<string, unknown>) {
       this.options = options;
       record.terminals.push(this);
@@ -63,6 +64,9 @@ const ghostty = vi.hoisted(() => {
     }
     hasFocusEvents() {
       return record.focusEvents;
+    }
+    getMode(mode: number) {
+      return mode === 1 ? this.applicationCursorKeys : false;
     }
     write() {}
     writeln() {}
@@ -418,6 +422,31 @@ describe("output and scrolling", () => {
     const { term } = await mountGhostty();
     expect(term.wheelHandler!(new WheelEvent("wheel", { deltaY: 10 }))).toBe(true);
     expect(ghostty.record.wheels).toBe(1);
+  });
+
+  const arrows = (socket: TerminalSocket): unknown[] =>
+    sentFrames(socket)
+      .filter((frame) => frame.type === "input")
+      .map((frame) => frame.data);
+
+  test("on the alternate screen a trackpad swipe sends one arrow per row it adds up to", async () => {
+    const { term, socket } = await mountGhostty();
+    term.buffer.active = term.buffer.alternate;
+    // 10 px on a 16 px row, scaled by 0.3: 0.1875 of a row per event.
+    const claimed = Array.from({ length: 20 }, () =>
+      term.wheelHandler!(new WheelEvent("wheel", { deltaY: 10 })),
+    );
+    expect(claimed.every(Boolean)).toBe(true);
+    expect(arrows(socket)).toEqual(["\x1b[B", "\x1b[B", "\x1b[B"]);
+    expect(ghostty.record.wheels).toBe(0);
+  });
+
+  test("on the alternate screen application cursor keys send the SS3 arrow", async () => {
+    const { term, socket } = await mountGhostty();
+    term.buffer.active = term.buffer.alternate;
+    term.applicationCursorKeys = true;
+    term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
+    expect(arrows(socket)).toEqual(["\x1bOA"]);
   });
 });
 

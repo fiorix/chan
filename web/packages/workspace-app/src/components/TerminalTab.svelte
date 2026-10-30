@@ -160,6 +160,7 @@
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
+  import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
   import {
     DEFAULT_SECRET_MASK_SUFFIXES,
@@ -463,6 +464,8 @@
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
+  // Rows built up by wheel input the app owns (see handleGhosttyWheel).
+  const ghosttyWheelRows = new GhosttyWheelRows();
   // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
   // clicks on the content beneath it while it is invisible. Non-null ONLY on
   // the ghostty backend, and only while the gate is installed.
@@ -2194,22 +2197,34 @@
     }
   }
 
-  /// Ghostty-backend wheel reporting. ghostty-web registers its
-  /// viewport scroller capture-phase with an unconditional
-  /// stopPropagation(), so its InputHandler's wheel reporter (SGR
-  /// 64/65) never sees the event; the custom-wheel hook runs before
-  /// the scroller and true claims the event. With mouse tracking
-  /// active, send either encoding as user input to this PTY and the
-  /// broadcast group, X10 as bytes and SGR as text, and claim the event. Without tracking, the viewport controller claims
-  /// only the calibrated macOS pixel-mode primary-buffer case; every
-  /// other event declines so ghostty keeps its native local scroll /
-  /// alt-screen arrow behavior. Coordinates come from
-  /// the canvas rect / live grid size (SGR coords are 1-based cells).
+  /// Ghostty-backend wheel input. ghostty-web registers its viewport
+  /// scroller capture-phase with an unconditional stopPropagation(), so
+  /// its InputHandler's wheel reporter (SGR 64/65) never sees the event;
+  /// the custom-wheel hook runs before the scroller and true claims the
+  /// event. On the primary buffer without mouse tracking the viewport
+  /// controller claims only the calibrated macOS pixel-mode case and
+  /// every other event declines to ghostty's native local scroll. When
+  /// the app owns the wheel (mouse tracking, or the alternate screen
+  /// without it) every event is claimed and paced like xterm.js
+  /// (ghosttyWheel.ts): an event that completes a row sends one wheel
+  /// report, or one up/down arrow, and the rest send nothing. Reports go
+  /// as user input to this PTY and the broadcast group, X10 as bytes and
+  /// SGR as text, with coordinates from the canvas rect / live grid size
+  /// (SGR coords are 1-based cells).
   function handleGhosttyWheel(e: WheelEvent): boolean {
     const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
     if (!t) return false;
-    if (!t.hasMouseTracking()) {
+    const tracking = t.hasMouseTracking();
+    if (!tracking && t.buffer.active !== t.buffer.alternate) {
       return ghosttyViewport?.handleWheel(e) ?? false;
+    }
+    if (!tracking) {
+      const cellHeight = t.renderer?.getMetrics().height ?? 0;
+      if (!(cellHeight > 0)) return false;
+      if (ghosttyWheelRows.consume(e, cellHeight, t.rows) !== 0) {
+        sendUserInput(ghosttyWheelArrow(e.deltaY < 0, t.getMode(1, false)));
+      }
+      return true;
     }
     const canvas = e.target as HTMLElement | null;
     const rect = canvas?.getBoundingClientRect?.();
@@ -2217,11 +2232,12 @@
     const cellW = rect.width / t.cols;
     const cellH = rect.height / t.rows;
     if (!(cellW > 0) || !(cellH > 0)) return false;
+    if (ghosttyWheelRows.consume(e, cellH, t.rows) === 0) return true;
     const col = Math.min(t.cols, Math.max(1, Math.floor((e.clientX - rect.left) / cellW) + 1));
     const row = Math.min(t.rows, Math.max(1, Math.floor((e.clientY - rect.top) / cellH) + 1));
     // Modifier bits mirror xterm/ghostty-web: shift 4, alt 8, ctrl 16.
     const mods = (e.shiftKey ? 4 : 0) + (e.altKey ? 8 : 0) + (e.ctrlKey ? 16 : 0);
-    // Wheel reports are press-only (xterm repeats the press per notch);
+    // Wheel reports are press-only, one per event that completes a row;
     // 64 = up, 65 = down. SGR encoding when mode 1006 is set (and by
     // default, mirroring ghostty-web's hasSgrMouseMode fallback);
     // legacy X10 otherwise.
