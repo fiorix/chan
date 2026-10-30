@@ -34,7 +34,7 @@
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
   import { LOCAL_LIBRARY_ID, rootName, windowRowLabel } from "../lib/windowLabel";
-  import { buildMachineTree } from "../lib/machineTree";
+  import { buildMachineTree, tmuxCardTitle } from "../lib/machineTree";
   import { library, clearError, reportError, disconnectDevserver } from "../state/library.svelte";
   import {
     canManageWindow,
@@ -109,6 +109,16 @@
   function machineNameForLibrary(libraryId: string): string {
     const devserver = library.devservers.find((row) => row.library_id === libraryId);
     return devserver ? devserverName(devserver) : "This machine";
+  }
+
+  // A tmux window's machine is its connection's card, whatever library runs
+  // the terminal, as the Library screen files it.
+  function machineNameForWindow(window: WindowRecord): string {
+    if (!window.tmux) return machineNameForLibrary(window.library_id);
+    const connection = window.tmux.connection;
+    return tmuxCardTitle(
+      library.tmuxConnections.find((entry) => entry.connection === connection) ?? null,
+    );
   }
 
   function machineNameForWorkspace(workspace: WorkspaceEntry): string {
@@ -226,7 +236,7 @@
   /// machine and open-versus-hidden ride the breadcrumb: the deck is a flat
   /// listbox with no section headers.
   function windowBranch(window: WindowRecord): Entry {
-    const machine = machineNameForLibrary(window.library_id);
+    const machine = machineNameForWindow(window);
     const context = windowContext(window);
     const state = window.hidden ? "Hidden" : "Open";
     return {
@@ -242,7 +252,7 @@
   }
 
   function windowEntry(command: WindowActionId, window: WindowRecord): Entry {
-    const machine = machineNameForLibrary(window.library_id);
+    const machine = machineNameForWindow(window);
     const context = windowContext(window);
     const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : command === "open" ? "Open in this browser" : "Close";
     return {
@@ -277,7 +287,12 @@
   /// local machine first, devservers by name, and within each the control
   /// terminal, then terminals, then workspace windows by ordinal.
   const orderedWindows = $derived.by<WindowRecord[]>(() => {
-    const tree = buildMachineTree(library.devservers, library.workspaces, library.windows);
+    const tree = buildMachineTree(
+      library.devservers,
+      library.workspaces,
+      library.windows,
+      library.tmuxConnections,
+    );
     const ordered = tree.machines.flatMap((machine) => [
       ...machine.control,
       ...machine.terminals,

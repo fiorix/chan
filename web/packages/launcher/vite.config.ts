@@ -46,7 +46,8 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 // client-side window manager, per-tenant leadership derivation, window URL
 // builder, config-backed per-machine collapse, the Gateways screen, the
 // Computers command launcher, and the desktop's carousel deck with its Add
-// devserver card, All windows and plasma background, about 60.2 KiB) leaves
+// devserver card, All windows, the tmux connection cards and plasma
+// background, about 61.8 KiB) leaves
 // a few KiB below the ceiling; raise it
 // deliberately when adding real surface, and treat an unexpected jump as an
 // accidental heavy import. Keep a few KiB of headroom rather than trimming to

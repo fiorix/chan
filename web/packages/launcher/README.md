@@ -6,7 +6,7 @@ Same stack as `web/` (Svelte 5, Vite, svelte-check, vitest), without `web/`'s ed
 
 ## Contract
 
-The launcher page, whether a browser tab or the launcher panel inside a chan-desktop window, is an HTTP client of chan-server's library routes. `src/api/library.ts` is the typed form of that contract: the workspace and devserver registry surfaces under `/api/library/`, plus the window feed it renders (`GET`/watch `/api/library/windows`).
+The launcher page, whether a browser tab or the launcher panel inside a chan-desktop window, is an HTTP client of chan-server's library routes. `src/api/library.ts` is the typed form of that contract: the workspace and devserver registry surfaces under `/api/library/`, the window feed it renders (`GET`/watch `/api/library/windows`, whose snapshot also carries the live tmux control-mode connections the Computers deck deals as cards), and the request route behind those cards (`POST /api/library/tmux/{connection}/request`).
 
 ## Develop
 

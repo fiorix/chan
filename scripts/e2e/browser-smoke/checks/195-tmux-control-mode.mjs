@@ -2,12 +2,15 @@
 // form that holds a window registry; a standalone `chan serve` mints no
 // windows). A terminal window's shell runs `tmux -CC`; the connection then
 // opens the tmux window as a chan window with a tab bound to its pane, moves
-// the control terminal into a window of its own that shows the status view,
-// splits the tmux pane on a chan split so two panes show, mints a window of
-// its own for the tmux window Cmd+T and New Window each ask for, and Detach
-// closes every tmux window while the control window stays. The windows are read where the product reads them: the library's
-// window records (never persisted for tmux rows) and the pages the launcher's
-// Open opens, so a tab arriving on a window's first socket is observed.
+// the control terminal into a chromeless control window of its own, shows the
+// connection as a card in the launcher's Computers carousel, splits the tmux
+// pane on a chan split so two panes show, mints a window of its own for the
+// tmux window Cmd+T and New Window each ask for, and the card's Detach closes
+// every tmux window while the control window stays and becomes a plain
+// terminal window again. The windows are read where the product reads them:
+// the library's window records (never persisted for tmux rows), its
+// connection records, and the pages the launcher's Open opens, so a tab
+// arriving on a window's first socket is observed.
 //
 // Skips when tmux is not installed or the launcher bundle is missing.
 
@@ -93,7 +96,7 @@ async function waitForPane(page, label) {
 /// main thread is stuck), pause its debugger and report where it stands,
 /// so a hang names the code that holds the page instead of a protocol
 /// timeout three minutes later.
-async function evaluateOrDump(page, fn, label) {
+async function evaluateOrDump(page, fn, label, ...args) {
   let timer;
   const stuck = new Promise((_, reject) => {
     timer = setTimeout(async () => {
@@ -120,7 +123,7 @@ async function evaluateOrDump(page, fn, label) {
     }, 15_000);
   });
   try {
-    return await Promise.race([page.evaluate(fn), stuck]);
+    return await Promise.race([page.evaluate(fn, ...args), stuck]);
   } finally {
     clearTimeout(timer);
   }
@@ -158,6 +161,20 @@ const panesAttached = (page) =>
 
 const rowName = (record) => `Terminal Window ${record.ordinal}${record.label ? ` [${record.label.trim()}]` : ""}`;
 
+/// The card title the launcher gives a connection whose marker a local tmux
+/// printed, which is also the control window's label.
+const CARD_TITLE = "tmux -CC on this machine";
+
+/// The live connection records, as the launcher reads them with the feed.
+async function fetchTmux(origin, token) {
+  const response = await fetch(`${origin}/api/library/tmux`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`tmux route answered ${response.status}`);
+  return response.json();
+}
+
 export default {
   name: "tmux-control-mode",
   async run(ctx) {
@@ -175,6 +192,7 @@ export default {
       const token = new URL(launchUrl).searchParams.get("t");
       check(token, "launcher URL has no management token");
       const windows = () => fetchWindows(origin, token);
+      const connections = () => fetchTmux(origin, token);
 
       // A terminal window from the launcher, whose shell runs tmux -CC.
       const launcher = watchPage(await ctx.browser.newPage(), "launcher");
@@ -200,17 +218,27 @@ export default {
       await source.keyboard.type(`exec tmux -L ${SOCKET} -f /dev/null -CC new-session -s ${SESSION}\n`);
 
       // The connection mints a window for the tmux window and one for the
-      // control terminal, both marked tmux and neither in the store.
+      // control terminal, both marked with the connection and neither in the
+      // store; the control row is the mark's control, titled as the card is.
       const minted = await poll("the control window and the tmux window", async () => {
         const rows = (await windows()).filter((row) => row.tmux && row.kind === "terminal");
-        const control = rows.find((row) => row.label.trim() === `tmux ${SESSION}`);
-        const tmuxWindow = rows.find((row) => row !== control);
+        const control = rows.find((row) => row.tmux.control);
+        const tmuxWindow = rows.find((row) => row.tmux && !row.tmux.control);
         return control && tmuxWindow ? { control, tmuxWindow } : null;
       }, 60_000);
       step(`minted control ${minted.control.window_id}, tmux window ${minted.tmuxWindow.window_id}`);
+      check(minted.control.tmux.connection === minted.tmuxWindow.tmux.connection, "the two rows name different connections");
+      check(minted.control.label.trim() === CARD_TITLE, `the control row's label is ${JSON.stringify(minted.control.label)}`);
       const store = JSON.parse(readFileSync(join(chanHome, "devserver", "windows.json"), "utf8"));
       check(!store.some((row) => row.tmux), "a tmux row reached windows.json");
-      check(!minted.control.hidden && !minted.tmuxWindow.hidden, "tmux rows are minted shown");
+      check(!minted.tmuxWindow.hidden, "the tmux window is minted hidden");
+      // The connection is a record of the feed and a card in the launcher,
+      // titled for its local origin, with the control terminal as its row.
+      const record = await poll("the connection record", async () => (await connections()).find((c) => c.connection === minted.control.tmux.connection) ?? null, 30_000);
+      check(record.origin && record.origin.local === true, `the record's origin is not local: ${JSON.stringify(record.origin)}`);
+      check(record.control_window === minted.control.window_id, "the record names another control window");
+      check(record.windows.some((w) => w.chan_window === minted.tmuxWindow.window_id), "the record lacks the tmux window");
+      await poll("the tmux card in the launcher", () => evaluateOrDump(launcher, (title) => document.body.textContent?.includes(title) ?? false, "launcher text", CARD_TITLE), 30_000);
       await ctx.shot("launcher-rows", launcher);
       // The control terminal's tab leaves the source window once the window
       // minted for it is open; the source opened it itself here.
@@ -220,7 +248,7 @@ export default {
       }, 30_000);
 
       // The tmux window opens from the launcher with the pane's tab and no
-      // default shell beside it; the control window shows the status view.
+      // default shell beside it; the control window is chromeless.
       const tmuxPage = watchPage(await popupFrom(launcher, () => openRow(launcher, rowName(minted.tmuxWindow)), "Open tmux window"), "tmux window");
       pages.push(tmuxPage);
       step("tmux window open");
@@ -246,10 +274,8 @@ export default {
       await poll("the control page on its window", () => evaluateOrDump(controlPage, () => new URL(location.href).searchParams.has("w"), "control page url"), 30_000);
       step("control page");
       await controlPage.bringToFront();
-      await poll("the status view", () => evaluateOrDump(controlPage, () => !!document.querySelector(".tmux-status"), "status view"), 60_000);
-      const status = await evaluateOrDump(controlPage, () => document.querySelector(".tmux-status")?.textContent ?? "", "status text");
-      check(status.includes(`session ${SESSION}`) || status.includes(SESSION), `the status view names no session: ${status.slice(0, 200)}`);
-      check(status.includes("Detach") && status.includes("End"), "the status view lacks Detach or End");
+      await poll("the control window's chromeless pane", () => evaluateOrDump(controlPage, () => !!document.querySelector(".tabs.control-hidden"), "control chrome"), 60_000);
+      check(!(await evaluateOrDump(controlPage, () => !!document.querySelector(".tmux-status"), "status view")), "a status view covers the control terminal");
       await ctx.shot("control-window", controlPage);
 
       // A chan split in the tmux window is tmux's: the pane is split in tmux
@@ -284,29 +310,29 @@ export default {
           return rows.length === countBefore + 2 ? rows : null;
         }, 60_000);
       } catch (error) {
-        const status = await controlPage.$eval(".tmux-status", (el) => el.textContent ?? "").catch(() => "(no status view)");
+        const records = JSON.stringify(await connections().catch((e) => String(e))).slice(0, 400);
         const line = await tmuxPage.$eval(".transient-status, .status-line, [data-transient-status]", (el) => el.textContent ?? "").catch(() => "(no status line)");
         const rows = (await windows()).filter((row) => row.tmux).map((row) => `${row.window_id}:${row.label}`);
-        throw new Error(`${error instanceof Error ? error.message : error}; status view: ${status.slice(0, 300)}; page status: ${line.slice(0, 200)}; tmux rows: ${rows.join(", ")}`);
+        throw new Error(`${error instanceof Error ? error.message : error}; connections: ${records}; page status: ${line.slice(0, 200)}; tmux rows: ${rows.join(", ")}`);
       }
 
-      // Detach from the status view: every tmux window goes, the control
-      // window stays and its view clears.
+      // Detach from the card: every tmux window goes, the connection record
+      // and the card go, and the control window stays as a plain terminal
+      // window whose page shows its pane chrome again.
       step("detach");
-      const detached = await evaluateOrDump(controlPage, () => {
-        const button = [...document.querySelectorAll(".tmux-status .ts-actions button")].find((b) => b.textContent?.trim() === "Detach");
-        button?.click();
-        return !!button;
-      }, "click Detach");
-      check(detached, "no Detach button in the status view");
+      await launcher.bringToFront();
+      const detachSelector = `button[aria-label="Detach ${CARD_TITLE}"]`;
+      await launcher.waitForSelector(detachSelector, { timeout: 30_000 });
+      await launcher.click(detachSelector);
       try {
-        await poll("only the control window's tmux row", async () => {
+        await poll("no tmux row and no connection record", async () => {
           const rows = (await windows()).filter((row) => row.tmux);
-          return rows.length === 1 && rows[0].window_id === minted.control.window_id ? rows : null;
+          const records = await connections();
+          return rows.length === 0 && records.length === 0 ? rows : null;
         }, 60_000);
       } catch (error) {
         const clients = (() => { try { return execFileSync("tmux", ["-L", SOCKET, "list-clients"], { encoding: "utf8" }).trim(); } catch (e) { return `list-clients failed: ${e}`; } })();
-        const status = await evaluateOrDump(controlPage, () => document.querySelector(".tmux-status")?.textContent?.slice(0, 300) ?? "(no status view)", "status after detach");
+        const status = JSON.stringify(await connections().catch((e) => String(e))).slice(0, 300);
         const rows = (await windows()).filter((row) => row.tmux).map((row) => `${row.window_id}:${row.label}`);
         const all = devserver.lines();
         const from = all.findIndex((line) => line.includes("tmux connection ending"));
@@ -314,7 +340,10 @@ export default {
         throw new Error(`${error instanceof Error ? error.message : error}; tmux clients: ${clients || "(none)"}; status view: ${status}; tmux rows: ${rows.join(", ")}\nserver log:\n  ${serverLines}`);
       }
       step("tmux rows gone");
-      await poll("the status view gone", () => evaluateOrDump(controlPage, () => !document.querySelector(".tmux-status"), "status view gone"), 30_000);
+      const released = (await windows()).find((row) => row.window_id === minted.control.window_id);
+      check(released && !released.tmux && !released.control, "the control window did not become a plain terminal window");
+      await poll("the control page shows its pane chrome", () => evaluateOrDump(controlPage, () => !!document.querySelector(".tabs") && !document.querySelector(".tabs.control-hidden"), "pane chrome"), 30_000);
+      await poll("the card gone from the launcher", () => evaluateOrDump(launcher, (title) => !(document.body.textContent?.includes(title) ?? false), "launcher text", CARD_TITLE), 30_000);
       await ctx.shot("after-detach", controlPage);
       step("done");
     } catch (error) {

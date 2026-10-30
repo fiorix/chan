@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WindowRecord } from "../api/library";
 import { backend } from "../api/backend";
-import { focusComputerWindow, openComputerWindow, setWindowShown } from "./computerActions";
+import {
+  detachTmux,
+  endTmux,
+  focusComputerWindow,
+  newTmuxWindow,
+  openComputerWindow,
+  openTmuxWindow,
+  setWindowShown,
+} from "./computerActions";
+import { cancelConfirm, confirm, resolveConfirm } from "./confirm.svelte";
 import { resetWindowManager } from "./windowManager.svelte";
 
 vi.mock("./capabilities", () => ({ hasDesktopBridge: false, selfManagedWindows: true }));
@@ -164,5 +173,47 @@ describe("browser action visibility", () => {
     await pending;
     expect(check).not.toHaveBeenCalled();
     expect(visibility).toHaveBeenCalledExactlyOnceWith("show follows", false, undefined);
+  });
+});
+
+describe("tmux connection requests", () => {
+  const logs = { id: "@3", name: "logs", panes: 1, open: false };
+
+  afterEach(() => {
+    cancelConfirm();
+  });
+
+  it("sends the closed request objects for a new window, a detach and an opened window", async () => {
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    await newTmuxWindow("tm-1");
+    await detachTmux("tm-1");
+    await openTmuxWindow("tm-1", logs);
+    expect(request.mock.calls).toEqual([
+      ["tm-1", { request: "new-window" }],
+      ["tm-1", { request: "detach" }],
+      ["tm-1", { request: "open-window", window: "@3" }],
+    ]);
+    expect(confirm.open).toBe(false);
+  });
+
+  it("ends the tmux server only once the confirm is resolved", async () => {
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    await endTmux("tm-1");
+    expect(confirm.open).toBe(true);
+    expect(confirm.title).toBe("End tmux server?");
+    expect(confirm.message).toBe("End the tmux server and every session it holds?");
+    expect(confirm.confirmLabel).toBe("End");
+    expect(request).not.toHaveBeenCalled();
+    await resolveConfirm();
+    expect(request).toHaveBeenCalledExactlyOnceWith("tm-1", { request: "end" });
+    expect(confirm.open).toBe(false);
+  });
+
+  it("sends nothing when the End confirm is cancelled", async () => {
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    await endTmux("tm-1");
+    cancelConfirm();
+    expect(request).not.toHaveBeenCalled();
+    expect(confirm.open).toBe(false);
   });
 });

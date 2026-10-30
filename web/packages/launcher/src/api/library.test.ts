@@ -39,6 +39,51 @@ describe("liveApi.liveTerminalCount", () => {
   });
 });
 
+describe("liveApi.tmuxRequest", () => {
+  it("posts the request object as-is to the connection's encoded request route", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 204 });
+    vi.stubGlobal("fetch", fetch);
+
+    await liveApi.tmuxRequest("term/one", { request: "open-window", window: "@3" });
+    await liveApi.tmuxRequest("term/one", { request: "end" });
+    expect(fetch.mock.calls).toEqual([
+      [
+        "/api/library/tmux/term%2Fone/request",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: '{"request":"open-window","window":"@3"}',
+        },
+      ],
+      [
+        "/api/library/tmux/term%2Fone/request",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: '{"request":"end"}',
+        },
+      ],
+    ]);
+  });
+
+  it("reports an unknown connection as the 404 ApiError the server answers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        text: async () => '{"error":"no tmux connection gone"}',
+      }),
+    );
+
+    await expect(liveApi.tmuxRequest("gone", { request: "detach" })).rejects.toMatchObject({
+      status: 404,
+      message: "no tmux connection gone",
+    });
+  });
+});
+
 describe("liveApi.removeWorkspace", () => {
   const remove: (id: string, force?: boolean) => Promise<void> = liveApi.removeWorkspace;
 
