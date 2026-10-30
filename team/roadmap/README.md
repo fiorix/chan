@@ -23,15 +23,17 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.116.0
 
-Opened 2026-10-29 at the v0.115.0 GA, which carries one row into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), raised the day after the v0.114.0 GA and not started when the owner asked for the v0.115.0 GA. Secret masking under the ghostty backend was raised 2026-10-30 ([ghmask]).
+Opened 2026-10-29 at the v0.115.0 GA, which carries one row into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), raised the day after the v0.114.0 GA and not started when the owner asked for the v0.115.0 GA. Secret masking under the ghostty backend was raised 2026-10-30 ([ghmask]). A local desktop terminal's `cs tunnel` naming its failure only in a toast was raised 2026-10-30 ([tuntoast]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Ghostty masks no secrets][ghmask] | accepted | build |
+| [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 
 [chk95]: v0.116.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [ghmask]: v0.116.0/secret-masking-does-nothing-under-the-ghostty-backend.md
+[tuntoast]: v0.116.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
 
 ## Completed
 
