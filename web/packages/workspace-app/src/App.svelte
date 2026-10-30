@@ -148,7 +148,7 @@
     setActivePane,
     setWindowFocusColor,
     splitActive,
-    tmuxPaneTabs,
+    tmuxRequestCarrier,
     toggleActiveFileTabMode,
     toggleActiveTerminalBroadcastSelectAll,
     type PaneModeStagedDraftEditor,
@@ -631,19 +631,15 @@
   });
 
   /// Ask the tmux connection this window shows for a new tmux window, which
-  /// opens in a chan window of its own. False when this is not a tmux
-  /// window, and nothing was asked. The request rides the active pane tab's
-  /// session when it is one, so a window mixing tmux and plain tabs still
-  /// asks tmux.
+  /// opens in a chan window of its own. False when this window shows no
+  /// tmux connection, and nothing was asked. The request rides the active
+  /// pane tab's session when it is one, else a pane's, else the control
+  /// session's, so the control window's status view asks too.
   function requestTmuxWindow(): boolean {
-    const panes = tmuxPaneTabs();
-    if (panes.length === 0) return false;
-    const active = activeTabInPane(activePane());
-    const carrier =
-      (active?.kind === "terminal" && active.tmuxPane ? active : null) ?? panes[0]!;
-    const sessionId = carrier.terminalSessionId!;
+    const carrier = tmuxRequestCarrier();
+    if (!carrier) return false;
     void api
-      .tmuxRequest(sessionId, { request: "new-window" })
+      .tmuxRequest(carrier.terminalSessionId!, { request: "new-window" })
       .catch((error) => setTransientStatus(`tmux new window failed: ${errorText(error)}`));
     return true;
   }
