@@ -1164,6 +1164,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-tmux"
+version = "0.116.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "chan-tunnel-client"
 version = "0.116.0"
 dependencies = [
