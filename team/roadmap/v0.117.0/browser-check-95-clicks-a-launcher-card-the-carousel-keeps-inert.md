@@ -1,6 +1,8 @@
 # Browser check 95 clicks a launcher card the carousel keeps inert
 
-Status: carried into v0.116.0 at the v0.115.0 GA on 2026-10-29, not started: the owner asked for the GA before it was built, and by the roadmap lifecycle an unbuilt row moves to the next version.
+Status: carried into v0.117.0 at the v0.116.0 GA on 2026-10-30, not started: the check is still red alone at the GA's base and tip (the launcher's carousel keeps the card inert), and no one took the row in the v0.116.0 round.
+
+Record before the release: carried into v0.116.0 at the v0.115.0 GA on 2026-10-29, not started: the owner asked for the GA before it was built, and by the roadmap lifecycle an unbuilt row moves to the next version.
 
 Record before the release: accepted for v0.115.0 by the owner's word of 2026-10-28; not started.
 

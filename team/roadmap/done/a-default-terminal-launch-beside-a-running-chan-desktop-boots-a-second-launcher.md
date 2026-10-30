@@ -1,6 +1,8 @@
 # A default-terminal launch beside a running chan-desktop boots a second launcher
 
-Status: built on `desktop/terminal-prototypes` on 2026-10-29 (commit `2d5944560`); read against the built app on macOS by the owner and through `xdg-terminal-exec` on Linux on 2026-10-30 (the section Built and verified); no item was written while it was built, so this record is written from the commit and the readings; closes at the GA.
+Status: shipped in [v0.116.0](../../release/release-v0.116.0.md); the section Built and verified holds the macOS and Linux readings. Not read: the shutdown refusal, the opt-out beside a running desktop, a handoff the desktop refuses.
+
+Record before the release: built on `desktop/terminal-prototypes` on 2026-10-29 (commit `2d5944560`); read against the built app on macOS by the owner and through `xdg-terminal-exec` on Linux on 2026-10-30 (the section Built and verified); no item was written while it was built, so this record is written from the commit and the readings; closes at the GA.
 
 ## What was seen
 

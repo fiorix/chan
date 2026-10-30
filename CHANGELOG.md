@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.116.0] - 2026-10-30
+
+v0.116.0 ships the terminal prototypes round: a see-through terminal background for chan-desktop's local terminal windows, a default-terminal launch beside a running chan-desktop that opens a terminal window in that desktop instead of a second launcher, and secret masking on the ghostty backend. Beside them, every ghostty terminal owns its WASM instance, wheel input in a full-screen app is paced like xterm.js, the mouse-driven entry into Hybrid Nav is gone, a settings write in one window reaches every open window, and `cs terminal list` reports a standalone terminal's directory outside the home. The browser check 95 row and the local `cs tunnel` toast row move to v0.117.0 unbuilt.
+
+### Added
+
+- **Terminal background opacity.** `terminal.background_opacity` in `server.toml`, a whole percent from 80 to 100 with 100 the default and opaque, set with `chan config set terminal.background_opacity N` or the Settings > Terminal > Background opacity slider in steps of one. chan-desktop builds every local standalone terminal window and the default-terminal window transparent, and the page paints the terminal background at the chosen alpha, so the desktop behind the window shows through the terminal body while the text, the tab strip and the frames around panes stay opaque; the setting applies live to every open terminal window, and on macOS the title bar stays opaque. Workspace windows, devserver windows, control terminals and browser tabs stay opaque. Linux needs a compositor.
+- **A default-terminal launch hands off to the running chan-desktop.** A bare `chan-desktop`, or one with `--dir` alone (`xdg-terminal-exec` with no command, Omarchy's Super+Return), beside a running chan-desktop opens a terminal window in that desktop with one shell in the launch's directory and exits 0; the window is not restored at the next launch. `-e`, `--hold`, `--app-id` and `--title` keep their own process, and `CHAN_NO_DESKTOP_HANDOFF=1` opts out. With no desktop running the launch goes on as before.
+- **Secret masking on the ghostty backend.** The on-screen masking of secret-looking `NAME=value` values, until now xterm.js only, paints on ghostty terminals too: the tab menu row and the per-tab toggle work on both backends, and a control terminal with masking on uses the configured backend instead of being held on xterm.js. A scrollback line filled to its last column is read as wrapping, so a full hard-ended line can mask into the next line's first word.
+
+### Changed
+
+- **Hybrid Nav is keyboard-only.** A drag or a double-click on the empty stretch of a pane's tab bar no longer enters Hybrid Nav's mouse mode; the mode is entered from the pane menu or its chord, and dragging a tab between panes is unchanged.
+- **A settings change reaches every open window.** chan-desktop and the devserver watch the config files for every tenant they mount, so `chan config set`, a hand edit or a Settings write in one window reaches the other open windows at once instead of at their next restart.
+- **The ghostty backend hint says a reload applies the switch.** Open terminals switch backend when their window reloads; new terminals switch at once.
+
+### Fixed
+
+- **A new ghostty terminal could show a closed terminal's screen.** The pinned ghostty-web build does not zero the pages it allocates and every terminal shared one instance; each terminal now has its own WASM instance, released with the terminal.
+- **Scrolling inside a full-screen app under ghostty was far too sensitive.** Wheel input with the app owning the wheel is paced as xterm.js paces it: a pixel delta becomes rows on the cell height, trackpad deltas are scaled, the fraction carries over, and one report or arrow goes per whole row.
+- **A focused ghostty terminal in a see-through window showed a blinking white bar down its left edge.** The browser caret of the terminal host is hidden; the terminal draws its own cursor.
+- **`cs terminal list` showed no directory for a standalone terminal outside the home.** The report accepts the shell's live directory under the directory the terminal was started in, so a handoff into `/tmp/x`, `cs terminal new /tmp/x` or a terminal opened from the file browser lists its directory.
+- **A settings slider moved under the pointer while it saved.** The value label keeps its widest width and a save flashes the value instead of putting a note in the row.
+
 ## [v0.115.0] - 2026-10-29
 
 v0.115.0 ships three of its four rows: `cs tunnel` opens several tunnels in one command, with port ranges, one all-or-nothing group and a devserver-wide cap; on the Linux and Windows desktop pane navigation moves to Alt+[ and Alt+] and the splits to Ctrl+Alt+/ and Ctrl+Alt+?, so both work with a terminal focused; and the manual says Super is not a shortcut modifier on the Linux and FreeBSD desktop. The browser check 95 repair moves to the next version.

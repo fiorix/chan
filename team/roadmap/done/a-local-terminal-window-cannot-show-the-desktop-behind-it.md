@@ -1,6 +1,8 @@
 # A local terminal window cannot show the desktop behind it
 
-Status: built on `desktop/terminal-prototypes` by 2026-10-30 (commits `1b66ab60f`, `fc97aef28`, `cff4cb0a1`, `25165529a`, `e63b637f1`); read by eye on macOS by the owner and measured on Linux under a compositor on 2026-10-30 (the section Built and verified); no item was written while it was built, so this record is written from the commits and the readings; the owner then found a macOS window opaque at a setting below 100, and every local terminal window is now built transparent (the section Every local terminal window is built transparent); closes at the GA.
+Status: shipped in [v0.116.0](../../release/release-v0.116.0.md); the section Built and verified holds the macOS and Linux readings, and the record of 2026-10-30 after it the change that builds every local terminal window transparent so the setting applies live. Not read by eye: the light theme in a see-through window; FreeBSD and Windows.
+
+Record before the release: built on `desktop/terminal-prototypes` by 2026-10-30 (commits `1b66ab60f`, `fc97aef28`, `cff4cb0a1`, `25165529a`, `e63b637f1`); read by eye on macOS by the owner and measured on Linux under a compositor on 2026-10-30 (the section Built and verified); no item was written while it was built, so this record is written from the commits and the readings; the owner then found a macOS window opaque at a setting below 100, and every local terminal window is now built transparent (the section Every local terminal window is built transparent); closes at the GA.
 
 ## What was asked
 

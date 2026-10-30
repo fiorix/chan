@@ -21,21 +21,28 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.116.0
+### v0.117.0
 
-Opened 2026-10-29 at the v0.115.0 GA, which carries one row into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), raised the day after the v0.114.0 GA and not started when the owner asked for the v0.115.0 GA. Secret masking under the ghostty backend was raised 2026-10-30 ([ghmask]). A local desktop terminal's `cs tunnel` naming its failure only in a toast was raised 2026-10-30 ([tuntoast]).
+Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a second time, and a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), raised 2026-10-30 and not started.
 
 | Item | State | Next |
 | --- | --- | --- |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
-| [Ghostty masks no secrets][ghmask] | built | review |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 
-[chk95]: v0.116.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
-[ghmask]: v0.116.0/secret-masking-does-nothing-under-the-ghostty-backend.md
-[tuntoast]: v0.116.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
+[chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
+[tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
 
 ## Completed
+
+### v0.116.0
+
+Shipped 2026-10-30; see [release-v0.116.0](../release/release-v0.116.0.md). Of the six rows the version held, four shipped with no release candidate, from the `desktop/terminal-prototypes` branch merged for the GA: a see-through terminal background for the desktop's local terminal windows, the default-terminal handoff to a running chan-desktop, `cs terminal list` reporting a standalone terminal's directory, and secret masking on the ghostty backend; those four are in [`done/`](done/). Browser check 95 moved to v0.117.0 unbuilt for the second time, and the local `cs tunnel` toast row moved with it, not started.
+
+- [a-default-terminal-launch-beside-a-running-chan-desktop-boots-a-second-launcher](done/a-default-terminal-launch-beside-a-running-chan-desktop-boots-a-second-launcher.md) - A default-terminal launch beside a running chan-desktop boots a second launcher.
+- [a-local-terminal-window-cannot-show-the-desktop-behind-it](done/a-local-terminal-window-cannot-show-the-desktop-behind-it.md) - A local terminal window cannot show the desktop behind it.
+- [cs-terminal-list-hides-the-directory-of-a-standalone-terminal-outside-the-home](done/cs-terminal-list-hides-the-directory-of-a-standalone-terminal-outside-the-home.md) - cs terminal list hides the directory of a standalone terminal outside the home.
+- [secret-masking-does-nothing-under-the-ghostty-backend](done/secret-masking-does-nothing-under-the-ghostty-backend.md) - Secret masking does nothing under the ghostty backend.
 
 ### v0.115.0
 

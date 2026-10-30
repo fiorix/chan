@@ -1,6 +1,8 @@
 # cs terminal list hides the directory of a standalone terminal outside the home
 
-Status: raised by the owner on 2026-10-30 from the Linux reading of the default-terminal handoff; fixed on `desktop/terminal-prototypes` the same day (the section Built and verified); closes at the GA.
+Status: shipped in [v0.116.0](../../release/release-v0.116.0.md); the section Built and verified 2026-10-30 holds the evidence.
+
+Record before the release: raised by the owner on 2026-10-30 from the Linux reading of the default-terminal handoff; fixed on `desktop/terminal-prototypes` the same day (the section Built and verified); closes at the GA.
 
 ## What was seen
 

@@ -1,6 +1,8 @@
 # Secret masking does nothing under the ghostty backend
 
-Status: accepted for v0.116.0 by the owner's word of 2026-10-30; built on `v0116/ghostty-mask` the same day; the macOS desktop read by eye is open.
+Status: shipped in [v0.116.0](../../release/release-v0.116.0.md); the section Built on `v0116/ghostty-mask`, 2026-10-30 holds the evidence, and the owner read the masking on the macOS desktop on 2026-10-30. Not read: the cosmetic overlap of a last-column mask with ghostty's overlay scrollbar thumb.
+
+Record before the release: accepted for v0.116.0 by the owner's word of 2026-10-30; built on `v0116/ghostty-mask` the same day; the macOS desktop read by eye is open.
 
 ## What was asked
 
