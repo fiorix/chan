@@ -3,14 +3,20 @@
 //! session's output bytes and ticked by the registry's drainer. It keeps no
 //! clock of its own: every call takes the moment it happens at.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chan_tmux::{Client, Command, Event, Limits, Message, Token, Version};
+use chan_tmux::{Client, Command, Event, Limits, Message, PaneId, Token, Version};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use super::tmux_connection::{self, Step, TmuxConnection, TmuxWork, WorkDone};
+use super::{PtyCommand, TerminalExit, TmuxConnectionId};
 use crate::config::TerminalTmuxConfig;
+
+/// Numbers connections across the process.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
 /// How long an unanswered question stands before it is a deny.
 pub const QUESTION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -67,17 +73,19 @@ pub enum TmuxAnswer {
 }
 
 /// What the session does after a feed, an answer or a tick.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum Action {
     /// Write these bytes to the PTY, as one write.
     Write(Vec<u8>),
     /// Show this line of chan's own to the user, in the terminal.
     Notice(String),
+    /// Something the registry does for the connection, off the gate lock.
+    Work(TmuxWork),
 }
 
 /// What a feed hands back: the bytes that go on to the ring, and the
 /// actions the feed decided.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(super) struct Fed {
     pub passthrough: Vec<u8>,
     pub actions: Vec<Action>,
@@ -100,8 +108,12 @@ enum Phase {
         deadline: Instant,
         probe: Option<Token>,
     },
-    /// Connected to a tmux at or past the floor.
-    Connected { version: Version },
+    /// Connected to a tmux at or past the floor: the connection keeps its
+    /// windows and panes.
+    Connected {
+        version: Version,
+        connection: Box<TmuxConnection>,
+    },
     /// Denied or ended: protocol lines are swallowed until `%exit` or the
     /// deadline, so none of them draw.
     Draining { deadline: Instant },
@@ -112,6 +124,8 @@ enum Phase {
 pub(super) struct TmuxGate {
     client: Client,
     policy: TerminalTmuxConfig,
+    /// The terminal scrollback setting, which sizes a pane's capture.
+    scrollback_mb: u32,
     phase: Phase,
     /// An earlier answer of allow-for-tab; dies with the session.
     allow_for_tab: bool,
@@ -120,13 +134,14 @@ pub(super) struct TmuxGate {
 }
 
 impl TmuxGate {
-    pub(super) fn new(policy: TerminalTmuxConfig) -> Self {
+    pub(super) fn new(policy: TerminalTmuxConfig, scrollback_mb: u32) -> Self {
         let mut client = Client::new(Limits::default());
         client.arm(policy.enabled);
         let (published, _) = watch::channel(Arc::new(TmuxConsentSnapshot::default()));
         Self {
             client,
             policy,
+            scrollback_mb,
             phase: Phase::Plain,
             allow_for_tab: false,
             published,
@@ -151,9 +166,77 @@ impl TmuxGate {
     /// The connected tmux's version, once connected.
     #[cfg(test)]
     pub(super) fn connected_version(&self) -> Option<Version> {
-        match self.phase {
-            Phase::Connected { version } => Some(version),
+        match &self.phase {
+            Phase::Connected { version, .. } => Some(*version),
             _ => None,
+        }
+    }
+
+    /// The connection, while connected.
+    #[cfg(test)]
+    pub(super) fn connection(&self) -> Option<&TmuxConnection> {
+        match &self.phase {
+            Phase::Connected { connection, .. } => Some(connection),
+            _ => None,
+        }
+    }
+
+    /// The registry answered a piece of the connection's work.
+    pub(super) fn work_done(&mut self, done: WorkDone, now: Instant) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if let Phase::Connected { connection, .. } = &mut self.phase {
+            let steps = connection.on_work_done(done);
+            if let Err(error) = drive(&mut self.client, connection, steps, &mut actions) {
+                self.end_control(
+                    &format!("tmux control mode ended: {error}"),
+                    &mut actions,
+                    now,
+                );
+            }
+        }
+        actions
+    }
+
+    /// A pane session's command, from the gateway thread.
+    pub(super) fn pane_command(
+        &mut self,
+        pane: PaneId,
+        command: PtyCommand,
+        now: Instant,
+    ) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if let Phase::Connected { connection, .. } = &mut self.phase {
+            let steps = connection.on_pane_command(pane, command);
+            if let Err(error) = drive(&mut self.client, connection, steps, &mut actions) {
+                self.end_control(
+                    &format!("tmux control mode ended: {error}"),
+                    &mut actions,
+                    now,
+                );
+            }
+        }
+        actions
+    }
+
+    /// The control session's process ended: whatever tmux did not say, the
+    /// connection is over.
+    pub(super) fn control_exited(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        self.end_connection(TerminalExit::Unknown, &mut actions);
+        if !matches!(self.phase, Phase::Plain) {
+            self.reset();
+        }
+        actions
+    }
+
+    /// End the connection's panes and windows, if there is one.
+    fn end_connection(&mut self, exit: TerminalExit, actions: &mut Vec<Action>) {
+        if let Phase::Connected { connection, .. } = &mut self.phase {
+            for step in connection.on_end(exit) {
+                if let Step::Action(action) = step {
+                    actions.push(action);
+                }
+            }
         }
     }
 
@@ -336,11 +419,30 @@ impl TmuxGate {
                         .and_then(|text| Version::parse(&text));
                     match version {
                         Some(version) if version >= VERSION_FLOOR => {
-                            self.phase = Phase::Connected { version };
+                            let id =
+                                TmuxConnectionId(NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed));
+                            let (mut connection, rx) =
+                                TmuxConnection::new(id, version, self.scrollback_mb);
                             actions.push(Action::Notice(format!(
                                 "tmux {}.{} control mode",
                                 version.major, version.minor
                             )));
+                            actions.push(Action::Work(TmuxWork::StartGateway { rx }));
+                            let steps = connection.start();
+                            if let Err(error) =
+                                drive(&mut self.client, &mut connection, steps, actions)
+                            {
+                                self.end_control(
+                                    &format!("tmux control mode ended: {error}"),
+                                    actions,
+                                    now,
+                                );
+                                return;
+                            }
+                            self.phase = Phase::Connected {
+                                version,
+                                connection: Box::new(connection),
+                            };
                         }
                         Some(version) => self.end_control(
                             &format!(
@@ -363,10 +465,19 @@ impl TmuxGate {
                 Event::Exited { reason, .. } => self.exited("tmux", reason, actions),
                 _ => {}
             },
-            Phase::Connected { version } => {
+            Phase::Connected {
+                version,
+                connection,
+            } => {
                 if let Event::Exited { reason, .. } = event {
                     let what = format!("tmux {}.{}", version.major, version.minor);
+                    self.end_connection(TerminalExit::Code { code: 0 }, actions);
                     self.exited(&what, reason, actions);
+                    return;
+                }
+                let steps = tmux_connection::event_steps(connection, event);
+                if let Err(error) = drive(&mut self.client, connection, steps, actions) {
+                    self.end_control(&format!("tmux control mode ended: {error}"), actions, now);
                 }
             }
             Phase::Draining { .. } => {
@@ -409,6 +520,7 @@ impl TmuxGate {
     /// Leave a control mode the peer answered in: detach, then swallow the
     /// protocol until its `%exit`.
     fn end_control(&mut self, notice: &str, actions: &mut Vec<Action>, now: Instant) {
+        self.end_connection(TerminalExit::Unknown, actions);
         if let Ok((_, detach)) = self.client.submit(&Command::Detach) {
             actions.push(Action::Write(detach));
         }
@@ -421,6 +533,7 @@ impl TmuxGate {
     /// Leave a stream that cannot be trusted any further: the bytes draw as
     /// plain output from here on.
     fn end(&mut self, notice: &str, actions: &mut Vec<Action>) {
+        self.end_connection(TerminalExit::Unknown, actions);
         actions.push(Action::Notice(notice.to_owned()));
         self.reset();
     }
@@ -438,6 +551,41 @@ impl TmuxGate {
             question,
         }));
     }
+}
+
+/// Submit the connection's commands through the client and collect its
+/// actions. A full queue keeps typed keys in the connection's backlog and
+/// drops anything else, which a later reply resubmits or the state replaces;
+/// any other refusal is the stream's and ends it.
+fn drive(
+    client: &mut Client,
+    connection: &mut TmuxConnection,
+    steps: Vec<Step>,
+    actions: &mut Vec<Action>,
+) -> Result<(), chan_tmux::Error> {
+    for step in steps {
+        match step {
+            Step::Action(action) => actions.push(action),
+            Step::Submit(command, purpose) => match client.submit(&command) {
+                Ok((token, bytes)) => {
+                    connection.submitted(token, purpose);
+                    actions.push(Action::Write(bytes));
+                }
+                Err(chan_tmux::Error::TooManyPending) => {
+                    if let Command::SendKeys { pane, bytes } = command {
+                        connection.backlog(pane, bytes);
+                    } else {
+                        tracing::debug!(?purpose, "tmux command queue full; dropped");
+                    }
+                }
+                Err(chan_tmux::Error::BadArgument(what)) => {
+                    tracing::warn!(what, ?purpose, "tmux command refused");
+                }
+                Err(error) => return Err(error),
+            },
+        }
+    }
+    Ok(())
 }
 
 /// The name and command line of a process, read from `/proc`.
@@ -507,7 +655,7 @@ mod tests {
             .iter()
             .filter_map(|a| match a {
                 Action::Write(bytes) => Some(bytes.clone()),
-                Action::Notice(_) => None,
+                Action::Notice(_) | Action::Work(_) => None,
             })
             .collect()
     }
@@ -517,7 +665,7 @@ mod tests {
             .iter()
             .filter_map(|a| match a {
                 Action::Notice(text) => Some(text.clone()),
-                Action::Write(_) => None,
+                Action::Write(_) | Action::Work(_) => None,
             })
             .collect()
     }
@@ -529,7 +677,7 @@ mod tests {
     #[test]
     fn a_local_tmux_enters_without_a_question_and_is_probed() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         let fed = gate.feed(b"$ tmux -CC\r\n", now, tmux);
         assert_eq!(fed.passthrough, b"$ tmux -CC\r\n");
         let fed = gate.feed(&entry(), now, tmux);
@@ -565,7 +713,7 @@ mod tests {
     #[test]
     fn another_foreground_asks_and_writes_nothing_meanwhile() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         let fed = gate.feed(&entry(), now, ssh);
         assert_eq!(fed.passthrough, SHOWN);
         assert!(fed.actions.is_empty());
@@ -582,7 +730,7 @@ mod tests {
     #[test]
     fn allow_replays_the_held_session_and_probes() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         let actions = gate.answer(TmuxAnswer::Allow, now);
         assert!(question(&gate).is_none(), "the question is withdrawn");
@@ -603,7 +751,7 @@ mod tests {
     #[test]
     fn deny_writes_one_newline_and_drains_until_exit() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         let actions = gate.answer(TmuxAnswer::Deny, now);
         assert_eq!(writes(&actions), vec![b"\n".to_vec()]);
@@ -618,7 +766,7 @@ mod tests {
     #[test]
     fn a_stream_that_breaks_while_draining_is_plain_from_the_next_read() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         gate.answer(TmuxAnswer::Deny, now);
         // A reply no command asked for: the framing is lost with the rest
@@ -632,7 +780,7 @@ mod tests {
     #[test]
     fn a_drain_that_never_sees_exit_ends_at_its_deadline() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         gate.answer(TmuxAnswer::Deny, now);
         gate.feed(b"%output %0 still here\r\n", now, ssh);
@@ -645,7 +793,7 @@ mod tests {
     #[test]
     fn no_answer_in_time_is_a_deny() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         assert!(gate
             .tick(now + QUESTION_TIMEOUT - Duration::from_secs(1))
@@ -662,7 +810,7 @@ mod tests {
     #[test]
     fn allow_for_tab_skips_the_next_question() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         gate.answer(TmuxAnswer::AllowForTab, now);
         gate.feed(b"%exit\r\n\x1b\\", now, ssh);
@@ -674,7 +822,7 @@ mod tests {
     #[test]
     fn a_trusted_name_enters_at_once() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &["ssh"]));
+        let mut gate = TmuxGate::new(policy(true, &["ssh"]), 10);
         let fed = gate.feed(&entry(), now, ssh);
         assert!(question(&gate).is_none());
         assert_eq!(writes(&fed.actions).len(), 2);
@@ -683,7 +831,7 @@ mod tests {
     #[test]
     fn an_unknown_foreground_asks_as_unknown() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, Foreground::default);
         assert_eq!(question(&gate).unwrap().program, "unknown");
     }
@@ -691,7 +839,7 @@ mod tests {
     #[test]
     fn disabled_passes_the_marker_through_as_bytes() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(false, &[]));
+        let mut gate = TmuxGate::new(policy(false, &[]), 10);
         let fed = gate.feed(&entry(), now, tmux);
         assert_eq!(fed.passthrough, entry());
         assert!(fed.actions.is_empty() && question(&gate).is_none());
@@ -700,7 +848,7 @@ mod tests {
     #[test]
     fn turning_off_leaves_a_live_connection_alone() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, tmux);
         gate.feed(
             b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n",
@@ -723,7 +871,7 @@ mod tests {
     #[test]
     fn a_peer_that_never_announces_a_session_gets_an_interrupt_and_plain_output_back() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(MARKER, now, tmux);
         assert!(gate
             .tick(now + PROBE_TIMEOUT - Duration::from_millis(1))
@@ -741,7 +889,7 @@ mod tests {
     #[test]
     fn a_peer_that_announces_but_never_answers_is_detached() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, tmux);
         let actions = gate.tick(now + PROBE_TIMEOUT);
         assert_eq!(writes(&actions), vec![b"detach-client\n".to_vec()]);
@@ -757,7 +905,7 @@ mod tests {
     #[test]
     fn a_version_below_the_floor_is_detached_with_the_reason() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, tmux);
         let fed = gate.feed(
             b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.1\r\n%end 2 3 1\r\n",
@@ -775,7 +923,7 @@ mod tests {
     #[test]
     fn a_hostile_stream_while_asking_draws_nothing_and_a_deny_ends_it() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         let mut hostile = MARKER.to_vec();
         hostile.extend_from_slice(
             b"%session-changed $0 x\r\n%output %0 \\033[31mpwned\r\n%window-add @9\r\n",
@@ -792,7 +940,7 @@ mod tests {
     #[test]
     fn a_flood_while_asking_is_a_deny() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, ssh);
         let line = b"%output %0 "
             .iter()
@@ -820,7 +968,7 @@ mod tests {
     #[test]
     fn a_broken_stream_ends_control_mode_with_its_error() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         gate.feed(&entry(), now, tmux);
         let fed = gate.feed(b"%window-add notanid\r\n", now, tmux);
         assert_eq!(
@@ -834,7 +982,7 @@ mod tests {
     #[test]
     fn snapshots_are_ordered_and_a_subscriber_sees_the_open_question() {
         let now = Instant::now();
-        let mut gate = TmuxGate::new(policy(true, &[]));
+        let mut gate = TmuxGate::new(policy(true, &[]), 10);
         let (first, mut rx) = gate.subscribe();
         assert_eq!(first.revision, 0);
         gate.feed(&entry(), now, ssh);
