@@ -32,9 +32,13 @@ pub struct Limits {
 }
 
 impl Default for Limits {
+    /// A capture row carries one cell's escapes beside each character, and a
+    /// cell can hold a hyperlink of about 1 KiB after tmux's own trimming, so
+    /// the line bound holds a row of the widest pane a size command may ask
+    /// for (10,000 cells) at 1.1 KiB a cell.
     fn default() -> Self {
         Self {
-            max_line: 256 * 1024,
+            max_line: 12 * 1024 * 1024,
             max_block_bytes: 64 * 1024 * 1024,
             max_block_lines: 200_000,
         }
@@ -53,11 +57,10 @@ pub enum Expect {
     /// follows it in the same command line.
     PaneState,
     /// Pane rows: `min(history_rows, history_size) + pane_height` of them as
-    /// the pane state just before it reported, or `pane_height` alone for a
-    /// capture of the saved screen, which asks for no history. A capture
-    /// with no pane state before it, or whose pane state failed, ends the
-    /// stream: the pane is gone and its reply cannot be sized.
-    Capture { history_rows: u32, alternate: bool },
+    /// the pane state just before it reported. A capture with no pane state
+    /// before it, or whose pane state failed, ends the stream: the pane is
+    /// gone and its reply cannot be sized.
+    Capture { history_rows: u32 },
 }
 
 /// One unit of decoded stream.
@@ -125,6 +128,9 @@ pub struct Decoder {
     armed: bool,
     /// Bytes of [`MARKER`] matched so far while plain.
     matched: usize,
+    /// A half-matched marker released by a disarm, passed through ahead of
+    /// the next read.
+    released: Vec<u8>,
     line: Vec<u8>,
     open: Option<Open>,
     expect: VecDeque<Expect>,
@@ -143,6 +149,7 @@ impl Decoder {
             state: State::Plain,
             armed: false,
             matched: 0,
+            released: Vec::new(),
             line: Vec::new(),
             open: None,
             expect: VecDeque::new(),
@@ -163,10 +170,11 @@ impl Decoder {
     /// decoder only when the user asked for control mode.
     pub fn arm(&mut self, armed: bool) {
         self.armed = armed;
-        if !armed {
-            // A half-matched marker stays in the stream as ordinary bytes the
-            // next time they are flushed.
-            self.matched = self.matched.min(MARKER.len() - 1);
+        if !armed && self.matched > 0 {
+            // A half-matched marker is ordinary bytes now, even if the
+            // decoder is armed again before the next read.
+            self.released.extend_from_slice(&MARKER[..self.matched]);
+            self.matched = 0;
         }
     }
 
@@ -206,7 +214,7 @@ impl Decoder {
     }
 
     fn feed_inner(&mut self, input: &[u8], out: &mut Vec<Frame>) -> Result<(), Error> {
-        let mut pass: Vec<u8> = Vec::new();
+        let mut pass: Vec<u8> = std::mem::take(&mut self.released);
         let mut i = 0;
         while i < input.len() {
             match self.state {
@@ -328,18 +336,11 @@ impl Decoder {
                 Expect::Any => (None, false),
                 Expect::Rows(n) => (Some(n), false),
                 Expect::PaneState => (None, true),
-                Expect::Capture {
-                    history_rows,
-                    alternate,
-                } => {
+                Expect::Capture { history_rows } => {
                     let state = pane_state.ok_or(Error::NoPaneState)?;
-                    let height = state.height as usize;
-                    let history = if alternate {
-                        0
-                    } else {
-                        history_rows.min(state.history_size) as usize
-                    };
-                    (Some(history + height), false)
+                    let rows =
+                        history_rows.min(state.history_size) as usize + state.height as usize;
+                    (Some(rows), false)
                 }
             };
             self.open = Some(Open {

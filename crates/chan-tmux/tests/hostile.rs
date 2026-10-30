@@ -70,7 +70,7 @@ fn too_many_rows_for_the_promise_fails_closed() {
 }
 
 #[test]
-fn a_short_reply_never_closes_and_runs_into_the_bound() {
+fn a_short_reply_never_closes_and_the_next_row_breaks_the_promise() {
     // The real terminator arriving early looks forged, so it is data; the
     // next row then exceeds the promise.
     let mut d = control(&[Expect::Rows(3)]);
@@ -303,10 +303,7 @@ fn state_block(hdr: &str, history_size: u32, height: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-const CAPTURE: Expect = Expect::Capture {
-    history_rows: 50,
-    alternate: false,
-};
+const CAPTURE: Expect = Expect::Capture { history_rows: 50 };
 
 #[test]
 fn a_capture_is_sized_by_the_state_before_it() {
@@ -332,25 +329,6 @@ fn a_capture_is_sized_by_the_state_before_it() {
     assert_eq!(b.lines.len(), 23);
     assert_eq!(b.lines[5], b"%end 100 8 1");
     assert!(matches!(&f[2], Frame::Line(l) if l == b"%output %7 after"));
-}
-
-#[test]
-fn an_alternate_capture_is_the_pane_height_alone() {
-    let mut d = control(&[
-        Expect::PaneState,
-        Expect::Capture {
-            history_rows: 50,
-            alternate: true,
-        },
-    ]);
-    let mut s = state_block("1 1 1", 500, 4);
-    s.extend_from_slice(b"%begin 1 2 1\r\na\r\nb\r\nc\r\nd\r\n%end 1 2 1\r\n");
-    let (f, r) = feed(&mut d, &s);
-    r.unwrap();
-    let Frame::Block(b) = &f[1] else {
-        panic!("{f:?}")
-    };
-    assert_eq!(b.lines.len(), 4);
 }
 
 #[test]
@@ -395,7 +373,6 @@ fn a_capture_past_the_block_bound_is_refused_not_fatal() {
     let big = Command::CapturePane {
         pane: PaneId(0),
         history_rows: 195_000,
-        alternate: false,
     };
     assert_eq!(
         c.submit(&big).unwrap_err(),
@@ -413,7 +390,6 @@ fn a_client_pairs_a_capture_with_its_state() {
         .submit(&Command::CapturePane {
             pane: PaneId(7),
             history_rows: 50,
-            alternate: false,
         })
         .unwrap();
     assert!(
@@ -439,6 +415,41 @@ fn a_client_pairs_a_capture_with_its_state() {
         other => panic!("{other:?}"),
     }
     assert_eq!(c.pending(), 0);
+}
+
+#[test]
+fn a_capture_row_of_the_widest_pane_fits_the_line_bound() {
+    // 10,000 cells, each a hyperlink of about 1 KiB plus its character.
+    let mut d = control(&[Expect::Any]);
+    let mut row = Vec::new();
+    for _ in 0..10_000 {
+        row.extend_from_slice(b"\x1b]8;;http://");
+        row.extend(std::iter::repeat_n(b'u', 1024));
+        row.extend_from_slice(b"\x1b\\x\x1b]8;;\x1b\\");
+    }
+    let mut s = b"%begin 1 1 1\r\n".to_vec();
+    s.extend_from_slice(&row);
+    s.extend_from_slice(b"\r\n%end 1 1 1\r\n");
+    let (f, r) = feed(&mut d, &s);
+    r.unwrap();
+    assert!(matches!(&f[0], Frame::Block(b) if b.lines[0].len() == row.len()));
+}
+
+#[test]
+fn disarming_then_rearming_between_reads_still_releases_the_bytes() {
+    let mut d = Decoder::new(Limits::default());
+    d.arm(true);
+    let mut out = Vec::new();
+    d.feed(b"\x1bP10", &mut out).unwrap();
+    d.arm(false);
+    d.arm(true);
+    d.feed(b"00p%begin 1 1 0\r\n", &mut out).unwrap();
+    assert_eq!(
+        out,
+        vec![Frame::Passthrough(b"\x1bP1000p%begin 1 1 0\r\n".to_vec())],
+        "the released half is plain, and so is the rest of the marker"
+    );
+    assert!(!d.in_control_mode());
 }
 
 #[test]
