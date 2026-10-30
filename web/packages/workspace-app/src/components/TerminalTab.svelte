@@ -192,6 +192,7 @@
     windowIsTransparent,
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
+  import { handleGhosttyControlV, handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -2306,6 +2307,18 @@
     }
   }
 
+  /// The tab's capture-phase paste: the PTY size reclaim on both backends,
+  /// then, under ghostty, a paste with no text on the clipboard (an image),
+  /// which ghostty-web would drop and xterm.js hands to the program
+  /// (ghosttyPaste.ts). Only a paste aimed at the renderer host: the composer
+  /// inside the tab takes its own pastes, images included.
+  function onTerminalPasteCapture(event: ClipboardEvent): void {
+    reclaimPtySize(event);
+    if (backend !== "ghostty" || !host) return;
+    if (!(event.target instanceof Node) || !host.contains(event.target)) return;
+    handleGhosttyEmptyPaste(event, term as GhosttyTerminal | null);
+  }
+
   function fitToHost(): void {
     if (!active) return;
     gridMeasured = runTerminalFit(fit, term, (detail) => {
@@ -2760,9 +2773,11 @@
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
     // does not consume the keystroke.
     if (shouldEscapeTerminal(e)) return false;
-    // ghostty-web currently collapses Shift+Enter to plain Enter. Preserve
-    // chan's LF fallback while its remaining keys stay on Ghostty's encoder.
+    // ghostty-web drops a bare Ctrl+V with its paste chords and collapses
+    // Shift+Enter to plain Enter. Send the control byte and chan's LF
+    // fallback here while the remaining keys stay on Ghostty's encoder.
     if (backend === "ghostty") {
+      if (!handleGhosttyControlV(e, sendUserInput)) return false;
       return handleGhosttyShiftEnter(e, sendUserInput);
     }
     // xterm leaves Ctrl+/ unencoded. Resolve the layout's symbol before
@@ -2861,7 +2876,7 @@
   onkeydown={onShellKeydown}
   onkeydowncapture={reclaimPtySize}
   onpointerdowncapture={reclaimPtySize}
-  onpastecapture={reclaimPtySize}
+  onpastecapture={onTerminalPasteCapture}
   onfocusin={noteKeyboardSurface}
   oncontextmenu={onTerminalContextMenu}
 >

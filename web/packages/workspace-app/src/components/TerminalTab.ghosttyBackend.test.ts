@@ -26,6 +26,10 @@ const ghostty = vi.hoisted(() => {
     focusEvents: false,
     // A renderer without the private hooks the mask painter binds to.
     bareRenderer: false,
+    // Whether the program asked for bracketed paste (DECSET 2004), and
+    // every text the component pasted through ghostty-web.
+    bracketedPaste: false,
+    pastes: [] as string[],
   };
   /// ghostty-web's own render, as the painter finds it on the renderer.
   function fakeRender() {}
@@ -74,11 +78,17 @@ const ghostty = vi.hoisted(() => {
       return record.focusEvents;
     }
     getMode(mode: number) {
+      if (mode === 2004) return record.bracketedPaste;
       return mode === 1 ? this.applicationCursorKeys : false;
+    }
+    hasBracketedPaste() {
+      return record.bracketedPaste;
     }
     write() {}
     writeln() {}
-    paste() {}
+    paste(text: string) {
+      record.pastes.push(text);
+    }
     resize(cols: number, rows: number) {
       if (cols === this.cols && rows === this.rows) return;
       this.resized.push([cols, rows]);
@@ -212,6 +222,8 @@ beforeEach(() => {
     osc52: [],
     focusEvents: false,
     bareRenderer: false,
+    bracketedPaste: false,
+    pastes: [],
   });
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
 });
@@ -405,6 +417,14 @@ describe("keys", () => {
     expect(paste.event.defaultPrevented).toBe(false);
   });
 
+  test("a bare Ctrl+V sends the control byte, before ghostty would drop it with its paste chords", async () => {
+    const { term, socket } = await mountGhostty();
+    const { event, claimed } = key(term, { key: "v", code: "KeyV", ctrlKey: true });
+    expect(claimed).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data)).toEqual(["\x16"]);
+  });
+
   test("Shift+Enter sends chan's line feed, before ghostty would send Enter", async () => {
     const { term, socket } = await mountGhostty();
     const { claimed } = key(term, { key: "Enter", shiftKey: true });
@@ -568,5 +588,44 @@ describe("secret masking", () => {
     const { target } = await mountGhostty();
     expect(ui.status).toBe("Secret masking stopped working in this terminal");
     expect(await spawned(target)).toMatchObject({ masking: "Secret masking: off" });
+  });
+});
+
+
+/// A paste event as the browser delivers it on the renderer host, its
+/// clipboard text stood in (jsdom builds no ClipboardEvent of its own).
+function pasteOn(element: Element, text: string): Event {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+  });
+  element.dispatchEvent(event);
+  return event;
+}
+
+describe("paste", () => {
+  test("a paste with no text reaches the program as an empty bracketed paste, which ghostty-web would drop", async () => {
+    ghostty.record.bracketedPaste = true;
+    const { target } = await mountGhostty();
+    const host = target.querySelector(".terminal-host")!;
+    const event = pasteOn(host, "");
+    expect(event.defaultPrevented).toBe(true);
+    expect(ghostty.record.pastes).toEqual([""]);
+  });
+
+  test("without bracketed paste an empty paste sends nothing; a paste with text stays ghostty-web's", async () => {
+    const { target } = await mountGhostty();
+    const host = target.querySelector(".terminal-host")!;
+    expect(pasteOn(host, "").defaultPrevented).toBe(true);
+    expect(pasteOn(host, "hello").defaultPrevented).toBe(false);
+    expect(ghostty.record.pastes).toEqual([]);
+  });
+
+  test("a paste outside the renderer host, the composer's, is not the terminal's", async () => {
+    ghostty.record.bracketedPaste = true;
+    const { target } = await mountGhostty();
+    const event = pasteOn(target.querySelector(".terminal-tab")!, "");
+    expect(event.defaultPrevented).toBe(false);
+    expect(ghostty.record.pastes).toEqual([]);
   });
 });

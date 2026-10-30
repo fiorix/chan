@@ -384,6 +384,45 @@ export default {
       }
     }
 
+    /// The PTY-side witness for chan's two ghostty paste repairs. The shell
+    /// prints DECSET 2004 so the terminal is in bracketed paste, and starts
+    /// `cat -v` with the tty's literal-next undefined, since a cooked tty
+    /// would otherwise eat the 0x16 byte as lnext. A paste event with an
+    /// empty DataTransfer stands in for an image-only clipboard; both
+    /// ghostty-web's listener and chan's capture listener handle it as a
+    /// user's. The control byte comes from a real keydown on ghostty's
+    /// textarea. Each probe ends in Enter so cooked cat echoes its line.
+    async function probePasteParity(tab) {
+      const ready = `G98_PASTE_${Date.now().toString(36)}`;
+      await cs(["write", "--tab-name", tab,
+        `printf '\\033[?2004h'; sh -c 'stty lnext undef; printf "${ready}_%s\\n" READY; exec cat -v'\n`]);
+      await waitScrollback(tab, `${ready}_READY`);
+      await page.evaluate(() => {
+        const textarea = document.querySelector(".terminal-tab .terminal-host textarea");
+        if (!(textarea instanceof HTMLTextAreaElement)) {
+          throw new Error("ghostty textarea missing for the paste probe");
+        }
+        textarea.focus();
+        textarea.dispatchEvent(new ClipboardEvent("paste", {
+          clipboardData: new DataTransfer(), bubbles: true, cancelable: true,
+        }));
+      });
+      await page.keyboard.press("Enter");
+      await waitScrollback(tab, "^[[200~^[[201~");
+      await page.keyboard.down("Control");
+      await page.keyboard.press("KeyV");
+      await page.keyboard.up("Control");
+      await page.keyboard.press("Enter");
+      await waitScrollback(tab, "^V");
+      // Leave cat and bracketed paste before the later shell-command legs.
+      await cs(["write", "--tab-name", tab, "\u0003"]);
+      await sleep(500);
+      await cs(["write", "--tab-name", tab,
+        `printf '\\033[?2004l${MARK_PREFIX}PASTE_%s\\n' ${MARK_ARG}\n`]);
+      await waitScrollback(tab, `${MARK_PREFIX}PASTE_${MARK_ARG}`);
+      return { emptyBracketedPaste: true, controlV: true };
+    }
+
     /// A real ghostty keydown reaches the hidden textarea under the host.
     /// Override only the live userAgent while dispatching so TerminalTab's
     /// currentOS() takes the macOS policy branch on this Linux Chrome host.
@@ -556,6 +595,13 @@ export default {
       // ---- Leg 3: KEYS -- macOS host chords bypass ghostty ----
       details.keyLeg = await probeHostOwnedKeys(TAB_G);
       await ctx.shot("ghostty-host-owned-keys");
+
+      // ---- Leg 3b: PASTE -- an empty paste and a bare Ctrl+V reach the PTY ----
+      // What a program needs to take an image from the clipboard, as xterm.js
+      // sends it: the empty bracketed paste and the 0x16 byte. ghostty-web
+      // alone drops both; chan's ghosttyPaste.ts restores them.
+      details.pasteLeg = await probePasteParity(TAB_G);
+      await ctx.shot("ghostty-paste-parity");
 
       // ---- Leg 4: OSC52 clipboard copy reaches the system clipboard ----
       await page.evaluate(
