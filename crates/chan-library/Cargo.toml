@@ -58,6 +58,12 @@ tokio = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 
+# The name of the process holding a PTY's foreground on macOS and FreeBSD,
+# where there is no /proc to read; the tmux gate's marker policy needs it.
+# Linux reads /proc and compiles this only for the test of the shared path.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))'.dependencies]
+sysinfo = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # `terminal.profiles` is an array-of-tables, a shape only TOML has. The struct
