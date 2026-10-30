@@ -427,12 +427,12 @@ pub const TERMINAL_SCROLLBACK_MB_MAX: u32 = 50;
 pub const TERMINAL_FONT_SIZE_MIN: u32 = 8;
 pub const TERMINAL_FONT_SIZE_MAX: u32 = 32;
 
-/// Inclusive terminal background-opacity bounds, in percent. The floor keeps a
-/// faint tint behind the text so a fully clear window cannot be configured by
-/// accident. Mirrored in
+/// Inclusive terminal background-opacity bounds, in percent: 80 to 100, where
+/// 100, the default, is opaque (transparency off). The floor keeps the range
+/// to the faint end people use. Mirrored in
 /// `web/packages/workspace-app/src/terminal/backgroundOpacity.ts`; keep in
 /// lockstep.
-pub const TERMINAL_BACKGROUND_OPACITY_MIN: u32 = 10;
+pub const TERMINAL_BACKGROUND_OPACITY_MIN: u32 = 80;
 pub const TERMINAL_BACKGROUND_OPACITY_MAX: u32 = 100;
 
 #[cfg(test)]

@@ -886,12 +886,12 @@ mod tests {
 
         let in_range = sanitize_terminal_config(TerminalConfig {
             scrollback_mb: 25,
-            background_opacity: 80,
+            background_opacity: 90,
             default_term: "tmux-256color".into(),
             ..TerminalConfig::default()
         });
         assert_eq!(in_range.scrollback_mb, 25);
-        assert_eq!(in_range.background_opacity, 80);
+        assert_eq!(in_range.background_opacity, 90);
         assert_eq!(in_range.default_term, "tmux-256color");
     }
 

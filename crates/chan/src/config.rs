@@ -266,7 +266,7 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
     },
     ConfigKeySpec {
         key: "server.terminal.background_opacity",
-        kind: ConfigValueKind::U32Range(10, 100),
+        kind: ConfigValueKind::U32Range(80, 100),
     },
     ConfigKeySpec {
         key: "server.terminal.mcp_env",

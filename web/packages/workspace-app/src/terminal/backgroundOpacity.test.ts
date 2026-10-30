@@ -19,6 +19,7 @@ describe("clampBackgroundOpacity", () => {
   it("clamps to the slider bounds", () => {
     expect(clampBackgroundOpacity(0)).toBe(TERMINAL_BACKGROUND_OPACITY_MIN);
     expect(clampBackgroundOpacity(-5)).toBe(TERMINAL_BACKGROUND_OPACITY_MIN);
+    expect(clampBackgroundOpacity(79)).toBe(80);
     expect(clampBackgroundOpacity(250)).toBe(TERMINAL_BACKGROUND_OPACITY_MAX);
   });
 
@@ -62,15 +63,15 @@ function fakeRoot() {
 describe("markTerminalOpacityRoot", () => {
   it("marks a transparent window and makes the body see-through below 100", () => {
     const { root, props } = fakeRoot();
-    markTerminalOpacityRoot(root, true, 70);
+    markTerminalOpacityRoot(root, true, 85);
     expect(root.dataset.transparentWindow).toBe("");
     expect(root.dataset.terminalSeeThrough).toBe("");
-    expect(props.get(TERMINAL_OPACITY_VAR)).toBe("70%");
+    expect(props.get(TERMINAL_OPACITY_VAR)).toBe("85%");
   });
 
   it("keeps the body opaque at 100 but stays marked transparent", () => {
     const { root, props } = fakeRoot();
-    markTerminalOpacityRoot(root, true, 70);
+    markTerminalOpacityRoot(root, true, 85);
     markTerminalOpacityRoot(root, true, 100);
     expect(root.dataset.transparentWindow).toBe("");
     expect(root.dataset.terminalSeeThrough).toBeUndefined();
@@ -116,7 +117,8 @@ describe("effectiveBackgroundOpacity", () => {
   });
 
   it("returns the clamped percent in a transparent window", () => {
-    expect(effectiveBackgroundOpacity(75, true)).toBe(75);
+    expect(effectiveBackgroundOpacity(85, true)).toBe(85);
+    expect(effectiveBackgroundOpacity(75, true)).toBe(TERMINAL_BACKGROUND_OPACITY_MIN);
     expect(effectiveBackgroundOpacity(1, true)).toBe(TERMINAL_BACKGROUND_OPACITY_MIN);
   });
 });

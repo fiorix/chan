@@ -9,7 +9,7 @@
 /// Inclusive bounds the Settings slider exposes. Mirrored from the Rust
 /// constants in `crates/chan-library/src/config.rs`
 /// (`TERMINAL_BACKGROUND_OPACITY_MIN` / `TERMINAL_BACKGROUND_OPACITY_MAX`).
-export const TERMINAL_BACKGROUND_OPACITY_MIN = 10;
+export const TERMINAL_BACKGROUND_OPACITY_MIN = 80;
 export const TERMINAL_BACKGROUND_OPACITY_MAX = 100;
 
 /// The URL flag chan-desktop appends to a window it built transparent.
