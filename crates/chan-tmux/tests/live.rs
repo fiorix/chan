@@ -121,17 +121,8 @@ impl Live {
         }
     }
 
-    fn capture(
-        &mut self,
-        pane: PaneId,
-        history_rows: u32,
-        alternate: bool,
-    ) -> (PaneState, Vec<Vec<u8>>) {
-        let token = self.send(&Command::CapturePane {
-            pane,
-            history_rows,
-            alternate,
-        });
+    fn capture(&mut self, pane: PaneId, history_rows: u32) -> (PaneState, Vec<Vec<u8>>) {
+        let token = self.send(&Command::CapturePane { pane, history_rows });
         self.wait(|l| {
             l.events
                 .iter()
@@ -201,6 +192,9 @@ fn against_a_real_tmux() {
         "100%",
         "#(touch /tmp/chan-tmux-injected)",
         "##",
+        "-x",
+        "--",
+        "-t @0; kill-server",
     ] {
         let r = t.call(&Command::RenameWindow {
             window: WindowId(0),
@@ -247,14 +241,14 @@ fn against_a_real_tmux() {
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("\r\n120\r\n"));
     let state = parse_pane_state(&t.call(&Command::PaneState(pane)).unwrap()).unwrap();
     assert!(state.history_size >= 50, "{state:?}");
-    let (captured, rows) = t.capture(pane, 50, false);
+    let (captured, rows) = t.capture(pane, 50);
     assert_eq!(captured.height, state.height);
     assert_eq!(rows.len(), 50 + state.height as usize);
     assert!(rows.iter().any(|r| r == b"120"), "{rows:?}");
 
     // A capture that asks for more history than there is gets what there
     // is, sized by the state in the same command line.
-    let (captured, rows) = t.capture(pane, 100_000, false);
+    let (captured, rows) = t.capture(pane, 100_000);
     assert_eq!(
         rows.len(),
         (captured.history_size + captured.height) as usize
@@ -266,7 +260,7 @@ fn against_a_real_tmux() {
         t.call(&Command::ClientSize { cols: 80, rows: 10 }),
         Ok(vec![])
     );
-    let (captured, rows) = t.capture(pane, 50, false);
+    let (captured, rows) = t.capture(pane, 50);
     assert_eq!(captured.height, 10, "{captured:?}");
     assert_eq!(rows.len(), 50 + 10);
     assert_eq!(
@@ -274,14 +268,13 @@ fn against_a_real_tmux() {
         Ok(vec![])
     );
 
-    // The alternate screen: the normal capture is what is shown, with the
-    // history tmux still reports; the -a capture is the saved primary
-    // screen, without history.
+    // The alternate screen: the capture is what the pane shows, with the
+    // history tmux still reports above it.
     t.type_into(pane, b"printf '\\033[?1049h'; printf 'ALTSCREEN\\n'\r");
     // The echo of the typed line holds the word too; the output line does
     // not arrive until the command ran.
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("ALTSCREEN\r\n"));
-    let (captured, shown) = t.capture(pane, 50, false);
+    let (captured, shown) = t.capture(pane, 50);
     assert!(captured.alternate_on, "{captured:?}");
     assert_eq!(
         shown.len(),
@@ -290,12 +283,6 @@ fn against_a_real_tmux() {
     assert!(shown
         .iter()
         .any(|r| r.windows(9).any(|w| w == b"ALTSCREEN")));
-    let (captured, saved) = t.capture(pane, 0, true);
-    assert_eq!(saved.len(), captured.height as usize);
-    assert!(
-        saved.iter().any(|r| r == b"120"),
-        "the primary screen is behind it"
-    );
     // The empty quotes keep the echoed line from spelling the word.
     t.type_into(pane, b"printf '\\033[?1049l'; echo ba\"\"ck\r");
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("back\r\n"));
@@ -309,7 +296,7 @@ fn against_a_real_tmux() {
         b"for i in 1 2 3 4 5 6; do printf '%%end 1 2 1\\n%%error 1 2 1\\n%%exit\\n%%output %%0 owned\\n'; done\r",
     );
     t.wait(|l| String::from_utf8_lossy(&l.output_of(pane)).contains("\r\n%output %0 owned\r\n"));
-    let (state, rows) = t.capture(pane, 10, false);
+    let (state, rows) = t.capture(pane, 10);
     assert_eq!(
         rows.len(),
         (state.history_size.min(10) + state.height) as usize

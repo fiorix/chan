@@ -51,17 +51,18 @@ pub enum Command {
     ListWindows,
     ListPanes(WindowId),
     PaneState(PaneId),
-    /// The pane's screen with up to `history_rows` rows of scrollback above
-    /// it, answered as one [`Event::Capture`](crate::Event::Capture). The
-    /// line asks for the pane's state and then the rows, and tmux runs the
-    /// two together, so the state sizes the rows exactly: a resize or a
-    /// shorter history between them cannot leave the reply short.
-    /// `alternate` captures the screen tmux saved when the pane entered the
-    /// alternate screen, without history, so it needs `history_rows` 0.
+    /// The screen the pane shows, the alternate one while a program has it
+    /// on, with up to `history_rows` rows of scrollback above it, answered
+    /// as one [`Event::Capture`](crate::Event::Capture). The line asks for
+    /// the pane's state and then the rows, and tmux runs the two together,
+    /// so the state sizes the rows exactly: a resize or a shorter history
+    /// between them cannot leave the reply short. The screen tmux saved
+    /// under an alternate screen is not asked for: its capture (`-a`) is one
+    /// row when no alternate screen is on and keeps its old height after a
+    /// resize, so no promise fits it.
     CapturePane {
         pane: PaneId,
         history_rows: u32,
-        alternate: bool,
     },
     /// Keys as raw bytes. At most [`MAX_KEY_BYTES`]; see [`Command::send_keys`].
     SendKeys {
@@ -120,26 +121,18 @@ impl Command {
             Command::PaneState(pane) => {
                 format!("display-message -p -t {pane} '{PANE_STATE_FORMAT}'")
             }
-            Command::CapturePane {
-                pane,
-                history_rows,
-                alternate,
-            } => {
+            Command::CapturePane { pane, history_rows } => {
                 if *history_rows > 1_000_000 {
                     return Err(Error::BadArgument("capture range"));
-                }
-                if *alternate && *history_rows != 0 {
-                    return Err(Error::BadArgument("saved screen capture takes no history"));
                 }
                 let start = if *history_rows == 0 {
                     "0".to_owned()
                 } else {
                     format!("-{history_rows}")
                 };
-                let alt = if *alternate { " -a" } else { "" };
                 format!(
                     "display-message -p -t {pane} '{PANE_STATE_FORMAT}' ; \
-                     capture-pane -p -e -q{alt} -t {pane} -S {start} -E -"
+                     capture-pane -p -e -t {pane} -S {start} -E -"
                 )
             }
             Command::SendKeys { pane, bytes } => {
@@ -159,8 +152,10 @@ impl Command {
             Command::KillWindow(window) => format!("kill-window -t {window}"),
             Command::SelectWindow(window) => format!("select-window -t {window}"),
             Command::SelectPane(pane) => format!("select-pane -t {pane}"),
+            // tmux reads a quoted word that starts with `-` as flags, so the
+            // name goes after `--`.
             Command::RenameWindow { window, name } => {
-                format!("rename-window -t {window} {}", quote(name)?)
+                format!("rename-window -t {window} -- {}", quote(name)?)
             }
             Command::Detach => "detach-client".into(),
         })
@@ -175,15 +170,10 @@ impl Command {
     /// the rows it sizes.
     pub fn expects(&self) -> Vec<Expect> {
         match self {
-            Command::CapturePane {
-                history_rows,
-                alternate,
-                ..
-            } => vec![
+            Command::CapturePane { history_rows, .. } => vec![
                 Expect::PaneState,
                 Expect::Capture {
                     history_rows: *history_rows,
-                    alternate: *alternate,
                 },
             ],
             _ => vec![Expect::Any],

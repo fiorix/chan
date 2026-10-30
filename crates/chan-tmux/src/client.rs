@@ -159,6 +159,13 @@ impl Client {
         Ok((token, line))
     }
 
+    /// End the client. A caller whose write of a submitted command failed or
+    /// stopped short calls this: the command's reply is still expected, so
+    /// every later reply would pair with the wrong command.
+    pub fn fail(&mut self) {
+        self.failed = true;
+    }
+
     /// Decode bytes read from tmux.
     ///
     /// Any error ends the client: later calls return [`Error::Poisoned`].

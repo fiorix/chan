@@ -108,19 +108,17 @@ fn commands_render() {
     let capture = r(Command::CapturePane {
         pane: PaneId(0),
         history_rows: 50,
-        alternate: false,
     });
     assert!(
         capture.starts_with("display-message -p -t %0 '#{pane_id} ")
-            && capture.ends_with("#{history_size}' ; capture-pane -p -e -q -t %0 -S -50 -E -"),
+            && capture.ends_with("#{history_size}' ; capture-pane -p -e -t %0 -S -50 -E -"),
         "{capture}"
     );
     assert!(r(Command::CapturePane {
         pane: PaneId(0),
         history_rows: 0,
-        alternate: true,
     })
-    .ends_with(" ; capture-pane -p -e -q -a -t %0 -S 0 -E -"));
+    .ends_with(" ; capture-pane -p -e -t %0 -S 0 -E -"));
     assert_eq!(
         r(Command::SplitWindow {
             pane: PaneId(1),
@@ -139,17 +137,10 @@ fn only_a_capture_promises_rows() {
     let c = Command::CapturePane {
         pane: PaneId(0),
         history_rows: 50,
-        alternate: false,
     };
     assert_eq!(
         c.expects(),
-        vec![
-            Expect::PaneState,
-            Expect::Capture {
-                history_rows: 50,
-                alternate: false
-            }
-        ]
+        vec![Expect::PaneState, Expect::Capture { history_rows: 50 }]
     );
     for c in [
         Command::Version,
@@ -172,7 +163,7 @@ fn free_text_cannot_end_the_command_line() {
     };
     assert_eq!(
         name("it's a \"test\" $x; y").unwrap(),
-        "rename-window -t @0 'it'\\''s a \"test\" $x; y'"
+        "rename-window -t @0 -- 'it'\\''s a \"test\" $x; y'"
     );
     for bad in ["a\nb", "a\rb", "a\0b", "a\x1bb", "a\u{7f}b", "a\u{85}b"] {
         assert_eq!(
@@ -183,8 +174,9 @@ fn free_text_cannot_end_the_command_line() {
     }
     assert_eq!(
         name("#{pane_id} #(touch x)").unwrap(),
-        "rename-window -t @0 '##{pane_id} ##(touch x)'"
+        "rename-window -t @0 -- '##{pane_id} ##(touch x)'"
     );
+    assert_eq!(name("-x").unwrap(), "rename-window -t @0 -- '-x'");
     assert!(name(&"x".repeat(2000)).is_err());
     assert!(Command::NewWindow {
         cwd: Some("/tmp/a\nb".into())
@@ -205,14 +197,6 @@ fn sizes_and_ranges_are_checked() {
     assert!(Command::CapturePane {
         pane: PaneId(0),
         history_rows: 1_000_001,
-        alternate: false
-    }
-    .render()
-    .is_err());
-    assert!(Command::CapturePane {
-        pane: PaneId(0),
-        history_rows: 5,
-        alternate: true
     }
     .render()
     .is_err());
