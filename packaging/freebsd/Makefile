@@ -23,10 +23,13 @@ endif
 
 FREEBSD_SYSROOT_ABS := $(abspath $(FREEBSD_SYSROOT))
 FREEBSD_CFLAGS := --target=$(FREEBSD_ABI_TARGET) --sysroot=$(FREEBSD_SYSROOT_ABS)
+# libelf last: libkvm and libprocstat, which sysinfo links for the process
+# table, call it, and a static link names every archive an archive needs.
 FREEBSD_RUSTFLAGS := -C target-feature=+crt-static \
 	-C link-arg=--target=$(FREEBSD_ABI_TARGET) \
 	-C link-arg=--sysroot=$(FREEBSD_SYSROOT_ABS) \
-	-C link-arg=-fuse-ld=lld
+	-C link-arg=-fuse-ld=lld \
+	-C link-arg=-lelf
 TARBALL_NAME := chan-$(FREEBSD_TARGET).tar.gz
 TARBALL_STAGE := $(CHAN_REPO)/target/package/chan-$(FREEBSD_TARGET)
 TARBALL_PATH := $(CHAN_REPO)/target/release/$(TARBALL_NAME)
