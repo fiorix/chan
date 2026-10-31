@@ -23,12 +23,12 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.118.0
 
-Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]).
+Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]). The owner decided both browser-suite rows by survey on 2026-10-31: a browser client keeps the tmux control tab in its source window, and the twenty-three checks migrate to the directory view, with browser check 95 built in the same lane.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Browser cannot open a tmux control window][tmuxbrw] | proposed | decision |
-| [Browser checks drive the old Files tree][filesel] | proposed | decision |
+| [Browser cannot open a tmux control window][tmuxbrw] | accepted | build |
+| [Browser checks drive the old Files tree][filesel] | accepted | build |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
