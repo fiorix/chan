@@ -157,7 +157,7 @@ pub struct AppState {
     /// Per connected devserver (`Devserver.id`), the stop handle for its window
     /// watcher. Disconnect stops the watcher and closes that devserver's native
     /// windows; `mark_devserver_control_exited` retires the watcher while keeping
-    /// its windows for the user's reconnect or abandon decision.
+    /// ordinary windows for the user's reconnect or abandon decision.
     pub(crate) devserver_watchers:
         Mutex<HashMap<String, tokio::sync::watch::Sender<DevserverWatcherStop>>>,
     /// Per connected devserver (`Devserver.id`), its window-watcher view state,
@@ -618,7 +618,7 @@ impl AppState {
 #[derive(Default)]
 pub struct DevserverFeed {
     /// Devserver id -> its live window snapshot (shared with the watcher feed task).
-    windows: Mutex<HashMap<String, Arc<Mutex<Vec<chan_server::WindowRecord>>>>>,
+    windows: Mutex<HashMap<String, Arc<Mutex<window_watcher_wiring::DevserverWindowSnapshot>>>>,
     /// Devserver id -> its cached served workspaces (refreshed by the poll task).
     workspaces: Mutex<HashMap<String, Vec<chan_server::LauncherWorkspace>>>,
     /// Devserver id -> its cached pane-highlight colour (its own remote
@@ -663,7 +663,11 @@ pub struct DevserverFeed {
 impl DevserverFeed {
     /// Track a freshly-connected devserver's window snapshot so `windows()` sees
     /// it; the Arc is the one the watcher feed task mutates in place.
-    fn register_windows(&self, id: String, snapshot: Arc<Mutex<Vec<chan_server::WindowRecord>>>) {
+    fn register_windows(
+        &self,
+        id: String,
+        snapshot: Arc<Mutex<window_watcher_wiring::DevserverWindowSnapshot>>,
+    ) {
         self.windows.lock().unwrap().insert(id, snapshot);
     }
 
@@ -747,12 +751,13 @@ impl DevserverFeed {
     /// control record (which needs the library_id) wouldn't emit until a later
     /// window arrives.
     fn library_id_of(&self, id: &str) -> Option<String> {
-        let from_snapshot = self
-            .windows
-            .lock()
-            .unwrap()
-            .get(id)
-            .and_then(|s| s.lock().unwrap().first().map(|r| r.library_id.clone()));
+        let from_snapshot = self.windows.lock().unwrap().get(id).and_then(|s| {
+            s.lock()
+                .unwrap()
+                .windows
+                .first()
+                .map(|r| r.library_id.clone())
+        });
         if let Some(lib) = from_snapshot {
             self.library_ids
                 .lock()
@@ -817,6 +822,7 @@ impl DevserverFeed {
                 snapshot
                     .lock()
                     .unwrap()
+                    .windows
                     .iter()
                     .map(window_watcher::native_label)
                     .collect::<Vec<_>>()
@@ -831,6 +837,7 @@ impl DevserverFeed {
         self.windows.lock().unwrap().iter().find_map(|(id, snap)| {
             snap.lock()
                 .unwrap()
+                .windows
                 .iter()
                 .find(|r| window_watcher::native_label(r) == label)
                 .cloned()
@@ -847,6 +854,7 @@ impl DevserverFeed {
         self.windows.lock().unwrap().iter().find_map(|(id, snap)| {
             snap.lock()
                 .unwrap()
+                .windows
                 .iter()
                 .find(|r| r.window_id == window_id)
                 .cloned()
@@ -863,6 +871,7 @@ impl DevserverFeed {
         if let Some(id) = self.windows.lock().unwrap().iter().find_map(|(id, snap)| {
             snap.lock()
                 .unwrap()
+                .windows
                 .iter()
                 .any(|r| r.library_id == library_id)
                 .then(|| id.clone())
@@ -878,6 +887,17 @@ impl DevserverFeed {
 }
 
 impl chan_server::DevserverFeedSource for DevserverFeed {
+    fn tmux_connections(&self) -> Vec<chan_server::TmuxConnectionRecord> {
+        let down = self.down.lock().unwrap().clone();
+        self.windows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| !down.contains(*id))
+            .flat_map(|(_, snapshot)| snapshot.lock().unwrap().tmux_connections.clone())
+            .collect()
+    }
+
     fn windows(&self) -> Vec<chan_server::WindowRecord> {
         // A DOWN devserver (script exited / transport unreachable) serves no
         // window rows at all: every launcher affordance on them (open / hide /
@@ -889,7 +909,7 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
             .unwrap()
             .iter()
             .filter(|(id, _)| !down.contains(*id))
-            .flat_map(|(_, snapshot)| snapshot.lock().unwrap().clone())
+            .flat_map(|(_, snapshot)| snapshot.lock().unwrap().windows.clone())
             .collect();
         // While this desktop has buried a window, report it to the launcher as
         // disconnected with no holder list because the closed webview cannot
@@ -1044,7 +1064,7 @@ fn wire_devserver_watcher(
     conn: devserver::DevserverConn,
     (cancel, snapshot, view): (
         tokio::sync::watch::Sender<DevserverWatcherStop>,
-        Arc<Mutex<Vec<chan_server::WindowRecord>>>,
+        Arc<Mutex<window_watcher_wiring::DevserverWindowSnapshot>>,
         Arc<window_watcher::WatcherViewState>,
     ),
     rows: Option<Vec<devserver::DevserverWorkspaceRow>>,
@@ -1538,9 +1558,9 @@ fn mark_devserver_control_exited(app: &tauri::AppHandle, state: &AppState, id: &
         .lock()
         .unwrap()
         .insert(id.to_string());
-    // Retire the window watcher + workspace poll WITHOUT closing the workspace
-    // windows here; the caller decides their fate (kept windows drop their own
-    // `/ws` to the now-dead transport and show the DisconnectOverlay reconnect
+    // Retire the window watcher + workspace poll, closing tmux windows and
+    // keeping ordinary windows here; the caller decides their fate (kept
+    // windows drop their own `/ws` to the now-dead transport and show the DisconnectOverlay reconnect
     // spinner). Do NOT forget the feed or reap the control terminal, so the
     // launcher keeps rendering the flashing control row (a `control:true`
     // record under the devserver's `lib-` library) at "process exited".
@@ -8097,9 +8117,10 @@ mod tests {
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };
-        state
-            .devserver_feed
-            .register_windows("ds-1".to_string(), Arc::new(Mutex::new(vec![record])));
+        state.devserver_feed.register_windows(
+            "ds-1".to_string(),
+            Arc::new(Mutex::new(vec![record].into())),
+        );
         let ours = state.retarget_tickets.begin("lib-fed::w-1");
         let other = state.retarget_tickets.begin("lib-other::w-1");
         cancel_devserver_retargets(&state, "ds-1");
@@ -8575,25 +8596,28 @@ mod tests {
         use chan_server::DevserverFeedSource;
         let feed = DevserverFeed::default();
         let lib = "lib-deadbeef";
-        let snapshot = Arc::new(Mutex::new(vec![chan_server::WindowRecord {
-            window_id: "w-1".into(),
-            library_id: lib.into(),
-            kind: chan_server::WindowKind::Terminal,
-            title: "Terminal".into(),
-            ordinal: 1,
-            label: String::new(),
-            workspace_path: None,
-            prefix: "/lib".into(),
-            token: "tok".into(),
-            persisted: true,
-            connected: true,
-            holders: None,
-            active_transfer: false,
-            control: false,
-            tmux: None,
-            hidden: false,
-            origin: chan_server::WindowOrigin::Native,
-        }]));
+        let snapshot = Arc::new(Mutex::new(
+            vec![chan_server::WindowRecord {
+                window_id: "w-1".into(),
+                library_id: lib.into(),
+                kind: chan_server::WindowKind::Terminal,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: None,
+                prefix: "/lib".into(),
+                token: "tok".into(),
+                persisted: true,
+                connected: true,
+                holders: None,
+                active_transfer: false,
+                control: false,
+                tmux: None,
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+            }]
+            .into(),
+        ));
         feed.register_windows("ds-1".to_string(), snapshot);
         // Cache cold during a fresh connect -> the window seeds None (blue).
         assert_eq!(feed.pane_color(lib), None);
@@ -8612,25 +8636,28 @@ mod tests {
     #[test]
     fn devserver_feed_resolves_current_record_by_native_label() {
         let feed = DevserverFeed::default();
-        let snapshot = Arc::new(Mutex::new(vec![chan_server::WindowRecord {
-            window_id: "w-1".into(),
-            library_id: "lib-fed".into(),
-            kind: chan_server::WindowKind::Terminal,
-            title: "Terminal".into(),
-            ordinal: 1,
-            label: String::new(),
-            workspace_path: None,
-            prefix: "/terminal".into(),
-            token: "fresh-token".into(),
-            persisted: true,
-            connected: true,
-            holders: None,
-            active_transfer: false,
-            control: false,
-            tmux: None,
-            hidden: false,
-            origin: chan_server::WindowOrigin::Native,
-        }]));
+        let snapshot = Arc::new(Mutex::new(
+            vec![chan_server::WindowRecord {
+                window_id: "w-1".into(),
+                library_id: "lib-fed".into(),
+                kind: chan_server::WindowKind::Terminal,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: None,
+                prefix: "/terminal".into(),
+                token: "fresh-token".into(),
+                persisted: true,
+                connected: true,
+                holders: None,
+                active_transfer: false,
+                control: false,
+                tmux: None,
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+            }]
+            .into(),
+        ));
         feed.register_windows("ds-1".to_string(), snapshot);
 
         let (id, record) = feed
@@ -8652,25 +8679,28 @@ mod tests {
         // the record reconciles back open as a new window.
         let feed = DevserverFeed::default();
         let rostered = "gw:9f2c1a44:alice:9e314b8e58ea";
-        let snapshot = Arc::new(Mutex::new(vec![chan_server::WindowRecord {
-            window_id: "w-86fd".into(),
-            library_id: "lib-f978".into(),
-            kind: chan_server::WindowKind::Terminal,
-            title: "Terminal".into(),
-            ordinal: 1,
-            label: String::new(),
-            workspace_path: None,
-            prefix: "/terminal".into(),
-            token: "tok".into(),
-            persisted: true,
-            connected: true,
-            holders: None,
-            active_transfer: false,
-            control: false,
-            tmux: None,
-            hidden: false,
-            origin: chan_server::WindowOrigin::Native,
-        }]));
+        let snapshot = Arc::new(Mutex::new(
+            vec![chan_server::WindowRecord {
+                window_id: "w-86fd".into(),
+                library_id: "lib-f978".into(),
+                kind: chan_server::WindowKind::Terminal,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: None,
+                prefix: "/terminal".into(),
+                token: "tok".into(),
+                persisted: true,
+                connected: true,
+                holders: None,
+                active_transfer: false,
+                control: false,
+                tmux: None,
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+            }]
+            .into(),
+        ));
         feed.register_windows(rostered.to_string(), snapshot);
 
         // The close-cascade discard matches the composite native label.
@@ -8791,9 +8821,10 @@ mod tests {
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
             };
-            state
-                .devserver_feed
-                .register_windows("ds-close".to_string(), Arc::new(Mutex::new(vec![record])));
+            state.devserver_feed.register_windows(
+                "ds-close".to_string(),
+                Arc::new(Mutex::new(vec![record].into())),
+            );
             let view = Arc::new(window_watcher::WatcherViewState::with_pending_deletes(
                 Arc::clone(&state.pending_window_deletes),
             ));
@@ -9304,7 +9335,7 @@ mod tests {
         let frame = source_region(
             WIRING_RS,
             "\n            let first_snapshot = !saw_snapshot;",
-            "\n            feed.write_frame(windows);",
+            "\n            feed.write_frame(windows, set.tmux_connections);",
         );
         assert!(
             frame.contains("pending_hide_posts_for_feed_snapshot("),
@@ -9430,25 +9461,28 @@ mod tests {
         // the reconnect overlay.
         use chan_server::DevserverFeedSource;
         let feed = DevserverFeed::default();
-        let snapshot = Arc::new(Mutex::new(vec![chan_server::WindowRecord {
-            window_id: "w-1".into(),
-            library_id: "lib-fed".into(),
-            kind: chan_server::WindowKind::Terminal,
-            title: "Terminal".into(),
-            ordinal: 1,
-            label: String::new(),
-            workspace_path: None,
-            prefix: "/terminal".into(),
-            token: "tok".into(),
-            persisted: true,
-            connected: true,
-            holders: None,
-            active_transfer: false,
-            control: false,
-            tmux: None,
-            hidden: false,
-            origin: chan_server::WindowOrigin::Native,
-        }]));
+        let snapshot = Arc::new(Mutex::new(
+            vec![chan_server::WindowRecord {
+                window_id: "w-1".into(),
+                library_id: "lib-fed".into(),
+                kind: chan_server::WindowKind::Terminal,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: None,
+                prefix: "/terminal".into(),
+                token: "tok".into(),
+                persisted: true,
+                connected: true,
+                holders: None,
+                active_transfer: false,
+                control: false,
+                tmux: None,
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+            }]
+            .into(),
+        ));
         feed.register_windows("ds-1".to_string(), snapshot);
         feed.set_workspaces(
             "ds-1".to_string(),
@@ -9515,7 +9549,7 @@ mod tests {
         };
         feed.register_windows(
             "ds-1".into(),
-            Arc::new(Mutex::new(vec![buried.clone(), other])),
+            Arc::new(Mutex::new(vec![buried.clone(), other].into())),
         );
         assert!(feed.set_buried(&window_watcher::native_label(&buried), true));
         let rows = feed.windows();

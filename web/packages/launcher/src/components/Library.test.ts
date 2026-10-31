@@ -1070,6 +1070,40 @@ describe("Library: tmux connection cards", () => {
     }
   });
 
+  it("shows a fed connection's details and sends new-window, detach and selection end", async () => {
+    const { backend } = await import("../api/backend");
+    const { bulkSetOnAll } = await import("../state/selection.svelte");
+    const { setMockTmuxConnections } = await import("../api/mock");
+    const fed = entry({ connection: "tm-fed", library_id: "lib-geekom", errors: ["fixture error"] });
+    setMockTmuxConnections([fed], [
+      { ...row("tm-fed", "tm-fed-control", true, 0), library_id: "lib-geekom" },
+      { ...row("tm-fed", "tm-fed-w1", false, 1), library_id: "lib-geekom" },
+    ]);
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    try {
+      mountList();
+      const c = card(LOCAL_TITLE);
+      expect(c.textContent).toContain("session main");
+      expect(c.textContent).toContain("tmux 3.5a");
+      expect(c.querySelector(".row-error")?.getAttribute("title")).toBe("fixture error");
+      byAria(`New tmux window in ${LOCAL_TITLE}`)!.click();
+      await settle();
+      byAria(`Detach ${LOCAL_TITLE}`)!.click();
+      await settle();
+      setSelectMode(true);
+      await settle();
+      c.querySelector<HTMLInputElement>(`input[aria-label="Select ${LOCAL_TITLE}"]`)!.click();
+      await settle();
+      await bulkSetOnAll(false);
+      expect(request.mock.calls).toEqual([
+        ["tm-fed", { request: "new-window" }],
+        ["tm-fed", { request: "detach" }],
+        ["tm-fed", { request: "end" }],
+      ]);
+      expect(library.error).toBeNull();
+    } finally { request.mockRestore(); }
+  });
+
   it("carries the selection check like the other cards, and the selection's turn off ends the server", async () => {
     const { setSelectMode, isSelected, bulkSetOnAll, selectedCount } = await import("../state/selection.svelte");
     const { backend } = await import("../api/backend");

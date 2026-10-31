@@ -16,6 +16,9 @@ use crate::{WindowKind, WindowOrigin, WindowRecord, WorkspaceHost};
 struct RemoteFeed;
 
 impl DevserverFeedSource for RemoteFeed {
+    fn tmux_connections(&self) -> Vec<chan_library::windows::TmuxConnectionRecord> {
+        Vec::new()
+    }
     fn windows(&self) -> Vec<WindowRecord> {
         vec![WindowRecord {
             window_id: "remote-window-must-not-leak".into(),
@@ -50,6 +53,9 @@ impl DevserverFeedSource for RemoteFeed {
 struct LocalFeed(String);
 
 impl DevserverFeedSource for LocalFeed {
+    fn tmux_connections(&self) -> Vec<chan_library::windows::TmuxConnectionRecord> {
+        Vec::new()
+    }
     fn windows(&self) -> Vec<WindowRecord> {
         let mut rows = RemoteFeed.windows();
         rows[0].library_id = self.0.clone();
@@ -89,6 +95,9 @@ struct EchoFeed {
 }
 
 impl DevserverFeedSource for EchoFeed {
+    fn tmux_connections(&self) -> Vec<chan_library::windows::TmuxConnectionRecord> {
+        Vec::new()
+    }
     fn windows(&self) -> Vec<WindowRecord> {
         let mut rows = RemoteFeed.windows();
         rows[0].library_id = self.library_id.clone();

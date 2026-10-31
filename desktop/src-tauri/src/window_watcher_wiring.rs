@@ -50,8 +50,8 @@ async fn prepare_remote_navigation(
 }
 
 /// How a devserver watcher should stop. Disconnect closes that devserver's
-/// native windows; the control-exit path retires the watcher while preserving
-/// its windows for the user's reconnect or abandon decision.
+/// native windows; the control-exit path preserves ordinary windows for
+/// reconnect and closes tmux windows, whose feed connection is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DevserverWatcherStop {
     Running,
@@ -110,6 +110,7 @@ struct RemoteLaunchKey {
     kind: chan_server::WindowKind,
     workspace_path: Option<String>,
     ordinal: u32,
+    tmux: bool,
 }
 
 impl RemoteLaunchKey {
@@ -124,6 +125,7 @@ impl RemoteLaunchKey {
             kind: record.kind,
             workspace_path: record.workspace_path.clone(),
             ordinal: record.ordinal,
+            tmux: record.tmux.is_some(),
         }
     }
 }
@@ -226,6 +228,7 @@ impl RemoteLaunch {
 struct Launches {
     entries: HashMap<String, RemoteLaunch>,
     retired: Option<WatchLoopStop>,
+    kept_builds: HashSet<String>,
 }
 
 impl Launches {
@@ -239,6 +242,14 @@ impl Launches {
 
     fn retire(&mut self, stop: WatchLoopStop) {
         self.retired = Some(stop);
+        if stop == WatchLoopStop::KeepWindows {
+            self.kept_builds = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| !entry.key.tmux)
+                .map(|(label, _)| label.clone())
+                .collect();
+        }
         self.entries.clear();
     }
 }
@@ -341,17 +352,17 @@ impl WindowBuilds {
 
     /// Settle a build whose window now exists. False when the watcher no
     /// longer wants that window: a disconnect retired it first, and its
-    /// sweep closed the windows before this one existed. A stop that keeps
-    /// the windows keeps this one too.
+    /// sweep closed the windows before this one existed. Ordinary windows
+    /// can survive a keep-windows stop; tmux windows require a live feed.
     fn land(&self, label: &str) -> bool {
         let mut pending = self.pending.lock().unwrap();
-        if let Some(stop) = pending.retired {
-            return stop == WatchLoopStop::KeepWindows;
+        if pending.retired.is_some() {
+            return pending.kept_builds.remove(label);
         }
-        pending.entries.remove(label);
+        let wanted = pending.entries.remove(label).is_some();
         drop(pending);
         self.nudge.notify_waiters();
-        true
+        wanted
     }
 
     fn completion(&self, label: String) -> BuildCompletion {
@@ -973,7 +984,7 @@ pub(crate) fn spawn_local_window_watcher(app: AppHandle, state: Arc<AppState>) {
 /// dropped socket (resubscribe + the idempotent reconcile self-heals).
 #[derive(Clone)]
 struct DevserverWindowFeed {
-    snapshot: Arc<Mutex<Vec<WindowRecord>>>,
+    snapshot: Arc<Mutex<DevserverWindowSnapshot>>,
     /// Whether a frame arrived and the feed task has not marked its round
     /// ended. Stopping inside a stream can leave this set; the watch loop
     /// consumes the same stop and reads no further snapshot. Written and read
@@ -982,20 +993,46 @@ struct DevserverWindowFeed {
     change: Arc<Notify>,
 }
 
+/// One watcher's snapshot, shared with the launcher. Retired tasks retain
+/// only their own Arc, so a late frame cannot repopulate a disconnected feed.
+#[derive(Default)]
+pub(crate) struct DevserverWindowSnapshot {
+    pub windows: Vec<WindowRecord>,
+    pub tmux_connections: Vec<chan_server::TmuxConnectionRecord>,
+}
+
+impl From<Vec<WindowRecord>> for DevserverWindowSnapshot {
+    fn from(windows: Vec<WindowRecord>) -> Self {
+        Self {
+            windows,
+            tmux_connections: Vec::new(),
+        }
+    }
+}
+
 impl DevserverWindowFeed {
     /// Replace the window set with a decoded frame's: the connection that
     /// sent the frame is up.
-    fn write_frame(&self, windows: Vec<WindowRecord>) {
+    fn write_frame(
+        &self,
+        windows: Vec<WindowRecord>,
+        tmux_connections: Vec<chan_server::TmuxConnectionRecord>,
+    ) {
         let mut set = self.snapshot.lock().unwrap();
-        *set = windows;
+        set.windows = windows;
+        set.tmux_connections = tmux_connections;
         self.live.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// End a feed connection's round: the set stays as its last frame left
-    /// it, and the connection that sent that frame is gone.
+    /// Tmux cards and windows belong to a live connection. Ordinary windows
+    /// stay available for their existing reconnect overlays.
     fn end_round(&self) {
-        let _set = self.snapshot.lock().unwrap();
+        let mut set = self.snapshot.lock().unwrap();
+        set.windows.retain(|record| record.tmux.is_none());
+        set.tmux_connections.clear();
         self.live.store(false, std::sync::atomic::Ordering::Relaxed);
+        drop(set);
+        self.change.notify_one();
     }
 }
 
@@ -1008,7 +1045,7 @@ impl WindowFeed for DevserverWindowFeed {
     /// holds a socket then. The launcher reads the shared set directly.
     fn snapshot(&self) -> Vec<WindowRecord> {
         let snapshot = self.snapshot.lock().unwrap();
-        let mut records = snapshot.clone();
+        let mut records = snapshot.windows.clone();
         if !self.live.load(std::sync::atomic::Ordering::Relaxed) {
             for record in &mut records {
                 record.connected = false;
@@ -1400,6 +1437,9 @@ async fn run_devserver_window_feed(
             }
         }
         feed.end_round();
+        if let Some(embedded) = state.embedded() {
+            embedded.signal_library_change();
+        }
         if (*cancel.borrow_and_update()).is_stopped() {
             return;
         }
@@ -1459,11 +1499,12 @@ async fn keepalive_pump(
 
 /// A `/watch` frame as the desktop reads it: the rows stay raw JSON until
 /// [`decode_window_rows`](crate::devserver::decode_window_rows) takes them one
-/// at a time, and the frame's other fields (the additive `leaders` map) are
-/// not read here.
+/// at a time. Tmux records share the frame; the leaders map is not read here.
 #[derive(serde::Deserialize)]
 struct WindowFeedFrame {
     windows: Vec<serde_json::Value>,
+    #[serde(default)]
+    tmux_connections: Vec<chan_server::TmuxConnectionRecord>,
 }
 
 /// The rows one `/watch` text frame carries that this desktop can read,
@@ -1474,14 +1515,18 @@ fn decode_window_frame(
     devserver_id: &str,
     text: &str,
     seen: &mut ConnectionRows,
-) -> Option<Vec<WindowRecord>> {
+) -> Option<chan_server::WindowSet> {
     match serde_json::from_str::<WindowFeedFrame>(text) {
-        Ok(frame) => Some(crate::devserver::decode_window_rows(
-            devserver_id,
-            "watch frame",
-            frame.windows,
-            seen,
-        )),
+        Ok(frame) => Some(chan_server::WindowSet {
+            windows: crate::devserver::decode_window_rows(
+                devserver_id,
+                "watch frame",
+                frame.windows,
+                seen,
+            ),
+            leaders: Default::default(),
+            tmux_connections: frame.tmux_connections,
+        }),
         Err(error) => {
             tracing::warn!(
                 devserver = %devserver_id,
@@ -1563,7 +1608,8 @@ async fn stream_window_feed(
                 embedded.signal_library_change();
             }
         }
-        if let Some(windows) = decode_window_frame(id, text, &mut rows) {
+        if let Some(set) = decode_window_frame(id, text, &mut rows) {
+            let windows = set.windows;
             // Rows keep their devserver-local tokens: `should_show` reads
             // token emptiness as the tenant on/off signal, and gateway
             // navigation credentials are minted at open/retarget time
@@ -1607,7 +1653,7 @@ async fn stream_window_feed(
                     .collect();
                 state.refresh_devserver_active_transfers(&library_id, &active);
             }
-            feed.write_frame(windows);
+            feed.write_frame(windows, set.tmux_connections);
             // Re-push the launcher feed: a devserver window change
             // shifts the merged launcher window set, so signal the embedded
             // host to re-assemble + re-push. The devserver only pushes on a
@@ -1725,7 +1771,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
 ) -> Result<
     (
         watch::Sender<DevserverWatcherStop>,
-        Arc<Mutex<Vec<WindowRecord>>>,
+        Arc<Mutex<DevserverWindowSnapshot>>,
         Arc<WatcherViewState>,
     ),
     String,
@@ -1740,7 +1786,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
             );
             Vec::new()
         });
-    let snapshot = Arc::new(Mutex::new(seed));
+    let snapshot = Arc::new(Mutex::new(DevserverWindowSnapshot::from(seed)));
     // A handle on the snapshot for the caller's launcher feed: the same
     // Arc the feed task mutates, so the launcher reads this devserver's live windows.
     let snapshot_handle = Arc::clone(&snapshot);
@@ -2054,7 +2100,7 @@ mod tests {
 
     #[derive(Clone)]
     struct RetryFeed {
-        records: Arc<Mutex<Vec<WindowRecord>>>,
+        records: Arc<Mutex<DevserverWindowSnapshot>>,
         nudge: Arc<Notify>,
         reads: Arc<std::sync::atomic::AtomicUsize>,
         // The production feed over `records`, so a pass reads what the
@@ -2256,7 +2302,7 @@ mod tests {
             let nudge = Arc::new(Notify::new());
             // The feed's connection is up until a test ends its round.
             let inner = DevserverWindowFeed {
-                snapshot: Arc::new(Mutex::new(records.clone())),
+                snapshot: Arc::new(Mutex::new(records.clone().into())),
                 live: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 change: Arc::clone(&nudge),
             };
@@ -2433,7 +2479,7 @@ mod tests {
         async fn set_connected(&self, record: &WindowRecord, connected: bool) {
             let mut pushed = record.clone();
             pushed.connected = connected;
-            *self.feed.records.lock().unwrap() = vec![pushed];
+            self.feed.records.lock().unwrap().windows = vec![pushed];
             self.feed_wake().await;
         }
 
@@ -2503,7 +2549,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(if reload_first { 1 } else { 5 })).await;
         if reload_first {
             record.token = "new-feed-token".into();
-            *harness.feed.records.lock().unwrap() = vec![record.clone()];
+            harness.feed.records.lock().unwrap().windows = vec![record.clone()];
             harness.feed_wake().await;
         } else {
             assert!(harness.request_reload(&record, true, Some(&harness.view)));
@@ -2729,14 +2775,14 @@ mod tests {
             "gone" => {
                 harness.surface.live.lock().unwrap().remove(&label);
             }
-            "removed" => harness.feed.records.lock().unwrap().clear(),
+            "removed" => harness.feed.records.lock().unwrap().windows.clear(),
             "closed" => {
                 harness.pending_deletes.queue("test-connection", &record);
                 harness.view.bury(&label);
                 harness.surface.close(&label);
             }
             "buried" => harness.view.bury(&label),
-            "hidden" => harness.feed.records.lock().unwrap()[0].hidden = true,
+            "hidden" => harness.feed.records.lock().unwrap().windows[0].hidden = true,
             "delete" => harness.pending_deletes.queue("test-connection", &record),
             _ => unreachable!(),
         }
@@ -2850,7 +2896,13 @@ mod tests {
                         .lock()
                         .unwrap()
                         .insert(native_label(record));
-                    harness.feed.records.lock().unwrap().push(record.clone());
+                    harness
+                        .feed
+                        .records
+                        .lock()
+                        .unwrap()
+                        .windows
+                        .push(record.clone());
                 }
             }
             harness.feed_wake().await;
@@ -2916,7 +2968,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(native_label(&b));
-        harness.feed.records.lock().unwrap().push(b.clone());
+        harness.feed.records.lock().unwrap().windows.push(b.clone());
         harness.feed_wake().await;
         assert_eq!(
             harness.times(&a),
@@ -2950,7 +3002,7 @@ mod tests {
         let harness = RetryHarness::start(vec![record.clone()], false, false).await;
         tokio::time::advance(Duration::from_secs(5)).await;
         record.token = "replacement-token".into();
-        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed.records.lock().unwrap().windows = vec![record.clone()];
         harness.feed_wake().await;
         assert_eq!(
             harness.times(&record),
@@ -3060,7 +3112,7 @@ mod tests {
         harness.surface.resolve_opens();
         tokio::time::advance(Duration::from_secs(5)).await;
         record.token = "restarted-token".into();
-        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed.records.lock().unwrap().windows = vec![record.clone()];
         harness.feed_wake().await;
         assert_eq!(
             harness.times(&record),
@@ -3133,7 +3185,7 @@ mod tests {
         harness.navigate_first(&record).await;
         tokio::time::advance(Duration::from_secs(5)).await;
         record.token = "restarted-token".into();
-        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed.records.lock().unwrap().windows = vec![record.clone()];
         harness.feed_wake().await;
         let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
         harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
@@ -3160,7 +3212,7 @@ mod tests {
         harness.navigate_first(&record).await;
         tokio::time::advance(Duration::from_secs(5)).await;
         record.token = "restarted-token".into();
-        *harness.feed.records.lock().unwrap() = vec![record.clone()];
+        harness.feed.records.lock().unwrap().windows = vec![record.clone()];
         harness.feed_wake().await;
         let (_, ticket) = harness.surface.held.lock().unwrap().pop().unwrap();
         harness.finish_requested(&record, &ticket, Ok(serve::RetargetOutcome::NotReady));
@@ -3418,7 +3470,7 @@ mod tests {
         record.connected = true;
         record.holders = Some(vec!["desktop-a".into()]);
         let feed = DevserverWindowFeed {
-            snapshot: Arc::new(Mutex::new(vec![record.clone()])),
+            snapshot: Arc::new(Mutex::new(vec![record.clone()].into())),
             live: Arc::default(),
             change: Arc::default(),
         };
@@ -3431,7 +3483,7 @@ mod tests {
             None,
             "a seed before any live frame cannot say whose socket is live"
         );
-        feed.write_frame(vec![record.clone()]);
+        feed.write_frame(vec![record.clone()], Vec::new());
         assert!(
             feed.snapshot()[0].connected,
             "a frame written reads as the frame says"
@@ -3453,19 +3505,95 @@ mod tests {
             "a down round cannot say whose socket is live"
         );
         assert!(
-            feed.snapshot.lock().unwrap()[0].connected,
+            feed.snapshot.lock().unwrap().windows[0].connected,
             "the launcher's set keeps what the last frame said"
         );
         assert_eq!(
-            feed.snapshot.lock().unwrap()[0].holders,
+            feed.snapshot.lock().unwrap().windows[0].holders,
             record.holders,
             "the shared set keeps the frame's holders"
         );
-        feed.write_frame(vec![record]);
+        feed.write_frame(vec![record], Vec::new());
         assert!(
             feed.snapshot()[0].connected,
             "the next frame reads as it says"
         );
+    }
+
+    fn tmux_record() -> WindowRecord {
+        let mut record = retry_record("tmux-loss", 1);
+        record.tmux = Some(
+            serde_json::from_value(serde_json::json!({
+                "connection": "term-fed", "control": false
+            }))
+            .unwrap(),
+        );
+        record
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_feed_loss_closes_tmux_windows_and_preserves_ordinary_windows() {
+        let tmux = tmux_record();
+        let ordinary = WindowRecord {
+            window_id: "ordinary".into(),
+            tmux: None,
+            ..tmux.clone()
+        };
+        let harness = RetryHarness::start(vec![tmux.clone(), ordinary.clone()], false, false).await;
+        harness.feed.inner.end_round();
+        harness.feed_wake().await;
+        assert!(!harness
+            .surface
+            .live
+            .lock()
+            .unwrap()
+            .contains(&native_label(&tmux)));
+        assert!(harness
+            .surface
+            .live
+            .lock()
+            .unwrap()
+            .contains(&native_label(&ordinary)));
+        harness.stop(WatchLoopStop::CloseWindows).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_control_script_exit_closes_tmux_windows_even_when_keeping_ordinary_windows() {
+        let tmux = tmux_record();
+        let ordinary = WindowRecord {
+            window_id: "ordinary".into(),
+            tmux: None,
+            ..tmux.clone()
+        };
+        let harness = RetryHarness::start(vec![tmux.clone(), ordinary.clone()], false, false).await;
+        let surface = harness.stop(WatchLoopStop::KeepWindows).await;
+        assert!(!surface.live.lock().unwrap().contains(&native_label(&tmux)));
+        assert!(surface
+            .live
+            .lock()
+            .unwrap()
+            .contains(&native_label(&ordinary)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tmux_build_landing_after_feed_loss_or_script_exit_stays_closed() {
+        for script_exit in [false, true] {
+            let tmux = tmux_record();
+            let harness = RetryHarness::start_with(vec![tmux.clone()], true, false, true).await;
+            harness.surface.resolve_opens();
+            let surface = if script_exit {
+                harness.stop(WatchLoopStop::KeepWindows).await
+            } else {
+                harness.feed.inner.end_round();
+                harness.feed_wake().await;
+                let surface = Arc::clone(&harness.surface);
+                surface.land_builds();
+                assert!(!surface.live.lock().unwrap().contains(&native_label(&tmux)));
+                harness.stop(WatchLoopStop::CloseWindows).await
+            };
+            surface.land_builds();
+            assert!(!surface.live.lock().unwrap().contains(&native_label(&tmux)));
+        }
     }
 
     // The raise a navigation receives is the one its dispatch's reason
@@ -3566,13 +3694,13 @@ mod tests {
             let harness = RetryHarness::start(vec![record.clone()], false, false).await;
             match action {
                 "bury" => harness.view.bury(&native_label(&record)),
-                "server-hidden" => harness.feed.records.lock().unwrap()[0].hidden = true,
+                "server-hidden" => harness.feed.records.lock().unwrap().windows[0].hidden = true,
                 "close" => {
                     harness.pending_deletes.queue("test-connection", &record);
                     harness.view.bury(&native_label(&record));
                     harness.surface.close(&native_label(&record));
                 }
-                "removed" => harness.feed.records.lock().unwrap().clear(),
+                "removed" => harness.feed.records.lock().unwrap().windows.clear(),
                 _ => unreachable!(),
             }
             harness.feed_wake().await;
@@ -4299,6 +4427,76 @@ mod tests {
         assert_eq!(frames, 0, "no frames should have arrived");
     }
 
+    #[test]
+    fn a_watch_frame_preserves_tmux_records_for_the_launcher() {
+        use chan_server::DevserverFeedSource;
+        let record: chan_server::TmuxConnectionRecord = serde_json::from_value(serde_json::json!({
+            "connection": "term-fed", "library_id": "lib-fed",
+            "origin": {"program": "tmux", "command": "tmux -CC", "local": true},
+            "version": "3.5a", "session": {"id": "$0", "name": "work"},
+            "windows": [], "window_cap": 8, "errors": ["fixture error"],
+            "control_window": "w-control"
+        }))
+        .unwrap();
+        let frame = serde_json::json!({"windows": [rec()], "tmux_connections": [record]});
+        let set = decode_window_frame("dev-1", &frame.to_string(), &mut ConnectionRows::default())
+            .unwrap();
+        assert_eq!(set.windows, vec![rec()]);
+        assert_eq!(set.tmux_connections, vec![record.clone()]);
+        let launcher = crate::DevserverFeed::default();
+        let feed = DevserverWindowFeed {
+            snapshot: Arc::default(),
+            live: Arc::default(),
+            change: Arc::default(),
+        };
+        // A first frame can arrive before the watcher is registered.
+        feed.write_frame(set.windows, set.tmux_connections);
+        launcher.register_windows("dev-1".into(), Arc::clone(&feed.snapshot));
+        assert_eq!(launcher.tmux_connections(), vec![record.clone()]);
+        launcher.set_down("dev-1", true);
+        assert!(launcher.tmux_connections().is_empty());
+        launcher.set_down("dev-1", false);
+        assert_eq!(launcher.tmux_connections(), vec![record.clone()]);
+        feed.end_round();
+        assert!(
+            launcher.tmux_connections().is_empty(),
+            "feed loss removes cards"
+        );
+        launcher.set_down("dev-1", true);
+        launcher.set_down("dev-1", false);
+        assert!(
+            launcher.tmux_connections().is_empty(),
+            "an HTTP recovery is not a fresh feed"
+        );
+        feed.write_frame(vec![rec()], vec![record.clone()]);
+        assert_eq!(launcher.tmux_connections(), vec![record.clone()]);
+        let empty = decode_window_frame(
+            "dev-1",
+            r#"{"windows": []}"#,
+            &mut ConnectionRows::default(),
+        )
+        .unwrap();
+        feed.write_frame(empty.windows, empty.tmux_connections);
+        assert!(
+            launcher.tmux_connections().is_empty(),
+            "a fresh empty frame removes cards"
+        );
+        launcher.forget("dev-1");
+        feed.write_frame(vec![rec()], vec![record.clone()]);
+        assert!(
+            launcher.tmux_connections().is_empty(),
+            "late frames cannot undo disconnect"
+        );
+        assert!(launcher.windows().is_empty());
+        let replacement = Arc::new(Mutex::new(DevserverWindowSnapshot::default()));
+        launcher.register_windows("dev-1".into(), replacement);
+        feed.write_frame(vec![rec()], vec![record]);
+        assert!(
+            launcher.tmux_connections().is_empty(),
+            "retired tasks cannot overwrite a new connection"
+        );
+    }
+
     /// One `/watch` frame from a devserver on a later release can hold a row
     /// this desktop cannot read. The frame still delivers every row the
     /// desktop can read, so its view of that devserver keeps moving, and the
@@ -4320,7 +4518,8 @@ mod tests {
         let _logs = logs.install();
 
         let windows = decode_window_frame("dev-1", &frame, &mut ConnectionRows::default())
-            .expect("one unreadable row must not drop the frame");
+            .expect("one unreadable row must not drop the frame")
+            .windows;
 
         let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
         assert_eq!(ids, ["w-1"], "the readable row survives its neighbour");
@@ -4446,7 +4645,8 @@ mod tests {
         decode_window_frame("dev-1", &first.to_string(), &mut connection)
             .expect("the first frame parses");
         let windows = decode_window_frame("dev-1", &second.to_string(), &mut connection)
-            .expect("the second frame parses");
+            .expect("the second frame parses")
+            .windows;
 
         assert_eq!(
             windows,
@@ -4470,7 +4670,8 @@ mod tests {
 
         // Later frames keep standing in for the row, without another line.
         let windows = decode_window_frame("dev-1", &second.to_string(), &mut connection)
-            .expect("the third frame parses");
+            .expect("the third frame parses")
+            .windows;
         assert_eq!(windows.len(), 1, "the stale record still stands in");
         assert_eq!(
             logs.warnings().len(),
@@ -4481,7 +4682,8 @@ mod tests {
         // A reconnect has read nothing, so the row is hidden there.
         let windows =
             decode_window_frame("dev-1", &second.to_string(), &mut ConnectionRows::default())
-                .expect("a reconnect's frame parses");
+                .expect("a reconnect's frame parses")
+                .windows;
         assert!(
             windows.is_empty(),
             "a row never read on a connection is hidden"
@@ -4502,10 +4704,12 @@ mod tests {
 
         decode_window_frame("dev-1", &shown.to_string(), &mut connection).expect("shown");
         let windows = decode_window_frame("dev-1", &discarded.to_string(), &mut connection)
-            .expect("discarded");
+            .expect("discarded")
+            .windows;
         assert!(windows.is_empty(), "a discarded row leaves the snapshot");
-        let windows =
-            decode_window_frame("dev-1", &returned.to_string(), &mut connection).expect("returned");
+        let windows = decode_window_frame("dev-1", &returned.to_string(), &mut connection)
+            .expect("returned")
+            .windows;
         assert!(
             windows.is_empty(),
             "a discarded window's record stood in for a later row: {windows:?}"

@@ -238,3 +238,7 @@ The launcher bundle is embedded beside the main workspace bundle and follows the
 
 - **Devservers registry bridge** (`/api/library/devservers*`). The registry is desktop-side config, CRUD-able over HTTP; the desktop-bridge ops (connect/disconnect, native-trust, terminal, workspace open/on/off/forget) dispatch to the attached desktop, and a registry-less surface lists empty.
 - **Proxy-injected signed role assertion.** devserver-proxy signs a gateway assertion (`chan_tunnel_proto::gateway_assertion`) with a per-tunnel key after its gate; the devserver verifies it, marks the request `TunnelOrigin`, and grants owner assertions the full launcher over the tunnel.
+
+## Tmux connections from devservers
+
+The desktop's window feed carries local and connected-devserver tmux records in `tmux_connections`. Both use the same card, with their origin title, session, version, errors and actions. Card actions and selection end post to the serving library's tmux request route; the library resolves ownership and the desktop forwards fed requests to the owning devserver using its existing authenticated connection. The browser holds no additional remote credentials.

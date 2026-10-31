@@ -2845,24 +2845,31 @@ mod tests {
         assert!(
             rounds.contains(concat!(
                 "            }\n        }\n        feed.end_round();\n",
+                "        if let Some(embedded) = state.embedded() {\n",
+                "            embedded.signal_library_change();\n        }\n",
                 "        if (*cancel.borrow_and_update()).is_stopped() {"
             )),
             "every completed stream ends its round before the stop check and backoff"
         );
         let frames = source_section(wiring, "async fn stream_window_feed(", "\n}\n");
-        assert_eq!(frames.matches("feed.write_frame(windows);").count(), 1);
+        assert_eq!(
+            frames
+                .matches("feed.write_frame(windows, set.tmux_connections);")
+                .count(),
+            1
+        );
         let decoded = source_section(
             frames,
-            "if let Some(windows) = decode_window_frame(",
+            "if let Some(set) = decode_window_frame(",
             "\n        }\n    })",
         );
-        let write = decoded.find("feed.write_frame(windows);").unwrap();
+        let write = decoded
+            .find("feed.write_frame(windows, set.tmux_connections);")
+            .unwrap();
         let launcher = decoded.find("embedded.signal_library_change();").unwrap();
         let watcher = decoded.find("feed.change.notify_one();").unwrap();
         assert!(
-            decoded.contains("            }\n            feed.write_frame(windows);\n")
-                && write < launcher
-                && launcher < watcher,
+            write < launcher && launcher < watcher,
             "the decoded frame is stored before either reader is woken"
         );
     }

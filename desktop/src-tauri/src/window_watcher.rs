@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 pub enum WatchLoopStop {
     /// Reconcile this watcher's known native windows away before stopping.
     CloseWindows,
-    /// Stop the watcher and leave its native windows in place.
+    /// Keep ordinary windows for reconnect, closing live tmux windows.
     KeepWindows,
 }
 
@@ -539,8 +539,8 @@ impl Drop for WatcherLifetime {
 /// with an explicit stop action. The reconcile is idempotent (snapshot-not-delta),
 /// so reconnect = resubscribe + reconcile can never spawn a duplicate. A real
 /// disconnect reconciles to empty (detach, not reap); a keep-windows stop can
-/// retire without closing native windows while the control-exit row awaits a
-/// reconnect or abandon decision.
+/// retain ordinary native windows while the control-exit row awaits a
+/// reconnect or abandon decision. Tmux windows close with their connection.
 ///
 /// Correctness: both change `Notified`s are created BEFORE the snapshot. tokio
 /// captures the `notify_waiters()` generation at creation, so a change firing in
@@ -614,6 +614,11 @@ pub async fn watch_loop<F, S, C>(
             biased;
             stop = &mut cancel => {
                 view.stop();
+                if stop == WatchLoopStop::KeepWindows {
+                    for record in snapshot.iter().filter(|record| record.tmux.is_some()) {
+                        surface.close(&native_label(record));
+                    }
+                }
                 surface.retire(stop);
                 if stop == WatchLoopStop::CloseWindows {
                     // Disconnect: reconcile to empty so the library's native
