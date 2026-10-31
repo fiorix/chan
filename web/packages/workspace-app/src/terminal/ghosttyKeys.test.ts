@@ -60,6 +60,28 @@ describe("ghosttyKeydownAction", () => {
     expect(action({ key: "Backspace", code: "Backspace", keyCode: 8, metaKey: true }, MAC)).toEqual({ kind: "send", data: "\x7f" });
   });
 
+  test("a layout's printable ASCII Option character types itself on macOS", () => {
+    // German: Option+L @, Option+5 [, Option+7 |, Option+8 {, Option+Shift+7 \.
+    expect(action({ key: "@", code: "KeyL", keyCode: 76, altKey: true }, MAC)).toEqual({ kind: "send", data: "@" });
+    expect(action({ key: "[", code: "Digit5", keyCode: 53, altKey: true }, MAC)).toEqual({ kind: "send", data: "[" });
+    expect(action({ key: "|", code: "Digit7", keyCode: 55, altKey: true }, MAC)).toEqual({ kind: "send", data: "|" });
+    expect(action({ key: "{", code: "Digit8", keyCode: 56, altKey: true }, MAC)).toEqual({ kind: "send", data: "{" });
+    expect(action({ key: "\\", code: "Digit7", keyCode: 55, altKey: true, shiftKey: true }, MAC)).toEqual({
+      kind: "send",
+      data: "\\",
+    });
+  });
+
+  test("Option stays Meta for a character outside ASCII, a space, and off macOS", () => {
+    expect(action({ key: "∫", code: "KeyB", keyCode: 66, altKey: true }, MAC)).toEqual({ kind: "send", data: "\x1bb" });
+    expect(action({ key: " ", code: "Space", keyCode: 32, altKey: true }, MAC)).toEqual({ kind: "send", data: "\x1b " });
+    expect(action({ key: "b", code: "KeyB", keyCode: 66, altKey: true }, LINUX)).toEqual({ kind: "send", data: "\x1bb" });
+    expect(action({ key: "@", code: "KeyL", keyCode: 76, altKey: true, ctrlKey: true }, MAC)).not.toEqual({
+      kind: "send",
+      data: "@",
+    });
+  });
+
   test("a Ctrl chord off macOS is the control character", () => {
     expect(action({ key: "n", code: "KeyN", keyCode: 78, ctrlKey: true })).toEqual({ kind: "send", data: "\x0e" });
   });

@@ -43,6 +43,13 @@ export function ghosttyTypesKey(ev: Pick<KeyboardEvent, "key" | "ctrlKey" | "alt
   return ev.key.length === 1;
 }
 
+/// One printable ASCII character other than the space, which stays Meta.
+function isOptionAscii(key: string): boolean {
+  if (key.length !== 1) return false;
+  const code = key.charCodeAt(0);
+  return code > 0x20 && code < 0x7f;
+}
+
 export type GhosttyKeyContext = {
   platform: XtermPlatform;
   applicationCursorMode: boolean;
@@ -63,6 +70,13 @@ export function ghosttyKeydownAction(
   // its composition listeners deliver the text.
   if (ev.isComposing || ev.keyCode === 229) return { kind: "ghostty" };
   if (ctx.chanBytes !== null) return { kind: "send", data: ctx.chanBytes };
+  // Option is Meta on macOS, as chan runs xterm.js, except where a layout
+  // puts a printable ASCII character on Option (@, [ and | on a German or a
+  // French layout): that character types itself, as ghostty-web typed it.
+  // A US layout's Option characters are all outside ASCII, so it keeps Meta.
+  if (ctx.platform.isMac && ev.altKey && !ev.ctrlKey && !ev.metaKey && isOptionAscii(ev.key)) {
+    return { kind: "send", data: ev.key };
+  }
   const decision = xtermKeydown(
     ev,
     { applicationCursorMode: ctx.applicationCursorMode, platform: ctx.platform, rows: ctx.rows },
