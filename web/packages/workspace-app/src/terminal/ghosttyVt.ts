@@ -392,6 +392,10 @@ function writeDeviceAttributes(wasm: VtWasm, out: number): void {
 
 type Rgb = { r: number; g: number; b: number };
 
+function sameRgb(a: Rgb, b: Rgb): boolean {
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
+
 function blankCell(fg: Rgb, bg: Rgb): GhosttyCell {
   return {
     codepoint: 0,
@@ -466,7 +470,7 @@ function readRgb(view: DataView, ptr: number): Rgb {
 }
 
 /// Byte size of the scratch area each terminal keeps for out parameters.
-const SCRATCH = {
+export const SCRATCH = {
   slot: 0, // u32 handle or size_t out value
   slot2: 8, // second u32 out value
   raw: 16, // GhosttyCell / GhosttyRow (u64)
@@ -868,22 +872,33 @@ export class VtTerminal {
     this.lastScreenAlternate = alternate;
     this.forceFull = false;
 
-    this.readColors();
+    // Every unstyled cell carries the default colors and every palette cell
+    // its resolved color, so a change to either redraws the whole screen,
+    // which the render state marks only as far as the rows it touched.
+    if (this.readColors()) dirty = D.FULL;
     if (dirty !== D.FALSE) this.readRows(dirty === D.FULL);
     fn.ghostty_render_state_clean(this.renderState);
     if (dirty > this.dirty) this.dirty = dirty;
   }
 
-  private readColors(): void {
+  /// Reads the default colors and the palette; true when any of them
+  /// differs from the last read.
+  private readColors(): boolean {
     const s = this.scratch;
     const C = LAYOUT.GhosttyRenderStateColors;
     const ptr = s + SCRATCH.colors;
     this.wasm.view().setUint32(ptr + C.fields.size, C.size, true);
     this.wasm.fn.ghostty_render_state_get(this.renderState, ABI.GhosttyRenderStateData.COLORS, ptr);
     const view = this.wasm.view();
-    this.bg = readRgb(view, ptr + C.fields.background);
-    this.fg = readRgb(view, ptr + C.fields.foreground);
-    this.palette = this.wasm.bytes().slice(ptr + C.fields.palette, ptr + C.fields.palette + 768);
+    const bg = readRgb(view, ptr + C.fields.background);
+    const fg = readRgb(view, ptr + C.fields.foreground);
+    const palette = this.wasm.bytes().slice(ptr + C.fields.palette, ptr + C.fields.palette + 768);
+    const changed =
+      !sameRgb(bg, this.bg) || !sameRgb(fg, this.fg) || palette.some((v, i) => v !== this.palette[i]);
+    this.bg = bg;
+    this.fg = fg;
+    this.palette = palette;
+    return changed;
   }
 
   private readRows(full: boolean): void {
@@ -942,13 +957,22 @@ export class VtTerminal {
       let graphemeLen = 0;
       if (raw.tag === T.CODEPOINT_GRAPHEME) {
         fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_LEN, s + SCRATCH.slot);
-        const total = Math.min(this.wasm.view().getUint32(s + SCRATCH.slot, true), GRAPHEME_CAP);
+        const len = this.wasm.view().getUint32(s + SCRATCH.slot, true);
+        const total = Math.min(len, GRAPHEME_CAP);
         if (total > 1) {
-          fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_BUF, s + SCRATCH.graphemes);
-          const view = this.wasm.view();
-          const cps: number[] = [];
-          for (let i = 0; i < total; i++) cps.push(view.getUint32(s + SCRATCH.graphemes + i * 4, true));
-          graphemes.set(x, String.fromCodePoint(...cps));
+          // GRAPHEMES_BUF writes the whole cluster, which can outgrow the
+          // scratch's room, so a longer one is read into a buffer of its own.
+          const own = len > GRAPHEME_CAP ? this.wasm.alloc(len * 4) : 0;
+          const buf = own || s + SCRATCH.graphemes;
+          try {
+            fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_BUF, buf);
+            const view = this.wasm.view();
+            const cps: number[] = [];
+            for (let i = 0; i < total; i++) cps.push(view.getUint32(buf + i * 4, true));
+            graphemes.set(x, String.fromCodePoint(...cps));
+          } finally {
+            this.wasm.free(own, len * 4);
+          }
           graphemeLen = total - 1;
         }
       }

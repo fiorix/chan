@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Ghostty, Key, type GhosttyCell, type GhosttyTerminal } from "ghostty-web";
 import { beforeAll, describe, expect, test } from "vitest";
-import { ABI, CELL_BITS, GhosttyVt, KEY_SHIFT_FROM, LAYOUT, upstreamKey } from "./ghosttyVt";
+import { ABI, CELL_BITS, GhosttyVt, KEY_SHIFT_FROM, LAYOUT, SCRATCH, upstreamKey } from "./ghosttyVt";
 
 /// Ghostty's release wasm, vendored beside the package (vitest runs in
 /// the package directory).
@@ -286,6 +286,35 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     t.write(Array.from({ length: 3_000 }, (_, i) => `line ${i}`).join("\r\n"));
     expect(t.getScrollbackLength()).toBe(3_000 - 24);
     expect(text(t.getScrollbackLine(0))).toBe("line 0");
+  });
+
+  test("a default color change redraws the rows drawn before it", async () => {
+    const t = (await upstream()).createTerminal(20, 4, { fgColor: 0xcccccc, bgColor: 0x101010 });
+    t.write("first\r\nsecond");
+    t.update();
+    t.markClean();
+    t.write("\x1b]11;rgb:40/00/00\x07\x1b]10;rgb:00/80/00\x07");
+    t.update();
+    expect(t.needsFullRedraw()).toBe(true);
+    for (const y of [0, 1]) {
+      const cell = t.getLine(y)![0];
+      expect([cell.bg_r, cell.bg_g, cell.bg_b], `row ${y} bg`).toEqual([64, 0, 0]);
+      expect([cell.fg_r, cell.fg_g, cell.fg_b], `row ${y} fg`).toEqual([0, 128, 0]);
+    }
+  });
+
+  test("a cluster longer than the scratch's room writes nothing past it", async () => {
+    type Internals = { scratch: number; wasm: { bytes(): Uint8Array } };
+    const t = (await upstream()).createTerminal(20, 3) as unknown as GhosttyTerminal & Internals;
+    const end = t.scratch + SCRATCH.size;
+    const before = t.wasm.bytes().slice(end, end + 512);
+    // One cluster: "e" and 64 combining acute accents.
+    t.write("e" + "́".repeat(64));
+    t.update();
+    expect([...t.wasm.bytes().slice(end, end + 512)]).toEqual([...before]);
+    const cell = [...(t.getGraphemeString(0, 0) ?? "")];
+    expect(cell[0]).toBe("e");
+    expect(cell.length).toBeGreaterThan(1);
   });
 
   test("a resize reflows and redraws everything", async () => {
