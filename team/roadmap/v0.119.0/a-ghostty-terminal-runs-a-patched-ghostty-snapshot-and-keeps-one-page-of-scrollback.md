@@ -49,7 +49,7 @@ The upstream build does this while keeping fifteen times the history. The "read 
 - Each terminal keeps its own instance: a wasm memory never shrinks, so a shared one would hold the largest scrollback ever opened for the page's life. The instance no longer exists to work around #142.
 - The core reports OSC 52, OSC 7501, the bell and the title through callbacks the binding does not install; chan keeps its byte observers for OSC 52 and OSC 7501 and ghostty-web keeps its own bell and title scanning. Routing them through the core is separate work.
 - `scripts/e2e/terminal-pixels/harness.mjs` still loads ghostty-web's wasm. It measures glyph rendering, which the renderer owns, not the core.
-- This does not touch focus or input handling, so it is not expected to change [ghidle].
+- This does not touch focus or input handling. The branch carries the [ghidle] repair as its own commit, by the owner's word, in the host-resume focus recovery.
 
 [ghidle]: a-ghostty-terminal-stops-taking-keys-after-idle.md
 [filesel]: ../done/browser-checks-drive-the-files-tree-the-directory-view-replaced.md

@@ -23,11 +23,11 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.119.0
 
-Opened 2026-10-31 at the v0.118.0 GA, which carries one row into it unbuilt by the owner's word of 2026-10-31 ("ghidle can proceed if you can take the capture otherwise let's keep going"): a ghostty terminal stops taking keys after idle ([ghidle]), still proposed with no reproduction; the capture must come from the owner's macOS window over the gateway, which the build host cannot stand in for. A second row was raised and built the same day and placed here by the owner's word ("this isn't going onto v0.118, this will be in the next version"): a ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback ([ghvt]), built on `v0119/ghostty-vt-wasm` and awaiting review.
+Opened 2026-10-31 at the v0.118.0 GA, which carries one row into it unbuilt by the owner's word of 2026-10-31 ("ghidle can proceed if you can take the capture otherwise let's keep going"): a ghostty terminal stops taking keys after idle ([ghidle]), carried with no reproduction and then built on the same branch as the second row by the owner's word of 2026-10-31, with the repair its trace named; the owner's window over the gateway is its proof. A second row was raised and built the same day and placed here by the owner's word ("this isn't going onto v0.118, this will be in the next version"): a ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback ([ghvt]), built on `v0119/ghostty-vt-wasm` and awaiting review.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [ghostty stops taking keys after idle][ghidle] | proposed | measure |
+| [ghostty stops taking keys after idle][ghidle] | built | review |
 | [ghostty runs a patched Ghostty snapshot][ghvt] | built | review |
 
 [ghidle]: v0.119.0/a-ghostty-terminal-stops-taking-keys-after-idle.md

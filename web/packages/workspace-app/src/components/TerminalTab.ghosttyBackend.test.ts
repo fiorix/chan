@@ -97,8 +97,12 @@ const ghostty = vi.hoisted(() => {
       for (const handler of this.resizeHandlers) handler({ cols, rows });
     }
     refresh() {}
-    focus() {}
-    blur() {}
+    focus() {
+      record.events.push("focus");
+    }
+    blur() {
+      record.events.push("blur");
+    }
     getSelection() {
       return "chosen";
     }
@@ -482,6 +486,50 @@ describe("output and scrolling", () => {
     term.applicationCursorKeys = true;
     term.wheelHandler!(new WheelEvent("wheel", { deltaY: -1, deltaMode: 1 }));
     expect(arrows(socket)).toEqual(["\x1bOA"]);
+  });
+});
+
+// WKWebView can keep document.activeElement on the host ghostty-web focuses
+// while detaching keyboard input after a sleep or an app switch, and focus()
+// on the active element is a DOM no-op; the host-resume recovery therefore
+// blurs the host before it refocuses the terminal, so the focus is a change.
+describe("focus recovery after a host resume", () => {
+  const resume = async (): Promise<void> => {
+    window.dispatchEvent(new Event("pageshow"));
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  test("with the host active, the resume blurs it and then focuses the terminal", async () => {
+    const { target } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    host.tabIndex = 0;
+    host.focus();
+    expect(document.activeElement, "the host is active before the resume").toBe(host);
+    const blurred = vi.spyOn(host, "blur");
+    ghostty.record.events.splice(0);
+
+    await resume();
+    expect(blurred, "the host is blurred once").toHaveBeenCalledTimes(1);
+    expect(ghostty.record.events, "the terminal is focused after the blur").toContain("focus");
+    expect(document.activeElement, "the DOM focus left the host").not.toBe(host);
+  });
+
+  test("with the focus elsewhere, the resume leaves the host and the terminal alone", async () => {
+    const { target } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    const blurred = vi.spyOn(host, "blur");
+    ghostty.record.events.splice(0);
+
+    await resume();
+    expect(blurred).not.toHaveBeenCalled();
+    expect(ghostty.record.events).not.toContain("focus");
+    expect(document.activeElement, "the input keeps the focus").toBe(input);
+    input.remove();
   });
 });
 

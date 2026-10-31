@@ -926,6 +926,20 @@
       ) {
         return;
       }
+      // ghostty-web focuses the host element it opened in, and focus() on
+      // the element that is already document.activeElement is a DOM no-op,
+      // so the refocus below re-arms nothing when WKWebView kept the
+      // element active while detaching keyboard input. Blur it first: the
+      // focus that follows is then a real focus change, as a click is. A
+      // program with focus reporting on sees CSI O then CSI I, as on any
+      // terminal's wake.
+      if (
+        backend === "ghostty" &&
+        owner instanceof HTMLElement &&
+        host?.contains(owner)
+      ) {
+        owner.blur();
+      }
       // focusTerminal carries the remaining survey-overlay ownership guard.
       focusTerminal();
     });
