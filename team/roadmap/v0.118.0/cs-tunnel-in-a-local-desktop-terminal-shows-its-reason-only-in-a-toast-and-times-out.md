@@ -1,6 +1,6 @@
 # cs tunnel in a local desktop terminal shows its reason only in a toast and times out
 
-Status: landed in `0.118.0-ga` on 2026-10-31 (merge `ecba860b3`; the section Built); the owner's reading by eye on macOS (the Acceptance's last item) is pending, and the row closes at the GA on that reading or the owner's word.
+Status: landed in `0.118.0-ga` on 2026-10-31 (merge `ecba860b3`; the section Built); the owner waived the reading by eye on macOS the same day (the section Owner's word), so the row closes at the GA.
 
 Record before the merge: carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"), not started.
 
@@ -90,3 +90,7 @@ Evidence commands ran in the worktree with `CARGO_TARGET_DIR` set to the sibling
 Not run: the no-default-features build, because no feature gate changed; the full pre-push/release and browser gates, because this verification is scoped to the touched Rust and desktop surfaces; the owner-run 2 GiB transfer, which remains ignored in the unchanged e2e suite. The other two ignored tests print host profiles manually and provide a child fixture driven by its parent probe. The macOS desktop reading is pending with the owner, not claimed by the Linux build or CLI probe. No remote push or merge was performed.
 
 Owner reading on macOS: run `cs tunnel 8080:3000` in a local workspace window's terminal and in a terminal-only window. Each must print one stderr refusal at once, with no ten-second wait; `echo $?` must read 1, no pill must appear, and the tab must show the failure mark. In a devserver window, with port 3000 listening on that devserver, `cs tunnel 8080:3000` must still open and forward. No implementation question remains open.
+
+## Owner's word, 2026-10-31
+
+After the merge, on the pending macOS reading of the Acceptance's last item: "No need to do the macos read". The check by eye is waived; a defect found later is a new row.
