@@ -5,8 +5,8 @@
   // True from a tab's dragstart to the drop or dragend that ends it. An
   // extension tab's body is an iframe, a document of its own: a drag over it
   // delivers dragover and drop there and never to the pane body's handlers,
-  // so for the drag's duration every pane body lets hit-testing skip its
-  // frames (the `tab-dragging` rule below).
+  // so for the drag's duration every pane body covers its frames (the
+  // `tab-dragging` rule below).
   let tabDragInFlight = $state(false);
 </script>
 
@@ -2503,11 +2503,15 @@
     z-index: 20;
   }
   /* The only iframes under a pane body are extension tabs. While a tab drag
-     is in flight nothing else needs the frame's pointer events, and with
-     them off the drag's dragover and drop reach this body's handlers and the
-     split edges show. */
-  .editor-wrap.tab-dragging :global(iframe) {
-    pointer-events: none;
+     is in flight a transparent cover sits over each one, so the drag's
+     dragover and drop land on this body's handlers and the split edges show.
+     Turning the frame's pointer events off is not enough: WebKit still hands
+     the drag to a frame with `pointer-events: none`, which ends it there. */
+  .editor-wrap.tab-dragging :global(.extension-tab)::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
   }
   .editor-wrap.body-drop-left::after,
   .editor-wrap.body-drop-right::after,

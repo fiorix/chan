@@ -1175,8 +1175,9 @@ describe("Pane tab drag and drop between windows", () => {
     // The extension's frame is a document of its own: a drag over it lands
     // its dragover and drop there, never on this body's handlers. The body
     // carries the mark from a tab's dragstart to the drop or dragend that
-    // ends the drag, and its stylesheet turns the frame's pointer events off
-    // under the mark, so hit-testing skips the frame and the body sees the drag.
+    // ends the drag, and its stylesheet lays a cover over each extension tab
+    // under the mark, so hit-testing stops above the frame and the body sees
+    // the drag.
     const source = await renderTarget();
     layout.nodes["pane-dest"] = {
       kind: "leaf", id: "pane-dest",
@@ -1222,8 +1223,11 @@ describe("Pane tab drag and drop between windows", () => {
     } finally {
       fire(tab, "dragend", data);
     }
-    // The mark is what the stylesheet keys the frame's pointer events on.
-    expect(paneSource).toMatch(/\.editor-wrap\.tab-dragging :global\(iframe\) \{\s*pointer-events: none;\s*\}/);
+    // The mark is what the stylesheet keys the cover over each extension
+    // tab's frame on.
+    expect(paneSource).toMatch(
+      /\.editor-wrap\.tab-dragging :global\(\.extension-tab\)::after \{\s*content: "";\s*position: absolute;\s*inset: 0;\s*z-index: 1;\s*\}/,
+    );
   });
 
   test.each([
