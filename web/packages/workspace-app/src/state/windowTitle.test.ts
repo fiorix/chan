@@ -25,6 +25,7 @@ function scopedWindow(over: Partial<ScopedLibraryWindow> = {}): ScopedLibraryWin
     connected: true,
     hidden: false,
     control: false,
+    tmux: false,
     launch_path: "/notes/",
     ...over,
   };

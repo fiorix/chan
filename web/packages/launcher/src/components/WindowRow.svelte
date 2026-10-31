@@ -12,8 +12,9 @@
   //     here flashes for a re-open click.
   //   - readonly (gateway): static, connection dot only, no actions.
   //
-  // `icon` adds a leading kind glyph (accent for the control terminal); the
-  // machine tree passes it for every row. The textual "connection lost" cue is
+  // `icon` adds a leading kind glyph (accent for a control terminal, a
+  // devserver's or a tmux connection's); the machine tree passes it for every
+  // row. The textual "connection lost" cue is
   // the devserver identity row's machine icon turned red (Library.svelte), not a
   // pill on this row.
   import { tick } from "svelte";
@@ -40,6 +41,15 @@
     context?: string;
   }
   let { w, icon = false, context }: Props = $props();
+  // A control terminal by either mark: the devserver's flag, or the tmux
+  // connection's, which the library clears when the connection ends.
+  const isControl = $derived(w.control === true || w.tmux?.control === true);
+  // A tmux connection's control terminal stays buried while the connection
+  // runs: the desktop opens no window for a control row, so a show would
+  // flip the flag and open nothing. The row lists it and offers no action;
+  // the library shows it again, as a plain window, when the connection ends.
+  const buried = $derived(w.tmux?.control === true);
+  const BURIED_NOTE = "The control terminal stays buried while the connection runs; it returns as a plain window when the connection ends.";
   let editingLabel = $state(false);
   let labelDraft = $state("");
   let labelInput: HTMLInputElement | undefined = $state();
@@ -61,6 +71,7 @@
     return (
       !readOnly &&
       !rec.control &&
+      !rec.tmux?.control &&
       (!selfManagedWindows || canActOnTenant(rec.prefix))
     );
   }
@@ -146,11 +157,14 @@
 {#if hasDesktopBridge}
   <div class="row" data-deck-row tabindex="-1">
     {#if icon}
-      <span class="row-glyph" class:control={w.control} aria-hidden="true">
+      <span class="row-glyph" class:control={isControl} aria-hidden="true">
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
     {@render windowName()}
+    {#if buried}
+      <span class="row-sub row-buried" title={BURIED_NOTE}>buried</span>
+    {:else}
     <div class="row-actions">
       <button
         class="icon-btn"
@@ -185,6 +199,7 @@
         {#if w.hidden}<EyeOff size={16} />{:else}<Eye size={16} />{/if}
       </button>
     </div>
+    {/if}
   </div>
 {:else if selfManagedWindows}
   <!-- Self-managed (devserver/PWA): no desktop bridge, so [OPEN] opens the
@@ -192,11 +207,14 @@
        live handle here flashes for a re-open click. -->
   <div class="row">
     {#if icon}
-      <span class="row-glyph" class:control={w.control} aria-hidden="true">
+      <span class="row-glyph" class:control={isControl} aria-hidden="true">
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}
     {@render windowName()}
+    {#if buried}
+      <span class="row-sub row-buried" title={BURIED_NOTE}>buried</span>
+    {:else}
     <div class="row-actions">
       <!-- SHOW repairs a disconnected browser window before unhiding it.
            Both visibility actions are leader-gated, so followers cannot run
@@ -227,13 +245,14 @@
         <ExternalLink size={16} />
       </button>
     </div>
+    {/if}
   </div>
 {:else}
   <!-- Readonly surface (gateway): the dot shows the connection state but can't
        drive a native window. -->
   <div class="row">
     {#if icon}
-      <span class="row-glyph" class:control={w.control} aria-hidden="true">
+      <span class="row-glyph" class:control={isControl} aria-hidden="true">
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
       </span>
     {/if}

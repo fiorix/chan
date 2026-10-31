@@ -145,6 +145,9 @@ function loadedTerminalTab(): TerminalTab {
       revision: 1,
       records: [{ source: "program", id: null, state: "working", kind: null, progress: 0, app: "test", title: null, msg: null, seen: false, update_order: 1 }],
     },
+    tmuxConsent: { revision: 2, question: { program: "ssh", command: "ssh host tmux -CC", timeout_secs: 60 } },
+    tmuxPane: { connection: 1, pane: "%0" },
+    tmuxHostGrid: { cols: 80, rows: 24 },
     pendingPrompt: { id: "prompt-1", phase: "queued", depth: 1 },
     cwd: "/work",
     seedInput: "echo hi",
@@ -175,11 +178,17 @@ async function startDrag(
 ): Promise<{ dt: FakeDataTransfer; payload: Record<string, any>; target: HTMLElement }> {
   for (const component of mounted.splice(0)) unmount(component);
   document.body.innerHTML = "";
+  // A tmux pane never leaves its window (see the last describe), so the
+  // dragged copy of the loaded tab is a plain terminal; the table's drop of
+  // the tmux fields is asserted on the fixture below all the same.
+  const draggable: TerminalTab = { ...tab };
+  delete (draggable as Partial<TerminalTab>).tmuxPane;
+  delete (draggable as Partial<TerminalTab>).tmuxHostGrid;
   const pane: LeafNode = {
     kind: "leaf",
     id: SOURCE_PANE,
-    tabs: [tab],
-    activeTabId: tab.id,
+    tabs: [draggable],
+    activeTabId: draggable.id,
   };
   layout.rootId = pane.id;
   layout.activePaneId = pane.id;
@@ -393,6 +402,9 @@ describe("a terminal moved to another window keeps its tab state", () => {
     expect(moved.terminalActivityPulsing).toBeUndefined();
     expect(moved.queueDepth).toBeUndefined();
     expect(moved.programStatus).toBeUndefined();
+    expect(moved.tmuxConsent).toBeUndefined();
+    expect(moved.tmuxPane).toBeUndefined();
+    expect(moved.tmuxHostGrid).toBeUndefined();
     expect(moved.seedInput).toBeUndefined();
     expect(moved.spawnCommand).toBeUndefined();
     expect(moved.spawnEnv).toBeUndefined();
@@ -596,3 +608,32 @@ async function endDragAfterMove(
   await vi.waitFor(() => expect(confirmState.open || sourceTabs().length === 0).toBe(true));
   return { asked: confirmState.open, left: sourceTabs().length === 0, moving };
 }
+
+describe("a tmux pane stays in its window", () => {
+  test("its tab starts no drag and offers no payload", async () => {
+    for (const component of mounted.splice(0)) unmount(component);
+    document.body.innerHTML = "";
+    const tab = loadedTerminalTab();
+    const pane: LeafNode = { kind: "leaf", id: SOURCE_PANE, tabs: [tab], activeTabId: tab.id };
+    layout.rootId = pane.id;
+    layout.activePaneId = pane.id;
+    layout.nodes = { [pane.id]: pane };
+    layout.focusColor = "blue";
+    cancelPaneMode();
+    const target = document.createElement("div");
+    document.body.append(target);
+    const livePane = layout.nodes[pane.id];
+    if (livePane?.kind !== "leaf") throw new Error("expected leaf");
+    mounted.push(mount(Pane, { target, props: { pane: livePane } }));
+    await tick();
+    expect(target.querySelector(".tabs.control-hidden"), "a tmux pane shows no tab strip").not.toBeNull();
+    const tabEl = target.querySelector<HTMLElement>('[draggable="true"]');
+    expect(tabEl, "the tab element still exists behind the hidden strip").not.toBeNull();
+    const dt = new FakeDataTransfer();
+    const event = new Event("dragstart", { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(event, "dataTransfer", { value: dt });
+    tabEl!.dispatchEvent(event);
+    expect(event.defaultPrevented, "the drag is refused at its start").toBe(true);
+    expect(dt.getData(CROSS_TAB_MIME)).toBe("");
+  });
+});

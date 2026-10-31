@@ -79,6 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
+    setTerminalTmuxConsent, setTerminalTmuxHostGrid, setTerminalTmuxPane,
     setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
@@ -110,6 +111,9 @@
   import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
   import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
   import Inspector from "./Inspector.svelte";
+  import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
+  import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
+  import type { TmuxPaneRef } from "../state/tmux";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -191,6 +195,8 @@
     transparentColor,
     windowIsTransparent,
   } from "../terminal/backgroundOpacity";
+  import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
+  import { handleGhosttyControlV, handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -260,6 +266,12 @@
         /// (re)attach re-syncs the badge (the tab field is never persisted).
         queue_depth?: number;
         program_status?: ProgramStatus;
+        /// The tmux control-mode consent state, with the question that
+        /// stands, if any; the attachment's authoritative value.
+        tmux_consent?: TmuxConsent;
+        /// Set when this session shows a tmux pane: its connection and tmux's
+        /// pane id. A window with such a tab is a tmux window.
+        tmux_pane?: TmuxPaneRef;
         /// The `prompt_id`s still in THIS session's write queue, FIFO order,
         /// one per tail-bearing message. Lets a reloaded SPA re-prove its
         /// restored pending Rich Prompt message is still queued at position
@@ -280,6 +292,7 @@
     | { type: "rename_failed"; message: string }
     | { type: "activity"; bytes_since_focus: number }
     | { type: "program-status"; id: string; generation: number; program_status: ProgramStatus }
+    | { type: "tmux-consent"; id: string; generation: number; tmux_consent: TmuxConsent }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
     /// the absolute LOGICAL MESSAGE depth on every change, so a drained batch
     /// of N `cs terminal write` notifications arrives as one N -> 0 step, not
@@ -378,6 +391,12 @@
   // A covered redial with a known host grid declares the last shown fit. A
   // host resize while covered leaves that fit stale until the reveal.
   let hostGridKnown = false;
+  // A tmux pane's grid is tmux's: the layout sizes the pane session and the
+  // server says so in resize frames, which this renderer adopts whether or
+  // not it is active; it fits nothing to its host, publishes no size and
+  // reclaims none. Its host's grid goes to the tab instead, for the window
+  // size the page asks tmux for.
+  const tmuxSized = $derived(Boolean(tab.tmuxPane));
   let sentGrid: { cols: number; rows: number } | null = null;
   let broadcastGrid: { cols: number; rows: number } | null = null;
   // A reveal takes back the PTY even when the local grid has not changed.
@@ -433,13 +452,12 @@
   // `.terminal-tab` CSS paints the tint at the live opacity.
   const transparentWindow = windowIsTransparent();
   // Whether the desktop shows through this terminal now: a transparent
-  // window with the opacity below 100. At 100 the tint is opaque, so the
+  // window with the desktop's own opacity below 100. The value is the
+  // desktop's, not this window's tenant preference, so a devserver's 100
+  // never paints a desktop window opaque. At 100 the tint is opaque, so the
   // terminal reads exactly as in an opaque window.
   const seeThrough = $derived(
-    effectiveBackgroundOpacity(
-      currentPreferences()?.terminal?.background_opacity,
-      transparentWindow,
-    ) !== null,
+    effectiveBackgroundOpacity(desktopTerminalOpacity(), transparentWindow) !== null,
   );
   const replayMaskScans = new ReplayMaskScanBatch();
   // The writer handed to ptyWrites. On xterm this is the terminal
@@ -458,7 +476,7 @@
   // the filter does not exist on the write path at all, keeping the default
   // byte-for-byte identical to an unfiltered terminal.
   let mouseFilter: MouseModeFilter | null = null;
-  // Terminal backend (Settings: terminal.ghostty, default xterm.js).
+  // Terminal backend (Settings: terminal.ghostty, on by default).
   // Read once in start() under the same spawn-time-only contract as the
   // scrollback / mouse_capture settings above it. The ghostty backend
   // swaps the parser/renderer for Ghostty's WASM engine; xterm-only
@@ -678,7 +696,7 @@
     untrack(() => {
       gridMeasured = false;
       revealPending = true;
-      if (!active) adoptBroadcastGrid();
+      if (!active || tmuxSized) adoptBroadcastGrid();
     });
   });
   $effect(() => {
@@ -1086,7 +1104,8 @@
     }
     // Backend honors the Settings toggle under the same spawn-time
     // contract (read once here; flipping it affects only newly opened
-    // terminals). Absent field (older server) means xterm.js. The ghostty
+    // terminals). An absent field (a server older than the key) means
+    // xterm.js, which such a server can still drive. The ghostty
     // kit lazy-loads ~420KB of WASM + JS only on this branch, and each
     // terminal gets its own WASM instance (see backend.ts); a failed load
     // falls back to xterm.js rather than breaking the spawn (fail-open,
@@ -1398,9 +1417,11 @@
     // This empty renderer needs its host's grid before parsing replay, even
     // when born hidden. There is no socket to publish to at this one fit.
     broadcastGrid = null;
-    gridMeasured = runTerminalFit(fit, term, (detail) => {
-      statusDetail = detail;
-    });
+    gridMeasured = tmuxSized
+      ? measureTmuxHost()
+      : runTerminalFit(fit, term, (detail) => {
+          statusDetail = detail;
+        });
     hostGridKnown = gridMeasured;
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
@@ -1536,8 +1557,8 @@
     const declareGrid = active && reattaching ? gridMeasured : hostGridKnown;
     const path = withTokenQuery(
       terminalWsPath({
-        cols: declareGrid ? term.cols : undefined,
-        rows: declareGrid ? term.rows : undefined,
+        cols: declareGrid && !tmuxSized ? term.cols : undefined,
+        rows: declareGrid && !tmuxSized ? term.rows : undefined,
         sizeIfUnset: !active,
         tabName: terminalTabName(tab),
         tabGroup: terminalTabGroup(tab),
@@ -1622,6 +1643,10 @@
         replayMaskScans.ready();
         suppressAttachReplayGeneratedReplies = false;
         statusDetail = `${frame.cols}x${frame.rows}`;
+        if (tmuxSized) {
+          broadcastGrid = { cols: frame.cols, rows: frame.rows };
+          adoptBroadcastGrid();
+        }
         terminalCwdAbs = frame.cwd ?? null;
         terminalCwdVirtual = frame.cwd_rel ?? null;
         recoverTerminalRendererAfterHostResume();
@@ -1658,6 +1683,8 @@
         // suppressed (see attachPtyWriteOrigin / connection.ts).
         serverGeneration = frame.generation;
         receivedSeq = frame.seq;
+        if (frame.tmux_consent) setTerminalTmuxConsent(tab, frame.tmux_consent, true);
+        setTerminalTmuxPane(tab, frame.tmux_pane ?? null);
         // A fresh shell replacing this tab's session (frame.id changed) starts
         // with the xterm still holding a dead TUI's negotiated input modes.
         // Reset mouse tracking (including the 1015 urxvt format), exit the
@@ -1748,7 +1775,7 @@
         }
       } else if (frame.type === "resize" || frame.type === "resize_other") {
         broadcastGrid = { cols: frame.cols, rows: frame.rows };
-        if (!active) adoptBroadcastGrid();
+        if (!active || tmuxSized) adoptBroadcastGrid();
         statusDetail = `${frame.cols}x${frame.rows}`;
       } else if (frame.type === "cwd") {
         terminalCwdAbs = frame.cwd ?? null;
@@ -1759,6 +1786,10 @@
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
           showProgramStatus(applyProgramStatus(tab.programStatus, frame.program_status));
           if (focused) markProgramCompletionsSeen(tab.programStatus);
+        }
+      } else if (frame.type === "tmux-consent") {
+        if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
+          setTerminalTmuxConsent(tab, frame.tmux_consent);
         }
       } else if (frame.type === "queue-details") {
         if (active && tab.inspectorOpen) queuedMessages = frame.messages;
@@ -1938,6 +1969,12 @@
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(frame));
     return true;
+  }
+
+  // The banner stays until the server says the question is closed: every
+  // attached client shows it and the first answer wins.
+  function answerTmux(answer: TmuxAnswer): void {
+    send({ type: "tmux-answer", answer });
   }
 
   // Sync this terminal's broadcast toggle to the server whenever it changes
@@ -2281,7 +2318,7 @@
   }
 
   function publishLocalSize(cols: number, rows: number, reclaim = false): void {
-    if (!active || !gridMeasured) return;
+    if (tmuxSized || !active || !gridMeasured) return;
     if (!reclaim && !revealPending && sentGrid?.cols === cols && sentGrid.rows === rows) return;
     if (send({ type: "resize", cols, rows })) {
       sentGrid = { cols, rows };
@@ -2300,13 +2337,49 @@
   // listens in the capture phase, so the resize frame goes out before the
   // renderer turns the same key or paste into input.
   function reclaimPtySize(event: Event): void {
-    if (term && shouldReclaimPtySize(event, term, broadcastGrid)) {
+    if (!tmuxSized && term && shouldReclaimPtySize(event, term, broadcastGrid)) {
       publishLocalSize(term.cols, term.rows, true);
     }
   }
 
+  /// The tab's capture-phase paste: the PTY size reclaim on both backends,
+  /// then, under ghostty, a paste with no text on the clipboard (an image),
+  /// which ghostty-web would drop and xterm.js hands to the program
+  /// (ghosttyPaste.ts). Only a paste aimed at the renderer host: the composer
+  /// inside the tab takes its own pastes, images included.
+  function onTerminalPasteCapture(event: ClipboardEvent): void {
+    reclaimPtySize(event);
+    if (backend !== "ghostty" || !host) return;
+    if (!(event.target instanceof Node) || !host.contains(event.target)) return;
+    handleGhosttyEmptyPaste(event, term as GhosttyTerminal | null);
+  }
+
+  /// Measure what a tmux pane's host can show without fitting the renderer
+  /// to it: the grid goes to the tab, and the renderer keeps tmux's size,
+  /// adopted from the server's last word. True once the host is measurable.
+  function measureTmuxHost(): boolean {
+    let proposed: { cols: number; rows: number } | null | undefined = null;
+    try {
+      proposed = fit?.proposeDimensions();
+    } catch {
+      proposed = null;
+    }
+    const measured = Boolean(
+      proposed && Number.isFinite(proposed.cols) && Number.isFinite(proposed.rows) && proposed.cols > 0 && proposed.rows > 0,
+    );
+    setTerminalTmuxHostGrid(tab, measured ? proposed! : null);
+    adoptBroadcastGrid();
+    if (term) statusDetail = `${term.cols}x${term.rows}`;
+    return measured;
+  }
+
   function fitToHost(): void {
     if (!active) return;
+    if (tmuxSized) {
+      gridMeasured = measureTmuxHost();
+      if (gridMeasured) hostGridKnown = true;
+      return;
+    }
     gridMeasured = runTerminalFit(fit, term, (detail) => {
       statusDetail = detail;
     });
@@ -2759,9 +2832,11 @@
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
     // does not consume the keystroke.
     if (shouldEscapeTerminal(e)) return false;
-    // ghostty-web currently collapses Shift+Enter to plain Enter. Preserve
-    // chan's LF fallback while its remaining keys stay on Ghostty's encoder.
+    // ghostty-web drops a bare Ctrl+V with its paste chords and collapses
+    // Shift+Enter to plain Enter. Send the control byte and chan's LF
+    // fallback here while the remaining keys stay on Ghostty's encoder.
     if (backend === "ghostty") {
+      if (!handleGhosttyControlV(e, sendUserInput)) return false;
       return handleGhosttyShiftEnter(e, sendUserInput);
     }
     // xterm leaves Ctrl+/ unencoded. Resolve the layout's symbol before
@@ -2860,7 +2935,7 @@
   onkeydown={onShellKeydown}
   onkeydowncapture={reclaimPtySize}
   onpointerdowncapture={reclaimPtySize}
-  onpastecapture={reclaimPtySize}
+  onpastecapture={onTerminalPasteCapture}
   onfocusin={noteKeyboardSurface}
   oncontextmenu={onTerminalContextMenu}
 >
@@ -3171,6 +3246,11 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
+    <TmuxConsentBanner
+      question={tab.tmuxConsent?.question ?? null}
+      program={terminalTabName(tab)}
+      onAnswer={answerTmux}
+    />
     {#if tab.inspectorOpen}
       <Inspector
         title="Details"

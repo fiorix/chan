@@ -64,6 +64,10 @@ pub struct RegistryDeps {
     pub devserver_conns: Arc<DevserverConns>,
     pub devserver_connecting: Arc<Mutex<HashSet<String>>>,
     pub devserver_feed: Arc<crate::DevserverFeed>,
+    /// Runs on every change of the desktop's `server.toml` on disk, so a value
+    /// the desktop owns (the terminal background opacity) reaches its windows
+    /// whichever tenant or tool wrote the file.
+    pub server_config_hook: chan_server::ServerConfigHook,
 }
 
 fn bind_embedded_port(saved_port: Option<u16>) -> std::io::Result<(TcpListener, bool)> {
@@ -86,6 +90,7 @@ impl EmbeddedServer {
             devserver_conns,
             devserver_connecting,
             devserver_feed,
+            server_config_hook,
         } = deps;
         let port_store = Arc::clone(&config_store);
         let saved_port = match config_store.lock().unwrap().get() {
@@ -110,7 +115,10 @@ impl EmbeddedServer {
         let host = Arc::new(chan_server::WorkspaceHost::with_desktop_bridge(
             library,
             bridge,
-            chan_server::route_builder_with_extensions(&extension_runtime),
+            chan_server::route_builder_with_config_hook(
+                Some(&extension_runtime),
+                server_config_hook,
+            ),
         ));
         // Register the host's self-handle so its per-tenant control sockets can
         // reach it for teardown -- otherwise the desktop's tenants report
@@ -257,13 +265,16 @@ impl EmbeddedServer {
     /// A terminal-only host for a default-terminal launch: the library, a
     /// desktop bridge that carries the title map but no window ops (so `cs
     /// window new/open/hide` answer "no desktop"), the self-handle for the
-    /// tenant's `cs` socket, and a loopback listener on an ephemeral port that
-    /// is never saved. No window registry (a mint fails instead of writing
-    /// `windows.json`), no workspace overlay (a shutdown snapshot has nothing
-    /// to write), no launcher root, no devserver or gateway registries and no
-    /// extension processes: the launch must leave a running chan-desktop's
-    /// state alone.
-    pub async fn start_terminal_only() -> Result<Self, String> {
+    /// tenant's `cs` socket, `server_config_hook` on the tenant builder (the
+    /// window follows the terminal background opacity like every other), and
+    /// a loopback listener on an ephemeral port that is never saved. No
+    /// window registry (a mint fails instead of writing `windows.json`), no
+    /// workspace overlay (a shutdown snapshot has nothing to write), no
+    /// launcher root, no devserver or gateway registries and no extension
+    /// processes: the launch must leave a running chan-desktop's state alone.
+    pub async fn start_terminal_only(
+        server_config_hook: chan_server::ServerConfigHook,
+    ) -> Result<Self, String> {
         let library = chan_workspace::Library::open()
             .map_err(|e| format!("opening chan workspace registry for the terminal host: {e}"))?;
         let bridge = DesktopBridge {
@@ -273,7 +284,7 @@ impl EmbeddedServer {
         let host = Arc::new(chan_server::WorkspaceHost::with_desktop_bridge(
             library,
             bridge,
-            chan_server::route_builder(),
+            chan_server::route_builder_with_config_hook(None, server_config_hook),
         ));
         host.install_self();
         let (listener, _fell_back) =
@@ -1489,6 +1500,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }

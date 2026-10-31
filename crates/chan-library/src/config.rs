@@ -67,12 +67,14 @@ pub struct TerminalConfig {
     /// either terminal backend; existing renderers keep their captured size.
     #[serde(default = "default_terminal_font_size")]
     pub font_size: u32,
-    /// Terminal background opacity in percent, 100 opaque. Below 100 the SPA
-    /// paints the terminal background of the desktop's local terminal-only
-    /// windows at this alpha, so the desktop behind the window shows through
-    /// while text stays opaque. Those windows are always built transparent and
-    /// paint themselves opaque at 100, so a change applies live to every open
-    /// one. Workspace windows, devserver windows and browser tabs stay opaque.
+    /// Terminal background opacity in percent, 100 opaque. The desktop's own
+    /// setting: below 100 chan-desktop paints the terminal tabs of every
+    /// window it builds (standalone terminal, workspace, devserver and control
+    /// windows alike) at this alpha, so the desktop behind the window shows
+    /// through while text stays opaque. A desktop window reads the value from
+    /// the desktop's own `server.toml` through the host and follows its
+    /// changes live; a devserver's copy of the key plays no part in a desktop
+    /// window, and a browser tab stays opaque.
     #[serde(default = "default_terminal_background_opacity")]
     pub background_opacity: u32,
     /// The non-team default for whether a newly-spawned terminal
@@ -100,17 +102,23 @@ pub struct TerminalConfig {
     /// terminal engines, which swallow the sequence either way.
     #[serde(default = "default_terminal_program_status")]
     pub program_status: bool,
+    /// tmux control mode (`tmux -CC`): whether a terminal honors the marker
+    /// the client prints on entry, and which foreground programs enter
+    /// without the question a non-local foreground otherwise gets. A change
+    /// to `enabled` applies to new markers in live terminals as well as new
+    /// ones; a connection already running is left alone.
+    #[serde(default)]
+    pub tmux: TerminalTmuxConfig,
     /// Whether newly opened terminals use the ghostty-web backend
     /// (Ghostty's WASM VT parser) instead of xterm.js. Consumed by the
     /// SPA at terminal start time; the server only persists the value.
-    /// Applies to newly opened terminals.
+    /// Applies to newly opened terminals, control terminals included.
     ///
-    /// Off by default on every platform. Ghostty is an opt-in for Linux
-    /// desktops whose xterm.js DOM renderer leaves one unpainted scanline at
-    /// cell boundaries in box drawings and block elements (96.0% rule
-    /// continuity and 95.2% block coverage). Ghostty draws those characters
-    /// itself. The Linux AppImage uses xterm.js WebGL when dma-buf is available;
-    /// other Linux packages use DOM.
+    /// On by default on every platform; `false` keeps xterm.js. Ghostty
+    /// draws box drawings and block elements itself, where the xterm.js DOM
+    /// renderer of the Linux desktop leaves one unpainted scanline at cell
+    /// boundaries (96.0% rule continuity and 95.2% block coverage), and both
+    /// engines mask secrets, so nothing keeps a window kind on xterm.js.
     #[serde(default = "default_terminal_ghostty")]
     pub ghostty: bool,
     /// Whether xterm.js terminals visually obscure the values of
@@ -222,6 +230,7 @@ impl Default for TerminalConfig {
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
             program_status: default_terminal_program_status(),
+            tmux: TerminalTmuxConfig::default(),
             ghostty: default_terminal_ghostty(),
             secret_masking: None,
             secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
@@ -268,7 +277,88 @@ fn default_terminal_program_status() -> bool {
 }
 
 fn default_terminal_ghostty() -> bool {
-    false
+    true
+}
+
+/// `terminal.tmux`: the control-mode marker policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalTmuxConfig {
+    /// Whether the marker is honored. On by default. Off, the marker passes
+    /// through as ordinary bytes and nothing is asked.
+    #[serde(default = "default_terminal_tmux_enabled")]
+    pub enabled: bool,
+    /// Foreground program names that enter control mode without the
+    /// question, beside `tmux` itself, which always does: for `ssh` or
+    /// `mosh` users who run a remote `tmux -CC` as a habit. A name is the
+    /// process name the OS reports for the PTY's foreground job.
+    /// Deserialization drops entries outside `[A-Za-z0-9._-]+` or longer
+    /// than 64 bytes with a warning, dedupes repeats, and caps the list at
+    /// 32.
+    #[serde(default, deserialize_with = "deserialize_terminal_tmux_trust")]
+    pub trust: Vec<String>,
+}
+
+impl Default for TerminalTmuxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_terminal_tmux_enabled(),
+            trust: Vec::new(),
+        }
+    }
+}
+
+fn default_terminal_tmux_enabled() -> bool {
+    true
+}
+
+/// Cap on `terminal.tmux.trust`.
+pub const TERMINAL_TMUX_TRUST_MAX: usize = 32;
+/// Longest `terminal.tmux.trust` entry, in bytes.
+pub const TERMINAL_TMUX_TRUST_NAME_MAX: usize = 64;
+
+/// Whether `name` can be a `terminal.tmux.trust` entry: a process name as
+/// the OS reports one, `[A-Za-z0-9._-]+` and at most 64 bytes.
+pub fn valid_terminal_tmux_trust_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= TERMINAL_TMUX_TRUST_NAME_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn deserialize_terminal_tmux_trust<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let names = Vec::<String>::deserialize(deserializer)?;
+    Ok(normalize_terminal_tmux_trust(names, |entries| {
+        tracing::warn!(
+            entries,
+            limit = TERMINAL_TMUX_TRUST_MAX,
+            "terminal.tmux.trust exceeds its limit; ignoring trailing entries"
+        );
+    }))
+}
+
+/// Same posture as [`normalize_terminal_secret_mask_suffixes`]: a bad entry
+/// costs the user that entry, never the rest of their config.
+fn normalize_terminal_tmux_trust(names: Vec<String>, warn: impl FnOnce(usize)) -> Vec<String> {
+    let (mut valid, invalid): (Vec<String>, Vec<String>) = names
+        .into_iter()
+        .partition(|name| valid_terminal_tmux_trust_name(name));
+    if !invalid.is_empty() {
+        tracing::warn!(
+            entries = ?invalid,
+            "terminal.tmux.trust: dropping entries outside [A-Za-z0-9._-]+ or over 64 bytes"
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    valid.retain(|name| seen.insert(name.clone()));
+    if valid.len() > TERMINAL_TMUX_TRUST_MAX {
+        warn(valid.len());
+        valid.truncate(TERMINAL_TMUX_TRUST_MAX);
+    }
+    valid
 }
 
 fn default_terminal_secret_mask_suffixes() -> Vec<String> {
@@ -607,6 +697,52 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
+    fn tmux_is_on_with_no_trust_unless_the_config_says_otherwise() {
+        let default = TerminalConfig::default().tmux;
+        assert!(default.enabled && default.trust.is_empty());
+        let unset: TerminalConfig = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(unset.tmux, default, "a config without the table is on");
+        let partial: TerminalConfig =
+            serde_json::from_value(json!({ "tmux": { "trust": ["ssh"] } })).unwrap();
+        assert!(partial.tmux.enabled, "a table without the switch is on");
+        assert_eq!(partial.tmux.trust, vec!["ssh"]);
+        let off: TerminalConfig =
+            serde_json::from_value(json!({ "tmux": { "enabled": false } })).unwrap();
+        assert!(!off.tmux.enabled);
+        assert_eq!(
+            serde_json::to_value(&off).unwrap()["tmux"],
+            json!({ "enabled": false, "trust": [] }),
+            "both fields are written"
+        );
+    }
+
+    #[test]
+    fn tmux_trust_drops_bad_names_dedupes_and_caps() {
+        let warned = Cell::new(None);
+        let names = normalize_terminal_tmux_trust(
+            vec![
+                "ssh".into(),
+                "mosh-client".into(),
+                "ssh".into(),
+                "".into(),
+                "a b".into(),
+                "x".repeat(65),
+                "et.v2".into(),
+            ],
+            |count| warned.set(Some(count)),
+        );
+        assert_eq!(names, vec!["ssh", "mosh-client", "et.v2"]);
+        assert_eq!(warned.get(), None);
+        let many: Vec<String> = (0..40).map(|i| format!("p{i}")).collect();
+        let names = normalize_terminal_tmux_trust(many, |count| warned.set(Some(count)));
+        assert_eq!(names.len(), TERMINAL_TMUX_TRUST_MAX);
+        assert_eq!(warned.get(), Some(40));
+        let parsed: TerminalConfig =
+            serde_json::from_value(json!({ "tmux": { "trust": ["ok", "no/slash"] } })).unwrap();
+        assert_eq!(parsed.tmux.trust, vec!["ok"]);
+    }
+
+    #[test]
     fn program_status_is_on_unless_the_config_says_off() {
         assert!(TerminalConfig::default().program_status);
         let unset: TerminalConfig = serde_json::from_value(json!({})).unwrap();
@@ -719,14 +855,14 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_backend_defaults_to_xterm_on_every_platform() {
-        assert!(!TerminalConfig::default().ghostty);
+    fn the_terminal_backend_defaults_to_ghostty_on_every_platform() {
+        assert!(TerminalConfig::default().ghostty);
     }
 
     #[test]
-    fn an_absent_backend_field_uses_xterm() {
+    fn an_absent_backend_field_uses_ghostty() {
         let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
-        assert!(!config.ghostty);
+        assert!(config.ghostty);
     }
 
     #[test]
@@ -739,8 +875,8 @@ mod tests {
     #[test]
     fn an_explicit_backend_choice_survives_the_default() {
         let config: TerminalConfig =
-            serde_json::from_value(json!({ "ghostty": true })).expect("deserialize");
-        assert!(config.ghostty);
+            serde_json::from_value(json!({ "ghostty": false })).expect("deserialize");
+        assert!(!config.ghostty);
     }
 
     #[test]

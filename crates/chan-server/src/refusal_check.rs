@@ -1040,6 +1040,8 @@ mod tests {
             ("POST", "/api/library/windows/probe/close"),
             ("PUT", "/api/library/windows/probe/label"),
             ("POST", "/api/library/windows/probe/visibility"),
+            ("GET", "/api/library/tmux"),
+            ("POST", "/api/library/tmux/probe/request"),
             ("POST", "/api/library/devservers/probe/workspaces/on"),
             ("POST", "/api/library/devservers/probe/workspaces/off"),
             ("POST", "/api/library/devservers/probe/workspaces/forget"),

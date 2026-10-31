@@ -19,6 +19,7 @@ mod revtunnel;
 mod runtime_capability;
 mod serve;
 mod terminal_mode;
+mod terminal_opacity;
 mod upload;
 mod watcher;
 mod window_ops;
@@ -270,6 +271,11 @@ pub struct AppState {
     /// AppImage), so a handoff `chan upgrade` that arrives afterwards relaunches
     /// into it instead of downloading the same payload again.
     pub update_installed_version: Mutex<Option<String>>,
+    /// The terminal background opacity the windows were last told, so the
+    /// config hook's call for the desktop's own write (already announced by
+    /// the command that wrote it) sends nothing again. `None` until the first
+    /// announcement; a window reads its first value through the command.
+    pub terminal_background_opacity: Mutex<Option<u32>>,
 }
 
 impl AppState {
@@ -317,6 +323,7 @@ impl AppState {
             pending_update: Mutex::new(None),
             update_gate: tokio::sync::Mutex::new(()),
             update_installed_version: Mutex::new(None),
+            terminal_background_opacity: Mutex::new(None),
         }
     }
 
@@ -5239,6 +5246,11 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         zoom_reset,
         probe_url,
         devserver::gateway_csrf_token,
+        // The desktop's terminal background opacity: a page reads it at load
+        // and the Settings slider writes it; later changes reach every window
+        // as the terminal_opacity::EVENT event.
+        terminal_opacity::terminal_background_opacity,
+        terminal_opacity::set_terminal_background_opacity,
     ]
 }
 
@@ -5420,6 +5432,7 @@ fn main() {
                 devserver_conns: Arc::clone(&state_for_setup.devservers),
                 devserver_connecting: Arc::clone(&state_for_setup.devserver_connecting),
                 devserver_feed: Arc::clone(&state_for_setup.devserver_feed),
+                server_config_hook: terminal_opacity::config_hook(app.handle().clone()),
             };
             match tauri::async_runtime::block_on(embedded::EmbeddedServer::start(registry_deps)) {
                 Ok(server) => {
@@ -5875,6 +5888,16 @@ fn main() {
                     .count();
                 if open == 0 {
                     api.prevent_exit();
+                    // A window of the library is on its way: the watcher opens
+                    // every shown record, and a tmux connection opens its
+                    // windows while the window its tab came from closes, then
+                    // shows its control window again when it ends. The process
+                    // stays for such a window, and exits shortly after when
+                    // none opened.
+                    if window_on_its_way(_app) {
+                        schedule_exit_when_nothing_opened(_app.clone());
+                        return;
+                    }
                     let _ = begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0));
                     return;
                 }
@@ -6682,6 +6705,12 @@ fn mint_workspace_window_copy(
 /// With nothing focused (or the About window), Cmd/Ctrl+Shift+N opens a
 /// standalone terminal window instead, as it does when a focused window's
 /// backing connection can't be resolved.
+/// Dispatched into a tmux window's page on New Window: the page asks its tmux
+/// connection for a new tmux window with no affinity, so it opens in a chan
+/// window of its own, the same request Cmd+T makes with the window as
+/// affinity.
+const TMUX_NEW_WINDOW_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.tmux.newWindow' } }));";
+
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(focused) = app
         .webview_windows()
@@ -6714,6 +6743,19 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
                 .find(|r| crate::window_watcher::native_label(r) == focused_label)
         });
         return match record {
+            // A tmux window: a new window is a new tmux window in a chan
+            // window of its own, which only the page can ask for, since it
+            // knows which of its sessions is a pane of the connection. The
+            // connection's control window is a terminal, not a tmux window,
+            // so it takes the plain branches below.
+            Some(r) if r.tmux.as_ref().is_some_and(|mark| !mark.control) => {
+                let window = app
+                    .get_webview_window(focused_label)
+                    .ok_or_else(|| format!("no webview window {focused_label}"))?;
+                window
+                    .eval(TMUX_NEW_WINDOW_DISPATCH_JS)
+                    .map_err(|e| format!("asking the tmux window for a new window: {e}"))
+            }
             Some(r) if r.kind == chan_server::WindowKind::Terminal => {
                 spawn_terminal_window(app);
                 Ok(())
@@ -7015,6 +7057,43 @@ async fn restore_on_workspaces<R: tauri::Runtime>(
 /// remaining state. A second request while a drain is in flight is refused and
 /// handed back, so a caller holding something valuable (the Windows staged
 /// installer) can keep it rather than lose it silently.
+/// Whether the embedded library holds a shown record the window watcher has
+/// not opened yet (`window_watcher::awaiting_native_window`).
+fn window_on_its_way(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<Arc<AppState>>();
+    let Some(records) = state
+        .embedded()
+        .map(|embedded| embedded.assemble_window_records())
+    else {
+        return false;
+    };
+    let open: std::collections::HashSet<String> = app.webview_windows().into_keys().collect();
+    let buried = state
+        .devserver_feed
+        .buried
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    window_watcher::awaiting_native_window(&records, &open, &buried)
+}
+
+/// After an exit held back for a window on its way: give it time to open,
+/// then run the normal shutdown when the process still shows nothing, so a
+/// window that never opened does not leave a process with no window.
+fn schedule_exit_when_nothing_opened(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let open = app
+            .webview_windows()
+            .into_keys()
+            .filter(|l| serve::is_workspace_webview_label(l))
+            .count();
+        if open == 0 {
+            let _ = begin_normal_shutdown(app.clone(), ShutdownAction::Exit(0));
+        }
+    });
+}
+
 fn begin_normal_shutdown(
     app: tauri::AppHandle,
     action: ShutdownAction,
@@ -8014,6 +8093,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };
@@ -8510,6 +8590,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8546,6 +8627,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8585,6 +8667,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -8704,6 +8787,7 @@ mod tests {
                 holders: None,
                 active_transfer: false,
                 control: false,
+                tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
             };
@@ -9361,6 +9445,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         }]));
@@ -9419,6 +9504,7 @@ mod tests {
             holders: Some(vec!["desktop-a".into()]),
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
         };
@@ -9562,6 +9648,9 @@ mod tests {
         );
         assert!(exit_arm.contains("if open == 0 {"));
         assert!(exit_arm.contains("begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0))"));
+        // A shown record the watcher has not opened yet holds the exit back.
+        assert!(exit_arm.contains("if window_on_its_way(_app) {"));
+        assert!(exit_arm.contains("schedule_exit_when_nothing_opened(_app.clone());"));
     }
 
     #[cfg(not(target_os = "macos"))]

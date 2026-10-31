@@ -9,6 +9,8 @@ import {
   type DevserverEntry,
   type GatewayEntry,
   type LibraryApi,
+  type TmuxConnectionEntry,
+  type TmuxWindowEntry,
   type WindowRecord,
   type WindowSet,
   type WorkspaceEntry,
@@ -236,10 +238,46 @@ const windows: WindowRecord[] = [
   },
 ];
 
+// The tmux control-mode connections the feed carries, none seeded: a suite
+// that renders a connection card seeds its own and clears it after, so every
+// other suite sees the deck it had. A connection's rows live in `windows`
+// with their `tmux` mark like any other row.
+const tmuxConnections: TmuxConnectionEntry[] = [];
+let seededTmuxRows: string[] = [];
+let nextTmuxWindow = 100;
+
+/** Test-only: replace the seeded tmux connections and the rows they own, then
+ * push the feed. The previous seed's rows, and any row a request minted, go
+ * first, so a second seed does not stack on the first. */
+export function setMockTmuxConnections(entries: TmuxConnectionEntry[], rows: WindowRecord[]): void {
+  tmuxConnections.splice(0, tmuxConnections.length, ...entries);
+  const stale = new Set(seededTmuxRows);
+  for (let i = windows.length - 1; i >= 0; i--) {
+    const w = windows[i]!;
+    if (stale.has(w.window_id) || w.tmux) windows.splice(i, 1);
+  }
+  seededTmuxRows = rows.map((w) => w.window_id);
+  windows.push(...rows);
+  notify();
+}
+
 const subscribers = new Set<(set: WindowSet) => void>();
 
-function notify(): void {
+/** The full snapshot the live watch socket pushes: every row, and the tmux
+ * connections only while there is one, as the wire omits the field when empty. */
+function snapshot(): WindowSet {
   const set: WindowSet = { windows: windows.map((w) => ({ ...w })) };
+  if (tmuxConnections.length) {
+    set.tmux_connections = tmuxConnections.map((c) => ({
+      ...c,
+      windows: c.windows.map((w) => ({ ...w })),
+    }));
+  }
+  return set;
+}
+
+function notify(): void {
+  const set = snapshot();
   for (const fn of subscribers) fn(set);
 }
 
@@ -699,10 +737,83 @@ export const mockApi: LibraryApi = {
     return tick(undefined);
   },
 
+  // A request names a connection, and the library answers 404 for one it no
+  // longer holds. The mock plays tmux's side: a new window gets a tmux window
+  // and the chan row for it, open-window gives a listed window its row, and
+  // detach or end drop the connection with every window row it owns, the way
+  // the connection's end closes its windows, while the control terminal stays
+  // and turns back into a plain terminal.
+  tmuxRequest: (connection, request) => {
+    const entry = tmuxConnections.find((c) => c.connection === connection);
+    if (!entry) {
+      return Promise.reject(
+        new ApiError(404, JSON.stringify({ error: `no tmux connection ${connection}` })),
+      );
+    }
+    const openRow = (tw: TmuxWindowEntry): void => {
+      const ordinal =
+        windows.filter((w) => w.tmux?.connection === connection && !w.tmux.control).length + 1;
+      const rec: WindowRecord = {
+        window_id: `${connection}-${tw.id}`,
+        library_id: entry.library_id,
+        kind: "terminal",
+        title: `Terminal Window ${ordinal}`,
+        ordinal,
+        workspace_path: null,
+        prefix: "t/tmux",
+        token: "",
+        persisted: false,
+        connected: true,
+        active_transfer: false,
+        control: false,
+        tmux: { connection, control: false },
+      };
+      windows.push(rec);
+      tw.open = true;
+      tw.chan_window = rec.window_id;
+    };
+    switch (request.request) {
+      case "new-window": {
+        const tw: TmuxWindowEntry = {
+          id: `@${nextTmuxWindow++}`,
+          name: "shell",
+          panes: 1,
+          open: false,
+          chan_window: null,
+        };
+        entry.windows.push(tw);
+        openRow(tw);
+        break;
+      }
+      case "open-window": {
+        const tw = entry.windows.find((w) => w.id === request.window);
+        if (tw && !tw.chan_window) openRow(tw);
+        break;
+      }
+      case "detach":
+      case "end": {
+        tmuxConnections.splice(tmuxConnections.indexOf(entry), 1);
+        for (let i = windows.length - 1; i >= 0; i--) {
+          const w = windows[i]!;
+          if (w.tmux?.connection !== connection) continue;
+          if (w.tmux.control) {
+            delete w.tmux;
+            w.control = false;
+          } else {
+            windows.splice(i, 1);
+          }
+        }
+        break;
+      }
+    }
+    notify();
+    return tick(undefined);
+  },
+
   watchWindows: (onSet) => {
     subscribers.add(onSet);
     // Full snapshot on subscribe, mirroring the live watch socket.
-    onSet({ windows: windows.map((w) => ({ ...w })) });
+    onSet(snapshot());
     return () => {
       subscribers.delete(onSet);
     };

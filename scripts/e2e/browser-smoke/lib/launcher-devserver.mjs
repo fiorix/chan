@@ -98,7 +98,9 @@ export function spawnDevserver(chanBin, chanHome) {
       }
     });
   });
-  return { child, url };
+  // `lines` is everything the devserver printed so far, token-masked by the
+  // reader, for a check that judges the server's own log on a failure.
+  return { child, url, lines: () => lines.map((line) => mask(line)) };
 }
 
 export async function killChild(child) {

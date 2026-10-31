@@ -159,6 +159,7 @@ describe("focus when the launcher closes", () => {
           connected: true,
           hidden: false,
           control: false,
+          tmux: false,
           launch_path: "/api/library/command-capabilities/cap/windows/w-notes/launch",
         },
       ],

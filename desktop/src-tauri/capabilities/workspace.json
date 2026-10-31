@@ -8,6 +8,8 @@
   "windows": ["control-terminal-*", "terminal-exec", "local::*", "lib-*"],
   "permissions": [
     "workspace-window",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:webview:allow-set-webview-zoom",
     "core:window:allow-set-fullscreen",
     "opener:default",

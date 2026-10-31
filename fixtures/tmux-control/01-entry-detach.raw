@@ -1,0 +1,14 @@
+P1000p%begin 1793319935 312 0
+%end 1793319935 312 0
+%sessions-changed
+%session-changed $0 m1
+%output %0 \033]3008;start=0;machineid=0;user=root;hostname=tmuxcc-m1;bootid=0;pid=0;type=shell;cwd=/opt\033\134
+%output %0 \033[?2004hroot@tmuxcc-m1:/opt# 
+%begin 1793319935 314 1
+0: bash* (1 panes) [80x24] [layout b25d,80x24,0,0,0] @0 (active)
+%end 1793319935 314 1
+%begin 1793319936 315 1
+3.8
+%end 1793319936 315 1
+%exit
+\

@@ -25,6 +25,10 @@
     markTerminalOpacityRoot,
     windowIsTransparent,
   } from "./terminal/backgroundOpacity";
+  import {
+    desktopTerminalOpacity,
+    startDesktopTerminalOpacity,
+  } from "./terminal/desktopTerminalOpacity.svelte";
   import { installSeeThroughBackdrop } from "./terminal/seeThroughBackdrop";
   import { installFileDropGuard } from "./state/fileDropGuard";
   import { refreshDrafts } from "./state/drafts.svelte";
@@ -91,41 +95,33 @@
   import { windowModeAllowsCommand } from "./state/windowMode";
   import { initWindowTitle } from "./state/windowTitle";
   import {
-    focusColorForWindow,
-    activeTabInPane,
     activeFileTab,
     activePane,
+    activeTabInPane,
     activeTerminalTab,
     allPaneTabs,
-    flushEditsToRecovery,
-    hasAnyTab,
+    cancelPaneMode,
     closeFind,
     closePane,
     closeTab,
     closeTabsInPane,
-    consumeLastMovedOutSession,
-    cancelPaneMode,
     commitPaneMode,
-    enterPaneMode,
-    isWindowFullyReadOnly,
-    layout,
+    consumeLastMovedOutSession,
     createTeamWorkLeadTerminal,
     defaultBrowserInspectorOpen,
-    openBrowserInActivePane,
-    toggleActiveTerminalBroadcastSelectAll,
+    enterPaneMode,
+    flipHybrid,
+    flushEditsToRecovery,
+    focusColorForWindow,
+    hasAnyTab,
     isDocSavePaused,
+    isWindowFullyReadOnly,
+    layout,
+    openBrowserInActivePane,
+    openDashboardInActivePane,
     openFind,
     openInActivePane,
-    openDashboardInActivePane,
     openInPane,
-    scheduleAutosave,
-    flipHybrid,
-    selectNextPane,
-    selectNextTabInActivePane,
-    selectPrevPane,
-    selectPrevTabInActivePane,
-    selectTabAtIndexInActivePane,
-    setActivePane,
     openTerminalInActivePane,
     paneActiveTabId,
     paneMode,
@@ -143,11 +139,22 @@
     paneTabs,
     requestPaneSideToggleFlash,
     resolveTabDestination,
+    scheduleAutosave,
+    selectNextPane,
+    selectNextTabInActivePane,
+    selectPrevPane,
+    selectPrevTabInActivePane,
+    selectTabAtIndexInActivePane,
+    setActivePane,
     setWindowFocusColor,
     splitActive,
+    tmuxPaneTabs,
+    tmuxRequestCarrier,
     toggleActiveFileTabMode,
+    toggleActiveTerminalBroadcastSelectAll,
     type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
+  import { tmuxWindowGrid } from "./state/tmuxWindowSize.svelte";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
@@ -173,6 +180,7 @@
     commandIdForChord,
   } from "./state/keymapOverrides.svelte";
   import { api, openLocalColorWatch, openLocalThemeWatch } from "./api/client";
+  import { errorText } from "./api/errors";
   import {
     applyInitialPageWidth,
     watchPageWidth,
@@ -344,24 +352,23 @@
   });
 
   // Terminal background opacity. Only a window chan-desktop built
-  // transparent (`?transparent=1`, fixed for the page) is marked; the root
-  // markers and `--terminal-opacity` follow the preference live.
+  // transparent (`?transparent=1`, fixed for the page, and every window the
+  // desktop builds) is marked; the root markers and `--terminal-opacity`
+  // follow the desktop's own value live, never this window's tenant
+  // preference, which a devserver window would otherwise paint with.
   const transparentWindow = windowIsTransparent();
   $effect(() => {
     markTerminalOpacityRoot(
       document.documentElement,
       transparentWindow,
-      currentPreferences()?.terminal?.background_opacity,
+      desktopTerminalOpacity(),
     );
   });
   // Below 100 the workspace backdrop keeps painting, with a hole behind each
   // pane showing a terminal (see seeThroughBackdrop.ts).
   let workspaceBackdrop: HTMLElement | undefined = $state();
   const terminalSeeThrough = $derived(
-    effectiveBackgroundOpacity(
-      currentPreferences()?.terminal?.background_opacity,
-      transparentWindow,
-    ) !== null,
+    effectiveBackgroundOpacity(desktopTerminalOpacity(), transparentWindow) !== null,
   );
   $effect(() => {
     if (!terminalSeeThrough || !workspaceBackdrop) return;
@@ -426,6 +433,9 @@
     // forget: it needs a library capability, and a window that cannot mint one
     // simply keeps the document's static title.
     void initWindowTitle();
+    // Follow chan-desktop's terminal background opacity for the life of the
+    // page. A no-op in a browser tab, where the terminals stay opaque.
+    void startDesktopTerminalOpacity();
     // Live per-library focus-colour broadcast. Subscribe ONCE PER
     // WINDOW (the var is per-document; <Pane> is per leaf node, so per-pane would
     // open redundant sockets) to this library's colour watch and recolour
@@ -577,6 +587,11 @@
   /// picked shell still gets the rootUnavailable guard, the resolved spawn
   /// cwd, and the session save that every other entry point gets.
   function spawnTerminalFromContext(profile?: string): void {
+    // In a tmux window a new terminal is a new tmux window, which opens in a
+    // chan window of its own, since a chan window shows one tmux window as
+    // its pane tree; a split makes a new pane here. Nothing exists ahead of
+    // tmux.
+    if (requestTmuxWindow()) return;
     if (tree.rootUnavailable) {
       setTransientStatus(
         `New terminal failed: ${tree.error ?? "workspace root does not exist"}`,
@@ -587,6 +602,75 @@
     openTerminalInActivePane({ cwd: ctx.dir, profile });
     scheduleSessionSave();
   }
+
+  /// In a tmux window a split is tmux's: the active pane's tmux pane is split
+  /// and the new pane arrives through the window's layout, so the pane never
+  /// exists ahead of tmux. False when the active tab is not a tmux pane.
+  function requestTmuxSplit(horizontal: boolean): boolean {
+    const active = activeTabInPane(activePane());
+    if (active?.kind !== "terminal" || !active.tmuxPane || !active.terminalSessionId) return false;
+    void api
+      .tmuxRequest(active.terminalSessionId, { request: "split", pane: active.tmuxPane.pane, horizontal })
+      .catch((error) => setTransientStatus(`tmux split failed: ${errorText(error)}`));
+    return true;
+  }
+
+  // Focus follows the page into tmux: when the active pane changes to one
+  // showing a tmux pane, tmux's active pane follows, so a split or a new
+  // window opens where the user is. Sent once per change.
+  let tmuxFocusSent: string | null = null;
+  $effect(() => {
+    const node = layout.nodes[layout.activePaneId];
+    if (!node || node.kind !== "leaf") return;
+    const active = activeTabInPane(node);
+    if (active?.kind !== "terminal" || !active.tmuxPane || !active.terminalSessionId) return;
+    const key = `${active.terminalSessionId}:${active.tmuxPane.pane}`;
+    if (tmuxFocusSent === key) return;
+    tmuxFocusSent = key;
+    void api
+      .tmuxRequest(active.terminalSessionId, { request: "focus", pane: active.tmuxPane.pane })
+      .catch(() => {});
+  });
+
+  /// Ask the tmux connection this window shows for a new tmux window, which
+  /// opens in a chan window of its own. False when this window shows no
+  /// tmux pane, and nothing was asked. The request rides the active pane
+  /// tab's session when it is one, else a pane's; a control window has no
+  /// pane and asks nothing, since the launcher's card is the connection's
+  /// console.
+  function requestTmuxWindow(): boolean {
+    const carrier = tmuxRequestCarrier();
+    if (!carrier) return false;
+    void api
+      .tmuxRequest(carrier.terminalSessionId!, { request: "new-window" })
+      .catch((error) => setTransientStatus(`tmux new window failed: ${errorText(error)}`));
+    return true;
+  }
+
+  // tmux owns a tmux window's geometry: this window tells it the grid its
+  // panes can show together, each pane's host folded over tmux's layout with
+  // a cell per divider, once per change and shortly after the last one, so a
+  // window drag asks once; tmux lays the panes out inside it and each pane
+  // session learns its size from the layout, which its renderer adopts.
+  let tmuxWindowSizeSent: string | null = null;
+  let tmuxWindowSizeTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const grid = tmuxWindowGrid();
+    const carrier = tmuxPaneTabs()[0];
+    if (!grid || !carrier?.tmuxPane || !carrier.terminalSessionId) return;
+    const sessionId = carrier.terminalSessionId;
+    const pane = carrier.tmuxPane.pane;
+    const key = `${sessionId}:${grid.cols}x${grid.rows}`;
+    if (tmuxWindowSizeSent === key) return;
+    if (tmuxWindowSizeTimer) clearTimeout(tmuxWindowSizeTimer);
+    tmuxWindowSizeTimer = setTimeout(() => {
+      tmuxWindowSizeTimer = null;
+      tmuxWindowSizeSent = key;
+      void api
+        .tmuxRequest(sessionId, { request: "window-size", pane, cols: grid.cols, rows: grid.rows })
+        .catch(() => {});
+    }, 150);
+  });
   function spawnBrowserFromContext(): void {
     // A window whose tenant serves no filesystem has no browser surface
     // (there is no /api/fs to list); the spawn is a no-op.
@@ -1474,10 +1558,10 @@
       // KEY_BRIDGE_JS). row = split right, column = split bottom, matching
       // the Hybrid Nav `/` and `?` keybinds.
       case "app.pane.splitRight":
-        splitActive("row");
+        if (!requestTmuxSplit(true)) splitActive("row");
         return;
       case "app.pane.splitDown":
-        splitActive("column");
+        if (!requestTmuxSplit(false)) splitActive("column");
         return;
       case "app.tab.next":
         selectNextTabInActivePane();
@@ -1515,6 +1599,12 @@
       // interacting with, and an empty window (no tabs) must never be recorded --
       // the discard cascade removes its row and DELETEs its session blob. Any
       // other window prompts Hide / Close / Cancel; the overlay owns the outcome.
+      // The desktop's New Window on a tmux window: a new tmux window in a chan
+      // window of its own, the request Cmd+T makes too. The desktop asks here
+      // because the page knows which of its sessions is a pane.
+      case "app.tmux.newWindow":
+        if (!requestTmuxWindow()) setTransientStatus("not a tmux window");
+        return;
       case "app.window.confirmClose":
         if (ui.disconnectBlocking || !hasAnyTab()) {
           discardWindowSession({ reap: true });
@@ -1778,6 +1868,12 @@
      through that surface subtree without touching the root. */
   :global(:root),
   :global([data-theme="dark"]) {
+    /* Tells the engine the scheme its own controls paint in: a select's
+       popup list, scrollbars, number spinners and the colour swatch are
+       native on WebKitGTK and WebView2 and follow this, not the page's
+       colours; WKWebView followed the OS appearance alone. Inherited, so
+       a Hybrid surface's own data-theme carries it. */
+    color-scheme: dark;
     --bg: #1c1c1e;
     --bg-card: #232325;
     --bg-elev: #2a2a2c;
@@ -1899,6 +1995,7 @@
     --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
   }
   :global([data-theme="light"]) {
+    color-scheme: light;
     --bg: #ffffff;
     --bg-card: #f5f5f7;
     --bg-elev: #ffffff;

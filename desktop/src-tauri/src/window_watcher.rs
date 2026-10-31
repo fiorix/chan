@@ -321,6 +321,22 @@ fn should_show(record: &WindowRecord, buried: &HashSet<String>) -> bool {
         && !record.token.is_empty()
 }
 
+/// Whether a shown record of `snapshot` has no native window among `open`
+/// yet: a window the reconcile is about to open. The desktop's exit on the
+/// last native window asks this, since a tmux connection opens its windows
+/// while the window its tab came from closes, and shows its control window
+/// again when the connection ends: a process with no window and one on its
+/// way stays for it.
+pub(crate) fn awaiting_native_window(
+    snapshot: &[WindowRecord],
+    open: &HashSet<String>,
+    buried: &HashSet<String>,
+) -> bool {
+    snapshot
+        .iter()
+        .any(|record| should_show(record, buried) && !open.contains(&native_label(record)))
+}
+
 /// One idempotent reconcile pass for `library_id`: open every shown record that
 /// lacks a native window; close every native window no longer shown (the library
 /// discarded it, or it was buried locally). Re-applying the same snapshot is a
@@ -672,6 +688,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
         }
@@ -679,6 +696,31 @@ mod tests {
 
     fn none() -> HashSet<String> {
         HashSet::new()
+    }
+
+    #[test]
+    fn a_shown_record_without_a_native_window_is_on_its_way() {
+        let shown = rec("lib", "w-1", WindowKind::Terminal);
+        let mut hidden = rec("lib", "w-2", WindowKind::Terminal);
+        hidden.hidden = true;
+        let mut open = HashSet::new();
+        // Nothing open: the shown record is on its way, the hidden one is not.
+        assert!(awaiting_native_window(
+            std::slice::from_ref(&shown),
+            &open,
+            &none()
+        ));
+        assert!(!awaiting_native_window(&[hidden.clone()], &open, &none()));
+        // Open already: nothing is on its way.
+        open.insert(native_label(&shown));
+        assert!(!awaiting_native_window(
+            &[shown.clone(), hidden],
+            &open,
+            &none()
+        ));
+        // Buried locally: not shown, so not on its way either.
+        let buried: HashSet<String> = [native_label(&shown)].into_iter().collect();
+        assert!(!awaiting_native_window(&[shown], &HashSet::new(), &buried));
     }
 
     #[test]

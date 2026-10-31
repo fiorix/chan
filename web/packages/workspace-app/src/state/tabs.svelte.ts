@@ -6,6 +6,8 @@
 
 import { flushSync } from "svelte";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
+import type { TmuxConsent } from "./tmuxConsent";
+import type { TmuxPaneRef } from "./tmux";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -500,6 +502,19 @@ export type TerminalTab = {
   inspectorWidth?: number;
   /// Current server snapshot for this attached page. Never serialized.
   programStatus?: ProgramStatus;
+  /// The tmux control-mode question the server has open on this session,
+  /// shown as a banner over the terminal. Server-owned and never
+  /// serialized: the `session` frame replaces it for each attachment.
+  tmuxConsent?: TmuxConsent;
+  /// The tmux pane this terminal shows, when its session is a pane of a
+  /// tmux connection; from the `session` frame, never serialized. A window
+  /// holding such a tab is a tmux window: Cmd+T asks tmux for a window and
+  /// the close prompt offers Detach.
+  tmuxPane?: TmuxPaneRef;
+  /// The grid this tmux pane's host box can show, measured by its renderer
+  /// and folded with the others over tmux's layout into the window size the
+  /// page asks tmux for. Local to this window and never serialized.
+  tmuxHostGrid?: { cols: number; rows: number };
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -1568,6 +1583,9 @@ function tabForReopen(src: Tab): Tab {
     tab.terminalMetadataError = undefined;
     tab.richPromptDraftPath = undefined;
     tab.richPromptCaret = undefined;
+    tab.tmuxConsent = undefined;
+    tab.tmuxPane = undefined;
+    tab.tmuxHostGrid = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
@@ -2564,6 +2582,50 @@ export function setTerminalProgramStatus(tab: TerminalTab, status: ProgramStatus
   tab.programStatus = status;
 }
 
+/// The server's tmux consent state for the attached page, applied for the
+/// `session` frame of each attachment and for a later snapshot with a
+/// greater revision.
+export function setTerminalTmuxConsent(tab: TerminalTab, consent: TmuxConsent, attach = false): void {
+  if (attach || !tab.tmuxConsent || consent.revision > tab.tmuxConsent.revision) tab.tmuxConsent = consent;
+}
+
+/// Record whether the attached session shows a tmux pane; each `session`
+/// frame says, so a fresh shell in the same tab clears it.
+export function setTerminalTmuxPane(tab: TerminalTab, pane: TmuxPaneRef | null): void {
+  tab.tmuxPane = pane ?? undefined;
+}
+
+/// Record the grid a tmux pane's host box can show, as its renderer measured
+/// it; the window grid asked of tmux folds these over the layout.
+export function setTerminalTmuxHostGrid(
+  tab: TerminalTab,
+  grid: { cols: number; rows: number } | null,
+): void {
+  const current = tab.tmuxHostGrid;
+  if (!grid) {
+    if (current) tab.tmuxHostGrid = undefined;
+    return;
+  }
+  if (current && current.cols === grid.cols && current.rows === grid.rows) return;
+  tab.tmuxHostGrid = { cols: grid.cols, rows: grid.rows };
+}
+
+/// The terminal tabs of this window that show tmux panes.
+export function tmuxPaneTabs(): TerminalTab[] {
+  return allTerminalTabs().filter((tab) => tab.tmuxPane && tab.terminalSessionId);
+}
+
+/// The terminal tab a tmux request of this window rides: the active tab when
+/// it shows a tmux pane (so a window mixing tmux and plain tabs still asks
+/// tmux), else the first pane tab. Null when the window shows no tmux pane,
+/// and nothing is to be asked: a control window asks nothing of tmux, since
+/// the launcher's card for the connection is its console.
+export function tmuxRequestCarrier(): TerminalTab | null {
+  const active = activeTabInPane(activePane());
+  if (active?.kind === "terminal" && active.tmuxPane && active.terminalSessionId) return active;
+  return tmuxPaneTabs()[0] ?? null;
+}
+
 /// Whether a fresh terminal still waits for the server's next name before it
 /// dials. The terminal clears it before the fetch, so a reconnect during the
 /// fetch does not fetch again.
@@ -2675,6 +2737,8 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
   tab.terminalSessionId = undefined;
   tab.cliCommandPending = undefined;
   if (!retainProgramStatus) tab.programStatus = undefined;
+  tab.tmuxConsent = undefined;
+  tab.tmuxPane = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
@@ -4444,6 +4508,9 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   profile: "carry",
   queueDepth: "carry",
   programStatus: "carry",
+  tmuxConsent: "carry",
+  tmuxPane: "carry",
+  tmuxHostGrid: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -4528,6 +4595,14 @@ function cloneTab(src: Tab): Tab {
     if (clone.programStatus) {
       clone.programStatus = { ...clone.programStatus, records: clone.programStatus.records.map((record) => ({ ...record })) };
     }
+    if (clone.tmuxHostGrid) clone.tmuxHostGrid = { ...clone.tmuxHostGrid };
+    if (clone.tmuxConsent) {
+      clone.tmuxConsent = {
+        ...clone.tmuxConsent,
+        ...(clone.tmuxConsent.question ? { question: { ...clone.tmuxConsent.question } } : {}),
+      };
+    }
+    if (clone.tmuxPane) clone.tmuxPane = { ...clone.tmuxPane };
     if (clone.terminalMetadataDraft) {
       clone.terminalMetadataDraft = { ...clone.terminalMetadataDraft };
     }
@@ -7702,6 +7777,9 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   // the first frame to arrive.
   queueDepth: "drop",
   programStatus: "drop",
+  tmuxConsent: "drop",
+  tmuxPane: "drop",
+  tmuxHostGrid: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
   terminalActivityPulsing: "drop",

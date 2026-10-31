@@ -1,6 +1,7 @@
 <script lang="ts">
-  // The machine-first library tree: LOCAL plus each registered devserver as an
-  // equal top-level machine, each owning its windows. A machine block is a header
+  // The machine-first library tree: LOCAL, each registered devserver and each
+  // tmux control-mode connection as an equal top-level machine, each owning
+  // its windows. A machine block is a header
   // (its machine-level actions) over the connected/local content: a TERMINALS
   // section (the control terminal pinned first, then standalone terminals) and a
   // WORKSPACES section of collapsible cards whose windows nest inside on expand.
@@ -11,13 +12,16 @@
   // expand a card to read its windows.
   //
   // On the desktop surface the machine cards are a carousel deck (Carousel):
-  // All windows first, This machine, the devservers by name, a Connecting card while
-  // windows wait for their machine, and the Add devserver card last. Other
-  // surfaces list the cards one under another.
+  // All windows first, This machine, the devservers by name, the tmux
+  // connections, a Connecting card while windows wait for their machine, and
+  // the Add devserver card last. Other surfaces list the cards one under
+  // another.
   import {
     AppWindow,
     ChevronRight,
     CircleAlert,
+    Columns3,
+    EyeOff,
     FolderPlus,
     Globe,
     House,
@@ -47,8 +51,11 @@
   import {
     connectComputer,
     canOpenWorkspaceWindow,
+    detachTmux,
     newTerminal,
+    newTmuxWindow,
     newWorkspaceWindow,
+    openTmuxWindow,
     setWorkspacePower,
   } from "../state/computerActions";
   import { checksVisible, isSelected, toggleSelected } from "../state/selection.svelte";
@@ -58,6 +65,7 @@
   import { rootName } from "../lib/windowLabel";
   import {
     buildMachineTree,
+    machineName,
     machineWindowCount,
     type MachineNode,
     type WorkspaceNode,
@@ -65,11 +73,18 @@
   import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
   import { contradictingState, powerWord, unactionable, workspaceCondition } from "../api/library";
-  import type { DevserverEntry, WorkspaceEntry } from "../api/library";
+  import type { DevserverEntry, TmuxWindowEntry, WorkspaceEntry } from "../api/library";
 
-  // The whole tree, recomputed when any of the three feeds change (the two-array
-  // interleave: workspaces + windows + devservers all drive it).
-  const tree = $derived(buildMachineTree(library.devservers, library.workspaces, library.windows));
+  // The whole tree, recomputed when any of the feeds change: workspaces,
+  // windows, devservers and the tmux connections all drive it.
+  const tree = $derived(
+    buildMachineTree(
+      library.devservers,
+      library.workspaces,
+      library.windows,
+      library.tmuxConnections,
+    ),
+  );
 
   function displayName(ws: WorkspaceEntry): string {
     return ws.label || rootName(ws.path) || ws.path;
@@ -98,12 +113,12 @@
   }
 
   // The persisted collapse key for a machine card: "local" for the local card,
-  // the devserver's stable id per devserver (matching the machine-tree card key).
+  // the devserver's stable id per devserver, and the connection id behind a
+  // prefix for a tmux connection, so no two kinds can share a deck key.
   function machineKey(node: MachineNode): string {
-    return node.kind === "local" ? "local" : node.devserver!.id;
-  }
-  function machineName(node: MachineNode): string {
-    return node.kind === "local" ? "This machine" : devserverName(node.devserver!);
+    if (node.kind === "local") return "local";
+    if (node.kind === "tmux") return `tmux:${node.connection}`;
+    return node.devserver!.id;
   }
 
   // Per-workspace card expand state, keyed by the machine and workspace so it
@@ -243,10 +258,42 @@
       node.control.length === 0 &&
       node.terminals.length === 0 &&
       node.workspaces.length === 0 &&
-      node.looseWindows.length === 0
+      node.looseWindows.length === 0 &&
+      node.unopened.length === 0
     );
   }
 </script>
+
+<!-- A tmux window past the cap: the connection opened no chan window for it,
+     so there is no record to focus or hide. It reads as a hidden row, and its
+     show asks the connection to open it; the chan window then arrives through
+     the feed as an ordinary row. The read-only surface, which can ask nothing,
+     shows the hidden mark alone. -->
+{#snippet tmuxWindowRow(connection: string, tw: TmuxWindowEntry)}
+  {@const name = tw.name || tw.id}
+  <div class="row" data-deck-row tabindex="-1">
+    <span class="unopened-glyph" aria-hidden="true"><SquareTerminal size={15} /></span>
+    <div class="row-main">
+      <span class="row-name">{name}</span>
+      <span class="row-sub">{tw.id} · {tw.panes} pane{tw.panes === 1 ? "" : "s"}</span>
+    </div>
+    {#if readOnly}
+      <span class="unopened-glyph" title="Hidden" aria-label="Hidden"><EyeOff size={14} /></span>
+    {:else}
+      <div class="row-actions">
+        <button
+          class="icon-btn"
+          type="button"
+          title="Show window (h)"
+          data-deck-key="h"
+          aria-label={`Show tmux window ${name}`}
+          onclick={() => run(openTmuxWindow(connection, tw))}>
+          <EyeOff size={16} />
+        </button>
+      </div>
+    {/if}
+  </div>
+{/snippet}
 
 {#snippet workspaceCard(node: WorkspaceNode, kind: "workspace" | "served", devserverId: string | null)}
   {@const ws = node.ws}
@@ -374,14 +421,19 @@
   {@const kind = node.kind === "local" ? "workspace" : "served"}
   {@const devserverId = node.devserver?.id ?? null}
   <div class="machine-content">
-    {#if node.control.length || node.terminals.length}
-      <div class="section-label">Terminals</div>
+    {#if node.control.length || node.terminals.length || node.unopened.length}
+      <!-- A tmux card's rows are the connection's windows, and the section
+           says so; its windows with no chan window yet follow the open ones. -->
+      <div class="section-label">{node.kind === "tmux" ? "Windows" : "Terminals"}</div>
       <div class="term-list">
         {#each node.control as w (w.window_id)}
           <WindowRow {w} icon />
         {/each}
         {#each node.terminals as w (w.window_id)}
           <WindowRow {w} icon />
+        {/each}
+        {#each node.unopened as tw (tw.id)}
+          {@render tmuxWindowRow(node.connection!, tw)}
         {/each}
       </div>
     {/if}
@@ -496,6 +548,70 @@
               aria-label={demoState.reset ? "Reset demo data" : "New local workspace"}
               onclick={() => (demoState.reset ? run(resetDemo()) : openNewDialog("local"))}>
               <FolderPlus size={16} />
+            </button>
+          {/if}
+        </div>
+      </div>
+      {@render machineContent(node)}
+    {:else if node.kind === "tmux"}
+      {@const entry = node.tmux}
+      {@const title = machineName(node)}
+      <!-- A tmux control-mode connection. The glyph reads live, since the card
+           exists only while the connection does; the identity block names
+           where tmux runs over its session and version, with a mark for the
+           errors tmux reported. The actions mirror a connected devserver's:
+           t asks for a new tmux window and c detaches in the disconnect
+           slot; ending the server is the selection's turn off or remove,
+           through the same check the other cards carry. A node whose record
+           has not arrived yet has nothing to ask of, so it carries its rows
+           alone until the next push. -->
+      <div class="card-header machine-header" data-deck-row tabindex="-1">
+        {#if entry && !readOnly && checksVisible()}
+          <input
+            class="row-check"
+            type="checkbox"
+            checked={isSelected("tmux", entry.connection)}
+            aria-label={`Select ${title}`}
+            onchange={() => toggleSelected("tmux", entry.connection)} />
+        {/if}
+        <span class="machine-icon live" title="Connected">
+          <Columns3 size={16} />
+        </span>
+        <div class="ds-id">
+          <span class="ds-name-row">
+            <span class="row-name">{title}</span>
+            {#if entry && entry.errors.length}
+              <span class="row-error" title={entry.errors.join("\n")}>
+                <CircleAlert size={14} />
+              </span>
+            {/if}
+          </span>
+          {#if entry}
+            <span class="ds-addr-row">
+              <span class="row-sub">session {entry.session.name} · tmux {entry.version}</span>
+            </span>
+          {/if}
+        </div>
+        <div class="card-actions machine-actions">
+          {@render windowCount(machineWindowCount(node))}
+          {#if entry && !readOnly}
+            <button
+              class="icon-btn"
+              type="button"
+              title="New tmux window (t)"
+              data-deck-key="t"
+              aria-label={`New tmux window in ${title}`}
+              onclick={() => run(newTmuxWindow(entry.connection))}>
+              <SquareTerminal size={16} />
+            </button>
+            <button
+              class="icon-btn on"
+              type="button"
+              title="Detach (c)"
+              data-deck-key="c"
+              aria-label={`Detach ${title}`}
+              onclick={() => run(detachTmux(entry.connection))}>
+              <Unplug size={16} />
             </button>
           {/if}
         </div>
@@ -810,6 +926,15 @@
 
   .term-list :global(.row:hover) {
     background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
+  }
+
+  /* The glyphs of a tmux window row with no chan window yet (WindowRow draws
+     its own for a row with a record). */
+  .unopened-glyph {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: var(--text-secondary);
   }
 
   .empty-hint code {

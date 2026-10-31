@@ -65,46 +65,49 @@ import {
   activeTabInPane,
   allPaneTabs,
   buildSplitGrid,
+  cancelMissingFileCheck,
   closePane,
   closeTab,
   conflictDialog,
   draftCloseState,
+  equalizePane,
   flushTabEdits,
+  focusPane,
   hasAnyTab,
   hasBrowserTab,
-  cancelMissingFileCheck,
   hasGraphTab,
   layout,
-  markTabFileMissing,
-  openBrowserInActivePane,
-  openBrowserInPane,
-  scheduleMissingFileCheck,
-  openGraphInActivePane,
-  openGraphInPane,
-  parseGraphLink,
-  paneActiveTabId,
-  paneSide,
-  paneTabs,
-  openInActivePane,
-  openInPane,
-  openTerminalInPane,
-  openTerminalInActivePane,
-  openDashboardInPane,
-  equalizePane,
-  focusPane,
   layoutHasDurableContent,
   layoutHasPersistableStructure,
   layoutHasReattachableTerminal,
+  markTabFileMissing,
+  markTerminalMovingOut,
+  openBrowserInActivePane,
+  openBrowserInPane,
+  openDashboardInPane,
+  openGraphInActivePane,
+  openGraphInPane,
+  openInActivePane,
+  openInPane,
+  openTerminalInActivePane,
+  openTerminalInPane,
+  paneActiveTabId,
   paneMode,
   paneModeDeferRemoteLayout,
+  paneSide,
+  paneTabs,
+  parseGraphLink,
   reconcileLayout,
-  registerPaneModeSettledSink,
   registerDraftPromotionSink,
+  registerPaneModeSettledSink,
   registerSavedStatSink,
   resizePane,
   resolveTabDestination,
   restoreLayout,
+  scheduleMissingFileCheck,
+  selectTabInPane,
   serializeLayout,
+  setTerminalPendingGlobalName,
   setWindowFocusColor,
   splitPane,
   swapPanes,
@@ -120,6 +123,9 @@ import {
   type TerminalGraft,
   type TerminalTab,
 } from "./tabs.svelte";
+import { isTmuxLayoutNode, tmuxLayoutToSer } from "./tmuxLayout";
+import { setTmuxLayout } from "./tmuxWindowSize.svelte";
+import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
 import {
@@ -331,11 +337,14 @@ export const ui = $state<{
   /// empty layout during boot can't trip the close-when-empty watcher in
   /// App.svelte. Always false in workspace mode.
   terminalArmed: boolean;
-  /// The control-terminal sub-mode (`kind=control`): a singleton terminal-only
-  /// window running a devserver's connect script. Stricter than `terminalOnly`
-  /// -- the tab strip / pane chrome are hidden and Cmd+T / pane splits are
-  /// disabled so it stays one PTY. Set once at bootstrap from the URL, never
-  /// flipped. Implies `terminalOnly`.
+  /// The control-terminal sub-mode (`kind=control`): a terminal-only window
+  /// holding one PTY, a devserver's connect script or the control terminal
+  /// of a tmux connection. Stricter than `terminalOnly` -- the tab strip /
+  /// pane chrome are hidden and Cmd+T / pane splits are disabled so it stays
+  /// one PTY. Set at bootstrap from the URL; the `control_release` window
+  /// command clears it (`releaseControlMode`) when the connection ends, and
+  /// the window is a plain terminal window from then on. Implies
+  /// `terminalOnly`.
   terminalControl: boolean;
 }>({
   status: null,
@@ -453,11 +462,33 @@ export function isTerminalOnlyWindow(): boolean {
 }
 
 /// The control terminal is a stricter sub-mode of terminal-only (`kind=control`,
-/// set by the shell's `spawn_control_terminal_window`): a singleton that hosts
-/// exactly one PTY (the connect script), hides the tab strip / pane chrome, and
-/// disables Cmd+T + pane splits so it can never replicate into Terminal 1/2/3.
+/// set by the shell's `spawn_control_terminal_window` and by the launcher for
+/// a window row marked `control`): a window that hosts exactly one PTY (the
+/// connect script, or a tmux connection's control terminal), hides the tab
+/// strip / pane chrome, and disables Cmd+T + pane splits so it can never
+/// replicate into Terminal 1/2/3. This is the URL's reading at boot;
+/// `ui.terminalControl` is the live bit, which `releaseControlMode` clears.
 export function isControlTerminalWindow(): boolean {
   return windowMode === "control";
+}
+
+/// Leave the control sub-mode while the page lives: the tmux connection the
+/// window's terminal controlled ended, and the library made the window a
+/// plain terminal window. `ui.terminalControl` is the bit every chrome and
+/// command gate reads, so clearing it shows the pane chrome and lifts the
+/// one-PTY rules; the URL's `kind` is rewritten to the plain spelling so a
+/// reload opens the plain window too. The terminal and its session stay.
+export function releaseControlMode(): void {
+  if (!ui.terminalControl) return;
+  ui.terminalControl = false;
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("kind", "terminal");
+    window.history.replaceState({}, "", url.toString());
+  } catch {
+    // The live flip stands, and the launcher opens the row with the plain
+    // kind once the library cleared its `control` mark.
+  }
 }
 
 export const HYBRID_SURFACE_KINDS: readonly HybridSurfaceKind[] = [
@@ -1441,6 +1472,44 @@ type WindowCommandFrame =
   | ({
       type: "window_command";
       window_id: string;
+      // Open a terminal tab bound to an existing session: a tmux pane
+      // session the connection bound to this window. A tab that already
+      // shows the session is focused instead.
+      command: "open_term_attach";
+      session_id: string;
+    } & DestinationWindowCommand)
+  | {
+      type: "window_command";
+      window_id: string;
+      // Drop the tab that shows `session_id`, which now belongs to `window`,
+      // without ending the session: the control session moved into the
+      // control window minted for it.
+      command: "release_term";
+      session_id: string;
+      window: string;
+    }
+  | {
+      type: "window_command";
+      window_id: string;
+      // The tmux connection this control window's terminal controlled ended
+      // and the library made the window a plain terminal window: the page
+      // leaves control mode and keeps the shell, which draws again.
+      command: "control_release";
+    }
+  | {
+      type: "window_command";
+      window_id: string;
+      // A tmux window's layout: the pane tree this window shows, with a
+      // terminal tab per pane bound to the pane's session. Applied through
+      // the layout reconciler, so tabs already attached move rather than
+      // remount, a pane with no tab yet gets one, and a pane tmux closed
+      // goes.
+      command: "tmux_layout";
+      layout: unknown;
+    }
+  | ({
+      type: "window_command";
+      window_id: string;
       command: "open_dashboard";
       carousel_index?: number | null;
       carousel_off?: boolean;
@@ -2044,6 +2113,19 @@ async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
   }
 }
 
+/// The terminal tab of this window attached to `sessionId`, with its pane.
+function locateTerminalBySession(sessionId: string): { paneId: string; tab: TerminalTab } | null {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const tab of allPaneTabs(node)) {
+      if (tab.kind === "terminal" && tab.terminalSessionId === sessionId) {
+        return { paneId: node.id, tab };
+      }
+    }
+  }
+  return null;
+}
+
 async function handleWindowCommand(raw: unknown): Promise<void> {
   const frame = raw as Partial<WindowCommandFrame> | null;
   if (!frame || frame.window_id !== sessionWindowId()) return;
@@ -2172,6 +2254,60 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // A CLI-opened tab can be reloaded before the debounced layout write runs.
     persistStateToHash();
     setTransientStatus("opened terminal");
+    scheduleSessionSave();
+    return;
+  }
+  if (frame.command === "open_term_attach") {
+    const sessionId = typeof frame.session_id === "string" ? frame.session_id : "";
+    if (!sessionId) return;
+    const existing = locateTerminalBySession(sessionId);
+    if (existing) {
+      selectTabInPane(existing.paneId, existing.tab.id);
+      return;
+    }
+    const destination = resolveWindowCommandDestination(frame);
+    if (!destination) return;
+    const tab = openTerminalInPane(destination.paneId, { sessionId, side: destination.side });
+    // A bound tab takes its name from the session's frame; it waits for no
+    // minted one.
+    if (tab) setTerminalPendingGlobalName(tab, false);
+    scheduleSessionSave();
+    return;
+  }
+  if (frame.command === "release_term") {
+    const sessionId = typeof frame.session_id === "string" ? frame.session_id : "";
+    const target = typeof frame.window === "string" ? frame.window : "";
+    if (!sessionId) return;
+    const found = locateTerminalBySession(sessionId);
+    if (!found) return;
+    const drop = () => {
+      // The target window holds the session now; the source lets go of the
+      // tab the way a cross-window drag does, killing nothing.
+      markTerminalMovingOut(found.tab.id);
+      void closeTab(found.paneId, found.tab.id, { force: true });
+    };
+    if (isTauriDesktop()) {
+      drop();
+      return;
+    }
+    // A browser opens the window itself; a refused popup keeps the tab, and
+    // the launcher lists the window for a later gesture.
+    void openLibraryWindowById(plainLibraryWindowBridge(), target)
+      .then((found) => {
+        if (found) drop();
+        else setTransientStatus("tmux control window opened in the library");
+      })
+      .catch(() => setTransientStatus("tmux control window is in the launcher; open it from there"));
+    return;
+  }
+  if (frame.command === "control_release") {
+    releaseControlMode();
+    return;
+  }
+  if (frame.command === "tmux_layout") {
+    if (!isTmuxLayoutNode(frame.layout)) return;
+    setTmuxLayout(frame.layout);
+    reconcileLayout(tmuxLayoutToSer(frame.layout));
     scheduleSessionSave();
     return;
   }

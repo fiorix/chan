@@ -38,6 +38,9 @@ export const TERMINAL_ONLY_COMMANDS: ReadonlySet<string> = new Set<string>([
   "app.window.close",
   "app.window.confirmClose",
   "app.window.hide",
+  // The desktop's New Window on a tmux window, which the page turns into a
+  // new tmux window in a chan window of its own.
+  "app.tmux.newWindow",
   "app.find.open",
   "app.find.next",
   "app.find.prev",

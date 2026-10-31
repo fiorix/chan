@@ -14,9 +14,16 @@ import { library, loadLibrary, saveDevserver, stopWatching } from "../state/libr
 import { isSelected, toggleSelected, clearSelection, setSelectMode } from "../state/selection.svelte";
 import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "../state/pending.svelte";
 import { confirm, requestConfirm, resolveConfirm, cancelConfirm } from "../state/confirm.svelte";
-import { ApiError, type DevserverEntry, type WorkspaceEntry } from "../api/library";
+import {
+  ApiError,
+  type DevserverEntry,
+  type TmuxConnectionEntry,
+  type WindowRecord,
+  type WorkspaceEntry,
+} from "../api/library";
 import { controlAttention, clearAllControlAttention } from "../state/controlAttention.svelte";
 import { setDemoMode } from "../state/demo.svelte";
+import { windowRowLabel } from "../lib/windowLabel";
 
 vi.mock("../api/backend", async () => {
   const { mockApi } = await import("../api/mock");
@@ -920,6 +927,238 @@ describe("Library: demo mode", () => {
     mountList();
     expect(byAria("New local workspace")).toBeTruthy();
     expect(byAria("Reset demo data")).toBeUndefined();
+  });
+});
+
+describe("Library: tmux connection cards", () => {
+  const LOCAL_TITLE = "tmux -CC on this machine";
+  const REMOTE_TITLE = "tmux -CC from ssh geekom";
+
+  function entry(
+    over: Partial<TmuxConnectionEntry> & Pick<TmuxConnectionEntry, "connection">,
+  ): TmuxConnectionEntry {
+    return {
+      library_id: "local",
+      origin: { program: "tmux", command: "tmux -CC", local: true },
+      version: "3.5a",
+      session: { id: "$0", name: "main" },
+      windows: [],
+      window_cap: 8,
+      errors: [],
+      control_window: `${over.connection}-control`,
+      ...over,
+    };
+  }
+
+  // A connection's rows as the library serves them: the control terminal
+  // minted hidden with both marks, the windows plain terminal rows with the
+  // connection's mark.
+  function row(connection: string, window_id: string, control: boolean, ordinal: number): WindowRecord {
+    return {
+      window_id,
+      library_id: "local",
+      kind: "terminal",
+      title: control ? "Control terminal" : `Terminal Window ${ordinal}`,
+      ordinal,
+      workspace_path: null,
+      prefix: "t/tmux",
+      token: "",
+      persisted: false,
+      connected: true,
+      active_transfer: false,
+      control,
+      hidden: control,
+      tmux: { connection, control },
+    };
+  }
+
+  const local = entry({
+    connection: "tm-local",
+    windows: [{ id: "@0", name: "zsh", panes: 1, open: true, chan_window: "tm-local-w1" }],
+  });
+  const remote = entry({
+    connection: "tm-geekom",
+    origin: { program: "ssh", command: "ssh geekom", local: false },
+    session: { id: "$2", name: "work" },
+    windows: [
+      { id: "@1", name: "vim", panes: 2, open: true, chan_window: "tm-geekom-w1" },
+      { id: "@3", name: "logs", panes: 1, open: false },
+    ],
+  });
+  const rows = [
+    row("tm-local", "tm-local-control", true, 0),
+    row("tm-local", "tm-local-w1", false, 1),
+    row("tm-geekom", "tm-geekom-w1", false, 1),
+    row("tm-geekom", "tm-geekom-control", true, 0),
+  ];
+
+  function card(title: string): HTMLElement {
+    const s = [...(target?.querySelectorAll("section.machine") ?? [])].find((m) =>
+      m.querySelector(".machine-header")?.textContent?.includes(title),
+    );
+    if (!s) throw new Error(`no card titled "${title}"`);
+    return s as HTMLElement;
+  }
+
+  function rowNames(c: HTMLElement): string[] {
+    return [...c.querySelectorAll(".term-list .row-name")].map((n) => n.textContent?.trim() ?? "");
+  }
+
+  beforeEach(async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    setMockTmuxConnections([local, remote], rows.map((r) => ({ ...r, tmux: { ...r.tmux! } })));
+  });
+
+  afterEach(async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    setMockTmuxConnections([], []);
+  });
+
+  it("deals one card per connection, titled by where tmux runs, with its rows off This machine", () => {
+    mountList();
+    const localCard = card(LOCAL_TITLE);
+    const remoteCard = card(REMOTE_TITLE);
+    expect(remoteCard.textContent).toContain("session work");
+    expect(remoteCard.textContent).toContain("tmux 3.5a");
+    expect(localCard.querySelector(".machine-icon.live")).not.toBeNull();
+    // The control terminal is pinned first; the rows are the connection's,
+    // and a tmux window past the cap closes the list.
+    expect(localCard.querySelector(".section-label")?.textContent).toBe("Windows");
+    expect(rowNames(localCard)).toEqual(["Control terminal", "Terminal Window 1"]);
+    expect(rowNames(remoteCard)).toEqual(["Control terminal", "Terminal Window 1", "logs"]);
+    // The control terminal stays buried while the connection runs: its row
+    // offers no action, while the connection's window keeps its buttons.
+    const localRows = [...localCard.querySelectorAll<HTMLElement>(".row")];
+    const controlRow = localRows.find((r) => r.textContent?.includes("Control terminal"))!;
+    expect(controlRow.querySelector("button")).toBeNull();
+    expect(controlRow.textContent).toContain("buried");
+    const windowRow = localRows.find((r) => r.textContent?.includes("Terminal Window 1"))!;
+    expect(windowRow.querySelector("button")).not.toBeNull();
+    // This machine lists neither the control terminals nor the tmux windows.
+    const thisMachine = card("This machine");
+    expect(thisMachine.textContent).not.toContain("Control terminal");
+    expect(rowNames(thisMachine)).not.toContain("logs");
+    expect(thisMachine.querySelector(".section-label")?.textContent).toBe("Terminals");
+    // The badge counts the rows the card shows, the unopened window included.
+    const badge = (c: HTMLElement) =>
+      c.querySelector(".machine-actions .count-badge")?.getAttribute("title");
+    expect(badge(localCard)).toBe("2 windows");
+    expect(badge(remoteCard)).toBe("3 windows");
+  });
+
+  it("asks the connection for a new window with t and detaches with c", async () => {
+    const { backend } = await import("../api/backend");
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    try {
+      mountList();
+      const newWindow = byAria(`New tmux window in ${REMOTE_TITLE}`)!;
+      expect(newWindow.dataset.deckKey).toBe("t");
+      newWindow.click();
+      await settle();
+      const detach = byAria(`Detach ${REMOTE_TITLE}`)!;
+      expect(detach.dataset.deckKey).toBe("c");
+      expect(detach.classList.contains("on")).toBe(true);
+      detach.click();
+      await settle();
+      expect(request.mock.calls).toEqual([
+        ["tm-geekom", { request: "new-window" }],
+        ["tm-geekom", { request: "detach" }],
+      ]);
+      expect(library.error).toBeNull();
+    } finally {
+      request.mockRestore();
+    }
+  });
+
+  it("carries the selection check like the other cards, and the selection's turn off ends the server", async () => {
+    const { setSelectMode, isSelected, bulkSetOnAll, selectedCount } = await import("../state/selection.svelte");
+    const { backend } = await import("../api/backend");
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    try {
+      mountList();
+      // No power toggle on the card: ending is the selection's, as elsewhere.
+      expect(byAria(`End ${LOCAL_TITLE}`)).toBeUndefined();
+      expect(target!.querySelector(`input[aria-label="Select ${LOCAL_TITLE}"]`)).toBeNull();
+      setSelectMode(true);
+      await settle();
+      flushSync();
+      const check = target!.querySelector<HTMLInputElement>(`input[aria-label="Select ${LOCAL_TITLE}"]`)!;
+      expect(check).not.toBeNull();
+      check.click();
+      await settle();
+      expect(isSelected("tmux", "tm-local")).toBe(true);
+      expect(selectedCount("tmux")).toBe(1);
+      await bulkSetOnAll(false);
+      expect(request).toHaveBeenCalledExactlyOnceWith("tm-local", { request: "end" });
+      // The card goes with the connection, and so does its selection.
+      expect(selectedCount("tmux")).toBe(0);
+    } finally {
+      request.mockRestore();
+      const { clearSelection } = await import("../state/selection.svelte");
+      clearSelection();
+    }
+  });
+
+  it("lists a tmux window past the cap as a hidden row whose show opens it", async () => {
+    const { backend } = await import("../api/backend");
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    try {
+      mountList();
+      const logs = [...card(REMOTE_TITLE).querySelectorAll<HTMLElement>(".term-list .row")].find(
+        (r) => r.textContent?.includes("logs"),
+      )!;
+      expect(logs.hasAttribute("data-deck-row")).toBe(true);
+      expect(logs.textContent).toContain("@3");
+      // No record, so nothing to focus; the one control is the show.
+      expect(logs.querySelector('[aria-label="Focus window"]')).toBeNull();
+      const show = logs.querySelector<HTMLButtonElement>("button[data-deck-key='h']")!;
+      expect(show.getAttribute("aria-label")).toBe("Show tmux window logs");
+      show.click();
+      await settle();
+      expect(request).toHaveBeenCalledExactlyOnceWith("tm-geekom", {
+        request: "open-window",
+        window: "@3",
+      });
+      // The window that is open (@1) is an ordinary row, not an unopened one.
+      expect(byAria("Show tmux window vim")).toBeUndefined();
+    } finally {
+      request.mockRestore();
+    }
+  });
+
+  it("drops the card when the connection ends and returns its control terminal to This machine", async () => {
+    const { setSelectMode, toggleSelected, bulkSetOnAll, clearSelection } = await import("../state/selection.svelte");
+    mountList();
+    setSelectMode(true);
+    toggleSelected("tmux", "tm-local");
+    await bulkSetOnAll(false);
+    clearSelection();
+    await settle();
+    flushSync();
+    expect(library.error).toBeNull();
+    expect(
+      [...target!.querySelectorAll("section.machine")].some((m) =>
+        m.querySelector(".machine-header")?.textContent?.includes(LOCAL_TITLE),
+      ),
+    ).toBe(false);
+    expect(card(REMOTE_TITLE)).toBeTruthy();
+    // The mock turns the control row into a plain terminal, as the library
+    // does when the connection ends, and the row files under This machine.
+    const plain = library.windows.find((w) => w.window_id === "tm-local-control")!;
+    expect(plain.tmux).toBeUndefined();
+    expect(plain.control).toBe(false);
+    expect(rowNames(card("This machine"))).toContain(windowRowLabel(plain));
+  });
+
+  it("renders rows that arrived before their record under a provisional card with no actions", async () => {
+    const { setMockTmuxConnections } = await import("../api/mock");
+    setMockTmuxConnections([], [row("tm-early", "tm-early-control", true, 0), row("tm-early", "tm-early-w1", false, 1)]);
+    mountList();
+    const early = card("tmux -CC");
+    expect(early.querySelector(".machine-header .row-name")?.textContent).toBe("tmux -CC");
+    expect(rowNames(early)).toEqual(["Control terminal", "Terminal Window 1"]);
+    expect(early.querySelectorAll(".machine-actions button")).toHaveLength(0);
+    expect(rowNames(card("This machine"))).not.toContain("Control terminal");
   });
 });
 

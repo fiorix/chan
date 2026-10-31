@@ -9,6 +9,8 @@ import type {
   DevserverInput,
   GatewayEntry,
   GatewayInput,
+  TmuxConnectionEntry,
+  TmuxRequest,
   WindowRecord,
   WorkspaceEntry,
 } from "../api/library";
@@ -24,6 +26,9 @@ interface LibraryState {
   devservers: DevserverEntry[];
   gateways: GatewayEntry[];
   windows: WindowRecord[];
+  // The live tmux control-mode connections from the watch feed, one record
+  // each; the Computers deck deals each as a card over the rows it owns.
+  tmuxConnections: TmuxConnectionEntry[];
   // Per-tenant leadership from the watch feed: prefix -> leader window_id. Empty
   // (leaderless) when the tenant has no live leader. Correlated against this
   // launcher's window handles to gate leader-only create controls.
@@ -37,6 +42,7 @@ export const library = $state<LibraryState>({
   devservers: [],
   gateways: [],
   windows: [],
+  tmuxConnections: [],
   leaders: {},
   loading: false,
   error: null,
@@ -94,6 +100,7 @@ function ensureWindowFeed(): void {
   try {
     unwatch = backend.watchWindows((set) => {
       library.windows = set.windows;
+      library.tmuxConnections = set.tmux_connections ?? [];
       library.leaders = set.leaders ?? {};
       // On a self-managed surface, reconcile the window.open handle map against
       // the feed (close handles for discarded records, flag orphans). Inert on
@@ -557,4 +564,11 @@ export async function closeWindow(w: WindowRecord, actingWindowId?: string): Pro
     return;
   }
   await backend.closeWindow(w.window_id);
+}
+
+/** Ask a tmux control-mode connection for a window, a detach, an end, or to
+ * open a window past its cap. The outcome rides the feed (a new row, the card
+ * leaving with its connection), so there is nothing to refresh here. */
+export async function requestTmux(connection: string, request: TmuxRequest): Promise<void> {
+  await backend.tmuxRequest(connection, request);
 }

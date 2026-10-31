@@ -705,6 +705,35 @@ async fn launcher_json_of_the_wrong_type_names_no_rust_type() {
     .await;
 }
 
+/// The tmux request route refuses as its window siblings do: a body of the
+/// wrong shape in the envelope with no Rust type, no body as a 400, and a
+/// well-formed request of a connection nobody has as a 404.
+#[tokio::test]
+async fn tmux_request_refusals_are_json_and_name_no_rust_type() {
+    assert_refusal(
+        launcher_answer(false, json_string("/api/library/tmux/term-1/request")).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        json!({"error": WRONG_SHAPE}),
+    )
+    .await;
+    assert_refusal(
+        launcher_answer(false, bodiless("POST", "/api/library/tmux/term-1/request")).await,
+        StatusCode::BAD_REQUEST,
+        json!({"error": "invalid tmux request: a JSON body with a request is required"}),
+    )
+    .await;
+    let request = Request::post("/api/library/tmux/term-1/request")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"request":"detach"}"#))
+        .unwrap();
+    assert_refusal(
+        launcher_answer(false, request).await,
+        StatusCode::NOT_FOUND,
+        json!({"error": "tmux connection not found"}),
+    )
+    .await;
+}
+
 /// A router assembled without the layer that carries a handler's extension
 /// answers a server fault in the envelope, and names no Rust type.
 #[tokio::test]

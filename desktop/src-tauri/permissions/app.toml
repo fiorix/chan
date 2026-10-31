@@ -27,6 +27,8 @@ permissions = [
   "allow-native-vocabulary",
   "allow-toggle-launcher-panel",
   "allow-set-launcher-focus-color",
+  "allow-terminal-background-opacity",
+  "allow-set-terminal-background-opacity",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -61,7 +63,23 @@ permissions = [
   "allow-native-vocabulary",
   "allow-toggle-launcher-panel",
   "allow-set-launcher-focus-color",
+  "allow-terminal-background-opacity",
+  "allow-set-terminal-background-opacity",
 ]
+
+# IN both sets: every window kind shows terminal tabs, which paint with the
+# desktop's own terminal background opacity, and neither command resolves
+# anything but that number (read from, or written to, the desktop's own
+# server.toml, never the window's tenant).
+[[permission]]
+identifier = "allow-terminal-background-opacity"
+description = "Enables the terminal_background_opacity command (the desktop's terminal background opacity, which every window's terminal tabs paint with)."
+commands.allow = ["terminal_background_opacity"]
+
+[[permission]]
+identifier = "allow-set-terminal-background-opacity"
+description = "Enables the set_terminal_background_opacity command (the Settings slider's write of the desktop's terminal background opacity)."
+commands.allow = ["set_terminal_background_opacity"]
 
 [[permission]]
 identifier = "allow-set-launcher-focus-color"

@@ -3605,6 +3605,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::default(),
         }

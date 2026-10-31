@@ -38,6 +38,9 @@ chan-shell = { workspace = true }
 # (the desktop-side dialing client stays out of the server stack).
 chan-revtunnel = { workspace = true }
 chan-systemd = { workspace = true }
+# The tmux control-mode protocol, a state machine with no I/O; the gate in
+# terminal_sessions feeds it a session's output.
+chan-tmux = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -54,6 +57,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
+
+# The name of the process holding a PTY's foreground on macOS and FreeBSD,
+# where there is no /proc to read; the tmux gate's marker policy needs it.
+# Linux reads /proc and compiles this only for the test of the shared path.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))'.dependencies]
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

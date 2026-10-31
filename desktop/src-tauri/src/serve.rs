@@ -465,7 +465,7 @@ pub(crate) async fn retarget_watched_remote_window(
         return Ok(RetargetOutcome::Gone);
     };
     let kind = watched_window_kind(record);
-    let target = workspace_window_target_url(
+    let mut target = workspace_window_target_url(
         app,
         &label,
         &record.window_id,
@@ -474,6 +474,8 @@ pub(crate) async fn retarget_watched_remote_window(
         kind,
         desktop_holder_tag(),
     )?;
+    // The window was built transparent; the page it navigates to must know.
+    mark_transparent_window(&mut target);
     let state = app.state::<Arc<AppState>>();
     retarget_window(
         || crate::probe_url(window.clone(), url.to_string()),
@@ -855,23 +857,29 @@ struct WindowSpec<'a> {
 
 pub(crate) type WindowBuildCompletion = Box<dyn FnOnce(Result<(), String>) + Send>;
 
-/// Whether a window is built natively transparent for the terminal background
-/// opacity setting: every local terminal-only window (a standalone terminal
-/// window on the local library, or the default-terminal `terminal-exec`
-/// window), whatever the setting is when the window is built. A window's
-/// transparency cannot change after it is built, and the page paints itself
-/// opaque at 100, so building each of them transparent is what lets every
-/// later change of the setting apply live. Workspace windows, devserver
-/// windows and control terminals stay opaque.
-fn builds_transparent(label: &str, library_id: &str, kind: Option<&str>) -> bool {
-    let local_terminal = library_id == "local" && kind == Some("terminal");
-    let terminal_exec = label == crate::terminal_mode::WINDOW_LABEL;
-    local_terminal || terminal_exec
+/// Mark a window URL as loading in a transparent native window. Every window
+/// chan-desktop builds is built transparent, whatever it shows: a window's
+/// transparency is fixed when it is built, the terminal background opacity is
+/// not, and the page paints every surface but a terminal body opaque, so an
+/// opaque window would only pin its terminal tabs at 100 for its lifetime.
+/// The page paints a terminal body see-through only when its URL says so,
+/// because a see-through page in an opaque window shows the window's own
+/// background instead of the desktop; a URL that leaves the desktop (one for
+/// a system browser) never carries the flag. Idempotent, so a retarget target
+/// built from a URL that already carries the flag keeps one.
+fn mark_transparent_window(url: &mut tauri::Url) {
+    if url
+        .query_pairs()
+        .any(|(key, value)| key == "transparent" && value == "1")
+    {
+        return;
+    }
+    url.query_pairs_mut().append_pair("transparent", "1");
 }
 
-/// Keep the title bar of a transparent macOS window opaque. A transparent
-/// window clears the native title bar along with the content, so the desktop
-/// shows through it; the terminal background is what should. This gives the
+/// Keep the title bar of a macOS window opaque. Every window is built
+/// transparent, which clears the native title bar along with the content, so
+/// the desktop shows through it; a terminal body is what should. This gives the
 /// title bar container an opaque layer in the window background colour,
 /// behind the title bar's own material, traffic lights and title, which keep
 /// their layout and dragging; the content stays below the title bar. The
@@ -985,13 +993,9 @@ fn build_workspace_window_with_completion(
         kind,
         desktop_holder_tag(),
     )?;
-    // The page learns the outcome from `?transparent=1` and stays opaque
-    // without it, because a see-through page in an opaque window shows the
-    // window's own background instead of the desktop.
-    let transparent = connecting.is_none() && builds_transparent(window_label, library_id, kind);
-    if transparent {
-        parsed.query_pairs_mut().append_pair("transparent", "1");
-    }
+    // Before the connecting payload is assembled, so its navigate target
+    // carries the flag as a direct load does.
+    mark_transparent_window(&mut parsed);
     // The connecting page receives its inputs before any page script runs
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
     // navigate URL (remote + ?w=<label>) so the SPA's per-window state survives
@@ -1116,13 +1120,12 @@ fn build_workspace_window_with_completion(
         } else {
             builder
         };
-        let builder = builder.transparent(transparent);
+        // Every window, whatever it shows: see `mark_transparent_window`.
+        let builder = builder.transparent(true);
         let result = match builder.build() {
             Ok(window) => {
                 #[cfg(target_os = "macos")]
-                if transparent {
-                    keep_title_bar_opaque(&window);
-                }
+                keep_title_bar_opaque(&window);
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
                 apply_geometry_plan(&window, &label_owned, geometry_plan);
@@ -2591,6 +2594,7 @@ mod tests {
             holders: None,
             active_transfer: false,
             control: false,
+            tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Browser,
         };
@@ -3949,25 +3953,84 @@ mod tests {
     }
 
     #[test]
-    fn only_local_terminal_windows_build_transparent() {
-        let exec = crate::terminal_mode::WINDOW_LABEL;
-        // A local standalone terminal window and the default-terminal window
-        // are built transparent whatever the setting, so a later change of it
-        // reaches them live.
-        assert!(builds_transparent("local::w-1", "local", Some("terminal")));
-        assert!(builds_transparent(exec, "local", Some("control")));
-        // Workspace windows, devserver windows and control terminals stay opaque.
-        assert!(!builds_transparent("local::w-2", "local", None));
-        assert!(!builds_transparent(
-            "lib-ab::w-3",
-            "lib-ab",
-            Some("terminal")
-        ));
-        assert!(!builds_transparent(
-            "control-terminal-x",
-            "local",
-            Some("control")
-        ));
+    fn mark_transparent_window_appends_the_flag_once() {
+        let mut url: tauri::Url = "http://127.0.0.1:1/api/w/index.html?t=tok&w=w-1"
+            .parse()
+            .unwrap();
+        mark_transparent_window(&mut url);
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:1/api/w/index.html?t=tok&w=w-1&transparent=1"
+        );
+        // A retarget target built from a marked URL keeps one flag.
+        mark_transparent_window(&mut url);
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:1/api/w/index.html?t=tok&w=w-1&transparent=1"
+        );
+    }
+
+    /// Every window chan-desktop builds is transparent and its page knows it:
+    /// the direct load, the connecting page's navigate target and the retarget
+    /// target of a devserver window carry the flag, and no window kind is
+    /// exempt. A URL handed to a system browser does not carry it.
+    #[test]
+    fn every_window_builds_transparent_and_its_url_says_so() {
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let (production, _) = SERVE_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let section = |start: &str| {
+            let (_, rest) = production.split_once(start).expect("the function exists");
+            let (body, _) = rest
+                .split_once("\n}\n")
+                .expect("the function ends at a column-0 brace");
+            body.to_string()
+        };
+
+        let build = section("\nfn build_workspace_window_with_completion(");
+        let marked = build
+            .find("mark_transparent_window(&mut parsed);")
+            .expect("the build marks its URL");
+        let connecting = build
+            .find("let (webview_url, init_script) = match connecting {")
+            .expect("the connecting payload is assembled");
+        assert!(
+            marked < connecting,
+            "the flag is on the URL before the connecting payload copies it as the target"
+        );
+        assert!(
+            build.contains(".transparent(true)"),
+            "every window is built transparent"
+        );
+        assert!(
+            build.contains(
+                "#[cfg(target_os = \"macos\")]\n                keep_title_bar_opaque(&window);"
+            ),
+            "the macOS title bar layer is kept for every window"
+        );
+
+        let retarget = section("\npub(crate) async fn retarget_watched_remote_window(");
+        let marked = retarget
+            .find("mark_transparent_window(&mut target);")
+            .expect("the retarget marks its target");
+        let navigated = retarget
+            .find(".navigate(target)")
+            .expect("the retarget navigates the target");
+        assert!(
+            marked < navigated,
+            "the target is marked before it is navigated"
+        );
+
+        let browser = section("\npub(crate) fn browser_window_url<R: Runtime>(");
+        assert!(
+            !browser.contains("mark_transparent_window"),
+            "a system-browser URL never carries the flag"
+        );
+        assert!(
+            !production.contains("fn builds_transparent("),
+            "no window kind decides transparency"
+        );
     }
 
     #[test]

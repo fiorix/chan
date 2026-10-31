@@ -20,9 +20,16 @@ vi.mock("../state/store.svelte", async (importOriginal) => ({
   discardWindowSession: vi.fn(async () => {}),
 }));
 
+const tmuxRequest = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api/client")>();
+  return { ...actual, api: { ...actual.api, tmuxRequest } };
+});
+
 import { hideWindowFromCloseConfirm, requestCloseWindow } from "../api/desktop";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { discardWindowSession, ui } from "../state/store.svelte";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 import CloseConfirmOverlay from "./CloseConfirmOverlay.svelte";
 
 type TauriWindow = { __TAURI_INTERNALS__?: unknown };
@@ -116,6 +123,28 @@ describe("the close prompt", () => {
     expect(hideWindowFromCloseConfirm).not.toHaveBeenCalled();
     expect(discardWindowSession).not.toHaveBeenCalled();
     expect(requestCloseWindow).not.toHaveBeenCalled();
+  });
+
+  test("a tmux window offers Detach, which asks the connection through a pane and keeps the window", async () => {
+    resetLayout([terminalTab({ id: "pane", title: "shell", terminalSessionId: "pane-1", tmuxPane: { connection: 1, pane: "%0" } })]);
+    try {
+      const { answer } = await ask();
+
+      expect([...target.querySelectorAll(".actions button")].map((b) => b.textContent?.trim())).toEqual([
+        "Hide",
+        "Close",
+        "Detach",
+        "Cancel",
+      ]);
+      action("Detach").click();
+
+      await expect(answer).resolves.toBe("cancel");
+      expect(tmuxRequest).toHaveBeenCalledWith("pane-1", { request: "detach" });
+      expect(discardWindowSession).not.toHaveBeenCalled();
+      expect(requestCloseWindow).not.toHaveBeenCalled();
+    } finally {
+      resetLayout();
+    }
   });
 
   test("Escape cancels", async () => {

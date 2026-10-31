@@ -19,6 +19,15 @@ import { transferSuffix, type TransferRoot } from "./client";
 import { errorText } from "./errors";
 import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
+type UnlistenFn = () => void;
+
+/// The global event API chan-desktop exposes through `withGlobalTauri`. The
+/// workspace app has no `@tauri-apps/api` dependency, so events are reached
+/// through the global the same way invokes are.
+interface TauriEventApi {
+  listen<T>(event: string, handler: (e: { payload: T }) => void): Promise<UnlistenFn>;
+}
+
 type TauriWindow = Window &
   typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -31,6 +40,7 @@ type TauriWindow = Window &
     __TAURI__?: {
       invoke?: (cmd: string, args?: unknown) => Promise<unknown>;
       core?: { invoke?: (cmd: string, args?: unknown) => Promise<unknown> };
+      event?: TauriEventApi;
     };
   };
 
@@ -256,6 +266,43 @@ export async function readDroppedPaths(): Promise<string[]> {
     // desktop build.
     return [];
   }
+}
+
+/// Subscribe to an event chan-desktop emits to its windows, delivering each
+/// payload to `handler`. Resolves to an unlisten handle. Best-effort: a
+/// missing event bridge (a browser tab) or a refused `listen` (a window whose
+/// grant withholds it) degrades to a no-op, so a page that follows an event
+/// boots the same everywhere and simply never hears it.
+export async function onTauriEvent<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<UnlistenFn> {
+  const api = (window as TauriWindow).__TAURI__?.event;
+  if (!api?.listen) return () => {};
+  try {
+    return await api.listen<T>(event, (e) => handler(e.payload));
+  } catch (err) {
+    console.warn(`onTauriEvent(${event}) failed:`, err);
+    return () => {};
+  }
+}
+
+/// The desktop's own `terminal.background_opacity`, in percent. It is
+/// chan-desktop's setting, not the tenant's: every window the desktop builds
+/// paints its terminal tabs with this value, whatever tenant the window
+/// shows. Throws off-desktop and on IPC/ACL refusal; the store that follows
+/// the value (terminal/desktopTerminalOpacity.svelte.ts) turns that into
+/// "paint opaque".
+export async function readTerminalBackgroundOpacity(): Promise<number> {
+  return await tauriInvoke<number>("terminal_background_opacity");
+}
+
+/// Write the desktop's `terminal.background_opacity`. The desktop clamps,
+/// writes its own `server.toml` and emits `terminal-background-opacity` to
+/// every window; the answer is the value it wrote. Throws off-desktop and
+/// on IPC/ACL refusal so the Settings field can show the refusal.
+export async function writeTerminalBackgroundOpacity(percent: number): Promise<number> {
+  return await tauriInvoke<number>("set_terminal_background_opacity", { percent });
 }
 
 /// Reload the chan window. On chan-desktop calls the

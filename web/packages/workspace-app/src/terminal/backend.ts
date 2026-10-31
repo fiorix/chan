@@ -44,8 +44,10 @@ export type GhosttyKit = {
 /// Backend for a newly spawned terminal. Spawn-time only, same contract
 /// as scrollback / mouse_capture: read once at terminal start, so
 /// flipping the setting later affects only newly opened terminals.
-/// Absent field (older server) means xterm.js. Secret masking exists on
-/// both backends, so the window's kind plays no part here.
+/// The server stores the choice and defaults it to ghostty; an absent
+/// field (a server older than the key) means xterm.js, which such a server
+/// can still drive. Secret masking exists on both backends, so the window's
+/// kind plays no part here.
 export function terminalBackendFromPrefs(
   prefs: TerminalPreferences | undefined,
 ): TerminalBackend {

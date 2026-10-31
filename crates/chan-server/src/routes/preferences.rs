@@ -170,15 +170,19 @@ struct PreferencesPatch {
 /// an exception, because its stored value has a third state, no choice,
 /// that a field left out would otherwise overwrite: an object that leaves the
 /// key out keeps the stored choice, `null` clears it, and `true` or `false`
-/// sets it. `program_status` is the other: a field left out reads as its
+/// sets it. `program_status` is another: a field left out reads as its
 /// default, on, so a page that does not know the key would turn the feature
 /// back on with any other terminal setting it saves. An object that leaves
-/// the key out keeps the stored value.
+/// the key out keeps the stored value. `tmux` is the third, for the same
+/// reason, and a `tmux` object that leaves `trust` out keeps the stored
+/// list, since Settings edits only the switch.
 #[derive(Debug, Clone)]
 struct TerminalPatch {
     config: TerminalConfig,
     names_secret_masking: bool,
     names_program_status: bool,
+    names_tmux: bool,
+    names_tmux_trust: bool,
 }
 
 impl<'de> Deserialize<'de> for TerminalPatch {
@@ -189,12 +193,19 @@ impl<'de> Deserialize<'de> for TerminalPatch {
         let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let names_secret_masking = object.contains_key("secret_masking");
         let names_program_status = object.contains_key("program_status");
+        let names_tmux = object.contains_key("tmux");
+        let names_tmux_trust = object
+            .get("tmux")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|tmux| tmux.contains_key("trust"));
         let config = serde_json::from_value(serde_json::Value::Object(object))
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
             config,
             names_secret_masking,
             names_program_status,
+            names_tmux,
+            names_tmux_trust,
         })
     }
 }
@@ -309,6 +320,11 @@ impl PreferencesPatch {
             }
             if !patch.names_program_status {
                 terminal.program_status = server.terminal.program_status;
+            }
+            if !patch.names_tmux {
+                terminal.tmux = server.terminal.tmux.clone();
+            } else if !patch.names_tmux_trust {
+                terminal.tmux.trust = server.terminal.tmux.trust.clone();
             }
             server.terminal = terminal;
         }
@@ -484,6 +500,7 @@ pub(crate) fn broadcast_config_changed(state: &AppState) {
         state
             .terminal_sessions
             .set_program_status(config.terminal.program_status);
+        state.terminal_sessions.set_tmux(&config.terminal.tmux);
         state.terminal_sessions.set_terminal_profiles(
             crate::terminal_sessions::TerminalProfilePrefs {
                 profiles: config.terminal.profiles.clone(),
@@ -1529,6 +1546,69 @@ mod tests {
             "a terminal object that does not name the key keeps the stored value"
         );
         assert!(!state.terminal_sessions.program_status_enabled());
+    }
+
+    #[test]
+    fn a_tmux_write_is_saved_and_switches_the_live_registry() {
+        let state = make_test_state(false);
+        assert_eq!(
+            terminal_as_read(&state)["tmux"],
+            json!({ "enabled": true, "trust": [] })
+        );
+        assert!(state.terminal_sessions.tmux_config().enabled);
+
+        let mut terminal = terminal_as_read(&state);
+        terminal["tmux"] = json!({ "enabled": false, "trust": ["ssh"] });
+        let saved = std::cell::Cell::new(None);
+        write_terminal_saving(&state, terminal, |config| {
+            saved.set(Some(config.terminal.tmux.clone()));
+            Ok(())
+        });
+        let stored = saved.take().expect("the write reaches server.toml");
+        assert!(!stored.enabled);
+        assert_eq!(stored.trust, vec!["ssh"]);
+        let live = state.terminal_sessions.tmux_config();
+        assert!(!live.enabled, "the write reaches the registry");
+        assert_eq!(live.trust, vec!["ssh"]);
+
+        let mut terminal = terminal_as_read(&state);
+        terminal["tmux"] = json!({ "enabled": true, "trust": ["ssh"] });
+        write_terminal(&state, terminal);
+        assert!(state.terminal_sessions.tmux_config().enabled);
+    }
+
+    #[test]
+    fn a_terminal_write_that_leaves_tmux_out_keeps_it() {
+        let state = make_test_state(false);
+        let mut terminal = terminal_as_read(&state);
+        terminal["tmux"] = json!({ "enabled": false, "trust": ["ssh", "mosh-client"] });
+        write_terminal(&state, terminal);
+
+        // A page from before the table saves another terminal setting.
+        let mut older = terminal_as_read(&state);
+        older.as_object_mut().unwrap().remove("tmux");
+        older["font_size"] = json!(16);
+        write_terminal(&state, older);
+        let read = terminal_as_read(&state);
+        assert_eq!(read["font_size"], json!(16), "its own setting is taken");
+        assert_eq!(
+            read["tmux"],
+            json!({ "enabled": false, "trust": ["ssh", "mosh-client"] }),
+            "a terminal object that does not name the table keeps the stored value"
+        );
+
+        // Settings edits only the switch; a tmux object without the list
+        // keeps the stored list.
+        let mut switch_only = terminal_as_read(&state);
+        switch_only["tmux"] = json!({ "enabled": true });
+        write_terminal(&state, switch_only);
+        assert_eq!(
+            terminal_as_read(&state)["tmux"],
+            json!({ "enabled": true, "trust": ["ssh", "mosh-client"] })
+        );
+        let live = state.terminal_sessions.tmux_config();
+        assert!(live.enabled);
+        assert_eq!(live.trust, vec!["ssh", "mosh-client"]);
     }
 
     #[test]

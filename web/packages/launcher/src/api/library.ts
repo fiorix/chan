@@ -56,6 +56,11 @@ export interface WindowRecord {
    * feed renders it FIRST in its library group; the desktop mints it. Omitted
    * from the wire for an ordinary window, so absent here rather than false. */
   control?: boolean;
+  /** A window of a tmux control-mode connection, omitted on a plain row: the
+   * launcher groups the row under its connection's card instead of its
+   * library's machine. Minted with its tabs parked for its first socket, never
+   * saved. */
+  tmux?: TmuxWindowMark;
   /**
    * Server-persisted visibility. The window is buried/hidden on the
    * desktop, vs shown. Skip-if-default on the wire; OMITTED for visible windows
@@ -84,7 +89,75 @@ export interface WindowSet {
    * affordances.
    */
   leaders?: Record<string, string>;
+  /** The live tmux control-mode connections, one record each, omitted when
+   * there is none. The Computers deck deals each as a card. */
+  tmux_connections?: TmuxConnectionEntry[];
 }
+
+// ---- tmux control-mode connections ---------------------------------------
+// A `tmux -CC` run in a chan terminal is a connection: its control terminal
+// keeps the tmux client, and each tmux window the connection opens is a chan
+// window. The launcher renders a connection as a card of the Computers
+// carousel beside This machine and the devservers. The field names ARE the
+// wire (the library's connection record).
+
+/** The tmux mark on a window row: which connection owns it, and whether the
+ * row is that connection's control terminal rather than one of its windows. */
+export interface TmuxWindowMark {
+  /** The control session's id, unique on the host for the connection's life:
+   * the key of the connection's record in `WindowSet.tmux_connections`. */
+  connection: string;
+  control: boolean;
+}
+
+/** The foreground process that printed the control-mode marker. */
+export interface TmuxConnectionOrigin {
+  /** The process name the gate read (`tmux`, `ssh`). */
+  program: string;
+  /** Its command line where the OS let it be read, else null. */
+  command: string | null;
+  /** The foreground was tmux itself, so the server runs on this machine. */
+  local: boolean;
+}
+
+/** One tmux window of a connection. */
+export interface TmuxWindowEntry {
+  /** The tmux window id (`@3`), what `open-window` names. */
+  id: string;
+  name: string;
+  panes: number;
+  /** A chan window is open for it. */
+  open: boolean;
+  /** That chan window's `window_id`; absent for a window past the cap, which
+   * the card lists as a hidden row whose show asks the connection to open it. */
+  chan_window?: string | null;
+}
+
+/** A live tmux control-mode connection: one record per connection in the
+ * window feed's snapshot, dropped when the connection ends. */
+export interface TmuxConnectionEntry {
+  connection: string;
+  /** The library whose terminal runs the tmux client. */
+  library_id: string;
+  origin: TmuxConnectionOrigin;
+  /** The tmux server's version string. */
+  version: string;
+  session: { id: string; name: string };
+  windows: TmuxWindowEntry[];
+  /** How many chan windows the connection opens at connect; the rest wait. */
+  window_cap: number;
+  errors: string[];
+  /** The control terminal's `window_id`. */
+  control_window: string;
+}
+
+/** What the launcher may ask of a connection: the closed set the terminal
+ * socket's `tmux-request` takes, posted to the library's request route. */
+export type TmuxRequest =
+  | { request: "new-window" }
+  | { request: "detach" }
+  | { request: "end" }
+  | { request: "open-window"; window: string };
 
 // ---- The workspace registry ---------------------------------------------
 
@@ -520,6 +593,10 @@ export interface LibraryApi {
   setWindowVisibility(id: string, hidden: boolean, actingWindowId?: string): Promise<void>;
   /** Persist optional user text beside a non-control window's generated label. */
   setWindowLabel(id: string, label: string, actingWindowId?: string): Promise<void>;
+  /** Ask a tmux control-mode connection for a new window, a detach, an end,
+   * or to open one of its windows that has no chan window yet. 404 for a
+   * connection the library no longer holds. The outcome rides the feed. */
+  tmuxRequest(connection: string, request: TmuxRequest): Promise<void>;
 }
 
 /**
@@ -765,4 +842,6 @@ export const liveApi: LibraryApi = {
       label,
       ...(actingWindowId ? { acting_window_id: actingWindowId } : {}),
     }),
+  tmuxRequest: (connection, request) =>
+    req("POST", `/api/library/tmux/${encodeURIComponent(connection)}/request`, request),
 };

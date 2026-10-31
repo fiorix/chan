@@ -26,6 +26,8 @@ export interface ScopedLibraryWindow {
   holders?: string[];
   hidden: boolean;
   control: boolean;
+  /** A window of a tmux control-mode connection: minted buried, never saved. */
+  tmux: boolean;
   /** Mint affinity. An older scoped server omits this, leaving it unknown. */
   origin?: "native" | "browser";
   /** False when this host sees the window through a devserver feed alone. */

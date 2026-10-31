@@ -20,7 +20,8 @@ export function rootName(path: string): string {
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
 
-/** Convenience over a whole launcher record. */
+/** Convenience over a whole launcher record. A tmux connection's control
+ * terminal reads as a control terminal whichever flag marks it. */
 export function windowRowLabel(w: WindowRecord): string {
-  return windowDisplayName(w);
+  return windowDisplayName(w.tmux?.control ? { ...w, control: true } : w);
 }

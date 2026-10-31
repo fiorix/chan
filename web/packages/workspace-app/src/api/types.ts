@@ -178,10 +178,11 @@ export type TerminalPreferences = {
   /// constructed; mounted renderers keep their current value. Optional for
   /// older servers; absent means 14.
   font_size?: number;
-  /// Terminal background opacity in percent; 100 is opaque. Takes effect
-  /// only in a window chan-desktop built transparent (`?transparent=1`),
-  /// where terminal panes paint their background at this alpha. Server
-  /// clamps to [80, 100]; absent means 100.
+  /// Terminal background opacity in percent; 100 is opaque. The server
+  /// clamps to [80, 100]; absent means 100. It is chan-desktop's setting: a
+  /// desktop window paints every terminal tab with the desktop's own value,
+  /// read through the host, not with this tenant's; a browser tab never
+  /// paints it. The Settings row shows this value in a browser tab only.
   background_opacity?: number;
   /// Whether newly-spawned terminals get the chan MCP discovery env
   /// vars (`CHAN_MCP_*`) so external agent CLIs can find the chan MCP
@@ -197,14 +198,22 @@ export type TerminalPreferences = {
   /// terminals.
   mouse_capture?: boolean;
   /// Whether newly opened terminals use the ghostty-web backend
-  /// (Ghostty's WASM VT parser) instead of xterm.js. Off by default
-  /// on every platform. Optional on the wire so
-  /// older servers (no field) deserialize cleanly; the SPA treats
-  /// `undefined` as false. Applies to newly opened terminals.
+  /// (Ghostty's WASM VT parser) instead of xterm.js. The server defaults
+  /// it to true on every platform. Optional on the wire so a server older
+  /// than the key (no field) deserializes cleanly; the SPA treats
+  /// `undefined` as false, since such a server drives xterm.js only.
+  /// Applies to newly opened terminals.
   ghostty?: boolean;
   /// Whether OSC 7501 program and chan status reports are enabled for all
   /// terminal sessions. On by default; changes apply to existing sessions.
   program_status?: boolean;
+  /// tmux control mode: whether a terminal honors the marker `tmux -CC`
+  /// prints (on by default; a change applies to new markers in every
+  /// terminal and leaves a running connection alone) and the foreground
+  /// program names trusted to enter without a question, which Settings does
+  /// not edit. Optional on the wire so older servers (no field) deserialize
+  /// cleanly; the SPA treats an absent `enabled` as true.
+  tmux?: { enabled?: boolean; trust?: string[] };
   /// Whether xterm.js terminals visually obscure values whose assignment
   /// names end in a configured secret suffix. When absent, control terminals
   /// seed masking on and other windows seed it off. Per-tab toggles do not

@@ -2,7 +2,12 @@
 // these wrappers so browser-vs-native window ownership, leader claims, native
 // trust, and live-terminal confirmation cannot drift between entry points.
 
-import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
+import type {
+  DevserverEntry,
+  TmuxWindowEntry,
+  WindowRecord,
+  WorkspaceEntry,
+} from "../api/library";
 import { liveTerminalsCount } from "../api/library";
 import {
   closeWindow,
@@ -14,6 +19,7 @@ import {
   openTerminal,
   openWorkspaceWindow,
   reportError,
+  requestTmux,
   setDevserverWorkspaceOn,
   toggleWindow,
   toggleWorkspace,
@@ -162,4 +168,27 @@ export async function closeComputerWindow(window: WindowRecord): Promise<void> {
 
 export async function liveTerminalCountForWindow(window: WindowRecord): Promise<number | null> {
   return windowLiveTerminalCount(window);
+}
+
+// The tmux connection card's actions. Each is one request to the connection
+// through the library; the feed carries the outcome (a new row, the card
+// leaving with its connection).
+
+/** Ask a connection for a new tmux window; its chan window arrives through
+ * the feed. The card's `t`, as a terminal is a machine's. */
+export async function newTmuxWindow(connection: string): Promise<void> {
+  await requestTmux(connection, { request: "new-window" });
+}
+
+/** Detach the connection: tmux keeps running, its chan windows close by
+ * themselves and the control terminal returns to a plain terminal. The card's
+ * `c`, in the slot a devserver's disconnect holds. */
+export async function detachTmux(connection: string): Promise<void> {
+  await requestTmux(connection, { request: "detach" });
+}
+
+/** Open a tmux window past the cap: the show action of a card row that has
+ * no chan window yet. */
+export async function openTmuxWindow(connection: string, window: TmuxWindowEntry): Promise<void> {
+  await requestTmux(connection, { request: "open-window", window: window.id });
 }

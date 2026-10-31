@@ -650,6 +650,12 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       notify();
       return tick(undefined);
     },
+    // The demo seeds no tmux connection, so a request names one the library
+    // does not hold: the 404 the server answers.
+    tmuxRequest: (connection) =>
+      Promise.reject(
+        new ApiError(404, JSON.stringify({ error: `no tmux connection ${connection}` })),
+      ),
     watchWindows: (onSet) => {
       subscribers.add(onSet);
       onSet({ windows: windows.map((w) => ({ ...w })) });
