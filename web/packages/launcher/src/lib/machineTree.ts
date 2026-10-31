@@ -64,16 +64,47 @@ function samePath(a: string | null, b: string): boolean {
   return a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
 }
 
+/** Devserver rows by name: the order in which the tree gives each library's
+ * windows to the first row that names it. */
+function byName(devservers: DevserverEntry[]): DevserverEntry[] {
+  return [...devservers].sort((a, b) => devserverName(a).localeCompare(devserverName(b)));
+}
+
+/** The name of the devserver whose terminal runs a connection: the first row
+ * by name whose library is the record's, the one whose card holds that
+ * library's windows. Null for a connection on this machine, and while no row
+ * knows the devserver's library id yet. */
+export function tmuxHost(
+  entry: TmuxConnectionEntry | null,
+  devservers: DevserverEntry[],
+): string | null {
+  if (entry === null) return null;
+  const host = byName(devservers).find((ds) => ds.library_id === entry.library_id);
+  return host ? devserverName(host) : null;
+}
+
 /** A connection card's title says where the tmux server runs, so a local run
- * and a remote one read apart: `on this machine` when the foreground that
- * printed the marker was tmux itself, else `from <command>` with the
- * foreground command the gate read (`ssh geekom`), or its program name when
- * the OS let no command line be read. A node whose record has not arrived
- * carries the bare command. */
-export function tmuxCardTitle(entry: TmuxConnectionEntry | null): string {
+ * and a remote one read apart. The library that runs the terminal calls a
+ * foreground of tmux itself local, so a local run is `on this machine` in
+ * this machine's terminal and `on <devserver>` in a devserver's (`host`, as
+ * `tmuxHost` reads it). A carrier's run is `from <command>` with the foreground
+ * command the gate read (`ssh geekom`), or its program name when the OS let
+ * no command line be read. A node whose record has not arrived carries the
+ * bare command. */
+export function tmuxCardTitle(entry: TmuxConnectionEntry | null, host: string | null): string {
   if (entry === null) return "tmux -CC";
-  if (entry.origin.local) return "tmux -CC on this machine";
+  if (entry.origin.local) return `tmux -CC on ${host ?? "this machine"}`;
   return `tmux -CC from ${entry.origin.command || entry.origin.program}`;
+}
+
+/** A tmux window's machine in a list of every machine's windows (All windows,
+ * the command launcher): the card's title and the tmux session, since two
+ * connections on one machine share a title and only the card shows the
+ * session. The title alone until tmux announces the session. */
+export function tmuxWindowMachine(entry: TmuxConnectionEntry | null, host: string | null): string {
+  const title = tmuxCardTitle(entry, host);
+  const session = entry?.session?.name;
+  return session ? `${title} (${session})` : title;
 }
 
 // ---- The machine tree (nested) ------------------------------------------
@@ -92,6 +123,9 @@ export interface MachineNode {
   connection: string | null;
   /** A tmux node's record; null while its rows arrived before the record. */
   tmux: TmuxConnectionEntry | null;
+  /** The devserver whose terminal runs a tmux node's connection, by name;
+   * null on this machine and for every other node. */
+  tmuxHost: string | null;
   /** Host-local library id, or the devserver's library_id (null before first connect). */
   libraryId: string | null;
   control: WindowRecord[];
@@ -118,7 +152,7 @@ export interface MachineTree {
 /** What a machine card is called: This machine, the devserver's name, or the
  * tmux connection's title. */
 export function machineName(node: MachineNode): string {
-  if (node.kind === "tmux") return tmuxCardTitle(node.tmux);
+  if (node.kind === "tmux") return tmuxCardTitle(node.tmux, node.tmuxHost);
   return node.devserver ? devserverName(node.devserver) : "This machine";
 }
 
@@ -126,7 +160,8 @@ export function machineName(node: MachineNode): string {
 export function windowOverview(tree: MachineTree): { window: WindowRecord; machine: string }[] {
   return [
     ...tree.machines.flatMap((node) => {
-      const machine = machineName(node);
+      const machine =
+        node.kind === "tmux" ? tmuxWindowMachine(node.tmux, node.tmuxHost) : machineName(node);
       return [...node.control, ...node.terminals, ...node.workspaces.flatMap((ws) => ws.windows), ...node.looseWindows]
         .sort(sortWindows)
         .map((window) => ({ window, machine }));
@@ -165,6 +200,7 @@ function machineNode(
     devserver,
     connection: null,
     tmux: null,
+    tmuxHost: null,
     libraryId,
     control,
     terminals,
@@ -181,6 +217,7 @@ function tmuxNode(
   connection: string,
   entry: TmuxConnectionEntry | null,
   rows: WindowRecord[],
+  devservers: DevserverEntry[],
 ): MachineNode {
   const control = rows.filter((w) => w.tmux?.control === true).sort(sortWindows);
   const terminals = rows.filter((w) => w.tmux?.control !== true).sort(sortWindows);
@@ -190,6 +227,7 @@ function tmuxNode(
     devserver: null,
     connection,
     tmux: entry,
+    tmuxHost: tmuxHost(entry, devservers),
     libraryId: entry?.library_id ?? rows[0]?.library_id ?? null,
     control,
     terminals,
@@ -199,13 +237,14 @@ function tmuxNode(
   };
 }
 
-/** The local connection first, then the rest by title, then by id so the
- * order is total; a node still waiting for its record sorts last. */
+/** The connections on this machine first, then the rest by title, then by id
+ * so the order is total; a node still waiting for its record sorts last. */
 function compareTmuxNodes(a: MachineNode, b: MachineNode): number {
-  const rank = (n: MachineNode): number => (n.tmux === null ? 2 : n.tmux.origin.local ? 0 : 1);
+  const rank = (n: MachineNode): number =>
+    n.tmux === null ? 2 : n.tmux.origin.local && n.tmuxHost === null ? 0 : 1;
   return (
     rank(a) - rank(b) ||
-    tmuxCardTitle(a.tmux).localeCompare(tmuxCardTitle(b.tmux)) ||
+    machineName(a).localeCompare(machineName(b)) ||
     (a.connection ?? "").localeCompare(b.connection ?? "")
   );
 }
@@ -268,9 +307,7 @@ export function buildMachineTree(
     ),
   );
 
-  const sortedDevservers = [...devservers].sort((a, b) =>
-    devserverName(a).localeCompare(devserverName(b)),
-  );
+  const sortedDevservers = byName(devservers);
   for (const ds of sortedDevservers) {
     // Two rows can resolve to one library: a directly registered devserver and
     // its gateway roster row, or a box registered twice. Every machine claiming
@@ -300,10 +337,12 @@ export function buildMachineTree(
   for (const entry of tmuxConnections) {
     if (recorded.has(entry.connection)) continue;
     recorded.add(entry.connection);
-    tmuxNodes.push(tmuxNode(entry.connection, entry, tmuxRows.get(entry.connection) ?? []));
+    tmuxNodes.push(
+      tmuxNode(entry.connection, entry, tmuxRows.get(entry.connection) ?? [], devservers),
+    );
   }
   for (const [connection, rows] of tmuxRows) {
-    if (!recorded.has(connection)) tmuxNodes.push(tmuxNode(connection, null, rows));
+    if (!recorded.has(connection)) tmuxNodes.push(tmuxNode(connection, null, rows, devservers));
   }
   tmuxNodes.sort(compareTmuxNodes);
   machines.push(...tmuxNodes);

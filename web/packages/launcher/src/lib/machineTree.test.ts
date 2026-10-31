@@ -13,6 +13,7 @@ import {
   machineName,
   machineWindowCount,
   tmuxCardTitle,
+  tmuxWindowMachine,
   windowOverview,
 } from "./machineTree";
 import type {
@@ -306,25 +307,75 @@ function tmuxRow(
 
 describe("tmuxCardTitle", () => {
   it("names a local run and a remote one by the foreground that printed the marker", () => {
-    expect(tmuxCardTitle(tmux({ connection: "a" }))).toBe("tmux -CC on this machine");
+    expect(tmuxCardTitle(tmux({ connection: "a" }), null)).toBe("tmux -CC on this machine");
     expect(
       tmuxCardTitle(
         tmux({ connection: "b", origin: { program: "ssh", command: "ssh geekom", local: false } }),
+        null,
+      ),
+    ).toBe("tmux -CC from ssh geekom");
+  });
+
+  it("names a tmux run in a devserver's terminal by the devserver", () => {
+    expect(tmuxCardTitle(tmux({ connection: "a", library_id: "lib-a" }), "alpha")).toBe(
+      "tmux -CC on alpha",
+    );
+    // A carrier's command line already says where the server runs.
+    expect(
+      tmuxCardTitle(
+        tmux({
+          connection: "b",
+          library_id: "lib-a",
+          origin: { program: "ssh", command: "ssh geekom", local: false },
+        }),
+        "alpha",
       ),
     ).toBe("tmux -CC from ssh geekom");
   });
 
   it("falls back to the program when the OS let no command line be read", () => {
     expect(
-      tmuxCardTitle(tmux({ connection: "c", origin: { program: "ssh", command: null, local: false } })),
+      tmuxCardTitle(
+        tmux({ connection: "c", origin: { program: "ssh", command: null, local: false } }),
+        null,
+      ),
     ).toBe("tmux -CC from ssh");
     expect(
-      tmuxCardTitle(tmux({ connection: "c", origin: { program: "mosh", command: "", local: false } })),
+      tmuxCardTitle(
+        tmux({ connection: "c", origin: { program: "mosh", command: "", local: false } }),
+        null,
+      ),
     ).toBe("tmux -CC from mosh");
   });
 
   it("is the bare command while the record has not arrived", () => {
-    expect(tmuxCardTitle(null)).toBe("tmux -CC");
+    expect(tmuxCardTitle(null, null)).toBe("tmux -CC");
+    expect(tmuxCardTitle(null, "alpha")).toBe("tmux -CC");
+  });
+});
+
+describe("tmuxWindowMachine", () => {
+  it("adds the tmux session to the card's title", () => {
+    expect(tmuxWindowMachine(tmux({ connection: "a", library_id: "lib-a" }), "alpha")).toBe(
+      "tmux -CC on alpha (main)",
+    );
+    expect(
+      tmuxWindowMachine(
+        tmux({
+          connection: "b",
+          origin: { program: "ssh", command: "ssh geekom", local: false },
+          session: { id: "$1", name: "work" },
+        }),
+        null,
+      ),
+    ).toBe("tmux -CC from ssh geekom (work)");
+  });
+
+  it("is the title alone before tmux announces the session", () => {
+    // The library leaves the session out of the record until tmux names it.
+    const unnamed = { ...tmux({ connection: "a" }), session: undefined } as unknown as TmuxConnectionEntry;
+    expect(tmuxWindowMachine(unnamed, null)).toBe("tmux -CC on this machine");
+    expect(tmuxWindowMachine(null, null)).toBe("tmux -CC");
   });
 });
 
@@ -381,6 +432,32 @@ describe("buildMachineTree: tmux connections", () => {
     const node = tree.machines.find((m) => m.kind === "tmux")!;
     expect(node.terminals.map((w) => w.window_id)).toEqual(["tm-a-w1"]);
     expect(node.libraryId).toBe("lib-a");
+    expect(node.tmuxHost).toBe("alpha");
+    expect(machineName(node)).toBe("tmux -CC on alpha");
+  });
+
+  it("names a devserver's tmux by the row that holds the library's windows", () => {
+    // A direct row and its gateway roster row share one library; the first by
+    // name holds its windows, so the tmux card names that one.
+    const devservers = [
+      ds({ id: "ds-z", label: "zeta", library_id: "lib-a" }),
+      ds({ id: "ds-b", label: "beta", library_id: "lib-a" }),
+    ];
+    const tree = buildMachineTree(devservers, [], [], [
+      tmux({ connection: "tm-a", library_id: "lib-a" }),
+    ]);
+    const holder = tree.machines.find((m) => m.libraryId === "lib-a" && m.kind === "devserver")!;
+    expect(holder.devserver!.label).toBe("beta");
+    expect(machineName(tree.machines.find((m) => m.kind === "tmux")!)).toBe("tmux -CC on beta");
+  });
+
+  it("keeps a local run on this machine while a devserver's library id is unknown", () => {
+    const devservers = [ds({ id: "ds-a", label: "alpha", library_id: null })];
+    const node = buildMachineTree(devservers, [], [], [tmux({ connection: "tm-1" })]).machines.find(
+      (m) => m.kind === "tmux",
+    )!;
+    expect(node.tmuxHost).toBeNull();
+    expect(machineName(node)).toBe("tmux -CC on this machine");
   });
 
   it("builds a provisional node for rows whose record has not arrived", () => {
@@ -444,6 +521,21 @@ describe("buildMachineTree: tmux connections", () => {
     expect(tree.machines.filter((m) => m.connection === "l")).toHaveLength(1);
     expect(tree.machines.find((m) => m.connection === "l")!.tmux!.origin.local).toBe(true);
   });
+
+  it("orders a devserver's tmux after this machine's, among the remote ones by title", () => {
+    const devservers = [ds({ id: "ds-a", label: "alpha", library_id: "lib-a" })];
+    const entries = [
+      tmux({ connection: "z", origin: { program: "ssh", command: "ssh zeta", local: false } }),
+      tmux({ connection: "d", library_id: "lib-a" }),
+      tmux({ connection: "l" }),
+    ];
+    const tree = buildMachineTree(devservers, [], [], entries);
+    expect(tree.machines.filter((m) => m.kind === "tmux").map(machineName)).toEqual([
+      "tmux -CC on this machine",
+      "tmux -CC from ssh zeta",
+      "tmux -CC on alpha",
+    ]);
+  });
 });
 
 describe("windowOverview", () => {
@@ -459,7 +551,24 @@ describe("windowOverview", () => {
     const tree = buildMachineTree([], [], windows, [entry]);
     expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
       ["plain", "This machine"],
-      ["tm-1-w1", "tmux -CC from ssh geekom"],
+      ["tm-1-w1", "tmux -CC from ssh geekom (main)"],
+    ]);
+  });
+
+  it("tells two connections on one devserver apart by their sessions", () => {
+    const devservers = [ds({ id: "ds-a", label: "alpha", library_id: "lib-a" })];
+    const entries = [
+      tmux({ connection: "tm-1", library_id: "lib-a" }),
+      tmux({ connection: "tm-2", library_id: "lib-a", session: { id: "$1", name: "work" } }),
+    ];
+    const windows = [
+      tmuxRow("tm-1", "tm-1-w1", false, 1, "lib-a"),
+      tmuxRow("tm-2", "tm-2-w1", false, 1, "lib-a"),
+    ];
+    const tree = buildMachineTree(devservers, [], windows, entries);
+    expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
+      ["tm-1-w1", "tmux -CC on alpha (main)"],
+      ["tm-2-w1", "tmux -CC on alpha (work)"],
     ]);
   });
 });
