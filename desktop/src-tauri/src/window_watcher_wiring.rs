@@ -1459,11 +1459,12 @@ async fn keepalive_pump(
 
 /// A `/watch` frame as the desktop reads it: the rows stay raw JSON until
 /// [`decode_window_rows`](crate::devserver::decode_window_rows) takes them one
-/// at a time, and the frame's other fields (the additive `leaders` map) are
-/// not read here.
+/// at a time. Tmux records share the frame; the leaders map is not read here.
 #[derive(serde::Deserialize)]
 struct WindowFeedFrame {
     windows: Vec<serde_json::Value>,
+    #[serde(default)]
+    tmux_connections: Vec<chan_server::TmuxConnectionRecord>,
 }
 
 /// The rows one `/watch` text frame carries that this desktop can read,
@@ -1474,14 +1475,18 @@ fn decode_window_frame(
     devserver_id: &str,
     text: &str,
     seen: &mut ConnectionRows,
-) -> Option<Vec<WindowRecord>> {
+) -> Option<chan_server::WindowSet> {
     match serde_json::from_str::<WindowFeedFrame>(text) {
-        Ok(frame) => Some(crate::devserver::decode_window_rows(
-            devserver_id,
-            "watch frame",
-            frame.windows,
-            seen,
-        )),
+        Ok(frame) => Some(chan_server::WindowSet {
+            windows: crate::devserver::decode_window_rows(
+                devserver_id,
+                "watch frame",
+                frame.windows,
+                seen,
+            ),
+            leaders: Default::default(),
+            tmux_connections: frame.tmux_connections,
+        }),
         Err(error) => {
             tracing::warn!(
                 devserver = %devserver_id,
@@ -1563,7 +1568,8 @@ async fn stream_window_feed(
                 embedded.signal_library_change();
             }
         }
-        if let Some(windows) = decode_window_frame(id, text, &mut rows) {
+        if let Some(set) = decode_window_frame(id, text, &mut rows) {
+            let windows = set.windows;
             // Rows keep their devserver-local tokens: `should_show` reads
             // token emptiness as the tenant on/off signal, and gateway
             // navigation credentials are minted at open/retarget time
@@ -1607,6 +1613,9 @@ async fn stream_window_feed(
                     .collect();
                 state.refresh_devserver_active_transfers(&library_id, &active);
             }
+            state
+                .devserver_feed
+                .set_tmux_connections(id, set.tmux_connections);
             feed.write_frame(windows);
             // Re-push the launcher feed: a devserver window change
             // shifts the merged launcher window set, so signal the embedded
@@ -4299,6 +4308,47 @@ mod tests {
         assert_eq!(frames, 0, "no frames should have arrived");
     }
 
+    #[test]
+    fn a_watch_frame_preserves_tmux_records_for_the_launcher() {
+        use chan_server::DevserverFeedSource;
+        let record: chan_server::TmuxConnectionRecord = serde_json::from_value(serde_json::json!({
+            "connection": "term-fed", "library_id": "lib-fed",
+            "origin": {"program": "tmux", "command": "tmux -CC", "local": true},
+            "version": "3.5a", "session": {"id": "$0", "name": "work"},
+            "windows": [], "window_cap": 8, "errors": ["fixture error"],
+            "control_window": "w-control"
+        }))
+        .unwrap();
+        let frame = serde_json::json!({"windows": [rec()], "tmux_connections": [record]});
+        let set = decode_window_frame("dev-1", &frame.to_string(), &mut ConnectionRows::default())
+            .unwrap();
+        assert_eq!(set.windows, vec![rec()]);
+        assert_eq!(set.tmux_connections, vec![record.clone()]);
+        let feed = crate::DevserverFeed::default();
+        feed.set_tmux_connections("dev-1", set.tmux_connections);
+        feed.set_down("dev-1", true);
+        assert!(feed.tmux_connections().is_empty());
+        feed.set_down("dev-1", false);
+        assert_eq!(feed.tmux_connections(), vec![record.clone()]);
+        let empty = decode_window_frame(
+            "dev-1",
+            r#"{"windows": []}"#,
+            &mut ConnectionRows::default(),
+        )
+        .unwrap();
+        feed.set_tmux_connections("dev-1", empty.tmux_connections);
+        assert!(
+            feed.tmux_connections().is_empty(),
+            "connection end removes its card"
+        );
+        feed.set_tmux_connections("dev-1", vec![record]);
+        feed.forget("dev-1");
+        assert!(
+            feed.tmux_connections().is_empty(),
+            "disconnect drops cached records"
+        );
+    }
+
     /// One `/watch` frame from a devserver on a later release can hold a row
     /// this desktop cannot read. The frame still delivers every row the
     /// desktop can read, so its view of that devserver keeps moving, and the
@@ -4320,7 +4370,8 @@ mod tests {
         let _logs = logs.install();
 
         let windows = decode_window_frame("dev-1", &frame, &mut ConnectionRows::default())
-            .expect("one unreadable row must not drop the frame");
+            .expect("one unreadable row must not drop the frame")
+            .windows;
 
         let ids: Vec<&str> = windows.iter().map(|row| row.window_id.as_str()).collect();
         assert_eq!(ids, ["w-1"], "the readable row survives its neighbour");
@@ -4446,7 +4497,8 @@ mod tests {
         decode_window_frame("dev-1", &first.to_string(), &mut connection)
             .expect("the first frame parses");
         let windows = decode_window_frame("dev-1", &second.to_string(), &mut connection)
-            .expect("the second frame parses");
+            .expect("the second frame parses")
+            .windows;
 
         assert_eq!(
             windows,
@@ -4470,7 +4522,8 @@ mod tests {
 
         // Later frames keep standing in for the row, without another line.
         let windows = decode_window_frame("dev-1", &second.to_string(), &mut connection)
-            .expect("the third frame parses");
+            .expect("the third frame parses")
+            .windows;
         assert_eq!(windows.len(), 1, "the stale record still stands in");
         assert_eq!(
             logs.warnings().len(),
@@ -4481,7 +4534,8 @@ mod tests {
         // A reconnect has read nothing, so the row is hidden there.
         let windows =
             decode_window_frame("dev-1", &second.to_string(), &mut ConnectionRows::default())
-                .expect("a reconnect's frame parses");
+                .expect("a reconnect's frame parses")
+                .windows;
         assert!(
             windows.is_empty(),
             "a row never read on a connection is hidden"
@@ -4502,10 +4556,12 @@ mod tests {
 
         decode_window_frame("dev-1", &shown.to_string(), &mut connection).expect("shown");
         let windows = decode_window_frame("dev-1", &discarded.to_string(), &mut connection)
-            .expect("discarded");
+            .expect("discarded")
+            .windows;
         assert!(windows.is_empty(), "a discarded row leaves the snapshot");
-        let windows =
-            decode_window_frame("dev-1", &returned.to_string(), &mut connection).expect("returned");
+        let windows = decode_window_frame("dev-1", &returned.to_string(), &mut connection)
+            .expect("returned")
+            .windows;
         assert!(
             windows.is_empty(),
             "a discarded window's record stood in for a later row: {windows:?}"

@@ -85,6 +85,14 @@ pub enum DesktopWindowOp {
         label: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Forward a tmux card action to the connected devserver that owns
+    /// the record, using the desktop's authenticated transport.
+    TmuxRequest {
+        library_id: String,
+        connection: String,
+        request: crate::terminal_sessions::TmuxRequest,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Destroy a window after the caller has applied its own live-terminal
     /// guard or confirmation, and let the server drop its saved layout. The
     /// reply is `Ok(true)` when a live window was destroyed, `Ok(false)` when

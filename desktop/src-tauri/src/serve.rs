@@ -2853,16 +2853,17 @@ mod tests {
         assert_eq!(frames.matches("feed.write_frame(windows);").count(), 1);
         let decoded = source_section(
             frames,
-            "if let Some(windows) = decode_window_frame(",
+            "if let Some(set) = decode_window_frame(",
             "\n        }\n    })",
         );
         let write = decoded.find("feed.write_frame(windows);").unwrap();
+        let tmux = decoded
+            .find(".set_tmux_connections(id, set.tmux_connections);")
+            .unwrap();
         let launcher = decoded.find("embedded.signal_library_change();").unwrap();
         let watcher = decoded.find("feed.change.notify_one();").unwrap();
         assert!(
-            decoded.contains("            }\n            feed.write_frame(windows);\n")
-                && write < launcher
-                && launcher < watcher,
+            tmux < write && write < launcher && launcher < watcher,
             "the decoded frame is stored before either reader is woken"
         );
     }

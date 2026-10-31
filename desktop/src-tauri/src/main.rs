@@ -619,6 +619,8 @@ impl AppState {
 pub struct DevserverFeed {
     /// Devserver id -> its live window snapshot (shared with the watcher feed task).
     windows: Mutex<HashMap<String, Arc<Mutex<Vec<chan_server::WindowRecord>>>>>,
+    /// Devserver id -> the live tmux records from its latest window feed frame.
+    tmux_connections: Mutex<HashMap<String, Vec<chan_server::TmuxConnectionRecord>>>,
     /// Devserver id -> its cached served workspaces (refreshed by the poll task).
     workspaces: Mutex<HashMap<String, Vec<chan_server::LauncherWorkspace>>>,
     /// Devserver id -> its cached pane-highlight colour (its own remote
@@ -667,6 +669,13 @@ impl DevserverFeed {
         self.windows.lock().unwrap().insert(id, snapshot);
     }
 
+    fn set_tmux_connections(&self, id: &str, records: Vec<chan_server::TmuxConnectionRecord>) {
+        self.tmux_connections
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), records);
+    }
+
     /// Seed a devserver's remote `library_id` into the cache BEFORE its first
     /// window reaches the snapshot. The connect flow learns the id from
     /// `wait_for_devserver`'s `info` and mints the control row under it; without
@@ -702,6 +711,7 @@ impl DevserverFeed {
     /// teardown, not a `forget` drop.
     fn forget(&self, id: &str) {
         self.windows.lock().unwrap().remove(id);
+        self.tmux_connections.lock().unwrap().remove(id);
         self.workspaces.lock().unwrap().remove(id);
         self.colors.lock().unwrap().remove(id);
         self.down.lock().unwrap().remove(id);
@@ -878,6 +888,17 @@ impl DevserverFeed {
 }
 
 impl chan_server::DevserverFeedSource for DevserverFeed {
+    fn tmux_connections(&self) -> Vec<chan_server::TmuxConnectionRecord> {
+        let down = self.down.lock().unwrap().clone();
+        self.tmux_connections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| !down.contains(*id))
+            .flat_map(|(_, records)| records.clone())
+            .collect()
+    }
+
     fn windows(&self) -> Vec<chan_server::WindowRecord> {
         // A DOWN devserver (script exited / transport unreachable) serves no
         // window rows at all: every launcher affordance on them (open / hide /

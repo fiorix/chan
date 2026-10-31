@@ -333,6 +333,9 @@ pub trait DevserverFeedSource: Send + Sync {
     /// `library_id`), appended to the local window set by
     /// [`WorkspaceHost::assemble_window_records`].
     fn windows(&self) -> Vec<WindowRecord>;
+    /// Connected devservers' live tmux connections, retaining the owning
+    /// `library_id` so requests can reach the same devserver.
+    fn tmux_connections(&self) -> Vec<TmuxConnectionRecord>;
     /// Connected devservers' served workspaces, already tagged with their
     /// `devserver_id` + remote `library_id`, appended to the local workspace
     /// rows by the launcher's list-workspaces route. Each row's `prefix` MUST be
@@ -1673,13 +1676,18 @@ impl WorkspaceHost {
         self.window_registry.get()
     }
 
-    /// The live tmux control-mode connections in this library's terminals,
-    /// as the window feed and `GET /api/library/tmux` list them. Empty with
-    /// no registry installed.
+    /// The live tmux control-mode connections in this library's terminals
+    /// and connected devservers, as the window feed and
+    /// `GET /api/library/tmux` list them.
     pub fn tmux_connections(&self) -> Vec<TmuxConnectionRecord> {
-        self.window_registry()
+        let mut records = self
+            .window_registry()
             .map(|registry| registry.tmux_connections())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(feed) = self.devserver_feed() {
+            records.extend(feed.tmux_connections());
+        }
+        records
     }
 
     /// A client's request of the live tmux connection `connection` (a
@@ -17561,8 +17569,12 @@ mod tests {
     struct FixedFeed {
         library_id: String,
         color: String,
+        tmux: Mutex<Vec<TmuxConnectionRecord>>,
     }
     impl DevserverFeedSource for FixedFeed {
+        fn tmux_connections(&self) -> Vec<TmuxConnectionRecord> {
+            self.tmux.lock().unwrap().clone()
+        }
         fn windows(&self) -> Vec<WindowRecord> {
             Vec::new()
         }
@@ -17588,6 +17600,7 @@ mod tests {
         host.install_devserver_feed(Arc::new(FixedFeed {
             library_id: "lib-abc".into(),
             color: "#abc".into(),
+            tmux: Mutex::default(),
         }));
 
         // "local" → the local-colour store; a devserver lib id → that devserver's
@@ -17596,6 +17609,49 @@ mod tests {
         assert_eq!(host.pane_color("lib-abc"), Some("#abc".into()));
         // An unknown devserver library id falls back to the default accent.
         assert_eq!(host.pane_color("lib-missing"), None);
+    }
+
+    #[test]
+    fn tmux_connections_merge_local_and_fed_records_and_follow_feed_removal() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = WorkspaceHost::new(lib, fake_builder());
+        let remote: TmuxConnectionRecord = serde_json::from_value(serde_json::json!({
+            "connection": "term-remote", "library_id": "lib-remote",
+            "origin": {"program": "tmux", "command": "tmux -CC", "local": true},
+            "version": "3.5a", "session": {"id": "$0", "name": "work"},
+            "windows": [], "window_cap": 8, "errors": ["fixture error"],
+            "control_window": "remote-control"
+        }))
+        .unwrap();
+        let feed = Arc::new(FixedFeed {
+            library_id: "lib-remote".into(),
+            color: "#abc".into(),
+            tmux: Mutex::new(vec![remote.clone()]),
+        });
+        host.install_devserver_feed(feed.clone());
+        assert_eq!(
+            host.tmux_connections(),
+            vec![remote.clone()],
+            "remote-only host"
+        );
+
+        let local = TmuxConnectionRecord {
+            connection: "term-local".into(),
+            library_id: "local".into(),
+            control_window: "local-control".into(),
+            ..remote.clone()
+        };
+        let registry = Arc::new(WindowRegistry::open(cfg.path().join("windows.json")));
+        registry.set_tmux_connection(local.clone());
+        host.install_window_registry(registry, "local".into());
+        assert_eq!(host.tmux_connections(), vec![local.clone(), remote]);
+        feed.tmux.lock().unwrap().clear();
+        assert_eq!(
+            host.tmux_connections(),
+            vec![local],
+            "feed removal preserves local connections"
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -58,6 +58,15 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
             let result = set_remote_window_label(&state, &id, &label).await;
             let _ = reply.send(result);
         }
+        DesktopWindowOp::TmuxRequest {
+            library_id,
+            connection,
+            request,
+            reply,
+        } => {
+            let result = request_remote_tmux(&state, &library_id, &connection, request).await;
+            let _ = reply.send(result);
+        }
         DesktopWindowOp::Hide { id, reply } => {
             let app2 = app.clone();
             let result = on_main(&app, move || hide_window(&app2, &id))
@@ -259,6 +268,21 @@ async fn set_remote_window_label(
         return Err(format!("devserver {devserver_id} is not connected"));
     };
     crate::devserver::set_window_label(&conn, &record.window_id, label).await
+}
+
+async fn request_remote_tmux(
+    state: &Arc<AppState>,
+    library_id: &str,
+    connection: &str,
+    request: chan_server::TmuxRequest,
+) -> Result<(), String> {
+    let Some(id) = state.devserver_feed.devserver_id_for_library(library_id) else {
+        return Err(format!("library {library_id} is not connected"));
+    };
+    let Some(conn) = state.devservers.get(&id) else {
+        return Err(format!("devserver {id} is not connected"));
+    };
+    crate::devserver::tmux_request(&conn, connection, request).await
 }
 
 /// Run `f` on the Tauri main thread and await its result. Tauri window

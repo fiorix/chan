@@ -2361,6 +2361,41 @@ pub async fn set_window_label(
     Ok(())
 }
 
+/// Ask a live tmux connection on this devserver, through the same authenticated
+/// transport as window operations (bearer locally, gate cookie over a gateway).
+pub async fn tmux_request(
+    conn: &DevserverConn,
+    connection: &str,
+    request: chan_server::TmuxRequest,
+) -> Result<(), String> {
+    let mut url = url::Url::parse("http://localhost/api/library/tmux").expect("static base URL");
+    url.path_segments_mut()
+        .expect("base URL has path segments")
+        .push(connection)
+        .push("request");
+    let body = serde_json::to_value(request).map_err(|e| format!("encoding tmux request: {e}"))?;
+    let resp = devserver_request(
+        conn,
+        reqwest::Method::POST,
+        url.path(),
+        Some(&body),
+        "requesting devserver tmux action",
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(devserver_status_error(
+            conn,
+            resp,
+            PerArmLabel {
+                gateway: "gateway tmux request",
+                raw: "devserver tmux request",
+            },
+        )
+        .await);
+    }
+    Ok(())
+}
+
 /// Allow lifecycle requests to mount or drain a tenant. Above the server's
 /// own 60 s mount timeout, so slow mounts can return their server error.
 /// The mount also uses this as an outer bound below the CLI's 75 s reply budget.
@@ -5087,6 +5122,60 @@ mod tests {
                         request,
                         Method::PUT,
                         "/api/library/windows/window-5/label",
+                        body,
+                    );
+                }
+            }
+            server.assert_responses_drained();
+        }
+    }
+
+    #[tokio::test]
+    async fn tmux_request_contract_per_arm() {
+        use axum::http::{Method, StatusCode};
+        for gateway in [false, true] {
+            let server = MockManagementServer::start(vec![
+                mock_response(StatusCode::NO_CONTENT, ""),
+                mock_response(StatusCode::INTERNAL_SERVER_ERROR, "failure"),
+            ])
+            .await;
+            let conn = if gateway {
+                server.gateway_conn()
+            } else {
+                server.raw_conn()
+            };
+            tmux_request(&conn, "term/one", chan_server::TmuxRequest::NewWindow)
+                .await
+                .unwrap();
+            let error = tmux_request(&conn, "term/one", chan_server::TmuxRequest::Detach)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                if gateway {
+                    "gateway tmux request returned HTTP 500 Internal Server Error"
+                } else {
+                    "devserver tmux request returned HTTP 500 Internal Server Error"
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for (request, action) in requests.iter().zip(["new-window", "detach"]) {
+                let body = Some(serde_json::json!({"request": action}));
+                if gateway {
+                    assert_gateway_request(
+                        request,
+                        Method::POST,
+                        "/api/library/tmux/term%2Fone/request",
+                        body,
+                        "__Host-devserver_gate=opaque; __Host-devserver_csrf=csrf-1",
+                        Some("csrf-1"),
+                    );
+                } else {
+                    assert_raw_request(
+                        request,
+                        Method::POST,
+                        "/api/library/tmux/term%2Fone/request",
                         body,
                     );
                 }

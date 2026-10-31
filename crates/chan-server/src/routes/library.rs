@@ -1809,7 +1809,7 @@ async fn handle_library_window_live_terminals(
 }
 
 /// `GET /api/library/tmux`: the live tmux control-mode connections in this
-/// library's terminals, the same records the window feed's snapshot carries
+/// library's terminals and connected devservers, the same records the window feed carries
 /// as `tmux_connections`. `[]` with none.
 async fn handle_list_tmux_connections(Host(host): Host) -> Response {
     Json(host.tmux_connections()).into_response()
@@ -1832,6 +1832,20 @@ async fn handle_tmux_connection_request(
             "invalid tmux request: a JSON body with a request is required".into(),
         );
     };
+    if let Some(record) = host
+        .tmux_connections()
+        .into_iter()
+        .find(|record| record.connection == connection)
+        .filter(|record| record.library_id != host.library_id())
+    {
+        return dispatch_window_op(&host, |reply| DesktopWindowOp::TmuxRequest {
+            library_id: record.library_id,
+            connection,
+            request,
+            reply,
+        })
+        .await;
+    }
     if host.tmux_request(&connection, request) {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -5256,6 +5270,98 @@ mod devserver_route_tests {
     }
 
     #[tokio::test]
+    async fn tmux_routes_list_fed_records_and_dispatch_actions_to_the_owning_library() {
+        struct Feed(chan_library::windows::TmuxConnectionRecord);
+        impl chan_library::DevserverFeedSource for Feed {
+            fn windows(&self) -> Vec<crate::WindowRecord> {
+                Vec::new()
+            }
+            fn tmux_connections(&self) -> Vec<chan_library::windows::TmuxConnectionRecord> {
+                vec![self.0.clone()]
+            }
+            fn workspaces(&self) -> Vec<chan_library::LauncherWorkspace> {
+                Vec::new()
+            }
+            fn pane_color(&self, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let record = serde_json::from_value(serde_json::json!({
+            "connection": "term-fed", "library_id": "lib-geekom",
+            "origin": {"program": "tmux", "command": "tmux -CC", "local": true},
+            "version": "3.5a", "session": {"id": "$0", "name": "work"},
+            "windows": [], "window_cap": 8, "errors": [], "control_window": "w-control"
+        }))
+        .unwrap();
+        let feed = Arc::new(Feed(record));
+        let cfg = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            lib,
+            crate::DesktopBridge {
+                window_ops: Some(tx),
+                window_titles: Default::default(),
+            },
+            crate::route_builder(),
+        ));
+        host.install_devserver_feed(feed.clone());
+        let router = launcher_router(host, None, None);
+        let (status, listed) = request(&router, "GET", "/api/library/tmux", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed, serde_json::json!([feed.0]));
+
+        for body in [
+            serde_json::json!({"request": "new-window"}),
+            serde_json::json!({"request": "open-window", "window": "@9"}),
+            serde_json::json!({"request": "detach"}),
+            serde_json::json!({"request": "end"}),
+        ] {
+            let json = body.to_string();
+            let action = request(
+                &router,
+                "POST",
+                "/api/library/tmux/term-fed/request",
+                Some(&json),
+            );
+            let reply = async {
+                let crate::DesktopWindowOp::TmuxRequest {
+                    library_id,
+                    connection,
+                    request,
+                    reply,
+                } = rx.recv().await.unwrap()
+                else {
+                    panic!("tmux action expected");
+                };
+                assert_eq!(library_id, "lib-geekom");
+                assert_eq!(connection, "term-fed");
+                assert_eq!(serde_json::to_value(request).unwrap(), body);
+                reply.send(Ok(())).unwrap();
+            };
+            let ((status, _), ()) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    tokio::join!(action, reply)
+                })
+                .await
+                .expect("fed action must dispatch and finish");
+            assert_eq!(status, StatusCode::NO_CONTENT);
+        }
+        let (status, _) = request(
+            &router,
+            "POST",
+            "/api/library/tmux/missing/request",
+            Some(r#"{"request":"end"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            rx.try_recv().is_err(),
+            "unknown ids must never reach a devserver"
+        );
+    }
+
+    #[tokio::test]
     async fn workspace_window_label_route_persists_trimmed_text_and_clears_it() {
         let cfg = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
@@ -6240,6 +6346,9 @@ mod window_op_route_tests {
     struct RemoteWindowFeed(WindowRecord);
 
     impl DevserverFeedSource for RemoteWindowFeed {
+        fn tmux_connections(&self) -> Vec<chan_library::windows::TmuxConnectionRecord> {
+            Vec::new()
+        }
         fn windows(&self) -> Vec<WindowRecord> {
             vec![self.0.clone()]
         }
@@ -8317,6 +8426,9 @@ mod refusal_envelopes {
     struct RefusalWindowFeed(WindowRecord);
 
     impl chan_library::DevserverFeedSource for RefusalWindowFeed {
+        fn tmux_connections(&self) -> Vec<chan_library::windows::TmuxConnectionRecord> {
+            Vec::new()
+        }
         fn windows(&self) -> Vec<WindowRecord> {
             vec![self.0.clone()]
         }
