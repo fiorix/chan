@@ -485,8 +485,8 @@
   // bypass) stay on the xterm branch.
   let backend = $state<TerminalBackend>("xterm");
   // OSC 52 clipboard observer, non-null ONLY on the ghostty backend:
-  // ghostty-web's WASM parser swallows OSC 52 with no JS hook, so the
-  // clipboard copy rides this byte observer instead of xterm's
+  // the ghostty VT core drops OSC 52 and ghostty-web exposes no hook for
+  // it, so the clipboard copy rides this byte observer instead of xterm's
   // registerOscHandler (see osc52Bridge.ts). The xterm backend keeps
   // installTerminalReportGuards.
   let osc52Bridge: Osc52Bridge | null = null;
@@ -1209,8 +1209,8 @@
           ghosttyTerm.resize(proposed.cols, proposed.rows);
         },
       };
-      // OSC 52 rides the byte observer: ghostty-web's WASM parser
-      // swallows the sequence and exposes no registerOscHandler
+      // OSC 52 rides the byte observer: the ghostty VT core drops the
+      // sequence and ghostty-web exposes no registerOscHandler
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
       ghosttyStatusGuard = new GhosttyStatusGuard();
@@ -2148,7 +2148,7 @@
   ): void {
     if (!term || !termWriter) return;
     // Ghostty backend only: observe (never alter) the stream for OSC 52
-    // clipboard copies -- the WASM parser swallows them with no JS hook.
+    // clipboard copies -- the VT core drops them and exposes no JS hook.
     osc52Bridge?.push(bytes);
     if (ghosttyStatusGuard) bytes = ghosttyStatusGuard.push(bytes);
     if (!bytes.length) {

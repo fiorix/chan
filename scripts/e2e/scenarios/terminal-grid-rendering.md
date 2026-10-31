@@ -69,8 +69,8 @@ content.
 
 With one terminal already holding a full screen, a second terminal built
 from the same process-wide backend comes up showing its prompt and nothing
-else. The backends share one Ghostty WASM instance, so this is where a leak
-between terminals would surface.
+else. Every ghostty terminal instantiates one compiled Ghostty WASM module,
+so this is where a leak between terminals would surface.
 
 ### TG-06 The font preference resolves to what the chain says
 

@@ -1,26 +1,25 @@
-/// Terminal backend selection + the ghostty-web lazy loader, backing
+/// Terminal backend selection + the ghostty lazy loader, backing
 /// `terminal.ghostty = true`.
 ///
-/// WHY lazy: ghostty-web ships a ~420KB WASM build of Ghostty's VT
-/// parser next to its JS. A static import would put that asset on the
-/// critical path for every user when the toggle is off by default, so
-/// both the library and the wasm URL load through dynamic imports and
-/// only ever fetch when a terminal actually spawns with the ghostty
-/// backend. Vite emits `ghostty-vt.wasm` as a hashed asset; the `?url`
-/// import hands us its served path, which the loader fetches and
-/// compiles itself -- the library's own default `init()` resolves the
-/// wasm relative to import.meta.url, which breaks once everything is
-/// bundled.
+/// A ghostty terminal is ghostty-web's `Terminal` (renderer, input,
+/// selection) over Ghostty's own release build of libghostty-vt, vendored
+/// in `vendor/ghostty-vt/` and bound to the shape ghostty-web expects by
+/// `ghosttyVt.ts`. ghostty-web's bundled wasm is not loaded.
 ///
-/// WHY one WASM instance per terminal: the pinned ghostty-web build does
-/// not zero the screen and scrollback pages it allocates, so on a shared
-/// instance a new terminal gets a disposed terminal's memory back, and the
-/// first resize to its real grid repaints the dead terminal's screen
-/// (upstream coder/ghostty-web#142). The module is compiled once and
+/// WHY lazy: the wasm is about 1.2MB. A static import would put that
+/// asset on the critical path for every user whose terminals run on
+/// xterm.js, so the library and the wasm URL load through dynamic imports
+/// and only ever fetch when a terminal actually spawns with the ghostty
+/// backend. Vite emits `ghostty-vt.wasm` as a hashed asset; the `?url`
+/// import hands us its served path, which the loader fetches and compiles
+/// itself.
+///
+/// WHY one WASM instance per terminal: a wasm memory only grows, so on a
+/// shared instance the scrollback of every terminal ever opened would stay
+/// allocated for the life of the page. The module is compiled once and
 /// cached; every terminal instantiates it into its own linear memory
-/// (about 1.2MB to start), which is released with the terminal. A
-/// shared instance never shrinks either, so the cost is per live
-/// terminal rather than per process.
+/// (about 1.7MB with an empty terminal), which is released with the
+/// terminal.
 ///
 /// The compiled module is cached behind a single promise so concurrent
 /// spawns coalesce. A rejected load is NOT cached: the next spawn
@@ -28,6 +27,7 @@
 /// failed (fail-open, same philosophy as MouseModeFilter).
 
 import type { Ghostty, Terminal } from "ghostty-web";
+import { GhosttyVt } from "./ghosttyVt";
 import type { TerminalPreferences } from "../api/types";
 
 export type TerminalBackend = "xterm" | "ghostty";
@@ -55,31 +55,15 @@ export function terminalBackendFromPrefs(
 }
 
 /// Build a kit over an already compiled ghostty-vt module. Split from
-/// the loader so a test can hand it the pinned wasm read from disk.
+/// the loader so a test can hand it the vendored wasm read from disk.
 export function ghosttyKitFrom(
   module: WebAssembly.Module,
-  lib: { Ghostty: typeof Ghostty; Terminal: typeof Terminal },
+  lib: { Terminal: typeof Terminal },
 ): GhosttyKit {
   return {
     Terminal: lib.Terminal,
-    instantiate: async () => {
-      let memory: WebAssembly.Memory | null = null;
-      const instance = await WebAssembly.instantiate(module, {
-        env: {
-          // The module's one import, wired the way ghostty-web's own
-          // loader wires it: a UTF-8 slice of this instance's memory.
-          log: (ptr: number, len: number) => {
-            if (!memory) return;
-            console.log(
-              "[ghostty-vt]",
-              new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len)),
-            );
-          },
-        },
-      });
-      memory = instance.exports.memory as WebAssembly.Memory;
-      return new lib.Ghostty(instance);
-    },
+    // The release build imports nothing from its host.
+    instantiate: async () => new GhosttyVt(await WebAssembly.instantiate(module, {})).asGhostty(),
   };
 }
 
@@ -94,7 +78,7 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
     kitPromise = (async () => {
       const [mod, wasmUrl] = await Promise.all([
         import("ghostty-web"),
-        import("ghostty-web/ghostty-vt.wasm?url"),
+        import("../../vendor/ghostty-vt/ghostty-vt.wasm?url"),
       ]);
       const response = await fetch(wasmUrl.default);
       if (!response.ok) {

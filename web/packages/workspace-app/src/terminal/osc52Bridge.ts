@@ -1,15 +1,15 @@
 /// Osc52Bridge -- a stateful OSC 52 clipboard observer for the PTY ->
 /// terminal output path, backing the ghostty-web terminal backend.
 ///
-/// WHY a byte observer: ghostty-web's WASM build compiles Ghostty's own
-/// VT engine, and its WASM shim lists the parser's clipboard-contents
-/// action under "actions that require no response and have no terminal
-/// effect" -- OSC 52 is parsed and then silently dropped, with no
-/// registerOscHandler equivalent on the JS side (the xterm path's hook
-/// in xtermReports.ts reaches xterm-internal parser state that does not
-/// exist here). The only non-fork mechanism is to watch the bytes
-/// before they reach write(); the xterm backend keeps its parser hook,
-/// the ghostty backend runs this observer.
+/// WHY a byte observer: the ghostty backend's VT core (Ghostty's
+/// libghostty-vt) parses OSC 52 itself and hands a copy only to a
+/// clipboard callback its embedder installs. ghostty-web's `Terminal`
+/// offers no way to install one and no registerOscHandler equivalent
+/// (the xterm path's hook in xtermReports.ts reaches xterm-internal
+/// parser state that does not exist here), so the sequence is dropped.
+/// The only non-fork mechanism is to watch the bytes before they reach
+/// write(); the xterm backend keeps its parser hook, the ghostty backend
+/// runs this observer.
 ///
 /// Observe-ONLY by design: push() returns nothing and never withholds
 /// or rewrites bytes. ghostty's parser already swallows OSC 52, so

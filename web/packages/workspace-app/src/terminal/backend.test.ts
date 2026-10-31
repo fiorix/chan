@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Ghostty, Terminal, type GhosttyTerminal } from "ghostty-web";
+import { Terminal, type Ghostty, type GhosttyTerminal } from "ghostty-web";
 import { describe, expect, test } from "vitest";
 import type { TerminalPreferences } from "../api/types";
 import { ghosttyKitFrom, terminalBackendFromPrefs, type TerminalBackend } from "./backend";
@@ -39,20 +39,21 @@ describe("the backend of a terminal and its masking", () => {
 });
 
 describe("ghostty kit instances", () => {
-  /// The pinned build's wasm, read where the web workspace hoists it
-  /// (relative to the package directory vitest runs in).
-  async function pinnedModule(): Promise<WebAssembly.Module> {
-    return WebAssembly.compile(readFileSync("../../node_modules/ghostty-web/ghostty-vt.wasm"));
+  /// The vendored release wasm (relative to the package directory vitest
+  /// runs in).
+  async function vendoredModule(): Promise<WebAssembly.Module> {
+    return WebAssembly.compile(readFileSync("vendor/ghostty-vt/ghostty-vt.wasm"));
   }
 
   /// Cells on screen holding the disposed terminal's marker byte.
   function staleCells(term: GhosttyTerminal): number {
     term.update();
-    const { cols, rows } = term.getDimensions();
-    const cells = term.getViewport();
+    const { rows } = term.getDimensions();
     let stale = 0;
-    for (let i = 0; i < cols * rows; i++) {
-      if (cells[i].codepoint === MARKER.codePointAt(0)) stale++;
+    for (let y = 0; y < rows; y++) {
+      for (const cell of term.getLine(y) ?? []) {
+        if (cell.codepoint === MARKER.codePointAt(0)) stale++;
+      }
     }
     return stale;
   }
@@ -73,16 +74,14 @@ describe("ghostty kit instances", () => {
     return fresh;
   }
 
-  test("the pinned build hands a freed terminal's cells to the next one on a shared instance", async () => {
-    // The defect the per-terminal instance exists for, measured against the
-    // pinned wasm. When this fails because nothing leaks, upstream zeroes its
-    // pages (coder/ghostty-web#142) and terminals could share an instance.
-    const shared = new Ghostty(await WebAssembly.instantiate(await pinnedModule(), { env: { log: () => {} } }));
-    expect(staleCells(disposeThenSpawn(shared, shared))).toBeGreaterThan(0);
+  test("a terminal starts blank after a freed one on the same instance", async () => {
+    const kit = ghosttyKitFrom(await vendoredModule(), { Terminal });
+    const shared = await kit.instantiate();
+    expect(staleCells(disposeThenSpawn(shared, shared))).toBe(0);
   });
 
   test("a terminal on its own instance starts blank after a resize", async () => {
-    const kit = ghosttyKitFrom(await pinnedModule(), { Ghostty, Terminal });
+    const kit = ghosttyKitFrom(await vendoredModule(), { Terminal });
     const first = await kit.instantiate();
     const second = await kit.instantiate();
     expect(second).not.toBe(first);
@@ -90,11 +89,11 @@ describe("ghostty kit instances", () => {
   });
 
   test("each instance owns its memory", async () => {
-    const kit = ghosttyKitFrom(await pinnedModule(), { Ghostty, Terminal });
+    const kit = ghosttyKitFrom(await vendoredModule(), { Terminal });
     const memories = await Promise.all(
       [kit.instantiate(), kit.instantiate()].map(async (pending) => {
-        const ghostty = (await pending) as unknown as { memory: WebAssembly.Memory };
-        return ghostty.memory;
+        const ghostty = (await pending) as unknown as { wasm: { memory: WebAssembly.Memory } };
+        return ghostty.wasm.memory;
       }),
     );
     expect(memories[0]).toBeInstanceOf(WebAssembly.Memory);
