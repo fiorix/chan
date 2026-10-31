@@ -1,6 +1,6 @@
 # tmux control mode is on by default though few use it
 
-Status: accepted for v0.118.0 by the owner's words of 2026-10-31 and built the same day on `v0118/tmux-default-off` (the section Built); next the merge into `0.118.0-ga`.
+Status: landed in `0.118.0-ga` on 2026-10-31 (merge `89f2cb007`; the section Built), accepted for v0.118.0 by the owner's words of 2026-10-31 and built the same day on `v0118/tmux-default-off`; the row closes at the GA.
 
 ## What was asked
 
