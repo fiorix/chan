@@ -8383,7 +8383,15 @@ mod tests {
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
-            tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig::default(), 10)),
+            // Test sessions honor the marker, as a user who turned the switch on;
+            // the default itself is pinned by the config tests.
+            tmux: Mutex::new(tmux_gate::TmuxGate::new(
+                TerminalTmuxConfig {
+                    enabled: true,
+                    trust: Vec::new(),
+                },
+                10,
+            )),
             #[cfg(unix)]
             tmux_foreground_group: std::sync::atomic::AtomicU32::new(0),
             tmux_work: Mutex::new(VecDeque::new()),

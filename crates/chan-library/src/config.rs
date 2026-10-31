@@ -283,8 +283,9 @@ fn default_terminal_ghostty() -> bool {
 /// `terminal.tmux`: the control-mode marker policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalTmuxConfig {
-    /// Whether the marker is honored. On by default. Off, the marker passes
-    /// through as ordinary bytes and nothing is asked.
+    /// Whether the marker is honored. Off by default: the marker passes
+    /// through as ordinary bytes and nothing is asked. On, a terminal whose
+    /// foreground prints it becomes a tmux connection.
     #[serde(default = "default_terminal_tmux_enabled")]
     pub enabled: bool,
     /// Foreground program names that enter control mode without the
@@ -307,8 +308,11 @@ impl Default for TerminalTmuxConfig {
     }
 }
 
+// Off: few terminals ever run `tmux -CC`, and the consent question in some
+// other program's output would surprise everyone else; the switch is one
+// setting away for those who do.
 fn default_terminal_tmux_enabled() -> bool {
-    true
+    false
 }
 
 /// Cap on `terminal.tmux.trust`.
@@ -697,21 +701,21 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn tmux_is_on_with_no_trust_unless_the_config_says_otherwise() {
+    fn tmux_is_off_with_no_trust_unless_the_config_says_otherwise() {
         let default = TerminalConfig::default().tmux;
-        assert!(default.enabled && default.trust.is_empty());
+        assert!(!default.enabled && default.trust.is_empty());
         let unset: TerminalConfig = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(unset.tmux, default, "a config without the table is on");
+        assert_eq!(unset.tmux, default, "a config without the table is off");
         let partial: TerminalConfig =
             serde_json::from_value(json!({ "tmux": { "trust": ["ssh"] } })).unwrap();
-        assert!(partial.tmux.enabled, "a table without the switch is on");
+        assert!(!partial.tmux.enabled, "a table without the switch is off");
         assert_eq!(partial.tmux.trust, vec!["ssh"]);
-        let off: TerminalConfig =
-            serde_json::from_value(json!({ "tmux": { "enabled": false } })).unwrap();
-        assert!(!off.tmux.enabled);
+        let on: TerminalConfig =
+            serde_json::from_value(json!({ "tmux": { "enabled": true } })).unwrap();
+        assert!(on.tmux.enabled);
         assert_eq!(
-            serde_json::to_value(&off).unwrap()["tmux"],
-            json!({ "enabled": false, "trust": [] }),
+            serde_json::to_value(&on).unwrap()["tmux"],
+            json!({ "enabled": true, "trust": [] }),
             "both fields are written"
         );
     }

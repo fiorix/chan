@@ -3657,6 +3657,9 @@ scenario_tmuxfeed() {
         --identity-token "$TOK_IDENTITY_ADMIN" --json \
         token create "$email" --scope desktop.account --label tmux-feed > "$account") ||
         assert_fail "tmuxfeed: desktop account PAT mint failed"
+    # The marker is off by default; the tmux devserver's home turns it on.
+    mkdir -p "$WORK/home-tmux"
+    CHAN_HOME="$WORK/home-tmux" "$CHAN_BIN" config set terminal.tmux.enabled true || exit 2
     spawn_devserver tmux "${DS_PORTS[9]}" "$tunnel_pat" "$(node_tunnel_url p1)" 1
     local ready=0
     for _ in $(seq 150); do

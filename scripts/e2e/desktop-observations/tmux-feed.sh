@@ -21,6 +21,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 obs_setup tmux-feed
 obs_need node tmux
+# The marker is off by default; the desktop's own terminals host the local
+# tmux connection the loss matrix keeps as its control.
+chan config set terminal.tmux.enabled true
 if [ "${TMUX_FEED_DISCONNECTS:-0}" = 1 ]; then
     obs_need ssh sshd ssh-keygen
 fi

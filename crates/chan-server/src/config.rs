@@ -317,7 +317,7 @@ mod tests {
                 mouse_capture: false,
                 program_status: true,
                 tmux: chan_library::TerminalTmuxConfig {
-                    enabled: false,
+                    enabled: true,
                     trust: vec!["ssh".into()],
                 },
                 ghostty: true,
