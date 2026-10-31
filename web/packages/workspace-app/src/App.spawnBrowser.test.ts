@@ -68,7 +68,8 @@ describe("a new Files tab", () => {
   test("enters a terminal's folder, expanding it and its parents", async () => {
     const tab = await spawnFrom([terminalTab({ id: "term", cwd: "notes/sub" })]);
 
-    expect(tab.selected).toBe("notes/sub");
+    expect(tab.directory).toBe("notes/sub");
+    expect(tab.selected).toBeUndefined();
     expect(tab.expanded).toEqual(["notes", "notes/sub"]);
     expect(browserSelection.showWorkspace).toBe(false);
     expect(treeExpanded.map).toMatchObject({ notes: true, "notes/sub": true });
@@ -97,7 +98,8 @@ describe("a new Files tab", () => {
 
     const tab = await spawnFrom([]);
 
-    expect(tab.selected).toBe("home/user");
+    expect(tab.directory).toBe("home/user");
+    expect(tab.selected).toBeUndefined();
     expect(tab.expanded).toEqual(["home", "home/user"]);
   });
 

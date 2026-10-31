@@ -628,6 +628,9 @@ export type GraphTab = {
 };
 
 export type BrowserTab = {
+  directory?: string;
+  browserSort?: "name" | "kind" | "size" | "modified";
+  browserDescending?: boolean;
   kind: "browser";
   id: string;
   title: string;
@@ -865,6 +868,10 @@ export function tabLabel(t: Tab, ctx?: BrowserLabelCtx): string {
 export function browserTabLabel(t: BrowserTab, ctx?: BrowserLabelCtx): string {
   const workspaceName = ctx?.workspaceName?.trim();
   const rootName = workspaceName || t.title;
+  if (t.directory !== undefined) {
+    const name = t.directory.split("/").filter(Boolean).at(-1);
+    return `${name || rootName}/`;
+  }
   const selected = t.selected?.trim();
   if (!selected) return `${rootName}/`;
   const trailing = selected.endsWith("/");
@@ -4462,6 +4469,9 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   selectedNodeId: "carry",
   selectedNodeLabel: "carry",
   selectedPaths: "carry",
+  directory: "carry",
+  browserSort: "carry",
+  browserDescending: "carry",
   showWorkspace: "carry",
   slidePreview: "carry",
   spawnCommand: "carry",
@@ -6740,6 +6750,10 @@ export type SerTab = {
   /// showing flag (`bd`), expanded directory paths (`be`), and scroll
   /// offset (`bsc`). All optional; absence means default state.
   bs?: string;
+  bp?: string;
+  bo?: "name" | "kind" | "size" | "modified";
+  br?: 1;
+  bsel?: string[];
   bd?: 1;
   be?: string[];
   bsc?: number;
@@ -6830,7 +6844,7 @@ export const paneModeConflictFieldSets = {
     },
     b: {
       included: ["k", "a"],
-      excluded: ["bi", "bs", "bd", "be", "bsc", "iw"],
+      excluded: ["bi", "bs", "bd", "be", "bsc", "iw", "bp", "bo", "br", "bsel"],
     },
     d: { included: ["k", "a"], excluded: ["cs", "ds", "ar", "dsi", "iw"] },
     x: { included: ["k", "a", "xi"], excluded: ["n"] },
@@ -7263,6 +7277,10 @@ function serializeTab(
       k: "b",
       ...(t.inspectorOpen ? { bi: 1 as const } : {}),
       ...(t.selected ? { bs: t.selected } : {}),
+      ...(t.directory !== undefined ? { bp: t.directory } : {}),
+      ...(t.browserSort ? { bo: t.browserSort } : {}),
+      ...(t.browserDescending ? { br: 1 as const } : {}),
+      ...(t.selectedPaths?.length ? { bsel: [...t.selectedPaths] } : {}),
       ...(t.showWorkspace ? { bd: 1 as const } : {}),
       ...(expanded.length > 0 ? { be: expanded } : {}),
       ...(t.scroll && t.scroll > 0 ? { bsc: Math.round(t.scroll) } : {}),
@@ -7450,6 +7468,10 @@ function restoreBrowserTabFromSer(sertab: SerTab): BrowserTab {
     title: "Files",
     inspectorOpen: sertab.bi === 1,
     ...(typeof sertab.bs === "string" ? { selected: sertab.bs } : {}),
+    ...(typeof sertab.bp === "string" ? { directory: sertab.bp } : {}),
+    ...(["name", "kind", "size", "modified"].includes(sertab.bo ?? "") ? { browserSort: sertab.bo } : {}),
+    ...(sertab.br === 1 ? { browserDescending: true } : {}),
+    ...(Array.isArray(sertab.bsel) ? { selectedPaths: sertab.bsel.filter((p) => typeof p === "string") } : {}),
     ...(sertab.bd === 1 ? { showWorkspace: true } : {}),
     ...(Array.isArray(sertab.be) && sertab.be.length > 0
       ? { expanded: sertab.be.filter((p) => typeof p === "string") }

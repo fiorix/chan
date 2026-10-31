@@ -61,7 +61,7 @@ afterEach(async () => {
 });
 
 function row(path: string, scope: ParentNode = document): HTMLElement | undefined {
-  return [...scope.querySelectorAll<HTMLElement>('[role="treeitem"]')].find((el) => {
+  return [...scope.querySelectorAll<HTMLElement>('[role="treeitem"], [role="option"]')].find((el) => {
     const title = el.title.replace(/ \(.*\)$/, "");
     return title === path || title.endsWith(`/${path}`);
   });
@@ -106,14 +106,14 @@ describe("a folder's menu", () => {
     expect(menu).not.toContain("New File");
     expect(menu).not.toContain("New Directory");
     expect(menu).not.toContain("Search");
-    expect(menu.slice(menu.indexOf("---"))).toEqual(["---", "Copy Path", "Rename / Move", "Delete", "---", "Flip"]);
+    expect(menu.slice(menu.indexOf("---"))).toEqual(["---", "Copy", "Cut", "Paste", "Select multiple", "---", "Copy Path", "Rename / Move", "Delete", "---", "Flip"]);
   });
 
   test("Open in File Browser opens a Files tab on the folder with its inspector open", async () => {
     item(await menuFor("docs"), "Open in File Browser").click();
     await settle();
 
-    expect(tabs().at(-1)).toMatchObject({ kind: "browser", selected: "docs", inspectorOpen: true });
+    expect(tabs().at(-1)).toMatchObject({ kind: "browser", directory: "docs", inspectorOpen: true });
   });
 
   test("New Terminal opens a terminal in the folder, under the new-terminal chord", async () => {
@@ -165,7 +165,7 @@ describe("a file's menu", () => {
 
   test("Delete shows its chord and deletes only after a destructive confirm", async () => {
     const menu = await menuFor("a.md");
-    expect(chord(menu, "Delete")).toBe(chordFor("app.files.delete") ?? "");
+    expect(chord(menu, "Delete")).toBe("Delete");
 
     item(menu, "Delete").click();
     await settle();

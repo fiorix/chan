@@ -25,7 +25,7 @@ import { ApiError } from "../api/errors";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
 import { allCommands, commandContext } from "../state/commands";
-import { browserSelection, fbSelectSet, fbSelectSingle, fileOps, ui } from "../state/store.svelte";
+import { browserSelection, fbSelectSet, fbSelectSingle, fileOps, ui, toggleBrowserSidePane, loadTreeDir, fbTreeInstance } from "../state/store.svelte";
 import { allPaneTabs, closeTab, layout, openBrowserInActivePane, openInActivePane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 function row(path: string): HTMLElement | undefined {
-  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].find((el) => {
+  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"], [role="option"]')].find((el) => {
     const title = el.title.replace(/ \(.*\)$/, "");
     return title === path || title.endsWith(`/${path}`);
   });
@@ -68,7 +68,7 @@ function menuItem(menu: HTMLElement, label: string): HTMLButtonElement {
 
 async function pressDelete(): Promise<void> {
   document
-    .querySelector<HTMLElement>('[role="tree"]')!
+    .querySelector<HTMLElement>('[role="tree"], [role="listbox"]')!
     .dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
   await settle();
 }
@@ -177,8 +177,8 @@ describe("Delete on a multi-selection", () => {
   });
 
   test("a selection that folds to one folder is cleared once the folder goes", async () => {
-    row("docs")!.querySelector<HTMLButtonElement>("button.twirl")!.click();
-    await vi.waitFor(() => expect(row("docs/y.md")).toBeDefined());
+    await loadTreeDir("docs");
+    await settle();
     fbSelectSet(["docs", "docs/x.md", "docs/y.md"], "docs");
     await pressDelete();
 
@@ -266,8 +266,11 @@ describe("Delete on one row", () => {
 
 describe("the expand chevron", () => {
   test("expanding a folder keeps the selection", async () => {
+    toggleBrowserSidePane("left");
+    await settle();
+    document.querySelector<HTMLElement>('[role="tree"]')!.focus();
     fbSelectSet(["a.md", "b.md"], "b.md");
-    const twirl = row("docs")!.querySelector<HTMLButtonElement>("button.twirl")!;
+    const twirl = document.querySelector<HTMLButtonElement>('[role="tree"] button.twirl')!;
     twirl.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
     window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
     twirl.click();
@@ -283,7 +286,7 @@ test("closing the Files tab detaches an unfinished rubber band without clearing 
   fbSelectSet(["a.md", "b.md"], "b.md");
   const add = vi.spyOn(window, "addEventListener");
   const remove = vi.spyOn(window, "removeEventListener");
-  document.querySelector('[role="tree"]')!.dispatchEvent(
+  document.querySelector('[role="tree"], [role="listbox"]')!.dispatchEvent(
     new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, clientX: 5, clientY: 5 }),
   );
   const move = add.mock.calls.find(([type]) => type === "mousemove")!;
@@ -293,14 +296,15 @@ test("closing the Files tab detaches an unfinished rubber band without clearing 
   const pane = layout.nodes[layout.activePaneId];
   if (pane?.kind !== "leaf") throw new Error("no active pane");
   const browser = allPaneTabs(pane).find((tab) => tab.kind === "browser")!;
+  const selection = fbTreeInstance(`fb-tab-${browser.id}`)!.selection;
   await closeTab(pane.id, browser.id);
   await settle();
-  expect(document.querySelector('[role="tree"]')).toBeNull();
-  expect(browserSelection.paths).toEqual(["a.md", "b.md"]);
+  expect(document.querySelector('[role="tree"], [role="listbox"]')).toBeNull();
+  expect(selection.paths).toEqual(["a.md", "b.md"]);
   const removedMove = remove.mock.calls.some(([type, handler, capture]) => type === "mousemove" && handler === move[1] && capture === true);
   const removedUp = remove.mock.calls.some(([type, handler, capture]) => type === "mouseup" && handler === up[1] && capture === true);
   window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
-  expect(browserSelection.paths, "a dead tree cannot clear the current selection").toEqual(["a.md", "b.md"]);
+  expect(selection.paths, "a dead tree cannot clear its saved selection").toEqual(["a.md", "b.md"]);
   expect(removedMove).toBe(true);
   expect(removedUp).toBe(true);
 });

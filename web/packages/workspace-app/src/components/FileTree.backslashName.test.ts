@@ -44,7 +44,7 @@ afterEach(async () => {
 function row(path: string): HTMLElement | undefined {
   const root = workspace.info?.root?.replace(/\/+$/, "") ?? "";
   const title = root ? `${root}/${path}` : path;
-  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].find(
+  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"], [role="option"]')].find(
     (el) => el.title.replace(/ \(.*\)$/, "") === title,
   );
 }
@@ -65,7 +65,7 @@ describe("a file named a\\b.md", () => {
   test("is listed by its whole name at the root and inside a folder", async () => {
     expect(rowName("a\\b.md")).toBe("a\\b.md");
 
-    row("dir")!.querySelector<HTMLButtonElement>("button.twirl")!.click();
+    row("dir")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await vi.waitFor(() => expect(row("dir/a\\b.md")).toBeDefined());
     expect(rowName("dir/a\\b.md")).toBe("a\\b.md");
   });

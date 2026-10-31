@@ -1,7 +1,15 @@
 <section class="manual-block" id="browse">
   <h2><a class="heading-anchor" href="#browse">Browse the filesystem</a></h2>
-<p>Open <strong>File browser</strong> from the pane menu or command launcher, or run <code>cs open .</code>. Expand directories, open files in editor tabs, and use <strong>Details</strong> to inspect the selected file or directory. In a workspace, the browser follows the project; standalone windows browse the host filesystem.</p>
+<p>Open <strong>File browser</strong> from the pane menu or command launcher, or run <code>cs open .</code>. Files tabs show the current directory with breadcrumbs, back/forward navigation, a path field, and a filename filter. Sort by Name, Kind, Size, or Modified; directories stay first. Double-click a directory to enter it or a file to open it. Use <strong>Details</strong> to inspect the selection; selecting another row keeps a closed inspector closed. Docked browsers retain an expandable tree. In a workspace, the browser follows the project; standalone windows browse the host filesystem.</p>
 <p>The separate <strong>Drafts</strong> group holds unfinished documents. See <a href="/manual/terminal/#drafts">Drafts</a> for how to keep, save, or discard them.</p>
+</section>
+
+<section class="manual-block" id="keyboard">
+  <h2><a class="heading-anchor" href="#keyboard">Keyboard navigation</a></h2>
+<p>Tab to the file list or tree. Use arrow keys, Home, End, Page Up, and Page Down to move; Enter opens the focused entry. Left goes to the parent directory in a list, or collapses a tree branch. Right enters a directory or expands a tree branch. Alt+Left and Alt+Right step through a Files tab's history; Alt+Up goes to its parent.</p>
+<p>Shift extends a selection. F8 enables independent marks: move with the arrows and press Space to toggle each item. Escape leaves that mode; another Escape clears the selection. Mod+A selects all visible entries. Mod means Command on macOS and Control elsewhere.</p>
+<p>Mod+C, Mod+X, and Mod+V copy, cut, and paste files. F2 renames, Delete asks to delete, Shift+F10 opens the selected entry's action menu, and Mod+Y toggles Details. Use arrows, Home, and End within a menu; Escape returns focus to its opener. Press / or Mod+F to focus the folder filter. Standard navigation also supports typing a filename prefix.</p>
+<p>Enable <strong>Vim keyboard navigation</strong> in the browser menu or Settings. It adds h/j/k/l, gg/G, y/x/p, and v for selection mode. It applies only while the file list or tree has focus, and the choice is saved in this browser. The <strong>Standard keys</strong> or <strong>Vim keys</strong> button shows the shortcut reference.</p>
 </section>
 
 <section class="manual-block" id="transfers">

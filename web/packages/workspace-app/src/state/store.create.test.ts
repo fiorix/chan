@@ -145,7 +145,7 @@ describe("creating a file or directory", () => {
   test("a new directory is selected in the browser and nothing opens", async () => {
     await create(fileOps.createFileOrDir(""), "sub/");
 
-    expect(browserSelection.path).toBe("sub/");
+    expect(browserSelection.path).toBe("sub");
     expect(activePane().tabs).toEqual([]);
   });
 

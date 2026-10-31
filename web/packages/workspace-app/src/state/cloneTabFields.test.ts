@@ -173,6 +173,9 @@ function loadedBrowserTab(): BrowserTab {
     expanded: ["src", "src/state"],
     scroll: 412,
     inspectorWidth: 265,
+    directory: "src",
+    browserSort: "modified",
+    browserDescending: true,
   } satisfies Required<BrowserTab>;
 }
 

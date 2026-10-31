@@ -69,6 +69,11 @@ describe("File-Browser inspector width persistence (save/restore seam)", () => {
       title: "Files",
       inspectorOpen: true,
       inspectorWidth: 333,
+      directory: "notes",
+      browserSort: "modified",
+      browserDescending: true,
+      selected: "notes/b.md",
+      selectedPaths: ["notes/a.md", "notes/b.md"],
     };
     paneWith(browser);
 
@@ -85,6 +90,7 @@ describe("File-Browser inspector width persistence (save/restore seam)", () => {
       | BrowserTab
       | undefined;
     expect(restored?.inspectorWidth).toBe(333);
+    expect(restored).toMatchObject({directory:"notes",browserSort:"modified",browserDescending:true,selected:"notes/b.md",selectedPaths:["notes/a.md","notes/b.md"]});
   });
 });
 
@@ -197,7 +203,7 @@ describe("the File-Browser tab's own view state", () => {
     }
   });
 
-  test("expanding a directory in the tab reaches the URL hash", async () => {
+  test("navigating a directory in the tab reaches the URL hash", async () => {
     const timers = trackTimers();
     installDemoWorkspace({
       metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1, fileCount: 1, textCount: 1 },
@@ -210,15 +216,15 @@ describe("the File-Browser tab's own view state", () => {
       await new Promise((r) => setTimeout(r, 400));
       window.history.replaceState(null, "", "#");
 
-      const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find((el) =>
+      const row = [...target.querySelectorAll<HTMLElement>("[role='option']")].find((el) =>
         el.textContent?.includes("notes"),
       );
-      row!.querySelector<HTMLButtonElement>("button.twirl")!.click();
+      row!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
       await settle();
       await new Promise((r) => setTimeout(r, 400));
 
       const tab = (layout.nodes["pane-test"] as LeafNode).tabs[0] as BrowserTab;
-      expect(tab.expanded).toEqual(["notes"]);
+      expect(tab.directory).toBe("notes");
       const params = new URLSearchParams(window.location.hash.slice(1));
       expect([...params.values()].some((v) => v.includes('"notes"')), "the layout in the hash").toBe(true);
     } finally {

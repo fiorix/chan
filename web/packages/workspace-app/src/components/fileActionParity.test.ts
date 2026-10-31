@@ -86,6 +86,8 @@ vi.mock("../state/store.svelte", () => ({
   browserSelection: { path: null, paths: [] },
   clearTreeLoadingForPath: vi.fn(),
   fbClearSelection: vi.fn(),
+  fbActivateInstance: vi.fn(),
+  fbActiveInstanceId: () => "fb-test",
   fbClipboard: { mode: "copy", paths: [] },
   fbClipboardClear: vi.fn(),
   fbClipboardPaste: vi.fn(async () => {}),
