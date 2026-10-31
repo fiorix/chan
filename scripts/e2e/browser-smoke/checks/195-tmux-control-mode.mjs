@@ -228,7 +228,7 @@ export default {
       }, 60_000);
       step(`minted control ${minted.control.window_id}, tmux window ${minted.tmuxWindow.window_id}`);
       check(minted.control.tmux.connection === minted.tmuxWindow.tmux.connection, "the two rows name different connections");
-      check(minted.control.label.trim() === CARD_TITLE, `the control row's label is ${JSON.stringify(minted.control.label)}`);
+      check(minted.control.title.trim() === CARD_TITLE, `the control row's title is ${JSON.stringify(minted.control.title)}`);
       const store = JSON.parse(readFileSync(join(chanHome, "devserver", "windows.json"), "utf8"));
       check(!store.some((row) => row.tmux), "a tmux row reached windows.json");
       check(!minted.tmuxWindow.hidden, "the tmux window is minted hidden");
