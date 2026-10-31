@@ -1171,6 +1171,65 @@ describe("Pane tab drag and drop between windows", () => {
     }
   });
 
+  test("a tab drag marks a pane body showing an extension tab so the drag reaches its split edges", async () => {
+    // The extension's frame is a document of its own: a drag over it lands
+    // its dragover and drop there, never on this body's handlers. The body
+    // carries the mark from a tab's dragstart to the drop or dragend that
+    // ends the drag, and its stylesheet lays a cover over each extension tab
+    // under the mark, so hit-testing stops above the frame and the body sees
+    // the drag.
+    const source = await renderTarget();
+    layout.nodes["pane-dest"] = {
+      kind: "leaf", id: "pane-dest",
+      tabs: [{ kind: "extension", id: "strudel", title: "Strudel", extensionId: "strudel" }], activeTabId: "strudel",
+    };
+    layout.nodes["split"] = { kind: "split", id: "split", direction: "row", ratio: 0.5, a: "pane-here", b: "pane-dest" };
+    layout.rootId = "split";
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane: layout.nodes["pane-dest"] as LeafNode } }));
+    await tick();
+    const tab = source.querySelector('.tab[draggable="true"]')!;
+    const body = target.querySelector<HTMLElement>(".editor-wrap")!;
+    body.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    expect(body.querySelector(".extension-tab")).not.toBeNull();
+    expect(body.classList.contains("tab-dragging")).toBe(false);
+
+    const data = new DragData();
+    fire(tab, "dragstart", data);
+    await tick();
+    expect(body.classList.contains("tab-dragging")).toBe(true);
+    data.dropEffect = "none";
+    fire(tab, "dragend", data);
+    await tick();
+    expect(body.classList.contains("tab-dragging")).toBe(false);
+
+    fire(tab, "dragstart", data);
+    try {
+      await tick();
+      expect(body.classList.contains("tab-dragging")).toBe(true);
+      expect(fire(body, "dragover", data, 799, 300).defaultPrevented).toBe(true);
+      await tick();
+      expect(body.classList.contains("body-drop-right")).toBe(true);
+      expect(fire(body, "drop", data, 799, 300).defaultPrevented).toBe(true);
+      await tick();
+      // The drop ends the drag before the source's dragend, which the source
+      // pane this drop emptied and collapsed may never deliver.
+      expect(body.classList.contains("tab-dragging")).toBe(false);
+      const split = Object.values(layout.nodes).find((node) => node.kind === "split" && node.a === "pane-dest");
+      expect(split?.kind).toBe("split");
+      if (split?.kind !== "split") throw new Error("no right-hand split");
+      expect((layout.nodes[split.b] as LeafNode).tabs.map((t) => t.id)).toEqual(["here"]);
+    } finally {
+      fire(tab, "dragend", data);
+    }
+    // The mark is what the stylesheet keys the cover over each extension
+    // tab's frame on.
+    expect(paneSource).toMatch(
+      /\.editor-wrap\.tab-dragging :global\(\.extension-tab\)::after \{\s*content: "";\s*position: absolute;\s*inset: 0;\s*z-index: 1;\s*\}/,
+    );
+  });
+
   test.each([
     [0, 2, 210], [0, 2, 290], [3, 1, 110], [3, 1, 190],
   ])("same-pane drag %i to %i at x=%i lands where its indicator points", async (from, to, x) => {

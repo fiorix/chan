@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.118.0
 
-Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]). The owner decided both browser-suite rows by survey on 2026-10-31: a browser client keeps the tmux control tab in its source window, and the twenty-three checks migrate to the directory view, with browser check 95 built in the same lane.
+Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]). One row was raised for v0.117.1 and built on its own branch, which that patch shipped without; the owner folded it into v0.118.0 on rebasing the branch onto the release ("Fold into v0.118.0"): a tab dragged over a pane showing an extension tab finds no split edge, since the extension's frame takes the drag's events before the pane body sees them ([extdrag]). The owner decided both browser-suite rows by survey on 2026-10-31: a browser client keeps the tmux control tab in its source window, and the twenty-three checks migrate to the directory view, with browser check 95 built in the same lane.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -33,8 +33,10 @@ Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt b
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
 | [tmux card from a devserver feed has no actions][tmuxfed] | accepted | build |
+| [Tab drag over an extension finds no split edge][extdrag] | built | review |
 
 [tmuxfed]: v0.118.0/a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions.md
+[extdrag]: v0.118.0/a-tab-dragged-over-an-extension-tab-finds-no-split-edge.md
 [tmuxbrw]: v0.118.0/a-browser-client-cannot-open-a-tmux-connections-control-window.md
 [filesel]: v0.118.0/browser-checks-drive-the-files-tree-the-directory-view-replaced.md
 [chk95]: v0.118.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md

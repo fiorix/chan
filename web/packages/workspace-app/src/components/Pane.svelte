@@ -2,6 +2,12 @@
   // Drag payload values are protected during hover; panes in this window
   // share the source identity recorded while the payload is writable.
   let localTabDrag: { fromPaneId: string; fromSide: "a" | "b"; tabId: string } | null = null;
+  // True from a tab's dragstart to the drop or dragend that ends it. An
+  // extension tab's body is an iframe, a document of its own: a drag over it
+  // delivers dragover and drop there and never to the pane body's handlers,
+  // so for the drag's duration every pane body covers its frames (the
+  // `tab-dragging` rule below).
+  let tabDragInFlight = $state(false);
 </script>
 
 <script lang="ts">
@@ -696,6 +702,7 @@
     // report; dragend selects a source that is still in this pane.
     draggedTerminalPress = wasPressed ? { tabId, side: fromSide } : null;
     localTabDrag = { fromPaneId: pane.id, fromSide, tabId };
+    tabDragInFlight = true;
     activeDragSourceSides.set(tabId, fromSide);
     e.dataTransfer.effectAllowed = "move";
     // `fromWindow` is what actually separates an intra-window move from a
@@ -811,6 +818,7 @@
     const draggedPress = draggedTerminalPress?.tabId === tabId ? draggedTerminalPress : null;
     draggedTerminalPress = null;
     localTabDrag = null;
+    tabDragInFlight = false;
     const fromSide = activeDragSourceSides.get(tabId) ?? fallbackSide;
     activeDragSourceSides.delete(tabId);
     if (paneMode.stale) return;
@@ -1065,6 +1073,9 @@
   }
 
   function onBodyDrop(e: DragEvent): void {
+    // A drop ends the drag here, before the source's dragend, which a source
+    // pane collapsed by this very drop may not deliver.
+    tabDragInFlight = false;
     if (tmuxPaneHere) return;
     const payload = tabDragPayload(e);
     const edge = bodyDropEdge ?? edgeForBodyDrop(e);
@@ -1143,6 +1154,7 @@
   }
 
   function onTabDrop(e: DragEvent, tabIdx: number): void {
+    tabDragInFlight = false;
     const dt = e.dataTransfer;
     if (!dt || tmuxPaneHere) return;
     dropActive = false;
@@ -1730,6 +1742,7 @@
     class:body-drop-right={bodyDropEdge === "right"}
     class:body-drop-top={bodyDropEdge === "top"}
     class:body-drop-bottom={bodyDropEdge === "bottom"}
+    class:tab-dragging={tabDragInFlight}
     bind:this={editorWrapEl}
     ondragover={onBodyDragOver}
     ondragleave={onBodyDragLeave}
@@ -2488,6 +2501,17 @@
     opacity: 0;
     transition: opacity 80ms ease;
     z-index: 20;
+  }
+  /* The only iframes under a pane body are extension tabs. While a tab drag
+     is in flight a transparent cover sits over each one, so the drag's
+     dragover and drop land on this body's handlers and the split edges show.
+     Turning the frame's pointer events off is not enough: WebKit still hands
+     the drag to a frame with `pointer-events: none`, which ends it there. */
+  .editor-wrap.tab-dragging :global(.extension-tab)::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
   }
   .editor-wrap.body-drop-left::after,
   .editor-wrap.body-drop-right::after,
