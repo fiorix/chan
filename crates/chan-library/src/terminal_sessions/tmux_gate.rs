@@ -765,8 +765,10 @@ pub(super) fn process_foreground(pid: u32) -> Foreground {
     process_foreground_from_table(pid)
 }
 
-/// Not read on this platform: an unknown foreground, which asks.
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
+/// Not read on this platform: an unknown foreground, which asks. Compiled
+/// only where the session reads a foreground group at all (the unix arm of
+/// `foreground_for_tmux`), so a Windows build has no unused function.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))))]
 pub(super) fn process_foreground(_pid: u32) -> Foreground {
     Foreground::default()
 }
