@@ -1,10 +1,12 @@
 # ghostty is not the default terminal backend
 
-Status: raised by the owner on 2026-10-30, after the terminal opacity item was built, with the decision made in the same words; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day (the section Built); the owner's reading is pending.
+Status: shipped in [v0.117.0](../../release/release-v0.117.0.md); the section Built, 2026-10-30 holds the evidence, with the whole browser suite green under the new default on the host. Not read: the owner's eye on macOS, FreeBSD and Windows.
+
+Record before the release: raised by the owner on 2026-10-30, after the terminal opacity item was built, with the decision made in the same words; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day (the section Built); the owner's reading is pending.
 
 ## What was asked
 
-The owner, reading the built terminal opacity on this machine: "i want to make ghostty the default terminal now, in all platforms - including for control terminals, since both ghostty and xterm.js now support the secret masking". The ghostty-web backend shipped as an opt-in (`terminal.ghostty`, false on every platform) while its secret masking was missing; v0.116.0 gave it masking (the item [secret-masking-does-nothing-under-the-ghostty-backend](../done/secret-masking-does-nothing-under-the-ghostty-backend.md)), which was the last reason to keep a window kind on xterm.js.
+The owner, reading the built terminal opacity on this machine: "i want to make ghostty the default terminal now, in all platforms - including for control terminals, since both ghostty and xterm.js now support the secret masking". The ghostty-web backend shipped as an opt-in (`terminal.ghostty`, false on every platform) while its secret masking was missing; v0.116.0 gave it masking (the item [secret-masking-does-nothing-under-the-ghostty-backend](secret-masking-does-nothing-under-the-ghostty-backend.md)), which was the last reason to keep a window kind on xterm.js.
 
 ## Evidence
 

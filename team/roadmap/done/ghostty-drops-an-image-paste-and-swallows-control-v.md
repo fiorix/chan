@@ -1,6 +1,8 @@
 # ghostty drops an image paste and swallows Ctrl+V
 
-Status: raised by the owner on 2026-10-30 against the built ghostty default on this machine's chan-desktop, reproduced by the owner by switching the backend and reloading; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day (the section Built); the owner's reading on macOS is pending.
+Status: shipped in [v0.117.0](../../release/release-v0.117.0.md); the section Built, 2026-10-30 holds the evidence (the module's tests, the mounted cases and browser check 94's paste leg). Not read: the owner's Cmd+V and Ctrl+V on macOS with an image on the clipboard.
+
+Record before the release: raised by the owner on 2026-10-30 against the built ghostty default on this machine's chan-desktop, reproduced by the owner by switching the backend and reloading; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day (the section Built); the owner's reading on macOS is pending.
 
 ## What was asked
 

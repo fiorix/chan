@@ -1,6 +1,8 @@
 # Select popups paint light in the dark theme off macOS
 
-Status: raised by the owner on 2026-10-30 on the Linux desktop; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day (the section Built); the owner's reading on Linux is pending.
+Status: shipped in [v0.117.0](../../release/release-v0.117.0.md); the section Built, 2026-10-30 holds the computed-scheme readings in Chromium and the WebKitGTK rig. Not read: the drop-down lists themselves by eye, and WebView2.
+
+Record before the release: raised by the owner on 2026-10-30 on the Linux desktop; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day (the section Built); the owner's reading on Linux is pending.
 
 ## What was asked
 

@@ -33,12 +33,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
   pname = "chan-desktop";
   inherit version src;
 
-  cargoHash = "sha256-GXWjFI4MOEFAt4kVXhK8asHPaAMG08IT30Qrh3ghyfM=";
+  cargoHash = "sha256-dcj1q/FoBzRlY/UknbfSNRmYYmitsptShnL+HbiyRSw=";
 
   npmDeps = fetchNpmDeps {
     name = "${finalAttrs.pname}-${finalAttrs.version}-npm-deps";
     src = "${finalAttrs.src}/web";
-    hash = "sha256-Mh6Lsz/HNqSFbC+HHt4nSt0nBWZfTZIRsNNGLsjKBgU=";
+    hash = "sha256-P3GvkKiqHLuLzfOACsGb3f5LwcHrALwukMN73UUdiQI=";
   };
   npmRoot = "web";
 

@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.117.0] - 2026-10-31
+
+v0.117.0 ships a `tmux -CC` client, shown as a card in the launcher's Computers carousel with one chan window per tmux window; the terminal background opacity on every window's terminal tabs; ghostty as the default terminal backend on every platform; and a Files tab that shows one directory at a time with breadcrumbs, history, a filter and desktop and Vim keymaps. Beside them ghostty takes an image paste and a bare Ctrl+V as xterm.js does, and select popups follow the dark theme off macOS.
+
+### Added
+
+- **tmux control mode (`tmux -CC`).** A terminal whose foreground `tmux -CC` prints the control-mode marker becomes a connection: each tmux window opens as a chan window of its own with tmux's layout as chromeless panes sized by tmux, a chan split asks tmux to split, focus follows, and Cmd+T and New Window each ask tmux for a new window. The connection is a card in the launcher's Computers carousel, titled `tmux -CC on this machine` or `tmux -CC from <command>` (an `ssh` among them), with its windows as rows, `t` for a new window, `c` to detach and the selection to end the server; the control terminal is the card's hidden control row and returns to a plain terminal window when the connection ends. A local `tmux` enters at once; any other foreground program asks first (Allow, Allow for this tab, Deny), and `terminal.tmux.trust` names programs that enter without the question. `terminal.tmux.enabled` turns the marker off. A local tmux and a remote one reached over ssh from a chan terminal are in scope, on Linux, macOS and FreeBSD; the chan gateway is not.
+- **Files tab directory navigation and keyboard model.** A Files tab shows the current directory with breadcrumbs, back and forward history (Alt+Left, Alt+Right, Alt+Up), a path field and a filename filter, sorted folder-first by Name, Kind, Size or Modified, with a locations rail in wide panes; docked browsers keep their expandable tree. One Tab stop with active-descendant focus, arrows, Home, End, Page Up and Page Down, Enter to open, Shift ranges, F8 and Space for independent marks, Mod+A, Mod+C, Mod+X and Mod+V, F2, Delete, Shift+F10 for the entry's menu, Mod+Y for Details and `/` for the filter. An optional Vim map (h/j/k/l, gg/G, y/x/p, v) is a per-browser preference, in the browser menu and Settings > Keyboard navigation. A Files tab saves its directory, sort, selection and inspector settings with the layout.
+
+### Changed
+
+- **ghostty is the default terminal backend on every platform.** New terminals use ghostty-web; a stored `terminal.ghostty = false` keeps xterm.js, new terminals at once and open ones when their window reloads.
+- **Terminal background opacity applies to every window's terminal tabs.** chan-desktop builds every window transparent and paints only terminal bodies see-through at `terminal.background_opacity`; the editor, the file browser, the pane frames and every other surface of a workspace, devserver or control window stay opaque. The setting is chan-desktop's: `chan config set`, a hand edit of `server.toml` or the Settings slider in a desktop window reaches every open window at once, and the slider in a browser tab says the setting applies in chan-desktop.
+
+### Fixed
+
+- **ghostty dropped an image paste and swallowed Ctrl+V.** A native paste with no text still reaches the program as the empty bracketed paste when it asked for bracketed paste, and a bare Ctrl+V sends 0x16 on every OS, as xterm.js does, so a program that takes an image from the clipboard works under ghostty.
+- **Select popups painted light in the dark theme off macOS.** The page declares its colour scheme, so the engine paints native select lists in the theme's scheme on Linux and Windows.
+
 ## [v0.116.0] - 2026-10-30
 
 v0.116.0 ships the terminal prototypes round: a see-through terminal background for chan-desktop's local terminal windows, a default-terminal launch beside a running chan-desktop that opens a terminal window in that desktop instead of a second launcher, and secret masking on the ghostty backend. Beside them, every ghostty terminal owns its WASM instance, wheel input in a full-screen app is paced like xterm.js, the mouse-driven entry into Hybrid Nav is gone, a settings write in one window reaches every open window, and `cs terminal list` reports a standalone terminal's directory outside the home. The browser check 95 row and the local `cs tunnel` toast row move to v0.117.0 unbuilt.

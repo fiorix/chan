@@ -1,6 +1,8 @@
 # Terminal opacity applies only to standalone terminal windows
 
-Status: raised by the owner on 2026-10-30, after the v0.116.0 tag, with the decision made in the same words; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day and read by pixel in the Linux rig (the section Built); the owner's macOS reading is pending.
+Status: shipped in [v0.117.0](../../release/release-v0.117.0.md); the section Built, 2026-10-30 holds the Linux pixel reading. Not read by eye: macOS, the Settings slider's write on Linux, the light theme, the Hybrid side flip.
+
+Record before the release: raised by the owner on 2026-10-30, after the v0.116.0 tag, with the decision made in the same words; accepted for v0.117.0; built on `v0117/terminal-opacity` the same day and read by pixel in the Linux rig (the section Built); the owner's macOS reading is pending.
 
 ## What was asked
 
@@ -14,7 +16,7 @@ Read at `f46a812dc` (the v0.116.0 GA commit).
 - The page paints see-through only in a window whose URL carries the flag (`windowIsTransparent` in `web/packages/workspace-app/src/terminal/backgroundOpacity.ts`): a see-through page in an opaque native window shows the window's own background, not the desktop.
 - The value the page paints with is its tenant's preference: `currentPreferences()?.terminal?.background_opacity` in `App.svelte` and `TerminalTab.svelte`. In a devserver window that tenant is the devserver, so the slider in Settings > Terminal (`TerminalSection.svelte`, `commit` to the tenant's `PATCH /api/config`) writes the devserver's `server.toml`, and a devserver with the default 100 would paint a transparent window opaque whatever the desktop's own setting says.
 - The desktop already pushes events to its pages (`app.emit` for the serves, the devserver control and the update prompt) and the pages reach the desktop through `tauriInvoke` (`web/packages/workspace-app/src/api/desktop.ts`); the desktop's embedded server runs one config watch for every local tenant (`crates/chan-server/src/config_watch.rs`), so a change of the desktop's `server.toml` is already an event inside the desktop process.
-- The v0.116.0 item ([a-local-terminal-window-cannot-show-the-desktop-behind-it](../done/a-local-terminal-window-cannot-show-the-desktop-behind-it.md)) scoped the feature to terminal-only windows; the config reference and the Settings hint say so.
+- The v0.116.0 item ([a-local-terminal-window-cannot-show-the-desktop-behind-it](a-local-terminal-window-cannot-show-the-desktop-behind-it.md)) scoped the feature to terminal-only windows; the config reference and the Settings hint say so.
 
 ## Desired contract
 

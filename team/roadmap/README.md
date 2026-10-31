@@ -21,31 +21,36 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.117.0
+### v0.118.0
 
-Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a second time, and a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), raised 2026-10-30 and not started. A third row was raised by the owner the same day, after the tag: the terminal opacity setting reaches only the terminal-only windows and not the terminal tabs of workspace, devserver and control windows ([opaall]), accepted and built the same day on `v0117/terminal-opacity` and read by pixel on Linux; the owner's macOS reading is pending. A fourth row was raised by the owner the same evening, after that build: ghostty becomes the default terminal backend on every platform, control terminals included ([ghdef]), built on the same branch; reading that build the owner found that ghostty drops an image paste and swallows Ctrl+V ([ghpaste]), fixed on the same branch, and, on the Linux desktop, that a select's drop-down paints light inside the dark theme off macOS ([selscheme]), fixed on the same branch too. The owner also reported that a ghostty terminal in a gateway-served window stops taking keys after idle until it is clicked ([ghidle]); traced in code without a reproduction, proposed, to be captured at the next occurrence.
+Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]).
 
 | Item | State | Next |
 | --- | --- | --- |
+| [Browser cannot open a tmux control window][tmuxbrw] | proposed | decision |
+| [Browser checks drive the old Files tree][filesel] | proposed | decision |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
-| [Terminal opacity only in terminal windows][opaall] | built | review |
-| [ghostty is not the default backend][ghdef] | built | review |
-| [ghostty drops an image paste][ghpaste] | built | review |
-| [Select popups paint light off macOS][selscheme] | built | review |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
-| [tmux control mode has no chan client][tmuxcc] | built | review |
 
-[chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
-[tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
-[opaall]: v0.117.0/terminal-opacity-applies-only-to-standalone-terminal-windows.md
-[ghdef]: v0.117.0/ghostty-is-not-the-default-terminal-backend.md
-[ghpaste]: v0.117.0/ghostty-drops-an-image-paste-and-swallows-control-v.md
-[selscheme]: v0.117.0/select-popups-paint-light-in-the-dark-theme-off-macos.md
-[ghidle]: v0.117.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
-[tmuxcc]: v0.117.0/tmux-control-mode-has-no-chan-client.md
+[tmuxbrw]: v0.118.0/a-browser-client-cannot-open-a-tmux-connections-control-window.md
+[filesel]: v0.118.0/browser-checks-drive-the-files-tree-the-directory-view-replaced.md
+[chk95]: v0.118.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
+[tuntoast]: v0.118.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
+[ghidle]: v0.118.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
 
 ## Completed
+
+### v0.117.0
+
+Shipped 2026-10-31; see [release-v0.117.0](../release/release-v0.117.0.md). Of the nine rows the version held, six shipped with no release candidate, from the `v0117/tmux-card` branch (which carries `v0117/terminal-opacity`) and the `v0117/file-browser-ui` branch merged for the GA: the terminal opacity on every window's terminal tabs, ghostty as the default backend on every platform, the ghostty image paste and Ctrl+V, the select popups' colour scheme off macOS, the `tmux -CC` client as a card in the launcher's Computers carousel, and the Files tab's directory navigation with desktop and Vim keymaps; those six are in [`done/`](done/). Browser check 95, the local `cs tunnel` toast row and the ghostty idle-keys row moved to v0.118.0 unbuilt by the owner's word.
+
+- [ghostty-drops-an-image-paste-and-swallows-control-v](done/ghostty-drops-an-image-paste-and-swallows-control-v.md) - ghostty drops an image paste and swallows Ctrl+V.
+- [ghostty-is-not-the-default-terminal-backend](done/ghostty-is-not-the-default-terminal-backend.md) - ghostty is not the default terminal backend.
+- [select-popups-paint-light-in-the-dark-theme-off-macos](done/select-popups-paint-light-in-the-dark-theme-off-macos.md) - Select popups paint light in the dark theme off macOS.
+- [terminal-opacity-applies-only-to-standalone-terminal-windows](done/terminal-opacity-applies-only-to-standalone-terminal-windows.md) - Terminal opacity applies only to standalone terminal windows.
+- [the-file-browser-shows-a-tree-with-no-directory-navigation-or-keyboard-model](done/the-file-browser-shows-a-tree-with-no-directory-navigation-or-keyboard-model.md) - The File Browser shows a tree with no directory navigation or keyboard model.
+- [tmux-control-mode-has-no-chan-client](done/tmux-control-mode-has-no-chan-client.md) - tmux control mode (`tmux -CC`) has no chan client.
 
 ### v0.116.0
 

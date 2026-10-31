@@ -1,6 +1,8 @@
 # A ghostty terminal stops taking keys after idle
 
-Status: raised by the owner on 2026-10-30 from the macOS desktop on a gateway-served devserver window of the Linux machine, after switching their own shells from xterm.js to ghostty; traced in code the same day without a reproduction (the section Trace); proposed, not started. The owner will capture the next occurrence.
+Status: carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"); traced in code without a reproduction, and the owner will capture the next occurrence.
+
+Record before the release: raised by the owner on 2026-10-30 from the macOS desktop on a gateway-served devserver window of the Linux machine, after switching their own shells from xterm.js to ghostty; traced in code the same day without a reproduction (the section Trace); proposed, not started. The owner will capture the next occurrence.
 
 ## What was asked
 

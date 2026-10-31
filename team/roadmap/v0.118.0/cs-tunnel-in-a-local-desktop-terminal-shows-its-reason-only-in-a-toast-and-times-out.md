@@ -1,6 +1,8 @@
 # cs tunnel in a local desktop terminal shows its reason only in a toast and times out
 
-Status: carried into v0.117.0 at the v0.116.0 GA on 2026-10-30, not started: raised during the round and not taken.
+Status: carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"), not started.
+
+Record before the release: carried into v0.117.0 at the v0.116.0 GA on 2026-10-30, not started: raised during the round and not taken.
 
 Record before the release: accepted for v0.116.0 by the owner's word of 2026-10-30; not started.
 
