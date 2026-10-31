@@ -27,13 +27,17 @@ Opened 2026-10-31 during the v0.119.0 cut with one row from that version's revie
 
 A second row was raised and accepted by the owner the same day ("add an item for next version"): the Computers keys turn no workspace on or off and open no terminal in a workspace ([onoffkeys]); `o` becomes the on and off key and `t` on a workspace opens a window with a terminal in it.
 
+A third row was raised and accepted by the owner the same day ("another roadmap item"): Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS ([navkeys]); `f` stages a File Browser and `e` an Excalidraw diagram, and Cmd+` is read on macOS before it is fixed.
+
 | Item | State | Next |
 | --- | --- | --- |
 | [ghostty defects the review left open][v0120review] | proposed | triage |
 | [Computers o on/off, t on a workspace][onoffkeys] | accepted | design |
+| [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | accepted | design |
 
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 [onoffkeys]: v0.120.0/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md
+[navkeys]: v0.120.0/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md
 
 ## Completed
 
