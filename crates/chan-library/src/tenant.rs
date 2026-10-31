@@ -140,6 +140,9 @@ pub trait HostControl: Send + Sync {
     /// a removal that would kill running shells is refused unless forced.
     fn live_terminal_count(&self, window_id: &str) -> usize;
 
+    /// Whether this host admits reverse tunnels from its terminal control sockets.
+    fn hosts_tunnels(&self) -> bool;
+
     /// The host's reverse-tunnel registry. `cs tunnel` registers here through
     /// this weak while the desktop-dialed WebSocket routes attach on the
     /// host's launcher router; the shared registry is where a tenant-scoped

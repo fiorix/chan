@@ -1804,6 +1804,11 @@ SIDE EFFECTS:
   empty and carries no tunnel traffic.
 
 CAUTIONS:
+  A terminal served locally by chan-desktop refuses the command at
+  once with exit 1: it forwards ports of the desktop machine to a
+  devserver. Run it in a devserver terminal. A standalone chan serve
+  also hosts no tunnels.
+
   The command BLOCKS for the tunnels' whole life; Ctrl-C tears them
   all down. A bind failure on the desktop fails the command with the
   desktop's error and closes the other listeners, and no listener
