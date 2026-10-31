@@ -32,8 +32,8 @@ Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt b
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
-| [tmux card from a devserver feed has no actions][tmuxfed] | built | review |
-| [Tab drag over an extension finds no split edge][extdrag] | built | review |
+| [tmux card from a devserver feed has no actions][tmuxfed] | landed | GA |
+| [Tab drag over an extension finds no split edge][extdrag] | landed | GA |
 
 [tmuxfed]: v0.118.0/a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions.md
 [extdrag]: v0.118.0/a-tab-dragged-over-an-extension-tab-finds-no-split-edge.md

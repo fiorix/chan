@@ -1,6 +1,6 @@
 # A tab dragged over an extension tab finds no split edge
 
-Status: carried into v0.118.0 after the v0.117.1 GA on 2026-10-31, built, and merged into `0.118.0-ga` on 2026-10-31 (`0b2ecc4e0`): v0.117.1 shipped without it, and the owner's word on rebasing `v01171/extension-tab-drag` onto the release was "Fold into v0.118.0"; the owner's reading of the first build in chan-desktop found the drag of the extension's own tab still failing, and it was rebuilt the same day (the section Rebuilt for WebKit); the owner's reading of the rebuild is pending.
+Status: landed in `0.118.0-ga` on 2026-10-31 (`0b2ecc4e0`); the owner waived the reading of the rebuild in chan-desktop the same day (the section Owner's word), so the row closes at the GA. Carried into v0.118.0 after the v0.117.1 GA on 2026-10-31 by the owner's word on rebasing `v01171/extension-tab-drag` onto the release ("Fold into v0.118.0"); v0.117.1 shipped without it.
 
 Record before the release: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop with the strudel and doom extensions; accepted for v0.117.1 as a patch and built the same day on `v01171/extension-tab-drag` (the section Built); the owner's reading in chan-desktop is pending.
 
@@ -59,3 +59,7 @@ In WebKit, with the first build, the frame computed `pointer-events: none` for t
 The rebuild keeps the `tab-dragging` mark and replaces the rule it keys: `.editor-wrap.tab-dragging :global(.extension-tab)::after` lays a transparent, absolutely positioned box over the whole extension tab at `z-index: 1`, below the body's edge preview (`z-index: 20`). Hit-testing stops at the cover, so the drag's `dragover` and `drop` target the extension tab's wrapper and bubble to the body's handlers. An inactive extension tab is `visibility: hidden` and `pointer-events: none`, which its cover inherits, so the cover takes nothing there; the frame takes the mouse again when the mark clears.
 
 Verification: the vitest in `Pane.test.ts` pins the cover rule in place of the pointer-events rule (51 tests in the file); `make web-check` is green in the worktree (vitest 234, 720, 7,972 and 20 tests; the production build); the arms above. Not read here: chan-desktop by hand (acceptance 2), and WebKitGTK and WebView2, where the cover is unmeasured.
+
+## Owner's word, 2026-10-31
+
+After both rows were merged into `0.118.0-ga`, the owner on the pending macOS reading: "no need for the macos reading, if i encounter an issue i will file a bug". The acceptance check by eye is waived; a defect found later is a new row.
