@@ -34,7 +34,7 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 | [ghostty drops an image paste][ghpaste] | built | review |
 | [Select popups paint light off macOS][selscheme] | built | review |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
-| [tmux control mode has no chan client][tmuxcc] | building | hand tests |
+| [tmux control mode has no chan client][tmuxcc] | built | review |
 
 [chk95]: v0.117.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [tuntoast]: v0.117.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
