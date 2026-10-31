@@ -23,13 +23,21 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.119.0
 
-Opened 2026-10-31 at the v0.118.0 GA, which carries one row into it unbuilt by the owner's word of 2026-10-31 ("ghidle can proceed if you can take the capture otherwise let's keep going"): a ghostty terminal stops taking keys after idle ([ghidle]), still proposed with no reproduction; the capture must come from the owner's macOS window over the gateway, which the build host cannot stand in for.
+Opened 2026-10-31 at the v0.118.0 GA, which carries one row into it unbuilt by the owner's word of 2026-10-31 ("ghidle can proceed if you can take the capture otherwise let's keep going"): a ghostty terminal stops taking keys after idle ([ghidle]), carried with no reproduction and then built on the same branch as the second row by the owner's word of 2026-10-31, with the repair its trace named and the gateway symptom still unreproduced. A second row was raised and built the same day and placed here by the owner's word ("this isn't going onto v0.118, this will be in the next version"): a ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback ([ghvt]), built on `v0119/ghostty-vt-wasm` and awaiting review. A third row was built the same day on `v0119/ghostty-keys`, on top of that branch: a ghostty terminal sends different key bytes than an xterm.js terminal ([ghkeys]), now sending what chan's xterm.js terminal sends for every keydown.
+
+At `13da87ba9` on 2026-10-31, the owner's macOS verification passed the native terminal replies, history retention, wrapped-line resize/copy, backend switch, focus recovery and sleep/wake checks. The whole workspace-app suite passed on macOS, 620 files and 8,002 tests, with `svelte-check` at 0 errors and 0 warnings. The session used local and Lima/sdme workspaces over an SSH forward; the actual gateway transport and the original intermittent idle failure remain unverified. The two items record the evidence and its limits; both remain at review.
+
+At `fb2506378` on 2026-10-31, the owner's macOS key check passed in a debug chan-desktop on the ghostty backend ("it works!"): Option+arrows and Option+B/F, the control and modified keys, the Command menu chords, Shift+PageUp/Down scrolling, a dead key and an IME. The gateway transport, the Linux desktop and Windows were not exercised; the item remains at review.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [ghostty stops taking keys after idle][ghidle] | proposed | measure |
+| [ghostty stops taking keys after idle][ghidle] | built | review |
+| [ghostty runs a patched Ghostty snapshot][ghvt] | built | review |
+| [ghostty key bytes differ from xterm.js][ghkeys] | built | review |
 
 [ghidle]: v0.119.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
+[ghvt]: v0.119.0/a-ghostty-terminal-runs-a-patched-ghostty-snapshot-and-keeps-one-page-of-scrollback.md
+[ghkeys]: v0.119.0/a-ghostty-terminal-sends-different-key-bytes-than-xterm-js.md
 
 ## Completed
 

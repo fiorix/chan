@@ -1,17 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, test, vi } from "vitest";
-import {
-  handleGhosttyControlV,
-  handleGhosttyEmptyPaste,
-  isBareControlV,
-  type GhosttyPasteTerminal,
-} from "./ghosttyPaste";
-
-function keyEvent(init: KeyboardEventInit & { type?: string }): KeyboardEvent {
-  const { type = "keydown", ...rest } = init;
-  return new KeyboardEvent(type, { bubbles: true, cancelable: true, ...rest });
-}
+import { handleGhosttyEmptyPaste, type GhosttyPasteTerminal } from "./ghosttyPaste";
 
 /// A paste event as the browser delivers it, with the clipboard's plain text
 /// stood in: jsdom builds no ClipboardEvent or DataTransfer of its own.
@@ -31,33 +21,6 @@ function terminal(bracketed: boolean): GhosttyPasteTerminal & { pastes: string[]
     paste: (text: string) => void pastes.push(text),
   };
 }
-
-describe("ghostty Ctrl+V", () => {
-  test("a bare Ctrl+V is the control byte on every OS, claimed before ghostty-web drops it", () => {
-    const sendInput = vi.fn();
-    const ev = keyEvent({ key: "v", code: "KeyV", ctrlKey: true });
-
-    expect(isBareControlV(ev)).toBe(true);
-    expect(handleGhosttyControlV(ev, sendInput)).toBe(false);
-    expect(sendInput).toHaveBeenCalledWith("\x16");
-    expect(ev.defaultPrevented).toBe(true);
-  });
-
-  test.each([
-    ["macOS Cmd+V, chan's paste chord", { key: "v", code: "KeyV", metaKey: true }],
-    ["Ctrl+Shift+V, the paste chord elsewhere", { key: "v", code: "KeyV", ctrlKey: true, shiftKey: true }],
-    ["Ctrl+Alt+V", { key: "v", code: "KeyV", ctrlKey: true, altKey: true }],
-    ["Ctrl+C", { key: "c", code: "KeyC", ctrlKey: true }],
-    ["a keyup of Ctrl+V", { type: "keyup", key: "v", code: "KeyV", ctrlKey: true }],
-  ])("%s flows on untouched", (_name, init) => {
-    const sendInput = vi.fn();
-    const ev = keyEvent(init);
-
-    expect(handleGhosttyControlV(ev, sendInput)).toBe(true);
-    expect(sendInput).not.toHaveBeenCalled();
-    expect(ev.defaultPrevented).toBe(false);
-  });
-});
 
 describe("ghostty empty paste", () => {
   test("a paste with no text reaches the program as an empty bracketed paste", () => {

@@ -4,7 +4,8 @@ import {
   chordFromEvent,
   shouldEscapeTerminal,
 } from "./shortcuts";
-import { isHostOwnedChord } from "../terminal/hostChord";
+import { ghosttyKeydownAction } from "../terminal/ghosttyKeys";
+import { createXtermKeydownState } from "../terminal/xtermKeyboard";
 
 // Chord-escape registry. Global chords that must reach the App keymap even
 // from a focused terminal (Command launcher, Settings, Search, New terminal,
@@ -249,12 +250,11 @@ describe("terminal find's escape flag decides who owns Cmd+F", () => {
   // key handler declines still bubbles to the component root and opens find,
   // so removing the flag changes no byte and no bar.
   //
-  // Its consumer is the ghostty backend's host-chord gate, which asks whether
-  // chan claims a macOS Command chord before handing it to AppKit. That gate
-  // is these two functions, and it is what these cases measure. What they do
-  // not measure is the wiring: that the gate is installed on the ghostty
-  // backend, and the inverted handler contract beside it, are read from
-  // `TerminalTab.svelte` and have no test that mounts that backend.
+  // Its consumer is the ghostty backend's key listener (ghosttyKeys.ts), which
+  // leaves a chord chan claims to chan's key handler and hands an unclaimed
+  // macOS Command chord to the browser and so to AppKit. These cases measure
+  // the claim and the listener's decision for the rest; the listener's
+  // wiring is TerminalTab.ghosttyBackend.test.ts's.
   beforeEach(() => {
     vi.stubGlobal("navigator", { userAgent: "Mac OS X" });
   });
@@ -266,25 +266,29 @@ describe("terminal find's escape flag decides who owns Cmd+F", () => {
     return new KeyboardEvent("keydown", { key: "f", code: "KeyF", metaKey: true });
   }
 
-  test("chan claims Cmd+F over a terminal, so the host does not get it", () => {
-    const e = cmdF();
-    const claimedByChan = shouldEscapeTerminal(e);
+  /// What the ghostty key listener does with a chord chan does not claim.
+  function unclaimed(e: KeyboardEvent) {
+    return ghosttyKeydownAction(
+      e,
+      { platform: { isMac: true, isWindows: false }, applicationCursorMode: false, rows: 24, chanBytes: null },
+      createXtermKeydownState(),
+    );
+  }
 
-    expect(claimedByChan, "the registry flag answers for this chord").toBe(true);
-    expect(isHostOwnedChord(e, { os: "mac", claimedByChan })).toBe(false);
+  test("chan claims Cmd+F over a terminal, so the host does not get it", () => {
+    expect(shouldEscapeTerminal(cmdF()), "the registry flag answers for this chord").toBe(true);
   });
 
   test("an unclaimed Command chord still reaches the host", () => {
     // The other side of the same gate, so the case above is not just "this
-    // function returns false".
+    // function returns true".
     const e = new KeyboardEvent("keydown", {
       key: "h",
       code: "KeyH",
       metaKey: true,
     });
-    const claimedByChan = shouldEscapeTerminal(e);
 
-    expect(claimedByChan).toBe(false);
-    expect(isHostOwnedChord(e, { os: "mac", claimedByChan })).toBe(true);
+    expect(shouldEscapeTerminal(e)).toBe(false);
+    expect(unclaimed(e)).toEqual({ kind: "browser" });
   });
 });

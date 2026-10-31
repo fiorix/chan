@@ -280,8 +280,8 @@ export class GhosttySecretMasker {
   }
 
   /// Whether the line after `row` continues it. A screen row carries the
-  /// parser's wrap flag. A scrollback line keeps none in the pinned build
-  /// (every scrollback line reads unwrapped), so a scrollback line filled
+  /// parser's wrap flag. ghostty-web's buffer reports none for a scrollback
+  /// line (every scrollback line reads unwrapped), so a scrollback line filled
   /// to its last column is read as wrapping: a soft wrap always fills the
   /// row, and the cost of reading a full hard-ended line as wrapped is a
   /// mask that can reach into the next line's first word, where the cost

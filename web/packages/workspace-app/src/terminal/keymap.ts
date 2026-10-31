@@ -101,26 +101,95 @@ export function handleTerminalMetaKey(
   return false;
 }
 
-/// ghostty-web's current input encoder maps Enter with either no modifiers or
-/// Shift to the same CR byte. Intercept only Shift+Enter and preserve chan's
-/// fallback LF contract; all other keys keep flowing through Ghostty.
-export function handleGhosttyShiftEnter(
+/// xterm.js leaves Ctrl+/ unencoded; chan sends the shell's Unit Separator.
+/// `resolved` is the chord the event resolves to on the user's layout
+/// (state/shortcuts.ts resolvedEventKey), so a Shift that only typed the
+/// symbol does not count.
+export function controlSlashBytes(
   ev: KeyboardEvent,
-  sendInput: (data: string) => void,
-): boolean {
+  resolved: { key: string; shiftKey: boolean } | null,
+): string | null {
   if (
-    ev.type !== "keydown" ||
-    ev.key !== "Enter" ||
-    !ev.shiftKey ||
-    ev.ctrlKey ||
-    ev.metaKey ||
-    ev.altKey
+    ev.type === "keydown" &&
+    ev.ctrlKey &&
+    !ev.metaKey &&
+    !ev.altKey &&
+    !ev.shiftKey &&
+    resolved?.key === "/" &&
+    !resolved.shiftKey
   ) {
-    return true;
+    return "\x1f";
   }
-  sendInput("\n");
-  ev.preventDefault();
-  return false;
+  return null;
+}
+
+/// A CSI sequence as xterm.js's parser hands it to a handler: the prefix
+/// (one of `<=>?`) and intermediates it collected, the final character and
+/// the params. The params are never empty: an absent param reads 0.
+export type KeyboardProtocolCsi = {
+  prefix: string;
+  intermediates: string;
+  final: string;
+  params: CsiParam[];
+};
+
+/// The CSI sequences the keyboard protocol state follows. `consume` is the
+/// xterm.js handler's answer: true for the ones xterm.js itself does not
+/// implement, false where its own handler must run too.
+const KEYBOARD_PROTOCOL_CSI: Array<{ id: FunctionIdentifier; consume: boolean }> = [
+  { id: { prefix: ">", final: "m" }, consume: true },
+  { id: { prefix: ">", final: "n" }, consume: true },
+  { id: { prefix: "?", final: "m" }, consume: true },
+  { id: { prefix: ">", final: "u" }, consume: true },
+  { id: { prefix: "<", final: "u" }, consume: true },
+  { id: { prefix: "=", final: "u" }, consume: true },
+  { id: { prefix: "?", final: "u" }, consume: true },
+  { id: { prefix: "?", final: "h" }, consume: false },
+  { id: { prefix: "?", final: "l" }, consume: false },
+  { id: { intermediates: "!", final: "p" }, consume: false },
+];
+
+/// Apply one CSI sequence to `protocol`: xterm's modifyOtherKeys
+/// (XTMODKEYS, its reset and its query), the kitty keyboard flags (push, pop,
+/// set, query), the screen switches the kitty flags are kept per, and DECSTR.
+/// Returns the reply the program is owed, or null.
+export function applyKeyboardProtocolCsi(
+  protocol: TerminalKeyboardProtocolState,
+  csi: KeyboardProtocolCsi,
+): string | null {
+  const { params } = csi;
+  switch (`${csi.prefix}${csi.intermediates}${csi.final}`) {
+    case ">m":
+      applyXtermModifierKeys(protocol, params);
+      return null;
+    case ">n":
+      disableXtermModifierKeys(protocol, params);
+      return null;
+    case "?m":
+      return queryXtermModifierKeys(protocol, params);
+    case ">u":
+      applyKittyKeyboardProtocol(protocol, "push", params);
+      return null;
+    case "<u":
+      applyKittyKeyboardProtocol(protocol, "pop", params);
+      return null;
+    case "=u":
+      applyKittyKeyboardProtocol(protocol, "set", params);
+      return null;
+    case "?u":
+      return `\x1b[?${currentKittyFlags(protocol)}u`;
+    case "?h":
+      updateKittyScreen(protocol, params, "alternate");
+      return null;
+    case "?l":
+      updateKittyScreen(protocol, params, "main");
+      return null;
+    case "!p":
+      resetTerminalKeyboardProtocolState(protocol);
+      return null;
+    default:
+      return null;
+  }
 }
 
 export function installKeyboardProtocolHandlers(
@@ -131,49 +200,18 @@ export function installKeyboardProtocolHandlers(
   const parser = (term as Terminal & { parser?: ParserLike }).parser;
   if (!parser?.registerCsiHandler) return;
 
-  parser.registerCsiHandler({ prefix: ">", final: "m" }, (params) => {
-    applyXtermModifierKeys(protocol, params);
-    return true;
-  });
-  parser.registerCsiHandler({ prefix: ">", final: "n" }, (params) => {
-    disableXtermModifierKeys(protocol, params);
-    return true;
-  });
-  parser.registerCsiHandler({ prefix: "?", final: "m" }, (params) => {
-    const reply = queryXtermModifierKeys(protocol, params);
-    if (reply) sendGeneratedInput(reply);
-    return true;
-  });
-
-  parser.registerCsiHandler({ prefix: ">", final: "u" }, (params) => {
-    applyKittyKeyboardProtocol(protocol, "push", params);
-    return true;
-  });
-  parser.registerCsiHandler({ prefix: "<", final: "u" }, (params) => {
-    applyKittyKeyboardProtocol(protocol, "pop", params);
-    return true;
-  });
-  parser.registerCsiHandler({ prefix: "=", final: "u" }, (params) => {
-    applyKittyKeyboardProtocol(protocol, "set", params);
-    return true;
-  });
-  parser.registerCsiHandler({ prefix: "?", final: "u" }, () => {
-    sendGeneratedInput(`\x1b[?${currentKittyFlags(protocol)}u`);
-    return true;
-  });
-
-  parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
-    updateKittyScreen(protocol, params, "alternate");
-    return false;
-  });
-  parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
-    updateKittyScreen(protocol, params, "main");
-    return false;
-  });
-  parser.registerCsiHandler({ intermediates: "!", final: "p" }, () => {
-    resetTerminalKeyboardProtocolState(protocol);
-    return false;
-  });
+  for (const { id, consume } of KEYBOARD_PROTOCOL_CSI) {
+    parser.registerCsiHandler(id, (params) => {
+      const reply = applyKeyboardProtocolCsi(protocol, {
+        prefix: id.prefix ?? "",
+        intermediates: id.intermediates ?? "",
+        final: id.final,
+        params,
+      });
+      if (reply) sendGeneratedInput(reply);
+      return consume;
+    });
+  }
   parser.registerEscHandler?.({ final: "c" }, () => {
     resetTerminalKeyboardProtocolState(protocol);
     return false;

@@ -16,8 +16,8 @@
 //   KEYS     -- present the page as macOS, focus ghostty's textarea,
 //               dispatch Cmd+` and Cmd+Shift+N, and prove both retain
 //               their native default while sending no bytes to the PTY.
-//   OSC52    -- ghostty-web's WASM parser swallows OSC 52 with no JS
-//               hook, so chan bridges it byte-level (osc52Bridge.ts).
+//   OSC52    -- the ghostty VT core drops OSC 52 and ghostty-web has no
+//               hook for it, so chan bridges it byte-level (osc52Bridge.ts).
 //               Seed the clipboard with a sentinel, printf a real OSC 52
 //               copy down the PTY, poll the clipboard until the payload
 //               text replaces the sentinel.

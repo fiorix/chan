@@ -184,7 +184,7 @@ describe("ghostty secret masking over a fake buffer", () => {
   });
 
   test("a scrollback line filled to its last column reads as wrapping into the next", () => {
-    // Scrollback lines carry no wrap flag in the pinned build, so both read
+    // ghostty-web's buffer reports no wrap flag for a scrollback line, so both read
     // unwrapped; the first is full, which is what a soft wrap leaves.
     const wrapped = [new FakeLine("NAME_TOKEN=a", 12), new FakeLine("bcdef", 12), new FakeLine("", 12), new FakeLine("", 12), new FakeLine("", 12)];
     const screen = ghosttyTerminal({ cols: 12, rows: 3, lines: wrapped });

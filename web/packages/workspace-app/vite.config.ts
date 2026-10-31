@@ -24,6 +24,11 @@ import { defineConfig } from "vitest/config";
 // svelte's exports map does not expose ./src, so reach it via the package dir.
 const require = createRequire(import.meta.url);
 const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/index-client.js");
+// xterm.js ships its TypeScript source, whose modules import each other as
+// `common/...` and `vs/...`. The keyboard parity tests load its key evaluator
+// and its parser from there to compare chan's ports with the originals
+// (src/terminal/xtermKeyboard.ts, src/terminal/keyboardProtocolStream.ts).
+const xtermSrc = join(dirname(require.resolve("@xterm/xterm/package.json")), "src");
 
 // Self-host excalidraw's canvas fonts. Excalidraw fetches label fonts at
 // runtime from `EXCALIDRAW_ASSET_PATH + fonts/<Family>/<file>.woff2`;
@@ -155,7 +160,10 @@ export default defineConfig({
     // Guarantees a working localStorage / sessionStorage under every Node the
     // gate runs on; see vitest.setup.ts for what jsdom does not deliver.
     setupFiles: ["./vitest.setup.ts"],
-    alias: [{ find: /^svelte$/, replacement: svelteClient }],
+    alias: [
+      { find: /^svelte$/, replacement: svelteClient },
+      { find: /^(common|vs)\/(.*)$/, replacement: `${xtermSrc}/$1/$2` },
+    ],
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },

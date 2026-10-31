@@ -32,6 +32,11 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     buffer = { active: {}, alternate: {} };
     hasMouseTracking() { return false; }
     hasFocusEvents() { return false; }
+    // What chan's ghostty key listener reads and drives on a key.
+    getMode() { return false; }
+    scrollLines() {}
+    selectAll() {}
+    clearSelection() {}
   }
   return {
     ...(await importOriginal<typeof import("../terminal/backend")>()),
