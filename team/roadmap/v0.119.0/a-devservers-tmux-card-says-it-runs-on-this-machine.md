@@ -1,6 +1,8 @@
 # A devserver's tmux card says it runs on this machine
 
-Status: built on `v0119/tmux-card-devserver-title` on 2026-10-31 (`5b4334acc`) and merged into `0.119.0-ga` the same day (`077c59a3d`); placed in v0.119.0 by the owner's word of 2026-10-31 ("these remote branches unmerged are the ones"). Awaiting review; no hand check in a desktop window is recorded.
+Status: landed in `0.119.0-ga` on 2026-10-31 (`077c59a3d`, with the session fix `52a75e155`) and reviewed there (the section Review, 2026-10-31); no hand check in a desktop window is recorded.
+
+Record before the review: built on `v0119/tmux-card-devserver-title` on 2026-10-31 (`5b4334acc`) and merged into `0.119.0-ga` the same day (`077c59a3d`); placed in v0.119.0 by the owner's word of 2026-10-31 ("these remote branches unmerged are the ones"). Awaiting review; no hand check in a desktop window is recorded.
 
 ## What was seen
 
@@ -38,3 +40,11 @@ Evidence: the new `Library.test.ts` case "renders a record that arrived before t
 
 1. A devserver's `tmux -CC`, direct and over the gateway, shows as `tmux -CC on <devserver>` on its Library card and in the command launcher, and this machine's still shows `tmux -CC on this machine`. Not yet checked by hand.
 2. The `machineTree` and `CommandLauncher` tests pin the title, the sort and the session label; the commit records them red on the old code with the reported title.
+
+## Review, 2026-10-31
+
+Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adversarial review"), whose reviewers were asked for evidence or a plain "nothing found"; the lead reproduced each finding acted on before its fix.
+
+The reviewer confirmed that `tmuxHost` and `buildMachineTree` give a library's windows to the same row. Left open as minor, in [v0120review]: the command launcher names a plain window's machine by the first devserver row in feed order and a tmux window's by the first by name, so a direct row and its gateway roster row on one library read as two names; and a devserver row on this machine's own library titles a local run by that row.
+
+[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md

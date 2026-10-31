@@ -1,6 +1,8 @@
 # A ghostty terminal stops taking keys after idle
 
-Status: built on `v0119/ghostty-vt-wasm` on 2026-10-31 by the owner's word ("there's an item \"ghostty idle keys\" that we should deal with in this change here"): the repair the trace names, without a reproduction (the section Built). The owner confirmed focus recovery and sleep/wake passed in the macOS verification session at `13da87ba9` on 2026-10-31; that session used local and direct sdme-backed windows, not the gateway transport. The original intermittent gateway failure remains unreproduced.
+Status: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and reviewed there (the section Review, 2026-10-31); the original intermittent failure over the gateway remains unreproduced, and the capture list above applies if it recurs.
+
+Record before the review: built on `v0119/ghostty-vt-wasm` on 2026-10-31 by the owner's word ("there's an item \"ghostty idle keys\" that we should deal with in this change here"): the repair the trace names, without a reproduction (the section Built). The owner confirmed focus recovery and sleep/wake passed in the macOS verification session at `13da87ba9` on 2026-10-31; that session used local and direct sdme-backed windows, not the gateway transport. The original intermittent gateway failure remains unreproduced.
 
 Record before the release: carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"); traced in code without a reproduction, and the owner will capture the next occurrence.
 
@@ -42,3 +44,11 @@ The freshly built chan-desktop reported `git-13da87ba9f34` on macOS 27.0.1 and r
 The local capture contains CSI O followed by CSI I and the subsequently typed `resume` bytes. The initial sdme capture contains typed keys but no CSI O/I pair; the owner was asked to repeat the app-switch cycle. The owner then explicitly confirmed both sleep/wake and focus worked. Those confirmations are manual observations; the saved sdme capture does not independently prove its focus-event pair, and the sleep/wake confirmation did not identify which window was used.
 
 The whole workspace-app suite passed on macOS at this tree, 620 files and 8,002 tests, and `svelte-check` reported 0 errors and 0 warnings. The native input checks support the resume repair on the tested macOS session. The actual gateway transport and a deterministic before/after reproduction of the original failure remain untested; the next-occurrence capture above still applies if it recurs.
+
+## Review, 2026-10-31
+
+Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adversarial review"), whose reviewers were asked for evidence or a plain "nothing found"; the lead reproduced each finding acted on before its fix.
+
+Rejected with evidence: the blur cannot take the focus from a dialog, the palette, an editor or the find box, since it runs only when the active element is inside this terminal's host; it does not run for a hidden or inactive tab, does not loop, sends no focus report to a program that did not ask for one, and leaves xterm.js unchanged. Left open as minor, in [v0120review]: in Chromium and WebView2 a program with focus reporting sees each report twice on a resume (CSI O, CSI O, CSI I, CSI I), measured in headful Chrome; WebKit was not measured.
+
+[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md

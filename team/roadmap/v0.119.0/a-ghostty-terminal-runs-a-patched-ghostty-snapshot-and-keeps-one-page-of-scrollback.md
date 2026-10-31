@@ -1,6 +1,8 @@
 # A ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback
 
-Status: built on 2026-10-31 at the owner's word ("let's do Option A") and placed in v0.119.0 the same day by the owner's word ("this isn't going onto v0.118, this will be in the next version"), rebased onto the v0.118.0 GA as `v0119/ghostty-vt-wasm`; the owner's macOS reading passed at `13da87ba9` on 2026-10-31 (the section macOS verification). Awaiting review; the actual gateway transport remains untested on macOS.
+Status: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and fixed there after the review (the section Review, 2026-10-31).
+
+Record before the review: built on 2026-10-31 at the owner's word ("let's do Option A") and placed in v0.119.0 the same day by the owner's word ("this isn't going onto v0.118, this will be in the next version"), rebased onto the v0.118.0 GA as `v0119/ghostty-vt-wasm`; the owner's macOS reading passed at `13da87ba9` on 2026-10-31 (the section macOS verification). Awaiting review; the actual gateway transport remains untested on macOS.
 
 Record before the release: raised by the owner on 2026-10-31 while weighing an invitation to Ghostty's author to read chan's terminal code; investigated, built and tested the same day.
 
@@ -22,7 +24,7 @@ A ghostty terminal runs Ghostty's own release build of libghostty-vt, pinned by 
 
 - `web/packages/workspace-app/vendor/ghostty-vt/`: the wasm from `tip` at `ae0dc1b71` (2026-10-31), its minisign signature verified against the key in Ghostty's `PACKAGING.md`, Ghostty's MIT license, and a README with the hash, the verification command and the re-pin steps.
 - `src/terminal/ghosttyVt.ts`: the `Ghostty` object ghostty-web's `Terminal` takes as its `ghostty` option, over the upstream C API: render state and row iterators for the screen, grid refs for history, hyperlinks, graphemes and wrap continuation, mode reads, replies through a `write_pty` callback installed in the module's function table, ghostty-web's DA1/DA2 answers through a device-attributes callback, ghostty-web's default colors and grapheme clustering (mode 2027), the scrollback line limit with the byte cap lifted, and the key renumbering.
-- `src/terminal/backend.ts` loads the vendored wasm and the binding; ghostty-web's wasm is no longer in the bundle.
+- `src/terminal/backend.ts` loads the vendored wasm and the binding; ghostty-web's wasm is no longer loaded (its lazy chunk still carries it inline, the section Review).
 - Comments that described ghostty-web's wasm (OSC 52, the shared instance, scrollback wrap flags) and the design doc's terminal backend section describe the new core.
 
 ## Evidence
@@ -68,3 +70,16 @@ This supplies the native WKWebView page reading missing from the earlier JavaScr
 
 [ghidle]: a-ghostty-terminal-stops-taking-keys-after-idle.md
 [filesel]: ../done/browser-checks-drive-the-files-tree-the-directory-view-replaced.md
+
+## Review, 2026-10-31
+
+Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adversarial review"), whose reviewers were asked for evidence or a plain "nothing found"; the lead reproduced each finding acted on before its fix.
+
+- Fixed, `0660097e8`: the core answered OSC 4, 10, 11 and 12 color queries, which ghostty-web's build never did and chan's xterm.js path suppresses on purpose (`xtermReports.ts`), and in a transparent window it answered black on any theme. The binding drops those replies and no other; the new differential case was red on the old binding and is green.
+- Fixed, `34abc34f2`: a screen cell's grapheme cluster was read into a 32-codepoint scratch area while the core writes the whole cluster (up to 65 codepoints), up to 132 bytes past the allocation; and after OSC 10, 11 or 4 changed a color, rows drawn before kept the old colors. A longer cluster is read into its own buffer, and a change to the default colors or the palette re-reads every row; the two new cases were red and are green.
+- Corrected: this item said ghostty-web's wasm is no longer in the bundle. It is never loaded, but ghostty-web's lazy chunk still carries it inline as base64 (565,252 of the chunk's 648,960 bytes, by the reviewer's `vite build`); the build's only wasm asset is the vendored one.
+- Left open as minor, in [v0120review]: a stale spacer head from an upstream dirty miss, the write buffer's failed allocation, the SIMD requirement for a WebKit older than 16.4, history read cell by cell (Copy scrollback of 55,000 lines blocks the page 1.7 to 3.5 s), late in-band resize reports with zero pixel sizes, the inline wasm, and the core's XTVERSION answer.
+
+The binding's reviewer then read the fixes. Both hold and add no re-reads: over 500 colored scrolling frames the binding re-reads the whole screen 477 times before and after, none of them from the new check, and every cluster buffer is freed once with its length. It found that the core also answers the OSC 21 query of kitty's color protocol, now dropped as well, and three plausible wrong fixes the tests passed (a check of the background alone, a buffer too short, a buffer taken only past 64 codepoints), which the tests now catch (`e53a4aeb8`).
+
+[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md

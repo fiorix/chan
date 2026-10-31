@@ -1,6 +1,8 @@
 # A ghostty terminal sends different key bytes than an xterm.js terminal
 
-Status: built on `v0119/ghostty-keys`, on top of `v0119/ghostty-vt-wasm`, on 2026-10-31 (`fb2506378`); the owner's macOS check passed at that commit the same day ("it works!", the section macOS verification). Awaiting review; the gateway transport, the Linux desktop and Windows were not exercised.
+Status: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and fixed there after the review (the section Review, 2026-10-31); the gateway transport, the Linux desktop and Windows were not exercised by hand.
+
+Record before the review: built on `v0119/ghostty-keys`, on top of `v0119/ghostty-vt-wasm`, on 2026-10-31 (`fb2506378`); the owner's macOS check passed at that commit the same day ("it works!", the section macOS verification). Awaiting review; the gateway transport, the Linux desktop and Windows were not exercised.
 
 ## What was seen
 
@@ -17,7 +19,7 @@ The build session reproduced items 1 and 2 by running ghostty-web's real input h
 
 ## Desired contract
 
-A ghostty terminal sends what chan's xterm.js terminal sends for every keydown, chan's own key handling included (Ctrl+/, Alt+Left/Right/Backspace/Delete, modified Enter under the negotiated keyboard protocol). Keys chan claims as its own chords, unclaimed macOS Command chords and the keys xterm.js leaves to the browser keep reaching chan, the native menus and the browser. Plain typing and IME composition stay with ghostty-web.
+A ghostty terminal sends what chan's xterm.js terminal sends for every keydown, chan's own key handling included (Ctrl+/, Alt+Left/Right/Backspace/Delete, modified Enter under the negotiated keyboard protocol), except that on macOS a layout's printable ASCII Option character types itself (the owner's decision of 2026-10-31, the section Review). Keys chan claims as its own chords, unclaimed macOS Command chords and the keys xterm.js leaves to the browser keep reaching chan, the native menus and the browser. Plain typing and IME composition stay with ghostty-web.
 
 ## What was done
 
@@ -51,3 +53,15 @@ That instance's socket paths exceeded the Unix socket length limit, so it ran wi
 - After a reload whose replay lost the program's kitty request, the VT answers a kitty query with 0, where the xterm.js path answers with the restored flags.
 - Plain typing still goes through ghostty-web's `onData`, unmarked, as before; only the keys the listener sends go through `sendUserInput`.
 - Not exercised over the gateway transport, on the Linux desktop (WebKitGTK) or on Windows.
+
+## Review, 2026-10-31
+
+Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adversarial review"), whose reviewers were asked for evidence or a plain "nothing found"; the lead reproduced each finding acted on before its fix.
+
+- Fixed, `a701b9bd3`: after an AltGr or a dead keydown the port's flag stayed set until a key it encodes, and the listener left the next key to the browser, whose text never reaches ghostty-web while its host holds the focus (ghostty-web cancels a `beforeinput` aimed at the host, which chan focuses). On Linux and WebKitGTK the AltGr character itself (`@`, `[`, `{`, `|`, `\`, `~` on a German layout) and a dead key's composed character were lost; on Windows the AltGr character typed and the key after it was lost (h, Enter, the arrows, Ctrl+C; Tab moved the focus). A key ghostty-web would type is now its to type, which clears the flag as xterm.js's keypress does. Seven sequence cases were red and are green; in headless Chrome with CDP key events and the host focused, Linux AltGr+Q then h, a dead acute then e-acute then h, and Windows AltGr+Q then h each lost a character before and deliver xterm.js 6.0.0's bytes after. Windows and WebKitGTK event shapes were modelled in Chrome on Linux, not run there.
+- Fixed by the owner's decision of 2026-10-31 ("ASCII types itself"), `9b7b106fb`: with Option always Meta, a German, French or Nordic Mac layout could not type `@`, `[`, `|`, `{` or `\` in the default terminal, which the ghostty backend of v0.117.0 and v0.118.0 typed. On macOS an Option character that is printable ASCII other than the space now types itself; a US layout keeps Meta, its Option characters being outside ASCII but for Option+Shift+` (a backquote, where xterm.js sends ESC ~). The new case was red and is green, and the review's end-to-end case through ghostty-web's own input handler passes five of five.
+- Left open as minor, in [v0120review]: the core's kitty flags against chan's after a replay cut, DECSTR, a deep stack and flags above 31; text the browser types with no keydown of its own while the host holds the focus; a dead key followed by Enter or Tab; and Windows Ctrl+Alt+letter and AltGr+V, both as in v0.118.0.
+
+The key path's reviewer then read the fixes. The AltGr fix matches xterm.js with the host or ghostty-web's textarea focused. An ASCII Option character after a dead key the input source composed left the flag set and lost the next key, fixed in `f99ac6291`. The key after a Windows dead key now types `ev.key`, as ghostty-web's own keydown did in v0.118.0; that is right only if Windows Chromium puts the composed character there, and US-International's apostrophe before a consonant is lost either way, so it is left open in [v0120review] for a reading on Windows.
+
+[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md

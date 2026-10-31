@@ -31,17 +31,29 @@ At `fb2506378` on 2026-10-31, the owner's macOS key check passed in a debug chan
 
 A fourth row was built the same day on `v0119/tmux-card-devserver-title` and placed here by the owner's word of 2026-10-31 ("these remote branches unmerged are the ones"): a devserver's tmux card says it runs on this machine ([tmuxhost]). The same word opened `0.119.0-ga` over `main` at the v0.118.0 publication record, and both branches were merged into it: `v0119/ghostty-keys` at `714700e7c`, which carries `v0119/ghostty-vt-wasm`, and `v0119/tmux-card-devserver-title` at `5b4334acc`. The merged tip `077c59a3d` passed `make web-lock-check`, `make web-check` (web-shared 234, launcher 729, workspace-app 8,120 in 622 files, profile 20; `svelte-check` 0 errors; both builds), `shortcuts-check`, `file-classes-check` and the browser suite's 64 Node tests; neither branch changes Rust, a manifest, a lockfile or a workflow.
 
+The owner then ruled the version straight to its GA with no release candidate ("no rc, straight to ga because ive already tested all of it") and asked for an adversarial review ("do an adversarial review"). Three reviewers read the ghostty binding, the key path and the terminal tab with the launcher change at `afb83e7a4`; their should-fix findings were fixed on the branch, each with a test red before it: AltGr and dead-key characters on Linux and Windows (`a701b9bd3`), the core's color query replies (`0660097e8`), a grapheme read past its scratch and rows left in old colors (`34abc34f2`), and, by the owner's decision ("ASCII types itself"), a layout's ASCII Option characters on macOS (`9b7b106fb`), beside the Library card's session fix (`52a75e155`); a second read of the fixes added the OSC 21 reply and stronger tests (`e53a4aeb8`) and a pending dead key ended by an Option character (`f99ac6291`). The minor findings went to v0.120.0 ([v0120review]).
+
 | Item | State | Next |
 | --- | --- | --- |
-| [ghostty stops taking keys after idle][ghidle] | built | review |
-| [ghostty runs a patched Ghostty snapshot][ghvt] | built | review |
-| [ghostty key bytes differ from xterm.js][ghkeys] | built | review |
-| [devserver tmux card says this machine][tmuxhost] | built | review |
+| [ghostty stops taking keys after idle][ghidle] | landed | GA |
+| [ghostty runs a patched Ghostty snapshot][ghvt] | landed | GA |
+| [ghostty key bytes differ from xterm.js][ghkeys] | landed | GA |
+| [devserver tmux card says this machine][tmuxhost] | landed | GA |
 
 [ghidle]: v0.119.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
 [ghvt]: v0.119.0/a-ghostty-terminal-runs-a-patched-ghostty-snapshot-and-keeps-one-page-of-scrollback.md
 [ghkeys]: v0.119.0/a-ghostty-terminal-sends-different-key-bytes-than-xterm-js.md
 [tmuxhost]: v0.119.0/a-devservers-tmux-card-says-it-runs-on-this-machine.md
+
+### v0.120.0
+
+Opened 2026-10-31 during the v0.119.0 cut with one row from that version's review: the minor ghostty defects it left open ([v0120review]), proposed for triage.
+
+| Item | State | Next |
+| --- | --- | --- |
+| [ghostty defects the review left open][v0120review] | proposed | triage |
+
+[v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 
 ## Completed
 
