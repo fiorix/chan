@@ -1,6 +1,8 @@
 # Browser check 95 clicks a launcher card the carousel keeps inert
 
-Status: built, awaiting owner review. The Built section records the implementation and verification.
+Status: landed in `0.118.0-ga` on 2026-10-31 (merge `879f576a3`; the section Built): red alone at the baseline with the identical failure and green alone and in the whole suite at the fix, so the acceptance holds and the row closes at the GA.
+
+Record before the merge: built, awaiting owner review. The Built section records the implementation and verification.
 
 Record before the release: carried into v0.117.0 at the v0.116.0 GA on 2026-10-30, not started: the check is still red alone at the GA's base and tip (the launcher's carousel keeps the card inert), and no one took the row in the v0.116.0 round.
 

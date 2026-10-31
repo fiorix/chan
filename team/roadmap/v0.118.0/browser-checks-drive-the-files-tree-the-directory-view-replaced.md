@@ -1,6 +1,8 @@
 # Browser checks drive the Files tree the directory view replaced
 
-Status: built, awaiting owner review. The Built section records the implementation and verification.
+Status: landed in `0.118.0-ga` on 2026-10-31 (merge `879f576a3`; the section Built): the twenty-three checks pass alone and in the whole suite in the Linux guest, whose final reds are exactly the four recorded at `main` (60, 125, 131, 195), so the acceptance holds and the row closes at the GA.
+
+Record before the merge: built, awaiting owner review. The Built section records the implementation and verification.
 
 ## What was asked
 

@@ -28,9 +28,9 @@ Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt b
 | Item | State | Next |
 | --- | --- | --- |
 | [Browser cannot open a tmux control window][tmuxbrw] | accepted | build |
-| [Browser checks drive the old Files tree][filesel] | built | review |
-| [Browser check 95 clicks an inert card][chk95] | built | review |
-| [Local cs tunnel fails in a toast][tuntoast] | built | review |
+| [Browser checks drive the old Files tree][filesel] | landed | GA |
+| [Browser check 95 clicks an inert card][chk95] | landed | GA |
+| [Local cs tunnel fails in a toast][tuntoast] | landed | review |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
 | [tmux card from a devserver feed has no actions][tmuxfed] | landed | GA |
 | [Tab drag over an extension finds no split edge][extdrag] | landed | GA |
