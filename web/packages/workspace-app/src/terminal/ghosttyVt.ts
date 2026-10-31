@@ -148,6 +148,20 @@ const DEFAULT_BG = 0x000000;
 /// it on for every terminal so multi-codepoint clusters take one cell.
 const MODE_GRAPHEME_CLUSTER = 2027;
 
+/// Whether a reply is upstream's answer to an OSC 4, 10, 11 or 12 color
+/// query. chan answers none, on either backend (ghostty-web's build never
+/// did, and xtermReports.ts suppresses xterm.js's): a program that exits
+/// before reading the reply leaves the PTY to echo it into the next prompt.
+/// Upstream writes each query's answer as one reply that starts with the
+/// query's own OSC number.
+function isColorReport(reply: Uint8Array): boolean {
+  if (reply.length < 5 || reply[0] !== 0x1b || reply[1] !== 0x5d) return false;
+  const semi = reply.indexOf(0x3b, 2);
+  if (semi < 0 || semi > 4) return false;
+  const ident = String.fromCharCode(...reply.subarray(2, semi));
+  return ident === "4" || ident === "10" || ident === "11" || ident === "12";
+}
+
 /// Packs a mode as upstream's `GhosttyMode`: the number in bits 0-14,
 /// bit 15 set for an ANSI mode.
 function packMode(mode: number, ansi: boolean): number {
@@ -740,7 +754,9 @@ export class VtTerminal {
   // ------------------------------------------------------------------
 
   queueReply(ptr: number, len: number): void {
-    this.replies.push(this.wasm.bytes().slice(ptr, ptr + len));
+    const reply = this.wasm.bytes().slice(ptr, ptr + len);
+    if (isColorReport(reply)) return;
+    this.replies.push(reply);
   }
 
   hasResponse(): boolean {

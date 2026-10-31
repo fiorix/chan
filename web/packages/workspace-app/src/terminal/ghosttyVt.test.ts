@@ -189,6 +189,28 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
     expect(b.readResponse()).toBe("\x1bP!|00000000\x1b\\");
   });
 
+  test("color queries get no reply, as from ghostty-web's build", async () => {
+    const a = (await ghosttyWeb()).createTerminal(80, 24);
+    const b = (await upstream()).createTerminal(80, 24, { fgColor: 0x24292f, bgColor: 0xffffff });
+    for (const query of [
+      "\x1b]10;?\x07",
+      "\x1b]11;?\x07",
+      "\x1b]11;?\x1b\\",
+      "\x1b]12;?\x07",
+      "\x1b]4;1;?\x07",
+      "\x1b]4;1;?;2;?\x07",
+      "\x1b]11;#ffffff\x07\x1b]11;?\x07",
+    ]) {
+      a.write(query);
+      b.write(query);
+      expect(a.readResponse(), `ghostty-web: ${JSON.stringify(query)}`).toBeNull();
+      expect(b.readResponse(), `upstream: ${JSON.stringify(query)}`).toBeNull();
+    }
+    // A status query in the same write as a color query still answers.
+    b.write("\x1b]11;?\x07\x1b[2;3H\x1b[6n\x1b]10;?\x07");
+    expect(b.readResponse()).toBe("\x1b[2;3R");
+  });
+
   test("keys encode the same, including keys past upstream's renumbering", async () => {
     const a = (await ghosttyWeb()).createKeyEncoder();
     const b = (await upstream()).createKeyEncoder();
