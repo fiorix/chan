@@ -20,7 +20,6 @@ import {
   type WindowPageCheck,
 } from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
-import { sessionWindowId } from "./client";
 import { clientHolder } from "./clientSession";
 import {
   blockedWindowMessage,
@@ -31,9 +30,6 @@ import {
 import { errorText } from "./errors";
 import { hostVocabulary, isAclRefusal } from "./nativeVocabulary";
 import {
-  checkScopedWindowPage,
-  loadScopedLibrarySnapshot,
-  runScopedLibraryAction,
   type ScopedLibraryAction,
   type ScopedLibraryActionResult,
   type ScopedLibrarySnapshot,
@@ -333,34 +329,6 @@ export async function openLibraryWindow(
 }
 
 /// Hide a library window, or close it outright.
-/// A bridge for a surface that keeps no scoped snapshot of its own, such as
-/// a terminal tab opening a tmux window's chan window: the deck's transport
-/// and refusal reader, no display to refresh.
-export function plainLibraryWindowBridge(): LibraryWindowBridge {
-  return {
-    checkPage: checkScopedWindowPage,
-    runAction: runScopedLibraryAction,
-    refresh: async () => {},
-    readSnapshot: loadScopedLibrarySnapshot,
-    currentWindowId: sessionWindowId,
-  };
-}
-
-/// Open the library window `windowId` from a fresh snapshot. For a caller
-/// that holds an id alone and not a row, such as the `release_term` window
-/// command with the window a session moved to. Resolves to `false` when the
-/// library has no such window.
-export async function openLibraryWindowById(
-  bridge: LibraryWindowBridge,
-  windowId: string,
-): Promise<boolean> {
-  const snapshot = await bridge.readSnapshot(new AbortController().signal);
-  const row = snapshot.windows.find((window) => window.window_id === windowId);
-  if (!row) return false;
-  await openLibraryWindow(bridge, row);
-  return true;
-}
-
 export async function buryLibraryWindow(
   bridge: LibraryWindowBridge,
   window: ScopedLibraryWindow,

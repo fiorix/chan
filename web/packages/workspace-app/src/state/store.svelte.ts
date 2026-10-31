@@ -125,7 +125,6 @@ import {
 } from "./tabs.svelte";
 import { isTmuxLayoutNode, tmuxLayoutToSer } from "./tmuxLayout";
 import { setTmuxLayout } from "./tmuxWindowSize.svelte";
-import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
 import {
@@ -1481,9 +1480,7 @@ type WindowCommandFrame =
   | {
       type: "window_command";
       window_id: string;
-      // Drop the tab that shows `session_id`, which now belongs to `window`,
-      // without ending the session: the control session moved into the
-      // control window minted for it.
+      // The desktop releases the tab without ending its session; a browser keeps it because the hidden control window has no page.
       command: "release_term";
       session_id: string;
       window: string;
@@ -2277,29 +2274,15 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "release_term") {
+    // A hidden control window has no browser page; its source tab holds the session until tmux detaches.
+    if (!isTauriDesktop()) return;
     const sessionId = typeof frame.session_id === "string" ? frame.session_id : "";
-    const target = typeof frame.window === "string" ? frame.window : "";
     if (!sessionId) return;
     const found = locateTerminalBySession(sessionId);
     if (!found) return;
-    const drop = () => {
-      // The target window holds the session now; the source lets go of the
-      // tab the way a cross-window drag does, killing nothing.
-      markTerminalMovingOut(found.tab.id);
-      void closeTab(found.paneId, found.tab.id, { force: true });
-    };
-    if (isTauriDesktop()) {
-      drop();
-      return;
-    }
-    // A browser opens the window itself; a refused popup keeps the tab, and
-    // the launcher lists the window for a later gesture.
-    void openLibraryWindowById(plainLibraryWindowBridge(), target)
-      .then((found) => {
-        if (found) drop();
-        else setTransientStatus("tmux control window opened in the library");
-      })
-      .catch(() => setTransientStatus("tmux control window is in the launcher; open it from there"));
+    // The desktop's target window holds the session, so releasing the source tab must not kill it.
+    markTerminalMovingOut(found.tab.id);
+    void closeTab(found.paneId, found.tab.id, { force: true });
     return;
   }
   if (frame.command === "control_release") {

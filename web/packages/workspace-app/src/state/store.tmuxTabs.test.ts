@@ -1,16 +1,11 @@
 // @vitest-environment jsdom
 //
-// The window commands a tmux connection sends its chan windows: `open_term_attach`
-// opens a tab bound to an existing pane session (or focuses the tab that has
-// it), `release_term` drops the tab for a session that moved to the window
-// minted for it, without ending the session, `tmux_layout` lays the window
-// out as tmux has it, and `control_release` returns the control window to a
-// plain terminal window when the connection ends.
+// The window commands preserve session ownership: desktop control tabs move to their hidden window, browser control tabs stay in the source page, and neither release ends the session.
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { preferences } from "../__tests__/standalone";
 
-const openLibraryWindowById = vi.hoisted(() => vi.fn<(bridge: unknown, windowId: string) => Promise<boolean>>());
+const readLibrary = vi.hoisted(() => vi.fn());
 const closeTerminal = vi.hoisted(() => vi.fn<(id: string) => Promise<void>>());
 
 vi.mock("../api/client", async (importOriginal) => {
@@ -31,9 +26,9 @@ vi.mock("../api/client", async (importOriginal) => {
   };
 });
 
-vi.mock("../api/libraryWindows", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../api/libraryWindows")>()),
-  openLibraryWindowById: (bridge: unknown, windowId: string) => openLibraryWindowById(bridge, windowId),
+vi.mock("../api/libraryCommand", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/libraryCommand")>()),
+  loadScopedLibrarySnapshot: () => readLibrary(),
 }));
 
 type TauriWindow = { __TAURI_INTERNALS__?: unknown };
@@ -47,14 +42,15 @@ async function app() {
 }
 
 beforeEach(() => {
-  openLibraryWindowById.mockReset();
+  readLibrary.mockReset();
   closeTerminal.mockReset();
 });
 
 afterEach(async () => {
   delete (window as TauriWindow).__TAURI_INTERNALS__;
   vi.restoreAllMocks();
-  const { ui } = await import("./store.svelte");
+  const { ui, dismissStatus } = await import("./store.svelte");
+  dismissStatus();
   ui.terminalControl = false;
   const url = new URL(window.location.href);
   url.searchParams.delete("kind");
@@ -92,24 +88,30 @@ test("release_term on the desktop drops the tab without ending its session", asy
   store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "release_term", session_id: "control-1", window: "w-ctl" });
   await vi.waitFor(() => expect(terminals(tabs)).toEqual(["shell-2"]));
   expect(closeTerminal, "the session lives on in its new window").not.toHaveBeenCalled();
-  expect(openLibraryWindowById, "the desktop opens the window natively").not.toHaveBeenCalled();
+  expect(readLibrary, "the desktop opens the window natively").not.toHaveBeenCalled();
   // An unknown session changes nothing.
   store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "release_term", session_id: "nope", window: "w-ctl" });
   expect(terminals(tabs)).toEqual(["shell-2"]);
 });
 
-test("release_term in a browser opens the window first and keeps the tab when it cannot", async () => {
+test.each([null, "an existing notice"])("release_term in a browser keeps its tab without opening a window or changing status %j", async (status) => {
   const { store, tabs, resetLayout, terminalTab, sessionWindowId } = await app();
   resetLayout([terminalTab({ id: "ctl", title: "ctl", terminalSessionId: "control-1" })]);
-  openLibraryWindowById.mockRejectedValueOnce(new Error("popup blocked"));
+  const before = tabs.allTerminalTabs()[0];
+  store.dismissStatus();
+  if (status) store.setTransientStatus(status);
+  const statusKind = store.ui.statusKind;
+  readLibrary.mockResolvedValue({ windows: [] });
+  const open = vi.spyOn(window, "open").mockReturnValue(null);
   store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "release_term", session_id: "control-1", window: "w-ctl" });
-  await vi.waitFor(() => expect(openLibraryWindowById).toHaveBeenCalledWith(expect.anything(), "w-ctl"));
   await Promise.resolve();
   await Promise.resolve();
-  expect(terminals(tabs), "a refused popup keeps the tab").toEqual(["control-1"]);
-  openLibraryWindowById.mockResolvedValueOnce(true);
-  store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "release_term", session_id: "control-1", window: "w-ctl" });
-  await vi.waitFor(() => expect(terminals(tabs)).toEqual([]));
+  expect(terminals(tabs), "the source page holds the control session").toEqual(["control-1"]);
+  expect(tabs.allTerminalTabs()[0]).toBe(before);
+  expect.soft(readLibrary, "a hidden control window needs no library lookup").not.toHaveBeenCalled();
+  expect.soft(open, "a hidden control window has no browser page").not.toHaveBeenCalled();
+  expect.soft(store.ui.status).toBe(status);
+  expect.soft(store.ui.statusKind).toBe(statusKind);
   expect(closeTerminal).not.toHaveBeenCalled();
 });
 
