@@ -1,6 +1,6 @@
 # Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"); not started.
+Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"), with the naming question decided by the owner the same day (the section Decisions); not started.
 
 ## What was asked
 
@@ -18,15 +18,18 @@ Read at `e721c63bf`, the v0.119.0 GA commit:
 
 ## Desired contract
 
-1. In Hybrid Nav, `f` stages a File Browser and `e` stages an Excalidraw diagram, with the capabilities they need today; `o` and `i` no longer stage anything. The cheatsheet shows the new letters.
+1. In Hybrid Nav, `f` stages a File Browser and `e` stages an Excalidraw diagram, with the capabilities they need today; `o` and `i` no longer stage anything. The cheatsheet shows the new letters, and its Stage Diagram row reads Stage Excalidraw; the command list keeps "New diagram", which the keyword `excalidraw` already finds.
 2. On chan-desktop for macOS, Cmd+` cycles through chan's open windows (the launcher, workspace windows and terminal windows) as it does in other Mac apps, from any focus inside them: a terminal of either backend, an editor, a list, a raised cover, and a window showing either reconnect surface.
+
+## Decisions
+
+The owner's words of 2026-10-31 on the lead's recommendation to rename the cheatsheet row Stage Diagram to Stage Excalidraw and keep the command list's "New diagram": "sure follow the recommendation".
 
 ## Open decisions
 
-- The name: the cheatsheet row Stage Diagram becomes Stage Excalidraw, as the owner suggested ("maybe"); whether the command list's "New diagram" follows. The lead's recommendation: rename the cheatsheet row and keep "New diagram", which `excalidraw` already finds.
 - Cmd+` needs a reading on macOS before a fix: in chan-desktop with two windows open, press Cmd+` with the focus on the launcher, in a workspace window outside any terminal, in an xterm.js terminal, in a ghostty terminal and behind a raised cover, and record which cycle; then start a devserver from a connect script with a control terminal, open its terminal and workspace windows, drop the connection, and press Cmd+` on a window showing the disconnect cover and on one showing the connecting screen, if any does. Which surface each reconnecting window shows is part of the reading. The candidates the reading separates: the webview's handling of a Command key equivalent the page did not take (wry and WKWebView), the default menu having no window-cycling item, or a page handler not found by reading.
 
 ## Acceptance
 
-1. Hybrid Nav tests pin `f` and `e` staging a File Browser and a diagram, and `o` and `i` staging nothing; the cheatsheet tests pin the rows and their labels.
+1. Hybrid Nav tests pin `f` and `e` staging a File Browser and a diagram, and `o` and `i` staging nothing; the cheatsheet tests pin the rows and their labels, Stage Excalidraw among them.
 2. On macOS, with the launcher and two workspace windows open, Cmd+` from each of the focuses listed above moves to the next chan window, and so it does from a dropped devserver's reconnecting terminal and workspace windows on both reconnect surfaces; the reading before the fix and the one after are recorded here.

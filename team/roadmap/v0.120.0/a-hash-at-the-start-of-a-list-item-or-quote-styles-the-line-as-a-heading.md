@@ -1,6 +1,6 @@
 # A hash at the start of a list item or a quote styles the line as a heading
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("one more bug to file"); cause read and probed, not started.
+Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("one more bug to file"), with the renderings question decided by the owner the same day (the section Decisions); cause read and probed, not started.
 
 ## What was asked
 
@@ -30,13 +30,15 @@ So a tag typed at the start of a list item makes the line an empty heading for t
 1. In the editor and the Rich Prompt, a line inside a list item or a block quote is never styled as a heading, whatever its `#` marks: `4. #`, `- # foo` and `> # foo` keep the size and weight of their list or quote text, and their `#` marks stay visible.
 2. An empty heading, a `#` run with nothing after it, is not styled as a heading anywhere, so typing a tag at the start of any line does not flash the line to heading size.
 3. Code blocks are unchanged: their content is never a heading.
+4. Copy as HTML (`editor/copy_html.ts`) and the slide view (`editor/slide_dom.ts`) keep CommonMark: `- # foo` and `> # foo` stay headings there, so a pasted document reads the same in other programs as on GitHub.
+5. The Rich Prompt sends the text as typed; the rule changes how a line is shown, not the text.
 
-## Open decisions
+## Decisions
 
-- CommonMark and GitHub render `- # foo` and `> # foo` as headings. The owner's rule makes the editor show them as text; whether chan's other Markdown renderings (copy as HTML in `editor/copy_html.ts`, the slide view in `editor/slide_dom.ts`) follow the editor or keep CommonMark. The lead's recommendation: the editor and the Rich Prompt follow the owner's rule, and the renderings that produce HTML for other programs keep CommonMark, so a pasted document reads the same in them.
-- Whether the Rich Prompt's outgoing text changes at all: it should not; the rule is about how a line is shown, and the text sent is what was typed.
+CommonMark and GitHub render `- # foo` and `> # foo` as headings, and the owner's rule makes the editor show them as text. The lead recommended that the editor and the Rich Prompt follow the owner's rule while the renderings that produce HTML for other programs keep CommonMark; the owner's word on 2026-10-31: "yes". The Rich Prompt's sent text needed no ruling: the rule is about display, so the text sent stays what was typed.
 
 ## Acceptance
 
 1. Decoration tests pin no heading line class on `4. #`, `1. # foo`, `- # foo`, `> # foo` and `> #`, and on `#` alone; a heading class on `# foo` at the top level; and no heading in fenced or indented code. The new cases are red before the fix.
 2. In the Rich Prompt, typing `4. #275` in a numbered list keeps the line at list size throughout, and the tag picker still opens on `#`.
+3. Copy as HTML of `- # foo` and `> # foo` still gives a heading inside the list item and the quote.

@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.120.0
 
-Opened 2026-10-31 during the v0.119.0 cut with one row from that version's review: the minor ghostty defects it left open ([v0120review]), proposed for triage.
+Opened 2026-10-31 during the v0.119.0 cut with one row from that version's review: the minor ghostty defects it left open ([v0120review]), proposed for triage. The owner took the lead's triage the same day: thirteen findings to fix, the XTVERSION reply dropped among them, two closed and one deferred.
 
 A second row was raised and accepted by the owner the same day ("add an item for next version"): the Computers keys turn no workspace on or off and open no terminal in a workspace ([onoffkeys]); `o` becomes the on and off key and `t` on a workspace opens a window with a terminal in it.
 
@@ -37,11 +37,11 @@ A sixth row was raised and accepted by the owner the same day ("one more to file
 
 | Item | State | Next |
 | --- | --- | --- |
-| [ghostty defects the review left open][v0120review] | proposed | triage |
+| [ghostty defects the review left open][v0120review] | accepted | build |
 | [Computers o on/off, t on a workspace][onoffkeys] | accepted | design |
 | [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | accepted | design |
 | [a date before a full stop has no badge][datestop] | accepted | build |
-| [# in a list item or quote is a heading][listhash] | accepted | design |
+| [# in a list item or quote is a heading][listhash] | accepted | build |
 | [a click on a URL opens it, not edits it][urlclick] | accepted | build |
 
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md

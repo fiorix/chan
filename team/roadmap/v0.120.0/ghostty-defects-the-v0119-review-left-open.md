@@ -1,6 +1,6 @@
 # Ghostty defects the v0.119.0 review left open
 
-Status: raised on 2026-10-31 by the lead from the adversarial review the owner asked for before the v0.119.0 GA ("sure you can do a round of code review"), with the review's should-fix findings fixed in v0.119.0 and these left open as minor; proposed, for triage.
+Status: raised on 2026-10-31 by the lead from the adversarial review the owner asked for before the v0.119.0 GA ("sure you can do a round of code review"), with the review's should-fix findings fixed in v0.119.0 and these left open as minor; triaged and accepted by the owner the same day (the section Triage), not started.
 
 ## What was asked
 
@@ -25,6 +25,35 @@ Three reviewers read the ghostty work of v0.119.0 (the libghostty-vt binding, th
 15. In-band resize reports (mode 2048, which the core now advertises) leave only at the next PTY output, since ghostty-web drains replies after a write, and carry zero pixel sizes, since the binding gives the core none.
 16. ghostty-web's own wasm still ships, inline as base64 in its lazy chunk (565,252 of the chunk's 648,960 bytes; never instantiated). Candidate fix: alias the module's data URL away in the build.
 
+## Triage
+
+The lead's recommendation, one outcome per finding, and the owner's word on 2026-10-31: "i take your recommendations about the ghostty findings; including the call to drop libghostty reply".
+
+Fix in v0.120.0, with the fix chosen where the finding offers more than one:
+
+- 1: skip a focus report that repeats the last one sent.
+- 2: answer `CSI ? u` from chan's copy of the kitty keyboard flags and drop the core's reply, so one copy decides; `workspace-app/src/design.md` says so.
+- 3: one by-name machine lookup for plain and tmux windows.
+- 4: drop the core's XTVERSION reply, as the color replies are dropped, so a ghostty terminal answers as an xterm.js terminal does.
+- 5: forward an `insertText` that lands on the host to the terminal.
+- 6: send the key after a dead key when it types no text, as xterm.js does.
+- 7: read the second keydown's `key` on Windows first (the W3C key event viewer, `'` then `e`), then fix with 5.
+- 9: both cases, Ctrl+Alt+letter with no AltGr character and the AltGr+V character, read on Windows before and after.
+- 11: allocate the new write buffer first, then free and swap.
+- 12: remember a compile failure of the wasm for the page's life, so a WebKit without wasm SIMD falls back to xterm.js once; a fetch failure still retries. No build without SIMD.
+- 14: retry the history read with the length the core returns, as the hyperlink read does.
+- 15: drain the core's replies after a resize, and give the core the cell's pixel size.
+- 16: alias ghostty-web's inline wasm data URL away in the build.
+
+Close here:
+
+- 8: it is the owner's v0.119.0 rule ("ASCII types itself"): on a US Mac layout Option+Shift+` gives a backquote, printable ASCII, which types itself.
+- 10: a defect in the Ghostty core, rare (one seed in 3,000) and cosmetic; it is for an upstream report, not a workaround here.
+
+Deferred:
+
+- 13: a speed item that needs its own measurement; at the v0.120.0 close it moves to the next active version as an item of its own.
+
 ## Acceptance
 
-Each finding is fixed with a test that was red before it, or closed here with the reason it stays.
+Each finding to fix is fixed with a test or a build check that was red before it; 7 and 9 also carry the Windows reading before and after. 8 and 10 close here with the reasons above, and 13 moves on as above.
