@@ -133,19 +133,21 @@
     terminalMessageBytes,
   } from "../terminal/connection";
   import {
+    controlSlashBytes,
     copyTerminalKeyboardProtocolState,
-    handleGhosttyShiftEnter,
     handleTerminalMetaKey,
     installKeyboardProtocolHandlers,
+    terminalMetaKeyBytes,
     type TerminalKeyboardProtocolState,
   } from "../terminal/keymap";
+  import { KeyboardProtocolObserver } from "../terminal/keyboardProtocolStream";
+  import { installGhosttyKeyParity } from "../terminal/ghosttyKeys";
   import {
     handleTerminalClipboardChord,
     isTerminalCopyChord,
     isTerminalPasteChord,
     terminalClipboardKeyHandlerResult,
   } from "../terminal/clipboardChord";
-  import { isHostOwnedChord } from "../terminal/hostChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
@@ -196,7 +198,7 @@
     windowIsTransparent,
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
-  import { handleGhosttyControlV, handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
+  import { handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -491,6 +493,13 @@
   // installTerminalReportGuards.
   let osc52Bridge: Osc52Bridge | null = null;
   let ghosttyStatusGuard: GhosttyStatusGuard | null = null;
+  // Follows the program's keyboard protocol requests on the ghostty backend,
+  // where installKeyboardProtocolHandlers has no parser to hook. Fed in the
+  // termWriter, so it sees the bytes in the order the VT parses them.
+  let keyboardProtocolObserver: KeyboardProtocolObserver | null = null;
+  // Removes the ghostty key listener (ghosttyKeys.ts). Non-null ONLY on the
+  // ghostty backend.
+  let ghosttyKeyParity: (() => void) | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
@@ -1238,9 +1247,15 @@
         cellHeight: () => ghosttyTerm.renderer?.getMetrics().height ?? 0,
       });
       ghosttyViewport = viewport;
+      keyboardProtocolObserver = new KeyboardProtocolObserver(
+        keyboardProtocol,
+        sendGeneratedTerminalInput,
+      );
+      const protocolObserver = keyboardProtocolObserver;
       // Sync-callback writer for the origin tracker (see termWriter).
       termWriter = {
         write: (bytes, done) => {
+          protocolObserver.push(bytes);
           viewport.write(bytes);
           done?.();
         },
@@ -1334,7 +1349,19 @@
       }
     }
     if (backend === "ghostty") {
-      host.addEventListener("keydown", onGhosttyHostChord, true);
+      ghosttyKeyParity = installGhosttyKeyParity(host, {
+        terminal: term as GhosttyTerminal,
+        platform: () => ({ isMac: currentOS() === "mac", isWindows: currentOS() === "windows" }),
+        claimed: (e) =>
+          isCloseExitedTabKey(e) ||
+          shouldEscapeTerminal(e) ||
+          isTerminalCopyChord(e, currentOS()) ||
+          isTerminalPasteChord(e, currentOS()),
+        chanBytes: (e) =>
+          controlSlashBytes(e, resolvedEventKey(e)) ??
+          terminalMetaKeyBytes(e, tab.keyboardProtocol),
+        send: sendUserInput,
+      });
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
@@ -2251,25 +2278,6 @@
     sendInput(e.type === "focusin" ? "\x1b[I" : "\x1b[O");
   }
 
-  /// Let unclaimed macOS Command chords reach the native host. ghostty-web
-  /// handles keydown in the bubble phase and suppresses every encoded key, so
-  /// this capture listener stops its handler without preventing the default
-  /// WKWebView needs to hand the chord to AppKit.
-  function onGhosttyHostChord(e: KeyboardEvent): void {
-    const claimedByChan =
-      shouldEscapeTerminal(e) ||
-      isTerminalCopyChord(e, currentOS()) ||
-      isTerminalPasteChord(e, currentOS());
-    if (
-      isHostOwnedChord(e, {
-        os: currentOS(),
-        claimedByChan,
-      })
-    ) {
-      e.stopPropagation();
-    }
-  }
-
   /// Ghostty-backend wheel input. ghostty-web registers its viewport
   /// scroller capture-phase with an unconditional stopPropagation(), so
   /// its InputHandler's wheel reporter (SGR 64/65) never sees the event;
@@ -2460,7 +2468,8 @@
     replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
-    host?.removeEventListener("keydown", onGhosttyHostChord, true);
+    ghosttyKeyParity?.();
+    ghosttyKeyParity = null;
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
     ghosttyScrollbarClickGate?.();
@@ -2479,6 +2488,7 @@
     mouseFilter = null;
     osc52Bridge = null;
     ghosttyStatusGuard = null;
+    keyboardProtocolObserver = null;
     ghosttyViewport = null;
     backend = "xterm";
     fit = null;
@@ -2846,26 +2856,13 @@
     // flagged `escapeTerminal: true` in shortcuts.ts, return false so xterm
     // does not consume the keystroke.
     if (shouldEscapeTerminal(e)) return false;
-    // ghostty-web drops a bare Ctrl+V with its paste chords and collapses
-    // Shift+Enter to plain Enter. Send the control byte and chan's LF
-    // fallback here while the remaining keys stay on Ghostty's encoder.
-    if (backend === "ghostty") {
-      if (!handleGhosttyControlV(e, sendUserInput)) return false;
-      return handleGhosttyShiftEnter(e, sendUserInput);
-    }
-    // xterm leaves Ctrl+/ unencoded. Resolve the layout's symbol before
-    // sending the shell's Unit Separator through the user-input path.
-    const key = resolvedEventKey(e);
-    if (
-      e.type === "keydown" &&
-      e.ctrlKey &&
-      !e.metaKey &&
-      !e.altKey &&
-      !e.shiftKey &&
-      key?.key === "/" &&
-      !key.shiftKey
-    ) {
-      sendUserInput("\x1f");
+    // On ghostty every other key was decided before ghostty-web saw it
+    // (ghosttyKeys.ts); what reaches here is plain typing, which ghostty-web
+    // types itself.
+    if (backend === "ghostty") return true;
+    const slash = controlSlashBytes(e, resolvedEventKey(e));
+    if (slash !== null) {
+      sendUserInput(slash);
       consumeKey(e);
       return false;
     }

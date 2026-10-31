@@ -16,7 +16,6 @@ const ghostty = vi.hoisted(() => {
     kitLoads: 0,
     instances: 0,
     alignOk: true,
-    hostOwned: false,
     terminals: [] as Array<Record<string, any>>,
     viewportWrites: [] as string[],
     wheels: 0,
@@ -112,6 +111,12 @@ const ghostty = vi.hoisted(() => {
     getScrollbackLength() {
       return 0;
     }
+    scrolled: number[] = [];
+    scrollLines(amount: number) {
+      this.scrolled.push(amount);
+    }
+    selectAll() {}
+    clearSelection() {}
     dispose() {}
   }
   return { record, FakeGhosttyTerminal, fakeRender };
@@ -174,9 +179,6 @@ vi.mock("../terminal/resize", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../terminal/resize")>()),
   proposeGhosttyDimensions: () => ({ cols: 100, rows: 30 }),
 }));
-vi.mock("../terminal/hostChord", () => ({
-  isHostOwnedChord: () => ghostty.record.hostOwned,
-}));
 
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -219,7 +221,6 @@ beforeEach(() => {
     kitLoads: 0,
     instances: 0,
     alignOk: true,
-    hostOwned: false,
     terminals: [],
     viewportWrites: [],
     wheels: 0,
@@ -265,6 +266,22 @@ async function mountGhostty() {
   await receive(socket, { type: "ready", cols: 80, rows: 24 });
   socket.sent.splice(0);
   return { ...mounted, tab: tab!, socket, term: ghostty.record.terminals.at(-1)! };
+}
+
+/// A keydown on the terminal host, where chan's ghostty key listener runs
+/// ahead of ghostty-web, with the legacy key code xterm.js reads.
+function hostKey(target: HTMLElement, init: KeyboardEventInit & { keyCode?: number }): KeyboardEvent {
+  const { keyCode = 0, ...rest } = init;
+  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...rest });
+  Object.defineProperty(event, "keyCode", { value: keyCode });
+  target.querySelector(".terminal-host")!.dispatchEvent(event);
+  return event;
+}
+
+function inputs(socket: TerminalSocket): unknown[] {
+  return sentFrames(socket)
+    .filter((frame) => frame.type === "input")
+    .map((frame) => frame.data);
 }
 
 function key(term: Record<string, any>, init: KeyboardEventInit): { event: KeyboardEvent; claimed: boolean } {
@@ -422,30 +439,62 @@ describe("keys", () => {
   });
 
   test("a bare Ctrl+V sends the control byte, before ghostty would drop it with its paste chords", async () => {
-    const { term, socket } = await mountGhostty();
-    const { event, claimed } = key(term, { key: "v", code: "KeyV", ctrlKey: true });
-    expect(claimed).toBe(true);
+    const { target, socket } = await mountGhostty();
+    const event = hostKey(target, { key: "v", code: "KeyV", keyCode: 86, ctrlKey: true });
     expect(event.defaultPrevented).toBe(true);
-    expect(sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data)).toEqual(["\x16"]);
+    expect(inputs(socket)).toEqual(["\x16"]);
   });
 
   test("Shift+Enter sends chan's line feed, before ghostty would send Enter", async () => {
-    const { term, socket } = await mountGhostty();
-    const { claimed } = key(term, { key: "Enter", shiftKey: true });
-    expect(claimed).toBe(true);
-    expect(sentFrames(socket).filter((f) => f.type === "input").map((f) => f.data)).toEqual(["\n"]);
+    const { target, socket } = await mountGhostty();
+    hostKey(target, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(inputs(socket)).toEqual(["\n"]);
   });
 
-  test("a host-owned chord stops before ghostty without losing its default", async () => {
-    ghostty.record.hostOwned = true;
+  test("Alt+Left sends xterm.js's word motion, not ghostty's modified arrow", async () => {
+    const { target, socket } = await mountGhostty();
+    const outer = vi.fn();
+    target.addEventListener("keydown", outer);
+    const event = hostKey(target, { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, altKey: true });
+    expect(inputs(socket)).toEqual(["\x1bb"]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(outer, "stopped before ghostty-web and the tab").not.toHaveBeenCalled();
+  });
+
+  test("Shift+PageUp scrolls the terminal a page less one row", async () => {
+    const { target, socket, term } = await mountGhostty();
+    hostKey(target, { key: "PageUp", code: "PageUp", keyCode: 33, shiftKey: true });
+    expect(term.scrolled).toEqual([-(term.rows - 1)]);
+    expect(inputs(socket)).toEqual([]);
+  });
+
+  test("a key xterm.js leaves to the browser stops before ghostty without losing its default", async () => {
+    const { target, socket } = await mountGhostty();
+    const outer = vi.fn();
+    target.addEventListener("keydown", outer);
+    const event = hostKey(target, { key: "w", code: "KeyW", keyCode: 87, metaKey: true });
+    expect(outer).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expect(inputs(socket)).toEqual([]);
+  });
+
+  test("plain typing and chan's own chords still reach ghostty-web", async () => {
     const { target } = await mountGhostty();
     const outer = vi.fn();
     target.addEventListener("keydown", outer);
-    const host = target.querySelector(".terminal-host")!;
-    const event = new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true });
-    host.dispatchEvent(event);
-    expect(outer).not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
+    hostKey(target, { key: "a", code: "KeyA", keyCode: 65 });
+    hostKey(target, { key: "C", code: "KeyC", keyCode: 67, ctrlKey: true, shiftKey: true });
+    hostKey(target, { key: "V", code: "KeyV", keyCode: 86, ctrlKey: true, shiftKey: true });
+    expect(outer).toHaveBeenCalledTimes(3);
+  });
+
+  test("the program's keyboard protocol requests reach the modified Enter", async () => {
+    const { target, socket } = await mountGhostty();
+    await output(socket, "\x1b[>4;2m\x1b[?4m");
+    expect(inputs(socket), "the modifyOtherKeys query is answered").toEqual(["\x1b[>4;2m"]);
+    socket.sent.splice(0);
+    hostKey(target, { key: "Enter", code: "Enter", keyCode: 13, shiftKey: true });
+    expect(inputs(socket)).toEqual(["\x1b[27;2;13~"]);
   });
 });
 
