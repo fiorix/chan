@@ -6,6 +6,7 @@
 import { createServer } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
+import { showCarouselCard } from "../lib/carousel.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -183,6 +184,7 @@ export default {
       page = await ctx.browser.newPage();
       await page.goto(backend.url, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector('[aria-label="Connect shared-lab"]', { timeout: 30_000 });
+      await showCarouselCard(page, '[aria-label="Connect shared-lab"]');
       await ctx.shot("trust-required", page);
 
       // Cancel is inert: no trust mutation and no pending/connect transition.
@@ -208,6 +210,7 @@ export default {
 
       // Confirm must PUT trust before connect. The backend returns 409 if this
       // ordering regresses, and the observed request log pins it exactly.
+      await showCarouselCard(page, '[aria-label="Connect shared-lab"]');
       await page.click('[aria-label="Connect shared-lab"]');
       await waitForNativeTrustDialog(page);
       await clickDialogButton(page, "Grant native access");
@@ -220,6 +223,7 @@ export default {
 
       // DELETE waits for teardown in the production route. The harness mirrors
       // the response state: disconnected and trust-required again.
+      await showCarouselCard(page, '[aria-label="Revoke native access for shared-lab"]');
       await page.click('[aria-label="Revoke native access for shared-lab"]');
       await page.waitForSelector('[aria-label="Connect shared-lab"]', { timeout: 15_000 });
       await page.waitForFunction(
