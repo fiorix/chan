@@ -778,8 +778,13 @@ pub(super) fn process_foreground(_pid: u32) -> Foreground {
 
 /// The process table's word on `pid`: its name and its arguments. Linux
 /// reads `/proc` instead and compiles this for its test alone, so the shared
-/// path is run on every platform the gate reads a foreground on.
-#[cfg(any(target_os = "macos", target_os = "freebsd", test))]
+/// path is run on every platform the gate reads a foreground on; `sysinfo` is
+/// a dependency on those three platforms and no other.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    all(test, target_os = "linux")
+))]
 fn process_foreground_from_table(pid: u32) -> Foreground {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let Ok(mut system) = System::new() else {
