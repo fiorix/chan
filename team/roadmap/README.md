@@ -33,6 +33,8 @@ A fourth row was raised and accepted by the owner the same day ("another roadmap
 
 A fifth row was raised and accepted by the owner the same day ("one more bug to file"): a hash at the start of a list item or a quote styles the line as a heading ([listhash]) in the editor and the Rich Prompt, since the parser follows CommonMark there.
 
+A sixth row was raised and accepted by the owner the same day ("one more to file"): a click on a URL in the editor opens it instead of editing the link ([urlclick]); a URL should take the first click for editing, with the link picker's open row, as a file link does.
+
 | Item | State | Next |
 | --- | --- | --- |
 | [ghostty defects the review left open][v0120review] | proposed | triage |
@@ -40,12 +42,14 @@ A fifth row was raised and accepted by the owner the same day ("one more bug to 
 | [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | accepted | design |
 | [a date before a full stop has no badge][datestop] | accepted | build |
 | [# in a list item or quote is a heading][listhash] | accepted | design |
+| [a click on a URL opens it, not edits it][urlclick] | accepted | build |
 
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 [onoffkeys]: v0.120.0/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md
 [navkeys]: v0.120.0/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md
 [datestop]: v0.120.0/a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor.md
 [listhash]: v0.120.0/a-hash-at-the-start-of-a-list-item-or-quote-styles-the-line-as-a-heading.md
+[urlclick]: v0.120.0/a-click-on-a-url-in-the-editor-opens-it-instead-of-editing-the-link.md
 
 ## Completed
 
