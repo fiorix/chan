@@ -88,6 +88,51 @@ describe("ghosttyKeydownAction", () => {
   });
 });
 
+/// One state across a key sequence, as the listener keeps it.
+function sequence(platform: XtermPlatform, inits: Init[]) {
+  const state = createXtermKeydownState();
+  return inits.map((init) =>
+    ghosttyKeydownAction(keydown(init), { platform, applicationCursorMode: false, rows: 24, chanBytes: null }, state),
+  );
+}
+
+describe("after AltGr or a dead key", () => {
+  // xterm.js types these from its keypress or input handler and clears its
+  // pending dead key there; ghostty-web types them from keydown, and the
+  // browser's own text does not reach it while its host holds the focus.
+  const ALTGR_LINUX: Init = { key: "AltGraph", code: "AltRight", keyCode: 225 };
+  const AT_LINUX: Init = { key: "@", code: "KeyQ", keyCode: 81 };
+  const CTRL_WIN: Init = { key: "Control", code: "ControlLeft", keyCode: 17, ctrlKey: true };
+  const ALTGR_WIN: Init = { key: "AltGraph", code: "AltRight", keyCode: 18, ctrlKey: true, altKey: true };
+  const AT_WIN: Init = { key: "@", code: "KeyQ", keyCode: 81, ctrlKey: true, altKey: true };
+
+  test("Linux: the AltGr character is ghostty-web's to type, and so is the key after it", () => {
+    expect(sequence(LINUX, [ALTGR_LINUX, AT_LINUX, { key: "h", code: "KeyH", keyCode: 72 }])).toEqual([
+      { kind: "browser" },
+      { kind: "ghostty" },
+      { kind: "ghostty" },
+    ]);
+  });
+
+  test("Linux: a dead key's composed character is ghostty-web's to type", () => {
+    const dead: Init = { key: "Dead", code: "Quote", keyCode: 222 };
+    expect(sequence(LINUX, [dead, { key: "é", code: "KeyE", keyCode: 69 }]).at(-1)).toEqual({ kind: "ghostty" });
+    expect(sequence(LINUX, [dead, { key: "é", code: "KeyE", keyCode: 0 }]).at(-1)).toEqual({ kind: "ghostty" });
+  });
+
+  test.each([
+    ["h", { key: "h", code: "KeyH", keyCode: 72 }, { kind: "ghostty" }],
+    ["Enter", { key: "Enter", code: "Enter", keyCode: 13 }, { kind: "send", data: "\r" }],
+    ["ArrowLeft", { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 }, { kind: "send", data: "\x1b[D" }],
+    ["Ctrl+C", { key: "c", code: "KeyC", keyCode: 67, ctrlKey: true }, { kind: "send", data: "\x03" }],
+    ["Tab", { key: "Tab", code: "Tab", keyCode: 9 }, { kind: "send", data: "\t" }],
+  ] as const)("Windows: after an AltGr character, %s is the terminal's", (_name, next, want) => {
+    const actions = sequence({ isMac: false, isWindows: true }, [CTRL_WIN, ALTGR_WIN, AT_WIN, next]);
+    expect(actions[2], "ghostty-web types the AltGr character").toEqual({ kind: "ghostty" });
+    expect(actions[3]).toEqual(want);
+  });
+});
+
 // The full path: chan's listener in front of ghostty-web's own InputHandler
 // on Ghostty's wasm key encoder, against what chan's xterm.js path sends.
 

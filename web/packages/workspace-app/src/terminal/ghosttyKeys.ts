@@ -78,9 +78,15 @@ export function ghosttyKeydownAction(
     case "select-all":
       return { kind: "select-all" };
     case "pass":
-      // The browser composes a dead key's text; anything else xterm.js leaves
-      // to the browser types `ev.key` or nothing.
-      if (!decision.deadKey && ghosttyTypesKey(ev)) return { kind: "ghostty" };
+      // xterm.js types a key it leaves to the browser from its keypress or
+      // input handler, which also ends a pending dead key or AltGr. ghostty-web
+      // types `ev.key` from keydown and never sees the browser's own text while
+      // its host holds the focus, so a key it would type is its to type: an
+      // AltGr character, a dead key's composed character, a plain key.
+      if (ghosttyTypesKey(ev)) {
+        state.deadKey = false;
+        return { kind: "ghostty" };
+      }
       return { kind: "browser" };
     case "composing":
       return { kind: "ghostty" };
