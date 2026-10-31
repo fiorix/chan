@@ -29,15 +29,19 @@ A second row was raised and accepted by the owner the same day ("add an item for
 
 A third row was raised and accepted by the owner the same day ("another roadmap item"): Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS ([navkeys]); `f` stages a File Browser and `e` an Excalidraw diagram, and Cmd+` is read on macOS before it is fixed.
 
+A fourth row was raised and accepted by the owner the same day ("another roadmap item"): a date followed by a full stop shows no badge in the editor ([datestop]); the scan's trailing boundary refuses any dot, a sentence's full stop included.
+
 | Item | State | Next |
 | --- | --- | --- |
 | [ghostty defects the review left open][v0120review] | proposed | triage |
 | [Computers o on/off, t on a workspace][onoffkeys] | accepted | design |
 | [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | accepted | design |
+| [a date before a full stop has no badge][datestop] | accepted | build |
 
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 [onoffkeys]: v0.120.0/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md
 [navkeys]: v0.120.0/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md
+[datestop]: v0.120.0/a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor.md
 
 ## Completed
 
