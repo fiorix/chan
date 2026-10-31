@@ -31,17 +31,21 @@ A third row was raised and accepted by the owner the same day ("another roadmap 
 
 A fourth row was raised and accepted by the owner the same day ("another roadmap item"): a date followed by a full stop shows no badge in the editor ([datestop]); the scan's trailing boundary refuses any dot, a sentence's full stop included.
 
+A fifth row was raised and accepted by the owner the same day ("one more bug to file"): a hash at the start of a list item or a quote styles the line as a heading ([listhash]) in the editor and the Rich Prompt, since the parser follows CommonMark there.
+
 | Item | State | Next |
 | --- | --- | --- |
 | [ghostty defects the review left open][v0120review] | proposed | triage |
 | [Computers o on/off, t on a workspace][onoffkeys] | accepted | design |
 | [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | accepted | design |
 | [a date before a full stop has no badge][datestop] | accepted | build |
+| [# in a list item or quote is a heading][listhash] | accepted | design |
 
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 [onoffkeys]: v0.120.0/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md
 [navkeys]: v0.120.0/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md
 [datestop]: v0.120.0/a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor.md
+[listhash]: v0.120.0/a-hash-at-the-start-of-a-list-item-or-quote-styles-the-line-as-a-heading.md
 
 ## Completed
 
