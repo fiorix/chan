@@ -34,7 +34,7 @@
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
   import { LOCAL_LIBRARY_ID, rootName, windowRowLabel } from "../lib/windowLabel";
-  import { buildMachineTree, tmuxCardTitle } from "../lib/machineTree";
+  import { buildMachineTree, tmuxHost, tmuxWindowMachine } from "../lib/machineTree";
   import { library, clearError, reportError, disconnectDevserver } from "../state/library.svelte";
   import {
     canManageWindow,
@@ -112,13 +112,13 @@
   }
 
   // A tmux window's machine is its connection's card, whatever library runs
-  // the terminal, as the Library screen files it.
+  // the terminal, as the Library screen files it, with the tmux session so
+  // two connections on one machine read apart.
   function machineNameForWindow(window: WindowRecord): string {
     if (!window.tmux) return machineNameForLibrary(window.library_id);
     const connection = window.tmux.connection;
-    return tmuxCardTitle(
-      library.tmuxConnections.find((entry) => entry.connection === connection) ?? null,
-    );
+    const entry = library.tmuxConnections.find((row) => row.connection === connection) ?? null;
+    return tmuxWindowMachine(entry, tmuxHost(entry, library.devservers));
   }
 
   function machineNameForWorkspace(workspace: WorkspaceEntry): string {

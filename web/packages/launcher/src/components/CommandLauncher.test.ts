@@ -52,7 +52,12 @@ vi.mock("../state/computerActions", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
-import type { WindowRecord, WorkspaceEntry } from "../api/library";
+import type {
+  DevserverEntry,
+  TmuxConnectionEntry,
+  WindowRecord,
+  WorkspaceEntry,
+} from "../api/library";
 import { library } from "../state/library.svelte";
 import {
   activeCommandLauncherDraft,
@@ -195,6 +200,7 @@ beforeEach(() => {
   library.devservers = [];
   library.gateways = [];
   library.leaders = {};
+  library.tmuxConnections = [];
   screen.current = "computers";
   screen.flips = 0;
   clearCommandLauncherDraft();
@@ -885,6 +891,59 @@ describe("Waiting command refusals", () => {
     openCommandLauncher();
     await flushPromises();
     expect(target.querySelector(".deck-operation")).toBeNull();
+  });
+});
+
+describe("tmux windows", () => {
+  it("names each window's machine by its devserver and tmux session", async () => {
+    const alpha: DevserverEntry = {
+      id: "ds-a",
+      url: "http://alpha:8000",
+      host: "alpha",
+      port: 8000,
+      label: "alpha",
+      script: "",
+      has_token: true,
+      library_id: "lib-a",
+      status: "connected",
+      pending_signin: false,
+      auto_hide_control: false,
+      os: "",
+      pretty_name: null,
+      gateway_id: null,
+      gateway_url: "",
+      shared: false,
+      native_trust_required: false,
+    };
+    const connection = (id: string, session: string): TmuxConnectionEntry => ({
+      connection: id,
+      library_id: "lib-a",
+      origin: { program: "tmux", command: "tmux -CC", local: true },
+      version: "3.5",
+      session: { id: `$${session}`, name: session },
+      windows: [],
+      window_cap: 8,
+      errors: [],
+      control_window: `${id}-control`,
+    });
+    const tmuxWindow = (id: string, connection: string, label: string): WindowRecord => ({
+      ...terminalRecord,
+      window_id: id,
+      library_id: "lib-a",
+      label,
+      control: false,
+      tmux: { connection, control: false },
+    });
+    library.devservers = [alpha];
+    library.tmuxConnections = [connection("tm-1", "main"), connection("tm-2", "work")];
+    library.windows = [tmuxWindow("tm-1-w1", "tm-1", "vim"), tmuxWindow("tm-2-w1", "tm-2", "logs")];
+    openCommandLauncher();
+    flushSync();
+    result("Windows").click();
+    await tick();
+    const path = (title: string) => result(title).querySelector(".deck-result-path")?.textContent;
+    expect(path("Terminal Window 2 [vim]")).toBe("Computers › Windows › tmux -CC on alpha (main) › Open");
+    expect(path("Terminal Window 2 [logs]")).toBe("Computers › Windows › tmux -CC on alpha (work) › Open");
   });
 });
 
