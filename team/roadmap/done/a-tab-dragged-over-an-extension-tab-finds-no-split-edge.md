@@ -1,6 +1,8 @@
 # A tab dragged over an extension tab finds no split edge
 
-Status: landed in `0.118.0-ga` on 2026-10-31 (`0b2ecc4e0`); the owner waived the reading of the rebuild in chan-desktop the same day (the section Owner's word), so the row closes at the GA. Carried into v0.118.0 after the v0.117.1 GA on 2026-10-31 by the owner's word on rebasing `v01171/extension-tab-drag` onto the release ("Fold into v0.118.0"); v0.117.1 shipped without it.
+Status: shipped in [v0.118.0](../../release/release-v0.118.0.md).
+
+Record before the release: landed in `0.118.0-ga` on 2026-10-31 (`0b2ecc4e0`); the owner waived the reading of the rebuild in chan-desktop the same day (the section Owner's word), so the row closes at the GA. Carried into v0.118.0 after the v0.117.1 GA on 2026-10-31 by the owner's word on rebasing `v01171/extension-tab-drag` onto the release ("Fold into v0.118.0"); v0.117.1 shipped without it.
 
 Record before the release: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop with the strudel and doom extensions; accepted for v0.117.1 as a patch and built the same day on `v01171/extension-tab-drag` (the section Built); the owner's reading in chan-desktop is pending.
 

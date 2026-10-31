@@ -1,6 +1,8 @@
 # cs tunnel in a local desktop terminal shows its reason only in a toast and times out
 
-Status: landed in `0.118.0-ga` on 2026-10-31 (merge `ecba860b3`; the section Built); the owner waived the reading by eye on macOS the same day (the section Owner's word), so the row closes at the GA.
+Status: shipped in [v0.118.0](../../release/release-v0.118.0.md).
+
+Record before the release: landed in `0.118.0-ga` on 2026-10-31 (merge `ecba860b3`; the section Built); the owner waived the reading by eye on macOS the same day (the section Owner's word), so the row closes at the GA.
 
 Record before the merge: carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"), not started.
 
@@ -41,7 +43,7 @@ How `cs tunnel` reports elsewhere:
 
 The contract the local path breaks: a failure known before any listener opens is one immediate error line and exit 1; exit 124 and the "no chan-desktop answered" text are for a trigger nobody answered.
 
-The multi-spec change shipped in v0.115.0 ([cs-tunnel-takes-one-spec-per-invocation](../done/cs-tunnel-takes-one-spec-per-invocation.md), commit `2749431a6`) is not the cause: the `conn_for_window` refusal dates from the feature's first commit, `4dfb61ea1`, first tagged in v0.80.0. It changed two things on this path: the ready window's expiry became the `Timeout` line, so the command exits 124 where before v0.115.0 it exited 1 with the same text; and a group of N specs sends N triggers, so the pill is set N times (the last wins) and the timeout line reads "for N of N tunnels".
+The multi-spec change shipped in v0.115.0 ([cs-tunnel-takes-one-spec-per-invocation](cs-tunnel-takes-one-spec-per-invocation.md), commit `2749431a6`) is not the cause: the `conn_for_window` refusal dates from the feature's first commit, `4dfb61ea1`, first tagged in v0.80.0. It changed two things on this path: the ready window's expiry became the `Timeout` line, so the command exits 124 where before v0.115.0 it exited 1 with the same text; and a group of N specs sends N triggers, so the pill is set N times (the last wins) and the timeout line reads "for N of N tunnels".
 
 ## Desired contract
 

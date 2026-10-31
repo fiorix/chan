@@ -1,6 +1,8 @@
 # A tmux card from a devserver feed has no record and no actions
 
-Status: landed in `0.118.0-ga` on 2026-10-31 (the section Built); the owner waived the macOS reading of acceptance 3 the same day (the section Owner's word), so the row closes at the GA.
+Status: shipped in [v0.118.0](../../release/release-v0.118.0.md).
+
+Record before the release: landed in `0.118.0-ga` on 2026-10-31 (the section Built); the owner waived the macOS reading of acceptance 3 the same day (the section Owner's word), so the row closes at the GA.
 
 Record before the build: carried into v0.118.0 at the v0.117.1 GA on 2026-10-31, not started: the owner's word at the patch was "the tmux case im less concerned with, the file browser we must fix now".
 

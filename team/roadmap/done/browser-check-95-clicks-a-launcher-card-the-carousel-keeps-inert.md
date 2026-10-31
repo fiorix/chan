@@ -1,37 +1,52 @@
-# Browser checks drive the Files tree the directory view replaced
+# Browser check 95 clicks a launcher card the carousel keeps inert
 
-Status: landed in `0.118.0-ga` on 2026-10-31 (merge `879f576a3`; the section Built): the twenty-three checks pass alone and in the whole suite in the Linux guest, whose final reds are exactly the four recorded at `main` (60, 125, 131, 195), so the acceptance holds and the row closes at the GA.
+Status: shipped in [v0.118.0](../../release/release-v0.118.0.md).
+
+Record before the release: landed in `0.118.0-ga` on 2026-10-31 (merge `879f576a3`; the section Built): red alone at the baseline with the identical failure and green alone and in the whole suite at the fix, so the acceptance holds and the row closes at the GA.
 
 Record before the merge: built, awaiting owner review. The Built section records the implementation and verification.
 
+Record before the release: carried into v0.117.0 at the v0.116.0 GA on 2026-10-30, not started: the check is still red alone at the GA's base and tip (the launcher's carousel keeps the card inert), and no one took the row in the v0.116.0 round.
+
+Record before the release: carried into v0.116.0 at the v0.115.0 GA on 2026-10-29, not started: the owner asked for the GA before it was built, and by the roadmap lifecycle an unbuilt row moves to the next version.
+
+Record before the release: accepted for v0.115.0 by the owner's word of 2026-10-28; not started.
+
 ## What was asked
 
-Nothing was asked yet; this is a finding of the cut. The Files tab shows one directory at a time since v0.117.0 (the item [the-file-browser-shows-a-tree-with-no-directory-navigation-or-keyboard-model](../done/the-file-browser-shows-a-tree-with-no-directory-navigation-or-keyboard-model.md)), and its builder recorded that the browser suite's tree selectors were not migrated and the suite was not run on the branch.
+The owner's words of 2026-10-28, after the v0.114.0 GA: "let's add a roadmap item to fix browser check 95".
 
 ## Evidence
 
-The whole browser suite at the merged release tree in the guest (Ubuntu 26.04, Chrome 156): 103 checks ran, 72 green, 90-launcher-gateways skipped for the missing marketing dist, 30 red. Twenty-three of the reds wait on the tree the Files tab no longer renders, `[role="treeitem"]`, `[role=tree]` or `.browser [role="tree"]`, in the check itself or in `lib/drafts.mjs` (lines 407 and 414): 100, 101, 102, 103, 106, 110, 111, 112, 123, 126, 130, 132, 133, 163, 164, 179, 20, 21, 22, 40, 50, 80 and 98. Each opens a File Browser tab with `app.files.toggle` and clicks a tree row to open a file or to read the selection, and fails at that step, before its own subject (the editor, graph, drafts, inspectors, collaboration and root-loss checks among them). Of the other seven reds, 60, 95, 125 and 131 are red alone at `main` before the release, 195 is the tmux browser row, 107 is green alone, and 170 is red alone at its precondition, which expects the status pill to cover the file browser's Details close button and finds the button clear under the Files tab's new inspector: a precondition of the old layout, to be read again against the new one with the migration.
+Read at `3931bf610`. Browser check 95 (`scripts/e2e/browser-smoke/checks/95-launcher-native-trust.mjs`, `launcher-native-trust`) serves the launcher bundle (`web-launcher/dist`) behind a fake backend holding one shared, trust-required devserver `shared-lab`, waits for `[aria-label="Connect shared-lab"]`, clicks it and waits for the "Grant native access?" dialog. It fails before the dialog: "native trust dialog name missing; saw []". Its first screenshot shows the launcher's carousel with All windows in front and the machine cards beside it; the carousel makes side cards inert (`web/packages/launcher/src/components/Carousel.svelte`), so the button the check finds receives no click.
+
+It fails the same way at the GA commit `1d8434419` and at the base `0604056a2` with the launcher bundle built from that commit, so it predates the v0.114.0 launcher changes; the records are in the v0.114.0 archive (`check95-ga/`, `check95-base/`). The v0.114.0 GA ran it alone because the window counter cleanup removed a route stub from its fake backend; it is not a release gate step.
 
 ## Desired contract
 
-The suite drives the Files tab as the product now presents it: a directory listing with breadcrumbs, a path field and a filter, with a docked browser keeping the tree. One shared helper opens a file by path from a Files tab (entering directories through the breadcrumbs or the path field, then the row), replacing the per-check tree walks, and `lib/drafts.mjs` reads the Drafts group where the directory view shows it.
+The check proves what it was written for: Cancel on the native trust dialog mutates nothing, Grant puts trust before connect, and Revoke tears both down, on the launcher as it renders today.
+
+## What to do
+
+- Bring the `shared-lab` card to the front before each click (as a user does with the deck's arrows, the Left and Right keys or `showCard`), or select it by the deck's own controls, then press Connect; keep the request-order assertions as they are.
+- Read the rest of the launcher checks for the same shape (a click on a control inside a card that is not in front) and fix any that share it.
 
 ## Acceptance
 
-1. The twenty-three checks above pass alone and in the whole suite in the Linux guest against the release tree or later.
-2. The suite's reds are the ones recorded at `main` and no other.
+- Check 95 alone green at the fix, and red at the base with the identical failure, so the fix is what turned it green.
+- The whole browser suite run at the fix, with any other launcher check the search found green.
 
 ## Owner's decision, 2026-10-31
 
-Surveyed in the owner's window on 2026-10-31 with three options: migrate the twenty-three checks to the directory view; point the checks at a docked browser, which keeps the tree; defer to v0.119.0. The answer, in the survey's words: "1 Migrate the 23 checks to the directory view (recommended)". So the Desired contract stands as written: one shared helper opens a file by path from a Files tab (the breadcrumbs or the path field, then the row) and replaces the per-check tree walks, `lib/drafts.mjs` reads the Drafts group where the directory view shows it, and check 170's precondition is read again against the new inspector with the migration.
+Surveyed in the owner's window on 2026-10-31 with three options: build it this round in the lane that migrates the Files-tree checks ([browser-checks-drive-the-files-tree-the-directory-view-replaced](browser-checks-drive-the-files-tree-the-directory-view-replaced.md)); build it this round in a lane of its own; carry it to v0.119.0. The answer, in the survey's words: "1 Build it this round in the filesel lane (recommended)". So one browser-suite agent in the Linux guest takes this row with the migration, and one whole-suite run at the lane's tip proves both; the Acceptance above stands.
 
 ## Built, 2026-10-31
 
-The shared `scripts/e2e/browser-smoke/lib/files.mjs` helper brings a Files tab forward with a real tab-strip click, enters a workspace-relative directory through the path field, and acts on the named directory row. Readings include the current directory, rows, filter and status, and absence waits require a visible, unfiltered listing without a loading or error state. `files.test.mjs` covers path normalization and failed or hidden absence containers. The twenty-three checks use this helper while retaining their editor, graph, inspector, collaboration, watcher and root-loss assertions; the suite README describes the helper contract.
+`scripts/e2e/browser-smoke/lib/carousel.mjs` brings the requested launcher card forward through the deck's Next control, requires the front card to be non-inert, and waits for the ring's CSS motion before returning. Check 95 uses this barrier before each Connect or Revoke action. Its Cancel, Grant-before-connect and Revoke assertions are unchanged; the observed request order is `PUT native-trust`, `POST connect`, `DELETE native-trust`. Seven Node tests in `carousel.test.mjs` cover delayed motion, reduced motion, an inert front card, ambiguous controls, ignored navigation and bounded failures.
 
-`lib/drafts.mjs` reads Drafts in the Files tab's visible `File locations` rail, which `FileBrowserSurface.svelte` renders independently of `FileTree.svelte`'s tree-only Drafts group. The rail hides in narrow panes, so an absence assertion first proves that rail is visible. The Files tab does list drafts; no dock fallback or missing-Drafts product question is needed.
+The launcher-check sweep found another immediate card interaction in 90 after adding a gateway, where the deck turns to the newly saved card before Connect. That check uses the same barrier. With marketing assets built, 90 passed at the untouched baseline and with the guard, so this is a timing guard rather than a claimed reproduced failure. The other launcher checks drive ordinary devserver cards or already wait for their screen or card flip; no other front-card change was needed. No product component changed.
 
-Check 98 visits and verifies all 121 generated directories and 120 files before root loss. Check 163 observes the directory listing in a Files tab and retains its docked-tree arm to prove cached descendant invalidation. Check 164 closes its named UI tabs before reaping remaining sessions, preventing a reload from saving a tab whose attachment arrives late. During development, 123 reached its editor setup but timed out because Details covered the rows in its roughly 190-pixel pane; `openFile` closes Details before the real double-click, and the check now passes with its four-pane layout intact. Check 170 retains the terminal find box as a positive overlap control and requires the Details close button to remain clear below the Files toolbar with the status pill expanded or collapsed. No product component changed.
+Check 95 failed alone and in the whole baseline with the identical line `Error: native trust dialog name missing; saw []`. It passes alone and in the final suite. The companion Files migration and the re-read Details precondition in 170 share the verification record below. Drafts are present in the Files tab's `File locations` rail, so no missing-Drafts product question arose.
 
 The untouched baseline at `a71ab0339` ran in the Ubuntu 26.04 guest with Node 22.21.1, Chrome 156.0.8078.80 and tmux 3.6. Its verdict was `[smoke] 29 FAILURE(S) (103 ran, 1 SKIPPED: launcher-gateways)`: 74 passed, 29 failed and 1 skipped among 104 listed checks. The red set was 20, 21, 22, 40, 50, 60, 80, 95, 98, 100, 101, 102, 103, 106, 110, 111, 112, 123, 125, 126, 130, 131, 132, 133, 163, 164, 170, 179-mutation-no-answer and 195. Check 107 passed in position, and 196 accounts for the additional check since the v0.117.0 reading.
 

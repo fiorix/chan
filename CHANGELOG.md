@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.118.0] - 2026-10-31
+
+v0.118.0 ships the tmux card for a connection made on a devserver's terminal, with its actions and a card that goes when its transport does; tab drag and drop over extension tabs; tmux control mode off by default; and `cs tunnel` refused at once in a terminal on chan-desktop's own machine. In a browser the terminal that ran `tmux -CC` stays where it is.
+
+### Changed
+
+- **tmux control mode is off by default.** `terminal.tmux.enabled` defaults to false: a terminal with no stored value shows the marker `tmux -CC` prints as ordinary output and asks nothing. Turn it on in Settings > Terminal > tmux control mode, or with `chan config set terminal.tmux.enabled true`; a stored value is honored as before, and `terminal.tmux.trust` is unchanged.
+
+### Fixed
+
+- **A `tmux -CC` run in a devserver's terminal reached a connected desktop as a card with no title, session line or actions.** The desktop now carries each devserver's tmux records with its window feed, so the card shows the origin, the session and version, and its new-window, detach and selection actions reach the devserver that owns the connection, over the direct or gateway transport. A connection also ends with its transport: a lost feed, a dead SSH client under a live shell, a devserver crash or a disconnect removes the card and its native windows while the remote tmux session survives; ordinary windows keep their reconnect overlay.
+- **A tab dragged over a pane showing an extension tab found no split edge.** The extension's frame took the drag's events before the pane body saw them, in WebKit even with the frame's pointer events off. While a tab drag is in flight each extension tab is covered, so the edge preview shows and the drop splits the pane, for the extension's own tab and any other.
+- **`cs tunnel` in a terminal served by chan-desktop's own machine showed its reason only in a toast and timed out.** The server now refuses the command at once on a host that can host no tunnel, with one line on stderr saying the command forwards ports of the desktop machine to a devserver, exit 1 and the tab's failure mark; no pill appears, and the ten-second wait and the false "no chan-desktop answered" line are gone. A devserver terminal still opens and forwards.
+- **In a browser, a `tmux -CC` connection tried to open its control window and reported one that never opened.** The hidden control window has no page a browser can show, so the browser now keeps the control terminal in its source tab for the connection's life, with no attempt and no notice; chan-desktop moves the tab to its control window as before. When the connection ends the tab is a plain, typing terminal again.
+
 ## [v0.117.1] - 2026-10-31
 
 v0.117.1 is a patch over v0.117.0: the Files tab no longer hides its pane's tab strip.

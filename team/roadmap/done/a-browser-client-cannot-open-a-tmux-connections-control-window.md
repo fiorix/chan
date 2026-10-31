@@ -1,6 +1,8 @@
 # A browser client cannot open a tmux connection's control window
 
-Status: landed in `0.118.0-ga` on 2026-10-31 (merge `8b47f9b63`; the section Built): check 195 is green alone three times and in two whole runs in the Linux guest, whose final reds are exactly the three recorded at `main` (60, 125, 131), and the connection's end leaves the browser's terminal typing, so both acceptance items hold and the row closes at the GA. Check 107 failed once in position in the first whole run and passed alone and in the unchanged repeat; that intermittent is recorded in the release report and is not this row's.
+Status: shipped in [v0.118.0](../../release/release-v0.118.0.md).
+
+Record before the release: landed in `0.118.0-ga` on 2026-10-31 (merge `8b47f9b63`; the section Built): check 195 is green alone three times and in two whole runs in the Linux guest, whose final reds are exactly the three recorded at `main` (60, 125, 131), and the connection's end leaves the browser's terminal typing, so both acceptance items hold and the row closes at the GA. Check 107 failed once in position in the first whole run and passed alone and in the unchanged repeat; that intermittent is recorded in the release report and is not this row's.
 
 Record before the merge: built on `v0118/browser-tmux-control-tab`, awaiting review. The owner's decision of 2026-10-31 is implemented: a browser keeps the control tab in the source window while the connection runs, opens no control page, and resumes shell typing when the connection ends. The Built section records the guest and host proofs.
 

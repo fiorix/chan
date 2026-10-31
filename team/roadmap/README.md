@@ -21,31 +21,29 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.118.0
+### v0.119.0
 
-Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]). One row was raised for v0.117.1 and built on its own branch, which that patch shipped without; the owner folded it into v0.118.0 on rebasing the branch onto the release ("Fold into v0.118.0"): a tab dragged over a pane showing an extension tab finds no split edge, since the extension's frame takes the drag's events before the pane body sees them ([extdrag]). The owner decided both browser-suite rows by survey on 2026-10-31: a browser client keeps the tmux control tab in its source window, and the twenty-three checks migrate to the directory view, with browser check 95 built in the same lane. One row was raised by the owner the same day, after the two built rows landed: tmux control mode is on by default though few use it ([tmuxoff]), accepted and built at once.
+Opened 2026-10-31 at the v0.118.0 GA, which carries one row into it unbuilt by the owner's word of 2026-10-31 ("ghidle can proceed if you can take the capture otherwise let's keep going"): a ghostty terminal stops taking keys after idle ([ghidle]), still proposed with no reproduction; the capture must come from the owner's macOS window over the gateway, which the build host cannot stand in for.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Browser cannot open a tmux control window][tmuxbrw] | landed | GA |
-| [Browser checks drive the old Files tree][filesel] | landed | GA |
-| [Browser check 95 clicks an inert card][chk95] | landed | GA |
-| [Local cs tunnel fails in a toast][tuntoast] | landed | GA |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
-| [tmux card from a devserver feed has no actions][tmuxfed] | landed | GA |
-| [Tab drag over an extension finds no split edge][extdrag] | landed | GA |
-| [tmux control mode on by default][tmuxoff] | landed | GA |
 
-[tmuxfed]: v0.118.0/a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions.md
-[extdrag]: v0.118.0/a-tab-dragged-over-an-extension-tab-finds-no-split-edge.md
-[tmuxoff]: v0.118.0/tmux-control-mode-is-on-by-default-though-few-use-it.md
-[tmuxbrw]: v0.118.0/a-browser-client-cannot-open-a-tmux-connections-control-window.md
-[filesel]: v0.118.0/browser-checks-drive-the-files-tree-the-directory-view-replaced.md
-[chk95]: v0.118.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
-[tuntoast]: v0.118.0/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md
-[ghidle]: v0.118.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
+[ghidle]: v0.119.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
 
 ## Completed
+
+### v0.118.0
+
+Shipped 2026-10-31; see [release-v0.118.0](../release/release-v0.118.0.md). Of the eight rows the version held, seven shipped with no release candidate: the tmux feed card and the extension-tab drag from the owner's agents' branches read and merged at the opening, tmux control mode off by default built by the lead on the owner's words, and the local `cs tunnel` refusal, the Files-tree check migration with check 95, and the browser's tmux control tab from two Codex lanes; those seven are in [`done/`](done/). The ghostty idle-keys row moved to v0.119.0 unbuilt by the owner's word.
+
+- [a-browser-client-cannot-open-a-tmux-connections-control-window](done/a-browser-client-cannot-open-a-tmux-connections-control-window.md) - A browser client cannot open a tmux connection's control window.
+- [a-tab-dragged-over-an-extension-tab-finds-no-split-edge](done/a-tab-dragged-over-an-extension-tab-finds-no-split-edge.md) - A tab dragged over an extension tab finds no split edge.
+- [a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions](done/a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions.md) - A tmux card from a devserver feed has no record and no actions.
+- [browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert](done/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md) - Browser check 95 clicks a launcher card the carousel keeps inert.
+- [browser-checks-drive-the-files-tree-the-directory-view-replaced](done/browser-checks-drive-the-files-tree-the-directory-view-replaced.md) - Browser checks drive the Files tree the directory view replaced.
+- [cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out](done/cs-tunnel-in-a-local-desktop-terminal-shows-its-reason-only-in-a-toast-and-times-out.md) - cs tunnel in a local desktop terminal shows its reason only in a toast and times out.
+- [tmux-control-mode-is-on-by-default-though-few-use-it](done/tmux-control-mode-is-on-by-default-though-few-use-it.md) - tmux control mode is on by default though few use it.
 
 ### v0.117.1
 
