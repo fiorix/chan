@@ -613,6 +613,7 @@ pub struct WorkspaceHost {
     root_fallback: Mutex<Option<Router>>,
     /// The lease every router of this host shares, dead while none exists.
     root_fallback_lease: Mutex<Weak<RootFallbackLease>>,
+    hosts_tunnels: bool,
     /// Live reverse tunnels (`cs tunnel`) across every tenant this host
     /// serves. Host-owned because the two desktop-dialed WebSocket legs
     /// terminate on the host's launcher router while the registering
@@ -1592,9 +1593,16 @@ impl WorkspaceHost {
             local_theme_notify: Arc::new(Notify::new()),
             root_fallback: Mutex::new(None),
             root_fallback_lease: Mutex::new(Weak::new()),
+            hosts_tunnels: true,
             tunnels: chan_revtunnel::server::TunnelRegistry::new(),
             mount_state: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Refuse reverse tunnels on every tenant served by this host.
+    pub fn without_tunnels(mut self) -> Self {
+        self.hosts_tunnels = false;
+        self
     }
 
     /// The host's reverse-tunnel registry. The launcher router's tunnel
@@ -6530,6 +6538,10 @@ impl HostControl for WorkspaceHost {
             .await
     }
 
+    fn hosts_tunnels(&self) -> bool {
+        self.hosts_tunnels
+    }
+
     fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
         self.tunnel_registry()
     }
@@ -8567,6 +8579,31 @@ mod tests {
             FakeBuilder
                 .build_terminal(library, config, desktop, unserve, options, control_identity)
                 .await
+        }
+    }
+
+    #[test]
+    fn tunnel_admission_is_independent_of_desktop_window_ops() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let devserver = WorkspaceHost::new(library.clone(), fake_builder());
+        assert!(HostControl::hosts_tunnels(&devserver));
+
+        let (window_ops, _rx) = tokio::sync::mpsc::channel(1);
+        for window_ops in [Some(window_ops), None] {
+            let has_window_ops = window_ops.is_some();
+            let bridge = DesktopBridge {
+                window_ops,
+                ..DesktopBridge::default()
+            };
+            let embedded =
+                WorkspaceHost::with_desktop_bridge(library.clone(), bridge, fake_builder())
+                    .without_tunnels();
+            assert_eq!(embedded.has_desktop_bridge(), has_window_ops);
+            assert!(
+                !HostControl::hosts_tunnels(&embedded),
+                "an embedded host must refuse tunnels with window ops {has_window_ops}"
+            );
         }
     }
 

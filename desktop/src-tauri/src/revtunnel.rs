@@ -141,17 +141,11 @@ async fn client_config(
     gateway_client_config(conn, cookie_header, tunnel_id, spec, half_close)
 }
 
-/// Open the reverse tunnel a devserver's `cs tunnel` asked for. `open` dials
-/// the control socket before it binds, so a bind failure is reported to the
-/// devserver itself and the error return here only feeds the SPA's
-/// console/status surface.
+/// Open the reverse tunnel a devserver's `cs tunnel` asked for. `open` dials the control socket before it binds, so a bind failure is reported to the devserver itself and the error return here only feeds the SPA's console/status surface.
 ///
-/// A refusal reached before that dial cannot be reported, and for the two that
-/// matter it never could be: an unresolvable window names no devserver to tell,
-/// and a gateway session that will not mint is the very credential the telling
-/// would need. Both leave the blocked `cs tunnel` to its ready timeout. The
-/// spec refusals below are reachable only from a client other than `cs`, which
-/// refuses an unsupported protocol and a malformed spec at its own edge.
+/// The embedded host refuses local `cs tunnel` requests before broadcasting a trigger. `conn_for_window` also refuses any trigger that reaches a local window, because that window has no devserver connection to answer.
+///
+/// A refusal before the control dial cannot be reported: an unresolvable window names no devserver to tell, and a gateway session that will not mint is the credential the report would need. A devserver request refused here therefore leaves the blocked `cs tunnel` to its ready timeout. The spec refusals below are reachable only from a client other than `cs`, which refuses an unsupported protocol and a malformed spec at its own edge.
 #[tauri::command]
 pub async fn open_reverse_tunnel(
     state: State<'_, Arc<AppState>>,

@@ -4198,13 +4198,29 @@ async fn handle_tunnel<R, W>(
         return write_response(
             write,
             &ControlResponse::Error {
-                message: "cs tunnel needs a devserver or chan-desktop host; \
+                message: "cs tunnel needs a devserver; \
                           this server serves a single workspace and hosts no tunnels"
                     .into(),
             },
         )
         .await;
     };
+
+    if !host.hosts_tunnels() {
+        if let Some(status) = status.take() {
+            status.tunnel_failed(false);
+        }
+        return write_response(
+            write,
+            &ControlResponse::Error {
+                message: "cs tunnel forwards ports of the desktop machine to a devserver; \
+                          this terminal runs on chan-desktop's own machine, so there is \
+                          nothing to forward (run it in a devserver terminal)"
+                    .into(),
+            },
+        )
+        .await;
+    }
 
     // Each id is the ONLY thing naming its tunnel on the two public WebSocket
     // paths, so they are minted here with the same unguessable token generator
@@ -9135,6 +9151,7 @@ mod tests {
         discarded: std::sync::atomic::AtomicBool,
         control: std::sync::Mutex<Option<ControlHandle>>,
         pub(super) tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
+        hosts_tunnels: bool,
         /// What `open_outside_workspace` answers: `None` stands for a host
         /// with no filesystem surface to route to.
         outside: Option<(String, String, bool, Option<String>)>,
@@ -9153,6 +9170,7 @@ mod tests {
                 discarded: std::sync::atomic::AtomicBool::new(false),
                 control: std::sync::Mutex::new(None),
                 tunnels: chan_revtunnel::server::TunnelRegistry::new(),
+                hosts_tunnels: true,
                 outside: None,
                 open_in_browser: None,
                 open_requests: std::sync::Mutex::new(Vec::new()),
@@ -9228,6 +9246,9 @@ mod tests {
         }
         fn tunnel_registry(&self) -> Arc<chan_revtunnel::server::TunnelRegistry> {
             Arc::clone(&self.tunnels)
+        }
+        fn hosts_tunnels(&self) -> bool {
+            self.hosts_tunnels
         }
         async fn open_outside_workspace(
             &self,
@@ -13323,11 +13344,97 @@ position = { row = 0, col = 1 }
         let mut reader = tokio::io::BufReader::new(&mut client);
         match read_response(&mut reader).await {
             Some(ControlResponse::Error { message }) => {
-                assert!(message.contains("devserver or chan-desktop"), "{message}");
+                assert_eq!(
+                    message,
+                    "cs tunnel needs a devserver; this server serves a single workspace and hosts no tunnels"
+                );
             }
             other => panic!("expected the no-host error, got {other:?}"),
         }
         task.await.expect("handler");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_host_without_tunnels_refuses_before_admission_and_marks_the_session() {
+        let fake = Arc::new(FakeHost {
+            hosts_tunnels: false,
+            ..FakeHost::new(0)
+        });
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let (_root, registry) = status_registry();
+        let registry = Arc::new(registry);
+        let caller = registry
+            .create(CreateOptions {
+                size: PtySize {
+                    cols: 80,
+                    rows: 24,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: Some("caller".into()),
+                tab_group: None,
+                window_id: Some("w-1".into()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("read -r line".into()),
+                env: Default::default(),
+                profile: None,
+            })
+            .expect("caller terminal");
+
+        let mut failures = 0;
+        for tenant in [ControlTenant::Workspace, ControlTenant::TerminalOnly] {
+            for max_live in [0, 32] {
+                let mut ctx = group_ctx(&host);
+                ctx.tenant = tenant;
+                ctx.tunnel_max_live = max_live;
+                ctx.terminal_registry.set(registry.clone()).unwrap();
+                let events_tx = ctx.events_tx.clone();
+                let mut frames = events_tx.subscribe();
+                let mut req = tunnel_group_request(
+                    chan_revtunnel::Proto::Tcp,
+                    &[("127.0.0.1", 8080, 3000), ("127.0.0.1", 8081, 3001)],
+                );
+                req.session_id = Some(caller.id().to_owned());
+                let (task, mut client) = spawn_tunnel(ctx, req);
+                let mut reader = tokio::io::BufReader::new(&mut client);
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    read_response(&mut reader),
+                )
+                .await
+                .expect("the refusal must not wait for a desktop");
+                match response {
+                    Some(ControlResponse::Error { message }) => assert_eq!(
+                        message,
+                        "cs tunnel forwards ports of the desktop machine to a devserver; this terminal runs on chan-desktop's own machine, so there is nothing to forward (run it in a devserver terminal)"
+                    ),
+                    other => panic!("expected the local-host refusal, got {other:?}"),
+                }
+                assert!(
+                    read_response(&mut reader).await.is_none(),
+                    "one line, then EOF"
+                );
+                task.await.expect("handler");
+                assert!(matches!(
+                    frames.try_recv(),
+                    Err(broadcast::error::TryRecvError::Empty)
+                ));
+                assert!(fake.tunnels.is_empty(), "no tunnel is registered");
+                let snapshot = serde_json::to_value(&**caller.program_status().borrow())
+                    .expect("status snapshot");
+                let records = snapshot["records"].as_array().expect("status records");
+                failures += 1;
+                assert_eq!(records.len(), failures);
+                for record in records {
+                    assert_eq!(record["state"], "error");
+                    assert_eq!(record["title"], "Tunnel");
+                    assert_eq!(record["msg"], "Tunnel could not be opened");
+                }
+            }
+        }
+        registry.close_all(crate::terminal_sessions::CloseReason::Shutdown);
     }
 
     #[tokio::test]

@@ -112,14 +112,17 @@ impl EmbeddedServer {
             window_titles: Arc::new(WindowTitles::new()),
         };
         let extension_runtime = chan_server::ExtensionRuntime::start().await;
-        let host = Arc::new(chan_server::WorkspaceHost::with_desktop_bridge(
-            library,
-            bridge,
-            chan_server::route_builder_with_config_hook(
-                Some(&extension_runtime),
-                server_config_hook,
-            ),
-        ));
+        let host = Arc::new(
+            chan_server::WorkspaceHost::with_desktop_bridge(
+                library,
+                bridge,
+                chan_server::route_builder_with_config_hook(
+                    Some(&extension_runtime),
+                    server_config_hook,
+                ),
+            )
+            .without_tunnels(),
+        );
         // Register the host's self-handle so its per-tenant control sockets can
         // reach it for teardown -- otherwise the desktop's tenants report
         // `UnserveMode::Unsupported` and `chan close` fails. Parity with the
@@ -281,11 +284,14 @@ impl EmbeddedServer {
             window_ops: None,
             window_titles: Arc::new(WindowTitles::new()),
         };
-        let host = Arc::new(chan_server::WorkspaceHost::with_desktop_bridge(
-            library,
-            bridge,
-            chan_server::route_builder_with_config_hook(None, server_config_hook),
-        ));
+        let host = Arc::new(
+            chan_server::WorkspaceHost::with_desktop_bridge(
+                library,
+                bridge,
+                chan_server::route_builder_with_config_hook(None, server_config_hook),
+            )
+            .without_tunnels(),
+        );
         host.install_self();
         let (listener, _fell_back) =
             bind_embedded_port(None).map_err(|e| format!("binding the terminal host: {e}"))?;
