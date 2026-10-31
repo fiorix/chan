@@ -1,6 +1,8 @@
 # A devserver's tmux card says it runs on this machine
 
-Status: landed in `0.119.0-ga` on 2026-10-31 (`077c59a3d`, with the session fix `52a75e155`) and reviewed there (the section Review, 2026-10-31); no hand check in a desktop window is recorded.
+Status: shipped in [v0.119.0](../../release/release-v0.119.0.md).
+
+Record before the release: landed in `0.119.0-ga` on 2026-10-31 (`077c59a3d`, with the session fix `52a75e155`) and reviewed there (the section Review, 2026-10-31); no hand check in a desktop window is recorded.
 
 Record before the review: built on `v0119/tmux-card-devserver-title` on 2026-10-31 (`5b4334acc`) and merged into `0.119.0-ga` the same day (`077c59a3d`); placed in v0.119.0 by the owner's word of 2026-10-31 ("these remote branches unmerged are the ones"). Awaiting review; no hand check in a desktop window is recorded.
 

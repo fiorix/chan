@@ -1,6 +1,8 @@
 # A ghostty terminal stops taking keys after idle
 
-Status: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and reviewed there (the section Review, 2026-10-31); the original intermittent failure over the gateway remains unreproduced, and the capture list above applies if it recurs.
+Status: shipped in [v0.119.0](../../release/release-v0.119.0.md).
+
+Record before the release: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and reviewed there (the section Review, 2026-10-31); the original intermittent failure over the gateway remains unreproduced, and the capture list above applies if it recurs.
 
 Record before the review: built on `v0119/ghostty-vt-wasm` on 2026-10-31 by the owner's word ("there's an item \"ghostty idle keys\" that we should deal with in this change here"): the repair the trace names, without a reproduction (the section Built). The owner confirmed focus recovery and sleep/wake passed in the macOS verification session at `13da87ba9` on 2026-10-31; that session used local and direct sdme-backed windows, not the gateway transport. The original intermittent gateway failure remains unreproduced.
 

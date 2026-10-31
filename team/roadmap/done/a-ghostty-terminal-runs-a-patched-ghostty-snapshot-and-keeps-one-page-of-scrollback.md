@@ -1,6 +1,8 @@
 # A ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback
 
-Status: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and fixed there after the review (the section Review, 2026-10-31).
+Status: shipped in [v0.119.0](../../release/release-v0.119.0.md).
+
+Record before the release: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and fixed there after the review (the section Review, 2026-10-31).
 
 Record before the review: built on 2026-10-31 at the owner's word ("let's do Option A") and placed in v0.119.0 the same day by the owner's word ("this isn't going onto v0.118, this will be in the next version"), rebased onto the v0.118.0 GA as `v0119/ghostty-vt-wasm`; the owner's macOS reading passed at `13da87ba9` on 2026-10-31 (the section macOS verification). Awaiting review; the actual gateway transport remains untested on macOS.
 
@@ -69,7 +71,7 @@ This supplies the native WKWebView page reading missing from the earlier JavaScr
 - This does not touch focus or input handling. The branch carries the [ghidle] repair as its own commit, by the owner's word, in the host-resume focus recovery.
 
 [ghidle]: a-ghostty-terminal-stops-taking-keys-after-idle.md
-[filesel]: ../done/browser-checks-drive-the-files-tree-the-directory-view-replaced.md
+[filesel]: browser-checks-drive-the-files-tree-the-directory-view-replaced.md
 
 ## Review, 2026-10-31
 

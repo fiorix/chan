@@ -1,6 +1,8 @@
 # A ghostty terminal sends different key bytes than an xterm.js terminal
 
-Status: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and fixed there after the review (the section Review, 2026-10-31); the gateway transport, the Linux desktop and Windows were not exercised by hand.
+Status: shipped in [v0.119.0](../../release/release-v0.119.0.md).
+
+Record before the release: landed in `0.119.0-ga` on 2026-10-31 (`0535eb10b`) and fixed there after the review (the section Review, 2026-10-31); the gateway transport, the Linux desktop and Windows were not exercised by hand.
 
 Record before the review: built on `v0119/ghostty-keys`, on top of `v0119/ghostty-vt-wasm`, on 2026-10-31 (`fb2506378`); the owner's macOS check passed at that commit the same day ("it works!", the section macOS verification). Awaiting review; the gateway transport, the Linux desktop and Windows were not exercised.
 

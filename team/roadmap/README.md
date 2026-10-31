@@ -21,30 +21,6 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.119.0
-
-Opened 2026-10-31 at the v0.118.0 GA, which carries one row into it unbuilt by the owner's word of 2026-10-31 ("ghidle can proceed if you can take the capture otherwise let's keep going"): a ghostty terminal stops taking keys after idle ([ghidle]), carried with no reproduction and then built on the same branch as the second row by the owner's word of 2026-10-31, with the repair its trace named and the gateway symptom still unreproduced. A second row was raised and built the same day and placed here by the owner's word ("this isn't going onto v0.118, this will be in the next version"): a ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback ([ghvt]), built on `v0119/ghostty-vt-wasm` and awaiting review. A third row was built the same day on `v0119/ghostty-keys`, on top of that branch: a ghostty terminal sends different key bytes than an xterm.js terminal ([ghkeys]), now sending what chan's xterm.js terminal sends for every keydown.
-
-At `13da87ba9` on 2026-10-31, the owner's macOS verification passed the native terminal replies, history retention, wrapped-line resize/copy, backend switch, focus recovery and sleep/wake checks. The whole workspace-app suite passed on macOS, 620 files and 8,002 tests, with `svelte-check` at 0 errors and 0 warnings. The session used local and Lima/sdme workspaces over an SSH forward; the actual gateway transport and the original intermittent idle failure remain unverified. The two items record the evidence and its limits; both remain at review.
-
-At `fb2506378` on 2026-10-31, the owner's macOS key check passed in a debug chan-desktop on the ghostty backend ("it works!"): Option+arrows and Option+B/F, the control and modified keys, the Command menu chords, Shift+PageUp/Down scrolling, a dead key and an IME. The gateway transport, the Linux desktop and Windows were not exercised; the item remains at review.
-
-A fourth row was built the same day on `v0119/tmux-card-devserver-title` and placed here by the owner's word of 2026-10-31 ("these remote branches unmerged are the ones"): a devserver's tmux card says it runs on this machine ([tmuxhost]). The same word opened `0.119.0-ga` over `main` at the v0.118.0 publication record, and both branches were merged into it: `v0119/ghostty-keys` at `714700e7c`, which carries `v0119/ghostty-vt-wasm`, and `v0119/tmux-card-devserver-title` at `5b4334acc`. The merged tip `077c59a3d` passed `make web-lock-check`, `make web-check` (web-shared 234, launcher 729, workspace-app 8,120 in 622 files, profile 20; `svelte-check` 0 errors; both builds), `shortcuts-check`, `file-classes-check` and the browser suite's 64 Node tests; neither branch changes Rust, a manifest, a lockfile or a workflow.
-
-The owner then ruled the version straight to its GA with no release candidate ("no rc, straight to ga because ive already tested all of it") and asked for an adversarial review ("do an adversarial review"). Three reviewers read the ghostty binding, the key path and the terminal tab with the launcher change at `afb83e7a4`; their should-fix findings were fixed on the branch, each with a test red before it: AltGr and dead-key characters on Linux and Windows (`a701b9bd3`), the core's color query replies (`0660097e8`), a grapheme read past its scratch and rows left in old colors (`34abc34f2`), and, by the owner's decision ("ASCII types itself"), a layout's ASCII Option characters on macOS (`9b7b106fb`), beside the Library card's session fix (`52a75e155`); a second read of the fixes added the OSC 21 reply and stronger tests (`e53a4aeb8`) and a pending dead key ended by an Option character (`f99ac6291`). The minor findings went to v0.120.0 ([v0120review]).
-
-| Item | State | Next |
-| --- | --- | --- |
-| [ghostty stops taking keys after idle][ghidle] | landed | GA |
-| [ghostty runs a patched Ghostty snapshot][ghvt] | landed | GA |
-| [ghostty key bytes differ from xterm.js][ghkeys] | landed | GA |
-| [devserver tmux card says this machine][tmuxhost] | landed | GA |
-
-[ghidle]: v0.119.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
-[ghvt]: v0.119.0/a-ghostty-terminal-runs-a-patched-ghostty-snapshot-and-keeps-one-page-of-scrollback.md
-[ghkeys]: v0.119.0/a-ghostty-terminal-sends-different-key-bytes-than-xterm-js.md
-[tmuxhost]: v0.119.0/a-devservers-tmux-card-says-it-runs-on-this-machine.md
-
 ### v0.120.0
 
 Opened 2026-10-31 during the v0.119.0 cut with one row from that version's review: the minor ghostty defects it left open ([v0120review]), proposed for triage.
@@ -56,6 +32,15 @@ Opened 2026-10-31 during the v0.119.0 cut with one row from that version's revie
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 
 ## Completed
+
+### v0.119.0
+
+Shipped 2026-10-31; see [release-v0.119.0](../release/release-v0.119.0.md). All four rows the version held shipped with no release candidate, by the owner's word: the ghostty core switch, the idle-keys repair and the key parity from the owner's agents' branch, and the devserver tmux card title, merged at the opening and fixed after the review the owner asked for; those four are in [`done/`](done/). The review's minor findings went to v0.120.0.
+
+- [a-devservers-tmux-card-says-it-runs-on-this-machine](done/a-devservers-tmux-card-says-it-runs-on-this-machine.md) - A devserver's tmux card says it runs on this machine.
+- [a-ghostty-terminal-runs-a-patched-ghostty-snapshot-and-keeps-one-page-of-scrollback](done/a-ghostty-terminal-runs-a-patched-ghostty-snapshot-and-keeps-one-page-of-scrollback.md) - A ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback.
+- [a-ghostty-terminal-sends-different-key-bytes-than-xterm-js](done/a-ghostty-terminal-sends-different-key-bytes-than-xterm-js.md) - A ghostty terminal sends different key bytes than an xterm.js terminal.
+- [a-ghostty-terminal-stops-taking-keys-after-idle](done/a-ghostty-terminal-stops-taking-keys-after-idle.md) - A ghostty terminal stops taking keys after idle.
 
 ### v0.118.0
 

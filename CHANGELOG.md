@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.119.0] - 2026-10-31
+
+v0.119.0 runs ghostty terminals on Ghostty's own terminal core, which keeps the scrollback the setting asks for; makes a ghostty terminal send the same key bytes as an xterm.js one; repairs a ghostty terminal that could stop taking keys after the window lost focus or slept; and names a devserver's `tmux -CC` card by the devserver.
+
+### Changed
+
+- **ghostty terminals run Ghostty's own terminal core.** The ghostty backend, the default on every platform, now runs Ghostty's signed release build of libghostty-vt under ghostty-web's renderer, input and selection, in place of the patched December 2025 snapshot ghostty-web builds, whose stream handler passed only a hand-picked subset of Ghostty's actions. The build is pinned by hash in the tree with its signature and Ghostty's MIT license. Measured with the change: an empty 120x40 terminal takes 1.7 MiB instead of 7.8 MiB, and output parses 3 to 7 times faster.
+
+### Fixed
+
+- **A ghostty terminal kept about one page of scrollback whatever the setting.** ghostty-web's build passed the scrollback line count as a byte limit, so a terminal held about 1,100 lines at 80 columns for any setting. The scrollback setting now holds; its 10 to 50 MB range is about 11,000 to 55,000 lines.
+- **A ghostty terminal sent different bytes than an xterm.js terminal for many keys.** It now sends what chan's xterm.js terminal sends for every keydown: Alt+Left/Right are the readline word motions ESC b and ESC f, Alt+letter sends ESC and the letter, and so does macOS Option+letter, except that a layout's printable ASCII Option characters (a German or French `@`, `[` or `|`) still type themselves, Shift reaches Home, End, Delete and the function keys, Ctrl+[ is ESC, Shift+PageUp/Down scrolls the scrollback, and Shift+Insert and dead keys reach the browser again. chan's own chords and the macOS menu chords are unchanged, and the kitty keyboard and modifyOtherKeys modes a program asks for are followed as on xterm.js.
+- **A ghostty terminal could stop taking keys after the window lost focus or slept.** When the window regains focus, is shown again or wakes, a ghostty terminal that held the focus now gives it up and takes it again, so the webview reattaches keyboard input to it. Confirmed on macOS for an app switch and a sleep and wake; the original intermittent failure over the gateway was never reproduced.
+- **A devserver's `tmux -CC` card said it ran on this machine.** A tmux connection run in a devserver's terminal, direct or over the gateway, is now titled `tmux -CC on <devserver>`, and the lists of every machine's windows add the tmux session, `tmux -CC on alpha (main)`. The card also renders when its record arrives before tmux names the session.
+
+### Documentation
+
+- The manual credits Superlogical, whose Program Status Protocol specification chan's OSC 7501 support implements.
+
 ## [v0.118.0] - 2026-10-31
 
 v0.118.0 ships the tmux card for a connection made on a devserver's terminal, with its actions and a card that goes when its transport does; tab drag and drop over extension tabs; tmux control mode off by default; and `cs tunnel` refused at once in a terminal on chan-desktop's own machine. In a browser the terminal that ran `tmux -CC` stays where it is.
