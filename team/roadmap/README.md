@@ -29,15 +29,19 @@ At `13da87ba9` on 2026-10-31, the owner's macOS verification passed the native t
 
 At `fb2506378` on 2026-10-31, the owner's macOS key check passed in a debug chan-desktop on the ghostty backend ("it works!"): Option+arrows and Option+B/F, the control and modified keys, the Command menu chords, Shift+PageUp/Down scrolling, a dead key and an IME. The gateway transport, the Linux desktop and Windows were not exercised; the item remains at review.
 
+A fourth row was built the same day on `v0119/tmux-card-devserver-title` and placed here by the owner's word of 2026-10-31 ("these remote branches unmerged are the ones"): a devserver's tmux card says it runs on this machine ([tmuxhost]). The same word opened `0.119.0-ga` over `main` at the v0.118.0 publication record, and both branches were merged into it: `v0119/ghostty-keys` at `714700e7c`, which carries `v0119/ghostty-vt-wasm`, and `v0119/tmux-card-devserver-title` at `5b4334acc`. The merged tip `077c59a3d` passed `make web-lock-check`, `make web-check` (web-shared 234, launcher 729, workspace-app 8,120 in 622 files, profile 20; `svelte-check` 0 errors; both builds), `shortcuts-check`, `file-classes-check` and the browser suite's 64 Node tests; neither branch changes Rust, a manifest, a lockfile or a workflow.
+
 | Item | State | Next |
 | --- | --- | --- |
 | [ghostty stops taking keys after idle][ghidle] | built | review |
 | [ghostty runs a patched Ghostty snapshot][ghvt] | built | review |
 | [ghostty key bytes differ from xterm.js][ghkeys] | built | review |
+| [devserver tmux card says this machine][tmuxhost] | built | review |
 
 [ghidle]: v0.119.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
 [ghvt]: v0.119.0/a-ghostty-terminal-runs-a-patched-ghostty-snapshot-and-keeps-one-page-of-scrollback.md
 [ghkeys]: v0.119.0/a-ghostty-terminal-sends-different-key-bytes-than-xterm-js.md
+[tmuxhost]: v0.119.0/a-devservers-tmux-card-says-it-runs-on-this-machine.md
 
 ## Completed
 
