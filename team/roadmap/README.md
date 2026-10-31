@@ -27,7 +27,7 @@ Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt b
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Browser cannot open a tmux control window][tmuxbrw] | built | review |
+| [Browser cannot open a tmux control window][tmuxbrw] | landed | GA |
 | [Browser checks drive the old Files tree][filesel] | landed | GA |
 | [Browser check 95 clicks an inert card][chk95] | landed | GA |
 | [Local cs tunnel fails in a toast][tuntoast] | landed | GA |
