@@ -2,6 +2,7 @@
   // File browser settings: which side panes show, and the surface's Hybrid
   // body-theme override.
 
+  import { browserKeys, setBrowserVim } from "../../state/browserKeys.svelte";
   import type { Preferences } from "../../api/types";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
@@ -33,6 +34,10 @@
     checked={prefs.browser_side_panes.right}
     ontoggle={(on) => commitSidePane("right", on)}
   />
+</SettingField>
+
+<SettingField label="Keyboard navigation" hint="Standard desktop keys are always available. The optional Vim map applies to file lists and trees in this browser; text inputs keep their normal keys.">
+  <PillToggle label="Vim navigation" checked={browserKeys.vim} ontoggle={setBrowserVim} />
 </SettingField>
 
 <SurfaceThemeField kind="browser" {prefs} {commit} />

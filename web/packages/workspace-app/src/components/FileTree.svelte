@@ -23,6 +23,10 @@
     Trash,
     Upload,
   } from "@lucide/svelte";
+  import { tick, untrack } from "svelte";
+  import { directoryEntries, type BrowserSort } from "../state/browserEntries";
+  import { browserKeys } from "../state/browserKeys.svelte";
+  import { browserKeyCommand, browserCommandChord, type BrowserCommand } from "../state/browserKeymap";
   import { api } from "../api/client";
   import DraftsGroup from "./DraftsGroup.svelte";
   import { clampMenu } from "./menuClamp";
@@ -30,7 +34,7 @@
   import type { TreeEntry } from "../api/types";
   import { isEditableText } from "../state/fileTypes";
   import { defaultCreateDirectory } from "../state/fileContext.svelte";
-  import { basename, parentDir } from "../state/format";
+  import { basename, parentDir, formatSize, formatMtime } from "../state/format";
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor, isOpenableTextKind } from "../state/kinds";
   import { windowCaps } from "../state/windowCaps";
@@ -51,21 +55,23 @@
   import { chordFor } from "../state/shortcuts";
   import {
     browserSelection,
+    fbActivateInstance,
+    fbActiveInstanceId,
     clearTreeDirError,
     clearTreeLoadingForPath,
     copyTextToClipboard,
     draftsDir,
     isDraftPath,
     workspace,
-    fbClearSelection,
+    fbClearSelection as fbClearSelectionFor,
     fbClipboard,
     fbClipboardClear,
     fbClipboardPaste,
     fbClipboardSet,
-    fbSelectRange,
-    fbSelectSet,
-    fbSelectSingle,
-    fbToggle,
+    fbSelectRange as fbSelectRangeFor,
+    fbSelectSet as fbSelectSetFor,
+    fbSelectSingle as fbSelectSingleFor,
+    fbToggle as fbToggleFor,
     fileOps,
     loadTreeDir,
     openFsGraphForDirectory,
@@ -98,12 +104,34 @@
     dockSide,
     onClickRow,
     onFlip,
+    view = "tree",
+    directory = "",
+    filter = "",
+    sort = "name",
+    descending = false,
+    showHidden = true,
+    selectionMode = $bindable(false),
+    onNavigate,
+    onPreview,
+    onFind,
+    onCount,
   }: {
     /// Stable id of the owning File Browser surface (`fb-tab-<id>` /
     /// `fb-dock-<side>` / `fb-overlay`). Keys this tree's expand/collapse
     /// map in the per-instance `fbTreeInstances` registry so two visible
     /// surfaces don't share expansion state.
     instanceId: string;
+    view?: "tree" | "list";
+    directory?: string;
+    filter?: string;
+    sort?: BrowserSort;
+    descending?: boolean;
+    showHidden?: boolean;
+    selectionMode?: boolean;
+    onNavigate?: (path: string) => void;
+    onPreview?: () => void;
+    onFind?: () => void;
+    onCount?: (count: number) => void;
     dockSide?: "left" | "right";
     /// Surface-owned hook fired when the user clicks a row. Lets the
     /// surface decide whether to auto-open the DETAILS inspector (tab
@@ -119,6 +147,20 @@
     onFlip?: () => void;
   } = $props();
   const rightDock = $derived(dockSide === "right");
+  const selection = $derived(fbTreeInstance(instanceId)?.selection ?? browserSelection);
+  function fbSelectSingle(path: string | null): void { fbSelectSingleFor(path, selection); }
+  function fbSelectSet(paths: string[], active?: string): void { fbSelectSetFor(paths, active, selection); }
+  function fbSelectRange(path: string, order: string[]): void { fbSelectRangeFor(path, order, selection); }
+  function fbClearSelection(): void { fbClearSelectionFor(selection); }
+  function fbToggle(path: string): void { fbToggleFor(path, selection); }
+  function activate(): void { fbActivateInstance(instanceId); }
+  function rowId(path: string): string { return instanceId + "-entry-" + encodeURIComponent(path); }
+  const entryByPath = $derived(new Map(tree.entries.map((entry) => [entry.path, entry])));
+  let keyPrefix = "";
+  let prefixAt = 0;
+  let typeAhead = "";
+  let typedAt = 0;
+
 
   // Mime type recognized by Pane.onDrop. Keep in sync with Pane.svelte.
   const FILE_DRAG_MIME = "application/x-md-file";
@@ -159,8 +201,8 @@
     // implicitly selects just this row (desktop behavior - grabbing an
     // unselected row drops the old selection).
     let dragPaths: string[];
-    if (browserSelection.paths.includes(path) && browserSelection.paths.length > 1) {
-      dragPaths = [...browserSelection.paths];
+    if (selection.paths.includes(path) && selection.paths.length > 1) {
+      dragPaths = [...selection.paths];
     } else {
       fbSelectSingle(path);
       dragPaths = [path];
@@ -342,6 +384,7 @@
   // under a different id). The workspace root (`""`) is kept expanded.
   $effect(() => {
     ensureFbTreeInstance(instanceId);
+    untrack(() => { if (!fbActiveInstanceId()) activate(); });
   });
   const expanded = $derived(fbTreeInstance(instanceId)?.expanded ?? { "": true });
   let menu = $state<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
@@ -358,13 +401,19 @@
   /// movement so long lists don't lose the cursor off-screen.
   const rowEls = new Map<string, HTMLElement>();
 
-  const root = $derived<Folder>(buildTree(tree.entries));
+  const root = $derived<Folder>(view === "tree" ? buildTree(tree.entries) : {
+    kind: "dir", name: basename(directory), path: directory,
+    children: directoryEntries(tree.entries, directory, filter, sort, descending, showHidden).map((entry): Node =>
+      entry.is_dir
+        ? { kind: "dir", name: basename(entry.path), path: entry.path, children: [] }
+        : { kind: "file", name: basename(entry.path), path: entry.path, fileKind: entry.kind, size: entry.size, mtime: entry.mtime }),
+  });
 
   /// Membership set for the multi-selection, O(1) per row. The whole
   /// set highlights as `.selected`; the active cursor (`browserSelection
   /// .path`) additionally gets `.active-cursor` so it reads as the
   /// keyboard/inspector focus within a multi-select.
-  const selectedSet = $derived(new Set(browserSelection.paths));
+  const selectedSet = $derived(new Set(selection.paths));
 
   /// Rows marked for a pending CUT render dimmed ("marked for move")
   /// until the paste lands or the clipboard is replaced. Copy is not
@@ -396,7 +445,7 @@
     function walk(nodes: Node[], depth: number): void {
       for (const n of nodes) {
         rows.push({ path: n.path, isDir: n.kind === "dir", depth });
-        if (n.kind === "dir" && expanded[n.path]) walk(n.children, depth + 1);
+        if (view === "tree" && n.kind === "dir" && expanded[n.path]) walk(n.children, depth + 1);
       }
     }
     walk(root.children, 0);
@@ -416,7 +465,7 @@
     function walk(nodes: Node[]): void {
       for (const n of nodes) {
         m.set(n.path, i++);
-        if (n.kind === "dir" && expanded[n.path]) walk(n.children);
+        if (view === "tree" && n.kind === "dir" && expanded[n.path]) walk(n.children);
       }
     }
     walk(root.children);
@@ -424,6 +473,7 @@
   });
 
   $effect(() => {
+    if (view === "list") return;
     const pending: string[] = [];
     function collect(nodes: Node[]): void {
       for (const n of nodes) {
@@ -569,14 +619,17 @@
   /// the surface can gate it per variant (tab + overlay auto-open;
   /// dock doesn't).
   function selectPath(path: string, ev?: MouseEvent): void {
+    activate();
+    ev?.stopPropagation();
+    treeRootEl?.focus({ preventScroll: true });
     // Desktop-file-browser click semantics:
     //   - cmd/ctrl+click toggles one entry in the set.
     //   - shift+click extends the range from the anchor over the
     //     visible rows (display order).
     //   - plain click = single select (resets set + anchor).
     // `path` always becomes the active cursor the inspector + single-
-    // target actions read off `browserSelection.path`.
-    if (ev?.metaKey || ev?.ctrlKey) {
+    // target actions read off `selection.path`.
+    if (ev?.metaKey || ev?.ctrlKey || selectionMode) {
       fbToggle(path);
     } else if (ev?.shiftKey) {
       fbSelectRange(path, visibleRows.map((r) => r.path));
@@ -587,6 +640,7 @@
   }
 
   function showMenu(ev: MouseEvent, path: string, isDir: boolean): void {
+    activate();
     ev.preventDefault();
     // Row right-click stays row-scoped (rename, delete, new under
     // here); only empty-area right-clicks reach the parent surface.
@@ -736,14 +790,13 @@
   function openSelectionInFileBrowser(path: string): void {
     const ancestors = expandedAncestors(path);
     const tab = openBrowserInActivePane({ select: path });
+    tab.directory = tree.entries.find((entry) => entry.path === path)?.is_dir ? path : parentDir(path);
     tab.inspectorOpen = true;
     tab.showWorkspace = false;
     // The new tab's surface seeds its own per-instance expansion from
     // `tab.expanded` on mount, so there is no global singleton to prime
     // here.
     tab.expanded = ancestors.length > 0 ? ancestors : undefined;
-    fbSelectSingle(path);
-    browserSelection.showWorkspace = false;
     menu = null;
   }
   /// Flip routes through the surface-supplied `onFlip`
@@ -805,8 +858,8 @@
   /// deletes the whole selection, the way a drag of it moves the whole
   /// selection; any other row is deleted alone.
   async function remove(path: string, isDir: boolean): Promise<void> {
-    if (browserSelection.paths.length > 1 && browserSelection.paths.includes(path)) {
-      await fileOps.removeSelection(browserSelection.paths);
+    if (selection.paths.length > 1 && selection.paths.includes(path)) {
+      await fileOps.removeSelection(selection.paths);
     } else {
       await fileOps.remove(path, isDir);
     }
@@ -823,61 +876,6 @@
     const target = terminalFromHereTarget(path, isDir);
     openTerminalInPane(layout.activePaneId, target);
     menu = null;
-  }
-
-  /// Move the selection by one row in the visible list. Wraps
-  /// nothing: stops at the ends. Scrolls the new row into view.
-  function moveSelection(delta: number): void {
-    const rows = visibleRows;
-    if (rows.length === 0) return;
-    const cur = browserSelection.path;
-    const idx = cur ? rows.findIndex((r) => r.path === cur) : -1;
-    let next: number;
-    if (idx === -1) {
-      next = delta > 0 ? 0 : rows.length - 1;
-    } else {
-      next = Math.max(0, Math.min(rows.length - 1, idx + delta));
-    }
-    const target = rows[next];
-    if (!target) return;
-    // A plain arrow move collapses any multi-selection to the new cursor.
-    fbSelectSingle(target.path);
-    queueScrollIntoView(target.path);
-  }
-
-  /// Shift+Arrow: extend the selection range from the anchor toward the
-  /// row one step (delta) past the current cursor, in visible-row order.
-  /// The anchor is held fixed so the range grows/shrinks from the same
-  /// origin (desktop shift-extend semantics).
-  function extendSelection(delta: number): void {
-    const rows = visibleRows;
-    if (rows.length === 0) return;
-    const order = rows.map((r) => r.path);
-    const cur = browserSelection.path;
-    const idx = cur ? order.indexOf(cur) : -1;
-    if (idx === -1) {
-      // No cursor yet: seed a single selection at an end and anchor it.
-      fbSelectSingle(delta > 0 ? order[0] : order[order.length - 1]);
-      queueScrollIntoView(browserSelection.path!);
-      return;
-    }
-    const next = Math.max(0, Math.min(order.length - 1, idx + delta));
-    fbSelectRange(order[next], order);
-    queueScrollIntoView(order[next]);
-  }
-
-  function moveToFirst(): void {
-    const rows = visibleRows;
-    if (rows.length === 0) return;
-    fbSelectSingle(rows[0].path);
-    queueScrollIntoView(rows[0].path);
-  }
-
-  function moveToLast(): void {
-    const rows = visibleRows;
-    if (rows.length === 0) return;
-    fbSelectSingle(rows[rows.length - 1].path);
-    queueScrollIntoView(rows[rows.length - 1].path);
   }
 
   function queueScrollIntoView(path: string): void {
@@ -898,7 +896,7 @@
   /// give Svelte a chance to expand any newly-uncollapsed ancestor
   /// directories so the row's DOM element exists.
   $effect(() => {
-    const path = browserSelection.path;
+    const path = selection.path;
     if (!path) return;
     requestAnimationFrame(() => {
       const el = rowEls.get(path);
@@ -917,144 +915,162 @@
     return next.depth > parent.depth ? next.path : null;
   }
 
-  function onTreeKeydown(e: KeyboardEvent): void {
-    if (e.isComposing) return;
+  function moveCursor(index: number, extend = false, focusOnly = false): void {
+    const order = visibleRows.map((row) => row.path);
+    const path = order[Math.max(0, Math.min(order.length - 1, index))];
+    if (!path) return;
+    if (extend) fbSelectRange(path, order);
+    else if (focusOnly || selectionMode) selection.path = path;
+    else fbSelectSingle(path);
+    queueScrollIntoView(path);
+  }
+
+  export function runCommand(command: BrowserCommand, shift = false, focusOnly = false): void {
+    activate();
     const rows = visibleRows;
-    const cur = browserSelection.path;
-    const curRow = cur ? rows.find((r) => r.path === cur) : undefined;
-
-    // Select-all-visible (cmd/ctrl+A), scoped to THIS focused tree.
-    // Caught before the generic modifier early-return below.
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "a" || e.key === "A")) {
-      e.preventDefault();
-      if (rows.length > 0) {
-        fbSelectSet(rows.map((r) => r.path));
-        queueScrollIntoView(rows[rows.length - 1].path);
-      }
-      return;
-    }
-
-    // Clipboard chords (cmd/ctrl+C copy, +X cut, +V paste), scoped to
-    // this focused tree. Caught before the generic modifier early-return.
-    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
-      const k = e.key.toLowerCase();
-      if (k === "c" || k === "x") {
-        if (browserSelection.paths.length > 0) {
-          e.preventDefault();
-          fbClipboardSet(k === "c" ? "copy" : "cut", browserSelection.paths);
+    const index = rows.findIndex((row) => row.path === selection.path);
+    const row = rows[index];
+    const selected = menu ? { path: menu.path, isDir: menu.isDir } : row;
+    const page = Math.max(1, Math.floor((treeRootEl?.parentElement?.clientHeight ?? 300) / 30) - 1);
+    if (command === "previous") return moveCursor(index < 0 ? rows.length - 1 : index - 1, shift, focusOnly);
+    if (command === "next") return moveCursor(index + 1, shift, focusOnly);
+    if (command === "first") return moveCursor(0, shift, focusOnly);
+    if (command === "last") return moveCursor(rows.length - 1, shift, focusOnly);
+    if (command === "pagePrevious") return moveCursor(index - page, shift, focusOnly);
+    if (command === "pageNext") return moveCursor(index + page, shift, focusOnly);
+    switch (command) {
+      case "parent":
+        if (view === "list") onNavigate?.(parentDir(directory));
+        else if (row?.isDir && expanded[row.path]) setExpanded(row.path, false);
+        else if (row && parentDir(row.path)) { fbSelectSingle(parentDir(row.path)); queueScrollIntoView(parentDir(row.path)); }
+        break;
+      case "child":
+        if (!row) moveCursor(0);
+        else if (row.isDir) {
+          if (view === "list") onNavigate?.(row.path);
+          else if (!expanded[row.path]) setExpanded(row.path, true);
+          else { const child = findFirstChildOf(row.path); if (child) { fbSelectSingle(child); queueScrollIntoView(child); } }
         }
+        break;
+      case "open":
+        if (selected?.isDir) {
+          if (view === "list") onNavigate?.(selected.path);
+          else toggle(selected.path);
+        } else if (selected) openFileRow(selected.path);
+        break;
+      case "rename": if (selected) void rename(selected.path, selected.isDir); break;
+      case "delete": if (selected) void remove(selected.path, selected.isDir); break;
+      case "copy": case "cut": {
+        const paths = menu && !selection.paths.includes(menu.path) ? [menu.path]
+          : selection.paths.length ? [...selection.paths] : selected ? [selected.path] : [];
+        fbClipboardSet(command, paths);
+        break;
+      }
+      case "paste": void pasteIntoTarget(); break;
+      case "selectAll": fbSelectSet(rows.map((row) => row.path), selection.path ?? undefined); break;
+      case "selectMode": selectionMode = !selectionMode; break;
+      case "toggle":
+        if (row) { fbToggle(row.path); selection.path = row.path; selectionMode = true; }
+        break;
+      case "clear":
+        keyPrefix = "";
+        if (selectionMode) selectionMode = false;
+        else if (fbClipboard.mode) fbClipboardClear();
+        else { const cursor = selection.path; fbClearSelection(); selection.path = cursor; }
+        break;
+      case "new": void newFileOrDir(view === "list" ? directory : pasteTargetDir()); break;
+      case "upload": uploadSelection(view === "list" ? directory : pasteTargetDir(), true); break;
+      case "download": if (selected) downloadSelection(selected.path, selected.isDir); break;
+      case "copyPath": if (selected) void copyPath(selected.path); break;
+      case "terminal": terminalFromHere(selected?.path ?? directory, selected?.isDir ?? true); break;
+      case "graph": if (selected) graphThis(selected.path, selected.isDir); break;
+      case "preview": onPreview?.(); break;
+      case "filter": onFind?.(); break;
+      case "menu": {
+        if (!row) break;
+        const rect = rowEls.get(row.path)?.getBoundingClientRect();
+        menu = { x: rect?.left ?? 0, y: rect?.bottom ?? 0, path: row.path, isDir: row.isDir };
         return;
       }
-      if (k === "v") {
-        e.preventDefault();
-        void pasteIntoTarget();
-        return;
-      }
     }
-    // Escape clears a pending cut/copy marker.
-    if (e.key === "Escape" && fbClipboard.mode) {
-      e.preventDefault();
-      fbClipboardClear();
-      return;
-    }
+    if (command !== "menu") menu = null;
+  }
 
-    // Shift+Arrow extends the selection range from the anchor. Plain
-    // arrows are a single-select move (reset set + anchor). Other
-    // modifier-laden chords we don't bind fall through to the OS.
-    if (e.altKey || ((e.metaKey || e.ctrlKey) && e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
+  function onTreeKeydown(e: KeyboardEvent): void {
+    if (e.isComposing || e.defaultPrevented) return;
+    if (e.target instanceof HTMLElement && e.target.closest("input, textarea, select, [contenteditable=true]")) return;
+    activate();
+    const now = Date.now();
+    if (now - prefixAt > 800) keyPrefix = "";
+    const command = browserKeyCommand(e, browserKeys.vim, keyPrefix);
+    if (command) {
+      e.preventDefault();
+      e.stopPropagation();
+      keyPrefix = "";
+      runCommand(command, e.shiftKey, e.ctrlKey && !e.metaKey);
       return;
     }
-    const extend = e.shiftKey && (e.key === "ArrowDown" || e.key === "ArrowUp");
-    switch (e.key) {
-      case "ArrowDown":
-        e.preventDefault();
-        if (extend) extendSelection(1);
-        else moveSelection(1);
-        break;
-      case "ArrowUp":
-        e.preventDefault();
-        if (extend) extendSelection(-1);
-        else moveSelection(-1);
-        break;
-      case "ArrowRight": {
-        if (!curRow) {
-          e.preventDefault();
-          moveToFirst();
-          break;
-        }
-        if (curRow.isDir) {
-          e.preventDefault();
-          if (!expanded[curRow.path]) {
-            setExpanded(curRow.path, true);
-          } else {
-            const child = findFirstChildOf(curRow.path);
-            if (child) {
-              fbSelectSingle(child);
-              queueScrollIntoView(child);
-            }
-          }
-        }
-        break;
-      }
-      case "ArrowLeft": {
-        if (!curRow) {
-          e.preventDefault();
-          moveToFirst();
-          break;
-        }
-        if (curRow.isDir && expanded[curRow.path]) {
-          e.preventDefault();
-          setExpanded(curRow.path, false);
-        } else {
-          e.preventDefault();
-          const parent = parentDir(curRow.path);
-          if (parent) {
-            fbSelectSingle(parent);
-            queueScrollIntoView(parent);
-          }
-        }
-        break;
-      }
-      case "Enter": {
-        if (!curRow) break;
-        e.preventDefault();
-        if (curRow.isDir) {
-          toggle(curRow.path);
-        } else {
-          // Same flow as a double-click on the row: media opens its
-          // viewer overlay, everything else attempts the editor open.
-          openFileRow(curRow.path);
-        }
-        break;
-      }
-      case "Home":
-        e.preventDefault();
-        moveToFirst();
-        break;
-      case "End":
-        e.preventDefault();
-        moveToLast();
-        break;
-      // Backspace (Mac "delete") and forward-Delete both trigger
-      // removal, of the whole selection when the cursor row is part of a
-      // multi-selection. The destructive uiConfirm in fileOps is the
-      // safety gate; without it we'd want to keep this unbound.
-      case "Backspace":
-      case "Delete": {
-        if (!curRow) break;
-        e.preventDefault();
-        void remove(curRow.path, curRow.isDir);
-        break;
-      }
+    if (browserKeys.vim && e.key === "g" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault(); e.stopPropagation(); keyPrefix = "g"; prefixAt = now; return;
+    }
+    keyPrefix = "";
+    if (browserKeys.vim || e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+    typeAhead = now - typedAt > 700 ? e.key : typeAhead + e.key;
+    typedAt = now;
+    const query = (/^(.)\1*$/u.test(typeAhead) ? typeAhead[0] : typeAhead).toLocaleLowerCase();
+    const start = visibleRows.findIndex((row) => row.path === selection.path);
+    const order = [...visibleRows.slice(start + 1), ...visibleRows.slice(0, start + 1)];
+    const found = order.find((row) => basename(row.path).toLocaleLowerCase().startsWith(query));
+    if (found) { e.preventDefault(); e.stopPropagation(); fbSelectSingle(found.path); queueScrollIntoView(found.path); }
+  }
+
+  function focusMenu(element: HTMLElement): { destroy(): void } {
+    void tick().then(() => element.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus());
+    return { destroy() {
+      const owned = element.contains(document.activeElement);
+      if (owned) void tick().then(() => {
+        if (document.activeElement === document.body) focusTree();
+      });
+    } };
+  }
+
+  function menuKeydown(e: KeyboardEvent): void {
+    e.stopPropagation();
+    const menuEl = e.currentTarget as HTMLElement;
+    const buttons = [...menuEl.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); menu = null; focusTree(); }
+    else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1
+        : (index + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
     }
   }
+
+  $effect(() => { onCount?.(visibleRows.length); });
+  let previousRows: string[] = [];
+  $effect(() => {
+    if (view === "list" && !tree.loadedDirs[directory] && !tree.rootUnavailable) return;
+    const order = visibleRows.map((row) => row.path);
+    untrack(() => {
+      const cursor = selection.path;
+      if (cursor && previousRows.includes(cursor) && !order.includes(cursor)) {
+        const parent = parentDir(cursor);
+        selection.path = order.includes(parent) ? parent : order[Math.min(previousRows.indexOf(cursor), order.length - 1)] ?? null;
+      }
+      selection.paths = selection.paths.filter((path) => !previousRows.includes(path) || order.includes(path));
+      previousRows = order;
+    });
+  });
 
   /// Resolve the directory a paste should land in: the active selection
   /// if it is a directory; otherwise the parent directory of the active
   /// selection; otherwise the workspace root. Mirrors how a desktop file
   /// browser pastes "into the current folder".
   function pasteTargetDir(): string {
-    const cur = browserSelection.path;
+    if (view === "list") return directory;
+    const cur = selection.path;
     if (!cur) return "";
     const row = visibleRows.find((r) => r.path === cur);
     if (row?.isDir) return cur;
@@ -1083,6 +1099,7 @@
   /// Pull keyboard focus to the tree. Called by the browser overlay
   /// when it opens so arrows are live without an extra click.
   export function focusTree(): void {
+    activate();
     treeRootEl?.focus();
   }
 
@@ -1240,7 +1257,7 @@
     // cmd/ctrl held: ADD the banded rows to the existing selection
     // (desktop additive rubber-band). Otherwise the band REPLACES it.
     bandAdditive = e.metaKey || e.ctrlKey;
-    bandBaseSelection = bandAdditive ? [...browserSelection.paths] : [];
+    bandBaseSelection = bandAdditive ? [...selection.paths] : [];
     band = null;
     window.addEventListener("mousemove", onBandMove, true);
     window.addEventListener("mouseup", onBandUp, true);
@@ -1325,20 +1342,27 @@
 
 <!-- The workspace's drafts are no rows of the tree: they are listed above
      it, and only in a workspace window. -->
-<DraftsGroup {rightDock} />
+{#if view === "tree"}<DraftsGroup {rightDock} />{/if}
+<!-- svelte-ignore a11y_no_noninteractive_tabindex (Both view roles are interactive composite widgets.) -->
 <ul
   class="tree"
-  class:drop-root={dropTarget === ""}
+  class:directory-list={view === "list"}
+  class:drop-root={dropTarget === (view === "list" ? directory : "")}
   class:right-dock={rightDock}
   class:banding={band !== null}
-  role="tree"
+  role={view === "list" ? "listbox" : "tree"}
+  aria-label={view === "list" ? "Directory contents" : "Files"}
+  aria-multiselectable="true"
+  aria-activedescendant={selection.path && rowIndexByPath.has(selection.path) ? rowId(selection.path) : undefined}
+  onfocusin={activate}
+  onfocusout={() => { keyPrefix = ""; typeAhead = ""; }}
   tabindex="0"
   bind:this={treeRootEl}
   onkeydown={onTreeKeydown}
   onmousedown={onTreeMouseDown}
-  ondragover={(e) => onRowDragOver(e, "")}
-  ondragleave={() => onRowDragLeave("")}
-  ondrop={(e) => onRowDrop(e, "")}
+  ondragover={(e) => onRowDragOver(e, view === "list" ? directory : "")}
+  ondragleave={() => onRowDragLeave(view === "list" ? directory : "")}
+  ondrop={(e) => onRowDrop(e, view === "list" ? directory : "")}
 >
   {#if band !== null}
     <div
@@ -1350,50 +1374,55 @@
   {#each root.children as node (node.path)}
     {@render renderNode(node, 0)}
   {/each}
-  {#if root.children.length === 0 && tree.loading}
-    <li class="empty">
+</ul>
+  {#if root.children.length === 0 && (tree.loading || tree.loadingDirs[directory])}
+    <div class="empty" role="status">
       <div class="empty-title">Loading files...</div>
-    </li>
+    </div>
   {:else if root.children.length === 0 && tree.rootUnavailable}
-    <li class="empty">
+    <div class="empty" role="status">
       <div class="empty-title">Workspace root unavailable</div>
       <div class="empty-detail">{tree.error}</div>
-    </li>
-  {:else if root.children.length === 0 && tree.error}
-    <li class="empty">
+    </div>
+  {:else if root.children.length === 0 && (tree.error || tree.dirErrors[directory])}
+    <div class="empty" role="status">
       <div class="empty-title">File listing failed</div>
-      <div class="empty-detail">{tree.error}</div>
-    </li>
+      <div class="empty-detail">{tree.dirErrors[directory] ?? tree.error}</div>
+    </div>
   {:else if root.children.length === 0}
-    <li class="empty">
-      <div class="empty-title">No files</div>
+    <div class="empty" role="status">
+      <div class="empty-title">{filter ? "No matching files" : "No files"}</div>
       <div class="empty-actions">
-        <button onclick={() => fileOps.createFile(defaultCreateDirectory())}>Create new file</button>
-        <button onclick={() => fileOps.createDir(defaultCreateDirectory())}>Create new directory</button>
+        <button onclick={() => fileOps.createFile(view === "list" ? directory : defaultCreateDirectory())}>Create new file</button>
+        <button onclick={() => fileOps.createDir(view === "list" ? directory : defaultCreateDirectory())}>Create new directory</button>
       </div>
-    </li>
+    </div>
   {/if}
-</ul>
 
 {#snippet renderNode(node: Node, depth: number)}
   {@const rowIndex = rowIndexByPath.get(node.path) ?? 0}
-  <li>
+  <li role="none">
     {#if node.kind === "dir"}
       <div
         class={`row dir ${rowMatchClass(node.path)}`}
         class:selected={selectedSet.has(node.path)}
-        class:active-cursor={browserSelection.path === node.path}
+        class:active-cursor={selection.path === node.path}
         class:cut={cutSet.has(node.path)}
         class:zebra={rowIndex % 2 === 1}
         class:drop-target={dropTarget === node.path}
         style={rightDock
           ? `padding-right: ${depth * 12}px`
           : `padding-left: ${depth * 12}px`}
+        onclick={(e) => selectPath(node.path, e)}
+        ondblclick={() => { if (view === "list") onNavigate?.(node.path); }}
         oncontextmenu={(e) => showMenu(e, node.path, true)}
-        role="treeitem"
+        role={view === "list" ? "option" : "treeitem"}
+        id={rowId(node.path)}
+        aria-level={view === "tree" ? depth + 1 : undefined}
         tabindex="-1"
-        aria-expanded={!!expanded[node.path]}
-        aria-selected={browserSelection.path === node.path}
+        aria-expanded={view === "tree" ? !!expanded[node.path] : undefined}
+        aria-owns={view === "tree" && expanded[node.path] ? `${rowId(node.path)}-children` : undefined}
+        aria-selected={selectedSet.has(node.path)}
         draggable="true"
         ondragstart={(e) => onFileDragStart(e, node.path, true)}
         ondragover={(e) => onRowDragOver(e, node.path)}
@@ -1402,9 +1431,10 @@
         title={fullPath(node.path)}
         use:trackRow={node.path}
       >
-        <button
+        {#if view === "tree"}<button
+          tabindex="-1"
           class="twirl"
-          onclick={() => toggle(node.path)}
+          onclick={(e) => { e.stopPropagation(); activate(); toggle(node.path); treeRootEl?.focus({ preventScroll: true }); }}
           aria-label={expanded[node.path] ? "collapse" : "expand"}
         >
           {#if expanded[node.path]}
@@ -1421,7 +1451,7 @@
           {:else}
             <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" />
           {/if}
-        </button>
+        </button>{/if}
         <!-- GitHub-style directory glyph (open chevron + directory mirror the
              dark file-tree styling from request.md). The icon swaps
              between open / closed so a glance over the column reads
@@ -1442,16 +1472,17 @@
         <span
           class="name"
           onclick={(e) => {
-            if (!(e.shiftKey || e.metaKey || e.ctrlKey)) toggle(node.path);
+            if (view === "tree" && !(e.shiftKey || e.metaKey || e.ctrlKey || selectionMode)) toggle(node.path);
             selectPath(node.path, e);
           }}
           onkeydown={() => {}}
           role="button"
-          tabindex="0"
-        >{node.name}/</span>
+          tabindex="-1"
+        >{node.name}</span>
+        {@render metadata(node)}
       </div>
-      {#if expanded[node.path]}
-        <ul class="children">
+      {#if view === "tree" && expanded[node.path]}
+        <ul class="children" role="group" id={`${rowId(node.path)}-children`}>
           {#each node.children as child (child.path)}
             {@render renderNode(child, depth + 1)}
           {/each}
@@ -1486,7 +1517,7 @@
       <div
         class={`row file ${rowMatchClass(node.path)}`}
         class:selected={selectedSet.has(node.path)}
-        class:active-cursor={browserSelection.path === node.path}
+        class:active-cursor={selection.path === node.path}
         class:cut={cutSet.has(node.path)}
         class:non-editable={!editable}
         class:contact
@@ -1494,10 +1525,14 @@
         style={rightDock
           ? `padding-right: ${depth * 12 + 16}px`
           : `padding-left: ${depth * 12 + 16}px`}
+        onclick={(e) => selectPath(node.path, e)}
+        ondblclick={() => openFileRow(node.path)}
         oncontextmenu={(e) => showMenu(e, node.path, false)}
-        role="treeitem"
+        role={view === "list" ? "option" : "treeitem"}
+        id={rowId(node.path)}
+        aria-level={view === "tree" ? depth + 1 : undefined}
         tabindex="-1"
-        aria-selected={browserSelection.path === node.path}
+        aria-selected={selectedSet.has(node.path)}
         draggable="true"
         ondragstart={(e) => onFileDragStart(e, node.path, false)}
         ondragover={(e) => onRowDragOver(e, parentDir(node.path))}
@@ -1523,9 +1558,11 @@
              content and refuses a binary one. -->
         <button
           class="name"
+          tabindex="-1"
           onclick={(e) => selectPath(node.path, e)}
-          ondblclick={() => openFileRow(node.path)}
+          ondblclick={(e) => { e.stopPropagation(); openFileRow(node.path); }}
         >{node.name}</button>
+        {@render metadata(node)}
         {#if editorDirty.has(node.path)}
           <span class="dirty-dot unsaved" title="unsaved changes" aria-label="unsaved">●</span>
         {/if}
@@ -1534,8 +1571,17 @@
   </li>
 {/snippet}
 
+{#snippet metadata(node: Node)}
+  {#if view === "list"}
+    {@const entry = entryByPath.get(node.path)}
+    <span class="entry-kind">{node.kind === "dir" ? "Folder" : entry?.kind ?? "File"}</span>
+    <span class="entry-size">{node.kind === "dir" ? "" : formatSize(entry?.size ?? 0)}</span>
+    <span class="entry-modified">{entry?.mtime ? formatMtime(entry.mtime) : ""}</span>
+  {/if}
+{/snippet}
+
 {#if menu}
-  <div class="ctx" use:portal use:clampMenu={{ x: menu.x, y: menu.y }}>
+  <div class="ctx" role="menu" tabindex="-1" aria-label="File actions" onkeydown={menuKeydown} use:portal use:clampMenu={{ x: menu.x, y: menu.y }} use:focusMenu>
     <!-- In-tree selection menu. Section label first ("From
          selection"), the dir-only "New File or Directory" creation
          entry (file-vs-dir detected from the path's trailing slash),
@@ -1554,14 +1600,14 @@
          entry hides). -->
     <div class="from-selection-label">From selection</div>
     {#if menu.isDir}
-      <button onclick={() => newFileOrDir(menu!.path)}>
+      <button role="menuitem" onclick={() => newFileOrDir(menu!.path)}>
         <FilePlus size={16} strokeWidth={1.75} aria-hidden="true" />
         <span>New File or Directory</span>
       </button>
     {/if}
     {#each menuActions as row (row.id)}
       {@const RowIcon = row.icon}
-      <button onclick={row.onClick}>
+      <button role="menuitem" onclick={row.onClick}>
         <RowIcon size={16} strokeWidth={1.75} aria-hidden="true" />
         <span class="menu-row-label">{row.label}</span>
         {#if row.chord}
@@ -1570,28 +1616,34 @@
       </button>
     {/each}
     {#if !menu.isDir && menu.path !== draftsDir() && !isDraftPath(menu.path)}
-      <button onclick={() => uploadSelection(menu!.path, false)}>
+      <button role="menuitem" onclick={() => uploadSelection(menu!.path, false)}>
         <Upload size={16} strokeWidth={1.75} aria-hidden="true" />
         <span>Upload</span>
       </button>
     {/if}
     <div class="ctx-sep" role="separator"></div>
-    <button onclick={() => copyPath(menu!.path)}>
+    {#each [{ command: "copy", label: "Copy" }, { command: "cut", label: "Cut" }, { command: "paste", label: "Paste" }, { command: "selectMode", label: selectionMode ? "Leave selection mode" : "Select multiple" }] as action}
+      <button role="menuitem" disabled={action.command === "paste" && !fbClipboard.mode} onclick={() => runCommand(action.command as BrowserCommand)}>
+        <span class="menu-row-label">{action.label}</span><span class="menu-row-chord">{browserCommandChord(action.command as BrowserCommand, browserKeys.vim)}</span>
+      </button>
+    {/each}
+    <div class="ctx-sep" role="separator"></div>
+    <button role="menuitem" onclick={() => runCommand("copyPath")}>
       <Copy size={16} strokeWidth={1.75} aria-hidden="true" />
       <span>Copy Path</span>
     </button>
-    <button onclick={() => rename(menu!.path, menu!.isDir)}>
+    <button role="menuitem" onclick={() => runCommand("rename")}>
       <Pencil size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span>Rename / Move</span>
+      <span class="menu-row-label">Rename / Move</span><span class="menu-row-chord">{browserCommandChord("rename", browserKeys.vim)}</span>
     </button>
-    <button class="danger" onclick={() => remove(menu!.path, menu!.isDir)}>
+    <button role="menuitem" class="danger" onclick={() => runCommand("delete")}>
       <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
       <span class="menu-row-label">Delete</span>
-      <span class="menu-row-chord">{chordFor("app.files.delete") ?? ""}</span>
+      <span class="menu-row-chord">{browserCommandChord("delete", browserKeys.vim)}</span>
     </button>
     {#if onFlip}
       <div class="ctx-sep" role="separator"></div>
-      <button onclick={flipFromMenu}>
+      <button role="menuitem" onclick={flipFromMenu}>
         <Settings2 size={16} strokeWidth={1.75} aria-hidden="true" />
         <span class="menu-row-label">Flip</span>
         <span class="menu-row-chord">{chordFor("app.pane.flip") ?? ""}</span>
@@ -1611,6 +1663,20 @@
 />
 
 <style>
+  .tree.directory-list { padding: 4px 8px; }
+  .directory-list .row { display: grid; grid-template-columns: 18px minmax(120px, 1fr) 82px 80px 136px; gap: 10px; padding: 0 10px !important; min-height: 34px; border-radius: 5px; }
+  .directory-list .name { min-width: 0; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; text-align: left; }
+  .entry-kind, .entry-size, .entry-modified { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .entry-size { text-align: right; font-variant-numeric: tabular-nums; }
+  .entry-modified { font-variant-numeric: tabular-nums; }
+  .tree .row { min-height: 29px; border-radius: 4px; margin: 1px 4px; }
+  .tree .row.zebra { background: transparent; }
+  .tree .row.selected { background: var(--accent-bg, var(--hover-bg)); }
+  .tree .row:hover { background: var(--hover-bg); }
+  .tree:focus-visible .row.active-cursor { outline: 2px solid var(--focus-color, var(--link)); outline-offset: -2px; }
+  .tree .row.active-cursor:not(.selected) { background: transparent; }
+  @container (max-width: 700px) { .directory-list .row { grid-template-columns: 18px minmax(100px, 1fr) 80px; } .entry-kind, .entry-modified { display: none; } }
+
   .tree, .children {
     list-style: none;
     margin: 0;

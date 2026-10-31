@@ -2068,6 +2068,7 @@ export function raiseReplacePicker(targetPath: string): void {
 }
 
 async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | undefined, filesApp: boolean): Promise<void> {
+  const selection = activeBrowserSelection();
   try {
     const uploaded = await runDesktopUpload(
       { dir: destDir, multiple: true },
@@ -2079,7 +2080,7 @@ async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | un
     if (uploadShowsInTree(root)) {
       // One listing for the batch; the watch relists show its rows meanwhile.
       await refreshTreeForPath(uploaded[uploaded.length - 1]!.path);
-      revealAndSelect(uploaded[uploaded.length - 1]!.path);
+      revealAndSelect(uploaded[uploaded.length - 1]!.path, selection);
     }
     setTransientStatus(
       uploaded.length === 1
@@ -2095,6 +2096,7 @@ async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | un
 }
 
 async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
+  const selection = activeBrowserSelection();
   try {
     const uploaded = await runDesktopUpload(
       { path: targetPath, multiple: false },
@@ -2105,7 +2107,7 @@ async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
     for (const tab of tabsForPath(targetPath)) {
       await refreshTabFromDisk(tab.tabId);
     }
-    revealAndSelect(targetPath);
+    revealAndSelect(targetPath, selection);
     setTransientStatus(`Replaced '${targetPath}'`);
   } catch (err) {
     ui.status = `upload failed: ${errorText(err)}`;
@@ -5143,9 +5145,11 @@ export function revealPathInBrowser(
   const tab = opts.destination
     ? openBrowserInPane(opts.destination.paneId, browserOpts)
     : openBrowserInActivePane(browserOpts);
+  tab.directory = opts.enter ? path : parentDir(path);
   tab.inspectorOpen = opts.inspectorOpen ?? true;
   tab.showWorkspace = isRoot;
   tab.expanded = expanded.length > 0 ? expanded : undefined;
+  fbActivateInstance(`fb-tab-${tab.id}`);
   fbSelectSingle(isRoot ? null : path);
   browserSelection.showWorkspace = isRoot;
   const map = treeExpanded.map;
@@ -5372,60 +5376,72 @@ export const browserSidePanes = $state<{
   right: false,
 });
 
-/// Currently inspected entry in the File Browser tab. Module-level
-/// (shared across browser tabs); selection is ephemeral so the
-/// minor cross-tab leakage is acceptable and avoids per-tab plumbing.
-/// File Browser selection. `path` is the ACTIVE/cursor entry the
-/// inspector + single-target actions key off (kept for zero churn to
-/// those consumers); `paths` is the full multi-selection set (the FB
-/// capabilities feature: shift/cmd-click, shift+arrows, cmd+A,
-/// rubber-band). Invariants the helpers below maintain:
-///   - `path` is always a member of `paths`, or both are empty/null.
-///   - `anchor` is the range pivot for shift-extend; it tracks the last
-///     plain/cmd click (the "from" of a future shift+click range).
-/// A plain click sets `paths=[path]`, `anchor=path`. Selection is
-/// per-FB-instance via snapshot/restore (FileBrowserSurface);
-/// dock + overlay intentionally share this singleton (workspace-wide intent).
-export const browserSelection = $state<{
+export interface BrowserSelectionState {
   path: string | null;
   paths: string[];
   anchor: string | null;
   showWorkspace: boolean;
-}>({
-  path: null,
-  paths: [],
-  anchor: null,
-  showWorkspace: false,
+}
+
+const detachedBrowserSelection = $state<BrowserSelectionState>({
+  path: null, paths: [], anchor: null, showWorkspace: false,
 });
+const browserFocus = $state<{ instanceId: string | null }>({ instanceId: null });
+
+function activeBrowserSelection(): BrowserSelectionState {
+  return (browserFocus.instanceId && fbTreeInstance(browserFocus.instanceId)?.selection)
+    || detachedBrowserSelection;
+}
+
+/// Commands target the last focused Files surface; each surface renders its own selection.
+export const browserSelection: BrowserSelectionState = {
+  get path() { return activeBrowserSelection().path; },
+  set path(value) { activeBrowserSelection().path = value; },
+  get paths() { return activeBrowserSelection().paths; },
+  set paths(value) { activeBrowserSelection().paths = value; },
+  get anchor() { return activeBrowserSelection().anchor; },
+  set anchor(value) { activeBrowserSelection().anchor = value; },
+  get showWorkspace() { return activeBrowserSelection().showWorkspace; },
+  set showWorkspace(value) { activeBrowserSelection().showWorkspace = value; },
+};
+
+export function fbActivateInstance(id: string): void {
+  ensureFbTreeInstance(id);
+  browserFocus.instanceId = id;
+}
+
+export function fbActiveInstanceId(): string | null {
+  return browserFocus.instanceId;
+}
 
 /// Set the selection to a single entry (a plain click / programmatic
 /// reveal). Resets the multi-set and the range anchor to that entry so a
 /// subsequent shift+click ranges from here. `null` clears the selection.
-export function fbSelectSingle(path: string | null): void {
-  browserSelection.path = path;
-  browserSelection.paths = path ? [path] : [];
-  browserSelection.anchor = path;
+export function fbSelectSingle(path: string | null, selection: BrowserSelectionState = browserSelection): void {
+  selection.path = path;
+  selection.paths = path ? [path] : [];
+  selection.anchor = path;
 }
 
 /// Toggle one entry in the multi-selection (cmd/ctrl+click). The toggled
 /// entry becomes the active cursor + the new range anchor; removing the
 /// active entry promotes the last remaining member (or null) to active.
-export function fbToggle(path: string): void {
-  const set = browserSelection.paths;
+export function fbToggle(path: string, selection: BrowserSelectionState = browserSelection): void {
+  const set = selection.paths;
   const at = set.indexOf(path);
   if (at === -1) {
-    browserSelection.paths = [...set, path];
-    browserSelection.path = path;
-    browserSelection.anchor = path;
+    selection.paths = [...set, path];
+    selection.path = path;
+    selection.anchor = path;
   } else {
     const next = set.filter((p) => p !== path);
-    browserSelection.paths = next;
+    selection.paths = next;
     // Keep a coherent cursor: if we just deselected the active entry,
     // fall back to the last remaining member.
-    if (browserSelection.path === path) {
-      browserSelection.path = next.length ? next[next.length - 1] : null;
+    if (selection.path === path) {
+      selection.path = next.length ? next[next.length - 1] : null;
     }
-    browserSelection.anchor = browserSelection.path;
+    selection.anchor = selection.path;
   }
 }
 
@@ -5435,40 +5451,40 @@ export function fbToggle(path: string): void {
 /// pivot from the SAME origin (desktop range semantics); `path` becomes
 /// the active cursor. Falls back to a single select if there is no anchor
 /// or either endpoint is off the visible list.
-export function fbSelectRange(path: string, ordered: string[]): void {
-  const anchor = browserSelection.anchor ?? browserSelection.path;
+export function fbSelectRange(path: string, ordered: string[], selection: BrowserSelectionState = browserSelection): void {
+  const anchor = selection.anchor ?? selection.path;
   if (!anchor) {
-    fbSelectSingle(path);
+    fbSelectSingle(path, selection);
     return;
   }
   const a = ordered.indexOf(anchor);
   const b = ordered.indexOf(path);
   if (a === -1 || b === -1) {
-    fbSelectSingle(path);
+    fbSelectSingle(path, selection);
     return;
   }
   const lo = Math.min(a, b);
   const hi = Math.max(a, b);
-  browserSelection.paths = ordered.slice(lo, hi + 1);
-  browserSelection.path = path;
+  selection.paths = ordered.slice(lo, hi + 1);
+  selection.path = path;
   // Anchor stays put: shift again pivots from the original origin.
-  browserSelection.anchor = anchor;
+  selection.anchor = anchor;
 }
 
 /// Replace the multi-selection with `paths` (rubber-band / select-all).
 /// `active` becomes the cursor (defaults to the last entry); the anchor
 /// is set to the first entry so a following shift gesture has an origin.
-export function fbSelectSet(paths: string[], active?: string): void {
-  browserSelection.paths = paths;
-  browserSelection.path = active ?? (paths.length ? paths[paths.length - 1] : null);
-  browserSelection.anchor = paths.length ? paths[0] : null;
+export function fbSelectSet(paths: string[], active?: string, selection: BrowserSelectionState = browserSelection): void {
+  selection.paths = paths;
+  selection.path = active ?? (paths.length ? paths[paths.length - 1] : null);
+  selection.anchor = paths.length ? paths[0] : null;
 }
 
 /// Clear the whole selection (e.g. clicking empty tree space).
-export function fbClearSelection(): void {
-  browserSelection.path = null;
-  browserSelection.paths = [];
-  browserSelection.anchor = null;
+export function fbClearSelection(selection: BrowserSelectionState = browserSelection): void {
+  selection.path = null;
+  selection.paths = [];
+  selection.anchor = null;
 }
 
 /// File Browser clipboard. Module-level (NOT per-instance) so a
@@ -5637,6 +5653,7 @@ export const treeExpanded = $state<{ map: Record<string, boolean> }>({
 /// instance id; never shared. The workspace root (`""`) is always conceptually
 /// expanded, so `expanded[""]` is kept true.
 export interface FbTreeInstance {
+  selection: BrowserSelectionState;
   /// Workspace-relative dir path -> expanded. `""` (root) stays true.
   expanded: Record<string, boolean>;
   /// The instance's current selection (workspace-relative path) or null.
@@ -5667,6 +5684,7 @@ export function ensureFbTreeInstance(id: string): FbTreeInstance {
   const existing = fbTreeInstances.byId[id];
   if (existing) return existing;
   const created: FbTreeInstance = {
+    selection: { path: null, paths: [], anchor: null, showWorkspace: false },
     expanded: { "": true },
     selected: null,
     showWorkspace: false,
@@ -5693,6 +5711,7 @@ export function fbTreeInstance(id: string): FbTreeInstance | null {
 /// toward the cross-instance refcount.
 export function disposeFbTreeInstance(id: string): void {
   if (!(id in fbTreeInstances.byId)) return;
+  if (browserFocus.instanceId === id) browserFocus.instanceId = null;
   const { [id]: _gone, ...rest } = fbTreeInstances.byId;
   fbTreeInstances.byId = rest;
 }
@@ -6025,7 +6044,8 @@ function seedTreeExpansionIfFresh(): void {
 /// for it. Walks the path segment-by-segment rather than the
 /// entries list because the new entry may not be in the snapshot
 /// yet (the tree refresh may still be in flight).
-export function revealAndSelect(path: string): void {
+export function revealAndSelect(path: string, selection: BrowserSelectionState = activeBrowserSelection()): void {
+  path = path.replace(/\/+$/, "");
   // A workspace's draft has no row to reveal, and its marked directory
   // must not enter the expansion map, which is persisted.
   if (isDraftClientPath(path)) return;
@@ -6043,8 +6063,8 @@ export function revealAndSelect(path: string): void {
   expandAncestorsInAllInstances(path);
   // Programmatic reveal is a single-select: reset the multi-set + anchor
   // so a later shift+click ranges from the revealed entry.
-  fbSelectSingle(path);
-  browserSelection.showWorkspace = false;
+  fbSelectSingle(path, selection);
+  selection.showWorkspace = false;
   // The expansion change counts as a user action - persist it so
   // the next launch keeps the new entry in view.
   persistTreeExpanded();
@@ -6415,6 +6435,7 @@ async function performMove(
   path: string,
   target: string,
   action: "rename" | "move" = "rename",
+  selection: BrowserSelectionState = activeBrowserSelection(),
 ): Promise<void> {
   if (target === path) return;
   const failed = `${action} failed`;
@@ -6458,7 +6479,7 @@ async function performMove(
     for (const { tabId } of tabsForPath(target)) {
       clearTabError(tabId);
     }
-    revealAndSelect(target);
+    revealAndSelect(target, selection);
     // Nudge open tabs to re-check their underlying file. Server-side
     // self_writes dedupe suppresses the watcher echo for our own
     // rewrites, so without this bump a tab pointing at a rewritten
@@ -6809,6 +6830,7 @@ export const fileOps = {
     return () => fileOps.downloadPathWithProgress(source.path, source.isDir, source.root);
   },
   async replaceFileAt(targetPath: string, picked: File): Promise<void> {
+    const selection = activeBrowserSelection();
     const draftsReason = fileBrowserDraftsPathReason(targetPath);
     if (draftsReason) {
       ui.status = `upload failed: ${draftsReason}`;
@@ -6840,7 +6862,7 @@ export const fileOps = {
         await refreshTabFromDisk(tab.tabId);
       }
       finishTransfer(xferId);
-      revealAndSelect(targetPath);
+      revealAndSelect(targetPath, selection);
       setTransientStatus(`Replaced '${targetPath}'`);
     } catch (e) {
       if ((e as Error).name === "AbortError") {
@@ -6866,6 +6888,7 @@ export const fileOps = {
     dropped: FileList | File[],
     root?: TransferRoot,
   ): Promise<void> {
+    const selection = activeBrowserSelection();
     const files = Array.from(dropped);
     if (files.length === 0) return;
     const seen = new Set<string>();
@@ -6951,7 +6974,7 @@ export const fileOps = {
       if (uploaded.length > 0) {
         forgetLinkKinds();
         if (uploadShowsInTree(root)) {
-          revealAndSelect(uploaded[uploaded.length - 1]!);
+          revealAndSelect(uploaded[uploaded.length - 1]!, selection);
         }
         setTransientStatus(
           uploaded.length === 1
@@ -7032,6 +7055,7 @@ export const fileOps = {
     }
   },
   async createDir(parentPath: string): Promise<void> {
+    const selection = activeBrowserSelection();
     const defaultValue = parentPath ? `${parentPath}/` : "";
     const path = await uiPathPrompt({
       title: "new directory",
@@ -7049,7 +7073,7 @@ export const fileOps = {
       // tab), so reveal the new directory and select it. Expands every
       // ancestor along the way so a `a/b/new-directory` create lands
       // visible even if `a` and `b` were collapsed.
-      revealAndSelect(path);
+      revealAndSelect(path, selection);
     } catch (e) {
       ui.status =
         reportUncertainOutcome("create", e, settleCreated) ??
@@ -7065,6 +7089,7 @@ export const fileOps = {
   /// kind detection via `effectiveKind`; this caller re-detects on the
   /// resolved path so the dispatch matches what the modal validated.
   async createFileOrDir(parentPath: string): Promise<void> {
+    const selection = activeBrowserSelection();
     const defaultValue = parentPath ? `${parentPath}/` : "";
     const next = await uiPathPrompt({
       title: "new file or directory (trailing / = directory)",
@@ -7087,7 +7112,7 @@ export const fileOps = {
       try {
         await api.create(next, true);
         await settleCreated();
-        revealAndSelect(next);
+        revealAndSelect(next, selection);
       } catch (e) {
         ui.status =
           reportUncertainOutcome("create", e, settleCreated) ??
@@ -7124,6 +7149,7 @@ export const fileOps = {
   /// might commit past it on Enter, so the confirm dialog is the
   /// second gate before any destructive overwrite.
   async rename(path: string, isDir = false): Promise<void> {
+    const selection = activeBrowserSelection();
     const next = await uiPathPrompt({
       title: "new path",
       defaultValue: path,
@@ -7133,7 +7159,7 @@ export const fileOps = {
     });
     if (!next || next === path) return;
     const target = isDir ? next : preserveExtension(path, next);
-    await performMove(path, target);
+    await performMove(path, target, "rename", selection);
   },
   /// Move a file or directory to a new path without prompting. Used
   /// by drag-and-drop in the file browser. Same file overwrite
@@ -7228,6 +7254,7 @@ export const fileOps = {
   /// that were refused, less any the server no longer has. A delete of every
   /// path clears the selection.
   async removeSelection(paths: readonly string[]): Promise<void> {
+    const selection = activeBrowserSelection();
     const unique = [...new Set(paths)];
     const targets = windowCaps.workspace
       ? unique.filter((p) => !unique.some((q) => p.startsWith(`${q}/`)))
@@ -7235,7 +7262,7 @@ export const fileOps = {
     if (targets.length === 0) return;
     if (targets.length === 1) {
       const path = targets[0]!;
-      if (await this.remove(path, isTreeDirectory(path))) fbClearSelection();
+      if (await this.remove(path, isTreeDirectory(path))) fbClearSelection(selection);
       return;
     }
     const dirs = targets.filter(isTreeDirectory).length;
@@ -7284,8 +7311,8 @@ export const fileOps = {
     // A path the server no longer has is not left selected: it is not in
     // the tree either.
     const kept = refused.filter((r) => !r.gone).map((r) => r.path);
-    if (kept.length === 0) fbClearSelection();
-    else fbSelectSet(kept);
+    if (kept.length === 0) fbClearSelection(selection);
+    else fbSelectSet(kept, undefined, selection);
     let refreshError: string | null = null;
     try {
       if (deleted.length > 0) await settleDeleted(deleted);
@@ -7308,13 +7335,14 @@ export const fileOps = {
   /// under the same directory, creates the file, refreshes the tree,
   /// and opens the new tab next to the source.
   async duplicateFile(path: string): Promise<void> {
+    const selection = activeBrowserSelection();
     try {
       const src = await api.read(path);
       const target = nextDuplicateName(path);
       await api.create(target, false, src.content);
       await settleCreated();
       await openInActivePane(target, { landAtTop: true });
-      revealAndSelect(target);
+      revealAndSelect(target, selection);
     } catch (e) {
       ui.status =
         reportUncertainOutcome("duplicate", e, settleCreated) ??

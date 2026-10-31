@@ -138,7 +138,7 @@ function mountInspector(path: string): HTMLElement {
 /// The directory name is the expand affordance: clicking it toggles the node.
 function expandDir(target: HTMLElement, name: string): void {
   const label = [...target.querySelectorAll<HTMLElement>(".name")].find(
-    (el) => el.textContent === `${name}/`,
+    (el) => el.textContent === name,
   );
   expect(label, `tree row for ${name}`).toBeDefined();
   label!.click();

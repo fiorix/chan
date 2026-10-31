@@ -20,7 +20,7 @@
   //   - `openAtCursor(x, y)` - anchor at the cursor, used by the
   //     parent's `oncontextmenu` so right-click feels native.
 
-  import type { Snippet } from "svelte";
+  import { tick, type Snippet } from "svelte";
   import { clampToViewport, triggerMenuX } from "./menuClamp";
   import { portal } from "./portal";
 
@@ -29,6 +29,7 @@
     width = 240,
     height = 256,
     showTrigger = true,
+    keyboardNavigation = false,
     onBeforeOpen,
     children,
   }: {
@@ -40,6 +41,7 @@
     /// The bubble still portals to <body> and dismisses on outside
     /// click as usual.
     showTrigger?: boolean;
+    keyboardNavigation?: boolean;
     onBeforeOpen?: () => void;
     children?: Snippet;
   } = $props();
@@ -116,6 +118,26 @@
     open = false;
   }
 
+  function focusItems(element: HTMLElement): { destroy(): void } {
+    if (keyboardNavigation) void tick().then(() => element.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus());
+    return { destroy() {
+      const owned = keyboardNavigation && element.contains(document.activeElement);
+      if (owned) void tick().then(() => { if (document.activeElement === document.body) triggerEl?.focus(); });
+    } };
+  }
+
+  function onMenuKeydown(e: KeyboardEvent): void {
+    if (!keyboardNavigation) return;
+    e.stopPropagation();
+    const buttons = [...(menuEl?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 : (index + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    } else if (e.key === "Tab") { e.preventDefault(); open = false; triggerEl?.focus(); }
+  }
+
   function onWindowMousedown(e: MouseEvent): void {
     if (!open) return;
     const target = e.target as HTMLElement | null;
@@ -165,6 +187,8 @@
     bind:this={menuEl}
     class="hamburger-menu"
     role="menu"
+    onkeydown={onMenuKeydown}
+    use:focusItems
     style="top: {pos.top}px; left: {pos.left}px; min-width: {width}px;"
     use:portal
   >

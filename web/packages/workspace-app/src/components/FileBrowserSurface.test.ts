@@ -22,6 +22,8 @@ vi.mock("../state/windowCaps", async (importOriginal) => ({
   },
 }));
 
+import { setBrowserVim } from "../state/browserKeys.svelte";
+import { api } from "../api/client";
 import FileBrowserSurface from "./FileBrowserSurface.svelte";
 import Pane from "./Pane.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -29,12 +31,15 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import { chordFor } from "../state/shortcuts";
 import {
   browserSelection,
+  fbTreeInstance,
+  fileOps,
+  fbClipboard,
+  fbClipboardClear,
   browserSidePanes,
   pathPromptState,
   refreshTree,
   resolvePathPrompt,
   refreshWorkspace,
-  workspace,
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, paneSide, type BrowserTab, type LeafNode } from "../state/tabs.svelte";
@@ -122,6 +127,8 @@ async function openFromTabStrip(tab: BrowserTab): Promise<void> {
 
 beforeEach(async () => {
   timers = trackTimers();
+  setBrowserVim(false);
+  fbClipboardClear();
   installDemoWorkspace({
     metadata: {
       workspaceRoot: "demo",
@@ -144,6 +151,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   caps.workspace = true;
   closeTabMenu();
   if (pathPromptState.open) resolvePathPrompt(null);
@@ -155,37 +163,27 @@ afterEach(async () => {
 });
 
 describe("the tab variant", () => {
-  test("has no header or trigger; the tab strip's right-click opens the menu", async () => {
+  test("has a toolbar menu; the tab strip's right-click also opens it", async () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab });
 
     expect(target.querySelector("header")).toBeNull();
-    expect(document.body.querySelector(".hamburger-trigger")).toBeNull();
+    expect(document.body.querySelector(".hamburger-trigger")).not.toBeNull();
     expect(menu()).toBeNull();
 
     await openFromTabStrip(tab);
     expect(menu()).not.toBeNull();
   });
 
-  test("the menu is the workspace rows, the stick toggles and Close, nothing else", async () => {
+  test("the menu exposes creation, selection, keymap, workspace and docking actions", async () => {
     const tab = seat(browserTab());
     await render({ variant: "tab", tab });
     await openFromTabStrip(tab);
-
-    const root = workspace.info?.root ?? "";
-    expect(root).not.toBe("");
     expect(menuRows()).toEqual([
-      workspace.info?.label ?? "",
-      root,
-      "---",
-      "Stick to left",
-      "Stick to right",
-      "---",
-      `Close ${chordFor("app.tab.close") ?? ""}`.trim(),
+      "New file or directory", "Upload files", "Selection actions Shift+F10", "Select multiple F8", "---",
+      "Show hidden files", "Vim keyboard navigation", "Keyboard shortcuts", "---", "Workspace details",
+      "Stick to left", "Stick to right", `Close ${chordFor("app.tab.close") ?? ""}`.trim(),
     ]);
-    const labelRow = menu()!.querySelector<HTMLElement>(".workspace-label-row")!;
-    expect(labelRow.title).toBe(root);
-    expect(labelRow.querySelector("input"), "the label is not editable").toBeNull();
   });
 
   test("Close closes the menu and hands the close to the host", async () => {
@@ -224,7 +222,7 @@ describe("the tab variant", () => {
     browserSelection.path = "notes/a.md";
     await openFromTabStrip(tab);
 
-    menuButton(workspace.info!.root).click();
+    menuButton("Workspace details").click();
     await settle();
     expect(browserSelection.path).toBeNull();
     expect(browserSelection.showWorkspace).toBe(true);
@@ -238,7 +236,7 @@ describe("the tab variant", () => {
     const onFlip = vi.fn();
     const target = await render({ variant: "tab", tab, onFlip });
 
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find((el) =>
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find((el) =>
       el.textContent?.includes("README.md"),
     );
     expect(row, "the tree listed the workspace").toBeDefined();
@@ -255,17 +253,21 @@ describe("the tab variant", () => {
 
 describe("clicking a row", () => {
   function clickRow(target: HTMLElement, name: string): void {
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
       (el) => el.querySelector(".name")?.textContent?.trim() === name,
     );
     row!.querySelector<HTMLElement>(".name")!.click();
   }
 
-  test("opens the inspector in a Files tab", async () => {
+  test("keeps details closed until explicitly opened", async () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab });
     expect(target.querySelector(".inspector")).toBeNull();
     clickRow(target, "README.md");
+    await settle();
+    expect(tab.inspectorOpen).toBe(false);
+    expect(target.querySelector(".inspector")).toBeNull();
+    target.querySelector<HTMLButtonElement>('[aria-label="Toggle details"]')!.click();
     await settle();
     expect(tab.inspectorOpen).toBe(true);
     expect(target.querySelector(".inspector")).not.toBeNull();
@@ -277,7 +279,7 @@ describe("graphs from the browser", () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab });
     await openFromTabStrip(tab);
-    menuButton(workspace.info!.root).click();
+    menuButton("Workspace details").click();
     await settle();
     return target;
   }
@@ -305,8 +307,8 @@ describe("graphs from the browser", () => {
     const target = await workspaceInspector();
     expect(await inspectorActions(target)).not.toContain("Graph from here");
 
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
-      (el) => el.querySelector(".name")?.textContent?.trim() === "notes/",
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
+      (el) => el.querySelector(".name")?.textContent?.trim() === "notes",
     );
     row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     await settle();
@@ -315,7 +317,7 @@ describe("graphs from the browser", () => {
     expect(labels).not.toContain("New Graph");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
-    const readme = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+    const readme = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
       (el) => el.querySelector(".name")?.textContent?.trim() === "README.md",
     );
     readme!.querySelector<HTMLElement>(".name")!.click();
@@ -328,7 +330,7 @@ describe("graphs from the browser", () => {
 
 describe("the tree's row menu", () => {
   async function rowMenu(target: HTMLElement, name: string): Promise<string[]> {
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
       (el) => el.querySelector(".name")?.textContent?.trim() === name,
     );
     expect(row, `the tree listed ${name}`).toBeDefined();
@@ -344,7 +346,7 @@ describe("the tree's row menu", () => {
   test("a directory row offers one New File or Directory entry, which opens the file-or-directory prompt there", async () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab, onFlip: vi.fn() });
-    const rows = await rowMenu(target, "notes/");
+    const rows = await rowMenu(target, "notes");
     expect(rows.filter((r) => /^New (File|Directory)/.test(r)), "no separate New File or New Directory").toEqual([
       "New File or Directory",
     ]);
@@ -374,7 +376,7 @@ describe("the dock variant", () => {
   test("has no header; a right-click on its body opens the menu at the cursor", async () => {
     const target = await render({ variant: "dock", side: "left" });
     expect(target.querySelector("header")).toBeNull();
-    expect(document.body.querySelector(".hamburger-trigger")).toBeNull();
+    expect(document.body.querySelector(".hamburger-trigger")).not.toBeNull();
 
     target
       .querySelector(".browser")!
@@ -392,12 +394,14 @@ describe("the dock variant", () => {
     await settle();
 
     const rows = menuRows();
-    expect(rows.slice(2)).toEqual(["Open in File Browser", "---", "Stick to left", "Stick to right"]);
+    expect(rows.slice(-4)).toEqual(["Open in File Browser", "Workspace details", "Stick to left", "Stick to right"]);
+    expect(rows.some((row) => row.startsWith("Close"))).toBe(false);
   });
 
-  test("Open in File Browser opens a tab on the selection with its ancestors expanded", async () => {
+  test("Open in File Browser opens a tab in the selection's directory", async () => {
     seat(browserTab({ id: "existing" }));
     const target = await render({ variant: "dock", side: "left" });
+    target.querySelector<HTMLElement>('[role="tree"]')!.focus();
     browserSelection.path = "notes/a.md";
     target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     await settle();
@@ -408,8 +412,8 @@ describe("the dock variant", () => {
     const opened = tabs.find((t) => t.kind === "browser" && t.id !== "existing") as BrowserTab;
     expect(opened).toBeDefined();
     expect(opened.inspectorOpen).toBe(true);
-    expect(opened.expanded).toEqual(["notes"]);
-    expect(opened.showWorkspace).toBe(false);
+    expect(opened.directory).toBe("notes");
+    expect(opened.showWorkspace).toBeFalsy();
     expect(browserSelection.path).toBe("notes/a.md");
   });
 
@@ -419,7 +423,7 @@ describe("the dock variant", () => {
     target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     await settle();
 
-    menuButton(workspace.info!.root).click();
+    menuButton("Workspace details").click();
     await settle();
     const tabs = (layout.nodes[layout.activePaneId] as LeafNode).tabs;
     const opened = tabs.find((t) => t.kind === "browser" && t.id !== "existing") as BrowserTab;
@@ -430,7 +434,7 @@ describe("the dock variant", () => {
 
   test("the tree's row menu carries no Flip", async () => {
     const target = await render({ variant: "dock", side: "left" });
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find((el) =>
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find((el) =>
       el.textContent?.includes("README.md"),
     );
     row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
@@ -451,7 +455,7 @@ describe("a Files tab inside a pane", () => {
     mounted.push(mount(Pane, { target, props: { pane: live } }));
     await settle();
 
-    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find((el) =>
+    const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find((el) =>
       el.textContent?.includes("README.md"),
     );
     expect(row, "the pane's browser listed the workspace").toBeDefined();
@@ -464,4 +468,181 @@ describe("a Files tab inside a pane", () => {
     await settle();
     expect(paneSide(layout.nodes[PANE] as LeafNode)).not.toBe(before);
   });
+});
+
+describe("directory navigation and keyboard interaction", () => {
+  function list(target: HTMLElement): HTMLElement { return target.querySelector<HTMLElement>('[role="listbox"]')!; }
+  function names(target: HTMLElement): string[] { return [...target.querySelectorAll('[role="option"] .name')].map((el) => el.textContent!.trim()); }
+  async function key(target: HTMLElement, key: string, modifiers: KeyboardEventInit = {}): Promise<KeyboardEvent> {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers });
+    target.dispatchEvent(event);
+    await settle();
+    return event;
+  }
+
+  test("arrows, ranges, independent marks, select all, and accessible focus share the displayed order", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const widget = list(target);
+    widget.focus();
+    await key(widget, "Home");
+    expect(tab.selected).toBe("notes");
+    await key(widget, "ArrowDown", { shiftKey: true });
+    expect(tab.selectedPaths).toEqual(["notes", "README.md"]);
+    expect(target.querySelectorAll('[aria-selected="true"]')).toHaveLength(2);
+    const cursor = document.getElementById(widget.getAttribute("aria-activedescendant")!);
+    expect(cursor?.textContent).toContain("README.md");
+    expect(document.activeElement).toBe(widget);
+    expect(target.querySelectorAll('[role="option"] button:not([tabindex="-1"])')).toHaveLength(0);
+    await key(widget, "F8");
+    await key(widget, "ArrowUp");
+    expect(tab.selectedPaths).toEqual(["notes", "README.md"]);
+    await key(widget, " ");
+    expect(tab.selectedPaths).toEqual(["README.md"]);
+    expect(tab.selected).toBe("notes");
+    await key(widget, "a", { ctrlKey: true });
+    expect(tab.selectedPaths).toEqual(["notes", "README.md"]);
+    expect((await key(widget, "Tab")).defaultPrevented).toBe(false);
+  });
+
+  test("keyboard menus move focus, dismiss back to the list, and rename the focused file", async () => {
+    const target = await render({ variant: "tab", tab: seat(browserTab()) });
+    const widget = list(target);
+    await key(widget, "End");
+    await key(widget, "F10", { shiftKey: true });
+    const actions = document.querySelector<HTMLElement>('.ctx')!;
+    expect(actions.contains(document.activeElement)).toBe(true);
+    const first = document.activeElement;
+    await key(actions, "ArrowDown");
+    expect(document.activeElement).not.toBe(first);
+    await key(actions, "Escape");
+    expect(document.querySelector('.ctx')).toBeNull();
+    expect(document.activeElement).toBe(widget);
+    await key(widget, "F2");
+    expect(pathPromptState.open).toBe(true);
+    expect(pathPromptState.defaultValue).toBe("README.md");
+  });
+
+  test("Enter navigates folders, Back restores selection, and filtering keeps focus in its input", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const widget = list(target);
+    await key(widget, "Home");
+    await key(widget, "Enter");
+    expect(tab.directory).toBe("notes");
+    expect(names(target)).toEqual(["a.md"]);
+    expect(target.querySelector('[aria-current="location"]')?.textContent).toBe("notes");
+    target.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.click();
+    await settle();
+    expect(tab.directory).toBe("");
+    expect(tab.selected).toBe("notes");
+    await key(widget, "/");
+    const input = target.querySelector<HTMLInputElement>('[aria-label="Filter this folder"]')!;
+    expect(document.activeElement).toBe(input);
+    input.value = "read";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    expect(names(target)).toEqual(["README.md"]);
+    expect(document.activeElement).toBe(input);
+    await key(input, "Escape");
+    expect(names(target)).toEqual(["notes", "README.md"]);
+    expect(document.activeElement).toBe(widget);
+  });
+
+  test("optional Vim is scoped to the widget and resets its prefix on focus loss", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const widget = list(target);
+    setBrowserVim(true);
+    await key(widget, "G");
+    expect(tab.selected).toBe("README.md");
+    await key(widget, "g");
+    const input = target.querySelector<HTMLInputElement>('[aria-label="Filter this folder"]')!;
+    input.focus();
+    expect((await key(input, "j")).defaultPrevented).toBe(false);
+    expect(tab.selected).toBe("README.md");
+    widget.focus();
+    await key(widget, "g");
+    expect(tab.selected).toBe("README.md");
+    await key(widget, "g");
+    expect(tab.selected).toBe("notes");
+    await key(widget, "j");
+    await key(widget, "y");
+    expect(fbClipboard.paths).toEqual(["README.md"]);
+  });
+
+  test("a dock and a tab keep separate selections and copy from the focused surface", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const dock = await render({ variant: "dock", side: "left" });
+    const widget = list(target);
+    widget.focus();
+    await key(widget, "End");
+    const dockTree = dock.querySelector<HTMLElement>('[role="tree"]')!;
+    dockTree.focus();
+    await key(dockTree, "Home");
+    expect(tab.selected).toBe("README.md");
+    expect(fbTreeInstance("fb-dock-left")!.selection.path).toBe("notes");
+    await key(dockTree, "c", { ctrlKey: true });
+    expect(fbClipboard.paths).toEqual(["notes"]);
+    widget.focus();
+    await key(widget, "c", { ctrlKey: true });
+    expect(fbClipboard.paths).toEqual(["README.md"]);
+    expect(dock.querySelector('[aria-selected="true"]')?.textContent).toContain("notes");
+  });
+});
+
+test("the toolbar menu supports keyboard movement and returns focus to its trigger", async () => {
+  const target = await render({ variant: "tab", tab: seat(browserTab()) });
+  const trigger = target.querySelector<HTMLButtonElement>(".hamburger-trigger")!;
+  trigger.focus(); trigger.click();
+  await settle();
+  expect(menu()!.contains(document.activeElement)).toBe(true);
+  const first = document.activeElement;
+  document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", {key:"ArrowDown",bubbles:true,cancelable:true}));
+  expect(document.activeElement).not.toBe(first);
+  document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape",bubbles:true,cancelable:true}));
+  await settle();
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+test("a rename finishing after focus moves keeps the result on its original surface", async () => {
+  const tab = seat(browserTab({selected:"README.md"}));
+  const target = await render({ variant: "tab", tab });
+  const dock = await render({ variant: "dock", side:"left" });
+  target.querySelector<HTMLElement>('[role="listbox"]')!.focus();
+  const pending = fileOps.rename("README.md");
+  await settle();
+  dock.querySelector<HTMLElement>('[role="tree"]')!.focus();
+  browserSelection.path = "notes";
+  browserSelection.paths = ["notes"];
+  resolvePathPrompt("notes/RENAMED.md");
+  await pending;
+  await settle();
+  expect(tab.selected).toBe("notes/RENAMED.md");
+  expect(tab.directory).toBe("notes");
+  expect(document.activeElement).toBe(dock.querySelector('[role="tree"]'));
+  expect(fbTreeInstance("fb-dock-left")!.selection.path).toBe("notes");
+});
+
+test("a root refresh reloads the open directory without losing its selection", async () => {
+  const tab = seat(browserTab({directory:"notes",selected:"notes/a.md",selectedPaths:["notes/a.md"]}));
+  const target = await render({variant:"tab",tab});
+  expect(target.querySelector('[role="option"] .name')?.textContent).toBe("a.md");
+  await refreshTree();
+  await settle();
+  expect(target.querySelector('[role="option"] .name')?.textContent).toBe("a.md");
+  expect(tab.selectedPaths).toEqual(["notes/a.md"]);
+  expect(tab.selected).toBe("notes/a.md");
+});
+
+test("a failed directory listing stays bounded and offers an explicit retry", async () => {
+  const list = api.list;
+  const calls = vi.spyOn(api,"list").mockImplementation((dir) => dir === "notes" ? Promise.reject(new Error("permission denied")) : list(dir));
+  const target = await render({variant:"tab",tab:seat(browserTab({directory:"notes"}))});
+  await settle(12);
+  expect(calls.mock.calls.filter(([dir]) => dir === "notes")).toHaveLength(1);
+  expect(target.textContent).toContain("permission denied");
+  expect(target.querySelector(".retry")?.textContent).toContain("Retry");
 });

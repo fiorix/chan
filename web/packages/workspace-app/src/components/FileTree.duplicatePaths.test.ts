@@ -14,7 +14,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
-import { tree } from "../state/store.svelte";
+import { tree, browserSidePanes } from "../state/store.svelte";
 import { openBrowserInActivePane } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -28,18 +28,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  browserSidePanes.left = false;
   await unmountApp();
 });
 
-function row(path: string): HTMLElement | undefined {
-  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].find((el) => {
-    const title = el.title.replace(/ \(.*\)$/, "");
-    return title === path || title.endsWith(`/${path}`);
-  });
-}
-
 function rows(path: string): number {
-  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].filter((el) => {
+  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"], [role="option"]')].filter((el) => {
     const title = el.title.replace(/ \(.*\)$/, "");
     return title === path || title.endsWith(`/${path}`);
   }).length;
@@ -55,16 +49,19 @@ describe("the Files tree", () => {
   });
 
   test("draws a folder once when its own entry follows a file inside it", async () => {
+    browserSidePanes.left = true;
+    await settle();
     tree.entries = [
       ...tree.entries,
       { path: "docs/b.md", is_dir: false, kind: "document", size: 5, mtime: 100 },
       { path: "docs", is_dir: true, size: 0, mtime: 100 },
     ];
     await settle();
-    row("docs")!.querySelector<HTMLButtonElement>("button.twirl")!.click();
+    document.querySelector<HTMLButtonElement>('[role="tree"] button.twirl')!.click();
     await settle();
 
-    expect(rows("docs")).toBe(1);
+    const dock = document.querySelector('[role="tree"]')!;
+    expect(dock.querySelectorAll('[role="treeitem"][aria-expanded]')).toHaveLength(1);
     expect(rows("docs/b.md")).toBe(1);
   });
 });

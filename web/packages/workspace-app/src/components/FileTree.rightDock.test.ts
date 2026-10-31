@@ -58,8 +58,8 @@ async function render(props: ComponentProps<typeof FileBrowserSurface>): Promise
 }
 
 function dirRow(target: HTMLElement, name: string): HTMLElement {
-  const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem']")].find(
-    (el) => el.querySelector(".name")?.textContent?.trim() === `${name}/`,
+  const row = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
+    (el) => el.querySelector(".name")?.textContent?.trim() === name,
   );
   if (!row) throw new Error(`no directory row ${name}`);
   return row;
@@ -104,7 +104,7 @@ describe("any other placement", () => {
       expect(target.querySelector(".tree")!.classList.contains("right-dock")).toBe(false);
       const notes = dirRow(target, "notes");
       expect(notes.getAttribute("style")).toMatch(/^padding-left:/);
-      expect(chevron(notes)).toBe("lucide-chevron-right");
+      expect(chevron(notes)).toBe(props.variant === "tab" ? "" : "lucide-chevron-right");
     });
   }
 });

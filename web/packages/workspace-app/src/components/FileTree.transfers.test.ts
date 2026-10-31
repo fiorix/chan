@@ -53,7 +53,7 @@ async function openFilesTab(): Promise<void> {
 }
 
 function row(path: string): HTMLElement | undefined {
-  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].find((el) => {
+  return [...document.querySelectorAll<HTMLElement>('[role="treeitem"], [role="option"]')].find((el) => {
     const title = el.title.replace(/ \(.*\)$/, "");
     return title === path || title.endsWith(`/${path}`);
   });
