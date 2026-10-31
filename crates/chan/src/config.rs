@@ -1226,14 +1226,14 @@ mod tests {
         let mut server = ServerConfig::default();
         assert_eq!(
             read_config_key(&editor, &server, "server.terminal.tmux.enabled").unwrap(),
-            serde_json::json!(true)
+            serde_json::json!(false)
         );
         assert_eq!(
             read_config_key(&editor, &server, "terminal.tmux.trust").unwrap(),
             serde_json::json!([])
         );
-        write_server_config_key(&mut server, "terminal.tmux.enabled", "false").unwrap();
-        assert!(!server.terminal.tmux.enabled);
+        write_server_config_key(&mut server, "terminal.tmux.enabled", "true").unwrap();
+        assert!(server.terminal.tmux.enabled);
         write_server_config_key(
             &mut server,
             "terminal.tmux.trust",
@@ -1245,7 +1245,7 @@ mod tests {
             vec!["ssh", "mosh-client", "et.v2"]
         );
         assert!(
-            !server.terminal.tmux.enabled,
+            server.terminal.tmux.enabled,
             "the list write keeps the switch"
         );
         for (raw, word) in [

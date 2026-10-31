@@ -347,7 +347,7 @@
 >
   <PillToggle
     label="tmux control mode (tmux -CC)"
-    checked={prefs.terminal.tmux?.enabled ?? true}
+    checked={prefs.terminal.tmux?.enabled ?? false}
     ontoggle={(on) =>
       commit((p) => ({
         ...p,

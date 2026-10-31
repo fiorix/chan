@@ -1553,28 +1553,28 @@ mod tests {
         let state = make_test_state(false);
         assert_eq!(
             terminal_as_read(&state)["tmux"],
-            json!({ "enabled": true, "trust": [] })
+            json!({ "enabled": false, "trust": [] })
         );
-        assert!(state.terminal_sessions.tmux_config().enabled);
+        assert!(!state.terminal_sessions.tmux_config().enabled);
 
         let mut terminal = terminal_as_read(&state);
-        terminal["tmux"] = json!({ "enabled": false, "trust": ["ssh"] });
+        terminal["tmux"] = json!({ "enabled": true, "trust": ["ssh"] });
         let saved = std::cell::Cell::new(None);
         write_terminal_saving(&state, terminal, |config| {
             saved.set(Some(config.terminal.tmux.clone()));
             Ok(())
         });
         let stored = saved.take().expect("the write reaches server.toml");
-        assert!(!stored.enabled);
+        assert!(stored.enabled);
         assert_eq!(stored.trust, vec!["ssh"]);
         let live = state.terminal_sessions.tmux_config();
-        assert!(!live.enabled, "the write reaches the registry");
+        assert!(live.enabled, "the write reaches the registry");
         assert_eq!(live.trust, vec!["ssh"]);
 
         let mut terminal = terminal_as_read(&state);
-        terminal["tmux"] = json!({ "enabled": true, "trust": ["ssh"] });
+        terminal["tmux"] = json!({ "enabled": false, "trust": ["ssh"] });
         write_terminal(&state, terminal);
-        assert!(state.terminal_sessions.tmux_config().enabled);
+        assert!(!state.terminal_sessions.tmux_config().enabled);
     }
 
     #[test]

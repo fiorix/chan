@@ -208,7 +208,7 @@ export type TerminalPreferences = {
   /// terminal sessions. On by default; changes apply to existing sessions.
   program_status?: boolean;
   /// tmux control mode: whether a terminal honors the marker `tmux -CC`
-  /// prints (on by default; a change applies to new markers in every
+  /// prints (off by default; a change applies to new markers in every
   /// terminal and leaves a running connection alone) and the foreground
   /// program names trusted to enter without a question, which Settings does
   /// not edit. Optional on the wire so older servers (no field) deserialize

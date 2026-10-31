@@ -184,6 +184,11 @@ export default {
     if (!tmuxInstalled()) ctx.skip("tmux is not installed");
     try { execFileSync("tmux", ["-L", SOCKET, "kill-server"], { stdio: "ignore" }); } catch {}
     const chanHome = mkdtempSync(join(tmpdir(), "chan-tmux-195-"));
+    // The marker is off by default; this check's devserver turns it on.
+    execFileSync(ctx.chanBin, ["config", "set", "terminal.tmux.enabled", "true"], {
+      env: { ...process.env, CHAN_HOME: chanHome },
+      stdio: "ignore",
+    });
     const devserver = spawnDevserver(ctx.chanBin, chanHome);
     const pages = [];
     try {

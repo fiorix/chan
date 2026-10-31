@@ -32,7 +32,7 @@ describe("Settings > Terminal > tmux control mode", () => {
   afterEach(closeSettings);
 
   test.each([
-    [undefined, true],
+    [undefined, false],
     [true, true],
     [false, false],
   ] as const)("reads stored value %s as %s", async (stored, expected) => {
@@ -56,8 +56,8 @@ describe("Settings > Terminal > tmux control mode", () => {
     const { target, writes, requests } = await openSettings("Terminal", config(undefined));
     row(target).toggle.click();
     await landed(requests, requests.length + 2);
-    expect(writes).toEqual([{ terminal: { ...TERMINAL, tmux: { enabled: false } } }]);
-    expect(row(target).toggle.checked).toBe(false);
+    expect(writes).toEqual([{ terminal: { ...TERMINAL, tmux: { enabled: true } } }]);
+    expect(row(target).toggle.checked).toBe(true);
   });
 
   test("a refused PATCH leaves the stored choice and shows the refusal", async () => {

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { spawn, execFile } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -66,6 +66,11 @@ const devHome = path.join(work, "devserver-home");
 const socket = path.join(work, "tmux.sock");
 const base = fixture?.base ?? `http://127.0.0.1:${await port()}`;
 fs.mkdirSync(devHome);
+if (!fixture) {
+  // The marker is off by default; the direct devserver turns it on. The gateway
+  // fixture's devserver is configured by gateway-zone.sh before it starts.
+  execFileSync(chan, ["config", "set", "terminal.tmux.enabled", "true"], { env: { ...process.env, CHAN_HOME: devHome }, stdio: "ignore" });
+}
 const server = fixture ? null : spawn(chan, ["devserver", "run", "--service=none", "--bind=127.0.0.1", `--port=${new URL(base).port}`], {
   env: { ...process.env, CHAN_HOME: devHome }, stdio: ["ignore", "pipe", "pipe"],
 });
