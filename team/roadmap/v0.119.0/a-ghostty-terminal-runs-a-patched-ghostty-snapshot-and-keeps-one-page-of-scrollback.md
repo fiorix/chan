@@ -1,6 +1,6 @@
 # A ghostty terminal runs a patched Ghostty snapshot and keeps one page of scrollback
 
-Status: built on 2026-10-31 at the owner's word ("let's do Option A") and placed in v0.119.0 the same day by the owner's word ("this isn't going onto v0.118, this will be in the next version"), rebased onto the v0.118.0 GA as `v0119/ghostty-vt-wasm`; awaiting review and the owner's reading on macOS.
+Status: built on 2026-10-31 at the owner's word ("let's do Option A") and placed in v0.119.0 the same day by the owner's word ("this isn't going onto v0.118, this will be in the next version"), rebased onto the v0.118.0 GA as `v0119/ghostty-vt-wasm`; the owner's macOS reading passed at `13da87ba9` on 2026-10-31 (the section macOS verification). Awaiting review; the actual gateway transport remains untested on macOS.
 
 Record before the release: raised by the owner on 2026-10-31 while weighing an invitation to Ghostty's author to read chan's terminal code; investigated, built and tested the same day.
 
@@ -31,7 +31,7 @@ A ghostty terminal runs Ghostty's own release build of libghostty-vt, pinned by 
 - Browser checks in Chrome on the Linux host on the v0.118.0 GA base (ghostty is the default backend, so each runs on the new core): 93 secret masking, 94 the ghostty toggle (wasm fetched, canvas, keys, OSC 52 copy), 97 mouse, 105 appearance, 107 rename, 164 CLI terminal reload, 175 details passed. On the earlier `0.118.0-ga` base 164 failed on the old Files tree selector before reaching a terminal, which [filesel] fixed in v0.118.0.
 - Whole workspace-app suite on the v0.118.0 GA base: 620 files, 8,000 tests passed; `svelte-check` 0 errors; production build emits the 1,191,241-byte vendored wasm only.
 - At `0d632058d` (the [ghidle] repair on the branch), rerun on the Linux host on 2026-10-31: the whole workspace-app suite 620 files, 8,002 tests passed; browser checks 93, 94, 97, 105, 107, 164 and 175 green in Chrome against the debug binary and bundle rebuilt at that commit.
-- WebKit's engine, short of a WebKit page: JavaScriptCore's shell from WebKitGTK 2.54.2 on the Linux host (`/usr/lib/webkit2gtk-4.1/jsc`, the JS and wasm engine WKWebView and WebKitGTK embed) compiled the vendored wasm (196 exports) and ran the binding bundled by rolldown as a plain script: the two callbacks installed through the core's function table took indices 160 and 161 and fired (`ESC [ 6 n` answered `ESC [ 4 ; 1 R`, `ESC [ c` answered `ESC [ ? 62 ; 22 c` through the device-attributes callback), the row reference passed as a BigInt read the wrap flag of a wrapped row and not of a plain one, a 20 by 4 terminal rendered `hello` in red and a 26-character line over two rows, and after six more lines the first history row read back. The harness and its output are in the branch's proofs directory (`dev/ghostty-vt/proofs/jsc/`, mirrored at the round's close). A WKWebView or WebKitGTK page remains unrun; the owner's macOS reading over the gateway is that proof.
+- WebKit's engine, short of a WebKit page: JavaScriptCore's shell from WebKitGTK 2.54.2 on the Linux host (`/usr/lib/webkit2gtk-4.1/jsc`, the JS and wasm engine WKWebView and WebKitGTK embed) compiled the vendored wasm (196 exports) and ran the binding bundled by rolldown as a plain script: the two callbacks installed through the core's function table took indices 160 and 161 and fired (`ESC [ 6 n` answered `ESC [ 4 ; 1 R`, `ESC [ c` answered `ESC [ ? 62 ; 22 c` through the device-attributes callback), the row reference passed as a BigInt read the wrap flag of a wrapped row and not of a plain one, a 20 by 4 terminal rendered `hello` in red and a 26-character line over two rows, and after six more lines the first history row read back. The harness and its output are in the branch's proofs directory (`dev/ghostty-vt/proofs/jsc/`, mirrored at the round's close). This earlier run did not exercise a WKWebView or WebKitGTK page; the macOS verification below supplies the WKWebView reading.
 - A shared instance under the new build leaves 0 stale cells after a freed terminal (2,365 under the pinned build). Memory per instance: 0.4 MiB plus 1.3 MiB for an empty 120x40 terminal (pinned build: 1.2 plus 6.6 MiB); after 11,000 lines, 13.9 MiB holding 10,960 lines of history (pinned build: 8.6 MiB holding 716).
 - Throughput through the same binding API, Node 26 (V8), 16 MiB per corpus, 120x40, median of three:
 
@@ -45,6 +45,19 @@ A ghostty terminal runs Ghostty's own release build of libghostty-vt, pinned by 
 | Unicode, read rows each 64K   | 19 MiB/s     | 59 MiB/s       |
 
 The upstream build does this while keeping fifteen times the history. The "read rows" figures include the binding's copy of every row ghostty-web asks for, so they bound the JS side as much as the core.
+
+## macOS verification, 2026-10-31
+
+Tested the clean `13da87ba9` tree on macOS 27.0.1. A freshly built debug chan-desktop reported `git-13da87ba9f34` and ran with a disposable `CHAN_HOME` and a separate `XDG_RUNTIME_DIR` for its handoff socket. The local workspace held only the terminal probes. A second workspace ran in an Ubuntu 24.04 sdme container in the local Lima VM, with its own `CHAN_HOME`, a Rust 1.95.0 `chan --no-default-features` debug build from the same source and the same freshly built web bundles. The desktop reached that devserver through a loopback SSH forward, not through chan-gateway.
+
+- macOS JavaScriptCore's shell ran the transpiled binding against the pinned wasm, using ASCII-only encoder/decoder shims for the shell's missing Web APIs. Callback slots 160 and 161 answered DSR 6 and DA1; BigInt row references distinguished a wrapped continuation from a plain row; screen and history rows read back; 3,000 input lines retained 2,976 history rows in a 24-row terminal, with `line 0` still the oldest.
+- In the actual WKWebView terminal, DSR 6 at row 3, column 7 answered `ESC [ 3 ; 7 R`, DSR 5 answered `ESC [ 0 n`, and DA1 answered `ESC [ ? 62 ; 22 c`. All three passed in both the local workspace and the sdme-backed workspace.
+- The owner confirmed that the local 4,000-line history probe retained its start marker and that a long wrapped line remained intact when the window narrowed and widened and could be selected and copied from history.
+- The owner confirmed the xterm-to-Ghostty Settings switch worked, then confirmed focus recovery and sleep/wake worked. The focus evidence and its limits are recorded in [ghidle].
+- The wasm fetched through the sdme workspace's authenticated HTTP surface was 1,191,241 bytes with SHA-256 `2b76c02544cf52fa28f9583e85f527e8f840001b9ed391e93b5921f181573155`, matching the vendored pin.
+- On macOS, the whole workspace-app suite passed: 620 files, 8,002 tests. The two targeted core/backend files also passed, 61 tests. `svelte-check` reported 0 errors and 0 warnings; the production web bundles, native debug desktop and Linux debug devserver built successfully. Browser checks 93, 94, 97, 105, 107, 164 and 175 were not rerun in this session; their Linux results above are the existing evidence.
+
+This supplies the native WKWebView page reading missing from the earlier JavaScriptCore-only run. It does not establish gateway reconnect behavior or reproduce the original intermittent idle-keys failure.
 
 ## Not done here
 
