@@ -142,6 +142,19 @@ describe("after AltGr or a dead key", () => {
     expect(sequence(LINUX, [dead, { key: "é", code: "KeyE", keyCode: 0 }]).at(-1)).toEqual({ kind: "ghostty" });
   });
 
+  test("macOS: a dead key composed by the input source, then an ASCII Option character, ends it", () => {
+    const dead: Init = { key: "Dead", code: "Equal", keyCode: 187 };
+    const composing: Init = { key: "Process", code: "KeyE", keyCode: 229 };
+    const at: Init = { key: "@", code: "KeyL", keyCode: 76, altKey: true };
+    const enter: Init = { key: "Enter", code: "Enter", keyCode: 13 };
+    expect(sequence(MAC, [dead, composing, at, enter])).toEqual([
+      { kind: "browser" },
+      { kind: "ghostty" },
+      { kind: "send", data: "@" },
+      { kind: "send", data: "\r" },
+    ]);
+  });
+
   test.each([
     ["h", { key: "h", code: "KeyH", keyCode: 72 }, { kind: "ghostty" }],
     ["Enter", { key: "Enter", code: "Enter", keyCode: 13 }, { kind: "send", data: "\r" }],

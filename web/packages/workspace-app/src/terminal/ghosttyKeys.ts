@@ -73,8 +73,11 @@ export function ghosttyKeydownAction(
   // Option is Meta on macOS, as chan runs xterm.js, except where a layout
   // puts a printable ASCII character on Option (@, [ and | on a German or a
   // French layout): that character types itself, as ghostty-web typed it.
-  // A US layout's Option characters are all outside ASCII, so it keeps Meta.
+  // A US layout keeps Meta: its Option characters are outside ASCII but for
+  // Option+Shift+` (a backquote, where xterm.js sends ESC ~).
   if (ctx.platform.isMac && ev.altKey && !ev.ctrlKey && !ev.metaKey && isOptionAscii(ev.key)) {
+    // Typing it ends a pending dead key, as any typed key does.
+    state.deadKey = false;
     return { kind: "send", data: ev.key };
   }
   const decision = xtermKeydown(
