@@ -1,6 +1,8 @@
 # The Files tab overflows its pane and hides the tab strip
 
-Status: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop on macOS showing a devserver window of the Linux machine; accepted for v0.117.1 as a patch and built the same day on `0.117.0-ga` (the section Built); the owner's reading on macOS is pending.
+Status: shipped in [v0.117.1](../../release/release-v0.117.1.md); the section Built, 2026-10-31 holds the cause, the one-line fix and browser check 196, red on the v0.117.0 tree and green with the fix. Not read by eye in WKWebView or WebKitGTK before the cut; the owner reads it on macOS.
+
+Record before the release: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop on macOS showing a devserver window of the Linux machine; accepted for v0.117.1 as a patch and built the same day on `0.117.0-ga` (the section Built); the owner's reading on macOS is pending.
 
 ## What was asked
 

@@ -1,6 +1,8 @@
 # A tmux card from a devserver feed has no record and no actions
 
-Status: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop on macOS connected to the Linux machine's devserver through the gateway; accepted for v0.117.1 as a patch, not started.
+Status: carried into v0.118.0 at the v0.117.1 GA on 2026-10-31, not started: the owner's word at the patch was "the tmux case im less concerned with, the file browser we must fix now".
+
+Record before the release: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop on macOS connected to the Linux machine's devserver through the gateway; accepted for v0.117.1 as a patch, not started.
 
 ## What was asked
 

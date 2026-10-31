@@ -21,18 +21,6 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.117.1
-
-Opened 2026-10-31 after the v0.117.0 publication for the bugs the owner found in its first hours, to ship as a patch: the Files tab's directory view overflows its pane card and, in WebKit, scrolls the pane's tab strip and the Details header out of view with its status bar short of the bottom ([filesovf]); and a `tmux -CC` connection made on a devserver's terminal reaches a connected desktop as window rows with no connection record, so its launcher card has no title, no session line and no new-window or detach action ([tmuxfed]).
-
-| Item | State | Next |
-| --- | --- | --- |
-| [Files tab overflows its pane][filesovf] | built | review |
-| [tmux card from a devserver feed has no actions][tmuxfed] | accepted | build |
-
-[filesovf]: v0.117.1/the-files-tab-overflows-its-pane-and-hides-the-tab-strip.md
-[tmuxfed]: v0.117.1/a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions.md
-
 ### v0.118.0
 
 Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt by the owner's word of 2026-10-31 ("Carry all three to v0.118.0 unbuilt"): browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), carried a third time; a local desktop terminal's `cs tunnel` names its failure only in a toast and times out ([tuntoast]), carried a second time; and a ghostty terminal that stops taking keys after idle ([ghidle]), still proposed with no reproduction. Two rows were raised at the GA from the browser suite's run against the release tree in the Linux guest: a browser client cannot open a tmux connection's control window, which the card model mints hidden, so the source window keeps the control tab and check 195 fails at that step ([tmuxbrw]); and the Files tab's directory view replaced the tree the browser suite's file-browser checks drive, so those checks fail on their tree selectors ([filesel]).
@@ -44,7 +32,9 @@ Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt b
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
 | [ghostty stops taking keys after idle][ghidle] | proposed | measure |
+| [tmux card from a devserver feed has no actions][tmuxfed] | accepted | build |
 
+[tmuxfed]: v0.118.0/a-tmux-card-from-a-devserver-feed-has-no-record-and-no-actions.md
 [tmuxbrw]: v0.118.0/a-browser-client-cannot-open-a-tmux-connections-control-window.md
 [filesel]: v0.118.0/browser-checks-drive-the-files-tree-the-directory-view-replaced.md
 [chk95]: v0.118.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
@@ -52,6 +42,12 @@ Opened 2026-10-31 at the v0.117.0 GA, which carries three rows into it unbuilt b
 [ghidle]: v0.118.0/a-ghostty-terminal-stops-taking-keys-after-idle.md
 
 ## Completed
+
+### v0.117.1
+
+Shipped 2026-10-31; see [release-v0.117.1](../release/release-v0.117.1.md). A patch over v0.117.0 cut the same day from the bugs the owner found in the release's first hours: of its two rows, the Files tab's overflow of its pane card shipped, in [`done/`](done/), and the tmux card from a devserver feed moved to v0.118.0 unbuilt by the owner's word.
+
+- [the-files-tab-overflows-its-pane-and-hides-the-tab-strip](done/the-files-tab-overflows-its-pane-and-hides-the-tab-strip.md) - The Files tab overflows its pane and hides the tab strip.
 
 ### v0.117.0
 

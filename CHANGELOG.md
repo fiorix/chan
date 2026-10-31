@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.117.1] - 2026-10-31
+
+v0.117.1 is a patch over v0.117.0: the Files tab no longer hides its pane's tab strip.
+
+### Fixed
+
+- **A Files tab hid its pane's tab strip and sibling tabs, with the Details header cut off and the status bar short of the bottom.** The folder list's scroller was not a positioned box, so the pane counted the whole list as its own overflow and WebKit (chan-desktop on macOS, WebKitGTK) scrolled the pane to a focused row. The scroller is positioned now, so the list scrolls inside it and the strip stays.
+
 ## [v0.117.0] - 2026-10-31
 
 v0.117.0 ships a `tmux -CC` client, shown as a card in the launcher's Computers carousel with one chan window per tmux window; the terminal background opacity on every window's terminal tabs; ghostty as the default terminal backend on every platform; and a Files tab that shows one directory at a time with breadcrumbs, history, a filter and desktop and Vim keymaps. Beside them ghostty takes an image paste and a bare Ctrl+V as xterm.js does, and select popups follow the dark theme off macOS.
