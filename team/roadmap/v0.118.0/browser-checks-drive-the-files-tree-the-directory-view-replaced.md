@@ -1,6 +1,6 @@
 # Browser checks drive the Files tree the directory view replaced
 
-Status: raised at the v0.117.0 GA on 2026-10-31 from the whole browser suite's run against the release tree in the Linux sdme guest; proposed, next the owner's decision to migrate the checks to the directory view.
+Status: accepted for v0.118.0 by the owner's survey answer of 2026-10-31 (the section Owner's decision), not started: the twenty-three checks migrate to the directory view through one shared open-by-path helper. Raised at the v0.117.0 GA on 2026-10-31 from the whole browser suite's run against the release tree in the Linux sdme guest.
 
 ## What was asked
 
@@ -18,3 +18,7 @@ The suite drives the Files tab as the product now presents it: a directory listi
 
 1. The twenty-three checks above pass alone and in the whole suite in the Linux guest against the release tree or later.
 2. The suite's reds are the ones recorded at `main` and no other.
+
+## Owner's decision, 2026-10-31
+
+Surveyed in the owner's window on 2026-10-31 with three options: migrate the twenty-three checks to the directory view; point the checks at a docked browser, which keeps the tree; defer to v0.119.0. The answer, in the survey's words: "1 Migrate the 23 checks to the directory view (recommended)". So the Desired contract stands as written: one shared helper opens a file by path from a Files tab (the breadcrumbs or the path field, then the row) and replaces the per-check tree walks, `lib/drafts.mjs` reads the Drafts group where the directory view shows it, and check 170's precondition is read again against the new inspector with the migration.

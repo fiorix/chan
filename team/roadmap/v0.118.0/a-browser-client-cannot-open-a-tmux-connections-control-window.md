@@ -1,6 +1,6 @@
 # A browser client cannot open a tmux connection's control window
 
-Status: raised at the v0.117.0 GA on 2026-10-31 from browser check 195's first runs against the release tree in the Linux sdme guest; proposed, next the owner's decision on what a browser client shows for the control terminal.
+Status: accepted for v0.118.0 by the owner's survey answer of 2026-10-31 (the section Owner's decision), not started: a browser client keeps the control tab in the source window while the connection runs, and check 195 models that. Raised at the v0.117.0 GA on 2026-10-31 from browser check 195's first runs against the release tree in the Linux sdme guest.
 
 ## What was asked
 
@@ -18,3 +18,7 @@ To decide: either a browser client keeps the control terminal in the source wind
 
 1. Check 195 green alone and in the whole suite in the Linux guest, modelling the chosen browser behaviour.
 2. The connection's end in a browser leaves the source window's terminal a plain, typing terminal.
+
+## Owner's decision, 2026-10-31
+
+Surveyed in the owner's window on 2026-10-31 with three options: keep the control tab in the source window in a browser; open the control window in the browser too; defer to v0.119.0. The answer, in the survey's words: "1 Keep the control tab in the source window (recommended)". So the contract is the first arm of the Desired contract: a browser client keeps the control terminal in the source window while the connection runs, no control page exists in a browser, and check 195 models that (the source keeps its tab, the control-mode chrome assertions go). The connection's end must still leave that terminal a plain, typing terminal: `control_release` goes to the source page's tab. The desktop's hidden control window is unchanged.

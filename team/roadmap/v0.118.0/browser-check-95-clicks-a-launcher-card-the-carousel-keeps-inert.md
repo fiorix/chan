@@ -1,6 +1,6 @@
 # Browser check 95 clicks a launcher card the carousel keeps inert
 
-Status: carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"), not started: the check is still red alone at the GA's base and tip.
+Status: to be built in v0.118.0 in the browser-suite lane beside the Files-tree migration, by the owner's survey answer of 2026-10-31 (the section Owner's decision); not started. Carried into v0.118.0 at the v0.117.0 GA on 2026-10-31 by the owner's word ("Carry all three to v0.118.0 unbuilt"): the check is still red alone at the GA's base and tip.
 
 Record before the release: carried into v0.117.0 at the v0.116.0 GA on 2026-10-30, not started: the check is still red alone at the GA's base and tip (the launcher's carousel keeps the card inert), and no one took the row in the v0.116.0 round.
 
@@ -31,3 +31,7 @@ The check proves what it was written for: Cancel on the native trust dialog muta
 
 - Check 95 alone green at the fix, and red at the base with the identical failure, so the fix is what turned it green.
 - The whole browser suite run at the fix, with any other launcher check the search found green.
+
+## Owner's decision, 2026-10-31
+
+Surveyed in the owner's window on 2026-10-31 with three options: build it this round in the lane that migrates the Files-tree checks ([browser-checks-drive-the-files-tree-the-directory-view-replaced](browser-checks-drive-the-files-tree-the-directory-view-replaced.md)); build it this round in a lane of its own; carry it to v0.119.0. The answer, in the survey's words: "1 Build it this round in the filesel lane (recommended)". So one browser-suite agent in the Linux guest takes this row with the migration, and one whole-suite run at the lane's tip proves both; the Acceptance above stands.
