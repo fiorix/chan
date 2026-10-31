@@ -942,6 +942,9 @@ jobs:
           git -C "$tap" init --quiet
           git -C "$tap" add -A
           git -C "$tap" -c user.name=ci -c user.email=ci@localhost commit --quiet -m render
+          # Homebrew loads a third-party tap's casks only once the tap is
+          # trusted; the audit below refuses an untrusted one.
+          brew trust fiorix/chan
           brew style fiorix/chan
           brew audit --cask fiorix/chan/chan-desktop
           brew audit --formula fiorix/chan/chan
