@@ -2,17 +2,7 @@
 // life in a workspace window and reads all three places it shows: the page,
 // the server's drafts list, and the disk.
 //
-// Create: the workspace root gains nothing and the sidecar store under the
-// server's CHAN_HOME holds the draft. Edit: what is typed is saved there, and
-// a reload of the page brings the tab and its text back. The Drafts group
-// above the file tree lists the draft. The client's own spelling of a
-// draft's path, sent to the files route, is refused and creates nothing.
-// Save to Workspace on a draft with no attachments makes one file at the
-// chosen path, the editor follows it, and the draft leaves the store and the
-// group. A second, edited draft discarded from its close dialog lands in
-// the store's trash. Nothing the page shows holds a draft path's mark or
-// the id of a draft's lifetime, and the search that says so is shown
-// refusing each when it is planted in the page.
+// Create: the workspace root gains nothing and the sidecar store under the server's CHAN_HOME holds the draft. Edit: what is typed is saved there, and a reload brings the tab and its text back. The Drafts group in File locations lists the draft. The client's own spelling of a draft's path, sent to the files route, is refused and creates nothing. Save to Workspace on a draft with no attachments makes one file at the chosen path, the editor follows it, and the draft leaves the store and the group. A second, edited draft discarded from its close dialog lands in the store's trash. Nothing the page shows holds a draft path's mark or the id of a draft's lifetime, and the search refuses each when planted in the page.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -28,7 +18,7 @@ import {
   listDrafts,
   markedPath,
   newDraft,
-  openTree,
+  openDraftsGroup,
   request,
   saveDraftToWorkspace,
   waitActiveTab,
@@ -93,9 +83,9 @@ export default {
       }
 
       // The Drafts group lists it.
-      await openTree(page);
+      await openDraftsGroup(page);
       await waitFor("the draft in the Drafts group", 20_000, async () => (await groupNames(page)).includes(first.name));
-      const note = await page.$eval(".drafts-group .drafts-note", (el) => el.textContent.replace(/\s+/g, " ").trim());
+      const note = await page.$eval('aside[aria-label="File locations"] section[aria-label="Drafts"] p', (el) => el.textContent.replace(/\s+/g, " ").trim());
       if (!note.includes("kept outside the workspace")) throw new Error(`the group's sentence reads: ${note}`);
       await ctx.shot("drafts-group");
       await activateTab(page, `Drafts/${first.path}`);

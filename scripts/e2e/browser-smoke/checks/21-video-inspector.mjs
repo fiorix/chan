@@ -9,6 +9,8 @@
 // browser-decodable video; without it (or without an H.264 decoder in
 // the browser) that stage records as skipped detail, not a failure.
 
+import { navigateFiles, selectFile, waitFileRow } from "../lib/files.mjs";
+
 import { copyFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -20,46 +22,15 @@ function patternBytes(len) {
   return out;
 }
 
-async function openFileBrowser(page) {
-  const open = await page.$(".file-tree, [role=tree]");
-  if (open) return;
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-    );
-  });
-  await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-}
-
-// The video files are written after the server started, so the row
-// arrives via a watcher push. A write that lands while the SPA is
-// still booting can slip past its update subscription, so on a first
-// miss re-run `write` (fresh mtime, fresh event) and wait once more.
-async function selectTreeFile(page, filename, write) {
-  const rowVisible = (timeout) =>
-    page
-      .waitForFunction(
-        (name) =>
-          [...document.querySelectorAll('[role="treeitem"] button.name')].some(
-            (b) => b.textContent?.trim() === name,
-          ),
-        { timeout },
-        filename,
-      )
-      .then(() => true)
-      .catch(() => false);
-  if (!(await rowVisible(10_000))) {
+// A watcher write can precede the update subscription; rewrite once if its row does not arrive.
+async function selectVideo(page, filename, write) {
+  try {
+    await waitFileRow(page, filename, true, { timeout: 10_000 });
+  } catch {
     write();
-    if (!(await rowVisible(15_000))) {
-      throw new Error(`tree row not found after rewrite: ${filename}`);
-    }
+    await waitFileRow(page, filename);
   }
-  await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
-    row.click();
-  }, filename);
+  await selectFile(page, filename, { details: true });
 }
 
 // Wait for the preview to show THIS file: the <video> node persists
@@ -84,13 +55,12 @@ export default {
     const { page } = ctx;
     const details = {};
 
-    // Open the browser BEFORE writing: the tree being rendered is the
-    // best available signal that the SPA's update subscription is live.
-    await openFileBrowser(page);
+    // Show the directory listing before writing so the page can receive the watcher update.
+    await navigateFiles(page, "");
     const writeClip = () =>
       writeFileSync(join(ctx.workspaceDir, "clip.mp4"), patternBytes(CLIP_BYTES));
     writeClip();
-    await selectTreeFile(page, "clip.mp4", writeClip);
+    await selectVideo(page, "clip.mp4", writeClip);
     const src = await inlinePreviewSrc(page, "clip.mp4");
     await ctx.shot("video-inspector");
 
@@ -209,7 +179,7 @@ export default {
 
     const writeReal = () => copyFileSync(realVideo, join(ctx.workspaceDir, "real-video.mp4"));
     writeReal();
-    await selectTreeFile(page, "real-video.mp4", writeReal);
+    await selectVideo(page, "real-video.mp4", writeReal);
     await inlinePreviewSrc(page, "real-video.mp4");
 
     details.playback = await page.evaluate(async () => {

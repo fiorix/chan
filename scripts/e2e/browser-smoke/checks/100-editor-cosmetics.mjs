@@ -11,37 +11,12 @@
 // ::before slab and of the live .cm-selectionBackground markers), not
 // just screenshots.
 
+import { openFile } from "../lib/files.mjs";
+
 const DOC = "doc.md";
 
 async function openDoc(page) {
-  await page.bringToFront();
-  const open = await page.$(".file-tree, [role=tree]");
-  if (!open) {
-    await page.evaluate(() => {
-      window.dispatchEvent(
-        new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-      );
-    });
-    await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-  }
-  const clicked = await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
-    if (!row) return false;
-    row.click();
-    return true;
-  }, DOC);
-  if (!clicked) throw new Error(`tree row not found: ${DOC}`);
-  const opened = await page.evaluate(() => {
-    const btn = [...document.querySelectorAll("button")].find(
-      (b) => b.textContent?.trim() === "Open",
-    );
-    if (!btn) return false;
-    btn.click();
-    return true;
-  });
-  if (!opened) throw new Error("inspector Open button not found");
+  await openFile(page, DOC);
   await page.waitForSelector(".cm-content", { timeout: 30_000 });
 }
 

@@ -18,6 +18,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { armFlip, screenFlip } from "../lib/flip.mjs";
 import { armCardFlip } from "../lib/card-flip.mjs";
+import { showCarouselCard } from "../lib/carousel.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -137,6 +138,7 @@ export default {
           ),
         { timeout: 10_000 },
       );
+      await showCarouselCard(page, '[aria-label="Connect gateway smoke-gw"]');
       await ctx.shot("gateway-added", page);
 
       // Connect it: the demo flips the badge live.

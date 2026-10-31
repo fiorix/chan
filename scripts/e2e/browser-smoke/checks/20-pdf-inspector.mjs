@@ -11,6 +11,8 @@
 // play does not break in the PDF, and an image with no size of its own is
 // as wide as play lays it out.
 
+import { selectFile, showFiles } from "../lib/files.mjs";
+
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -518,29 +520,6 @@ function inspectClipPath(rasters) {
   return { details: { amber, green }, faults };
 }
 
-async function openFileBrowser(page) {
-  const open = await page.$(".file-tree, [role=tree]");
-  if (open) return;
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-    );
-  });
-  await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-}
-
-async function selectTreeFile(page, filename) {
-  const clicked = await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
-    if (!row) return false;
-    row.click();
-    return true;
-  }, filename);
-  if (!clicked) throw new Error(`tree row not found: ${filename}`);
-}
-
 async function clickExportToPdf(page) {
   await page.waitForSelector(".pill-caret", { timeout: 10_000 });
   await page.click(".pill-caret");
@@ -578,7 +557,7 @@ export default {
   name: "pdf-inspector",
   async run(ctx) {
     const { page } = ctx;
-    await openFileBrowser(page);
+    await showFiles(page);
     await ctx.shot("file-browser");
 
     const cases = [
@@ -648,7 +627,7 @@ export default {
       const target = join(ctx.downloadDir, c.pdf);
       if (existsSync(target)) rmSync(target);
 
-      await selectTreeFile(page, c.file);
+      await selectFile(page, c.file, { details: true });
       await watchImageLift(page, c.file === "layout-images.md" ? "wide-table" :
         c.file === "layout-height.md" ? "height-only" : "");
       await clickExportToPdf(page);

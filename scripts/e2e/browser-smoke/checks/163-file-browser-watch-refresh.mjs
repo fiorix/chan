@@ -1,27 +1,31 @@
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { browserTab, request, showFileTree, waitFor } from "../lib/drafts.mjs";
+import { request, waitFor } from "../lib/drafts.mjs";
+import { FILE_LIST, fileRow, navigateFiles, readFiles, showFiles } from "../lib/files.mjs";
 
-const TAB = ".browser:not(.dock)";
-const DOCK = ".browser.dock";
+const TAB = FILE_LIST;
+const DOCK = '[role="tree"][aria-label="Files"]';
 
 async function command(page, name) {
   await page.evaluate((id) => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: id } })), name);
 }
 
 async function row(page, surface, name) {
-  for (const item of await page.$$(`${surface} [role=treeitem]`)) {
-    const label = await item.$eval(".name", (node) => node.textContent?.trim() ?? "").catch(() => "");
+  if (surface === TAB) return fileRow(page, name);
+  await page.waitForSelector(surface, { visible: true, timeout: 15_000 });
+  for (const item of await page.$$(`${surface} [role="treeitem"]`)) {
+    const label = await item.$eval('button:not([aria-label]), [role="button"]', (node) => node.textContent?.trim() ?? "").catch(() => "");
     if (label === name || label === `${name}/`) return item;
   }
   return null;
 }
 
-/// The row in `surface` whose title, the full path the tree shows on hover with
-/// any kind note after it, names `path`.
+/// The row in `surface` whose hover title names `path`, excluding its optional kind note.
 async function rowAt(page, surface, path) {
-  for (const item of await page.$$(`${surface} [role=treeitem]`)) {
+  await page.waitForSelector(surface, { visible: true, timeout: 15_000 });
+  const role = surface === TAB ? "option" : "treeitem";
+  for (const item of await page.$$(`${surface} [role="${role}"]`)) {
     const title = (await item.evaluate((node) => node.getAttribute("title") ?? "")).replace(/ \((contact|view-only)\)$/, "");
     if (title === path || title.endsWith(`/${path}`)) return item;
   }
@@ -30,14 +34,15 @@ async function rowAt(page, surface, path) {
 
 async function armDetector(page, surface, token) {
   await page.evaluate(({ surface, token }) => {
-    const tree = document.querySelector(`${surface} [role=tree]`);
-    const wrap = tree?.closest(".tree-wrap");
-    if (!tree || !wrap) throw new Error(`no tree in ${surface}`);
+    const tree = document.querySelector(surface);
+    const wrap = tree?.parentElement;
+    if (!tree || !wrap) throw new Error(`no file listing in ${surface}`);
+    const rowSelector = tree.getAttribute("role") === "listbox" ? '[role="option"]' : '[role="treeitem"]';
     const maxScroll = wrap.scrollHeight - wrap.clientHeight;
-    if (maxScroll <= 0) throw new Error("the tree is too short to test scroll preservation");
+    if (maxScroll <= 0) throw new Error("the file listing is too short to test scroll preservation");
     wrap.scrollTop = Math.min(120, maxScroll);
-    if (wrap.scrollTop <= 0) throw new Error("the tree did not take a non-zero scroll offset");
-    const rows = [...tree.querySelectorAll("[role=treeitem]")].filter((item) => item.getClientRects().length > 0);
+    if (wrap.scrollTop <= 0) throw new Error("the file listing did not take a non-zero scroll offset");
+    const rows = [...tree.querySelectorAll(rowSelector)].filter((item) => item.getClientRects().length > 0);
     const before = rows.map((item) => {
       item.__fbroot163 = token;
       return { item, title: item.getAttribute("title"), selected: item.getAttribute("aria-selected"), expanded: item.getAttribute("aria-expanded") };
@@ -45,17 +50,17 @@ async function armDetector(page, surface, token) {
     const records = [];
     const observer = new MutationObserver((batch) => records.push(...batch));
     observer.observe(tree, { childList: true, subtree: true });
-    window.__fbroot163 = { tree, wrap, before, records, observer, scrollTop: wrap.scrollTop, active: document.activeElement, token };
+    window.__fbroot163 = { tree, wrap, rowSelector, before, records, observer, scrollTop: wrap.scrollTop, active: document.activeElement, token };
   }, { surface, token });
 }
 
 async function finishDetector(page, expectedAdded, expectNoRecords = false) {
   const result = await page.evaluate(() => {
     const state = window.__fbroot163;
-    if (!state) throw new Error("the tree detector was not armed");
+    if (!state) throw new Error("the file listing detector was not armed");
     state.observer.disconnect();
     delete window.__fbroot163;
-    const now = [...state.tree.querySelectorAll("[role=treeitem]")];
+    const now = [...state.tree.querySelectorAll(state.rowSelector)];
     const missing = state.before.filter(({ item }) => !item.isConnected || !state.tree.contains(item)).map(({ title }) => title);
     const replaced = state.before.filter(({ item }) => item.isConnected && item.__fbroot163 !== state.token).map(({ title }) => title);
     const changed = state.before.filter(({ item, selected, expanded }) =>
@@ -63,7 +68,7 @@ async function finishDetector(page, expectedAdded, expectNoRecords = false) {
     ).map(({ title }) => title);
     const countRows = (nodes) => nodes.reduce((sum, node) => {
       if (node.nodeType !== Node.ELEMENT_NODE) return sum;
-      return sum + (node.matches("[role=treeitem]") ? 1 : 0) + node.querySelectorAll("[role=treeitem]").length;
+      return sum + (node.matches(state.rowSelector) ? 1 : 0) + node.querySelectorAll(state.rowSelector).length;
     }, 0);
     const added = state.records.reduce((sum, record) => sum + countRows([...record.addedNodes]), 0);
     const removed = state.records.reduce((sum, record) => sum + countRows([...record.removedNodes]), 0);
@@ -74,7 +79,7 @@ async function finishDetector(page, expectedAdded, expectNoRecords = false) {
   if (result.missing.length || result.replaced.length || result.changed.length || !result.activeSame ||
       result.scrollBefore <= 0 || result.scrollAfter !== result.scrollBefore || result.added !== expectedAdded || result.removed !== 0 ||
       (expectNoRecords && result.records !== 0)) {
-    throw new Error(`file tree flickered: ${JSON.stringify(result)}`);
+    throw new Error(`file listing flickered: ${JSON.stringify(result)}`);
   }
   return result;
 }
@@ -216,8 +221,9 @@ export default {
       await awaitFrame("watch", name, frameAt);
       try {
         await waitFor(`${name} in ${surface}`, 20_000, () => row(page, surface, name));
-      } catch {
-        throw new Error(`root row ${name} missing after its watch frame in ${surface}`);
+      } catch (error) {
+        const listing = surface === TAB ? await readFiles(page).catch((failure) => ({ error: failure.message })) : null;
+        throw new Error(`root row ${name} missing after its watch frame in ${surface}: ${JSON.stringify(listing)} (${error.message})`);
       }
       const report = { name, elapsedMs: Date.now() - start, rootListings: rootListingsSince(listAt) };
       console.log(`[fbroot163] ${JSON.stringify(report)}`);
@@ -242,13 +248,13 @@ export default {
       writeFileSync(join(ctx.workspaceDir, folder, nested), "nested\n");
       for (const name of filler) writeFileSync(join(ctx.workspaceDir, name), "fill\n");
 
-      await showFileTree(page);
+      await showFiles(page);
+      await navigateFiles(page, folder);
+      await waitFor(`nested row ${nested}`, 20_000, () => row(page, TAB, nested));
+      await navigateFiles(page, "");
       const folderRow = await waitFor(`folder ${folder}`, 20_000, () => row(page, TAB, folder));
-      await (await folderRow.$("button.twirl")).click();
-      const nestedRow = await waitFor(`nested row ${nested}`, 20_000, () => row(page, TAB, nested));
-      await (await nestedRow.$(".name")).click();
-      await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role=treeitem][aria-selected=true] .name`)]
-        .some((item) => item.textContent?.trim() === name), { timeout: 5_000 }, nested, TAB);
+      await folderRow.click();
+      await waitFor(`selected folder ${folder}`, 5_000, async () => (await readFiles(page)).rows.some((item) => item.name === folder && item.selected));
 
       await graphFetched(setupStep, 90_000);
       graphSteps.shift();
@@ -296,41 +302,42 @@ export default {
           ({ type: frame.type, path: frame.event?.path ?? null, at: frameReceived[unrelatedFrameAt + index] }));
         throw new Error(`unopened directory caused a listing: ${JSON.stringify({ listings: caused, ownFrameAt: frameReceived[ownFrame], frames: seen })}`);
       }
-      if (await row(page, TAB, unseenFile)) throw new Error("unopened directory's file was rendered before expansion");
+      if (await row(page, TAB, unseenFile)) throw new Error("unopened directory's file was rendered in the root listing");
       report.unrelatedDetector = await finishDetector(page, 0, true);
       await graphFetched(unrelatedStep);
-      const unseenRow = await row(page, TAB, unseen);
-      await (await unseenRow.$("button.twirl")).click();
-      await waitFor(`file ${unseenFile} after expansion`, 20_000, () => row(page, TAB, unseenFile));
+      await navigateFiles(page, unseen);
+      await waitFor(`file ${unseenFile} after navigation`, 20_000, () => row(page, TAB, unseenFile));
       if (!listings.slice(unrelatedListAt).some(({ dir }) => dir === unseen)) {
-        throw new Error("the listing counter missed expansion's request");
+        throw new Error("the listing counter missed navigation's request");
       }
-      report.expansionListings = listings.length - unrelatedListAt;
+      report.navigationListings = listings.length - unrelatedListAt;
+      await navigateFiles(page, "");
 
       await page.keyboard.down("Control");
-      try { await (await (await row(page, TAB, nested)).$(".name")).click(); }
+      try { await (await row(page, TAB, folder)).click(); }
       finally { await page.keyboard.up("Control"); }
-      await page.waitForFunction((surface) => !document.querySelector(`${surface} [role=treeitem][aria-selected=true]`), { timeout: 5_000 }, TAB);
+      await waitFor("cleared directory selection", 5_000, async () => (await readFiles(page)).rows.every((item) => !item.selected));
       report.created.push(await created(rootClear, TAB));
 
-      await (await (await row(page, TAB, nested)).$(".name")).click();
+      await (await row(page, TAB, folder)).click();
       await command(page, "app.dashboard.open");
-      await page.waitForFunction(() => !document.querySelector(".tabs .tab.active .lucide-folder"), { timeout: 10_000 });
+      await page.waitForFunction(() => ![...document.querySelectorAll('[role="tab"][aria-selected="true"]')]
+        .some((tab) => (tab.getAttribute("title") ?? "").startsWith("File Browser")), { timeout: 10_000 });
       const hiddenFrameAt = frames.length;
       const hiddenListAt = listings.length;
       const hiddenStart = Date.now();
       const hiddenStep = graphStep("hidden tab", [rootHidden]);
       writeFileSync(join(ctx.workspaceDir, rootHidden), "hidden outside chan\n");
       await awaitFrame("watch", rootHidden, hiddenFrameAt);
-      await (await browserTab(page)).click();
+      await showFiles(page);
       await waitFor(`hidden-tab root row ${rootHidden}`, 20_000, () => row(page, TAB, rootHidden));
       const hiddenReport = { name: rootHidden, elapsedMs: Date.now() - hiddenStart, rootListings: rootListingsSince(hiddenListAt) };
       console.log(`[fbroot163] ${JSON.stringify(hiddenReport)}`);
       report.created.push(hiddenReport);
       await graphFetched(hiddenStep);
 
-      if (!(await page.$(`${DOCK} [role=tree]`))) {
-        await page.$eval(TAB, (surface) => surface.dispatchEvent(new MouseEvent("contextmenu", {
+      if (!(await page.$(DOCK))) {
+        await page.$eval(TAB, (listing) => listing.closest('[role="presentation"]').dispatchEvent(new MouseEvent("contextmenu", {
           bubbles: true, cancelable: true, clientX: 200, clientY: 200,
         })));
         const stick = await waitFor("Stick to left menu action", 10_000, async () => {
@@ -342,31 +349,26 @@ export default {
         await stick.click();
         openedLeftDock = true;
       }
-      await page.waitForSelector(`${DOCK} [role=tree]`, { timeout: 15_000 });
+      await page.waitForSelector(DOCK, { visible: true, timeout: 15_000 });
       const dockFolder = await waitFor(`dock folder ${folder}`, 20_000, () => row(page, DOCK, folder));
       if ((await dockFolder.evaluate((item) => item.getAttribute("aria-expanded"))) !== "true") {
-        await (await dockFolder.$("button.twirl")).click();
+        await (await dockFolder.$('button[aria-label="expand"]')).click();
       }
       const dockNested = await waitFor(`dock nested row ${nested}`, 20_000, () => row(page, DOCK, nested));
-      await (await dockNested.$(".name")).click();
-      await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role=treeitem][aria-selected=true] .name`)]
+      await (await dockNested.$("button:not([aria-label])")).click();
+      await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role="treeitem"][aria-selected="true"] button:not([aria-label])`)]
         .some((item) => item.textContent?.trim() === name), { timeout: 5_000 }, nested, DOCK);
       report.created.push(await created(rootDock, DOCK));
       // The dock expands the directory the rename takes too, so its child has
       // a row there for the rename to leave behind.
       const dockUnseen = await waitFor(`dock directory ${unseen}`, 20_000, () => row(page, DOCK, unseen));
       if ((await dockUnseen.evaluate((item) => item.getAttribute("aria-expanded"))) !== "true") {
-        await (await dockUnseen.$("button.twirl")).click();
+        await (await dockUnseen.$('button[aria-label="expand"]')).click();
       }
       await waitFor(`dock row ${unseen}/${unseenFile}`, 20_000, () => rowAt(page, DOCK, `${unseen}/${unseenFile}`));
 
-      // A loaded, expanded directory renamed outside chan, and one removed,
-      // leave the tree with their cached rows. Each waits on a row that only a
-      // root listing answering after the change brings, then reads the old
-      // paths' rows in the tab's tree and the dock's; both readings are taken
-      // before either is judged.
-      await (await browserTab(page)).click();
-      await page.waitForSelector(`${TAB} [role=tree]`, { timeout: 15_000 });
+      // A fresh root row proves the listing answered after the mutation. The Files tab exposes root entries; the expanded dock also materializes cached descendants.
+      await showFiles(page);
       const renamedFrameAt = frames.length;
       // A directory's rename is applied as the old path's removal (naming the
       // files it held) and the new path's arrival: either names the step.
@@ -376,7 +378,7 @@ export default {
       await waitFor(`renamed row ${renamed} in ${TAB}`, 20_000, () => row(page, TAB, renamed));
       await settlePaint(page);
       const leftAt = async (paths) => Object.fromEntries(await Promise.all(Object.entries(paths).flatMap(([key, path]) => [
-        rowAt(page, TAB, path).then((item) => [key, Boolean(item)]),
+        ...(!path.includes("/") ? [rowAt(page, TAB, path).then((item) => [key, Boolean(item)])] : []),
         rowAt(page, DOCK, path).then((item) => [`dock-${key}`, Boolean(item)]),
       ])));
       const renamedLeft = await leftAt({ oldName: unseen, oldChild: `${unseen}/${unseenFile}` });
@@ -429,7 +431,7 @@ export default {
           try {
             await waitFor("left dock persisted open", 15_000, () => dockState(true));
           } finally {
-            await page.$eval(DOCK, (surface) => surface.dispatchEvent(new MouseEvent("contextmenu", {
+            await page.$eval(DOCK, (listing) => listing.closest('[role="presentation"]').dispatchEvent(new MouseEvent("contextmenu", {
               bubbles: true, cancelable: true, clientX: 200, clientY: 200,
             })));
             const unstick = await waitFor("Unstick left menu action", 10_000, async () => {

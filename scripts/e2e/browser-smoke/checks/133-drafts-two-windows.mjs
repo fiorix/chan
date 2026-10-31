@@ -19,7 +19,7 @@ import {
   draftsStore,
   groupNames,
   newDraft,
-  openTree,
+  openDraftsGroup,
   saveDraftToWorkspace,
   waitActiveTab,
   waitFor,
@@ -38,10 +38,11 @@ async function typeAtEnd(page, text) {
 /// Open the draft `name` in `page` from its row in the Drafts group.
 async function openFromGroup(page, name, text) {
   await page.bringToFront();
+  await openDraftsGroup(page);
   await waitFor(`${name} in the other window's Drafts group`, 20_000, async () => (await groupNames(page)).includes(name));
   await page.evaluate((wanted) => {
-    const row = [...document.querySelectorAll(".drafts-group .draft-row")].find(
-      (el) => el.querySelector(".draft-name")?.textContent === wanted,
+    const row = [...document.querySelectorAll('aside[aria-label="File locations"] section[aria-label="Drafts"] button[title]')].find(
+      (el) => el.getAttribute("title") === `Open draft ${wanted}`,
     );
     row?.click();
   }, name);
@@ -115,7 +116,7 @@ export default {
       const gone = await newDraft(ctx, A);
       await typeAtEnd(A, `\n\nto discard ${stamp}\n`);
       await savedInStore(ctx, gone, `to discard ${stamp}`);
-      await openTree(B);
+      await openDraftsGroup(B);
       await openFromGroup(B, gone.name, `to discard ${stamp}`);
 
       // A discards it; B's tab says so.

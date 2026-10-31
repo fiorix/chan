@@ -2,34 +2,20 @@
 // through a real tag reference, proving the tag lens still uses /api/graph,
 // renders a non-empty scoped canvas, and preserves the established view.
 
+import { fileRow, navigateFiles, selectFile, showFiles } from "../lib/files.mjs";
+
 const DOC = "doc.md";
 const TAG = "#graph-smoke";
-
-async function openFileBrowser(page) {
-  if (await page.$(".file-tree, [role=tree]")) return;
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-    );
-  });
-  await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-}
 
 export default {
   name: "graph-lens",
   async run(ctx) {
     const { page } = ctx;
     await page.bringToFront();
-    await openFileBrowser(page);
-    const selected = await page.evaluate((name) => {
-      const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-        (button) => button.textContent?.trim() === name,
-      );
-      if (!row) return false;
-      row.click();
-      return true;
-    }, DOC);
-    if (!selected) ctx.skip(`graph fixture document not present: ${DOC}`);
+    await showFiles(page);
+    await navigateFiles(page, "");
+    if (!(await fileRow(page, DOC))) ctx.skip(`graph fixture document not present: ${DOC}`);
+    await selectFile(page, DOC, { details: true });
 
     // The lens button is this check's subject, not one of its preconditions.
     // Catching the wait and calling ctx.skip turned "the tag lens stopped

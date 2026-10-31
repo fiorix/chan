@@ -1,10 +1,8 @@
-// Two windows of one workspace use watch frames to keep the other window's
-// tree, link kinds and open tabs current after a note is created, moved or
-// deleted. Document sessions are off in both windows so the tab state in this
-// check belongs to the watch path.
+// Two windows use workspace watch frames to keep directory listings, link kinds and open tabs current after a note is created, moved or deleted. Document sessions are off in both windows so tab state belongs to the watch path.
 
 import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { FILE_LIST, fileRow, navigateFiles, openFile, showFiles, waitFileRow } from "../lib/files.mjs";
 
 async function wait(page, label, timeout, predicate, value) {
   await page.bringToFront();
@@ -22,20 +20,11 @@ async function command(page, name) {
   }, name);
 }
 
-async function treeRow(page, name) {
-  const rows = await page.$$("[role=tree] [role=treeitem] button.name");
-  for (const row of rows) {
-    if ((await row.evaluate((node) => node.textContent?.trim())) === name) return row;
-  }
-  throw new Error(`tree row not found: ${name}`);
-}
-
-async function waitTreeRow(page, name, present, label, timeout = 20_000) {
-  await wait(page, label, timeout, (args) => {
-    const found = [...document.querySelectorAll("[role=tree] [role=treeitem] button.name")]
-      .some((node) => node.textContent?.trim() === args.name);
-    return found === args.present;
-  }, { name, present });
+async function waitListedRow(page, name, present, label, timeout = 20_000) {
+  await page.bringToFront();
+  await waitFileRow(page, name, present, { timeout }).catch((cause) => {
+    throw new Error(`${label}: ${cause.message}`, { cause });
+  });
 }
 
 async function selectTab(page, label) {
@@ -54,49 +43,28 @@ async function selectTab(page, label) {
   throw new Error(`tab not clickable: ${label}`);
 }
 
-async function browserTabLabel(page) {
-  await wait(page, "File Browser tab did not open", 15_000, () =>
-    [...document.querySelectorAll(".tabs .tab .path")]
-      .some((node) => node.textContent?.trim().endsWith("/")));
-  return page.evaluate(() => [...document.querySelectorAll(".tabs .tab .path")]
-    .map((node) => node.textContent?.trim())
-    .find((label) => label?.endsWith("/")));
-}
-
 async function openBrowser(page) {
-  await command(page, "app.files.toggle");
-  const label = await browserTabLabel(page);
-  await selectTab(page, label);
-  return label;
+  await showFiles(page);
+  await navigateFiles(page, "");
 }
 
-async function openNote(page, browserLabel, name) {
-  await selectTab(page, browserLabel);
-  await waitTreeRow(page, name, true, `tree row ${name} did not appear`, 15_000);
-  await (await treeRow(page, name)).click();
-  await wait(page, `inspector did not offer Open for ${name}`, 15_000, () =>
-    [...document.querySelectorAll("button")]
-      .some((node) => node.textContent?.trim() === "Open"));
-  const buttons = await page.$$("button");
-  for (const button of buttons) {
-    if ((await button.evaluate((node) => node.textContent?.trim())) === "Open") {
-      await button.click();
-      await wait(page, `editor tab ${name} did not open`, 30_000, (wanted) =>
-        document.querySelector(".tabs .tab.active .path")?.textContent?.trim() === wanted &&
-        !!document.querySelector(".editor-tab.active .cm-content"), name);
-      return;
-    }
-  }
-  throw new Error(`Open button not clickable for ${name}`);
+async function openNote(page, name) {
+  await openFile(page, name);
+  await wait(page, `editor tab ${name} did not open`, 30_000, (wanted) =>
+    document.querySelector(".tabs .tab.active .path")?.textContent?.trim() === wanted &&
+    !!document.querySelector(".editor-tab.active .cm-content"), name);
 }
 
 async function rowMenu(page, name, action) {
   await page.bringToFront();
-  await (await treeRow(page, name)).click({ button: "right" });
+  await waitFileRow(page, name);
+  const row = await fileRow(page, name);
+  if (!row) throw new Error(`directory row disappeared: ${name}`);
+  await row.click({ button: "right" });
   await wait(page, `menu did not offer ${action}`, 10_000, (wanted) =>
-    [...document.querySelectorAll(".ctx button")]
+    [...document.querySelectorAll('[role="menu"][aria-label="File actions"] [role="menuitem"]')]
       .some((node) => (node.querySelector(".menu-row-label") ?? node).textContent?.trim() === wanted), action);
-  const buttons = await page.$$(".ctx button");
+  const buttons = await page.$$('[role="menu"][aria-label="File actions"] [role="menuitem"]');
   for (const button of buttons) {
     if ((await button.evaluate((node) =>
       (node.querySelector(".menu-row-label") ?? node).textContent?.trim())) === action) {
@@ -159,30 +127,30 @@ export default {
       if (flag !== "0") throw new Error(`B loaded with document sessions flag ${flag}`);
       await B.evaluate(() => { window.__chanSmokeMarker = "kept"; });
 
-      const bBrowser = await openBrowser(B);
-      await waitTreeRow(B, holder, true, `B's tree lacked ${holder}`, 15_000);
-      await waitTreeRow(B, kept, true, `B's tree lacked ${kept}`, 15_000);
-      await openNote(B, bBrowser, holder);
+      await openBrowser(B);
+      await waitListedRow(B, holder, true, `B's directory listing lacked ${holder}`, 15_000);
+      await waitListedRow(B, kept, true, `B's directory listing lacked ${kept}`, 15_000);
+      await openNote(B, holder);
       await wait(B, "B's link pill did not start broken", 20_000, (wanted) =>
         document.querySelector(`.editor-tab.active .cm-md-wiki-pill[data-target="${wanted}"]`)
           ?.getAttribute("data-refkind") === "broken", target);
-      await openNote(B, bBrowser, kept);
+      await openNote(B, kept);
       await wait(B, "B's kept note did not mount", 30_000, (wanted) =>
         document.querySelector(".editor-tab.active .cm-content")?.textContent?.includes(wanted), stamp);
-      await selectTab(B, bBrowser);
-      await waitTreeRow(B, holder, true, "B's File Browser lost its holder row");
-      await waitTreeRow(B, kept, true, "B's File Browser lost its kept row");
-      const aBrowser = await openBrowser(A);
-      await waitTreeRow(A, holder, true, "A's File Browser lacked the holder row");
-      await waitTreeRow(A, kept, true, "A's File Browser lacked the kept row");
+      await showFiles(B);
+      await waitListedRow(B, holder, true, "B's File Browser lost its holder row");
+      await waitListedRow(B, kept, true, "B's File Browser lost its kept row");
+      await openBrowser(A);
+      await waitListedRow(A, holder, true, "A's File Browser lacked the holder row");
+      await waitListedRow(A, kept, true, "A's File Browser lacked the kept row");
 
-      // B's browser tab stays active until the tree has answered each change.
+      // B's Files tab stays active until its directory listing has answered each change.
       await command(A, "app.file.new");
       await submitPath(A, target);
       await wait(A, "A's create opened no tab", 30_000, (wanted) =>
         document.querySelector(".tabs .tab.active .path")?.textContent?.trim() === wanted, made);
-      await waitTreeRow(B, made, true, "B's tree never showed the note A created");
-      passed.push("B's tree never showed the note A created");
+      await waitListedRow(B, made, true, "B's directory listing never showed the note A created");
+      passed.push("B's directory listing never showed the note A created");
       await selectTab(B, holder);
       await wait(B, "B's link pill kept its broken kind after A created its target", 20_000, (wanted) =>
         document.querySelector(`.editor-tab.active .cm-md-wiki-pill[data-target="${wanted}"]`)
@@ -190,18 +158,20 @@ export default {
       passed.push("B's link pill kept its broken kind after A created its target");
       await assertMarker(B);
 
-      await selectTab(B, bBrowser);
-      await selectTab(A, aBrowser);
+      await showFiles(B);
+      await showFiles(A);
       await rowMenu(A, kept, "Rename / Move");
       await submitPath(A, moved);
-      await waitTreeRow(A, moved, true, "A's own tree never showed its move");
-      await wait(B, "B's tree never showed the note at the path A moved it to", 20_000,
-        ({ from, to }) => {
-          const rows = [...document.querySelectorAll("[role=tree] [role=treeitem] button.name")]
+      await waitListedRow(A, moved, true, "A's own directory listing never showed its move");
+      await wait(B, "B's directory listing never showed the note at the path A moved it to", 20_000,
+        ({ from, to, selector }) => {
+          const listing = document.querySelector(selector);
+          if (!listing?.checkVisibility()) return false;
+          const rows = [...listing.querySelectorAll('[role="option"] button')]
             .map((node) => node.textContent?.trim());
           return rows.includes(to) && !rows.includes(from);
-        }, { from: kept, to: moved });
-      passed.push("B's tree never showed the note at the path A moved it to");
+        }, { from: kept, to: moved, selector: FILE_LIST });
+      passed.push("B's directory listing never showed the note at the path A moved it to");
       await selectTab(B, kept);
       await wait(B, "B's tab of the moved note was not marked missing", 20_000, (wanted) =>
         document.querySelector(".editor-tab.active .missing-file-state .missing-path")
@@ -216,16 +186,16 @@ export default {
       await ctx.shot("peer-moved-tab-missing", B);
       await assertMarker(B);
 
-      await openNote(B, bBrowser, made);
-      await selectTab(B, bBrowser);
-      await waitTreeRow(B, made, true, "B's tree lacked the note before A deleted it");
+      await openNote(B, made);
+      await showFiles(B);
+      await waitListedRow(B, made, true, "B's directory listing lacked the note before A deleted it");
       await rowMenu(A, made, "Delete");
       await wait(A, "delete confirmation did not open", 10_000,
         () => !!document.querySelector("#confirm-title"));
       await A.click(".modal button.ok");
-      await waitTreeRow(A, made, false, "A's tree kept the deleted note");
-      await waitTreeRow(B, made, false, "B's tree kept the note A deleted");
-      passed.push("B's tree kept the note A deleted");
+      await waitListedRow(A, made, false, "A's directory listing kept the deleted note");
+      await waitListedRow(B, made, false, "B's directory listing kept the note A deleted");
+      passed.push("B's directory listing kept the note A deleted");
       await selectTab(B, made);
       await wait(B, "B's tab of the deleted note was not marked missing", 20_000, (wanted) =>
         document.querySelector(".editor-tab.active .missing-file-state .missing-path")
@@ -242,15 +212,15 @@ export default {
       passed.push("B's link pill kept its file kind after A deleted its target");
       await assertMarker(B);
 
-      await openNote(A, aBrowser, moved);
-      await selectTab(A, aBrowser);
-      await selectTab(B, bBrowser);
+      await openNote(A, moved);
+      await showFiles(A);
+      await showFiles(B);
       await rowMenu(A, moved, "Rename / Move");
       await submitPath(A, kept);
       await wait(A, "A's tab did not follow the note moved back", 20_000, (wanted) =>
         [...document.querySelectorAll(".tabs .tab .path")]
           .some((node) => node.textContent?.trim() === wanted), kept);
-      await waitTreeRow(B, kept, true, "B's tree never showed the note moved back");
+      await waitListedRow(B, kept, true, "B's directory listing never showed the note moved back");
       await selectTab(B, kept);
       await wait(B, "B raised no banner on the tab whose path A filled again", 20_000, () =>
         document.querySelector(".editor-tab.active .recovery-banner[role=alert] .recovery-banner-text")

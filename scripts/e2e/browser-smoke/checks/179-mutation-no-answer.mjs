@@ -17,7 +17,7 @@
 // after the report, and the group lists the draft once; a drafts listing that
 // failed in between, which a refresh behind the held HTTP can, is recorded.
 
-import { groupNames, listDrafts, showFileTree, waitFor } from "../lib/drafts.mjs";
+import { groupNames, listDrafts, showDraftLocations, waitFor } from "../lib/drafts.mjs";
 import { startHoldProxy } from "../lib/hold-proxy.mjs";
 import { maskTokens } from "../lib/token-mask.mjs";
 
@@ -59,9 +59,8 @@ async function openWindow(ctx, proxy, windowId, record) {
   url.searchParams.set("w", windowId);
   await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 60_000 });
-  // The file tree is open before anything is held, so its Drafts group is on
-  // the page when the stored draft is listed.
-  await showFileTree(page);
+  // File locations is visible before the hold, so the stored draft can appear without navigating while responses are held.
+  await showDraftLocations(page);
   const socket = await waitFor("the event socket open", 30_000, () =>
     seen.sockets.find((s) => isEventSocket(s.path) && s.open === 101),
   );

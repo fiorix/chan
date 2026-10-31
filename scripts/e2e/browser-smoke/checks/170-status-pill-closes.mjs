@@ -1,10 +1,4 @@
-// The status pill sits at the window's top right, over whichever pane is
-// rightmost, and its sections can be closed. Two controls it is known to
-// cover are raised under it: the terminal's find box and the file browser's
-// Details close. For each, expanded and then collapsed, the check first reads
-// that the pill covers the control (the precondition: without it a green
-// proves nothing), closes the pill's sections, and reads that the control is
-// the topmost element at every probe point.
+// The status pill covers the terminal's find box, while the Files inspector's Details close lies below its toolbar and clear of the pill. Both expanded and collapsed, the check proves the expected overlap before closing the pill's sections and finding each control topmost at every probe point.
 //
 // The pill is raised by `chan shell upload`, which adds an upload request to
 // the Transfers launcher and writes a short "upload to" confirmation that
@@ -84,7 +78,7 @@ export default {
     // Probe points every 8px across a control's middle row, and whether
     // the control or the pill is topmost at each.
     async function probe(selector) {
-      return read(`(() => {
+      const points = await read(`(() => {
         const control = document.querySelector(${JSON.stringify(selector)});
         if (!control) throw new Error(${JSON.stringify(`no ${selector}`)});
         const box = control.getBoundingClientRect();
@@ -97,6 +91,8 @@ export default {
         }
         return points;
       })()`);
+      assert.ok(points.length > 0, `the control has probe points: ${selector}`);
+      return points;
     }
     // Raise the expanded pill with the Transfers launcher alone in it.
     async function raisePill() {
@@ -116,27 +112,29 @@ export default {
       // The upload's own confirmation clears itself; the closed sections do not come back.
       await wait("document.querySelector('.app-statusbar') === null", "the pill to leave");
     }
-    async function leg(label, selector) {
-      const observed = {};
+    async function leg(label, selector, covered) {
+      const observed = { covered };
       await raisePill();
       const expanded = await probe(selector);
-      assert.ok(expanded.some((point) => point.pill), `${label}: the expanded pill covers the control (${JSON.stringify(expanded)})`);
-      await ctx.shot(`${label}-covered`);
+      if (covered) assert.ok(expanded.some((point) => point.pill), `${label}: the expanded pill covers the control (${JSON.stringify(expanded)})`);
+      else assert.ok(expanded.every((point) => point.control), `${label}: the control stays clear of the expanded pill (${JSON.stringify(expanded)})`);
+      await ctx.shot(`${label}-${covered ? "covered" : "clear"}`);
       await click('[aria-label="hide file transfers"]');
       await pillGone();
       await ctx.shot(`${label}-closed`);
-      observed.expanded = { covered: expanded, closed: await probe(selector) };
+      observed.expanded = { withPill: expanded, closed: await probe(selector) };
       assert.ok(observed.expanded.closed.every((point) => point.control), `${label}: the control is topmost once the pill is closed (${JSON.stringify(observed.expanded.closed)})`);
 
       await raisePill();
       await click(".app-statusbar .collapse");
       await wait("Boolean(document.querySelector('.app-statusbar.collapsed'))", "the collapsed chip");
       const collapsed = await probe(selector);
-      assert.ok(collapsed.some((point) => point.pill), `${label}: the collapsed chip covers the control (${JSON.stringify(collapsed)})`);
+      if (covered) assert.ok(collapsed.some((point) => point.pill), `${label}: the collapsed chip covers the control (${JSON.stringify(collapsed)})`);
+      else assert.ok(collapsed.every((point) => point.control), `${label}: the control stays clear of the collapsed chip (${JSON.stringify(collapsed)})`);
       await ctx.shot(`${label}-chip`);
       await click('[aria-label="close all status"]');
       await pillGone();
-      observed.collapsed = { covered: collapsed, closed: await probe(selector) };
+      observed.collapsed = { withPill: collapsed, closed: await probe(selector) };
       assert.ok(observed.collapsed.closed.every((point) => point.control), `${label}: the control is topmost once the chip is closed (${JSON.stringify(observed.collapsed.closed)})`);
       return observed;
     }
@@ -156,11 +154,11 @@ export default {
       await wait("[...document.querySelectorAll('.mbtn .mbtn-label')].some((label) => label.textContent.trim() === 'Find')", "the terminal menu's Find");
       await read("([...document.querySelectorAll('.mbtn')].find((button) => button.querySelector('.mbtn-label')?.textContent.trim() === 'Find').click(), true)");
       await wait("Boolean(document.querySelector('.terminal-find input.find'))", "the terminal find box");
-      observations.findBox = await leg("find-box", ".terminal-find input.find");
+      observations.findBox = await leg("find-box", ".terminal-find input.find", true);
 
       await shell(["open", DIR]);
-      await wait("Boolean(document.querySelector('aside.inspector.right .title button.close'))", "the file browser's Details close");
-      observations.details = await leg("details-close", "aside.inspector.right .title button.close");
+      await wait('Boolean(document.querySelector(\'aside[aria-label="Details"] [aria-label="Close Details"]\'))', "the file browser's Details close");
+      observations.details = await leg("details-close", 'aside[aria-label="Details"] [aria-label="Close Details"]', false);
       return observations;
     } finally {
       await cdp.detach().catch(() => {});
