@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { openFile } from "../lib/files.mjs";
 import { poll } from "../lib/launcher-devserver.mjs";
 
 const NOTICE = "After reload, this tab opened a plain shell. Its requested command was not restored here and may still be running in another session.";
@@ -178,24 +179,7 @@ async function searchRestoreArm(ctx) {
   try {
     await page.goto(windowUrl(ctx, windowId), { waitUntil: "domcontentloaded" });
     await page.waitForSelector(".pane");
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })));
-    await page.waitForSelector('[role="treeitem"]');
-    const selected = await page.evaluate(() => {
-      const row = [...document.querySelectorAll('[role="treeitem"] button.name')]
-        .find((button) => button.textContent?.trim() === "doc.md");
-      if (!row) return false;
-      row.click();
-      return true;
-    });
-    assert.ok(selected, "fixture file is present in the file browser");
-    const opened = await page.evaluate(() => {
-      const button = [...document.querySelectorAll("button")]
-        .find((candidate) => candidate.textContent?.trim() === "Open");
-      if (!button) return false;
-      button.click();
-      return true;
-    });
-    assert.ok(opened, "the file inspector has an Open button");
+    await openFile(page, "doc.md");
     await page.waitForSelector(".cm-content");
     await page.keyboard.down("Control");
     await page.keyboard.down("Alt");
@@ -267,7 +251,7 @@ async function plainControlNegativeArm(ctx) {
     assert.ok(oldControl.includes("CLIRLD_164_PLAIN_SHELL"), "the old marker matches its own echo");
     return { newMarkerAbsent: true, oldMarkerPresent: true };
   } finally {
-    await cli(ctx, windowId, ["close", "--tab-name", name]).catch(() => {});
+    await closeNamedSessions(ctx, ctx.page, windowId, name);
   }
 }
 
@@ -341,7 +325,7 @@ async function preSocketArm(ctx) {
     return details;
   } finally {
     if (copy && !copy.isClosed()) await copy.close().catch(() => {});
-    if (opened) await cli(ctx, windowId, ["close", "--tab-name", name]).catch(() => {});
+    if (opened) await closeNamedSessions(ctx, page, windowId, name);
   }
 }
 
@@ -368,11 +352,44 @@ async function openHeldSessionTab(ctx, page, windowId, name, mode, details) {
   return original;
 }
 
-async function closeNamedSessions(ctx, windowId, name) {
-  const rows = await allSessions(ctx, windowId).catch(() => []);
-  for (const terminalName of new Set(rows.filter((row) => row.name === name || row.name.startsWith(`${name}-`)).map((row) => row.name))) {
-    await cli(ctx, windowId, ["close", "--tab-name", terminalName]).catch(() => {});
+async function closeNamedSessions(ctx, page, windowId, name) {
+  // Closing the UI tab cancels pending attachment even before its session reaches the roster, and unmounting stops its socket from redialing.
+  for (;;) {
+    const handle = await page.evaluateHandle((name) => [...document.querySelectorAll('[role="tablist"] [role="tab"]')].find((tab) => {
+      const title = tab.getAttribute("title") ?? "";
+      return title === name || title.startsWith(`${name}: `) || title.startsWith(`${name}-`);
+    }) ?? null, name);
+    const tab = handle.asElement();
+    if (!tab) {
+      await handle.dispose();
+      break;
+    }
+    try {
+      const close = await tab.$('button[aria-label^="close "]');
+      assert.ok(close, `terminal tab ${name} has a close button`);
+      await close.click();
+      await page.waitForFunction((tab) => !tab.isConnected || document.querySelector('#confirm-title')?.textContent?.trim() === "Close tab?",
+        { timeout: 15_000 }, tab);
+      if (await tab.evaluate((node) => node.isConnected)) {
+        const dialog = await page.$('[role="dialog"][aria-labelledby="confirm-title"]');
+        assert.ok(dialog, `terminal tab ${name} has a close confirmation`);
+        const buttons = await dialog.$$("button");
+        let confirm = null;
+        for (const button of buttons) if (await button.evaluate((node) => node.textContent?.trim() === "Close")) confirm = button;
+        assert.ok(confirm, `terminal tab ${name} has a Close action`);
+        await confirm.click();
+        await page.waitForFunction((tab) => !tab.isConnected, { timeout: 15_000 }, tab);
+      }
+    } finally {
+      await handle.dispose();
+    }
   }
+  await poll("closed sessions absent from the terminal roster", async () => {
+    const remaining = (await allSessions(ctx, windowId)).filter((row) => row.name === name || row.name.startsWith(`${name}-`));
+    if (remaining.length === 0) return true;
+    for (const terminalName of new Set(remaining.map((row) => row.name))) await cli(ctx, windowId, ["close", "--tab-name", terminalName]);
+    return null;
+  });
 }
 
 /// The page never adopted its CLI tab's session id, and the session still runs
@@ -406,8 +423,8 @@ async function heldMessagesArm(ctx) {
     await ctx.shot("before-frame-reattach", page);
     return details;
   } finally {
-    await closeNamedSessions(ctx, windowId, name);
-    await page.close().catch(() => {});
+    try { await closeNamedSessions(ctx, page, windowId, name); }
+    finally { await page.close().catch(() => {}); }
   }
 }
 
@@ -459,8 +476,8 @@ async function heldGoneArm(ctx) {
     await ctx.shot("before-frame-gone-notice", page);
     return details;
   } finally {
-    await closeNamedSessions(ctx, windowId, name);
-    await page.close().catch(() => {});
+    try { await closeNamedSessions(ctx, page, windowId, name); }
+    finally { await page.close().catch(() => {}); }
   }
 }
 
@@ -515,11 +532,8 @@ async function exitedCommandArm(ctx) {
     assert.equal(await page.$(".cli-reload-notice"), null, "an exited command owes no notice after reload");
     return { firstDial: first.dials[0], frames: first.frames, settledBits, reloadedWithoutNotice: true };
   } finally {
-    const rows = await allSessions(ctx, windowId).catch(() => []);
-    for (const terminalName of new Set(rows.filter((row) => row.name === name || row.name.startsWith(`${name}-`)).map((row) => row.name))) {
-      await cli(ctx, windowId, ["close", "--tab-name", terminalName]).catch(() => {});
-    }
-    await page.close().catch(() => {});
+    try { await closeNamedSessions(ctx, page, windowId, name); }
+    finally { await page.close().catch(() => {}); }
   }
 }
 

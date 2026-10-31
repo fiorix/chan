@@ -6,6 +6,8 @@
 // blamed line by typing a marker there, then ArrowUp must stay inside
 // the block.
 
+import { fileRow, selectFile } from "../lib/files.mjs";
+
 const DOC = "mermaid-err.md";
 const BLAMED = "B -->|no| D[Bad; label, x] - E";
 const LINE_ABOVE = "A --> B";
@@ -139,35 +141,10 @@ async function caretLine(page) {
 }
 
 async function openFile(page, filename, steps) {
-  await page.bringToFront();
-  if (!(await page.$(".file-tree, [role=tree]"))) {
-    await page.evaluate(() => {
-      window.dispatchEvent(
-        new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-      );
-    });
-    await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-  }
-  const clicked = await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
-    if (!row) return false;
-    row.click();
-    return true;
-  }, filename);
-  if (!clicked) throw new Error(`tree row not found: ${filename}`);
-  await page.waitForFunction(
-    () =>
-      [...document.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Open"),
-    { timeout: 15_000, polling: 200 },
-  );
+  await selectFile(page, filename);
+  const row = await fileRow(page, filename);
   await armProbe(page);
-  await page.evaluate(() => {
-    [...document.querySelectorAll("button")]
-      .find((b) => b.textContent?.trim() === "Open")
-      ?.click();
-  });
+  await row.click({ count: 2 });
   steps.push({ name: "Open-click", at: Date.now() });
   await page.waitForSelector(".cm-content", { timeout: 30_000 });
 }

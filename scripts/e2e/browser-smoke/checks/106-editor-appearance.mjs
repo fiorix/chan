@@ -2,6 +2,8 @@
 // surfaces stay mounted, observe the offscreen printable document DOM, and
 // keep source plus slide preview alive while Use theme clears the override.
 
+import { openFile as openFilesPath } from "../lib/files.mjs";
+
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -46,33 +48,7 @@ export default {
       );
       if (!paneId) throw new Error("active pane has no id before opening a file browser");
       const pane = `.pane[data-pane-id="${paneId}"]`;
-      const tabsBefore = await page.$$eval(`${pane} .tabs > .tab`, (tabs) => tabs.length);
-      await page.evaluate(() => {
-        window.dispatchEvent(
-          new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-        );
-      });
-      await page.waitForFunction((id, count) => {
-        const root = document.querySelector(`.pane[data-pane-id="${id}"]`);
-        return (root?.querySelectorAll(".tabs > .tab").length ?? 0) > count &&
-          root?.querySelector(".browser [role=tree] [role=treeitem]");
-      }, { timeout: 15_000 }, paneId, tabsBefore);
-      const browser = `${pane} .browser`;
-      const clicked = await page.$eval(`${browser} [role=tree]`, (tree, name) => {
-        const row = [...tree.querySelectorAll('[role="treeitem"] button.name')].find(
-          (candidate) => candidate.textContent?.trim() === name,
-        );
-        if (!row) return false;
-        row.click();
-        return true;
-      }, filename);
-      if (!clicked) throw new Error(`tree row not found: ${filename}`);
-      await page.waitForFunction(
-        (selector) => document.querySelector(`${selector} .action-pill .pill-main`)
-          ?.textContent?.trim() === "Open",
-        { timeout: 15_000, polling: 200 }, browser,
-      );
-      await page.click(`${browser} .action-pill .pill-main`);
+      await openFilesPath(page, filename, pane);
       await page.waitForFunction((id, name) => {
         const root = document.querySelector(`.pane[data-pane-id="${id}"]`);
         return root?.querySelector(".tab.active .path")?.textContent?.trim() === name &&

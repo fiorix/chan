@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { createServer, connect } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { openFile, readFiles } from "../lib/files.mjs";
 
 const WINDOW_ID = "hybrid-nav-stale-smoke";
 const DOC = "doc.md";
@@ -362,30 +363,11 @@ async function splitAndCommit(page, expectedPanes) {
 }
 
 async function openDoc(page) {
-  await page.bringToFront();
-  if (!(await page.$(".file-tree, [role=tree]"))) {
-    await dispatchCommand(page, "app.files.toggle");
-    await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-  }
-  const selected = await page.evaluate((filename) => {
-    const row = [
-      ...document.querySelectorAll('[role="treeitem"] button.name'),
-    ].find((button) => button.textContent?.trim() === filename);
-    if (!row) return false;
-    row.click();
-    return true;
-  }, DOC);
-  if (!selected) throw new Error(`tree row not found: ${DOC}`);
-  const opened = await page.evaluate(() => {
-    const button = [...document.querySelectorAll("button")].find(
-      (candidate) => candidate.textContent?.trim() === "Open",
-    );
-    if (!button) return false;
-    button.click();
-    return true;
+  await openFile(page, DOC);
+  await page.waitForSelector(".editor-tab.active .cm-content", { timeout: 30_000 }).catch(async (cause) => {
+    const listing = await readFiles(page).catch((error) => ({ error: error.message }));
+    throw new Error(`the editor did not open ${DOC}; Files holds ${JSON.stringify(listing)}`, { cause });
   });
-  if (!opened) throw new Error("file inspector Open button not found");
-  await page.waitForSelector(".cm-content", { timeout: 30_000 });
 }
 
 async function selectTab(page, label) {

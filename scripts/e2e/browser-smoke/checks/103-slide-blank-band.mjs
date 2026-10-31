@@ -5,39 +5,10 @@
 // the default zoom). Interior blank runs keep their spacers; slide 3
 // pins that the boundary fix did not eat them.
 
+import { openFile } from "../lib/files.mjs";
+
 const DOC = "deck-blank.md";
 
-async function openFile(page, filename) {
-  await page.bringToFront();
-  if (!(await page.$(".file-tree, [role=tree]"))) {
-    await page.evaluate(() => {
-      window.dispatchEvent(
-        new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-      );
-    });
-    await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-  }
-  const clicked = await page.evaluate((name) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (b) => b.textContent?.trim() === name,
-    );
-    if (!row) return false;
-    row.click();
-    return true;
-  }, filename);
-  if (!clicked) throw new Error(`tree row not found: ${filename}`);
-  await page.waitForFunction(
-    () =>
-      [...document.querySelectorAll("button")].some((b) => b.textContent?.trim() === "Open"),
-    { timeout: 15_000, polling: 200 },
-  );
-  await page.evaluate(() => {
-    [...document.querySelectorAll("button")]
-      .find((b) => b.textContent?.trim() === "Open")
-      ?.click();
-  });
-  await page.waitForSelector(".cm-content", { timeout: 30_000 });
-}
 
 async function slideState(page) {
   return page.evaluate(() => {
@@ -56,6 +27,7 @@ export default {
   async run(ctx) {
     const { page } = ctx;
     await openFile(page, DOC);
+    await page.waitForSelector(".cm-content", { timeout: 30_000 });
 
     // The overlay opens on the CARET's slide; pin the caret to the doc
     // start so the check always begins at slide 1.

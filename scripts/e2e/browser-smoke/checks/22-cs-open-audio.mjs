@@ -4,6 +4,7 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { navigateFiles, readFiles, showFiles, waitFileRow } from "../lib/files.mjs";
 
 const FILE = "audio-smoke.wav";
 const SAMPLE_RATE = 8_000;
@@ -51,17 +52,6 @@ function browserTabCount(snapshot) {
   );
 }
 
-async function openFileBrowser(page) {
-  const open = await page.$(".file-tree, [role=tree]");
-  if (open) return;
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-    );
-  });
-  await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-}
-
 async function cli(ctx, windowId, args) {
   return ctx.exec(ctx.chanBin, ["shell", ...args], {
     cwd: ctx.workspaceDir,
@@ -102,26 +92,15 @@ export default {
   async run(ctx) {
     if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
     const { page } = ctx;
-    await openFileBrowser(page);
+    await showFiles(page);
+    await navigateFiles(page, "");
     const writeAudio = () => writeFileSync(join(ctx.workspaceDir, FILE), pcmWav());
-    const rowVisible = (timeout) =>
-      page
-        .waitForFunction(
-          (filename) =>
-            [...document.querySelectorAll('[role="treeitem"] button.name')].some(
-              (button) => button.textContent?.trim() === filename,
-            ),
-          { timeout },
-          FILE,
-        )
-        .then(() => true)
-        .catch(() => false);
+    const rowVisible = (timeout) => waitFileRow(page, FILE, true, { timeout }).then(() => true).catch(() => false);
     writeAudio();
     if (!(await rowVisible(10_000))) {
-      // A write while the SPA is still booting can precede its watcher
-      // subscription. A second write gives the live tree a fresh event.
+      // A write while the SPA is still booting can precede its watcher subscription. A second write gives the live listing a fresh event.
       writeAudio();
-      if (!(await rowVisible(15_000))) throw new Error(`${FILE} did not reach the file tree`);
+      if (!(await rowVisible(15_000))) throw new Error(`${FILE} did not reach the directory listing: ${JSON.stringify(await readFiles(page))}`);
     }
     await page.bringToFront();
     const windowId = await page.evaluate(
@@ -142,23 +121,16 @@ export default {
       "new File Browser tab",
     );
 
-    await page.waitForFunction(
-      (filename) =>
-        [...document.querySelectorAll('[role="treeitem"][aria-selected="true"]')].some(
-          (row) => row.querySelector("button.name")?.textContent?.trim() === filename,
-        ),
-      { timeout: 20_000 },
-      FILE,
-    );
-    await page.waitForSelector(".inspector.right .audio-preview audio", {
+    await poll(() => readFiles(page), (listing) => listing.rows.some((row) => row.name === FILE && row.selected), "revealed audio selection");
+    await page.waitForSelector('aside[aria-label="Details"] .audio-preview audio', {
       timeout: 20_000,
     });
     await page.waitForSelector(".md-audio-viewer audio", { timeout: 20_000 });
 
     const initial = await page.evaluate(async (filename) => {
-      const inline = document.querySelector(".inspector.right .audio-preview audio");
+      const inline = document.querySelector('aside[aria-label="Details"] .audio-preview audio');
       const viewer = document.querySelector(".md-audio-viewer audio");
-      const heading = document.querySelector(".inspector.right h3.title");
+      const heading = document.querySelector('aside[aria-label="Details"] h3.title');
       if (!(inline instanceof HTMLAudioElement)) throw new Error("inline audio missing");
       if (!(viewer instanceof HTMLAudioElement)) throw new Error("audio viewer missing");
       if (heading?.textContent?.trim() !== filename) {
@@ -292,12 +264,10 @@ export default {
         connected: audio?.isConnected ?? null,
         src: audio?.getAttribute("src") ?? null,
         paused: audio?.paused ?? null,
-        selected: [...document.querySelectorAll('[role="treeitem"][aria-selected="true"]')]
-          .map((row) => row.querySelector("button.name")?.textContent?.trim())
-          .filter(Boolean),
-        inspectorAudio: !!document.querySelector(".inspector.right .audio-preview audio"),
+        inspectorAudio: !!document.querySelector('aside[aria-label="Details"] .audio-preview audio'),
       };
     });
+    teardown.selected = (await readFiles(page)).rows.filter((row) => row.selected).map((row) => row.name);
     if (teardown.connected || teardown.src !== null || teardown.paused !== true) {
       throw new Error(`viewer teardown incomplete: ${JSON.stringify(teardown)}`);
     }

@@ -5,48 +5,14 @@
 // version, and killing one client leaves the other working (with a
 // cursor-gone cleanup on the survivor).
 
+import { openFile } from "../lib/files.mjs";
+
 import { createHash } from "node:crypto";
 
 const BOARD = "board.excalidraw";
 
-async function openFileBrowser(page) {
-  const open = await page.$(".file-tree, [role=tree]");
-  if (open) return;
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-    );
-  });
-  await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-}
-
-async function selectTreeFile(page, filename) {
-  const clicked = await page.evaluate((name) => {
-    const row = [
-      ...document.querySelectorAll('[role="treeitem"] button.name'),
-    ].find((b) => b.textContent?.trim() === name);
-    if (!row) return false;
-    row.click();
-    return true;
-  }, filename);
-  if (!clicked) throw new Error(`tree row not found: ${filename}`);
-}
-
 async function openBoard(page) {
-  await page.bringToFront();
-  await openFileBrowser(page);
-  await selectTreeFile(page, BOARD);
-  // A tree click selects into the Details inspector; the Open button
-  // is what mounts the tab.
-  const opened = await page.evaluate(() => {
-    const btn = [...document.querySelectorAll("button")].find(
-      (b) => b.textContent?.trim() === "Open",
-    );
-    if (!btn) return false;
-    btn.click();
-    return true;
-  });
-  if (!opened) throw new Error("inspector Open button not found");
+  await openFile(page, BOARD);
   // The React island lazy-loads on first canvas activation.
   await page.waitForSelector(".excalidraw-host canvas", { timeout: 60_000 });
 }

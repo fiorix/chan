@@ -1,7 +1,4 @@
-// Destructive tail check: remove the harness-owned workspace root while a
-// fully expanded File Browser, max-depth Graph, and dirty >2 MiB editor are
-// live. The runner pins this check last because every later check would
-// inherit a deliberately missing workspace.
+// Remove the harness-owned workspace root with cached directory listings, a max-depth Graph and a dirty >2 MiB editor. The runner pins this check last because every later check would inherit a deliberately missing workspace.
 
 import {
   existsSync,
@@ -12,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { FILE_LIST, navigateFiles, readFiles, showFiles, waitFileRow } from "../lib/files.mjs";
 
 const TREE = "root-loss-tree";
 const LARGE = "root-loss-large.md";
@@ -85,15 +83,10 @@ async function dispatch(page, name) {
 }
 
 async function activateTab(page, selector, description) {
-  const activated = await page.evaluate((tabSelector) => {
-    const marker = document.querySelector(tabSelector);
-    const tab = marker?.closest(".tab");
-    if (!(tab instanceof HTMLElement)) return false;
-    tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    tab.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
-    return true;
-  }, selector);
-  if (!activated) throw new Error(`could not activate retained ${description} tab`);
+  const marker = await page.$(selector);
+  const tab = marker && (await marker.evaluateHandle((node) => node.closest('[role="tab"]'))).asElement();
+  if (!tab) throw new Error(`could not activate retained ${description} tab`);
+  await tab.click();
 }
 
 async function api(page, token, path, method = "GET") {
@@ -198,65 +191,42 @@ export default {
         { token, expectedDocs: visible.files.length },
       );
 
-      // File Browser: expand every generated directory and prove the deepest
-      // layer is actually materialized before moving to the graph.
-      await dispatch(page, "app.files.toggle");
-      await page.waitForSelector(".pane .browser [role=tree]", {
-        timeout: 20_000,
-      });
-      const titleNeedle = `/${TREE}`;
-      for (let round = 0; round < 20; round += 1) {
-        const clicked = await page.evaluate((needle) => {
-          const buttons = [
-            ...document.querySelectorAll(
-              '.pane .browser .row.dir button.twirl[aria-label="expand"]',
-            ),
-          ].filter((button) =>
-            button.closest(".row.dir")?.getAttribute("title")?.includes(needle),
-          );
-          for (const button of buttons) button.click();
-          return buttons.length;
-        }, titleNeedle);
-        if (clicked === 0) {
-          const count = await page.evaluate(
-            (needle) =>
-              [...document.querySelectorAll(".pane .browser .row.dir")]
-                .filter((row) => row.getAttribute("title")?.includes(needle))
-                .length,
-            titleNeedle,
-          );
-          if (count >= visible.dirs.length) break;
+      // Visiting every generated directory fills the shared listing cache, including the deepest files, before the root disappears.
+      await showFiles(page);
+      await navigateFiles(page, "");
+      await waitFileRow(page, TREE);
+      const loadedDirs = new Set();
+      const loadedFiles = new Set();
+      for (const directory of visible.dirs) {
+        await navigateFiles(page, directory);
+        const expectedDirs = visible.dirs.filter((path) => dirname(path) === directory);
+        const expectedFiles = visible.files.filter((path) => dirname(path) === directory);
+        for (const path of [...expectedDirs, ...expectedFiles]) await waitFileRow(page, basename(path));
+        const listing = await readFiles(page);
+        const byName = (left, right) => left.name.localeCompare(right.name);
+        const expected = [
+          ...expectedDirs.map((path) => ({ name: basename(path), directory: true })),
+          ...expectedFiles.map((path) => ({ name: basename(path), directory: false })),
+        ].sort(byName);
+        const entries = listing.rows.map(({ name, directory }) => ({ name, directory })).sort(byName);
+        if (listing.directory !== directory || JSON.stringify(entries) !== JSON.stringify(expected)) {
+          throw new Error(`generated directory listing mismatch: expected ${JSON.stringify({ directory, rows: expected })}, saw ${JSON.stringify(listing)}`);
         }
-        await page
-          .waitForFunction(
-            () =>
-              ![...document.querySelectorAll(".pane .browser .child-empty")]
-                .some((row) => row.textContent?.includes("Loading")),
-            { timeout: 20_000, polling: 50 },
-          )
-          .catch(() => {});
-        await delay(75);
+        loadedDirs.add(listing.directory);
+        for (const row of listing.rows) if (!row.directory) loadedFiles.add(row.path);
       }
-      const expanded = await page.evaluate((needle) => {
-        const rows = [...document.querySelectorAll(".pane .browser .row.dir")]
-          .filter((row) => row.getAttribute("title")?.includes(needle));
-        return {
-          count: rows.length,
-          expanded: rows.filter((row) => row.getAttribute("aria-expanded") === "true").length,
-        };
-      }, titleNeedle);
-      evidence.expanded = expanded;
-      if (
-        expanded.count !== visible.dirs.length ||
-        expanded.expanded !== visible.dirs.length
-      ) {
-        throw new Error(
-          `generated File Browser tree not fully expanded: ${JSON.stringify(expanded)}, expected ${visible.dirs.length}`,
-        );
+      const loaded = { directories: loadedDirs.size, files: loadedFiles.size };
+      evidence.loaded = loaded;
+      if (loaded.directories !== visible.dirs.length || loaded.files !== visible.files.length) {
+        throw new Error(`generated directory cache incomplete: ${JSON.stringify(loaded)}, expected ${visible.dirs.length} directories and ${visible.files.length} files`);
+      }
+      await navigateFiles(page, "");
+      const rootListing = await readFiles(page);
+      if (rootListing.rows.some((row) => row.selected)) {
+        throw new Error(`workspace graph setup retained a file selection: ${JSON.stringify(rootListing)}`);
       }
 
-      // Graph: open from the unselected workspace File Browser context, then
-      // drive its real tab-menu depth slider to that scope's computed maximum.
+      // The unselected workspace Files tab gives the graph its root scope; its tab-menu slider sets that scope's computed maximum depth.
       await dispatch(page, "app.graph.toggle");
       await page.waitForSelector(".graph-tab canvas", { timeout: 30_000 });
       await page.waitForFunction(
@@ -355,9 +325,7 @@ export default {
             const sample = () => {
               const next = JSON.stringify({
                 ms: Date.now() - started,
-                treeRows: document.querySelectorAll(
-                  ".pane .browser [role=treeitem]",
-                ).length,
+                directoryRows: document.querySelectorAll('[role="listbox"][aria-label="Directory contents"] [role="option"]').length,
                 rootUnavailable: (document.body.innerText ?? "").includes(
                   "Workspace root unavailable",
                 ),
@@ -432,11 +400,12 @@ export default {
       // Inactive tabs are intentionally not mounted. Activate each retained
       // surface before inspecting its post-loss UI; this also proves switching
       // back to it is safe after the backing workspace disappears.
-      await activateTab(page, ".tab .lucide-folder", "File Browser");
+      await showFiles(page);
       ctx.mark("root-loss:waiting-for-browser-unavailable");
       await page.waitForFunction(
-        () => (document.body.innerText ?? "").includes("Workspace root unavailable"),
+        (selector) => document.querySelector(selector)?.closest('[role="presentation"]')?.textContent?.includes("Workspace root unavailable"),
         { timeout: 30_000, polling: 100 },
+        FILE_LIST,
       );
       await activateTab(page, ".tab .lucide-network", "Graph");
       await page.waitForFunction(
@@ -529,28 +498,27 @@ export default {
       );
 
       const browserCount = await page.$$eval(
-        ".pane .browser",
+        FILE_LIST,
         (nodes) => nodes.length,
       );
       await dispatch(page, "app.files.toggle");
       await page.waitForFunction(
-        (before) =>
-          document.querySelectorAll(".pane .browser").length > before,
+        ({ before, selector }) => document.querySelectorAll(selector).length > before,
         { timeout: 15_000 },
-        browserCount,
+        { before: browserCount, selector: FILE_LIST },
       );
       await page.waitForFunction(
-        (expected) => {
-          const browsers = [...document.querySelectorAll(".pane .browser")];
+        ({ expected, selector }) => {
+          const browsers = [...document.querySelectorAll(selector)].map((listing) => listing.closest('[role="presentation"]'));
           return (
             browsers.length === expected &&
             browsers.every((browser) =>
-              (browser.textContent ?? "").includes("Workspace root unavailable"),
+              (browser?.textContent ?? "").includes("Workspace root unavailable"),
             )
           );
         },
         { timeout: 15_000 },
-        browserCount + 1,
+        { expected: browserCount + 1, selector: FILE_LIST },
       );
 
       const finalApi = {
@@ -596,7 +564,7 @@ export default {
           largeBytes,
           ballastFiles,
         },
-        expanded,
+        loaded,
         graphDepth,
         deleteMs,
         apiTimeline,
@@ -632,16 +600,17 @@ export default {
       let captureTimer;
       try {
         browserState = await Promise.race([
-          page.evaluate(() => {
-            const tree = document.querySelector(".pane .browser [role=tree]");
+          page.evaluate((selector) => {
+            const listing = document.querySelector(selector);
+            const surface = listing?.closest('[role="presentation"]');
             return {
-              treeRows: tree?.querySelectorAll("[role=treeitem]").length ?? null,
-              rootUnavailableRendered: (tree?.textContent ?? "").includes("Workspace root unavailable"),
-              rootErrorRendered: tree?.querySelector(".empty-detail")?.textContent?.trim() ?? null,
-              browserText: (tree?.textContent ?? "").slice(0, 2000),
+              directoryRows: listing?.querySelectorAll('[role="option"]').length ?? null,
+              rootUnavailableRendered: (surface?.textContent ?? "").includes("Workspace root unavailable"),
+              rootErrorRendered: surface?.querySelector('[role="status"]')?.textContent?.trim() ?? null,
+              browserText: (surface?.textContent ?? "").slice(0, 2000),
               uiTimeline: globalThis.__smokeRootLossTimeline ?? [],
             };
-          }),
+          }, FILE_LIST),
           new Promise((_, reject) => {
             captureTimer = setTimeout(() => reject(new Error("root-loss state capture timed out")), 5000);
           }),

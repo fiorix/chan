@@ -1,14 +1,9 @@
-// Item 8: the command-launcher Open, driven like a user would.
-//
-// Dialog flow: Ctrl+Alt+K raises the launcher, "Open" + Enter (bare pick)
-// pops the PathPromptModal in open mode, typing a seeded file and Enter
-// rides POST /api/open -> open_file window command -> an editor tab.
-// Inline-arg flow: "Open <dir>" typed straight into the launcher opens the
-// file browser (open_browser). An existing image is revealed and viewed;
-// a missing image name is refused in the persistent status pill.
+// The command-launcher Open action opens files through its path prompt, opens directories through an inline argument, reveals existing images and refuses missing images in the persistent status pill.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readFiles } from "../lib/files.mjs";
+import { waitFor } from "../lib/drafts.mjs";
 
 const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
@@ -81,11 +76,11 @@ export default {
     );
     await launcherRun(page, "Open photo.png");
     await selected.catch(() => { throw new Error("binary reveal pill missing: selected photo.png"); });
-    await page.waitForFunction(
-      () => [...document.querySelectorAll('[role="treeitem"][aria-selected="true"]')]
-        .some((row) => row.textContent?.includes("photo.png")),
-      { timeout: 15_000 },
-    );
+    let listing;
+    await waitFor("the revealed image selection", 15_000, async () => {
+      listing = await readFiles(page);
+      return listing.rows.some((row) => row.name === "photo.png" && row.selected);
+    }).catch((error) => { throw new Error(`${error.message}: ${JSON.stringify(listing)}`); });
     await page.waitForSelector(".md-image-zoom", { timeout: 15_000 });
     await ctx.shot("binary-revealed");
     await page.keyboard.press("Escape");

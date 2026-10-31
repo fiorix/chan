@@ -17,7 +17,8 @@
 // restated from the fixture.
 
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+import { fileRow, navigateFiles, showFiles, waitFileRow } from "../lib/files.mjs";
 
 const DIR = "from-here-dir";
 const NESTED = `${DIR}/nested`;
@@ -88,14 +89,6 @@ function subtreeShape(page, token, dir) {
   );
 }
 
-async function dispatch(page, name) {
-  await page.evaluate((command) => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: command } }),
-    );
-  }, name);
-}
-
 /// The graph panel of the ACTIVE tab. Graph tabs stay MOUNTED while hidden
 /// (the keep-alive load gating) and a hidden one still lays out, so a plain
 /// `.graph-tab` query reads whichever copy the DOM lists first and a later
@@ -145,96 +138,26 @@ async function waitForLoadedGraph(page) {
   return last;
 }
 
-/// Bring a retained tab back to the front the way a click on it does.
-async function activate(handle) {
-  await handle.evaluate((tab) => {
-    tab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    tab.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
-  });
-}
-
-async function waitForRow(page, treeSelector, relPath) {
-  try {
-    await page.waitForFunction(
-      (selector, needle) =>
-        [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].some((row) =>
-          row.getAttribute("title")?.endsWith(`/${needle}`),
-        ),
-      { timeout: 30_000, polling: 250 },
-      treeSelector,
-      relPath,
-    );
-  } catch {
-    const rows = await page.evaluate((selector) =>
-      [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].map((row) =>
-        row.getAttribute("title"),
-      ),
-      treeSelector,
-    );
-    throw new Error(
-      `file browser row not found: ${relPath}; rows=${JSON.stringify(rows)}`,
-    );
-  }
-}
-
-async function rowHandle(page, treeSelector, relPath) {
-  const handle = await page.evaluateHandle(
-    (selector, needle) =>
-      [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].find((row) =>
-        row.getAttribute("title")?.endsWith(`/${needle}`),
-      ) ?? null,
-    treeSelector,
-    relPath,
-  );
-  const element = handle.asElement();
-  if (!element) throw new Error(`file browser row not clickable: ${relPath}`);
-  return element;
-}
-
-/// Run the tree row's own "New Graph" entry -- the per-entry "Graph from
-/// here" the roadmap item names, straight off the row context menu rather
-/// than through a command id the host bridge does not carry.
-async function graphFromRow(page, treeSelector, relPath) {
-  await waitForRow(page, treeSelector, relPath);
-  const row = await rowHandle(page, treeSelector, relPath);
+/// Navigate to a directory's parent so its own context menu supplies the graph scope.
+async function graphFromRow(page, scope, relPath) {
+  await showFiles(page, scope);
+  const parent = posix.dirname(relPath);
+  await navigateFiles(page, parent === "." ? "" : parent, scope);
+  const name = posix.basename(relPath);
+  await waitFileRow(page, name, true, { timeout: 30_000, scope });
+  const row = await fileRow(page, name, scope);
+  if (!row) throw new Error(`directory row disappeared: ${relPath}`);
   await row.click({ button: "right" });
-  await page.waitForFunction(
-    () =>
-      [...document.querySelectorAll("button")].some(
-        (button) =>
-          button.querySelector(".menu-row-label")?.textContent?.trim() ===
-          "New Graph",
-      ),
-    { timeout: 15_000, polling: 100 },
-  );
+  await page.waitForSelector('[role="menu"][aria-label="File actions"]', { visible: true, timeout: 15_000 });
   const clicked = await page.evaluate(() => {
-    const button = [...document.querySelectorAll("button")].find(
-      (candidate) =>
-        candidate.querySelector(".menu-row-label")?.textContent?.trim() ===
-        "New Graph",
+    const button = [...document.querySelectorAll('[role="menu"][aria-label="File actions"] [role="menuitem"]')].find(
+      (candidate) => candidate.querySelector(".menu-row-label")?.textContent?.trim() === "New Graph",
     );
     if (!(button instanceof HTMLElement)) return false;
     button.click();
     return true;
   });
   if (!clicked) throw new Error(`row menu "New Graph" vanished: ${relPath}`);
-}
-
-/// Select a directory row in the File Browser tree. Clicking the name both
-/// selects and toggles expansion, which is what the real gesture does.
-async function selectDir(page, treeSelector, relPath) {
-  await waitForRow(page, treeSelector, relPath);
-  const clicked = await page.evaluate((selector, needle) => {
-    const row = [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].find((candidate) =>
-      candidate.getAttribute("title")?.endsWith(`/${needle}`),
-    );
-    const name = row?.querySelector(".name");
-    if (!(name instanceof HTMLElement)) return false;
-    name.click();
-    return true;
-  }, treeSelector, relPath);
-  if (!clicked) throw new Error(`file browser row not clickable: ${relPath}`);
-  await delay(400);
 }
 
 export default {
@@ -285,9 +208,7 @@ export default {
       ctx.skip(`fixture directory not indexed yet: ${JSON.stringify(spine)}`);
     }
 
-    // The window rendered its tree before this check wrote the fixture, and
-    // the File Browser's listing is what the row lookup below reads. Reload
-    // rather than wait on a refresh the surface may not owe us.
+    // Reload after seeding so the first directory listing includes the fixtures.
     await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
     const paneId = await page.evaluate(() =>
@@ -296,28 +217,10 @@ export default {
     );
     if (!paneId) throw new Error("active pane has no id before opening a file browser");
     const paneSelector = `.pane[data-pane-id="${paneId}"]`;
-    const tabsBefore = await page.$$eval(`${paneSelector} .tabs > .tab`, (tabs) => tabs.length);
-    await dispatch(page, "app.files.toggle");
-    await page.waitForFunction((id, count) => {
-      const pane = document.querySelector(`.pane[data-pane-id="${id}"]`);
-      return (pane?.querySelectorAll(".tabs > .tab").length ?? 0) > count;
-    }, { timeout: 20_000 }, paneId, tabsBefore);
-    const treeSelector = `${paneSelector} .browser [role="tree"]`;
-    await page.waitForSelector(`${treeSelector} [role="treeitem"]`, { timeout: 20_000 });
-    await page.waitForFunction((selector, dir) =>
-      [...(document.querySelector(selector)?.querySelectorAll(":scope > li > .row.dir") ?? [])]
-        .some((row) => row.getAttribute("title")?.endsWith(`/${dir}`)),
-    { timeout: 20_000 }, treeSelector, DIR);
-    // Each leg spawns a graph tab over the File Browser, so hold the browser
-    // tab itself to come back to rather than re-deriving it from tab titles.
-    const browserTab = await page.evaluateHandle((selector) =>
-      document.querySelector(`${selector} .tabs > .tab.active`), paneSelector);
-    if (!browserTab.asElement()) throw new Error("opened file browser has no active tab");
+    await showFiles(page, paneSelector);
 
-    // Leg 1: the surface under test. Expanding the fixture directory also
-    // makes its nested child addressable for leg 2.
-    await selectDir(page, treeSelector, DIR);
-    await graphFromRow(page, treeSelector, DIR);
+    // The row's own graph action supplies the first scope.
+    await graphFromRow(page, paneSelector, DIR);
     const fromHere = await waitForLoadedGraph(page);
     if (!fromHere) throw new Error("from-here graph never reported a stat line");
     await ctx.shot("graph-from-here-dir");
@@ -325,9 +228,7 @@ export default {
     // Leg 2: the reference. Open the nested directory the same way, then walk
     // one crumb back up to the parent, which re-scopes THAT tab in place to
     // the scope leg 1 opened cold.
-    await activate(browserTab);
-    await selectDir(page, treeSelector, NESTED);
-    await graphFromRow(page, treeSelector, NESTED);
+    await graphFromRow(page, paneSelector, NESTED);
     await waitForLoadedGraph(page);
     const rescoped = await page.evaluate((label) => {
       const panel = document.querySelector(".graph-tab.active");
@@ -346,12 +247,11 @@ export default {
     // Leg 3: the directory that has no file among its immediate children.
     // Its files are in the payload this tab already fetched, so a graph that
     // renders only folder bubbles is withholding what it was asked for.
-    await activate(browserTab);
     const deepShape = await subtreeShape(page, token, DEEP);
     if (!deepShape || deepShape.shallowestFileDepth < 2) {
       ctx.skip(`deep fixture not indexed yet: ${JSON.stringify(deepShape)}`);
     }
-    await graphFromRow(page, treeSelector, DEEP);
+    await graphFromRow(page, paneSelector, DEEP);
     const deep = await waitForLoadedGraph(page);
     if (!deep) throw new Error("deep from-here graph never reported a stat line");
     await ctx.shot("graph-from-here-deep-dir");

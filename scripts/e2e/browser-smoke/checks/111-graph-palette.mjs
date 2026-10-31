@@ -1,11 +1,4 @@
-// Graph palette end to end. A custom contact hue written from OUTSIDE
-// the page (`chan config set`, the preferences.toml watcher +
-// config_changed broadcast path) must repaint the running graph without
-// a reload, and must NOT escape the graph subtree: the file tree, the
-// kind chips, the inspector, the JSON tree and the empty-pane carousel
-// keep the theme hues. Then a hand-edited non-hex value in
-// preferences.toml must drop that one key back to the theme default
-// rather than painting a stale hue.
+// A custom contact hue written outside the page through chan config set must repaint the running graph without reloading. The directory listing, kind chips, inspector, JSON tree and empty-pane carousel keep their theme hues. A non-hex value in preferences.toml resets that key to its theme default.
 //
 // The graph under test is a tag lens scoped on this check's own
 // fixture tag, so its `.graph-tab.active` is distinguishable from any
@@ -13,6 +6,7 @@
 
 import { appendFileSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { FILE_ROW, navigateFiles, selectFile, showFiles } from "../lib/files.mjs";
 
 const CONTACT = "palette-contact.md";
 const NOTE = "palette-note.md";
@@ -39,26 +33,6 @@ const NOTE_MD = `# Palette Note
 
 A mention of @@Palette Contact, tagged ${TAG} for the palette smoke.
 `;
-
-async function openFileBrowser(page) {
-  if (await page.$(".file-tree, [role=tree]")) return;
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-    );
-  });
-  await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-}
-
-async function selectTreeRow(page, name) {
-  await page.evaluate((wanted) => {
-    const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
-      (button) => button.textContent?.trim() === wanted,
-    );
-    if (!row) throw new Error(`tree row missing: ${wanted}`);
-    row.click();
-  }, name);
-}
 
 export default {
   name: "graph-palette",
@@ -165,7 +139,7 @@ export default {
     };
     const inspectorChipColor = () =>
       page.evaluate(() => {
-        const chip = [...document.querySelectorAll(".inspector .kind-chip")].find(
+        const chip = [...document.querySelectorAll('aside[aria-label="Details"] .kind-chip')].find(
           (candidate) => candidate.textContent?.trim() === "contact",
         );
         return chip ? getComputedStyle(chip).backgroundColor : null;
@@ -183,23 +157,22 @@ export default {
 
     try {
       mark("start");
-      await openFileBrowser(page);
+      await showFiles(page);
+      await navigateFiles(page, "");
       mark("file-browser-open");
-      // The contact row carries the hue the file tree must keep. A
-      // write that precedes the SPA's watcher subscription never
-      // reaches the tree, so the fixtures go in AFTER the browser is
-      // open, with one rewrite if the first write raced the watcher.
+      // Fixtures written after Files mounts reach its directory watcher; one rewrite covers a write racing that subscription.
       const contactRowVisible = (timeout) =>
         page
           .waitForFunction(
-            () =>
-              [...document.querySelectorAll('[role="treeitem"]')].some(
+            (selector) =>
+              [...document.querySelectorAll(selector)].some(
                 (row) =>
                   row.classList.contains("contact") &&
-                  row.querySelector("button.name")?.textContent?.trim() ===
+                  row.querySelector("button")?.textContent?.trim() ===
                     "palette-contact.md",
               ),
             { timeout, polling: 250 },
+            FILE_ROW,
           )
           .then(() => true)
           .catch(() => false);
@@ -207,7 +180,7 @@ export default {
       if (!(await contactRowVisible(10_000))) {
         writeFixtures();
         if (!(await contactRowVisible(20_000))) {
-          throw new Error("palette-contact.md never reached the file tree as a contact row");
+          throw new Error("palette-contact.md never reached the directory listing as a contact row");
         }
       }
 
@@ -217,33 +190,31 @@ export default {
         window.__paletteSmoke = "intact";
       });
 
-      // Baselines that need the file tree mounted come FIRST: the tree
-      // unmounts when another tab takes the pane, and the lens below
-      // does exactly that.
-      const fileTreeProbe = await page.evaluate(() => {
-        const items = [...document.querySelectorAll('[role="treeitem"]')];
+      // Directory color baselines require Files to remain mounted before the graph takes its pane.
+      const fileListProbe = await page.evaluate((selector) => {
+        const items = [...document.querySelectorAll(selector)];
         const row = items
           .filter((candidate) => candidate.classList.contains("contact"))
-          .map((candidate) => candidate.querySelector("button.name"))
+          .map((candidate) => candidate.querySelector("button"))
           .find(Boolean);
         return {
           color: row ? getComputedStyle(row).color : null,
-          treeitems: items.length,
+          rows: items.length,
         };
-      });
-      const fileTreeContactColor = fileTreeProbe.color;
-      if (!fileTreeContactColor) {
-        throw new Error(`contact file-tree row unreadable: ${JSON.stringify(fileTreeProbe)}`);
+      }, FILE_ROW);
+      const fileListContactColor = fileListProbe.color;
+      if (!fileListContactColor) {
+        throw new Error(`contact directory row unreadable: ${JSON.stringify(fileListProbe)}`);
       }
       const rootContactBaseline = await page.evaluate(() =>
         getComputedStyle(document.documentElement).getPropertyValue("--g-contact").trim(),
       );
 
       // Inspector kind chip for the contact file.
-      await selectTreeRow(page, "palette-contact.md");
+      await selectFile(page, CONTACT, { details: true });
       await page.waitForFunction(
         () =>
-          [...document.querySelectorAll(".inspector .kind-chip")].some(
+          [...document.querySelectorAll('aside[aria-label="Details"] .kind-chip')].some(
             (candidate) => candidate.textContent?.trim() === "contact",
           ),
         { timeout: 15_000, polling: 250 },
@@ -251,9 +222,9 @@ export default {
       const chipBaseline = await inspectorChipColor();
       if (!chipBaseline) throw new Error("inspector contact chip unreadable");
 
-      mark("tree-chip-baselines-done");
+      mark("directory-chip-baselines-done");
       // Open the tag lens on the fixture note.
-      await selectTreeRow(page, "palette-note.md");
+      await selectFile(page, NOTE, { details: true });
       await page.waitForFunction(
         (tag) =>
           [...document.querySelectorAll('button[title="open in graph (scoped to this tag)"]')]
@@ -399,25 +370,25 @@ export default {
       }
 
       mark("dot-checked");
-      // Condition 2: nothing outside the graph subtree moved. The file
-      // tree unmounted when the lens took the pane, so spawn a FRESH
-      // browser tab: a mount that happens under the live override is
-      // the stronger escape probe anyway.
+      // A fresh Files mount under the live graph override proves that directory colors remain outside its scope.
       await page.evaluate(() => {
         window.dispatchEvent(
           new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
         );
       });
+      const freshFilesTab = await page.waitForSelector('[role="tab"][aria-selected="true"][title="File Browser"]', { timeout: 15_000 });
+      await freshFilesTab.click();
       if (!(await contactRowVisible(15_000))) {
         throw new Error("respawned file browser never showed the contact row");
       }
-      const fileTreeAfter = await page.evaluate(() => {
-        const row = [...document.querySelectorAll('[role="treeitem"].contact')]
-          .map((candidate) => candidate.querySelector("button.name"))
+      const fileListAfter = await page.evaluate((selector) => {
+        const row = [...document.querySelectorAll(selector)]
+          .filter((candidate) => candidate.classList.contains("contact"))
+          .map((candidate) => candidate.querySelector("button"))
           .find(Boolean);
         return row ? getComputedStyle(row).color : null;
-      });
-      await selectTreeRow(page, "palette-contact.md");
+      }, FILE_ROW);
+      await selectFile(page, CONTACT, { details: true });
       const chipAfter = await inspectorChipColor();
       const rootContactAfter = await page.evaluate(() =>
         getComputedStyle(document.documentElement).getPropertyValue("--g-contact").trim(),
@@ -431,8 +402,8 @@ export default {
       const marker = await page.evaluate(() => window.__paletteSmoke ?? null);
       const escapes = [
         marker !== "intact" && `page reloaded (marker=${marker})`,
-        fileTreeAfter !== fileTreeContactColor &&
-          `file tree contact row ${fileTreeContactColor} -> ${fileTreeAfter}`,
+        fileListAfter !== fileListContactColor &&
+          `directory contact row ${fileListContactColor} -> ${fileListAfter}`,
         chipAfter !== chipBaseline && `inspector chip ${chipBaseline} -> ${chipAfter}`,
         rootContactAfter !== rootContactBaseline &&
           `:root --g-contact ${rootContactBaseline} -> ${rootContactAfter}`,
@@ -489,7 +460,7 @@ export default {
         preDocPx,
         preContactSamples: preContactBaseline.samples,
         preDocSamples: preDocBaseline.samples,
-        fileTreeContact: fileTreeContactColor,
+        fileListContact: fileListContactColor,
         inspectorChip: chipBaseline,
         carousel: carouselBaseline,
         contactPixels,

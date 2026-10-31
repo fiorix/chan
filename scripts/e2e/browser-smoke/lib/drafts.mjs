@@ -7,6 +7,7 @@
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { showFiles } from "./files.mjs";
 
 /// A 1x1 red PNG.
 export const RED_DOT_PNG_B64 =
@@ -381,67 +382,44 @@ export async function saveDraftToWorkspace(page, target, whileOpen = null) {
   await page.waitForFunction(() => !document.querySelector("#path-prompt-title"), { timeout: 20_000 });
 }
 
-/// The File Browser's tab: the one whose label is a directory's.
-export async function browserTab(page) {
-  for (const tab of await page.$$(".tabs .tab")) {
-    const label = await tab.$eval(".path", (node) => node.textContent?.trim() ?? "").catch(() => "");
-    if (label.endsWith("/")) return tab;
-  }
-  return null;
-}
-
-/// Bring the file tree forward, opening a File Browser tab when there is
-/// none. Answers whether this call opened it. The tab becomes the active
-/// one: a caller that goes back to an editor brings that tab forward again.
-export async function showFileTree(page) {
-  await page.bringToFront();
-  let tab = await browserTab(page);
-  const opened = tab === null;
-  if (opened) {
-    await page.evaluate(() => {
-      window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }));
-    });
-    tab = await waitFor("a File Browser tab", 15_000, () => browserTab(page));
-  }
-  await tab.click();
-  await page.waitForSelector("[role=tree]", { timeout: 15_000 });
-  return opened;
-}
-
-/// The tree's row for the entry `name`, or null. A file's name is a button
-/// and a directory's a span, both of class `name`.
-export async function treeItem(page, name) {
-  for (const item of await page.$$("[role=tree] [role=treeitem]")) {
-    const text = await item.$eval(".name", (node) => node.textContent?.trim() ?? "").catch(() => "");
-    if (text === name || text === `${name}/`) return item;
-  }
-  return null;
-}
-
-/// Show the Drafts group, which sits above the file tree of a File Browser
-/// tab. Call it while at least one draft is listed: the group is not drawn
-/// for none.
-export async function openTree(page) {
-  await showFileTree(page);
-  await page.waitForSelector(".drafts-group", { timeout: 15_000 }).catch(() => {
-    throw new Error("the Drafts group did not appear above the file tree");
+/// The locations rail stays visible when its final draft disappears, so an empty group is meaningful only while this container is shown.
+async function waitDraftLocations(page) {
+  await page.waitForSelector('aside[aria-label="File locations"]', { visible: true, timeout: 15_000 }).catch(() => {
+    throw new Error("the Files tab does not show its File locations rail");
   });
 }
 
-/// Wait until the Drafts group lists `name` (`present`) or does not. The
-/// file tree is brought forward first: a File Browser tab that is not the
-/// active one is not in the page, and a group that is not there lists
-/// nothing, which would pass an absence without showing it.
+export async function showDraftLocations(page) {
+  const opened = await showFiles(page);
+  await waitDraftLocations(page);
+  return opened;
+}
+
+/// A nonempty drafts list has its own group inside the Files tab's locations rail.
+export async function openDraftsGroup(page) {
+  await showDraftLocations(page);
+  await page.waitForSelector('aside[aria-label="File locations"] section[aria-label="Drafts"]', { visible: true, timeout: 15_000 }).catch(() => {
+    throw new Error("the File locations rail does not show the Drafts group");
+  });
+}
+
+/// Bring the Files tab forward before reading presence or absence, because inactive tabs do not render their locations rail.
 export async function waitGroup(page, name, present) {
-  await showFileTree(page);
+  await showDraftLocations(page);
   await waitFor(`the Drafts group ${present ? "to list" : "to lose"} ${name}`, 20_000, async () =>
     (await groupNames(page)).includes(name) === present,
   );
 }
 
-/// The names the Drafts group lists, in order; empty when it is not shown.
+/// The visible locations rail's draft names, in order; the group itself is absent when it has no drafts.
 export async function groupNames(page) {
-  return page.evaluate(() =>
-    [...document.querySelectorAll(".drafts-group .draft-row .draft-name")].map((el) => el.textContent ?? ""),
-  );
+  await waitDraftLocations(page);
+  return page.evaluate(() => {
+    const locations = document.querySelector('aside[aria-label="File locations"]');
+    if (!locations?.checkVisibility()) throw new Error("the File locations rail is not visible while reading drafts");
+    return [...locations.querySelectorAll('section[aria-label="Drafts"] button[title]')].map((el) => {
+      const title = el.getAttribute("title") ?? "";
+      return title.startsWith("Open draft ") ? title.slice("Open draft ".length) : title.replace(/ is busy$/, "");
+    });
+  });
 }
