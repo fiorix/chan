@@ -362,7 +362,11 @@
   .column-headings { display: grid; grid-template-columns: minmax(148px, 1fr) 82px 80px 136px; gap: 10px; padding: 5px 22px; border-bottom: 1px solid var(--border); font-size: 11px; }
   .column-headings button { justify-content: space-between; padding: 3px 0; }
   .column-headings .size { justify-content: flex-end; }
-  .tree-wrap { overflow: auto; flex: 1; min-height: 0; min-width: 0; padding: 3px 0; }
+  /* The scroller is positioned so the list's relatively positioned box (the
+     rubber band's anchor) belongs to it: left static, the pane card counts
+     the whole list as its own overflow, and WebKit scrolls the card to a
+     focused row, taking the tab strip and the Details header out of view. */
+  .tree-wrap { position: relative; overflow: auto; flex: 1; min-height: 0; min-width: 0; padding: 3px 0; }
   .browser-status { display: flex; align-items: center; gap: 10px; min-height: 31px; padding: 0 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); }
   .keyboard-status { margin-left: auto; white-space: nowrap; }
   .selection-mode { color: var(--text); background: var(--accent-bg, var(--hover-bg)); }

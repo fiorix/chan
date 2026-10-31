@@ -27,7 +27,7 @@ Opened 2026-10-31 after the v0.117.0 publication for the bugs the owner found in
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Files tab overflows its pane][filesovf] | accepted | build |
+| [Files tab overflows its pane][filesovf] | built | review |
 | [tmux card from a devserver feed has no actions][tmuxfed] | accepted | build |
 
 [filesovf]: v0.117.1/the-files-tab-overflows-its-pane-and-hides-the-tab-strip.md

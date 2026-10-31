@@ -1,6 +1,6 @@
 # The Files tab overflows its pane and hides the tab strip
 
-Status: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop on macOS showing a devserver window of the Linux machine; accepted for v0.117.1 as a patch, not started.
+Status: raised by the owner on 2026-10-31 after the v0.117.0 publication, from chan-desktop on macOS showing a devserver window of the Linux machine; accepted for v0.117.1 as a patch and built the same day on `0.117.0-ga` (the section Built); the owner's reading on macOS is pending.
 
 ## What was asked
 
@@ -24,3 +24,9 @@ The Files surface sizes itself to the pane's content area under the strip: no de
 
 1. In headless Chrome against a workspace window with a terminal tab and a Files tab over the seed workspace, `.pane-card-face` reports `scrollHeight == clientHeight` with the Files tab active, before and after focusing the list and pressing End; the strip's rect stays at the pane's top. A browser check pins this.
 2. The owner reads the window on macOS chan-desktop (WKWebView) and on the Linux desktop (WebKitGTK): strip shown with both tabs, Details under the strip, the status bar at the pane's bottom, no empty band.
+
+## Built, 2026-10-31
+
+The cause, read in headless Chrome against the release tree by hiding one subtree at a time and toggling style properties while reading the pane card's `scrollHeight`: the folder list `ul.tree.directory-list` is `position: relative` (`FileTree.svelte`, the anchor of the rubber-band overlay), and its scroller `.tree-wrap` (`FileBrowserSurface.svelte`) was not positioned, so the engine attributed the list's whole box to the nearest positioned ancestor, the surface's `.body`, past the scroller: the card's `scrollHeight` read 1,124 px for 990 px with the list of the seed workspace open, and went back to 990 with the scroller made `position: relative` (as with `contain: paint` or `display: flex` on it, or `overflow: hidden` on `.body`), while `overflow: hidden` or `clip` on the scroller and `position: static` on the list changed nothing. The fix is the one line: `.tree-wrap { position: relative; ... }`, with the reason in a comment.
+
+Verification: the browser check `196-files-tab-keeps-the-pane-strip` opens a terminal tab and a Files tab in one pane, requires the card's `scrollHeight` to equal its `clientHeight`, the card unscrolled and the strip at the card's top with both tabs listed, then clicks a row, walks the list with ArrowDown, End, ArrowUp, Home and End, reveals the last row with `scrollIntoView` and focuses it, and requires the same again; red against the release tree in the guest (`Files tab open: the pane card holds 1124px of scrollable content in 990px`) and green three times in a row with the fix (about 2.1 s each). The surface's vitest files (11 files, 88 tests) pass. Not read here: WKWebView and WebKitGTK by eye, where the card's overflow was what the engine scrolled; the owner's capture is the record of the symptom.
