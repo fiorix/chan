@@ -4784,6 +4784,10 @@ struct Session {
     /// sees it. Taken alone or after the registry's sessions lock, never
     /// while the output lock is held.
     tmux: Mutex<tmux_gate::TmuxGate>,
+    /// The foreground job that entered control mode can exit while its
+    /// parent shell and PTY remain alive. Accessed under the tmux gate lock.
+    #[cfg(unix)]
+    tmux_foreground_group: std::sync::atomic::AtomicU32,
     /// Work the gate's connection asked the registry for, performed by the
     /// drainer off the gate lock.
     tmux_work: Mutex<VecDeque<tmux_connection::TmuxWork>>,
@@ -5152,6 +5156,8 @@ impl Session {
                 config.terminal.tmux.clone(),
                 config.terminal.scrollback_mb,
             )),
+            #[cfg(unix)]
+            tmux_foreground_group: std::sync::atomic::AtomicU32::new(0),
             tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
@@ -5578,6 +5584,8 @@ impl Session {
                 config.terminal.tmux.clone(),
                 config.terminal.scrollback_mb,
             )),
+            #[cfg(unix)]
+            tmux_foreground_group: std::sync::atomic::AtomicU32::new(0),
             tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
@@ -6367,6 +6375,8 @@ impl Session {
                 },
                 config.terminal.scrollback_mb,
             )),
+            #[cfg(unix)]
+            tmux_foreground_group: std::sync::atomic::AtomicU32::new(0),
             tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),
@@ -7043,11 +7053,13 @@ impl Session {
         if bytes.is_empty() {
             return;
         }
-        let fed = self.tmux.lock().expect("terminal tmux gate poisoned").feed(
-            bytes,
-            std::time::Instant::now(),
-            || self.foreground_for_tmux(),
-        );
+        let mut gate = self.tmux.lock().expect("terminal tmux gate poisoned");
+        let ended = self.end_gone_tmux_foreground(&mut gate);
+        let fed = gate.feed(bytes, std::time::Instant::now(), || {
+            self.foreground_for_tmux()
+        });
+        drop(gate);
+        self.perform_tmux_actions(ended);
         self.perform_tmux_actions(fed.actions);
         if !fed.passthrough.is_empty() {
             self.record_plain_output(&fed.passthrough);
@@ -7171,12 +7183,33 @@ impl Session {
 
     /// The gate's deadlines, from the registry's drainer.
     fn tick_tmux(&self, now: std::time::Instant) {
-        let actions = self
-            .tmux
-            .lock()
-            .expect("terminal tmux gate poisoned")
-            .tick(now);
+        let mut gate = self.tmux.lock().expect("terminal tmux gate poisoned");
+        let mut actions = self.end_gone_tmux_foreground(&mut gate);
+        actions.extend(gate.tick(now));
+        drop(gate);
         self.perform_tmux_actions(actions);
+    }
+
+    /// A killed SSH client cannot send tmux's exit marker. Check the job's
+    /// lifetime before decoding the surviving shell's output and on idle ticks.
+    fn end_gone_tmux_foreground(&self, gate: &mut tmux_gate::TmuxGate) -> Vec<tmux_gate::Action> {
+        #[cfg(unix)]
+        {
+            if gate.accepts_input() {
+                self.tmux_foreground_group.store(0, Ordering::Relaxed);
+                return Vec::new();
+            }
+            let group = self.tmux_foreground_group.load(Ordering::Relaxed);
+            if rustix::process::Pid::from_raw(group as i32).is_some_and(|group| {
+                rustix::process::test_kill_process_group(group) == Err(rustix::io::Errno::SRCH)
+            }) {
+                self.tmux_foreground_group.store(0, Ordering::Relaxed);
+                return gate.control_exited();
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = gate;
+        Vec::new()
     }
 
     /// Writes go to the PTY through its controller, as a client's input
@@ -7270,7 +7303,10 @@ impl Session {
                 return tmux_gate::Foreground::default();
             };
             match u32::try_from(group.as_raw_nonzero().get()) {
-                Ok(pid) => tmux_gate::process_foreground(pid),
+                Ok(pid) => {
+                    self.tmux_foreground_group.store(pid, Ordering::Relaxed);
+                    tmux_gate::process_foreground(pid)
+                }
                 Err(_) => tmux_gate::Foreground::default(),
             }
         }
@@ -8348,6 +8384,8 @@ mod tests {
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
             tmux: Mutex::new(tmux_gate::TmuxGate::new(TerminalTmuxConfig::default(), 10)),
+            #[cfg(unix)]
+            tmux_foreground_group: std::sync::atomic::AtomicU32::new(0),
             tmux_work: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             tmux_foreground: Mutex::new(None),

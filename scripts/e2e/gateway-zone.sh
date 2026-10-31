@@ -49,6 +49,7 @@
 #   scripts/e2e/gateway-zone.sh tmuxfeed   # opt-in native desktop + real tmux
 #   E2E_KEEP=1 scripts/e2e/gateway-zone.sh # leave the stack running
 #   E2E_LAUNCHER_BUNDLE=1|0                # pin the launcher-bundle expectation
+#   E2E_CA_CERT=FILE E2E_CA_KEY=FILE       # reuse a CA trusted by a native test guest
 #
 # Scenarios: self-contained assert groups that run against the
 # brought-up stack after the core region. Register one by defining
@@ -206,9 +207,16 @@ mkdir -p "$WORK" "$LOGS"
 : > "$ASSERT_LOG"
 TLS_DIR="$WORK/tls"
 mkdir -p "$TLS_DIR"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-    -subj '/CN=chan gateway-zone e2e CA' \
-    -keyout "$TLS_DIR/ca.key" -out "$TLS_DIR/ca.crt" >/dev/null 2>&1 || exit 2
+if [ -n "${E2E_CA_CERT:-}${E2E_CA_KEY:-}" ]; then
+    [ -r "${E2E_CA_CERT:-}" ] && [ -r "${E2E_CA_KEY:-}" ] || {
+        log "E2E_CA_CERT and E2E_CA_KEY must both name readable files"; exit 2;
+    }
+    (umask 077; cp "$E2E_CA_CERT" "$TLS_DIR/ca.crt" && cp "$E2E_CA_KEY" "$TLS_DIR/ca.key") || exit 2
+else
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -subj '/CN=chan gateway-zone e2e CA' \
+        -keyout "$TLS_DIR/ca.key" -out "$TLS_DIR/ca.crt" >/dev/null 2>&1 || exit 2
+fi
 openssl req -newkey rsa:2048 -nodes -subj "/CN=$DOMAIN" \
     -addext "subjectAltName=DNS:id.$DOMAIN,DNS:$APEX,DNS:*.$APEX,DNS:*.p1.$APEX,DNS:*.p2.$APEX,DNS:*.p3.$APEX,IP:127.0.0.1,IP:127.0.0.2,IP:127.0.0.3,IP:127.0.0.4" \
     -keyout "$TLS_DIR/edge.key" -out "$TLS_DIR/edge.csr" >/dev/null 2>&1 || exit 2
@@ -3663,13 +3671,15 @@ scenario_tmuxfeed() {
         "127.0.0.1:$PROXY_PORT" "$(node_ip p1):$PROXY_PORT"
     fixture="$WORK/tmux-fixture.json"
     node - "$account" "$WORK/home-tmux/devserver/config.json" "$fixture" \
-        "http://127.0.0.1:${DS_PORTS[9]}" "https://$ID_HOST" <<'EOF'
+        "http://127.0.0.1:${DS_PORTS[9]}" "https://$ID_HOST" "$WORK/pids" <<'EOF'
 const fs = require("node:fs");
-const [account, config, output, base, origin] = process.argv.slice(2);
+const [account, config, output, base, origin, pids] = process.argv.slice(2);
 const minted = JSON.parse(fs.readFileSync(account));
 const pat = {id: minted.id, secret: minted.secret, label: minted.label ?? "tmux-feed", expires_at: minted.expires_at ?? ""};
 const token = JSON.parse(fs.readFileSync(config)).devserver_token;
-fs.writeFileSync(output, JSON.stringify({base, origin, token, pat}), {mode: 0o600});
+const ingressPid = Number(fs.readFileSync(`${pids}/tmux-ingress.pid`, "utf8").trim());
+const devserverPid = Number(fs.readFileSync(`${pids}/ds-tmux.pid`, "utf8").trim());
+fs.writeFileSync(output, JSON.stringify({base, origin, token, pat, ingressPid, devserverPid}), {mode: 0o600});
 EOF
     local status=0
     SSL_CERT_FILE="$TLS_DIR/ca.crt" CHAN_BIN="$CHAN_BIN" \

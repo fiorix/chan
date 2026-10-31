@@ -931,6 +931,49 @@ fn the_control_process_ending_removes_the_windows_on_the_next_drain() {
     assert_ended_after_remove(&recorded, &rig.control.id);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_foreground_job_exit_ends_tmux_while_its_control_shell_stays_alive() {
+    use std::os::unix::process::CommandExt;
+    for idle in [false, true] {
+        let (mut rig, _pane, hook) = attached_with_hook();
+        let mut job = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        rig.control
+            .tmux_foreground_group
+            .store(job.id(), Ordering::Relaxed);
+        rig.control.tick_tmux(Instant::now());
+        rig.work();
+        assert!(
+            !calls(&hook).iter().any(|call| call.starts_with("ended ")),
+            "a live job stays connected"
+        );
+        job.kill().unwrap();
+        job.wait().unwrap();
+        if idle {
+            rig.control.tick_tmux(Instant::now());
+        }
+        let mut events = rig.control.output_tx.subscribe();
+        rig.feed(b"shell prompt> ");
+        rig.work();
+        assert_ended_after_remove(&calls(&hook), &rig.control.id);
+        assert!(
+            rig.control.exit.lock().unwrap().is_none(),
+            "the parent shell is still alive"
+        );
+        assert!(
+            rig.control_output(&mut events).contains("shell prompt> "),
+            "the shell prompt is not swallowed as tmux protocol"
+        );
+        rig.control.tick_tmux(Instant::now());
+        rig.work();
+        assert!(calls(&hook).is_empty(), "cleanup happens once");
+    }
+}
+
 #[test]
 fn a_control_process_exit_that_removes_the_session_still_removes_its_windows() {
     let (mut rig, _pane, hook) = attached_with_hook();

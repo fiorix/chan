@@ -77,6 +77,7 @@ let connected = false;
 let gatewayId;
 let local;
 let token;
+let disconnectMatrix = false;
 
 try {
   await until("devserver ready", async () => {
@@ -197,6 +198,12 @@ try {
   const alive = await run("tmux", ["-S", socket, "has-session", "-t", "fed-smoke"]).then(() => true, () => false);
   assert.equal(alive, false);
   pass("selection Turn off ends the owning tmux server and removes its card");
+  if (process.env.TMUX_FEED_DISCONNECTS === "1") {
+    disconnectMatrix = true;
+    const { disconnectChecks } = await import("./tmux-disconnect.mjs");
+    await disconnectChecks({ work, run, port, until, pass, inspect, api, local, remote,
+      localOrigin: launcherUrl.origin, base, token, secrets, inspector, here, fixture, gatewayId, server });
+  }
   status = 0;
 } catch (error) {
   const message = mask(error.stack ?? error);
@@ -212,8 +219,8 @@ try {
   await run("import", ["-window", "root", path.join(work, "shots/failure.png")]).catch(() => {});
   const targets = await run(process.execPath, [path.join(here, "inspect.mjs"), inspector, "list"], { timeout: 10000 }).catch(() => null);
   if (targets) fs.writeFileSync(path.join(work, "inspector-pages.jsonl"), mask(targets.stdout));
-  status = checks.some((check) => check.pass)
-    && (error.code === "ERR_ASSERTION" || String(error.message).startsWith("timed out:")) ? 10 : 3;
+  status = error.e2eFault === true || (!disconnectMatrix && checks.some((check) => check.pass)
+    && (error.code === "ERR_ASSERTION" || String(error.message).startsWith("timed out:"))) ? 10 : 3;
 } finally {
   if (gatewayId) await local("POST", `/api/library/gateways/${gatewayId}/disconnect`, {}).catch(() => {});
   if (connected) await run(chan, ["devserver", "disconnect", "tmux-feed-test"], { timeout: 15000 }).catch(() => {});

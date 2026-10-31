@@ -21,6 +21,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 obs_setup tmux-feed
 obs_need node tmux
+if [ "${TMUX_FEED_DISCONNECTS:-0}" = 1 ]; then
+    obs_need ssh sshd ssh-keygen
+fi
 if [ -n "$GATEWAY_FIXTURE" ]; then
     account="$(node -e 'process.stdout.write("keyring-rs:gateway:" + require(process.argv[1]).origin + "@chan-desktop")' "$GATEWAY_FIXTURE")"
     node -e 'process.stdout.write(JSON.stringify(require(process.argv[1]).pat))' "$GATEWAY_FIXTURE" |
