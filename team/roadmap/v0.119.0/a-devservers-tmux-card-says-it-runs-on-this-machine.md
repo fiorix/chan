@@ -27,7 +27,12 @@ At the merge, read against the server: `TmuxConnectionRecord.library_id` is a re
 - A devserver row whose `library_id` is still unknown keeps `on this machine` until it is learned.
 - The hidden control row keeps the server-set `tmux -CC on this machine` title.
 - Two clients on the same tmux session still look alike.
-- `Library.svelte` reads `entry.session.name` unguarded on the card's sub-line, while the server omits `session` until tmux announces it (`#[serde(default, skip_serializing_if = "Option::is_none")]` on `TmuxConnectionRecord.session`) and the TypeScript `TmuxConnectionEntry` types it as always present. A record published before the announcement would fail the card's render on that read; this is read from the types and the serializer, not observed. Not changed here.
+
+## The card before tmux names its session
+
+Found at the merge and fixed on `0.119.0-ga` by the owner's word of 2026-10-31 ("fix Library.svelte yes"). The server leaves `session` out of a record until tmux announces it (`#[serde(default, skip_serializing_if = "Option::is_none")]` on `TmuxConnectionRecord.session` in `crates/chan-library/src/windows.rs`), while the launcher's `TmuxConnectionEntry` typed it as always present and `Library.svelte` read `entry.session.name` on the card's sub-line. `session` is now optional in the type, and the sub-line reads `tmux <version>` until the session is named and puts `session <name>` before it after.
+
+Evidence: the new `Library.test.ts` case "renders a record that arrived before tmux announced its session" was red on the old template (`TypeError: Cannot read properties of undefined (reading 'name')`) and is green with the fix; launcher vitest 730 of 730, `svelte-check` 0 errors. With the type optional, restoring the old read alone fails `svelte-check` at that line (`'entry.session' is possibly 'undefined'`), so no other unguarded read of `session` is left in the launcher.
 
 ## Acceptance
 

@@ -1184,6 +1184,18 @@ describe("Library: tmux connection cards", () => {
     expect(rowNames(card("This machine"))).toContain(windowRowLabel(plain));
   });
 
+  it("renders a record that arrived before tmux announced its session", async () => {
+    // The library leaves `session` out of the record until tmux names it.
+    const unannounced = entry({ connection: "tm-new" });
+    delete unannounced.session;
+    const { setMockTmuxConnections } = await import("../api/mock");
+    setMockTmuxConnections([unannounced], [row("tm-new", "tm-new-control", true, 0)]);
+    mountList();
+    const c = card(LOCAL_TITLE);
+    expect(c.querySelector(".machine-header .row-sub")?.textContent).toBe("tmux 3.5a");
+    expect(byAria(`New tmux window in ${LOCAL_TITLE}`)).toBeDefined();
+  });
+
   it("renders rows that arrived before their record under a provisional card with no actions", async () => {
     const { setMockTmuxConnections } = await import("../api/mock");
     setMockTmuxConnections([], [row("tm-early", "tm-early-control", true, 0), row("tm-early", "tm-early-w1", false, 1)]);

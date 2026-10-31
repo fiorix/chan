@@ -142,7 +142,8 @@ export interface TmuxConnectionEntry {
   origin: TmuxConnectionOrigin;
   /** The tmux server's version string. */
   version: string;
-  session: { id: string; name: string };
+  /** The attached session; the library leaves it out until tmux names it. */
+  session?: { id: string; name: string };
   windows: TmuxWindowEntry[];
   /** How many chan windows the connection opens at connect; the rest wait. */
   window_cap: number;

@@ -588,7 +588,7 @@
           </span>
           {#if entry}
             <span class="ds-addr-row">
-              <span class="row-sub">session {entry.session.name} · tmux {entry.version}</span>
+              <span class="row-sub">{entry.session ? `session ${entry.session.name} · ` : ""}tmux {entry.version}</span>
             </span>
           {/if}
         </div>
