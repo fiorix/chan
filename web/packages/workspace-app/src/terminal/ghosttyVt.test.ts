@@ -200,6 +200,8 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
       "\x1b]4;1;?\x07",
       "\x1b]4;1;?;2;?\x07",
       "\x1b]11;#ffffff\x07\x1b]11;?\x07",
+      "\x1b]21;foreground=?\x1b\\",
+      "\x1b]21;background=?;cursor=?\x07",
     ]) {
       a.write(query);
       b.write(query);
@@ -288,33 +290,51 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(text(t.getScrollbackLine(0))).toBe("line 0");
   });
 
-  test("a default color change redraws the rows drawn before it", async () => {
+  test.each([
+    ["OSC 11, the background", "\x1b]11;rgb:40/00/00\x07", "bg", [64, 0, 0]],
+    ["OSC 10, the foreground", "\x1b]10;rgb:00/80/00\x07", "fg", [0, 128, 0]],
+  ] as const)("a default color change by %s redraws the rows drawn before it", async (_name, set, which, rgb) => {
     const t = (await upstream()).createTerminal(20, 4, { fgColor: 0xcccccc, bgColor: 0x101010 });
     t.write("first\r\nsecond");
     t.update();
     t.markClean();
-    t.write("\x1b]11;rgb:40/00/00\x07\x1b]10;rgb:00/80/00\x07");
+    t.write(set);
     t.update();
     expect(t.needsFullRedraw()).toBe(true);
     for (const y of [0, 1]) {
       const cell = t.getLine(y)![0];
-      expect([cell.bg_r, cell.bg_g, cell.bg_b], `row ${y} bg`).toEqual([64, 0, 0]);
-      expect([cell.fg_r, cell.fg_g, cell.fg_b], `row ${y} fg`).toEqual([0, 128, 0]);
+      const got = which === "bg" ? [cell.bg_r, cell.bg_g, cell.bg_b] : [cell.fg_r, cell.fg_g, cell.fg_b];
+      expect(got, `row ${y} ${which}`).toEqual([...rgb]);
     }
   });
 
-  test("a cluster longer than the scratch's room writes nothing past it", async () => {
-    type Internals = { scratch: number; wasm: { bytes(): Uint8Array } };
-    const t = (await upstream()).createTerminal(20, 3) as unknown as GhosttyTerminal & Internals;
+  test.each([33, 40, 65])("a cluster of %i codepoints is read into a buffer of its own", async (n) => {
+    type Wasm = { bytes(): Uint8Array; alloc(len: number): number; free(ptr: number, len: number): void };
+    const t = (await upstream()).createTerminal(20, 3) as unknown as GhosttyTerminal & { scratch: number; wasm: Wasm };
     const end = t.scratch + SCRATCH.size;
     const before = t.wasm.bytes().slice(end, end + 512);
-    // One cluster: "e" and 64 combining acute accents.
-    t.write("e" + "́".repeat(64));
+    const allocs: [number, number][] = [];
+    const frees: [number, number][] = [];
+    const { alloc, free } = t.wasm;
+    t.wasm.alloc = (len) => {
+      const ptr = alloc.call(t.wasm, len);
+      allocs.push([ptr, len]);
+      return ptr;
+    };
+    t.wasm.free = (ptr, len) => {
+      frees.push([ptr, len]);
+      free.call(t.wasm, ptr, len);
+    };
+    // One cluster: "e" and n - 1 combining acute accents.
+    t.write("e" + "\u0301".repeat(n - 1));
     t.update();
-    expect([...t.wasm.bytes().slice(end, end + 512)]).toEqual([...before]);
-    const cell = [...(t.getGraphemeString(0, 0) ?? "")];
+    expect([...t.wasm.bytes().slice(end, end + 512)], "nothing past the scratch").toEqual([...before]);
+    const own = allocs.filter(([, len]) => len === n * 4);
+    expect(own, "one buffer of four bytes a codepoint").toHaveLength(1);
+    expect(frees, "freed with its length").toContainEqual(own[0]);
+    const cell = [...t.getGraphemeString(0, 0)];
     expect(cell[0]).toBe("e");
-    expect(cell.length).toBeGreaterThan(1);
+    expect(cell.length).toBe(32);
   });
 
   test("a resize reflows and redraws everything", async () => {

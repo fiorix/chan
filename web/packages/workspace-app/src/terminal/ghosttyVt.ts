@@ -149,7 +149,7 @@ const DEFAULT_BG = 0x000000;
 const MODE_GRAPHEME_CLUSTER = 2027;
 
 /// Whether a reply is upstream's answer to an OSC 4, 10, 11 or 12 color
-/// query. chan answers none, on either backend (ghostty-web's build never
+/// query, or to an OSC 21 query of kitty's color protocol. chan answers none, on either backend (ghostty-web's build never
 /// did, and xtermReports.ts suppresses xterm.js's): a program that exits
 /// before reading the reply leaves the PTY to echo it into the next prompt.
 /// Upstream writes each query's answer as one reply that starts with the
@@ -159,7 +159,7 @@ function isColorReport(reply: Uint8Array): boolean {
   const semi = reply.indexOf(0x3b, 2);
   if (semi < 0 || semi > 4) return false;
   const ident = String.fromCharCode(...reply.subarray(2, semi));
-  return ident === "4" || ident === "10" || ident === "11" || ident === "12";
+  return ident === "4" || ident === "10" || ident === "11" || ident === "12" || ident === "21";
 }
 
 /// Packs a mode as upstream's `GhosttyMode`: the number in bits 0-14,
