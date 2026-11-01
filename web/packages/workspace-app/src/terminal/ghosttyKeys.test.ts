@@ -3,11 +3,13 @@ import { InputHandler } from "ghostty-web";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { ghosttyKeydownAction, ghosttyTypesKey, installGhosttyKeyParity } from "./ghosttyKeys";
 import { GhosttyVt } from "./ghosttyVt";
+import { isTerminalPasteChord } from "./clipboardChord";
 import { createTerminalKeyboardProtocolState, terminalMetaKeyBytes } from "./keymap";
 import { createXtermKeydownState, xtermKeydown, type XtermPlatform } from "./xtermKeyboard";
 
 const LINUX: XtermPlatform = { isMac: false, isWindows: false };
 const MAC: XtermPlatform = { isMac: true, isWindows: false };
+const WINDOWS: XtermPlatform = { isMac: false, isWindows: true };
 
 type Init = KeyboardEventInit & { keyCode?: number };
 
@@ -127,14 +129,31 @@ describe("after AltGr or a dead key", () => {
   const ALTGR_WIN: Init = { key: "AltGraph", code: "AltRight", keyCode: 18, ctrlKey: true, altKey: true };
   const AT_WIN: Init = { key: "@", code: "KeyQ", keyCode: 81, ctrlKey: true, altKey: true };
 
+  test("Windows AltGraph alone does not make the next plain key a dead-key continuation", () => {
+    expect(sequence(WINDOWS, [ALTGR_WIN, { key: "h", code: "KeyH", keyCode: 72 }])).toEqual([
+      { kind: "browser" }, { kind: "ghostty" },
+    ]);
+  });
+
+  test("a Windows dead-key continuation consumes only the pending key", () => {
+    expect(sequence(WINDOWS, [
+      { key: "Dead", code: "Quote", keyCode: 222 },
+      { key: "Shift", code: "ShiftLeft", keyCode: 16 },
+      { key: "E", code: "KeyE", keyCode: 69, shiftKey: true },
+      { key: "h", code: "KeyH", keyCode: 72 },
+    ])).toEqual([{ kind: "browser" }, { kind: "browser" }, { kind: "browser" }, { kind: "ghostty" }]);
+  });
+
   test.each([
     ["Enter", 13, "\r"],
     ["Tab", 9, "\t"],
   ] as const)("a dead key followed by %s sends the non-text key", (key, keyCode, data) => {
-    expect(sequence(LINUX, [
-      { key: "Dead", code: "Quote", keyCode: 222 },
-      { key, code: key, keyCode },
-    ])).toEqual([{ kind: "browser" }, { kind: "send", data }]);
+    for (const platform of [LINUX, WINDOWS]) {
+      expect(sequence(platform, [
+        { key: "Dead", code: "Quote", keyCode: 222 },
+        { key, code: key, keyCode },
+      ])).toEqual([{ kind: "browser" }, { kind: "send", data }]);
+    }
   });
 
   test("Linux: the AltGr character is ghostty-web's to type, and so is the key after it", () => {
@@ -193,7 +212,7 @@ afterEach(() => {
 });
 
 /// Exercise the host listener together with ghostty-web's real input path.
-function inputTerminal(cancelHost = false) {
+function inputTerminal(cancelHost = false, platform = LINUX) {
   const host = document.createElement("div");
   const textarea = document.createElement("textarea");
   host.append(textarea);
@@ -206,8 +225,8 @@ function inputTerminal(cancelHost = false) {
   if (cancelHost) host.addEventListener("beforeinput", (event) => { cancelled.reached = true; event.preventDefault(); });
   const remove = installGhosttyKeyParity(host, {
     terminal: { rows: 24, getMode: () => false, scrollLines() {}, selectAll() {}, clearSelection() {} },
-    platform: () => LINUX,
-    claimed: () => false,
+    platform: () => platform,
+    claimed: (event) => isTerminalPasteChord(event, platform.isMac ? "mac" : "windows"),
     chanBytes: () => null,
     send: (text) => data.push(text),
   });
@@ -222,6 +241,66 @@ function inputTerminal(cancelHost = false) {
 }
 
 describe("browser text on the ghostty host", () => {
+  test.each([
+    ["e", "KeyE", 69, "\u00e9"],
+    ["\u00e9", "KeyE", 69, "\u00e9"],
+    ["t", "KeyT", 84, "'t"],
+    [" ", "Space", 32, "'"],
+    ["'", "Space", 32, "'"],
+    ["E", "KeyE", 69, "\u00c9"],
+    ["\u00e9", "KeyE", 0, "\u00e9"],
+  ] as const)("Windows Dead then %s (%s, keyCode %i) takes browser text %s once", (key, code, keyCode, text) => {
+    const term = inputTerminal(true, WINDOWS);
+    term.host.dispatchEvent(keydown({ key: "Dead", code: "Quote", keyCode: 222 }));
+    const event = keydown({ key, code, keyCode });
+    term.host.dispatchEvent(event);
+    expect(term.data, "keydown must not guess the composed text").toEqual([]);
+    expect(event.defaultPrevented, "the browser must be allowed to compose").toBe(false);
+    term.beforeinput(text);
+    expect(term.data).toEqual([text]);
+    term.host.dispatchEvent(keydown({ key: "h", code: "KeyH", keyCode: 72 }));
+    expect(term.data).toEqual([text, "h"]);
+    term.dispose();
+  });
+
+  test.each([
+    ["b", "KeyB", 66, "\x1b\x02"],
+    ["@", "KeyQ", 81, "@"],
+    ["@", "KeyV", 86, "@"],
+  ] as const)("Windows Ctrl+Alt key=%s code=%s delivers its chord or character", (key, code, keyCode, data) => {
+    const term = inputTerminal(true, WINDOWS);
+    term.host.dispatchEvent(keydown({ key: "Control", code: "ControlLeft", keyCode: 17, ctrlKey: true }));
+    term.host.dispatchEvent(keydown({ key: "AltGraph", code: "AltRight", keyCode: 18, ctrlKey: true, altKey: true }));
+    let reachedGhostty = false;
+    term.host.addEventListener("keydown", () => { reachedGhostty = true; });
+    const event = keydown({ key, code, keyCode, ctrlKey: true, altKey: true });
+    term.host.dispatchEvent(event);
+    expect(term.data).toEqual([data]);
+    expect(event.defaultPrevented).toBe(true);
+    if (code === "KeyV") expect(reachedGhostty, "AltGr must not reach the KeyV paste early return").toBe(false);
+    term.beforeinput(key);
+    expect(term.data, "matching text after a handled key is not duplicated").toEqual([data]);
+    term.host.dispatchEvent(keydown({ key: "Enter", code: "Enter", keyCode: 13 }));
+    expect(term.data).toEqual([data, "\r"]);
+    term.dispose();
+  });
+
+  test("Windows Ctrl+V is input and Ctrl+Shift+V retains native paste", () => {
+    const term = inputTerminal(true, WINDOWS);
+    const ctrlV = keydown({ key: "v", code: "KeyV", keyCode: 86, ctrlKey: true });
+    term.host.dispatchEvent(ctrlV);
+    expect(ctrlV.defaultPrevented).toBe(true);
+    expect(term.data).toEqual(["\x16"]);
+    const pasteKey = keydown({ key: "V", code: "KeyV", keyCode: 86, ctrlKey: true, shiftKey: true });
+    term.host.dispatchEvent(pasteKey);
+    expect(pasteKey.defaultPrevented).toBe(false);
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { getData: () => "clipboard text" } });
+    term.host.dispatchEvent(paste);
+    expect(term.data).toEqual(["\x16", "clipboard text"]);
+    term.dispose();
+  });
+
   test("insertText without keydown sends once, ahead of the host's cancel", () => {
     const term = inputTerminal(true);
     expect(term.beforeinput("\u{1f600}").defaultPrevented).toBe(true);

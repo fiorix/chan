@@ -81,6 +81,15 @@ export function ghosttyKeydownAction(
     state.deadKey = false;
     return { kind: "send", data: ev.key };
   }
+  // Windows AltGraph is a modifier, not a pending dead-key composition.
+  // Its next key either carries a layout character or encodes a Ctrl+Alt chord.
+  if (ctx.platform.isWindows && ev.key === "AltGraph") return { kind: "browser" };
+  // Windows Chromium can supply the base key here and the composed text in
+  // beforeinput, including two characters for an apostrophe then a consonant.
+  if (ctx.platform.isWindows && state.deadKey && ghosttyTypesKey(ev)) {
+    state.deadKey = false;
+    return { kind: "browser" };
+  }
   const decision = xtermKeydown(
     ev,
     { applicationCursorMode: ctx.applicationCursorMode, platform: ctx.platform, rows: ctx.rows },
@@ -102,6 +111,8 @@ export function ghosttyKeydownAction(
       // AltGr character, a dead key's composed character, a plain key.
       if (ghosttyTypesKey(ev)) {
         state.deadKey = false;
+        // ghostty-web's Ctrl+KeyV paste early return also matches AltGr+V.
+        if (ev.ctrlKey && ev.code === "KeyV") return { kind: "send", data: ev.key };
         return { kind: "ghostty" };
       }
       // A non-text key has no browser text to compose. Encode it even when

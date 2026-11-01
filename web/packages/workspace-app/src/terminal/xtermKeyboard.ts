@@ -303,11 +303,14 @@ export function xtermKeydown(
     return { kind: "scroll", lines: result.type === "page-up" ? -lines : lines };
   }
   if (result.type === "select-all") return { kind: "select-all" };
-  // A Windows AltGr (Ctrl+Alt) on a character key types the character.
+  // A Windows AltGr (Ctrl+Alt) character types itself. A bare letter still
+  // uses the evaluator's Ctrl+Alt bytes when the layout supplies no character.
+  const bareLetter = ev.keyCode >= 65 && ev.keyCode <= 90 &&
+    (ev.key === String.fromCharCode(ev.keyCode) || ev.key === String.fromCharCode(ev.keyCode + 32));
   const thirdLevelShift =
     ((isWindows && ev.altKey && ev.ctrlKey && !ev.metaKey) ||
       (isWindows && ev.getModifierState("AltGraph"))) &&
-    (!ev.keyCode || ev.keyCode > 47);
+    (!ev.keyCode || ev.keyCode > 47) && !bareLetter;
   if (thirdLevelShift) return { kind: "pass", deadKey: false };
   if (!result.key) return { kind: "pass", deadKey: state.deadKey };
   // Unmodified capitals go through keypress so macOS IMEs see Caps Lock.
