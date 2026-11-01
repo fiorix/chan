@@ -65,8 +65,10 @@ export async function withoutNavigation(page, what, action) {
   }
 }
 
-export function spawnDevserver(chanBin, chanHome) {
-  const child = spawn(chanBin, ["devserver", "run", "--port", "0"], {
+// `args` follow the fixed ones; a check that must not dial a tunnel passes
+// `["--no-tunnel"]`.
+export function spawnDevserver(chanBin, chanHome, args = []) {
+  const child = spawn(chanBin, ["devserver", "run", "--port", "0", ...args], {
     env: { ...process.env, CHAN_HOME: chanHome, CHAN_NO_DEVSERVER_HANDOFF: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });

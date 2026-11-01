@@ -1,10 +1,14 @@
 <script lang="ts" generics="T extends { key: string; label: string }">
   // A ring of cards around a vertical axis, one card in front. The layout is a
   // port of a 3D circular gallery: each card stands at `index * step` degrees,
-  // `radius` out from the axis, under a 2000px perspective, and the ring turns
+  // `radius` out from the axis, under a 2000px perspective, and the deck turns
   // to bring a card forward, dimming the others by their angle from the front
-  // (lib/carousel). The ring sits `radius` back from the viewer, so the card in
-  // front renders at its natural size.
+  // (lib/carousel). Each slot carries the whole turn itself: pushed back by the
+  // radius, turned by its angle from the front and pushed out again. The slot
+  // in front therefore stands on the identity transform and its card renders
+  // at its natural size on a flat layer, which is what lets its list scroll
+  // under the wheel in WebKit: an overflow box inside a layer pushed out along
+  // Z takes no wheel scrolling there, though it takes clicks and keys.
   //
   // Up/Down select rows; Left/Right walk their controls and turn the ring at
   // either edge. Tab also walks the card's controls. Every other card is inert,
@@ -216,9 +220,7 @@
   aria-roledescription="carousel"
   aria-label={label}>
   <div class="stage" bind:this={stage} style:--card-width={`${width}px`}>
-    <div
-      class="ring"
-      style:transform={`translateZ(${-radius}px) rotateY(${-position * layout.step}deg)`}>
+    <div class="ring">
       {#each items as item, i (item.key)}
         {@const angle = relativeAngle(i, position, layout.step)}
         {@const active = i === activeIndex}
@@ -237,7 +239,7 @@
           data-key={item.key}
           tabindex="-1"
           bind:this={slotEls[i]}
-          style:transform={`rotateY(${i * layout.step}deg) translateZ(${radius}px)`}
+          style:transform={`translateZ(${-radius}px) rotateY(${(i - position) * layout.step}deg) translateZ(${radius}px)`}
           style:filter={active ? undefined : `brightness(${slotBrightness(angle)})`}
           onclick={() => {
             if (active) return;
@@ -295,6 +297,8 @@
   .key-hint { margin: 0; text-align: center; color: var(--text-secondary); font-size: 0.78rem; }
   .carousel {
     --deck-height: clamp(12rem, calc(100vh - 11rem), 48rem);
+    /* The room under a card's last row, as end padding and as scroll padding. */
+    --card-end-gap: 0.75rem;
 
     display: flex;
     flex-direction: column;
@@ -313,11 +317,12 @@
     overflow: clip;
   }
 
+  /* One 3D context for the slots to sort by depth in. The ring itself carries
+     no transform, so the slot in front is the only transform over its card. */
   .ring {
     position: absolute;
     inset: 0;
     transform-style: preserve-3d;
-    transition: transform 600ms cubic-bezier(0.2, 0.7, 0.2, 1);
   }
 
   .slot {
@@ -329,7 +334,9 @@
     margin-left: calc(var(--card-width) / -2);
     outline: none;
     cursor: pointer;
-    transition: filter 300ms linear;
+    transition:
+      transform 600ms cubic-bezier(0.2, 0.7, 0.2, 1),
+      filter 300ms linear;
   }
 
   .slot.active {
@@ -345,12 +352,17 @@
   }
 
   /* A card fills its slot and scrolls inside it, so every card in the ring
-     has one size whatever it holds. */
+     has one size whatever it holds. The end padding keeps the last row clear
+     of the card's border at the end of the range, and the same length as
+     scroll padding parks a row the keys select above the border, since
+     scrollIntoView otherwise aligns it to the padding edge. */
   .slot-body > :global(.card) {
     box-sizing: border-box;
     height: 100%;
     margin: 0;
+    padding-bottom: var(--card-end-gap);
     overflow-y: auto;
+    scroll-padding-block-end: var(--card-end-gap);
   }
 
   /* The ring moves the cards; a card does not also grow under the pointer. */
@@ -407,7 +419,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .ring,
     .slot {
       transition: none;
     }
