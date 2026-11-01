@@ -255,18 +255,15 @@ export type DateMatch = {
   date: Date;
 };
 
-/// Sentinel characters for word-boundary detection. We treat any
-/// alphanumeric / dash / slash / dot adjacent to a candidate as a
-/// "still part of a longer token" signal; otherwise the match
-/// stands. Dash keeps "2026-05-05" from bleeding into hyphenated
-/// identifiers, slash keeps "/path/04/05/2024.txt" from pilling.
+/// Alphanumeric, dash, slash, and dot characters keep a date inside a longer token; trailing dots end a sentence only before whitespace, line end, or closing punctuation.
 const SENTINEL_BAD = "A-Za-z0-9./\\-";
+const TRAILING_BOUNDARY = `(?=$|[^${SENTINEL_BAD}]|\\.+(?=$|\\s|\\)|\\]|['"]))`;
 
 /// One scan pattern per catalog format, in catalog order, built once. Each
 /// is global, and a global RegExp keeps its position between calls, so a
 /// scan resets `lastIndex` before it starts.
 const SCAN_PATTERNS: readonly RegExp[] = DATE_FORMATS.map(
-  (fmt) => new RegExp(`(?:^|[^${SENTINEL_BAD}])(${fmt.pattern})(?=$|[^${SENTINEL_BAD}])`, "g"),
+  (fmt) => new RegExp(`(?:^|[^${SENTINEL_BAD}])(${fmt.pattern})${TRAILING_BOUNDARY}`, "g"),
 );
 
 /// Find every date occurrence in `text` across every catalog format.

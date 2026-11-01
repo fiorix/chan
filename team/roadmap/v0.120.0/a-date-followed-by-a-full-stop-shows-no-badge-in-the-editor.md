@@ -38,3 +38,11 @@ Every format misses a date before a full stop; a comma or a closing parenthesis 
 
 1. `dateFormats.test.ts` pins the owner's sentence and one line per catalog format ending in a full stop as matches, a full stop at the end of a line and before closing punctuation, and an ellipsis before a space; and keeps `notes/2026-10-31.md`, `2026-10-31.1` and the four token cases unmatched. The new matching cases are red before the fix.
 2. The date widget shows a badge on `Happening on Halloween, 2026-10-31.` in the editor.
+
+## Closing evidence - 2026-11-01
+
+`dateFormats.ts` accepts a trailing run of dots when the run reaches whitespace, line end or `)`, `]` or a quote; its leading boundary and the letter, digit, slash and dash exclusions stay in place. The date widget and the date-at-caret macro both call `findDateMatches`, so they read the same matches.
+
+`dateFormats.test.ts` covers the owner's sentence, all seven catalog formats before a full stop, a dot run at line end or before whitespace, each closing punctuation, and the longer-token exclusions. The new matching assertions were red before the change (14 failed, 20 passed); the focused test passes all 36 cases with the change. Four isolated mutations of the dot-run, line-end, closing-punctuation and letter-or-digit guards each failed the corresponding cases.
+
+After `make web`, an isolated Chrome check opened `ws-alpha/datestop.md`, reloaded with cache disabled and found a visible ISO date badge for `2026-10-31` in `Happening on Halloween, 2026-10-31.`. The screenshot and driver log are in `dev/v0120-team/evidence/Editor120/`.
