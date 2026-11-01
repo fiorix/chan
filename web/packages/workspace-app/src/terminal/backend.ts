@@ -22,9 +22,10 @@
 /// terminal.
 ///
 /// The compiled module is cached behind a single promise so concurrent
-/// spawns coalesce. A rejected load is NOT cached: the next spawn
-/// retries, and callers fall back to xterm.js for the terminal that
-/// failed (fail-open, same philosophy as MouseModeFilter).
+/// spawns coalesce. A compile failure stays cached for the page's life:
+/// an engine without the wasm's required features cannot use this core.
+/// Fetch failures retry at the next spawn. Callers fall back to xterm.js
+/// for each terminal whose load fails.
 
 import type { Ghostty, Terminal } from "ghostty-web";
 import { GhosttyVt } from "./ghosttyVt";
@@ -70,11 +71,11 @@ export function ghosttyKitFrom(
 let kitPromise: Promise<GhosttyKit> | null = null;
 
 /// Load the ghostty kit, fetching the library and compiling the wasm
-/// asset on first use. Rejects if either can't be fetched or compiled;
-/// the rejection is not cached so a later spawn can retry after a
-/// transient failure.
+/// asset on first use. Compile failures stay cached; failures fetching
+/// the library or wasm retry at the next spawn.
 export function loadGhosttyKit(): Promise<GhosttyKit> {
   if (!kitPromise) {
+    let compileFailed = false;
     kitPromise = (async () => {
       const [mod, wasmUrl] = await Promise.all([
         import("ghostty-web"),
@@ -86,11 +87,15 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
           `fetching ${wasmUrl.default}: ${response.status} ${response.statusText}`,
         );
       }
-      const module = await WebAssembly.compile(await response.arrayBuffer());
+      const bytes = await response.arrayBuffer();
+      const module = await WebAssembly.compile(bytes).catch((error: unknown) => {
+        compileFailed = true;
+        throw error;
+      });
       return ghosttyKitFrom(module, mod);
     })();
     kitPromise.catch(() => {
-      kitPromise = null;
+      if (!compileFailed) kitPromise = null;
     });
   }
   return kitPromise;
