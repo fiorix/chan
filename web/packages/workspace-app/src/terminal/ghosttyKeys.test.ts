@@ -148,12 +148,42 @@ describe("after AltGr or a dead key", () => {
     ["Enter", 13, "\r"],
     ["Tab", 9, "\t"],
   ] as const)("a dead key followed by %s sends the non-text key", (key, keyCode, data) => {
-    for (const platform of [LINUX, WINDOWS]) {
-      expect(sequence(platform, [
-        { key: "Dead", code: "Quote", keyCode: 222 },
-        { key, code: key, keyCode },
-      ])).toEqual([{ kind: "browser" }, { kind: "send", data }]);
+    expect(sequence(LINUX, [
+      { key: "Dead", code: "Quote", keyCode: 222 },
+      { key, code: key, keyCode },
+    ])).toEqual([{ kind: "browser" }, { kind: "send", data }]);
+  });
+
+  test("Windows: Tab after a dead key is sent; a plain Enter waits for the browser's text", () => {
+    const dead: Init = { key: "Dead", code: "Quote", keyCode: 222 };
+    expect(sequence(WINDOWS, [dead, { key: "Tab", code: "Tab", keyCode: 9 }])).toEqual([
+      { kind: "browser" }, { kind: "send", data: "\t" },
+    ]);
+    expect(sequence(WINDOWS, [dead, { key: "Enter", code: "Enter", keyCode: 13 }, { key: "Enter", code: "Enter", keyCode: 13 }]))
+      .toEqual([{ kind: "browser" }, { kind: "line-break", data: "\r" }, { kind: "send", data: "\r" }]);
+    expect(sequence(WINDOWS, [dead, { key: "Enter", code: "NumpadEnter", keyCode: 13 }]).at(-1))
+      .toEqual({ kind: "line-break", data: "\r" });
+    expect(sequence(WINDOWS, [dead, { key: "Enter", code: "Enter", keyCode: 13, altKey: true }]).at(-1))
+      .toEqual({ kind: "send", data: "\x1b\r" });
+    for (const mod of ["shiftKey", "ctrlKey", "metaKey"] as const) {
+      expect(sequence(WINDOWS, [dead, { key: "Enter", code: "Enter", keyCode: 13, [mod]: true }]).at(-1)?.kind, mod)
+        .not.toBe("line-break");
     }
+  });
+
+  test("Windows: numpad digits typed with Alt held are an Alt code, not keys", () => {
+    // Recorded on Windows 11 Chrome and Edge 156: Num Lock off reads the
+    // digits as arrows, which chan's own bytes would send as word motions.
+    expect(action({ key: "ArrowLeft", code: "Numpad4", keyCode: 37, altKey: true }, WINDOWS, "\x1bb")).toEqual({ kind: "cancel" });
+    expect(action({ key: "ArrowRight", code: "Numpad6", keyCode: 39, altKey: true }, WINDOWS, "\x1bf")).toEqual({ kind: "cancel" });
+    expect(action({ key: "4", code: "Numpad4", keyCode: 100, altKey: true }, WINDOWS)).toEqual({ kind: "cancel" });
+    expect(action({ key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, altKey: true }, WINDOWS, "\x1bb")).toEqual({ kind: "send", data: "\x1bb" });
+    expect(action({ key: "ArrowLeft", code: "Numpad4", keyCode: 37, altKey: true }, LINUX, "\x1bb")).toEqual({ kind: "send", data: "\x1bb" });
+    for (const mod of ["ctrlKey", "metaKey", "shiftKey"] as const) {
+      expect(action({ key: "4", code: "Numpad4", keyCode: 100, altKey: true, [mod]: true }, WINDOWS), mod).not.toEqual({ kind: "cancel" });
+    }
+    expect(action({ key: "4", code: "Numpad4", keyCode: 100 }, WINDOWS)).not.toEqual({ kind: "cancel" });
+    expect(action({ key: "Enter", code: "NumpadEnter", keyCode: 13, altKey: true }, WINDOWS)).not.toEqual({ kind: "cancel" });
   });
 
   test("Linux: the AltGr character is ghostty-web's to type, and so is the key after it", () => {
@@ -212,7 +242,11 @@ afterEach(() => {
 });
 
 /// Exercise the host listener together with ghostty-web's real input path.
-function inputTerminal(cancelHost = false, platform = LINUX) {
+function inputTerminal(
+  cancelHost = false,
+  platform = LINUX,
+  chanBytes: (e: KeyboardEvent) => string | null = () => null,
+) {
   const host = document.createElement("div");
   const textarea = document.createElement("textarea");
   host.append(textarea);
@@ -227,7 +261,7 @@ function inputTerminal(cancelHost = false, platform = LINUX) {
     terminal: { rows: 24, getMode: () => false, scrollLines() {}, selectAll() {}, clearSelection() {} },
     platform: () => platform,
     claimed: (event) => isTerminalPasteChord(event, platform.isMac ? "mac" : "windows"),
-    chanBytes: () => null,
+    chanBytes,
     send: (text) => data.push(text),
   });
   const beforeinput = (text: string | null, init: InputEventInit = {}, target: HTMLElement = host) => {
@@ -282,6 +316,115 @@ describe("browser text on the ghostty host", () => {
     expect(term.data, "matching text after a handled key is not duplicated").toEqual([data]);
     term.host.dispatchEvent(keydown({ key: "Enter", code: "Enter", keyCode: 13 }));
     expect(term.data).toEqual([data, "\r"]);
+    term.dispose();
+  });
+
+  test("Windows AltGr+V as Chromium reports it types its character once", () => {
+    // Recorded on Windows 11 Chrome and Edge 156 (Czech, Slovak, Hungarian): a
+    // synthetic Control keydown, then AltGraph and the character with ctrlKey
+    // and altKey false and only the AltGraph modifier state set.
+    const term = inputTerminal(true, WINDOWS);
+    term.host.dispatchEvent(keydown({ key: "Control", code: "ControlLeft", keyCode: 17, ctrlKey: true }));
+    term.host.dispatchEvent(keydown({ key: "AltGraph", code: "AltRight", keyCode: 18, modifierAltGraph: true }));
+    term.host.dispatchEvent(keydown({ key: "@", code: "KeyV", keyCode: 86, modifierAltGraph: true }));
+    term.beforeinput("@");
+    expect(term.data).toEqual(["@"]);
+    term.dispose();
+  });
+
+  describe("Windows Enter after a dead key", () => {
+    // Recorded on Windows 11 Chrome and Edge 156 (US-International): the
+    // pending apostrophe arrives as insertText only after Enter's keydown,
+    // then Enter's own line break; a cancelled Enter keydown drops it.
+    const DEAD: Init = { key: "Dead", code: "Quote", keyCode: 222 };
+    const ENTER: Init = { key: "Enter", code: "Enter", keyCode: 13 };
+    const enterUp = () => new KeyboardEvent("keyup", { bubbles: true, key: "Enter", code: "Enter" });
+
+    test.each([
+      ["the focused host", "insertParagraph", false],
+      ["ghostty-web's textarea", "insertLineBreak", true],
+    ] as const)("on %s the apostrophe comes before CR, each once", (_where, inputType, onTextarea) => {
+      const term = inputTerminal(true, WINDOWS);
+      const target = onTextarea ? term.textarea : term.host;
+      target.dispatchEvent(keydown(DEAD));
+      const enter = keydown(ENTER);
+      target.dispatchEvent(enter);
+      expect(enter.defaultPrevented, "the browser must still type the pending apostrophe").toBe(false);
+      expect(term.data, "CR must wait for the apostrophe").toEqual([]);
+      term.beforeinput("'", {}, target);
+      expect(term.data).toEqual(["'"]);
+      expect(term.beforeinput(null, { inputType }, target).defaultPrevented).toBe(true);
+      expect(term.data, "CR goes with Enter's own input").toEqual(["'", "\r"]);
+      target.dispatchEvent(enterUp());
+      expect(term.data).toEqual(["'", "\r"]);
+      term.dispose();
+    });
+
+    test("an already cancelled line break leaves CR to Enter's keyup", () => {
+      const term = inputTerminal(false, WINDOWS);
+      term.host.dispatchEvent(keydown(DEAD));
+      term.host.dispatchEvent(keydown(ENTER));
+      const cancelled = new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertParagraph" });
+      cancelled.preventDefault();
+      term.host.dispatchEvent(cancelled);
+      expect(term.data).toEqual([]);
+      term.host.dispatchEvent(enterUp());
+      expect(term.data).toEqual(["\r"]);
+      term.dispose();
+    });
+
+    test("with no line-break input, Enter's keyup sends CR", () => {
+      const term = inputTerminal(true, WINDOWS);
+      term.host.dispatchEvent(keydown(DEAD));
+      term.host.dispatchEvent(keydown(ENTER));
+      term.host.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Shift", code: "ShiftLeft" }));
+      expect(term.data).toEqual([]);
+      term.host.dispatchEvent(enterUp());
+      term.host.dispatchEvent(enterUp());
+      expect(term.data).toEqual(["\r"]);
+      term.dispose();
+    });
+
+    test.each(["keydown", "focusout"])("a %s before Enter's input sends its CR first", (type) => {
+      const term = inputTerminal(true, WINDOWS);
+      term.host.dispatchEvent(keydown(DEAD));
+      term.host.dispatchEvent(keydown(ENTER));
+      if (type === "keydown") term.host.dispatchEvent(keydown({ key: "h", code: "KeyH", keyCode: 72 }));
+      else term.host.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      expect(term.data).toEqual(type === "keydown" ? ["\r", "h"] : ["\r"]);
+      term.beforeinput(null, { inputType: "insertParagraph" });
+      term.host.dispatchEvent(enterUp());
+      expect(term.data, "CR is sent once").toEqual(type === "keydown" ? ["\r", "h"] : ["\r"]);
+      term.dispose();
+    });
+
+    test("a line break with no pending Enter is left alone", () => {
+      const term = inputTerminal(false, WINDOWS);
+      expect(term.beforeinput(null, { inputType: "insertParagraph" }).defaultPrevented).toBe(false);
+      expect(term.data).toEqual([]);
+      term.dispose();
+    });
+  });
+
+  test.each([
+    ["Num Lock off", [["ArrowRight", "Numpad6", 39], ["ArrowLeft", "Numpad4", 37]]],
+    ["Num Lock on", [["6", "Numpad6", 102], ["4", "Numpad4", 100]]],
+  ] as const)("Windows Alt+Numpad 6 4 types only its character (%s)", (_name, digits) => {
+    // Recorded on Windows 11 Chrome and Edge 156: Windows types the Alt code's
+    // character when Alt is released, as insertText after a keyup whose key is
+    // that character; the digit keydowns type nothing.
+    const term = inputTerminal(true, WINDOWS, (e) => terminalMetaKeyBytes(e, createTerminalKeyboardProtocolState()));
+    term.host.dispatchEvent(keydown({ key: "Alt", code: "AltLeft", keyCode: 18, altKey: true }));
+    for (const [key, code, keyCode] of digits) {
+      const down = keydown({ key, code, keyCode, altKey: true });
+      term.host.dispatchEvent(down);
+      expect(down.defaultPrevented, `${code} must not reach the browser, where Alt+ArrowLeft is Back`).toBe(true);
+      term.host.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key, code, altKey: true }));
+    }
+    term.host.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "@", code: "AltLeft" }));
+    expect(term.data).toEqual([]);
+    term.beforeinput("@");
+    expect(term.data).toEqual(["@"]);
     term.dispose();
   });
 
