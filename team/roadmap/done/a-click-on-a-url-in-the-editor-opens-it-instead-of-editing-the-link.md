@@ -1,6 +1,8 @@
 # A click on a URL in the editor opens it instead of editing the link
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("one more to file"), with its questions decided by the owner the same day (the section Decisions); not started.
+Status: shipped in [v0.120.0](../../release/release-v0.120.0.md).
+
+Record before the release: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("one more to file"), with its questions decided by the owner the same day (the section Decisions); not started.
 
 ## What was asked
 

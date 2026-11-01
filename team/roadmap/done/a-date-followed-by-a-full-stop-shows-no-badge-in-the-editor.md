@@ -1,6 +1,8 @@
 # A date followed by a full stop shows no badge in the editor
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"); cause found by reading and confirmed by a probe, not started.
+Status: shipped in [v0.120.0](../../release/release-v0.120.0.md).
+
+Record before the release: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"); cause found by reading and confirmed by a probe, not started.
 
 ## What was asked
 

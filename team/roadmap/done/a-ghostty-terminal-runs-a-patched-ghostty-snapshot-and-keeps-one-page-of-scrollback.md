@@ -84,4 +84,4 @@ Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adve
 
 The binding's reviewer then read the fixes. Both hold and add no re-reads: over 500 colored scrolling frames the binding re-reads the whole screen 477 times before and after, none of them from the new check, and every cluster buffer is freed once with its length. It found that the core also answers the OSC 21 query of kitty's color protocol, now dropped as well, and three plausible wrong fixes the tests passed (a check of the background alone, a buffer too short, a buffer taken only past 64 codepoints), which the tests now catch (`e53a4aeb8`).
 
-[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md
+[v0120review]: ghostty-defects-the-v0119-review-left-open.md

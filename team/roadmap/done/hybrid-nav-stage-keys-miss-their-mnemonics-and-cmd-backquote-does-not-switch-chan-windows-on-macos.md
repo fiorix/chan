@@ -1,6 +1,8 @@
 # Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"), with the naming question decided by the owner the same day (the section Decisions); the stage letters are implemented on their lane and in review, while Cmd+` awaits the Mac reading.
+Status: shipped in [v0.120.0](../../release/release-v0.120.0.md).
+
+Record before the release: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"), with the naming question decided by the owner the same day (the section Decisions); the stage letters are implemented on their lane and in review, while Cmd+` awaits the Mac reading.
 
 ## What was asked
 
@@ -41,3 +43,7 @@ In Hybrid Nav, `f` and `F` stage a File Browser behind the files capability, and
 Acceptance 1 is met by the focused App and cheatsheet tests (8 expected failures before the handler change, then 47 passes), ten independent mutations of the routes, guards and caps that each failed an assertion, and a Chrome hand check on the isolated 18133 server after rebuilding the worktree bundle: `o` and `i` staged nothing, `f` plus Enter opened a File Browser, and `e` plus Enter opened an Excalidraw canvas. The served workspace asset names matched the worktree build. The `web/packages/workspace-app/src/design.md` Hybrid Nav text names no stage letters, so it needs no edit for this change.
 
 Acceptance 2 remains pending Alex's Mac reading of Cmd+` from the listed focuses and reconnect surfaces; the reading and any routed fix will be recorded here when it lands.
+
+## 2026-11-01 close
+
+The stage letters shipped in v0.120.0 (`4dfcdb2c3`). The Cmd+` half waited for the owner's macOS reading (the round's check 1), not received by the GA cut; it is carried into v0.121.0 as its own item ([cmdbq](../v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md)), with the reading as its first step.

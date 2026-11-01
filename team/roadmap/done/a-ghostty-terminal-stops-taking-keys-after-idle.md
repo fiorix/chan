@@ -53,4 +53,4 @@ Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adve
 
 Rejected with evidence: the blur cannot take the focus from a dialog, the palette, an editor or the find box, since it runs only when the active element is inside this terminal's host; it does not run for a hidden or inactive tab, does not loop, sends no focus report to a program that did not ask for one, and leaves xterm.js unchanged. Left open as minor, in [v0120review]: in Chromium and WebView2 a program with focus reporting sees each report twice on a resume (CSI O, CSI O, CSI I, CSI I), measured in headful Chrome; WebKit was not measured.
 
-[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md
+[v0120review]: ghostty-defects-the-v0119-review-left-open.md

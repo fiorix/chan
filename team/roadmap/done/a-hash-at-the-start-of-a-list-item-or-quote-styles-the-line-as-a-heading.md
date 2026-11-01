@@ -1,6 +1,8 @@
 # A hash at the start of a list item or a quote styles the line as a heading
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("one more bug to file"), with the renderings question decided by the owner the same day (the section Decisions); cause read and probed, not started.
+Status: shipped in [v0.120.0](../../release/release-v0.120.0.md).
+
+Record before the release: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("one more bug to file"), with the renderings question decided by the owner the same day (the section Decisions); cause read and probed, not started.
 
 ## What was asked
 

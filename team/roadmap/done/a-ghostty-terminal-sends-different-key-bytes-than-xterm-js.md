@@ -66,4 +66,4 @@ Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adve
 
 The key path's reviewer then read the fixes. The AltGr fix matches xterm.js with the host or ghostty-web's textarea focused. An ASCII Option character after a dead key the input source composed left the flag set and lost the next key, fixed in `f99ac6291`. The key after a Windows dead key now types `ev.key`, as ghostty-web's own keydown did in v0.118.0; that is right only if Windows Chromium puts the composed character there, and US-International's apostrophe before a consonant is lost either way, so it is left open in [v0120review] for a reading on Windows.
 
-[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md
+[v0120review]: ghostty-defects-the-v0119-review-left-open.md

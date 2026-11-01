@@ -37,5 +37,5 @@ Honest feedback: a key path change needs a non-US layout and an AltGr sequence i
 
 ## Follow-ups
 
-- [ghostty-defects-the-v0119-review-left-open](../roadmap/v0.120.0/ghostty-defects-the-v0119-review-left-open.md): sixteen minor findings of the review, each with its trigger and probe, for triage in v0.120.0.
+- [ghostty-defects-the-v0119-review-left-open](../roadmap/done/ghostty-defects-the-v0119-review-left-open.md): sixteen minor findings of the review, each with its trigger and probe, for triage in v0.120.0.
 - The gateway transport, the Linux desktop and Windows were not exercised by hand for the ghostty rows; the original idle-keys failure stays unreproduced, and the item's capture list applies if it recurs.

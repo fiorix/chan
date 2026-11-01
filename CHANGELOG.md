@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.120.0] - 2026-11-01
+
+v0.120.0 fixes the ghostty terminal's minor defects the v0.119.0 review left open; gives the editor a date badge before a full stop, keeps a hash inside a list item or a quote at body size, and makes the first click on a URL edit the link; gives Hybrid Nav its `f` and `e` stage keys; makes `o` the launcher's on and off key with `t` opening a workspace window with a terminal; and lets a tmux window's panes be resized from chan.
+
+### Fixed
+
+- **ghostty terminals: the review's thirteen fixes.** A failed write-buffer allocation no longer leaves a dangling buffer; a grapheme cluster longer than 32 codepoints reads whole on screen and in history; a wasm compile failure is remembered for the page's life so an engine without wasm SIMD falls back to xterm.js once, while a fetch failure still retries; ghostty-web's unused inline wasm is stripped from the production bundle, which shrinks the terminal's lazy chunk from 648,962 to 83,687 bytes. A focus report is sent once per transition; the core's XTVERSION and kitty keyboard replies are dropped and chan answers `CSI ? u` from the flags its encoder uses, so a program reads one consistent keyboard mode after a reconnect, a soft reset or unbalanced pushes; an in-band resize report (mode 2048) leaves at the resize with the cell's real pixel size. A dead key followed by Enter or Tab sends that key; text the browser inserts with no keydown of its own (the emoji picker, dictation, Alt+Numpad, an input method's commit) reaches the terminal once; on Windows the key after a dead key and an apostrophe before a consonant keep the browser's text, Ctrl+Alt plus a bare letter sends its chord and AltGr+V types its character instead of being read as paste. Two findings are closed as intended behaviour or a core defect reported upstream, and the Copy scrollback speed item moves to v0.121.0.
+- **A date followed by a full stop shows its badge.** The editor's date scan admits a dot run that ends a sentence (before a space, the line's end or closing punctuation) while a dot followed by a letter or a digit still keeps a file name or a version plain.
+- **A hash at the start of a list item or a quote is not a heading.** In the editor and the Rich Prompt, a heading parsed inside a list item or a block quote, or a `#` run with nothing after it, keeps body size with its marks visible; Copy as HTML and the slide view keep CommonMark.
+- **A click on a URL edits the link.** A plain click on a URL, an autolink, a bare URL, a `mailto`, `tel` or `chan://graph` link places the caret at the end of the target, reveals the source and opens the link picker with one OPEN row and a copy button; Enter, Cmd+Enter or a click on the row opens it, and Cmd+click (Ctrl+click elsewhere) opens at once, as a plain click did before.
+
+### Changed
+
+- **Hybrid Nav's stage keys.** `f` stages a File Browser and `e` stages an Excalidraw diagram; `o` and `i` stage nothing; the cheatsheet reads Stage Excalidraw.
+- **The launcher's on and off key.** On the Computers and Gateways screens `o` connects and disconnects a devserver, detaches a tmux connection, turns a workspace on or off (with the confirmation for live terminals) and connects, disconnects or cancels a gateway; `c` no longer acts there. `t` on a ready workspace row opens a new window of that workspace with a terminal tab in it, on this machine and on a connected devserver; `w` still opens a window with no terminal.
+- **One by-name machine lookup in the command launcher.** A plain window, a tmux window and a workspace target of one library are named by the same devserver row: the local card claims its own library first, then the first devserver by name claims each other library. A devserver row that resolves to this machine's own library leaves a local tmux run on This machine.
+- **tmux panes resize from chan.** Dragging the divider between two panes of a tmux window resizes tmux's panes: the drag previews locally and sends tmux one `resize-pane` at release, Hybrid Nav's committed resizes do the same, and chan then shows the layout tmux returns. A divider whose border no first-side pane reaches (a same-axis split nested under a perpendicular one) refuses the drag; that case is a v0.121.0 item.
+
 ## [v0.119.0] - 2026-10-31
 
 v0.119.0 runs ghostty terminals on Ghostty's own terminal core, which keeps the scrollback the setting asks for; makes a ghostty terminal send the same key bytes as an xterm.js one; repairs a ghostty terminal that could stop taking keys after the window lost focus or slept; and names a devserver's `tmux -CC` card by the devserver.

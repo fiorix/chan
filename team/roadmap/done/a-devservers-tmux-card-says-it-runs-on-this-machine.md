@@ -49,4 +49,4 @@ Read at `afb83e7a4` by the review the owner asked for before the GA ("do an adve
 
 The reviewer confirmed that `tmuxHost` and `buildMachineTree` give a library's windows to the same row. Left open as minor, in [v0120review]: the command launcher names a plain window's machine by the first devserver row in feed order and a tmux window's by the first by name, so a direct row and its gateway roster row on one library read as two names; and a devserver row on this machine's own library titles a local run by that row.
 
-[v0120review]: ../v0.120.0/ghostty-defects-the-v0119-review-left-open.md
+[v0120review]: ghostty-defects-the-v0119-review-left-open.md

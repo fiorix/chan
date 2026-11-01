@@ -1,6 +1,8 @@
 # The Computers keys turn no workspace on or off and open no terminal in a workspace
 
-Status: implemented on 2026-11-01; native launcher verification on macOS is pending.
+Status: shipped in [v0.120.0](../../release/release-v0.120.0.md).
+
+Record before the release: implemented on 2026-11-01; native launcher verification on macOS is pending.
 
 ## What was asked
 

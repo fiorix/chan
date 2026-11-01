@@ -1,6 +1,8 @@
 # A tmux window's panes cannot be resized from chan
 
-Status: raised by the owner on 2026-11-01, accepted for v0.120.0 the same day, and implemented.
+Status: shipped in [v0.120.0](../../release/release-v0.120.0.md).
+
+Record before the release: raised by the owner on 2026-11-01, accepted for v0.120.0 the same day, and implemented.
 
 ## What was asked
 

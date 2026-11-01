@@ -21,41 +21,33 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.120.0
+### v0.121.0
 
-Opened 2026-10-31 during the v0.119.0 cut with one row from that version's review: the minor ghostty defects it left open ([v0120review]), proposed for triage. The owner took the lead's triage the same day: thirteen findings to fix, the XTVERSION reply dropped among them, two closed and one deferred.
-
-A second row was raised and accepted by the owner the same day ("add an item for next version"): the Computers keys turn no workspace on or off and open no terminal in a workspace ([onoffkeys]); `o` becomes the on and off key and `t` on a workspace opens a window with a terminal in it.
-
-A third row was raised and accepted by the owner the same day ("another roadmap item"): Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS ([navkeys]); `f` stages a File Browser and `e` an Excalidraw diagram, and Cmd+` is read on macOS before it is fixed.
-
-A fourth row was raised and accepted by the owner the same day ("another roadmap item"): a date followed by a full stop shows no badge in the editor ([datestop]); the scan's trailing boundary refuses any dot, a sentence's full stop included.
-
-A fifth row was raised and accepted by the owner the same day ("one more bug to file"): a hash at the start of a list item or a quote styles the line as a heading ([listhash]) in the editor and the Rich Prompt, since the parser follows CommonMark there.
-
-A sixth row was raised and accepted by the owner the same day ("one more to file"): a click on a URL in the editor opens it instead of editing the link ([urlclick]); a URL should take the first click for editing, with the link picker's open row, as a file link does.
-
-A seventh row was raised and accepted by the owner on 2026-11-01 ("this is a v0.120 item"): a tmux window's panes cannot be resized from chan ([tmuxresize]); a divider drag sends tmux a `resize-pane` and the window shows the layout tmux answers with.
+Opened 2026-11-01 at the v0.120.0 close with three items that version left: the ghostty row's Copy scrollback speed finding, deferred by the owner's triage as an item that needs its own measurement ([ghscroll]), and the tmux divider between nested splits that the one-command resize of v0.120.0 cannot reach ([tmuxnest]), raised from that row's recorded limit. The third is the Cmd+` half of the navkeys row, which waited for the owner's macOS reading ([cmdbq]).
 
 | Item | State | Next |
 | --- | --- | --- |
-| [ghostty defects the review left open][v0120review] | building | review |
-| [Computers o on/off, t on a workspace][onoffkeys] | building | review |
-| [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | landed | reading |
-| [a date before a full stop has no badge][datestop] | landed | release |
-| [# in a list item or quote is a heading][listhash] | landed | release |
-| [a click on a URL opens it, not edits it][urlclick] | landed | release |
-| [tmux panes cannot be resized from chan][tmuxresize] | accepted | build |
+| [Copy scrollback of a long history blocks the page][ghscroll] | deferred | measure |
+| [a tmux divider between nested splits][tmuxnest] | raised | decision |
+| [Cmd+` does not switch chan windows on macOS][cmdbq] | raised | reading |
 
-[v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
-[onoffkeys]: v0.120.0/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md
-[navkeys]: v0.120.0/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md
-[datestop]: v0.120.0/a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor.md
-[listhash]: v0.120.0/a-hash-at-the-start-of-a-list-item-or-quote-styles-the-line-as-a-heading.md
-[urlclick]: v0.120.0/a-click-on-a-url-in-the-editor-opens-it-instead-of-editing-the-link.md
-[tmuxresize]: v0.120.0/a-tmux-windows-panes-cannot-be-resized-from-chan.md
+[ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
+[tmuxnest]: v0.121.0/a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan.md
+[cmdbq]: v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md
 
 ## Completed
+
+### v0.120.0
+
+Shipped 2026-11-01; see [release-v0.120.0](../release/release-v0.120.0.md). All seven rows the version held shipped with no release candidate, by the owner's word, each built on its own lane with tests red before the change and merged after the lead's review and the full gate; those rows are in [`done/`](done/). The ghostty row's Copy scrollback speed finding and the nested tmux divider moved to v0.121.0 as items of their own.
+
+- [a-click-on-a-url-in-the-editor-opens-it-instead-of-editing-the-link](done/a-click-on-a-url-in-the-editor-opens-it-instead-of-editing-the-link.md) - A click on a URL in the editor opens it instead of editing the link.
+- [a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor](done/a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor.md) - A date followed by a full stop shows no badge in the editor.
+- [a-hash-at-the-start-of-a-list-item-or-quote-styles-the-line-as-a-heading](done/a-hash-at-the-start-of-a-list-item-or-quote-styles-the-line-as-a-heading.md) - A hash at the start of a list item or a quote styles the line as a heading.
+- [a-tmux-windows-panes-cannot-be-resized-from-chan](done/a-tmux-windows-panes-cannot-be-resized-from-chan.md) - A tmux window's panes cannot be resized from chan.
+- [ghostty-defects-the-v0119-review-left-open](done/ghostty-defects-the-v0119-review-left-open.md) - Ghostty defects the v0.119.0 review left open.
+- [hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos](done/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md) - Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS.
+- [the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace](done/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md) - The Computers keys turn no workspace on or off and open no terminal in a workspace.
 
 ### v0.119.0
 
