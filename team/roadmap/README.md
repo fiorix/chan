@@ -35,14 +35,17 @@ A fifth row was raised and accepted by the owner the same day ("one more bug to 
 
 A sixth row was raised and accepted by the owner the same day ("one more to file"): a click on a URL in the editor opens it instead of editing the link ([urlclick]); a URL should take the first click for editing, with the link picker's open row, as a file link does.
 
+A seventh row was raised and accepted by the owner on 2026-11-01 ("this is a v0.120 item"): a tmux window's panes cannot be resized from chan ([tmuxresize]); a divider drag sends tmux a `resize-pane` and the window shows the layout tmux answers with.
+
 | Item | State | Next |
 | --- | --- | --- |
-| [ghostty defects the review left open][v0120review] | accepted | build |
-| [Computers o on/off, t on a workspace][onoffkeys] | accepted | design |
-| [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | accepted | design |
-| [a date before a full stop has no badge][datestop] | accepted | build |
-| [# in a list item or quote is a heading][listhash] | accepted | build |
-| [a click on a URL opens it, not edits it][urlclick] | accepted | build |
+| [ghostty defects the review left open][v0120review] | building | review |
+| [Computers o on/off, t on a workspace][onoffkeys] | building | review |
+| [Hybrid Nav f and e, Cmd+` on macOS][navkeys] | landed | reading |
+| [a date before a full stop has no badge][datestop] | landed | release |
+| [# in a list item or quote is a heading][listhash] | landed | release |
+| [a click on a URL opens it, not edits it][urlclick] | landed | release |
+| [tmux panes cannot be resized from chan][tmuxresize] | accepted | build |
 
 [v0120review]: v0.120.0/ghostty-defects-the-v0119-review-left-open.md
 [onoffkeys]: v0.120.0/the-computers-keys-turn-no-workspace-on-or-off-and-open-no-terminal-in-a-workspace.md
@@ -50,6 +53,7 @@ A sixth row was raised and accepted by the owner the same day ("one more to file
 [datestop]: v0.120.0/a-date-followed-by-a-full-stop-shows-no-badge-in-the-editor.md
 [listhash]: v0.120.0/a-hash-at-the-start-of-a-list-item-or-quote-styles-the-line-as-a-heading.md
 [urlclick]: v0.120.0/a-click-on-a-url-in-the-editor-opens-it-instead-of-editing-the-link.md
+[tmuxresize]: v0.120.0/a-tmux-windows-panes-cannot-be-resized-from-chan.md
 
 ## Completed
 
