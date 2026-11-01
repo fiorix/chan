@@ -61,7 +61,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage Graph",
       "Stage Dashboard",
       "Stage New Draft",
-      "Stage Diagram",
+      "Stage Excalidraw",
       "Toggle right-side file browser dock",
     ]) {
       expect(actions, action).toContain(action);
@@ -80,7 +80,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage Graph",
       "Stage Dashboard",
       "Stage New Draft",
-      "Stage Diagram",
+      "Stage Excalidraw",
     ]) {
       expect(actions, action).not.toContain(action);
     }
@@ -94,7 +94,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
     for (const action of [
       "Stage File Browser",
       "Stage New Draft",
-      "Stage Diagram",
+      "Stage Excalidraw",
       "Stage Terminal",
     ]) {
       expect(actions, action).toContain(action);
@@ -113,7 +113,7 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage Graph",
       "Stage Dashboard",
       "Stage New Draft",
-      "Stage Diagram",
+      "Stage Excalidraw",
       "Toggle right-side file browser dock",
     ]) {
       expect(actions, action).not.toContain(action);

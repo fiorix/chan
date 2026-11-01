@@ -203,25 +203,36 @@ describe("arranging the draft", () => {
 });
 
 describe("staging tabs", () => {
-  test("o, g and b stage a Files, a Graph and a Dashboard tab into the draft only", async () => {
+  test("f, g and b stage a Files, a Graph and a Dashboard tab into the draft only", async () => {
     await twoPanes();
     await enterHybridNav();
 
-    await keys("o", "g", "b");
+    await keys("f", "g", "b");
 
     expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["file", "browser", "graph", "dashboard"]);
     expect(kinds(leaf(layout, "pane-test").tabs)).toEqual(["file"]);
   });
 
-  test("n and i stage a draft and a diagram, created only on commit", async () => {
+  test("n and e stage a draft and a diagram, created only on commit", async () => {
     await twoPanes();
     const createDraft = vi.spyOn(api, "createDraft");
     await enterHybridNav();
 
-    await keys("n", "I");
+    await keys("n", "E");
 
     expect(paneMode.stagedDraftEditors.map((entry) => entry.kind)).toEqual(["draft", "diagram"]);
     expect(createDraft).not.toHaveBeenCalled();
+  });
+
+  test("o and i leave the draft and staged editors unchanged", async () => {
+    await twoPanes();
+    await enterHybridNav();
+    const before = JSON.stringify(draft());
+
+    await keys("o", "O", "i", "I");
+
+    expect(JSON.stringify(draft())).toBe(before);
+    expect(paneMode.stagedDraftEditors).toEqual([]);
   });
 
   test("h shows the help and hides it again, still in Hybrid Nav", async () => {
@@ -237,11 +248,11 @@ describe("staging tabs", () => {
   });
 
   test.each([
-    ["o", "files"],
+    ["f", "files"],
     ["g", "workspace"],
     ["b", "workspace"],
     ["n", "drafts"],
-    ["i", "drafts"],
+    ["e", "drafts"],
   ] as const)("%s stages nothing in a window without %s", async (key, surface) => {
     await twoPanes();
     await enterHybridNav();
@@ -301,7 +312,7 @@ describe("a stale draft", () => {
     paneMode.stale = true;
     const before = JSON.stringify(draft());
 
-    await keys("ArrowRight", "d", "]", "0", "Tab", "t", "o", "n", "/", "<", "Enter");
+    await keys("ArrowRight", "d", "]", "0", "Tab", "t", "f", "e", "n", "/", "<", "Enter");
 
     expect(paneMode.active).toBe(true);
     expect(JSON.stringify(draft())).toBe(before);

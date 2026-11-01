@@ -929,7 +929,7 @@
         return;
       }
       case "Escape":
-        // Discard staged additions. T / O / G / B additions live inside the
+        // Discard staged additions. T / F / G / B additions live inside the
         // draft layout and disappear automatically when commitPaneMode does
         // not run. Esc bails before materializeStagedDraftEditors fires,
         // so no orphan drafts are created.
@@ -992,8 +992,8 @@
       case "T":
         paneModeOpenTerminal(resolveSpawnContext());
         return;
-      case "o":
-      case "O":
+      case "f":
+      case "F":
         if (!windowCaps.files) return;
         paneModeOpenBrowser(resolveSpawnContext());
         return;
@@ -1012,8 +1012,8 @@
         if (!windowCaps.drafts) return;
         paneModeStageDraftEditor();
         return;
-      case "i":
-      case "I":
+      case "e":
+      case "E":
         if (!windowCaps.drafts) return;
         paneModeStageDiagramEditor();
         return;

@@ -65,9 +65,8 @@
           caps: [
             { label: "W", key: "w" },
             { label: "A", key: "a" },
-            // `s` / `S` both map to swap-down (Search is on `f`, see
-            // Spawn section), so cap dispatch matches the W / A / D
-            // lowercase-key pattern with no case-split.
+            // `s` / `S` both map to swap-down, so cap dispatch matches
+            // the W / A / D lowercase-key pattern with no case-split.
             { label: "S", key: "s" },
             { label: "D", key: "d" },
           ],
@@ -82,11 +81,11 @@
       title: "Stage (Enter to commit, Esc to discard)",
       rows: [
         { caps: [{ label: "t", key: "t" }], action: "Stage Terminal" },
-        { caps: [{ label: "o", key: "o" }], action: "Stage File Browser", needs: "files" },
+        { caps: [{ label: "f", key: "f" }], action: "Stage File Browser", needs: "files" },
         { caps: [{ label: "g", key: "g" }], action: "Stage Graph", needs: "workspace" },
         { caps: [{ label: "b", key: "b" }], action: "Stage Dashboard", needs: "workspace" },
         { caps: [{ label: "n", key: "n" }], action: "Stage New Draft", needs: "drafts" },
-        { caps: [{ label: "i", key: "i" }], action: "Stage Diagram", needs: "drafts" },
+        { caps: [{ label: "e", key: "e" }], action: "Stage Excalidraw", needs: "drafts" },
       ],
     },
     {
