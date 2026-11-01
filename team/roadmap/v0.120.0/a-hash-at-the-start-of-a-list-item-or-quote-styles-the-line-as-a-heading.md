@@ -42,3 +42,11 @@ CommonMark and GitHub render `- # foo` and `> # foo` as headings, and the owner'
 1. Decoration tests pin no heading line class on `4. #`, `1. # foo`, `- # foo`, `> # foo` and `> #`, and on `#` alone; a heading class on `# foo` at the top level; and no heading in fenced or indented code. The new cases are red before the fix.
 2. In the Rich Prompt, typing `4. #275` in a numbered list keeps the line at list size throughout, and the tag picker still opens on `#`.
 3. Copy as HTML of `- # foo` and `> # foo` still gives a heading inside the list item and the quote.
+
+## Closing evidence - 2026-11-01
+
+The WYSIWYG heading handler applies a heading line class and hides its marks only for non-empty ATX headings outside list items and block quotes. Nested headings and empty `#` runs keep body styling and visible marks; the source remains the same. Copy as HTML and slide rendering still use CommonMark.
+
+The decoration cases for numbered lists, bullets, quotes, empty headings and code were red before the handler change (6 failed, 3 passed) and green after it. Removing each of the list, quote and empty-content guards separately made its cases fail. The Copy as HTML and slide rendering tests found heading elements inside both a list item and a quote.
+
+After `make web`, an isolated Chrome check opened the Rich Prompt over a terminal in `ws-alpha` and typed `#275` in a fourth numbered item. The line stayed at 16px and weight 400 before and after each character, showed `#`, carried no heading class, and opened the tag picker; a screenshot and snapshots are in `dev/v0120-team/evidence/Editor120/`.

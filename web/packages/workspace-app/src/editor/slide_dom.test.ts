@@ -58,6 +58,12 @@ function mount(html: string): HTMLElement {
 }
 
 describe("renderSlideMarkdown", () => {
+  test("keeps headings inside a list item and a quote", () => {
+    const root = mount(renderSlideMarkdown("- # foo\n\n> # foo"));
+    expect(root.querySelector("li > h1")?.textContent).toBe("foo");
+    expect(root.querySelector("blockquote > h1")?.textContent).toBe("foo");
+  });
+
   test("preserves extra blank lines as spacer divs", () => {
     const html = renderSlideMarkdown("# T\n\n\n\nafter gap\n");
     const root = mount(html);

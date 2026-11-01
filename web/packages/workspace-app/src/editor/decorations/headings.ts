@@ -32,13 +32,17 @@ const HEADING_LINE: Record<number, Decoration> = {
 function makeHeadingHandler(level: number): TokenHandler {
   const lineDeco = HEADING_LINE[level]!;
   return (ctx: TokenContext) => {
+    for (let parent = ctx.node.node.parent; parent; parent = parent.parent) {
+      if (parent.name === "ListItem" || parent.name === "Blockquote") return;
+    }
     const line = ctx.state.doc.lineAt(ctx.node.from);
-    // Line decoration: zero-width at line start, applies to whole line.
-    ctx.push(lineDeco, line.from, line.from);
     // Find the HeaderMark child (always first per CommonMark) and the
     // run of whitespace immediately following it.
     const cursor = ctx.node.node.cursor();
     if (!cursor.firstChild() || cursor.name !== "HeaderMark") return;
+    if (!ctx.state.doc.sliceString(cursor.to, ctx.node.to).trim()) return;
+    // Line decoration: zero-width at line start, applies to whole line.
+    ctx.push(lineDeco, line.from, line.from);
     const markFrom = cursor.from;
     let hideTo = cursor.to;
     // Eat trailing whitespace so the visible content has no leading
