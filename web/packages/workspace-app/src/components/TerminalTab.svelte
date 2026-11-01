@@ -500,6 +500,7 @@
   // Removes the ghostty key listener (ghosttyKeys.ts). Non-null ONLY on the
   // ghostty backend.
   let ghosttyKeyParity: (() => void) | null = null;
+  let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
@@ -1139,7 +1140,10 @@
     if (backend === "ghostty") {
       try {
         ghosttyKit = await loadGhosttyKit();
-        ghosttyInstance = await ghosttyKit.instantiate();
+        ghosttyInstance = await ghosttyKit.instantiate({
+          cellSize: () => (term as GhosttyTerminal | null)?.renderer?.getMetrics(),
+          onResizeReply: sendGeneratedTerminalInput,
+        });
       } catch (err) {
         console.warn(
           "[chan] ghostty-web failed to load; falling back to xterm.js:",
@@ -2275,7 +2279,12 @@
     }
     const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
     if (!t?.hasFocusEvents()) return;
-    sendInput(e.type === "focusin" ? "\x1b[I" : "\x1b[O");
+    const hasFocus = e.type === "focusin";
+    // A resume's blur/refocus and the browser's retained focus events can
+    // report the same transition twice.
+    if (hasFocus === ghosttyReportedFocus) return;
+    ghosttyReportedFocus = hasFocus;
+    sendInput(hasFocus ? "\x1b[I" : "\x1b[O");
   }
 
   /// Ghostty-backend wheel input. ghostty-web registers its viewport
@@ -2470,6 +2479,7 @@
     resizeObserver = null;
     ghosttyKeyParity?.();
     ghosttyKeyParity = null;
+    ghosttyReportedFocus = null;
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);
     ghosttyScrollbarClickGate?.();

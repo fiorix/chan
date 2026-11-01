@@ -28,7 +28,7 @@
 /// for each terminal whose load fails.
 
 import type { Ghostty, Terminal } from "ghostty-web";
-import { GhosttyVt } from "./ghosttyVt";
+import { GhosttyVt, type VtHost } from "./ghosttyVt";
 import type { TerminalPreferences } from "../api/types";
 
 export type TerminalBackend = "xterm" | "ghostty";
@@ -38,7 +38,7 @@ export type TerminalBackend = "xterm" | "ghostty";
 export type GhosttyKit = {
   /// A fresh WASM instance for ONE terminal; never share it (see the
   /// module comment).
-  instantiate: () => Promise<Ghostty>;
+  instantiate: (host?: VtHost) => Promise<Ghostty>;
   Terminal: typeof Terminal;
 };
 
@@ -64,7 +64,7 @@ export function ghosttyKitFrom(
   return {
     Terminal: lib.Terminal,
     // The release build imports nothing from its host.
-    instantiate: async () => new GhosttyVt(await WebAssembly.instantiate(module, {})).asGhostty(),
+    instantiate: async (host) => new GhosttyVt(await WebAssembly.instantiate(module, {}), host).asGhostty(),
   };
 }
 

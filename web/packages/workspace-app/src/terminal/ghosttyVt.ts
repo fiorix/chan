@@ -162,6 +162,17 @@ function isColorReport(reply: Uint8Array): boolean {
   return ident === "4" || ident === "10" || ident === "11" || ident === "12" || ident === "21";
 }
 
+/// chan's xterm.js path leaves XTVERSION unanswered too.
+function isVersionReport(reply: Uint8Array): boolean {
+  return reply[0] === 0x1b && reply[1] === 0x50 && reply[2] === 0x3e && reply[3] === 0x7c;
+}
+
+/// The keyboard observer answers from the flags chan's encoder uses.
+function isKittyKeyboardReport(reply: Uint8Array): boolean {
+  if (reply.length < 5 || reply[0] !== 0x1b || reply[1] !== 0x5b || reply[2] !== 0x3f || reply.at(-1) !== 0x75) return false;
+  return reply.subarray(3, -1).every((byte) => byte >= 0x30 && byte <= 0x39);
+}
+
 /// Packs a mode as upstream's `GhosttyMode`: the number in bits 0-14,
 /// bit 15 set for an ANSI mode.
 function packMode(mode: number, ansi: boolean): number {
@@ -322,6 +333,12 @@ export type VtTerminalConfig = {
   palette?: number[];
 };
 
+/// Renderer measurements and delivery for replies generated outside a write.
+export type VtHost = {
+  cellSize: () => { width: number; height: number } | undefined;
+  onResizeReply: (data: string) => void;
+};
+
 /// The `Ghostty` object ghostty-web's `Terminal` takes as `ghostty`.
 export class GhosttyVt {
   private readonly wasm: VtWasm;
@@ -329,7 +346,7 @@ export class GhosttyVt {
   readonly writePtyCallback: number;
   readonly deviceAttributesCallback: number;
 
-  constructor(instance: WebAssembly.Instance) {
+  constructor(instance: WebAssembly.Instance, readonly host?: VtHost) {
     this.wasm = new VtWasm(instance);
     this.writePtyCallback = this.wasm.addFunction(
       (terminal, _userdata, data, len) => {
@@ -570,8 +587,18 @@ export class VtTerminal {
     if (cols === this._cols && rows === this._rows) return;
     this._cols = cols;
     this._rows = rows;
-    this.wasm.fn.ghostty_terminal_resize(this.handle, cols, rows, 0, 0);
+    const cell = this.owner.host?.cellSize();
+    this.wasm.fn.ghostty_terminal_resize(
+      this.handle, cols, rows,
+      Math.round(cell?.width ?? 0), Math.round(cell?.height ?? 0),
+    );
     this.resetCache();
+    // ghostty-web drains after writes only; a resize can produce its own
+    // mode 2048 report while the program is otherwise silent.
+    if (this.owner.host) {
+      const reply = this.readResponse();
+      if (reply !== null) this.owner.host.onResizeReply(reply);
+    }
   }
 
   free(): void {
@@ -761,7 +788,7 @@ export class VtTerminal {
 
   queueReply(ptr: number, len: number): void {
     const reply = this.wasm.bytes().slice(ptr, ptr + len);
-    if (isColorReport(reply)) return;
+    if (isColorReport(reply) || isVersionReport(reply) || isKittyKeyboardReport(reply)) return;
     this.replies.push(reply);
   }
 

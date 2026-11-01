@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { Ghostty, Key, type GhosttyCell, type GhosttyTerminal } from "ghostty-web";
 import { beforeAll, describe, expect, test } from "vitest";
 import { ABI, CELL_BITS, GhosttyVt, KEY_SHIFT_FROM, LAYOUT, SCRATCH, upstreamKey } from "./ghosttyVt";
+import { KeyboardProtocolObserver } from "./keyboardProtocolStream";
+import { copyTerminalKeyboardProtocolState, createTerminalKeyboardProtocolState } from "./keymap";
 
 /// Ghostty's release wasm, vendored beside the package (vitest runs in
 /// the package directory).
@@ -187,6 +189,18 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
     // answers it from the same callback, with a zero unit id.
     b.write("\x1b[=c");
     expect(b.readResponse()).toBe("\x1bP!|00000000\x1b\\");
+  });
+
+  test("XTVERSION gets no reply while device status and attributes still pass", async () => {
+    const t = (await upstream()).createTerminal(80, 24);
+    try {
+      t.write("\x1b[>q");
+      expect(t.readResponse()).toBeNull();
+      t.write("\x1b[>0q\x1b[5n\x1b[c");
+      expect(t.readResponse()).toBe("\x1b[0n\x1b[?62;22c");
+    } finally {
+      t.free();
+    }
   });
 
   test("color queries get no reply, as from ghostty-web's build", async () => {
@@ -416,5 +430,84 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     a.free();
     b.write("\x1b[6n");
     expect(b.readResponse()).toBe("\x1b[4;5R");
+  });
+});
+
+describe("kitty replies use chan's encoding state", () => {
+  test.each([
+    ["soft reset", "\x1b[>5u\x1b[!p", 0],
+    ["deep stack", Array.from({ length: 10 }, (_, i) => `\x1b[>${i + 1}u`).join("") + "\x1b[<9u", 1],
+    ["flags beyond the core's supported bits", "\x1b[>63u", 63],
+    ["alternate screen restored", "\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[?1049l", 1],
+  ] as const)("%s", async (_name, stream, flags) => {
+    const t = (await upstream()).createTerminal(80, 24);
+    const protocol = createTerminalKeyboardProtocolState();
+    const replies: string[] = [];
+    const observer = new KeyboardProtocolObserver(protocol, (reply) => replies.push(reply));
+    try {
+      const bytes = new TextEncoder().encode(stream + "\x1b[?u");
+      // Split every byte so a query crossing output chunks is still answered.
+      for (const byte of bytes) {
+        observer.push(Uint8Array.of(byte));
+        t.write(Uint8Array.of(byte));
+      }
+      expect(replies).toEqual([`\x1b[?${flags}u`]);
+      expect(t.readResponse(), "the core adds no second answer").toBeNull();
+    } finally {
+      t.free();
+    }
+  });
+
+  test("a cut replay restores chan's flags after RIS", async () => {
+    const t = (await upstream()).createTerminal(80, 24);
+    const protocol = createTerminalKeyboardProtocolState();
+    const replies: string[] = [];
+    const observer = new KeyboardProtocolObserver(protocol, (reply) => replies.push(reply));
+    const write = (text: string) => {
+      const bytes = new TextEncoder().encode(text);
+      observer.push(bytes);
+      t.write(bytes);
+    };
+    try {
+      write("\x1b[>5u");
+      const saved = createTerminalKeyboardProtocolState();
+      copyTerminalKeyboardProtocolState(protocol, saved);
+      write("\x1bc");
+      copyTerminalKeyboardProtocolState(saved, protocol);
+      write("\x1b[?u");
+      expect(replies).toEqual(["\x1b[?5u"]);
+      expect(t.readResponse(), "the reset core's answer is suppressed").toBeNull();
+    } finally {
+      t.free();
+    }
+  });
+});
+
+describe("in-band resize replies", () => {
+  test("a resize delivers its report immediately with the current cell pixel size", async () => {
+    const replies: string[] = [];
+    let cell = { width: 9.6, height: 19.6 };
+    const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}), {
+      cellSize: () => cell,
+      onResizeReply: (reply: string) => replies.push(reply),
+    });
+    const t = vt.createTerminal(80, 24);
+    try {
+      t.write("\x1b[?2048h");
+      t.readResponse();
+      t.resize(100, 30);
+      expect(replies, "delivered without another write").toEqual(["\x1b[48;30;100;600;1000t"]);
+      expect(t.readResponse(), "the delivered report is drained").toBeNull();
+      cell = { width: 8, height: 16 };
+      t.resize(90, 25);
+      expect(replies.at(-1)).toBe("\x1b[48;25;90;400;720t");
+      t.resize(90, 25);
+      expect(replies).toHaveLength(2);
+      t.write("\x1b[?2048l");
+      t.resize(80, 24);
+      expect(replies).toHaveLength(2);
+    } finally {
+      t.free();
+    }
   });
 });

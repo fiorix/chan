@@ -51,8 +51,8 @@ export class KeyboardProtocolObserver {
   private rejectDigits = false;
   private rejectSubDigits = false;
 
-  /// `reply` sends a reply the program is owed. The kitty query (CSI ? u) is
-  /// left to the VT, which answers it from its own copy of the same state.
+  /// Replies read the same state as chan's key encoder, including flags
+  /// restored after a cut replay. The VT's own kitty answer is suppressed.
   constructor(
     private readonly protocol: TerminalKeyboardProtocolState,
     private readonly reply: (data: string) => void,
@@ -186,8 +186,6 @@ export class KeyboardProtocolObserver {
       final,
       params,
     });
-    if (reply && !(this.prefix === "?" && final === "u" && !this.intermediates)) {
-      this.reply(reply);
-    }
+    if (reply) this.reply(reply);
   }
 }
