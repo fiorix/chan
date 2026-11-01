@@ -16,8 +16,8 @@ async function stateOf(page, selector) {
       cards: [...(deck?.querySelectorAll(cardSelector) ?? [])].map((item) => ({
         label: item.getAttribute("aria-label"), current: item.getAttribute("aria-current") === "true",
       })),
-      transform: ring ? getComputedStyle(ring).transform : null,
-      animations: (ring?.getAnimations() ?? []).map((animation) => ({
+      transform: card ? getComputedStyle(card).transform : null,
+      animations: (ring ? [ring, ...ring.children].flatMap((el) => el.getAnimations()) : []).map((animation) => ({
         state: animation.playState, pending: animation.pending,
       })),
     };
@@ -34,11 +34,11 @@ async function settle(page, selector, timeoutMs) {
       reject(new Error(`carousel motion did not settle within ${timeout}ms`));
     }, timeout);
     const fail = (error) => { clearTimeout(timer); reject(error); };
-    // The active card changes before its CSS transition starts. Flush layout and cross two frames before reading animations so that idle cannot mean not started yet.
+    // The active card changes before its CSS transition starts. Flush layout and cross two frames before reading animations so that idle cannot mean not started yet. The turn runs on each slot, the ring's children; the ring is read with them.
     frame = requestAnimationFrame(() => {
       ring.getBoundingClientRect();
       frame = requestAnimationFrame(() => {
-        Promise.all(ring.getAnimations().map((animation) => animation.finished)).then(() => {
+        Promise.all([ring, ...ring.children].flatMap((el) => el.getAnimations()).map((animation) => animation.finished)).then(() => {
           clearTimeout(timer);
           resolve();
         }, fail);

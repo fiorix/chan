@@ -596,3 +596,33 @@ describe("the Computers deck's letter actions", () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 });
+
+describe("the deck's geometry", () => {
+  // The slots carry the ring's turn themselves: pushed back by the radius,
+  // turned by their angle from the front and pushed out again, so the card in
+  // front stands on the identity transform and the ring on none. WebKit scrolls
+  // no overflow box under the wheel inside a layer pushed out along Z, so the
+  // front card's scroller must sit on a flat layer.
+  it("stands the card in front on the identity transform with the ring untransformed", async () => {
+    mountDeck();
+    press("ArrowRight");
+    await tick();
+    expect(front()).toBe("This machine, 2 of 4");
+    expect(target!.querySelector<HTMLElement>(".ring")!.style.transform).toBe("");
+    const transforms = slots().map((slot) => slot.style.transform);
+    const parse = (transform: string) => {
+      const match = transform.match(
+        /^translateZ\((-?\d+)px\)\s*rotateY\((-?\d+)deg\)\s*translateZ\((-?\d+)px\)$/,
+      );
+      expect(match, `${transform} is a push back, a turn and a push out`).not.toBeNull();
+      return match!.slice(1).map(Number);
+    };
+    const [back, turn, out] = parse(transforms[1]);
+    expect(turn).toBe(0);
+    expect(back + out).toBe(0);
+    expect(out).toBeGreaterThan(0);
+    // The neighbours stand one step either side of the front on the same radius.
+    expect(parse(transforms[0])).toEqual([back, -60, out]);
+    expect(parse(transforms[2])).toEqual([back, 60, out]);
+  });
+});

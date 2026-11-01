@@ -40,12 +40,12 @@ function fixture(t, options = {}) {
     callback();
   }, 0);
   globalThis.cancelAnimationFrame = clearTimeout;
+  // The turn's transition runs on each slot, a child of the ring; the ring
+  // itself carries no transform and so never animates.
   const ring = {
+    children: [],
     getBoundingClientRect: () => { state.flushes += 1; return {}; },
-    getAnimations: () => {
-      if (state.animation) state.runningReads += 1;
-      return state.animation ? [state.animation] : [];
-    },
+    getAnimations: () => [],
   };
   globalThis.getComputedStyle = () => ({ transform: `turn(${state.active})` });
   const labels = ["All windows, 1 of 3", "This machine, 2 of 3", "shared-lab, 3 of 3"];
@@ -53,7 +53,13 @@ function fixture(t, options = {}) {
     getAttribute: (name) => name === "aria-label" ? label : name === "aria-current" && state.active === index ? "true" : null,
     closest: (selector) => selector === DECK ? deck : null,
     parentElement: ring,
+    getAnimations: () => {
+      if (index !== state.active) return [];
+      if (state.animation) state.runningReads += 1;
+      return state.animation ? [state.animation] : [];
+    },
   }));
+  ring.children = cards;
   const next = {
     async click() {
       assert.equal(state.animation, null, "the pointer cannot act while the ring moves");
