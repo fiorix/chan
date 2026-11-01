@@ -21,6 +21,18 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
+### v0.120.1
+
+Opened 2026-11-01 as a patch over v0.120.0 with two defects the owner found on the day of the release: the Computers card cannot be scrolled with the mouse when it holds more workspaces than the deck shows and cuts its last row ([cardscroll]), and a tmux pane drag starts a fight between chan's window-size requests and tmux's proportional re-layout ([tmuxfight]). Both are built on the owner's macOS machine from `main`, on `v01201/cardscroll` and `v01201/tmuxresize`, and cut as a no-rc patch.
+
+| Item | State | Next |
+| --- | --- | --- |
+| [the Computers card does not scroll with the mouse][cardscroll] | accepted | build |
+| [a tmux pane drag fights tmux][tmuxfight] | accepted | build |
+
+[cardscroll]: v0.120.1/the-computers-card-does-not-scroll-with-the-mouse-and-cuts-its-last-workspace.md
+[tmuxfight]: v0.120.1/a-tmux-pane-drag-starts-a-fight-between-chan-and-tmux.md
+
 ### v0.121.0
 
 Opened 2026-11-01 at the v0.120.0 close with three items that version left: the ghostty row's Copy scrollback speed finding, deferred by the owner's triage as an item that needs its own measurement ([ghscroll]), and the tmux divider between nested splits that the one-command resize of v0.120.0 cannot reach ([tmuxnest]), raised from that row's recorded limit. The third is the Cmd+` half of the navkeys row, which waited for the owner's macOS reading ([cmdbq]).
