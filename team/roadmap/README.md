@@ -31,11 +31,15 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 | [a tmux divider between nested splits][tmuxnest] | raised | decision |
 | [Cmd+` does not switch chan windows on macOS][cmdbq] | raised | reading |
 | [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | raised | decision |
+| [hiding the last shown window quits chan][lastwin] | raised | decision |
+| [keys pass under an open confirm][confirmkeys] | raised | decision |
 
 [ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
 [tmuxnest]: v0.121.0/a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan.md
 [cmdbq]: v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md
 [cachixpins]: v0.121.0/the-cachix-publication-keeps-every-releases-pins-and-fills-the-cache.md
+[lastwin]: v0.121.0/hiding-the-last-shown-window-quits-chan-and-kills-the-hidden-windows-terminals.md
+[confirmkeys]: v0.121.0/keys-pass-under-an-open-confirm-so-one-enter-answers-it-and-commits-hybrid-nav.md
 
 ## Completed
 
