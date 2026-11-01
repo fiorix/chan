@@ -722,7 +722,7 @@ export default {
       ctx.mark(step);
       await enterHybridNav(pageA);
       await pageA.keyboard.press("n");
-      await pageA.keyboard.press("i");
+      await pageA.keyboard.press("e");
       await pageA.waitForFunction(
         () => document.querySelectorAll(".staged-editor").length === 2,
         { timeout: 10_000 },

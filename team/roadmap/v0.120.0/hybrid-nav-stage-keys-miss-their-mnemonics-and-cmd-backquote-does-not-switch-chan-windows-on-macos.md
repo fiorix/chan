@@ -1,6 +1,6 @@
 # Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"), with the naming question decided by the owner the same day (the section Decisions); not started.
+Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("another roadmap item"), with the naming question decided by the owner the same day (the section Decisions); the stage letters are implemented on their lane and in review, while Cmd+` awaits the Mac reading.
 
 ## What was asked
 
@@ -33,3 +33,11 @@ The owner's words of 2026-10-31 on the lead's recommendation to rename the cheat
 
 1. Hybrid Nav tests pin `f` and `e` staging a File Browser and a diagram, and `o` and `i` staging nothing; the cheatsheet tests pin the rows and their labels, Stage Excalidraw among them.
 2. On macOS, with the launcher and two workspace windows open, Cmd+` from each of the focuses listed above moves to the next chan window, and so it does from a dropped devserver's reconnecting terminal and workspace windows on both reconnect surfaces; the reading before the fix and the one after are recorded here.
+
+## 2026-11-01 stage letters
+
+In Hybrid Nav, `f` and `F` stage a File Browser behind the files capability, and `e` and `E` stage an Excalidraw diagram behind the drafts capability; `o`, `O`, `i` and `I` stage nothing. The cheatsheet shows `f` and `e` and labels the diagram row Stage Excalidraw. The command list retains New diagram.
+
+Acceptance 1 is met by the focused App and cheatsheet tests (8 expected failures before the handler change, then 47 passes), ten independent mutations of the routes, guards and caps that each failed an assertion, and a Chrome hand check on the isolated 18133 server after rebuilding the worktree bundle: `o` and `i` staged nothing, `f` plus Enter opened a File Browser, and `e` plus Enter opened an Excalidraw canvas. The served workspace asset names matched the worktree build. The `web/packages/workspace-app/src/design.md` Hybrid Nav text names no stage letters, so it needs no edit for this change.
+
+Acceptance 2 remains pending Alex's Mac reading of Cmd+` from the listed focuses and reconnect surfaces; the reading and any routed fix will be recorded here when it lands.

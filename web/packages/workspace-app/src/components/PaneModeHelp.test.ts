@@ -50,7 +50,7 @@ describe("the Hybrid Nav help", () => {
           "Stage Graph",
           "Stage Dashboard",
           "Stage New Draft",
-          "Stage Diagram",
+          "Stage Excalidraw",
         ],
       },
       { title: "Split", rows: ["Split right", "Split down"] },
@@ -79,7 +79,7 @@ describe("the Hybrid Nav help", () => {
     expect(pressed).toEqual([
       "ArrowUp", "ArrowLeft", "ArrowDown", "ArrowRight",
       "w", "a", "s", "d",
-      "t", "o", "g", "b", "n", "i",
+      "t", "f", "g", "b", "n", "e",
       "/", "?",
       "<", ">",
       "[", "]", "-", "=", "0",
@@ -88,11 +88,15 @@ describe("the Hybrid Nav help", () => {
   });
 
   test("names each cap by its action for assistive tech", () => {
-    const cap = [...help.querySelectorAll<HTMLButtonElement>("button.kbd-button")].find(
-      (button) => button.textContent === "t",
-    )!;
-
-    expect(cap.getAttribute("aria-label")).toBe("t: Stage Terminal");
+    const caps = [...help.querySelectorAll<HTMLButtonElement>("button.kbd-button")];
+    for (const [key, action] of [
+      ["t", "Stage Terminal"],
+      ["f", "Stage File Browser"],
+      ["e", "Stage Excalidraw"],
+    ]) {
+      const cap = caps.find((button) => button.textContent === key);
+      expect(cap?.getAttribute("aria-label")).toBe(`${key}: ${action}`);
+    }
   });
 
   test("shows the Shift nudge as a label, not a button", () => {

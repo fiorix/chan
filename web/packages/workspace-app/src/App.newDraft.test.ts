@@ -284,7 +284,7 @@ describe("drafts staged in Hybrid Nav", () => {
       .mockResolvedValue({ path: "board.excalidraw", name: "board" });
 
     enterPaneMode();
-    press({ key: "i", code: "KeyI" });
+    press({ key: "e", code: "KeyE" });
     press({ key: "Enter", code: "Enter" });
 
     await vi.waitFor(() => expect(fileTabsIn("pane-test")).toHaveLength(1));
