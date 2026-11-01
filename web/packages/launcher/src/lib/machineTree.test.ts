@@ -460,6 +460,19 @@ describe("buildMachineTree: tmux connections", () => {
     expect(machineName(node)).toBe("tmux -CC on this machine");
   });
 
+  it("keeps a local run on this machine when a devserver resolves to its library", () => {
+    const workspaces = [ws({ workspace_id: "local-ws", path: "/local", library_id: "lib-host" })];
+    const devservers = [ds({ id: "ds-self", label: "other name", library_id: "lib-host" })];
+    const windows = [win({ window_id: "local-term", library_id: "lib-host" })];
+    const tree = buildMachineTree(devservers, workspaces, windows, [
+      tmux({ connection: "tm-local", library_id: "lib-host" }),
+    ]);
+    expect(tree.machines[0]!.terminals.map((window) => window.window_id)).toEqual(["local-term"]);
+    const node = tree.machines.find((machine) => machine.kind === "tmux")!;
+    expect(node.tmuxHost).toBeNull();
+    expect(machineName(node)).toBe("tmux -CC on this machine");
+  });
+
   it("builds a provisional node for rows whose record has not arrived", () => {
     const windows = [
       tmuxRow("tm-early", "e-control", true, 0),
