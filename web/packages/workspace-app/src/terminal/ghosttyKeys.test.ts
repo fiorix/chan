@@ -120,13 +120,22 @@ function sequence(platform: XtermPlatform, inits: Init[]) {
 
 describe("after AltGr or a dead key", () => {
   // xterm.js types these from its keypress or input handler and clears its
-  // pending dead key there; ghostty-web types them from keydown, and the
-  // browser's own text does not reach it while its host holds the focus.
+  // pending dead key there; ghostty-web types them from keydown.
   const ALTGR_LINUX: Init = { key: "AltGraph", code: "AltRight", keyCode: 225 };
   const AT_LINUX: Init = { key: "@", code: "KeyQ", keyCode: 81 };
   const CTRL_WIN: Init = { key: "Control", code: "ControlLeft", keyCode: 17, ctrlKey: true };
   const ALTGR_WIN: Init = { key: "AltGraph", code: "AltRight", keyCode: 18, ctrlKey: true, altKey: true };
   const AT_WIN: Init = { key: "@", code: "KeyQ", keyCode: 81, ctrlKey: true, altKey: true };
+
+  test.each([
+    ["Enter", 13, "\r"],
+    ["Tab", 9, "\t"],
+  ] as const)("a dead key followed by %s sends the non-text key", (key, keyCode, data) => {
+    expect(sequence(LINUX, [
+      { key: "Dead", code: "Quote", keyCode: 222 },
+      { key, code: key, keyCode },
+    ])).toEqual([{ kind: "browser" }, { kind: "send", data }]);
+  });
 
   test("Linux: the AltGr character is ghostty-web's to type, and so is the key after it", () => {
     expect(sequence(LINUX, [ALTGR_LINUX, AT_LINUX, { key: "h", code: "KeyH", keyCode: 72 }])).toEqual([
@@ -181,6 +190,151 @@ beforeAll(async () => {
 
 afterEach(() => {
   for (const host of hosts.splice(0)) host.remove();
+});
+
+/// Exercise the host listener together with ghostty-web's real input path.
+function inputTerminal(cancelHost = false) {
+  const host = document.createElement("div");
+  const textarea = document.createElement("textarea");
+  host.append(textarea);
+  document.body.append(host);
+  hosts.push(host);
+  const data: string[] = [];
+  const handler = new InputHandler(vt as never, host, (text) => data.push(text), () => {}, undefined,
+    () => false, () => false, undefined, textarea);
+  const cancelled = { reached: false };
+  if (cancelHost) host.addEventListener("beforeinput", (event) => { cancelled.reached = true; event.preventDefault(); });
+  const remove = installGhosttyKeyParity(host, {
+    terminal: { rows: 24, getMode: () => false, scrollLines() {}, selectAll() {}, clearSelection() {} },
+    platform: () => LINUX,
+    claimed: () => false,
+    chanBytes: () => null,
+    send: (text) => data.push(text),
+  });
+  const beforeinput = (text: string | null, init: InputEventInit = {}, target: HTMLElement = host) => {
+    const event = new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, inputType: "insertText", data: text, ...init,
+    });
+    target.dispatchEvent(event);
+    return event;
+  };
+  return { host, textarea, data, beforeinput, cancelled, dispose() { remove(); handler.dispose(); } };
+}
+
+describe("browser text on the ghostty host", () => {
+  test("insertText without keydown sends once, ahead of the host's cancel", () => {
+    const term = inputTerminal(true);
+    expect(term.beforeinput("\u{1f600}").defaultPrevented).toBe(true);
+    expect(term.data).toEqual(["\u{1f600}"]);
+    expect(term.cancelled.reached).toBe(false);
+    term.dispose();
+  });
+
+  test("textarea input stays with ghostty-web and sends once", () => {
+    const term = inputTerminal();
+    let reachedTextarea = false;
+    term.textarea.addEventListener("beforeinput", () => { reachedTextarea = true; });
+    term.beforeinput("\u{1f600}", {}, term.textarea);
+    expect(reachedTextarea).toBe(true);
+    expect(term.data).toEqual(["\u{1f600}"]);
+    term.dispose();
+  });
+
+  test("composing text stays with ghostty-web, including the commit's follow-up input", () => {
+    const term = inputTerminal();
+    expect(term.beforeinput("draft", { isComposing: true }).defaultPrevented).toBe(false);
+    term.host.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    expect(term.beforeinput("draft").defaultPrevented).toBe(false);
+    term.host.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "\u00e9" }));
+    term.beforeinput("\u00e9");
+    expect(term.data).toEqual(["\u00e9"]);
+    term.dispose();
+  });
+
+  test("a keydown's text is not sent again, and the next independent insertion is delivered", () => {
+    const term = inputTerminal();
+    term.host.dispatchEvent(keydown({ key: "a", code: "KeyA", keyCode: 65 }));
+    term.beforeinput("a");
+    expect(term.data).toEqual(["a"]);
+    term.beforeinput("a");
+    expect(term.data).toEqual(["a", "a"]);
+    term.host.dispatchEvent(keydown({ key: "b", code: "KeyB", keyCode: 66 }));
+    term.host.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "b" }));
+    term.beforeinput("b");
+    expect(term.data).toEqual(["a", "a", "b", "b"]);
+    term.dispose();
+  });
+
+  test("a different insertion after a handled key is not lost", () => {
+    const term = inputTerminal();
+    term.host.dispatchEvent(keydown({ key: "a", code: "KeyA", keyCode: 65 }));
+    term.beforeinput("\u{1f600}");
+    expect(term.data).toEqual(["a", "\u{1f600}"]);
+    term.dispose();
+  });
+
+  test.each(["keyup", "focusout", "keydown"])("%s clears a key's duplicate guard", (type) => {
+    const term = inputTerminal();
+    term.host.dispatchEvent(keydown({ key: "a", code: "KeyA", keyCode: 65 }));
+    if (type === "keydown") term.host.dispatchEvent(keydown({ key: "Dead", code: "Quote", keyCode: 222 }));
+    else term.host.dispatchEvent(new Event(type, { bubbles: true }));
+    term.beforeinput("a");
+    expect(term.data).toEqual(["a", "a"]);
+    term.dispose();
+  });
+
+  test.each([
+    { isComposing: true, keyCode: 65 },
+    { isComposing: false, keyCode: 229 },
+  ])("an IME key does not suppress its text commit: %j", (marks) => {
+    const term = inputTerminal();
+    term.host.dispatchEvent(keydown({ key: "a", code: "KeyA", ...marks }));
+    term.beforeinput("a");
+    expect(term.data).toEqual(["a"]);
+    term.dispose();
+  });
+
+  test.each([["Enter", 13, "\r"], ["Tab", 9, "\t"]] as const)(
+    "the browser's dead-key character precedes %s without being reconstructed from its key code",
+    (key, keyCode, data) => {
+      const term = inputTerminal();
+      term.host.dispatchEvent(keydown({ key: "Dead", code: "Quote", keyCode: 222 }));
+      term.beforeinput("\u00b4");
+      term.host.dispatchEvent(keydown({ key, code: key, keyCode }));
+      expect(term.data).toEqual(["\u00b4", data]);
+      term.dispose();
+    },
+  );
+
+  test("a composing letter after Dead stays with the browser and ghostty-web", () => {
+    const term = inputTerminal();
+    term.host.dispatchEvent(keydown({ key: "Dead", code: "Quote", keyCode: 222 }));
+    term.host.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    term.host.dispatchEvent(keydown({ key: "e", code: "KeyE", keyCode: 229, isComposing: true }));
+    term.beforeinput("\u00e9", { isComposing: true });
+    expect(term.data).toEqual([]);
+    term.host.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "\u00e9" }));
+    expect(term.data).toEqual(["\u00e9"]);
+    term.dispose();
+  });
+
+  test("non-text input, empty data, and already cancelled input are left alone", () => {
+    const term = inputTerminal();
+    for (const text of [null, ""]) expect(term.beforeinput(text).defaultPrevented).toBe(false);
+    expect(term.beforeinput("paste", { inputType: "insertFromPaste" }).defaultPrevented).toBe(false);
+    const cancelled = new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: "x" });
+    cancelled.preventDefault();
+    term.host.dispatchEvent(cancelled);
+    expect(term.data).toEqual([]);
+    term.dispose();
+  });
+
+  test("removal detaches the text listener", () => {
+    const term = inputTerminal();
+    term.dispose();
+    expect(term.beforeinput("text").defaultPrevented).toBe(false);
+    expect(term.data).toEqual([]);
+  });
 });
 
 type Outcome = { data: string; scrolled: number; prevented: boolean };

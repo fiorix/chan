@@ -1,6 +1,6 @@
-// Keyboard parity for ghostty terminals: a ghostty terminal sends what an
-// xterm.js terminal sends for the same keydown, chan's own key handling
-// included.
+// Keyboard encoding for ghostty terminals follows xterm.js and chan's own
+// key handling. Non-text keys after a dead key send their encoded bytes
+// even when the browser emits no keypress for them.
 //
 // ghostty-web encodes keys differently from xterm.js. Among other things it
 // never prefixes Alt with ESC (Alt+B sends "b"), passes no text to the encoder
@@ -22,6 +22,7 @@
 
 import {
   createXtermKeydownState,
+  evaluateKeyboardEvent,
   xtermKeydown,
   type XtermKeydownInput,
   type XtermKeydownState,
@@ -59,7 +60,7 @@ export type GhosttyKeyContext = {
   chanBytes: string | null;
 };
 
-/// Decide one keydown the way chan's xterm.js terminal does.
+/// Decide one keydown with chan's key mapping and xterm.js's encoding.
 export function ghosttyKeydownAction(
   ev: XtermKeydownInput & Pick<KeyboardEvent, "type">,
   ctx: GhosttyKeyContext,
@@ -97,12 +98,20 @@ export function ghosttyKeydownAction(
     case "pass":
       // xterm.js types a key it leaves to the browser from its keypress or
       // input handler, which also ends a pending dead key or AltGr. ghostty-web
-      // types `ev.key` from keydown and never sees the browser's own text while
-      // its host holds the focus, so a key it would type is its to type: an
+      // types `ev.key` from keydown, so a key it would type is its to type: an
       // AltGr character, a dead key's composed character, a plain key.
       if (ghosttyTypesKey(ev)) {
         state.deadKey = false;
         return { kind: "ghostty" };
+      }
+      // A non-text key has no browser text to compose. Encode it even when
+      // xterm.js's keydown deferred it for a pending dead key.
+      if (decision.deadKey) {
+        const data = evaluateKeyboardEvent(ev, ctx.applicationCursorMode, ctx.platform.isMac, true).key;
+        if (data) {
+          state.deadKey = false;
+          return { kind: "send", data };
+        }
       }
       return { kind: "browser" };
     case "composing":
@@ -135,11 +144,14 @@ export type GhosttyKeyDeps = {
 /// DEC private mode 1, application cursor keys (DECCKM).
 const DECCKM = 1;
 
-/// Install the parity listener on `host`, the element ghostty-web was opened
-/// in. Returns its removal.
+/// Install the parity listeners on `host`, the element ghostty-web was opened
+/// in. Returns their removal.
 export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps): () => void {
   const state = createXtermKeydownState();
+  let pendingText: string | null = null;
+  let composing = false;
   const onKeydown = (e: KeyboardEvent): void => {
+    pendingText = null;
     if (deps.claimed(e)) return;
     const term = deps.terminal;
     const action = ghosttyKeydownAction(
@@ -154,11 +166,13 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
     );
     switch (action.kind) {
       case "ghostty":
+        if (!composing && !e.isComposing && e.keyCode !== 229 && ghosttyTypesKey(e)) pendingText = e.key;
         return;
       case "send":
         // As xterm.js and ghostty-web both do for typed input.
         term.clearSelection();
         deps.send(action.data);
+        pendingText = e.key.length === 1 ? e.key : action.data;
         break;
       case "scroll":
         term.scrollLines(action.lines);
@@ -174,6 +188,44 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
     e.preventDefault();
     e.stopImmediatePropagation();
   };
+  const clearPendingText = (): void => { pendingText = null; };
+  const onCompositionStart = (): void => {
+    composing = true;
+    pendingText = null;
+  };
+  const onCompositionEnd = (e: CompositionEvent): void => {
+    composing = false;
+    state.deadKey = false;
+    // ghostty-web sends the commit. Some input sources also emit insertText
+    // for that same commit before the next key event.
+    pendingText = e.data;
+  };
+  const onBeforeInput = (e: InputEvent): void => {
+    // ghostty-web owns textarea input and composition. Its host listener
+    // only cancels beforeinput, so text aimed at the focused host goes here.
+    if (e.target !== host || e.defaultPrevented || composing || e.isComposing || e.inputType !== "insertText" || !e.data) return;
+    const duplicate = pendingText === e.data;
+    pendingText = null;
+    state.deadKey = false;
+    if (!duplicate) {
+      deps.terminal.clearSelection();
+      deps.send(e.data.replace(/\n/g, "\r"));
+    }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  };
   host.addEventListener("keydown", onKeydown, true);
-  return () => host.removeEventListener("keydown", onKeydown, true);
+  host.addEventListener("keyup", clearPendingText, true);
+  host.addEventListener("focusout", clearPendingText, true);
+  host.addEventListener("compositionstart", onCompositionStart, true);
+  host.addEventListener("compositionend", onCompositionEnd, true);
+  host.addEventListener("beforeinput", onBeforeInput, true);
+  return () => {
+    host.removeEventListener("keydown", onKeydown, true);
+    host.removeEventListener("keyup", clearPendingText, true);
+    host.removeEventListener("focusout", clearPendingText, true);
+    host.removeEventListener("compositionstart", onCompositionStart, true);
+    host.removeEventListener("compositionend", onCompositionEnd, true);
+    host.removeEventListener("beforeinput", onBeforeInput, true);
+  };
 }

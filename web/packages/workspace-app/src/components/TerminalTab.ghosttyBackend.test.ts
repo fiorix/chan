@@ -430,6 +430,35 @@ describe("the mount", () => {
 });
 
 describe("keys", () => {
+  test("host insertText reaches the PTY once as typed input and never as paste", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    host.dispatchEvent(new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, inputType: "insertText", data: "\u{1f600}",
+    }));
+    expect(inputs(socket)).toEqual(["\u{1f600}"]);
+    expect(ghostty.record.pastes).toEqual([]);
+  });
+
+  test("a handled key's following host insertText does not duplicate its bytes", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    hostKey(target, { key: "Enter", code: "Enter", keyCode: 13 });
+    host.dispatchEvent(new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, inputType: "insertText", data: "\r",
+    }));
+    expect(inputs(socket)).toEqual(["\r"]);
+  });
+
+  test.each([["Enter", 13, "\r"], ["Tab", 9, "\t"]] as const)(
+    "Dead then %s reaches the PTY", async (key, keyCode, data) => {
+      const { target, socket } = await mountGhostty();
+      hostKey(target, { key: "Dead", code: "Quote", keyCode: 222 });
+      hostKey(target, { key, code: key, keyCode });
+      expect(inputs(socket)).toEqual([data]);
+    },
+  );
+
   test("the handler ghostty calls inverts chan's answer: copy is claimed, paste stays native", async () => {
     const { term } = await mountGhostty();
     const copy = key(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
