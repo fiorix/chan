@@ -8,6 +8,7 @@
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { VtHost } from "../terminal/ghosttyVt";
 
 const ghostty = vi.hoisted(() => {
   const record = {
@@ -15,6 +16,7 @@ const ghostty = vi.hoisted(() => {
     kitFails: false,
     kitLoads: 0,
     instances: 0,
+    hosts: [] as VtHost[],
     alignOk: true,
     terminals: [] as Array<Record<string, any>>,
     viewportWrites: [] as string[],
@@ -134,7 +136,8 @@ vi.mock("../terminal/backend", async (importOriginal) => ({
     ghostty.record.kitLoads += 1;
     if (ghostty.record.kitFails) throw new Error("wasm fetch failed");
     return {
-      instantiate: async () => {
+      instantiate: async (host?: VtHost) => {
+        if (host) ghostty.record.hosts.push(host);
         ghostty.record.instances += 1;
         ghostty.record.events.push("instantiate");
         return { instance: ghostty.record.instances };
@@ -220,6 +223,7 @@ beforeEach(() => {
     kitFails: false,
     kitLoads: 0,
     instances: 0,
+    hosts: [],
     alignOk: true,
     terminals: [],
     viewportWrites: [],
@@ -582,6 +586,17 @@ describe("focus recovery after a host resume", () => {
   });
 });
 
+test("the VT reads current renderer metrics and sends a resize reply to its own PTY", async () => {
+  const { term, socket } = await mountGhostty();
+  expect(ghostty.record.hosts).toHaveLength(1);
+  const host = ghostty.record.hosts[0]!;
+  expect(host.cellSize()).toEqual({ width: 8, height: 16 });
+  vi.spyOn(term.renderer, "getMetrics").mockReturnValue({ width: 10, height: 20 });
+  expect(host.cellSize()).toEqual({ width: 10, height: 20 });
+  host.onResizeReply("\x1b[48;30;100;600;1000t");
+  expect(inputs(socket)).toEqual(["\x1b[48;30;100;600;1000t"]);
+});
+
 // ghostty-web tracks DECSET 1004 and sends no report of its own, so the
 // component reports focus at the element ghostty-web focuses.
 describe("focus reports", () => {
@@ -624,6 +639,38 @@ describe("focus reports", () => {
     expect(reports(socket), "after the mode came on and went off").toEqual([
       "\x1b[I",
     ]);
+  });
+
+  test("a resume reports each focus transition once despite retained browser events", async () => {
+    const { target, socket, term } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    host.tabIndex = 0;
+    ghostty.record.focusEvents = true;
+    host.focus();
+    expect(reports(socket)).toEqual(["\x1b[I"]);
+    socket.sent.splice(0);
+    vi.spyOn(term, "focus").mockImplementation(() => host.focus());
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // Chromium retains the active element across a window blur, then
+      // dispatches focusin after the resume repair blurs and refocuses it.
+      move(host, "focusout");
+      window.dispatchEvent(new Event("focus"));
+      await tick();
+      move(host, "focusin");
+      expect(document.activeElement).toBe(host);
+      expect(reports(socket)).toEqual(["\x1b[O", "\x1b[I"]);
+
+      socket.sent.splice(0);
+      host.blur();
+      move(host, "focusout");
+      host.focus();
+      move(host, "focusin");
+      expect(reports(socket), "a later tab switch still reports both transitions").toEqual(["\x1b[O", "\x1b[I"]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   test("focus moving between the terminal's own elements is no change", async () => {

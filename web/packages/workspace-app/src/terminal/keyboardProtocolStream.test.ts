@@ -57,11 +57,6 @@ function observer(stream: string, cuts: number[] = []): Run {
   return { protocol, replies };
 }
 
-/// The VT answers the kitty query on ghostty, so the observer leaves it.
-function withoutKittyQueryReplies(run: Run): Run {
-  return { ...run, replies: run.replies.filter((r) => !/^\x1b\[\?\d+u$/.test(r)) };
-}
-
 const CORPUS: Array<[string, string]> = [
   ["kitty push", "\x1b[>1u"],
   ["kitty push with no flags", "\x1b[>u"],
@@ -110,7 +105,7 @@ const CORPUS: Array<[string, string]> = [
 ];
 
 function same(stream: string, cuts?: number[]) {
-  const want = withoutKittyQueryReplies(xterm(stream));
+  const want = xterm(stream);
   const got = observer(stream, cuts);
   expect(got).toEqual(want);
 }
@@ -139,14 +134,14 @@ describe("the observer follows the stream as chan's xterm.js handlers do", () =>
       const length = 1 + Math.floor(next() * 40);
       let stream = "";
       for (let i = 0; i < length; i++) stream += alphabet[Math.floor(next() * alphabet.length)];
-      const want = withoutKittyQueryReplies(xterm(stream));
+      const want = xterm(stream);
       const got = observer(stream, [Math.floor(next() * new TextEncoder().encode(stream).length)]);
       expect(got, JSON.stringify(stream)).toEqual(want);
     }
   });
 });
 
-test("the kitty query is left to the VT and the modifyOtherKeys query is answered", () => {
+test("kitty and modifyOtherKeys queries are answered from chan's state", () => {
   const { replies } = observer("\x1b[>1u\x1b[?u\x1b[>4;2m\x1b[?4m");
-  expect(replies).toEqual(["\x1b[>4;2m"]);
+  expect(replies).toEqual(["\x1b[?1u", "\x1b[>4;2m"]);
 });

@@ -99,4 +99,23 @@ describe("ghostty kit instances", () => {
     expect(memories[0]).toBeInstanceOf(WebAssembly.Memory);
     expect(memories[0]).not.toBe(memories[1]);
   });
+
+  test("the kit supplies renderer measurements and delivers resize replies", async () => {
+    const kit = ghosttyKitFrom(await vendoredModule(), { Terminal });
+    const replies: string[] = [];
+    const instance = await kit.instantiate({
+      cellSize: () => ({ width: 9, height: 18 }),
+      onResizeReply: (data) => replies.push(data),
+    });
+    const term = instance.createTerminal(80, 24);
+    try {
+      term.write("\x1b[?2048h");
+      term.readResponse();
+      term.resize(100, 30);
+      expect(replies).toEqual(["\x1b[48;30;100;540;900t"]);
+      expect(term.readResponse()).toBeNull();
+    } finally {
+      term.free();
+    }
+  });
 });
