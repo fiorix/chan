@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from "vitest";
 
-import { findDateMatches, type DateMatch } from "./dateFormats";
+import { DATE_FORMATS, findDateMatches, type DateMatch } from "./dateFormats";
 
 function day(year: number, month: number, date: number): Date {
   return new Date(year, month - 1, date);
@@ -16,6 +16,58 @@ function at(line: string, text: string, formatId: DateMatch["formatId"], date: D
 }
 
 describe("findDateMatches", () => {
+  test("a date at the end of a sentence is a match", () => {
+    const line = "Happening on Halloween, 2026-10-31.";
+
+    expect(findDateMatches(line)).toEqual([at(line, "2026-10-31", "iso", day(2026, 10, 31))]);
+  });
+
+  test.each(DATE_FORMATS.map((format) => [format.id, format.format(day(2026, 10, 31))] as const))(
+    "a %s date before a full stop is a match",
+    (formatId, text) => {
+      const line = `Due ${text}.`;
+
+      expect(findDateMatches(line)).toEqual([at(line, text, formatId, day(2026, 10, 31))]);
+    },
+  );
+
+  test("a full stop at the end of a line is a date boundary", () => {
+    const line = "Due 2026-10-31.";
+
+    expect(findDateMatches(line)).toEqual([at(line, "2026-10-31", "iso", day(2026, 10, 31))]);
+  });
+
+  test("an ellipsis at the end of a line is a date boundary", () => {
+    const line = "Due 2026-10-31...";
+
+    expect(findDateMatches(line)).toEqual([at(line, "2026-10-31", "iso", day(2026, 10, 31))]);
+  });
+
+  test("a full stop before whitespace is a date boundary", () => {
+    const line = "Due 2026-10-31. Next week";
+
+    expect(findDateMatches(line)).toEqual([at(line, "2026-10-31", "iso", day(2026, 10, 31))]);
+  });
+
+  test.each([")", "]", "'", '"'])("a full stop before %s is a date boundary", (closing) => {
+    const line = `Due 2026-10-31.${closing}`;
+
+    expect(findDateMatches(line)).toEqual([at(line, "2026-10-31", "iso", day(2026, 10, 31))]);
+  });
+
+  test("an ellipsis before whitespace is a date boundary", () => {
+    const line = "On 2026-10-31... maybe";
+
+    expect(findDateMatches(line)).toEqual([at(line, "2026-10-31", "iso", day(2026, 10, 31))]);
+  });
+
+  test.each(["notes/2026-10-31.md", "2026-10-31.1", "2026-10-31...md", "2026-10-31...1"])(
+    "a dot followed by a letter or digit stays part of a token: %s",
+    (line) => {
+      expect(findDateMatches(line)).toEqual([]);
+    },
+  );
+
   test.each([
     ["iso", "2026-05-05", day(2026, 5, 5)],
     ["medium", "02 Jan 2029", day(2029, 1, 2)],
