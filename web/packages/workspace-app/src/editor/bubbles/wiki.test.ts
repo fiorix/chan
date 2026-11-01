@@ -12,7 +12,12 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+vi.mock("../../state/store.svelte", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/store.svelte")>();
+  return { ...actual, openGraphFromLink: vi.fn(() => true) };
+});
 import { api } from "../../api/client";
+import { openGraphFromLink } from "../../state/store.svelte";
 import type { LinkTarget, TreeEntry } from "../../api/types";
 import { openWikiBubble, type WikiBubbleOpts } from "./wiki";
 import { json, recordRequests, stopRecordingRequests, type RecordedRequest } from "../../__tests__/fetch";
@@ -38,6 +43,7 @@ function entry(path: string): TreeEntry {
 }
 
 let views: EditorView[] = [];
+let handles: ReturnType<typeof openWikiBubble>[] = [];
 
 beforeEach(() => {
   vi.spyOn(api, "linkTargets").mockResolvedValue([]);
@@ -45,9 +51,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const handle of handles.splice(0)) handle.dismiss();
   for (const view of views.splice(0)) view.destroy();
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 /// Open the bubble over `doc`, triggered by the text from `start` to the end.
@@ -65,6 +73,7 @@ function open(doc: string, start: number, over: Partial<WikiBubbleOpts> = {}) {
     onDismiss: () => {},
     ...over,
   });
+  handles.push(handle);
   const key = (key: string, init: KeyboardEventInit = {}) =>
     handle.handleKey(new KeyboardEvent("keydown", { key, ...init }));
   return { view, handle, key };
@@ -319,6 +328,67 @@ describe("inside an existing link's URL", () => {
 
     expect(onOpenLink).toHaveBeenCalledWith("notes/other.md", null);
     expect(view.state.doc.toString()).toBe(slot);
+  });
+});
+
+describe("external URL rows", () => {
+  const urls = ["https://chan.app", "mailto:a@example.com", "tel:+15551212"];
+
+  test.each(urls)("%s has only an OPEN row, and Enter opens once", async (url) => {
+    vi.mocked(api.linkTargets).mockResolvedValue([target("notes/other.md")]);
+    vi.mocked(api.list).mockResolvedValue([entry(url)]);
+    const browser = vi.spyOn(window, "open").mockReturnValue(null);
+    const doc = `[x](${url})`;
+    const { key } = open(doc, doc.indexOf(url), { triggerEnd: doc.length - 1, initialQuery: url, templateMode: "raw", onOpenLink: vi.fn() });
+    await vi.waitFor(() => expect(rows()).toEqual([`OPEN${url}`]));
+    expect(browser).not.toHaveBeenCalled();
+    key("Enter");
+    expect(browser).toHaveBeenCalledExactlyOnceWith(url, "_blank", "noopener,noreferrer");
+  });
+
+  test.each([{ metaKey: true }, { ctrlKey: true }])("modifier Enter opens the URL once", (modifier) => {
+    const browser = vi.spyOn(window, "open").mockReturnValue(null);
+    const url = "https://chan.app";
+    const doc = `[x](${url})`;
+    const { key } = open(doc, doc.indexOf(url), { triggerEnd: doc.length - 1, initialQuery: url, templateMode: "raw", onOpenLink: vi.fn() });
+    key("Enter", modifier);
+    expect(browser).toHaveBeenCalledExactlyOnceWith(url, "_blank", "noopener,noreferrer");
+  });
+
+  test("clicking the row opens a graph link once", () => {
+    const url = "chan://graph?s=one";
+    const doc = `[x](${url})`;
+    open(doc, doc.indexOf(url), { triggerEnd: doc.length - 1, initialQuery: url, templateMode: "raw", onOpenLink: vi.fn() });
+    expect(rows()).toEqual([`OPEN${url}`]);
+    const row = document.querySelector(".md-bubble-row")!;
+    row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(openGraphFromLink).toHaveBeenCalledExactlyOnceWith(url);
+  });
+
+  test("the copy button copies the URL without opening it", async () => {
+    const url = "https://chan.app";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const browser = vi.spyOn(window, "open").mockReturnValue(null);
+    const doc = `[x](${url})`;
+    open(doc, doc.indexOf(url), { triggerEnd: doc.length - 1, initialQuery: url, templateMode: "raw", onOpenLink: vi.fn() });
+    const copy = document.querySelector<HTMLButtonElement>(".md-bubble-row .copy-btn");
+    expect(copy?.querySelector("svg")).toBeTruthy();
+    copy!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    copy!.click();
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(url));
+    expect(browser).not.toHaveBeenCalled();
+  });
+
+  test("an external row does not ask the file index or tree for candidates", async () => {
+    vi.useFakeTimers();
+    const url = "https://chan.app";
+    const doc = `[x](${url})`;
+    open(doc, doc.indexOf(url), { triggerEnd: doc.length - 1, initialQuery: url, templateMode: "raw", onOpenLink: vi.fn() });
+    await vi.advanceTimersByTimeAsync(80);
+    expect(rows()).toEqual([`OPEN${url}`]);
+    expect(api.linkTargets).not.toHaveBeenCalled();
+    expect(api.list).not.toHaveBeenCalled();
   });
 });
 

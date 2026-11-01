@@ -71,6 +71,7 @@
   import CodeReportSection from "./CodeReportSection.svelte";
   import KindChip from "./KindChip.svelte";
   import { ChevronDown, Copy } from "@lucide/svelte";
+  import "../editor/copy_button.css";
 
   /// Visual / behavioural kind for a file reference. Images route to
   /// the fullscreen zoom overlay (editor's "Zoom" button shares the
@@ -1517,20 +1518,6 @@
     flex: 1;
     margin: 0;
   }
-  .copy-btn {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: 1px solid var(--btn-border);
-    border-radius: 3px;
-    color: var(--text);
-    cursor: pointer;
-    padding: 3px;
-    line-height: 0;
-  }
-  .copy-btn:hover { border-color: var(--btn-hover); }
   .file-picker {
     position: absolute;
     width: 1px;
