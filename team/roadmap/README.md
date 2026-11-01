@@ -30,10 +30,12 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 | [Copy scrollback of a long history blocks the page][ghscroll] | deferred | measure |
 | [a tmux divider between nested splits][tmuxnest] | raised | decision |
 | [Cmd+` does not switch chan windows on macOS][cmdbq] | raised | reading |
+| [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | raised | decision |
 
 [ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
 [tmuxnest]: v0.121.0/a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan.md
 [cmdbq]: v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md
+[cachixpins]: v0.121.0/the-cachix-publication-keeps-every-releases-pins-and-fills-the-cache.md
 
 ## Completed
 
