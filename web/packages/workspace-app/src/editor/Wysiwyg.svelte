@@ -1970,6 +1970,18 @@
     background: var(--accent-bg, rgba(106, 168, 255, 0.18));
     color: var(--accent, #2563b8);
   }
+  :global(.md-bubble .md-bubble-row-external) {
+    display: flex;
+    align-items: center;
+  }
+  :global(.md-bubble .md-bubble-row-external > span:nth-child(2)) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  :global(.md-bubble .md-bubble-row-external .copy-btn) {
+    margin-left: auto;
+  }
   :global(.md-bubble .md-bubble-status) {
     padding: 4px 8px;
     color: var(--text-secondary, #888);

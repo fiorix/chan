@@ -27,6 +27,8 @@ import type { EditorState } from "@codemirror/state";
 import { isExcalidrawImageSrc } from "../extensions/image";
 import type { BubbleSpec } from "./types";
 import { windowCaps } from "../../state/windowCaps";
+import { isOpenableExternalUrl } from "../external_links";
+import { GRAPH_LINK_PREFIX } from "../../state/tabs.svelte";
 
 /// Syntax nodes whose interior the text scans may not fire inside: the
 /// caret is in markup that already exists, and only the URL-slot branches
@@ -102,6 +104,16 @@ export function computeBubbleSpec(
       triggerStart: linkUrl.from,
       triggerEnd: linkUrl.to,
       query: linkUrl.queryUpToCaret,
+      templateMode: "raw",
+    };
+  }
+  const exposedUrl = exposedUrlAtCaret(state, pos);
+  if (exposedUrl !== null) {
+    return {
+      kind: "wiki",
+      triggerStart: exposedUrl.from,
+      triggerEnd: exposedUrl.to,
+      query: exposedUrl.queryUpToCaret,
       templateMode: "raw",
     };
   }
@@ -363,6 +375,25 @@ function linkUrlAtCaret(
   pos: number,
 ): { from: number; to: number; queryUpToCaret: string } | null {
   return urlSlotAtCaret(state, pos, "Link");
+}
+
+function exposedUrlAtCaret(
+  state: EditorState,
+  pos: number,
+): { from: number; to: number; queryUpToCaret: string } | null {
+  const node = syntaxTree(state).resolveInner(pos, -1);
+  let urlNode: typeof node | null = node;
+  while (urlNode && urlNode.name !== "URL") urlNode = urlNode.parent;
+  if (!urlNode || pos < urlNode.from || pos > urlNode.to) return null;
+  const parent = urlNode.parent;
+  if (parent?.name === "Link" || parent?.name === "Image") return null;
+  const url = state.doc.sliceString(urlNode.from, urlNode.to);
+  if (!isOpenableExternalUrl(url) && !url.startsWith(GRAPH_LINK_PREFIX)) return null;
+  return {
+    from: urlNode.from,
+    to: urlNode.to,
+    queryUpToCaret: state.doc.sliceString(urlNode.from, pos),
+  };
 }
 
 /// Walk up from pos looking for a WikiLink syntax node. When found

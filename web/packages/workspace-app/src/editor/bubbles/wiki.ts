@@ -28,8 +28,11 @@ import { createCaretAnchor } from "./anchor";
 import { api } from "../../api/client";
 import { errorText } from "../../api/errors";
 import type { LinkTarget, TreeEntry } from "../../api/types";
-import { indexStatus, tree } from "../../state/store.svelte";
+import { copyTextToClipboard, indexStatus, openGraphFromLink, tree } from "../../state/store.svelte";
 import { windowCaps } from "../../state/windowCaps";
+import { GRAPH_LINK_PREFIX } from "../../state/tabs.svelte";
+import { isOpenableExternalUrl, openExternalUrl } from "../external_links";
+import "../copy_button.css";
 import { decodePercent, encodeRelPath, relativizePath, wikiLinkToMarkdown } from "../links";
 import { parseInternalLink } from "../widgets/wikilink";
 import {
@@ -143,11 +146,12 @@ interface HeadingHit {
 /// the link the user is sitting on can never be opened from the bubble.
 interface SelfHit {
   kind: "Self";
-  /// Canonical resolved target (workspace-rooted), passed to onOpenLink.
+  /// Resolved workspace target or literal external URL.
   target: string;
   anchor: string | null;
   /// The literal URL-slot text, shown in the row.
   url: string;
+  external: boolean;
 }
 
 function isSelfHit(hit: unknown): hit is SelfHit {
@@ -249,6 +253,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   let blockHits: ParsedBlock[] = [];
   let selectedIndex = 0;
   let reqSeq = 0;
+  let pathSeq = 0;
   let debounceTimer: number | undefined;
   let indexWatch: number | undefined;
   let alive = true;
@@ -266,14 +271,15 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   status.className = "md-bubble-status";
   shell.wrap.appendChild(status);
 
-  /// In raw `[label](url)` mode, the literal URL slot resolved to an openable
-  /// internal target -- the "OPEN <url>" sentinel. Null in wrap mode, when
-  /// there is no open handler, or when the slot is external / anchor-only /
-  /// unresolvable (parseInternalLink returns null for `http`/`mailto`/`#...`).
+  /// In raw URL mode, the literal slot's "OPEN <url>" row. Internal paths
+  /// need the host's open handler; external and graph URLs open here.
   function selfHit(): SelfHit | null {
-    if (!opts.onOpenLink) return null;
     if (!slotMode || mode.kind !== "file") return null;
     const literal = opts.view.state.doc.sliceString(opts.triggerStart, triggerEnd);
+    if (isOpenableExternalUrl(literal) || literal.startsWith(GRAPH_LINK_PREFIX)) {
+      return { kind: "Self", target: literal, anchor: null, url: literal, external: true };
+    }
+    if (!opts.onOpenLink) return null;
     const parsed = parseInternalLink(literal, "", opts.fromPath ?? null);
     if (!parsed) return null;
     return {
@@ -281,6 +287,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       target: parsed.target,
       anchor: parsed.anchor ? parsed.anchor : null,
       url: literal,
+      external: false,
     };
   }
 
@@ -357,7 +364,9 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       // target) while authoring a fresh `[[` link. Suppressed in raw
       // mode, where those separators are part of the URL being edited.
       const modeHint = slotMode ? "" : " - # heading - ^ block";
-      status.textContent = `${hits.length} result${hits.length === 1 ? "" : "s"} - ↵ insert${openHint}${modeHint}`;
+      status.textContent = isSelfHit(hits[0]) && hits[0].external
+        ? "↵ open"
+        : `${hits.length} result${hits.length === 1 ? "" : "s"} - ↵ insert${openHint}${modeHint}`;
     }
     for (let i = 0; i < hits.length; i++) {
       const hit = hits[i]!;
@@ -395,6 +404,27 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         text.textContent = hit.url;
         row.appendChild(tag);
         row.appendChild(text);
+        if (hit.external) {
+          row.classList.add("md-bubble-row-external");
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "copy-btn";
+          copy.title = "Copy URL to clipboard";
+          copy.setAttribute("aria-label", "Copy URL to clipboard");
+          copy.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+          copy.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          });
+          copy.addEventListener("click", (e) => {
+            e.stopPropagation();
+            void copyTextToClipboard(hit.url, {
+              onSuccess: () => { status.textContent = "Copied URL"; },
+              onError: (msg) => { status.textContent = `Copy failed: ${msg}`; },
+            });
+          });
+          row.appendChild(copy);
+        }
       } else {
         const t = hit as LinkTarget;
         if (t.kind === "Heading") {
@@ -438,6 +468,13 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
 
   function fetchFile(): void {
     if (debounceTimer !== undefined) clearTimeout(debounceTimer);
+    if (selfHit()?.external) {
+      ++reqSeq;
+      fileHits = [];
+      searchFailure = null;
+      render();
+      return;
+    }
     // Without a workspace there is no name/title index behind the picker:
     // the PATH lane over loaded browser entries is the whole completion
     // surface, and probing the absent route would only paint errors.
@@ -502,8 +539,14 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   /// query, then re-render. Cheap (in-memory filter over the cached
   /// tree); the only async cost is the one-time tree fetch.
   function fetchPaths(): void {
+    const seq = ++pathSeq;
+    if (selfHit()?.external) {
+      pathHits = [];
+      render();
+      return;
+    }
     void ensureTreeLoaded().then(() => {
-      if (!alive || mode.kind !== "file") return;
+      if (!alive || mode.kind !== "file" || seq !== pathSeq) return;
       pathHits = computePathHits(query, allEntries ?? []);
       render();
     });
@@ -664,7 +707,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       // it. Mandatory guard: a SelfHit carries no `.path`, so falling through
       // to the file-mode branch would call fileLinkInsert(undefined, ...) and
       // corrupt the document.
-      if (opts.onOpenLink) opts.onOpenLink(hit.target, hit.anchor);
+      openSelfHit(hit);
       dismiss();
       return;
     }
@@ -699,6 +742,15 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
       selection: { anchor: opts.triggerStart + insert.length },
     });
     dismiss();
+  }
+
+  function openSelfHit(hit: SelfHit): void {
+    if (hit.external) {
+      if (hit.url.startsWith(GRAPH_LINK_PREFIX)) openGraphFromLink(hit.url);
+      else void openExternalUrl(hit.url);
+    } else {
+      opts.onOpenLink?.(hit.target, hit.anchor);
+    }
   }
 
   /// Format an on-disk file link for a resolved (path, anchor). `path`
@@ -788,11 +840,11 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
   }
 
   function openSelected(): void {
-    if (!opts.onOpenLink) return;
+    if (!opts.onOpenLink && !selfHit()?.external) return;
     const hits = activeHits();
     const hit = hits[selectedIndex];
     if (isSelfHit(hit)) {
-      opts.onOpenLink(hit.target, hit.anchor);
+      openSelfHit(hit);
       dismiss();
       return;
     }
@@ -817,7 +869,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     } else {
       target = query;
     }
-    opts.onOpenLink(target, anchor);
+    opts.onOpenLink?.(target, anchor);
     dismiss();
   }
 
@@ -847,7 +899,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         // instead of committing a replace. The host wires this to
         // openInActivePane via onOpenLink.
         if (event.metaKey || event.ctrlKey) {
-          if (opts.onOpenLink) {
+          if (opts.onOpenLink || selfHit()?.external) {
             openSelected();
             return true;
           }

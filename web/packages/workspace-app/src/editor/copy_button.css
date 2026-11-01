@@ -1,0 +1,15 @@
+.copy-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--btn-border);
+  border-radius: 3px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 3px;
+  line-height: 0;
+}
+
+.copy-btn:hover { border-color: var(--btn-hover); }

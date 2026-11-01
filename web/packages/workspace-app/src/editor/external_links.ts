@@ -117,26 +117,26 @@ export function externalUrlAtPos(state: EditorState, pos: number): string | null
 
 export function externalLinkClickHandler() {
   return EditorView.domEventHandlers({
-    click(event, view) {
+    mousedown(event, view) {
+      if (event.button !== 0) return false;
       const target = event.target as HTMLElement | null;
       if (!target?.closest(".cm-md-link, .cm-md-link-url")) return false;
       const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
       if (pos === null) return false;
-      // In-app `chan://graph?...` links (pasted from a graph tab's "Copy
-      // link to graph") open the graph tab rather than navigating out.
-      // Checked before the external-URL path because `chan:` is not an
-      // openable external scheme, so externalUrlAtPos would drop it.
-      const raw = linkUrlAtPos(view.state, pos);
-      if (raw?.startsWith(GRAPH_LINK_PREFIX) && openGraphFromLink(raw)) {
-        event.preventDefault();
-        event.stopPropagation();
-        return true;
+      const hit = linkUrlRangeAtPos(view.state, pos);
+      if (!hit || (!isOpenableExternalUrl(hit.url) && !hit.url.startsWith(GRAPH_LINK_PREFIX))) return false;
+      if (event.metaKey || event.ctrlKey) {
+        if (hit.url.startsWith(GRAPH_LINK_PREFIX)) {
+          if (!openGraphFromLink(hit.url)) return false;
+        } else {
+          void openExternalUrl(hit.url);
+        }
+      } else {
+        view.focus();
+        view.dispatch({ selection: { anchor: hit.to } });
       }
-      const url = externalUrlAtPos(view.state, pos);
-      if (!url) return false;
       event.preventDefault();
       event.stopPropagation();
-      void openExternalUrl(url);
       return true;
     },
   });
@@ -148,11 +148,15 @@ export function externalLinkClickHandler() {
 /// intentionally ignores. Image URLs are excluded (an image is not a
 /// navigable link).
 export function linkUrlAtPos(state: EditorState, pos: number): string | null {
+  return linkUrlRangeAtPos(state, pos)?.url ?? null;
+}
+
+function linkUrlRangeAtPos(state: EditorState, pos: number): { url: string; to: number } | null {
   for (const side of [-1, 0, 1] as const) {
     let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, side);
     while (node) {
-      const url = rawUrlForNode(state, node);
-      if (url) return url;
+      const range = rawUrlRangeForNode(node);
+      if (range) return { url: state.doc.sliceString(range.from, range.to).trim(), to: range.to };
       node = node.parent;
     }
   }
@@ -165,24 +169,29 @@ function externalUrlForNode(state: EditorState, node: SyntaxNode): string | null
 }
 
 function rawUrlForNode(state: EditorState, node: SyntaxNode): string | null {
+  const range = rawUrlRangeForNode(node);
+  return range ? state.doc.sliceString(range.from, range.to).trim() : null;
+}
+
+function rawUrlRangeForNode(node: SyntaxNode): { from: number; to: number } | null {
   if (node.name === "Link" || node.name === "Autolink") {
-    return rawUrlFromChild(state, node);
+    return rawUrlRangeFromChild(node);
   }
   if (node.name !== "URL") return null;
   const parent = node.parent;
   if (parent?.name === "Image") return null;
   if (parent?.name === "Link" || parent?.name === "Autolink") {
-    return rawUrlFromChild(state, parent);
+    return rawUrlRangeFromChild(parent);
   }
-  return state.doc.sliceString(node.from, node.to).trim();
+  return { from: node.from, to: node.to };
 }
 
-function rawUrlFromChild(state: EditorState, node: SyntaxNode): string | null {
+function rawUrlRangeFromChild(node: SyntaxNode): { from: number; to: number } | null {
   const cursor = node.cursor();
   if (!cursor.firstChild()) return null;
   do {
     if (cursor.name === "URL") {
-      return state.doc.sliceString(cursor.from, cursor.to).trim();
+      return { from: cursor.from, to: cursor.to };
     }
   } while (cursor.nextSibling());
   return null;

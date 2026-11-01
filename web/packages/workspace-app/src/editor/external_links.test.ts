@@ -19,6 +19,7 @@ import {
 import { chanMarkdown } from "./markdown/grammar";
 import { setNotifyHandler } from "../state/notify.svelte";
 import { openGraphFromLink } from "../state/store.svelte";
+import { computeBubbleSpec } from "./bubbles/triggers";
 
 function state(doc: string): EditorState {
   return EditorState.create({ doc, extensions: [chanMarkdown()] });
@@ -211,7 +212,7 @@ describe("a click on a link in the editor", () => {
 
   /// Clicks the rendered link over `text` in `doc`. jsdom has no layout, so
   /// the view's hit test answers the link's position directly.
-  function click(doc: string, text: string): MouseEvent {
+  function click(doc: string, text: string, init: MouseEventInit = {}) {
     const view = new EditorView({
       parent: document.body.appendChild(document.createElement("div")),
       state: EditorState.create({ doc, extensions: [chanMarkdown(), externalLinkClickHandler()] }),
@@ -221,36 +222,58 @@ describe("a click on a link in the editor", () => {
     view.posAtCoords = () => pos;
     const link = view.contentDOM.appendChild(document.createElement("span"));
     link.className = "cm-md-link";
-    const event = new MouseEvent("click", { bubbles: true, cancelable: true, clientX: 1, clientY: 1 });
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 1, clientY: 1, ...init });
     link.dispatchEvent(event);
-    return event;
+    return { event, view };
   }
 
-  test("opens a chan://graph link in the graph and never navigates out", () => {
+  test.each([
+    ["[x](https://example.com)", "[x]", "https://example.com"],
+    ["<https://example.com>", "example", "https://example.com"],
+    ["https://example.com", "example", "https://example.com"],
+    ["[m](mailto:a@example.com)", "[m]", "mailto:a@example.com"],
+    ["[t](tel:+15551212)", "[t]", "tel:+15551212"],
+    ["[g](chan://graph?s=workspace&d=2)", "[g]", "chan://graph?s=workspace&d=2"],
+  ])("plain click on %s edits its target", (doc, label, url) => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
-    const event = click("see [g](chan://graph?s=workspace&d=2) here", "[g]");
+    const { event, view } = click(`see ${doc} here`, label);
 
-    expect(openGraphFromLink).toHaveBeenCalledWith("chan://graph?s=workspace&d=2");
+    expect(view.state.selection.main.head).toBe(view.state.doc.toString().indexOf(url) + url.length);
+    expect(computeBubbleSpec(view.state)).toMatchObject({ kind: "wiki", templateMode: "raw", query: url });
+    expect(openGraphFromLink).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(true);
     expect(open).not.toHaveBeenCalled();
   });
 
-  test("opens an external link in the browser, not the graph", () => {
+  test.each([{ ctrlKey: true }, { metaKey: true }])("modifier click opens an external link", (modifier) => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
-    const event = click("see [x](https://example.com) here", "[x]");
+    const { event, view } = click("see [x](https://example.com) here", "[x]", modifier);
 
     expect(open).toHaveBeenCalledWith("https://example.com", "_blank", "noopener,noreferrer");
     expect(openGraphFromLink).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(true);
+    expect(view.state.selection.main.head).toBe(0);
   });
 
-  test("leaves a chan:// link the graph cannot open alone", () => {
+  test.each([{ ctrlKey: true }, { metaKey: true }])("modifier click opens the graph link", (modifier) => {
+    const { event } = click("see [g](chan://graph?s=one) here", "[g]", modifier);
+    expect(openGraphFromLink).toHaveBeenCalledWith("chan://graph?s=one");
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  test("a file link remains with the file-link handler", () => {
+    const browser = vi.spyOn(window, "open").mockReturnValue(null);
+    click("see [Notes](notes.md) here", "Notes");
+    expect(browser).not.toHaveBeenCalled();
+    expect(openGraphFromLink).not.toHaveBeenCalled();
+  });
+
+  test("leaves a chan:// link the graph cannot open alone on modifier click", () => {
     graphLinks.handled = false;
     const open = vi.spyOn(window, "open").mockReturnValue(null);
-    const event = click("see [g](chan://graph?bad) here", "[g]");
+    click("see [g](chan://graph?bad) here", "[g]", { ctrlKey: true });
 
     expect(openGraphFromLink).toHaveBeenCalledTimes(1);
     expect(open, "chan: is not an openable external scheme").not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
   });
 });

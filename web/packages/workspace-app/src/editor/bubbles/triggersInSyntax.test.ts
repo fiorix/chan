@@ -67,6 +67,26 @@ describe("a caret inside a formed image or link opens no trigger bubble", () => 
   });
 });
 
+describe("a caret at the end of an external URL opens the link picker", () => {
+  test.each([
+    ["[label](https://chan.app)", "https://chan.app"],
+    ["<https://chan.app>", "https://chan.app"],
+    ["https://chan.app", "https://chan.app"],
+    ["[mail](mailto:a@example.com)", "mailto:a@example.com"],
+    ["[call](tel:+15551212)", "tel:+15551212"],
+    ["[graph](chan://graph?s=one)", "chan://graph?s=one"],
+  ])("%s", (doc, url) => {
+    const from = doc.indexOf(url);
+    expect(specAt(doc, from + url.length)).toMatchObject({
+      kind: "wiki",
+      templateMode: "raw",
+      triggerStart: from,
+      triggerEnd: from + url.length,
+      query: url,
+    });
+  });
+});
+
 describe("a heading marker is not a tag trigger", () => {
   test.each(["#", "##", "###", "  ##"])(
     "the caret after %j opens no tag picker",
