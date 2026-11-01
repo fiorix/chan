@@ -122,6 +122,13 @@ describe("findWorkspaceImageRefs", () => {
 });
 
 describe("buildBaselineHtml (wrapper + resolution + tagging)", () => {
+  test("keeps headings inside a list item and a quote", () => {
+    const html = buildBaselineHtml("- # foo\n\n> # foo", null, null);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector("li > h1")?.textContent).toBe("foo");
+    expect(doc.querySelector("blockquote > h1")?.textContent).toBe("foo");
+  });
+
   test("wrapper attributes round-trip through the paste-side parser", () => {
     const md = 'title "quoted" & <b> #hash\n![](./a.png)';
     const html = buildBaselineHtml(md, "notes/foo.md", "/ws");
