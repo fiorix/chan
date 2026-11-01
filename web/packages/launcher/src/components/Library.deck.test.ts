@@ -11,7 +11,7 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import Library from "./Library.svelte";
 import { openNewDialog, closeDialog } from "../state/dialog.svelte";
 import { openCommandLauncher, closeCommandLauncher } from "../state/commandLauncher.svelte";
-import { confirm } from "../state/confirm.svelte";
+import { cancelConfirm, confirm } from "../state/confirm.svelte";
 import {
   library,
   loadLibrary,
@@ -77,6 +77,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   setSelectMode(false);
+  cancelConfirm();
   if (app) unmount(app);
   stopWatching();
   target?.remove();
@@ -407,7 +408,7 @@ describe("the Computers deck's letter actions", () => {
     return clicked;
   }
 
-  it("t opens a terminal on local and connected devserver headers; c presses the connection control", async () => {
+  it("t opens a terminal on local and connected devserver headers; o presses the connection control", async () => {
     mountDeck();
     for (const card of ["local", "ds-1"]) {
       decks.computers.activeKey = card;
@@ -422,13 +423,15 @@ describe("the Computers deck's letter actions", () => {
       const connection = header.querySelector<HTMLButtonElement>('[aria-label^="Disconnect"]');
       if (connection) {
         const toggled = watchClick(connection);
-        key("c", header);
+        key("o", header);
         expect(toggled).toHaveBeenCalledOnce();
-      } else expect(key("c", header).defaultPrevented).toBe(false);
+        expect(key("c", header).defaultPrevented).toBe(false);
+        expect(toggled).toHaveBeenCalledOnce();
+      } else expect(key("o", header).defaultPrevented).toBe(false);
     }
   });
 
-  it("c connects a disconnected devserver and respects its disabled control", async () => {
+  it("o connects a disconnected devserver and respects its disabled control", async () => {
     await addDevserver("letter-connect", 19901);
     const ds = library.devservers.find((d) => d.label === "letter-connect")!;
     mountDeck();
@@ -437,15 +440,16 @@ describe("the Computers deck's letter actions", () => {
     const header = target!.querySelector<HTMLElement>(`.slot[data-key="${ds.id}"] .machine-header`)!;
     const connect = header.querySelector<HTMLButtonElement>('[aria-label^="Connect"]')!;
     const clicked = watchClick(connect);
-    key("c", header);
+    key("o", header);
     expect(clicked).toHaveBeenCalledOnce();
     connect.disabled = true;
-    expect(key("c", header).defaultPrevented).toBe(false);
+    expect(key("o", header).defaultPrevented).toBe(false);
     expect(clicked).toHaveBeenCalledOnce();
+    expect(key("c", header).defaultPrevented).toBe(false);
     expect(key("t", header).defaultPrevented).toBe(false);
   });
 
-  it("w opens only an enabled workspace row and h toggles only window rows", async () => {
+  it("w and t open only an enabled workspace row, o controls power, and h toggles only window rows", async () => {
     mountDeck();
     decks.computers.activeKey = "local";
     flushSync();
@@ -455,11 +459,22 @@ describe("the Computers deck's letter actions", () => {
     const opened = watchClick(open);
     key("w", workspace);
     expect(opened).toHaveBeenCalledOnce();
-    open.disabled = true;
-    expect(key("w", workspace).defaultPrevented).toBe(false);
-    expect(opened).toHaveBeenCalledOnce();
+    const terminal = workspace.querySelector<HTMLButtonElement>('[aria-label^="New terminal window of"]')!;
+    const terminalOpened = watchClick(terminal);
+    key("t", workspace);
+    expect(terminalOpened).toHaveBeenCalledOnce();
+    const power = workspace.querySelector<HTMLButtonElement>('[aria-label^="Turn off"]')!;
+    const toggledPower = watchClick(power);
+    key("o", workspace);
+    expect(toggledPower).toHaveBeenCalledOnce();
     expect(key("c", workspace).defaultPrevented).toBe(false);
+    expect(toggledPower).toHaveBeenCalledOnce();
+    open.disabled = true;
+    terminal.disabled = true;
+    expect(key("w", workspace).defaultPrevented).toBe(false);
     expect(key("t", workspace).defaultPrevented).toBe(false);
+    expect(opened).toHaveBeenCalledOnce();
+    expect(terminalOpened).toHaveBeenCalledOnce();
     expect(key("h", workspace).defaultPrevented).toBe(false);
     const row = slot.querySelector<HTMLElement>(".term-list .row")!;
     const toggle = row.querySelector<HTMLButtonElement>('[aria-label="Hide window"]')!;
@@ -470,14 +485,49 @@ describe("the Computers deck's letter actions", () => {
     expect(key("h", slot.querySelector(".machine-header")!).defaultPrevented).toBe(false);
   });
 
-  it("All windows rows use h for shown, hidden, workspace and control windows, and ignore t, w and c", () => {
+  it("o uses the workspace power confirmation for live terminals", async () => {
+    const { setMockLocalLiveTerminals } = await import("../api/mock");
+    const workspace = library.workspaces.find((entry) => entry.devserver_id === null && entry.on)!;
+    setMockLocalLiveTerminals(workspace.workspace_id, 2);
+    try {
+      mountDeck();
+      decks.computers.activeKey = "local";
+      flushSync();
+      const row = target!.querySelector<HTMLElement>('.slot[data-key="local"] .ws-head')!;
+      key("o", row);
+      await settleAll();
+      expect(confirm.open).toBe(true);
+      expect(confirm.message).toContain("2 live terminal sessions");
+      expect(library.workspaces.find((entry) => entry.workspace_id === workspace.workspace_id)?.on).toBe(true);
+      cancelConfirm();
+      expect(library.workspaces.find((entry) => entry.workspace_id === workspace.workspace_id)?.on).toBe(true);
+    } finally {
+      setMockLocalLiveTerminals(workspace.workspace_id, 0);
+    }
+  });
+
+  it("t stays disabled on a workspace that is not ready", () => {
+    const workspace = library.workspaces.find((entry) => entry.devserver_id === null && !entry.on)!;
+    mountDeck();
+    decks.computers.activeKey = "local";
+    flushSync();
+    const row = [...target!.querySelectorAll<HTMLElement>('.slot[data-key="local"] .ws-head')]
+      .find((head) => head.textContent?.includes(workspace.label || workspace.path.split("/").at(-1)!))!;
+    const open = row.querySelector<HTMLButtonElement>('[aria-label^="New window of"]')!;
+    const terminal = row.querySelector<HTMLButtonElement>('[aria-label^="New terminal window of"]')!;
+    expect(open.disabled).toBe(true);
+    expect(terminal.disabled).toBe(true);
+    expect(key("t", row).defaultPrevented).toBe(false);
+  });
+
+  it("All windows rows use h for shown, hidden, workspace and control windows, and ignore t, w, o and c", () => {
     mountDeck();
     const rows = [...target!.querySelectorAll<HTMLElement>(".all-windows [data-window-id]")];
     expect(rows.length).toBeGreaterThan(3);
     for (const row of rows) {
       const toggle = row.querySelector<HTMLButtonElement>('[aria-label^="Show window"], [aria-label^="Hide window"]')!;
       const clicked = watchClick(toggle);
-      for (const letter of ["t", "w", "c"]) expect(key(letter, row).defaultPrevented).toBe(false);
+      for (const letter of ["t", "w", "o", "c"]) expect(key(letter, row).defaultPrevented).toBe(false);
       key("h", row);
       expect(clicked).toHaveBeenCalledOnce();
     }

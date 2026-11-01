@@ -39,6 +39,7 @@ export function windowUrl(record: WindowRecord, origin: string): string {
     if (record.tmux) url.searchParams.set("seed", "0");
   }
   if (record.library_id) url.searchParams.set("lib", record.library_id);
+  if (record.kind === "workspace" && record.start_terminal) url.searchParams.set("start", "terminal");
   if (record.token) url.searchParams.set("t", record.token);
   url.searchParams.set("h", openerHolderTag());
   return url.toString();

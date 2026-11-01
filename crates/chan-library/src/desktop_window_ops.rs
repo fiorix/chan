@@ -153,6 +153,7 @@ pub enum DesktopWindowOp {
     OpenDevserverWorkspace {
         id: String,
         path: String,
+        start_terminal: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Turn a connected devserver's workspace on or off, keyed by `(id, prefix)`

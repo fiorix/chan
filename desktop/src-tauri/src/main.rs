@@ -2672,12 +2672,19 @@ pub(crate) async fn open_devserver_workspace_impl(
     state: &Arc<AppState>,
     id: String,
     path: String,
+    start_terminal: bool,
 ) -> Result<(), String> {
     let conn = state
         .devservers
         .get(&id)
         .ok_or_else(|| "devserver is not connected".to_string())?;
-    devserver::mint_library_window(&conn, chan_server::WindowKind::Workspace, Some(path)).await?;
+    devserver::mint_library_window_with_start(
+        &conn,
+        chan_server::WindowKind::Workspace,
+        Some(path),
+        start_terminal,
+    )
+    .await?;
     Ok(())
 }
 
@@ -8116,6 +8123,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
         };
         state.devserver_feed.register_windows(
             "ds-1".to_string(),
@@ -8615,6 +8623,7 @@ mod tests {
                 tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
+                start_terminal: false,
             }]
             .into(),
         ));
@@ -8655,6 +8664,7 @@ mod tests {
                 tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
+                start_terminal: false,
             }]
             .into(),
         ));
@@ -8698,6 +8708,7 @@ mod tests {
                 tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
+                start_terminal: false,
             }]
             .into(),
         ));
@@ -8820,6 +8831,7 @@ mod tests {
                 tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
+                start_terminal: false,
             };
             state.devserver_feed.register_windows(
                 "ds-close".to_string(),
@@ -9480,6 +9492,7 @@ mod tests {
                 tmux: None,
                 hidden: false,
                 origin: chan_server::WindowOrigin::Native,
+                start_terminal: false,
             }]
             .into(),
         ));
@@ -9541,6 +9554,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
         };
         let other = chan_server::WindowRecord {
             window_id: "other".into(),

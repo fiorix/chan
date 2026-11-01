@@ -3070,6 +3070,8 @@ export async function bootstrap(): Promise<void> {
     bootstrapHydrated = false;
     try {
       const { source, remote } = await restoreBootLayout(fresh, fromHash, cliReloadBits);
+      const startTerminal = readAndConsumeTerminalStart();
+      if (startTerminal && source === null) openTerminalInActivePane({});
       // The hash wins on layout, but personal UI prefs like tree expansion
       // still come from session.json. The hash deliberately doesn't carry
       // these so a shared link doesn't leak the recipient's directory state
@@ -3732,6 +3734,16 @@ function readAndConsumeFreshFlag(): boolean {
     window.history.replaceState({}, "", url.toString());
   }
   return fresh;
+}
+
+function readAndConsumeTerminalStart(): boolean {
+  const url = new URL(window.location.href);
+  const start = url.searchParams.get("start") === "terminal";
+  if (start) {
+    url.searchParams.delete("start");
+    window.history.replaceState({}, "", url.toString());
+  }
+  return start;
 }
 
 /// Parse the layout encoding from `location.hash` (if any). Tolerant of

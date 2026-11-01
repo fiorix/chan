@@ -43,6 +43,14 @@ describe("windowUrl", () => {
     expect(u.searchParams.get("kind")).toBeNull();
     expect(u.searchParams.get("lib")).toBe("local");
     expect(u.searchParams.get("t")).toBe("tok_live");
+    expect(u.searchParams.has("start")).toBe(false);
+  });
+
+  it("carries terminal-start intent only for a workspace window that asks for it", () => {
+    const seeded = new URL(windowUrl(record({ start_terminal: true } as Partial<WindowRecord>), ORIGIN));
+    expect(seeded.searchParams.get("start")).toBe("terminal");
+    const plain = new URL(windowUrl(record({}), ORIGIN));
+    expect(plain.searchParams.has("start")).toBe(false);
   });
 
   it("stamps kind=terminal for a standalone terminal", () => {

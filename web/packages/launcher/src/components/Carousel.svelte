@@ -139,7 +139,7 @@
 
   function onKey(e: KeyboardEvent): void {
     const letter = e.key.toLowerCase();
-    const rowKey = ["c", "t", "w", "h"].includes(letter);
+    const rowKey = ["o", "t", "w", "h"].includes(letter);
     if (!rowKey && !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"].includes(e.key)) return;
     if (rowKey && (e.repeat || dialog.open || confirm.open || activeCommandLauncherDraft().visible)) return;
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
@@ -269,7 +269,7 @@
       </button>
     {/if}
   </div>
-  <p class="key-hint">g screens · c connect/disconnect · t terminal · w workspace window · h show/hide</p>
+  <p class="key-hint">g screens · o on/off · t terminal · w workspace window · h show/hide</p>
   {#if count > 1}
     <!-- Pointer convenience mirroring the arrows: hidden from assistive tech
          and out of the tab order, since the arrows and the side buttons

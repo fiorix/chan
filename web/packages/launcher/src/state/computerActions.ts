@@ -70,19 +70,28 @@ export async function newTerminal(devserver?: DevserverEntry): Promise<void> {
   await openTerminal();
 }
 
-export async function newWorkspaceWindow(workspace: WorkspaceEntry): Promise<void> {
+async function mintWorkspaceWindow(workspace: WorkspaceEntry, startTerminal: boolean): Promise<void> {
   if (workspace.devserver_id) {
-    await openDevserverWorkspace(workspace.devserver_id, workspace.path);
+    await openDevserverWorkspace(workspace.devserver_id, workspace.path, startTerminal);
     return;
   }
   if (selfManagedWindows) {
     await mintWindow("workspace", {
       workspacePath: workspace.path,
       actingWindowId: actingFor(workspace.prefix),
+      startTerminal,
     });
     return;
   }
-  await openWorkspaceWindow(workspace.path);
+  await openWorkspaceWindow(workspace.path, startTerminal);
+}
+
+export async function newWorkspaceWindow(workspace: WorkspaceEntry): Promise<void> {
+  await mintWorkspaceWindow(workspace, false);
+}
+
+export async function newWorkspaceTerminalWindow(workspace: WorkspaceEntry): Promise<void> {
+  await mintWorkspaceWindow(workspace, true);
 }
 
 export function canOpenWorkspaceWindow(workspace: WorkspaceEntry): boolean {
@@ -182,7 +191,7 @@ export async function newTmuxWindow(connection: string): Promise<void> {
 
 /** Detach the connection: tmux keeps running, its chan windows close by
  * themselves and the control terminal returns to a plain terminal. The card's
- * `c`, in the slot a devserver's disconnect holds. */
+ * `o` uses the same slot as a devserver's disconnect. */
 export async function detachTmux(connection: string): Promise<void> {
   await requestTmux(connection, { request: "detach" });
 }

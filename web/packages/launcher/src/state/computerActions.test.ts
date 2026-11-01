@@ -4,6 +4,8 @@ import { backend } from "../api/backend";
 import {
   detachTmux,
   focusComputerWindow,
+  newWorkspaceTerminalWindow,
+  newWorkspaceWindow,
   newTmuxWindow,
   openComputerWindow,
   openTmuxWindow,
@@ -16,6 +18,40 @@ vi.mock("./capabilities", () => ({ hasDesktopBridge: false, selfManagedWindows: 
 vi.mock("../api/backend", async () => {
   const { mockApi } = await import("../api/mock");
   return { backend: mockApi };
+});
+
+describe("workspace window actions", () => {
+  it("mints a local terminal window with one startup intent and leaves w unchanged", async () => {
+    const workspace = (await backend.listWorkspaces()).find((entry) => entry.devserver_id === null && entry.status === "running");
+    expect(workspace).toBeDefined();
+    const children = [popup(), popup()];
+    let opened = 0;
+    vi.spyOn(window, "open").mockImplementation(() => children[opened++] as unknown as Window);
+    vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
+    const create = vi.spyOn(backend, "createWindow");
+
+    await newWorkspaceTerminalWindow(workspace!);
+    expect(create).toHaveBeenLastCalledWith("workspace", expect.objectContaining({ workspacePath: workspace!.path, startTerminal: true }));
+    expect(new URL(children[0]!.location.href).searchParams.get("start")).toBe("terminal");
+
+    await newWorkspaceWindow(workspace!);
+    expect(create).toHaveBeenLastCalledWith("workspace", expect.objectContaining({ workspacePath: workspace!.path, startTerminal: false }));
+    expect(new URL(children[1]!.location.href).searchParams.has("start")).toBe(false);
+  });
+
+  it("forwards the terminal intent to a connected devserver and leaves w unchanged", async () => {
+    const workspace = (await backend.listWorkspaces()).find((entry) => entry.devserver_id !== null && entry.status === "running");
+    expect(workspace).toBeDefined();
+    const open = vi.spyOn(backend, "openDevserverWorkspace").mockResolvedValue(undefined);
+
+    await newWorkspaceTerminalWindow(workspace!);
+    await newWorkspaceWindow(workspace!);
+
+    expect(open.mock.calls).toEqual([
+      [workspace!.devserver_id, workspace!.path, true],
+      [workspace!.devserver_id, workspace!.path, false],
+    ]);
+  });
 });
 
 const record: WindowRecord = {

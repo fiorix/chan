@@ -219,6 +219,38 @@ test("a standalone window applies a layout a peer saved before its socket was re
 
 const workspaceInfo = { root: "/ws", label: "ws", metadata_key: null, preferences: preferences(), warnings: [] };
 
+test("a new workspace window's terminal-start hint opens one terminal and is stripped", async () => {
+  workspace.mockResolvedValue(workspaceInfo);
+  window.history.replaceState({}, "", "/?w=w-new&start=terminal");
+  const store = await import("./store.svelte");
+  await store.bootstrap();
+
+  expect(await pageTerminals()).toHaveLength(1);
+  expect(new URL(window.location.href).searchParams.has("start")).toBe(false);
+});
+
+test("a terminal-start hint does not add to a saved workspace layout", async () => {
+  workspace.mockResolvedValue(workspaceInfo);
+  serveStored({ layout: leaf(["saved", "s-saved"]) });
+  window.history.replaceState({}, "", "/?w=w-reload&start=terminal");
+  const store = await import("./store.svelte");
+  await store.bootstrap();
+
+  expect(await pageTerminals()).toEqual([{ title: "saved", id: "s-saved" }]);
+  expect(new URL(window.location.href).searchParams.has("start")).toBe(false);
+});
+
+test("a terminal-start hint respects a saved empty workspace layout", async () => {
+  workspace.mockResolvedValue(workspaceInfo);
+  serveStored({ layout: { k: "l", t: [] } });
+  window.history.replaceState({}, "", "/?w=w-empty-saved&start=terminal");
+  const store = await import("./store.svelte");
+  await store.bootstrap();
+
+  expect(await pageTerminals()).toEqual([]);
+  expect(new URL(window.location.href).searchParams.has("start")).toBe(false);
+});
+
 /// Boot a page, then let its socket come up with a save scheduled, as App's
 /// layout effect schedules one once the boot has hydrated, and the first
 /// ready's read run.

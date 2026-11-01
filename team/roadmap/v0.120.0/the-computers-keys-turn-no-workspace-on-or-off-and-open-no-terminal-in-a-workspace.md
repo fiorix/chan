@@ -1,6 +1,6 @@
 # The Computers keys turn no workspace on or off and open no terminal in a workspace
 
-Status: raised and accepted for v0.120.0 by the owner on 2026-10-31, during the v0.119.0 cut ("add an item for next version"), with the Gateways question decided by the owner the same day (the section Decisions); not started.
+Status: implemented on 2026-11-01; native launcher verification on macOS is pending.
 
 ## What was asked
 
@@ -35,3 +35,11 @@ The owner's words of 2026-10-31 on whether the Gateways screen's connect, discon
 1. In the native launcher on Computers, `o` on a devserver header connects and disconnects it, on a tmux connection header detaches it, and on a workspace row turns the workspace on and off, with the live-terminals confirmation; on the Gateways screen `o` connects, disconnects and cancels a gateway; `c` does nothing on those rows or on the Gateways screen. Launcher tests pin each case, and a case that `c` no longer dispatches.
 2. `t` on a ready workspace row opens one new window of that workspace that shows one terminal tab, on this machine and on a connected devserver; `t` on a workspace that is not ready does nothing.
 3. `web/packages/launcher/design.md`, the button titles and the deck hint name the new keys.
+
+## 2026-11-01 implementation and verification
+
+The terminal uses the first-load request from the design read's candidate B. A workspace window mint may carry `start_terminal`; the library persists it in the window record, the remote desktop bridge forwards it, and browser and native URL builders append `start=terminal` for that record. The workspace app strips the parameter after layout restore and opens one terminal only when no saved layout exists; a saved empty layout opens none. An ordinary `w` mint omits the flag and keeps its URL. This extends the existing mint and remote-open routes without adding a route.
+
+The Computers deck dispatches `o` through each enabled devserver connection control, tmux detach control and workspace power control; the Gateways deck uses `o` for connect, disconnect and cancel. `c` has no deck action. A ready workspace row has a `t` button beside `w`, using the same readiness and session-leader conditions. Titles, accessible labels, the deck hint and launcher design name the new keys.
+
+Launcher, workspace-app, chan-library, chan-server and chan-desktop tests cover the key dispatch, unchanged `w`, local and remote intent transport, persistence, native and browser URLs, and bootstrap behavior with no layout, a saved tab and a saved empty layout. Focused tests were red before the implementation and passed after it; mutations of the dispatch, readiness, request bodies, bridge, persistence and URL/layout guards each failed an intended assertion. On the isolated Vite launcher at port 5184, `o` turned ws-alpha off and on, `c` left it unchanged, and `t` opened one window with one `Terminal-1` tab; the page consumed the launch hint. That browser check temporarily gave Vite a browser-window capability and a tenant-path proxy because its development launcher otherwise has desktop capability and proxies only `/api`; both test fixtures were restored byte for byte. Native launcher behavior on macOS awaits Alex's hand check.

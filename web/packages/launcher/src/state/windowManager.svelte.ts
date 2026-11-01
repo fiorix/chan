@@ -114,7 +114,7 @@ const checkWindowPage: WindowPageCheck = async (url, signal) => {
  * the leader identity for the per-tenant mint gate. */
 export async function mintWindow(
   kind: WindowKind,
-  opts: { workspacePath?: string; actingWindowId?: string } = {},
+  opts: { workspacePath?: string; actingWindowId?: string; startTerminal?: boolean } = {},
 ): Promise<WindowRecord | null> {
   if (demoState.enabled) return null;
   const blank = servingOrigin() ? window.open("", "_blank") : null;
@@ -125,6 +125,7 @@ export async function mintWindow(
       workspacePath: opts.workspacePath,
       origin: "browser",
       actingWindowId: opts.actingWindowId,
+      startTerminal: opts.startTerminal,
     });
     if (blank) {
       // A tab its user closed before the answer cancels the mint. One whose

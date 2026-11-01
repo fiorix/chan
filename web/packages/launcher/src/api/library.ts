@@ -76,6 +76,8 @@ export interface WindowRecord {
    * skips non-native records so a browser-minted window never gets a native twin.
    */
   origin?: WindowOrigin;
+  /** A workspace window opens one terminal on its first empty boot. */
+  start_terminal?: boolean;
 }
 
 /** Full snapshot pushed on connect and on every change over the watch socket. */
@@ -481,6 +483,8 @@ export interface CreateWindowOptions {
    * missing claim, a leaderless target, or a claim matching the live leader
    * is allowed. */
   actingWindowId?: string;
+  /** Ask a new workspace window to start with one terminal tab. */
+  startTerminal?: boolean;
 }
 
 export interface LibraryApi {
@@ -515,7 +519,7 @@ export interface LibraryApi {
   openDevserverTerminal(id: string): Promise<void>;
   /** Open a window onto one of a connected devserver's served workspaces by its
    * remote path (desktop action, 409 with no bridge). */
-  openDevserverWorkspace(id: string, path: string): Promise<void>;
+  openDevserverWorkspace(id: string, path: string, startTerminal?: boolean): Promise<void>;
   /** Turn a connected devserver's served workspace on/off by its mounted prefix
    * (desktop action, 409 with no bridge). An unforced off of a workspace that
    * still has live terminal sessions answers 409 `{error, code:"live_terminals",
@@ -732,8 +736,11 @@ export const liveApi: LibraryApi = {
   // JSON body, not a path segment: a mount prefix can hold characters axum's
   // Path extractor + intervening (gateway) proxies mangle. on/off/forget are
   // distinct POST routes; forget is POST (a DELETE body is poorly supported).
-  openDevserverWorkspace: (id, path) =>
-    req("POST", `/api/library/devservers/${encodeURIComponent(id)}/workspaces/open`, { path }),
+  openDevserverWorkspace: (id, path, startTerminal) =>
+    req("POST", `/api/library/devservers/${encodeURIComponent(id)}/workspaces/open`, {
+      path,
+      ...(startTerminal ? { start_terminal: true } : {}),
+    }),
   // `on` posts just the prefix; `off` carries `force` so an unforced off can
   // answer 409 live_terminals and the launcher retry the same route forced.
   setDevserverWorkspaceOn: (id, prefix, on, force) =>
@@ -815,6 +822,7 @@ export const liveApi: LibraryApi = {
       ...(opts?.workspacePath ? { workspace_path: opts.workspacePath } : {}),
       ...(opts?.actingWindowId ? { acting_window_id: opts.actingWindowId } : {}),
       ...(opts?.origin ? { origin: opts.origin } : {}),
+      ...(opts?.startTerminal ? { start_terminal: true } : {}),
     }),
   openWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/open`),
   hideWindow: (id) => req("POST", `/api/library/windows/${encodeURIComponent(id)}/hide`),

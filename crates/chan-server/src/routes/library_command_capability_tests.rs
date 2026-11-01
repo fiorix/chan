@@ -38,6 +38,7 @@ impl DevserverFeedSource for RemoteFeed {
             tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         }]
     }
 
