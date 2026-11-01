@@ -70,16 +70,27 @@ function byName(devservers: DevserverEntry[]): DevserverEntry[] {
   return [...devservers].sort((a, b) => devserverName(a).localeCompare(devserverName(b)));
 }
 
+/** The row whose card owns a library's windows. The local card claims its
+ * library before any devserver row, then devservers claim in name order. */
+export function devserverForLibrary(
+  libraryId: string,
+  devservers: DevserverEntry[],
+  localLibraryId: string,
+): DevserverEntry | null {
+  if (libraryId === localLibraryId) return null;
+  return byName(devservers).find((ds) => ds.library_id === libraryId) ?? null;
+}
+
 /** The name of the devserver whose terminal runs a connection: the first row
- * by name whose library is the record's, the one whose card holds that
- * library's windows. Null for a connection on this machine, and while no row
- * knows the devserver's library id yet. */
+ * by name whose card holds the record's library. Null for a connection on
+ * this machine, and while no row knows the devserver's library id yet. */
 export function tmuxHost(
   entry: TmuxConnectionEntry | null,
   devservers: DevserverEntry[],
+  localLibraryId: string,
 ): string | null {
   if (entry === null) return null;
-  const host = byName(devservers).find((ds) => ds.library_id === entry.library_id);
+  const host = devserverForLibrary(entry.library_id, devservers, localLibraryId);
   return host ? devserverName(host) : null;
 }
 
@@ -218,6 +229,7 @@ function tmuxNode(
   entry: TmuxConnectionEntry | null,
   rows: WindowRecord[],
   devservers: DevserverEntry[],
+  localLibraryId: string,
 ): MachineNode {
   const control = rows.filter((w) => w.tmux?.control === true).sort(sortWindows);
   const terminals = rows.filter((w) => w.tmux?.control !== true).sort(sortWindows);
@@ -227,7 +239,7 @@ function tmuxNode(
     devserver: null,
     connection,
     tmux: entry,
-    tmuxHost: tmuxHost(entry, devservers),
+    tmuxHost: tmuxHost(entry, devservers, localLibraryId),
     libraryId: entry?.library_id ?? rows[0]?.library_id ?? null,
     control,
     terminals,
@@ -338,11 +350,11 @@ export function buildMachineTree(
     if (recorded.has(entry.connection)) continue;
     recorded.add(entry.connection);
     tmuxNodes.push(
-      tmuxNode(entry.connection, entry, tmuxRows.get(entry.connection) ?? [], devservers),
+      tmuxNode(entry.connection, entry, tmuxRows.get(entry.connection) ?? [], devservers, localLibraryId),
     );
   }
   for (const [connection, rows] of tmuxRows) {
-    if (!recorded.has(connection)) tmuxNodes.push(tmuxNode(connection, null, rows, devservers));
+    if (!recorded.has(connection)) tmuxNodes.push(tmuxNode(connection, null, rows, devservers, localLibraryId));
   }
   tmuxNodes.sort(compareTmuxNodes);
   machines.push(...tmuxNodes);

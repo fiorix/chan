@@ -36,7 +36,7 @@ vi.mock("../state/computerActions", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
-import type { DevserverEntry, WindowRecord } from "../api/library";
+import type { DevserverEntry, TmuxConnectionEntry, WindowRecord, WorkspaceEntry } from "../api/library";
 import { library } from "../state/library.svelte";
 import {
   activeCommandLauncherDraft,
@@ -122,11 +122,12 @@ beforeEach(() => {
   // The same box reached twice: registered directly and again through its
   // gateway roster, so both rows carry one library_id.
   library.devservers = [
-    ds({ id: "direct", label: "box", library_id: SHARED }),
-    ds({ id: "roster", label: "box via gateway", library_id: SHARED, gateway_id: "gw-1" }),
+    ds({ id: "direct", label: "zeta", library_id: SHARED }),
+    ds({ id: "roster", label: "beta", library_id: SHARED, gateway_id: "gw-1" }),
   ];
   library.workspaces = [];
   library.windows = [{ ...sharedWindow }];
+  library.tmuxConnections = [];
   library.gateways = [];
   library.leaders = {};
   screen.current = "computers";
@@ -142,6 +143,7 @@ afterEach(() => {
   closeCommandLauncher();
   library.devservers = [];
   library.windows = [];
+  library.tmuxConnections = [];
   vi.resetAllMocks();
 });
 
@@ -166,5 +168,57 @@ describe("Computers deck with two rows on one library", () => {
     // very render throw this test exists to catch.
     expect(shown.length, `the window is offered: ${titles()}`).toBeGreaterThan(0);
     expect(new Set(shown).size, `and offered once: ${shown}`).toBe(shown.length);
+  });
+
+  it("names plain and tmux windows of one library by the same machine", async () => {
+    library.tmuxConnections = [{
+      connection: "tm-1",
+      library_id: SHARED,
+      origin: { program: "tmux", command: "tmux -CC", local: true },
+      version: "3.5",
+      session: { id: "$main", name: "main" },
+      windows: [],
+      window_cap: 8,
+      errors: [],
+      control_window: "tm-control",
+    } as TmuxConnectionEntry];
+    library.windows = [
+      { ...sharedWindow },
+      { ...sharedWindow, window_id: "tm-window", tmux: { connection: "tm-1", control: false } },
+    ];
+
+    openDeck();
+    const windows = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
+      (button) => button.querySelector(".deck-result-title")?.textContent === "Windows",
+    );
+    expect(windows, "the Windows branch exists").toBeDefined();
+    windows!.click();
+    await tick();
+    const paths = [...target.querySelectorAll(".deck-result-path")].map((node) => node.textContent);
+    expect(paths).toContain("Computers › Windows › beta › Open");
+    expect(paths).toContain("Computers › Windows › tmux -CC on beta (main) › Open");
+  });
+
+  it("uses the library's machine name for a workspace target", async () => {
+    library.workspaces = [{
+      workspace_id: "project",
+      path: "/project",
+      label: "Project",
+      on: true,
+      status: "running",
+      library_id: SHARED,
+      devserver_id: "direct",
+      prefix: "project",
+    } as WorkspaceEntry];
+
+    openDeck();
+    const turnOff = [...target.querySelectorAll<HTMLButtonElement>("button.deck-result")].find(
+      (button) => button.querySelector(".deck-result-title")?.textContent === "Turn off",
+    );
+    expect(turnOff, "the Turn off branch exists").toBeDefined();
+    turnOff!.click();
+    await tick();
+    const paths = [...target.querySelectorAll(".deck-result-path")].map((node) => node.textContent);
+    expect(paths).toContain("Computers › Turn off › beta");
   });
 });

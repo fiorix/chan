@@ -34,7 +34,7 @@
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
   import { LOCAL_LIBRARY_ID, rootName, windowRowLabel } from "../lib/windowLabel";
-  import { buildMachineTree, tmuxHost, tmuxWindowMachine } from "../lib/machineTree";
+  import { buildMachineTree, devserverForLibrary, tmuxHost, tmuxWindowMachine } from "../lib/machineTree";
   import { library, clearError, reportError, disconnectDevserver } from "../state/library.svelte";
   import {
     canManageWindow,
@@ -91,6 +91,13 @@
   // overtaken keeps its hands off both.
   const confirmedCloseCounts = new Map<string, unknown>();
   const closePreparationVersions = new Map<string, number>();
+  const machineTree = $derived(buildMachineTree(
+    library.devservers,
+    library.workspaces,
+    library.windows,
+    library.tmuxConnections,
+  ));
+  const localLibraryId = $derived(machineTree.machines[0]?.libraryId ?? LOCAL_LIBRARY_ID);
 
   function windowKey(window: WindowRecord): string {
     return `${window.library_id}:${window.window_id}`;
@@ -107,7 +114,7 @@
   }
 
   function machineNameForLibrary(libraryId: string): string {
-    const devserver = library.devservers.find((row) => row.library_id === libraryId);
+    const devserver = devserverForLibrary(libraryId, library.devservers, localLibraryId);
     return devserver ? devserverName(devserver) : "This machine";
   }
 
@@ -118,13 +125,16 @@
     if (!window.tmux) return machineNameForLibrary(window.library_id);
     const connection = window.tmux.connection;
     const entry = library.tmuxConnections.find((row) => row.connection === connection) ?? null;
-    return tmuxWindowMachine(entry, tmuxHost(entry, library.devservers));
+    return tmuxWindowMachine(entry, tmuxHost(entry, library.devservers, localLibraryId));
   }
 
   function machineNameForWorkspace(workspace: WorkspaceEntry): string {
     if (!workspace.devserver_id) return "This machine";
     const devserver = library.devservers.find((row) => row.id === workspace.devserver_id);
-    return devserver ? devserverName(devserver) : workspace.devserver_id;
+    if (!devserver) return workspace.devserver_id;
+    return devserver.library_id
+      ? machineNameForLibrary(devserver.library_id)
+      : devserverName(devserver);
   }
 
   function workspaceForWindow(window: WindowRecord): WorkspaceEntry | undefined {
@@ -287,19 +297,13 @@
   /// local machine first, devservers by name, and within each the control
   /// terminal, then terminals, then workspace windows by ordinal.
   const orderedWindows = $derived.by<WindowRecord[]>(() => {
-    const tree = buildMachineTree(
-      library.devservers,
-      library.workspaces,
-      library.windows,
-      library.tmuxConnections,
-    );
-    const ordered = tree.machines.flatMap((machine) => [
+    const ordered = machineTree.machines.flatMap((machine) => [
       ...machine.control,
       ...machine.terminals,
       ...machine.workspaces.flatMap((workspace) => workspace.windows),
       ...machine.looseWindows,
     ]);
-    return [...ordered, ...tree.orphans].filter(canManageWindow);
+    return [...ordered, ...machineTree.orphans].filter(canManageWindow);
   });
 
   function workspacePending(workspace: WorkspaceEntry): boolean {
