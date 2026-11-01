@@ -5074,13 +5074,14 @@ export function paneModeResize(
   axis: SplitNode["direction"],
   positive: boolean,
   amount: number,
+  tmux = false,
 ): void {
   const draft = draftLayout();
   if (!draft) return;
   const split = nearestAncestorSplit(draft, draft.activePaneId, axis);
   if (!split) return;
   const delta = positive ? amount : -amount;
-  split.ratio = Math.max(0.05, Math.min(0.95, split.ratio + delta));
+  split.ratio = Math.max(tmux ? 0 : 0.05, Math.min(tmux ? 1 : 0.95, split.ratio + delta));
 }
 
 export function paneModeEqualize(): void {

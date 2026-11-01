@@ -26,6 +26,13 @@ const LIST_WINDOWS_FORMAT: &str =
 const LIST_PANES_FORMAT: &str = "#{pane_id} #{pane_active}";
 const PANE_STATE_FORMAT: &str = "#{pane_id} #{cursor_x} #{cursor_y} #{pane_in_mode} #{alternate_on} #{scroll_region_upper} #{scroll_region_lower} #{pane_width} #{pane_height} #{history_size}";
 
+/// The dimension `resize-pane` sets on one pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeAxis {
+    Width,
+    Height,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// A line holding only `^C`, the first thing written after entry. tmux
@@ -46,6 +53,12 @@ pub enum Command {
         window: WindowId,
         cols: u32,
         rows: u32,
+    },
+    /// Size a pane on one axis; tmux applies its layout bounds.
+    ResizePane {
+        pane: PaneId,
+        axis: ResizeAxis,
+        cells: u32,
     },
     /// Pause a pane's output after it has been unread for `seconds`.
     PauseAfter {
@@ -122,6 +135,14 @@ impl Command {
             Command::WindowSize { window, cols, rows } => {
                 check_size(*cols, *rows)?;
                 format!("refresh-client -C {window}:{cols}x{rows}")
+            }
+            Command::ResizePane { pane, axis, cells } => {
+                check_size(*cells, *cells)?;
+                let flag = match axis {
+                    ResizeAxis::Width => "-x",
+                    ResizeAxis::Height => "-y",
+                };
+                format!("resize-pane -t {pane} {flag} {cells}")
             }
             Command::PauseAfter { seconds } => format!("refresh-client -f pause-after={seconds}"),
             Command::NewLayouts => "refresh-client -f new-layouts".into(),

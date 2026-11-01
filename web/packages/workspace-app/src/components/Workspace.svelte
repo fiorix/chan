@@ -13,7 +13,10 @@
   // the parent so column splits don't starve their children's
   // cross-axis space.
 
+  import { api } from "../api/client";
   import { activeLayout, type LeafNode, type SplitNode } from "../state/tabs.svelte";
+  import { tmuxResizeForSplit } from "../state/tmuxResize";
+  import { tmuxLayout } from "../state/tmuxWindowSize.svelte";
   import {
     schedulePersistStateToHash,
     scheduleSessionSave,
@@ -28,6 +31,8 @@
   const node = $derived(viewLayout.nodes[effectiveId]);
 
   function startResize(e: MouseEvent, split: SplitNode): void {
+    const tmuxTree = tmuxLayout();
+    if (tmuxTree && !tmuxResizeForSplit(split, viewLayout.nodes, tmuxTree, split.ratio)) return;
     e.preventDefault();
     const splitEl = (e.currentTarget as HTMLElement).parentElement;
     if (!splitEl) return;
@@ -41,9 +46,11 @@
     const onMove = (ev: MouseEvent) => {
       const coord = isRow ? ev.clientX : ev.clientY;
       const delta = coord - startCoord;
-      // Clamp so panes can't be dragged out of existence; 5% on
-      // each side is enough headroom to grab the divider back.
-      const next = Math.max(0.05, Math.min(0.95, startRatio + delta / total));
+      // Plain panes keep a grab area. tmux owns its pane minimum, so a
+      // drag may request the edge and settle at the cell bound it reports.
+      const minimum = tmuxTree ? 0 : 0.05;
+      const maximum = tmuxTree ? 1 : 0.95;
+      const next = Math.max(minimum, Math.min(maximum, startRatio + delta / total));
       split.ratio = next;
     };
     const onUp = () => {
@@ -54,6 +61,18 @@
       // child elements with their own cursor styles).
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
+      if (tmuxTree) {
+        if (split.ratio === startRatio) return;
+        const resize = tmuxResizeForSplit(split, viewLayout.nodes, tmuxLayout() ?? tmuxTree, split.ratio);
+        if (!resize) {
+          split.ratio = startRatio;
+          return;
+        }
+        void api.tmuxRequest(resize.sessionId, resize.request).catch(() => {
+          split.ratio = startRatio;
+        });
+        return;
+      }
       // Persist the new ratio. The layout-persistence effect only tracks
       // leaf nodes, so a divider drag (which mutates the split's ratio)
       // never schedules a save on its own -- the size is then lost on

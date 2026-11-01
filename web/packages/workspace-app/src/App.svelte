@@ -154,7 +154,8 @@
     toggleActiveTerminalBroadcastSelectAll,
     type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
-  import { tmuxWindowGrid } from "./state/tmuxWindowSize.svelte";
+  import { tmuxLayout, tmuxWindowGrid } from "./state/tmuxWindowSize.svelte";
+  import { tmuxResizeForSplit, type TmuxPaneResize } from "./state/tmuxResize";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
@@ -922,10 +923,28 @@
           else if (intent.ctx.dir) revealAndSelect(intent.ctx.dir);
         }
         const stagedEditors = paneMode.stagedDraftEditors.slice();
+        const pendingTmuxResizes: TmuxPaneResize[] = [];
+        const tmuxTree = tmuxLayout();
+        if (tmuxTree && paneMode.draft) {
+          for (const node of Object.values(paneMode.draft.nodes)) {
+            if (node.kind !== "split") continue;
+            const live = layout.nodes[node.id];
+            if (live?.kind !== "split" || node.ratio === live.ratio) continue;
+            const resize = tmuxResizeForSplit(node, paneMode.draft.nodes, tmuxTree, node.ratio);
+            if (resize) pendingTmuxResizes.push(resize);
+            // The draft previews the drag; tmux's next layout owns the result.
+            node.ratio = live.ratio;
+          }
+        }
         commitPaneMode();
         scheduleSessionSave();
         paneModeHelpVisible = false;
         materializeStagedDraftEditors(stagedEditors);
+        for (const { sessionId, request } of pendingTmuxResizes) {
+          void api.tmuxRequest(sessionId, request).catch((error) =>
+            setTransientStatus(`tmux pane resize failed: ${errorText(error)}`),
+          );
+        }
         return;
       }
       case "Escape":
@@ -971,16 +990,16 @@
         paneModeSwap("right");
         return;
       case "[":
-        paneModeResize("row", false, large);
+        paneModeResize("row", false, large, tmuxLayout() !== null);
         return;
       case "]":
-        paneModeResize("row", true, large);
+        paneModeResize("row", true, large, tmuxLayout() !== null);
         return;
       case "-":
-        paneModeResize("column", false, large);
+        paneModeResize("column", false, large, tmuxLayout() !== null);
         return;
       case "=":
-        paneModeResize("column", true, large);
+        paneModeResize("column", true, large, tmuxLayout() !== null);
         return;
       case "0":
         paneModeEqualize();

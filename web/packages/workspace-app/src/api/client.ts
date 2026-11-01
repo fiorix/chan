@@ -1537,7 +1537,7 @@ const calls = {
   /// A request of the tmux connection a session belongs to: a pane session's
   /// reaches the control session that holds its connection. Used where no
   /// terminal socket is at hand: Cmd+T in a tmux window, the close prompt's
-  /// Detach.
+  /// Detach, or a pane divider resize.
   tmuxRequest: (sessionId: string, request: TmuxRequest) =>
     req<void>("POST", `/api/terminals/${encodeURIComponent(sessionId)}/tmux-request`, request),
   /// Set a terminal's broadcast toggle from another window. The server routes

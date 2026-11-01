@@ -251,7 +251,7 @@ enum ClientFrame {
     TmuxAnswer { answer: TmuxAnswer },
     /// A request of the tmux connection the session belongs to, from a
     /// tmux window of it: `{"type":"tmux-request","request":"new-window"}`,
-    /// `"split"`, `"focus"`, `"window-size"`, `"open-window"` with
+    /// `"split"`, `"focus"`, `"window-size"`, `"resize-pane"`, `"open-window"` with
     /// `window`, `"detach"` or `"end"`. One with no connection changes
     /// nothing.
     #[serde(rename = "tmux-request")]

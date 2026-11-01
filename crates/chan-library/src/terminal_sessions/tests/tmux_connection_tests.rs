@@ -311,6 +311,41 @@ fn a_window_size_request_sizes_the_tmux_window_of_its_pane() {
 }
 
 #[test]
+fn a_pane_resize_request_reaches_tmux_only_for_a_shown_pane_and_valid_size() {
+    let (rig, pane, _hook) = attached_with_hook();
+    let pane_ref = pane.tmux_pane.expect("a pane");
+    assert!(rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::ResizePane {
+            pane: "%0".into(),
+            axis: TmuxResizeAxis::Width,
+            cells: 70,
+        },
+    ));
+    assert_eq!(rig.inputs(), vec![b"resize-pane -t %0 -x 70\n".to_vec()]);
+    rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::ResizePane {
+            pane: "%0".into(),
+            axis: TmuxResizeAxis::Height,
+            cells: 25,
+        },
+    );
+    assert_eq!(rig.inputs(), vec![b"resize-pane -t %0 -y 25\n".to_vec()]);
+    for (pane, cells) in [("%9", 70), ("%0", 0), ("%0", 10_001)] {
+        rig.registry.tmux_request_for(
+            &pane_ref,
+            TmuxRequest::ResizePane {
+                pane: pane.into(),
+                axis: TmuxResizeAxis::Width,
+                cells,
+            },
+        );
+    }
+    assert!(rig.inputs().is_empty());
+}
+
+#[test]
 fn typing_into_the_control_terminal_reaches_nothing_while_connected() {
     let (mut rig, _pane) = attached();
     rig.control.send_input(b"detach-client\n");

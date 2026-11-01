@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use chan_tmux::{
     parse_layout, parse_list_panes, parse_list_windows, Command, Event, Message, PaneId, PaneState,
-    SessionId, Token, Version, WindowId,
+    ResizeAxis, SessionId, Token, Version, WindowId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -391,6 +391,23 @@ impl TmuxConnection {
         self.resize_wanted.insert(window, (cols, rows));
         self.send_resizes(&mut steps);
         steps
+    }
+
+    /// Resize a shown pane on one axis. tmux owns the border walk and the
+    /// bounds; its layout notification determines the pane tree shown next.
+    pub(super) fn request_resize_pane(
+        &self,
+        pane: PaneId,
+        axis: ResizeAxis,
+        cells: u32,
+    ) -> Vec<Step> {
+        if !self.panes.contains_key(&pane) || !(1..=10_000).contains(&cells) {
+            return Vec::new();
+        }
+        vec![Step::Submit(
+            Command::ResizePane { pane, axis, cells },
+            Purpose::Fire,
+        )]
     }
 
     /// Queue the pane tree of `window` for its chan window, when it has both

@@ -2,7 +2,7 @@ use chan_tmux::escape::{escape_output, unescape_output};
 use chan_tmux::layout::checksum;
 use chan_tmux::{
     parse_created_id, parse_layout, parse_list_panes, parse_list_windows, parse_pane_state,
-    Command, Error, Expect, LayoutError, PaneId, Version, WindowId, MAX_KEY_BYTES,
+    Command, Error, Expect, LayoutError, PaneId, ResizeAxis, Version, WindowId, MAX_KEY_BYTES,
 };
 
 #[test]
@@ -132,6 +132,22 @@ fn commands_render() {
         "new-window -PF '#{window_id}'"
     );
     assert_eq!(r(Command::KillPane(PaneId(4))), "kill-pane -t %4");
+    assert_eq!(
+        r(Command::ResizePane {
+            pane: PaneId(4),
+            axis: ResizeAxis::Width,
+            cells: 70,
+        }),
+        "resize-pane -t %4 -x 70"
+    );
+    assert_eq!(
+        r(Command::ResizePane {
+            pane: PaneId(4),
+            axis: ResizeAxis::Height,
+            cells: 25,
+        }),
+        "resize-pane -t %4 -y 25"
+    );
 }
 
 #[test]
@@ -190,6 +206,20 @@ fn free_text_cannot_end_the_command_line() {
 
 #[test]
 fn sizes_and_ranges_are_checked() {
+    assert!(Command::ResizePane {
+        pane: PaneId(0),
+        axis: ResizeAxis::Width,
+        cells: 0,
+    }
+    .render()
+    .is_err());
+    assert!(Command::ResizePane {
+        pane: PaneId(0),
+        axis: ResizeAxis::Height,
+        cells: 10_001,
+    }
+    .render()
+    .is_err());
     assert!(Command::ClientSize { cols: 0, rows: 1 }.render().is_err());
     assert!(Command::ClientSize {
         cols: 1,
