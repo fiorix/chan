@@ -26,7 +26,7 @@ export function tmuxLayoutToSer(node: TmuxLayoutNode): SerNode {
       d: node.kind === "row" ? "r" : "c",
       a: tmuxLayoutToSer(first!),
       b: fold(others),
-      r: Math.min(0.95, Math.max(0.05, ratio)),
+      r: ratio,
     };
   };
   return fold(children);

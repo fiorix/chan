@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chan_tmux::{
-    Client, Command, Event, Limits, Message, PaneId, SessionId, Token, Version, WindowId,
+    Client, Command, Event, Limits, Message, PaneId, ResizeAxis, SessionId, Token, Version,
+    WindowId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -86,10 +87,25 @@ pub enum TmuxRequest {
     /// as tmux draws them. tmux lays its panes out inside and tells each
     /// pane session its size.
     WindowSize { pane: String, cols: u32, rows: u32 },
+    /// Set the width or height of a shown tmux pane; tmux clamps the result
+    /// and sends the resulting layout to the window.
+    ResizePane {
+        pane: String,
+        axis: TmuxResizeAxis,
+        cells: u32,
+    },
     /// Detach the control client; the tmux server and its sessions live on.
     Detach,
     /// End the tmux server with every session it holds.
     End,
+}
+
+/// Which cell dimension a pane resize sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TmuxResizeAxis {
+    Width,
+    Height,
 }
 
 /// A client's answer to the question.
@@ -264,6 +280,17 @@ impl TmuxGate {
                 },
                 TmuxRequest::WindowSize { pane, cols, rows } => match PaneId::parse(&pane) {
                     Some(pane) => connection.request_window_size(pane, cols, rows),
+                    None => Vec::new(),
+                },
+                TmuxRequest::ResizePane { pane, axis, cells } => match PaneId::parse(&pane) {
+                    Some(pane) => connection.request_resize_pane(
+                        pane,
+                        match axis {
+                            TmuxResizeAxis::Width => ResizeAxis::Width,
+                            TmuxResizeAxis::Height => ResizeAxis::Height,
+                        },
+                        cells,
+                    ),
                     None => Vec::new(),
                 },
                 TmuxRequest::Detach => vec![Step::Submit(Command::Detach, Purpose::Fire)],
@@ -1286,6 +1313,17 @@ mod tests {
                 pane: "%0".into(),
                 cols: 120,
                 rows: 40
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<TmuxRequest>(
+                r#"{"request":"resize-pane","pane":"%0","axis":"width","cells":70}"#
+            )
+            .unwrap(),
+            TmuxRequest::ResizePane {
+                pane: "%0".into(),
+                axis: TmuxResizeAxis::Width,
+                cells: 70,
             }
         );
     }

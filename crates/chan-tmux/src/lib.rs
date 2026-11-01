@@ -24,7 +24,7 @@ mod message;
 pub use client::{Client, Event, Token};
 pub use command::{
     parse_created_id, parse_list_panes, parse_list_windows, parse_pane_state, Command, PaneInfo,
-    PaneState, Version, WindowInfo, MAX_KEY_BYTES,
+    PaneState, ResizeAxis, Version, WindowInfo, MAX_KEY_BYTES,
 };
 pub use decode::{Block, Decoder, Expect, Frame, Limits};
 pub use error::Error;

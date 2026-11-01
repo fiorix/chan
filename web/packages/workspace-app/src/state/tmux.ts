@@ -6,7 +6,7 @@
 /// A request of the live connection, the closed set the pane-session POST
 /// (`api.tmuxRequest`) and the terminal socket's `tmux-request` frame take.
 /// The page sends one on a pane's session: Cmd+T, a split, a focus change,
-/// the window size and the close prompt's Detach.
+/// the window size, a pane divider resize and the close prompt's Detach.
 export type TmuxRequest =
   | { request: "open-window"; window: string }
   /// A new tmux window, which opens in a chan window of its own.
@@ -20,6 +20,9 @@ export type TmuxRequest =
   /// show together, dividers counted as tmux draws them; tmux lays the panes
   /// out inside it and each pane session learns its size from the layout.
   | { request: "window-size"; pane: string; cols: number; rows: number }
+  /// Size one pane on an axis in whole cells; the next tmux layout decides
+  /// where the border actually lands.
+  | { request: "resize-pane"; pane: string; axis: "width" | "height"; cells: number }
   | { request: "detach" }
   | { request: "end" };
 

@@ -51,6 +51,7 @@ import {
   type Tab,
 } from "./state/tabs.svelte";
 import { closeTeamDialog, teamDialogState } from "./state/teamDialog.svelte";
+import { setTmuxLayout } from "./state/tmuxWindowSize.svelte";
 
 stubAppEnvironment();
 
@@ -67,6 +68,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  setTmuxLayout(null);
   cancelPaneMode();
   closeTeamDialog();
   browserSidePanes.left = false;
@@ -141,6 +143,32 @@ describe("entering and leaving Hybrid Nav", () => {
 });
 
 describe("arranging the draft", () => {
+  test("a tmux keyboard resize sends its final cell size on Enter and leaves the layout to tmux", async () => {
+    resetLayout([terminalTab({ id: "t0", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } })]);
+    const rightId = splitPane("pane-test", "row")!;
+    leaf(layout, rightId).tabs.push(terminalTab({ id: "t1", terminalSessionId: "s1", tmuxPane: { connection: 1, pane: "%1" } }));
+    leaf(layout, rightId).activeTabId = "t1";
+    layout.activePaneId = "pane-test";
+    setTmuxLayout({ kind: "row", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 60, h: 40 },
+      { kind: "pane", session: "s1", w: 59, h: 40 },
+    ] });
+    const request = vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
+    await settle();
+    await enterHybridNav();
+    await keys("]");
+    expect(rootSplit(draft()).ratio).toBeCloseTo(0.52);
+    await keys("Enter");
+    expect(request).toHaveBeenCalledWith("s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 62 });
+    expect(request.mock.calls.filter(([, body]) => body.request === "resize-pane")).toHaveLength(1);
+    expect(rootSplit(layout).ratio).toBeCloseTo(0.5);
+    await enterHybridNav();
+    await keys(...Array(30).fill("]"));
+    expect(rootSplit(draft()).ratio).toBe(1);
+    await keys("Enter");
+    expect(request).toHaveBeenCalledWith("s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 119 });
+    expect(rootSplit(layout).ratio).toBeCloseTo(0.5);
+  });
   test.each([
     ["row", "ArrowRight", "ArrowLeft"],
     ["column", "ArrowDown", "ArrowUp"],

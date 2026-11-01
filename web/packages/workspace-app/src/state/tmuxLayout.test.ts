@@ -32,7 +32,7 @@ test("a row of three folds into nested splits whose ratios give each pane tmux's
   });
 });
 
-test("a column nests a row, a one-child node collapses, and sizes outside the slack are clamped", () => {
+test("a column nests a row, a one-child node collapses, and tmux's cells set the ratio", () => {
   const ser = tmuxLayoutToSer({
     kind: "column",
     w: 80,
@@ -45,10 +45,20 @@ test("a column nests a row, a one-child node collapses, and sizes outside the sl
   expect(ser).toEqual({
     k: "s",
     d: "c",
-    r: 0.05,
+    r: 0.02,
     a: { k: "l", t: [{ k: "t", tsid: "top" }] },
     b: { k: "l", t: [{ k: "t", tsid: "only" }] },
   });
+});
+
+test("a pane at tmux's one-cell bound keeps its exact share", () => {
+  const ser = tmuxLayoutToSer({ kind: "row", w: 120, h: 40, children: [
+    { kind: "pane", session: "left", w: 118, h: 40 },
+    { kind: "pane", session: "right", w: 1, h: 40 },
+  ] });
+  expect(ser.k).toBe("s");
+  if (ser.k !== "s") return;
+  expect(ser.r).toBeCloseTo(118 / 119, 5);
 });
 
 test("the shape guard accepts the connection's trees and refuses others", () => {

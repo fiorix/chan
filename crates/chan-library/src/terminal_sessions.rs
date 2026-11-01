@@ -76,7 +76,7 @@ use ring::RingBuffer;
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
 pub use tmux_connection::{TmuxConnectionStatus, TmuxOrigin, TmuxSessionStatus, TmuxWindowStatus};
-pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest};
+pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest, TmuxResizeAxis};
 
 const BROADCAST_CAP: usize = 1024;
 
