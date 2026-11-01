@@ -1,6 +1,8 @@
 # A tmux pane drag starts a fight between chan and tmux
 
-Status: raised by the owner on 2026-11-01, accepted for v0.120.1 the same day, built; the patch cut closes it.
+Status: shipped in [v0.120.1](../../release/release-v0.120.1.md).
+
+Record before the release: raised by the owner on 2026-11-01, accepted for v0.120.1 the same day, built; the patch cut closes it.
 
 ## What was asked
 

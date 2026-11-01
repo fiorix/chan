@@ -21,20 +21,6 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.120.1
-
-Opened 2026-11-01 as a patch over v0.120.0 with three defects found on the day of the release: the Computers card cannot be scrolled with the mouse when it holds more workspaces than the deck shows and cuts its last row ([cardscroll]), and a tmux pane drag starts a fight between chan's window-size requests and tmux's proportional re-layout ([tmuxfight]), and on Windows Enter after a dead key drops the dead key's character while an Alt code typed on the numpad sends word motions ([winkeys]). The first two are built on the owner's macOS machine from `main`, on `v01201/cardscroll` and `v01201/tmuxresize`, the third by the Windows reading agent on `v01201/winkeys`, and all three cut as a no-rc patch.
-
-| Item | State | Next |
-| --- | --- | --- |
-| [the Computers card does not scroll with the mouse][cardscroll] | accepted | build |
-| [a tmux pane drag fights tmux][tmuxfight] | accepted | build |
-| [on Windows, Enter after a dead key drops its character; an Alt code sends word motions][winkeys] | accepted | build |
-
-[cardscroll]: v0.120.1/the-computers-card-does-not-scroll-with-the-mouse-and-cuts-its-last-workspace.md
-[tmuxfight]: v0.120.1/a-tmux-pane-drag-starts-a-fight-between-chan-and-tmux.md
-[winkeys]: v0.120.1/on-windows-enter-after-a-dead-key-drops-its-character-and-an-alt-code-sends-word-motions.md
-
 ### v0.121.0
 
 Opened 2026-11-01 at the v0.120.0 close with three items that version left: the ghostty row's Copy scrollback speed finding, deferred by the owner's triage as an item that needs its own measurement ([ghscroll]), and the tmux divider between nested splits that the one-command resize of v0.120.0 cannot reach ([tmuxnest]), raised from that row's recorded limit. The third is the Cmd+` half of the navkeys row, which waited for the owner's macOS reading ([cmdbq]).
@@ -50,6 +36,14 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 [cmdbq]: v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md
 
 ## Completed
+
+### v0.120.1
+
+Shipped 2026-11-01; see [release-v0.120.1](../release/release-v0.120.1.md). Both rows the patch held shipped: the Computers card's mouse scroll and last-row margin, and the tmux pane drag that no longer fights tmux.
+
+- [a-tmux-pane-drag-starts-a-fight-between-chan-and-tmux](done/a-tmux-pane-drag-starts-a-fight-between-chan-and-tmux.md) - A tmux pane drag starts a fight between chan and tmux.
+- [on-windows-enter-after-a-dead-key-drops-its-character-and-an-alt-code-sends-word-motions](done/on-windows-enter-after-a-dead-key-drops-its-character-and-an-alt-code-sends-word-motions.md) - On Windows, Enter after a dead key drops its character and an Alt code sends word motions.
+- [the-computers-card-does-not-scroll-with-the-mouse-and-cuts-its-last-workspace](done/the-computers-card-does-not-scroll-with-the-mouse-and-cuts-its-last-workspace.md) - The Computers card does not scroll with the mouse and cuts its last workspace.
 
 ### v0.120.0
 

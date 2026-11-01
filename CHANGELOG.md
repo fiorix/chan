@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.120.1] - 2026-11-01
+
+v0.120.1 is a patch over v0.120.0 for three defects found on the day of the release: the Computers card scrolls with the mouse and shows its last workspace whole, a tmux pane drag no longer fights tmux, and two Windows key sequences on the ghostty engine send what was typed.
+
+### Fixed
+
+- **The Computers card scrolls with the mouse and shows its last row.** The launcher's deck carries its turn on each slot instead of the ring, so the card in front stands on the identity transform and renders on a flat layer, which WebKit scrolls under the wheel and the trackpad (an overflow box inside a layer pushed out along Z took no wheel scrolling in chan-desktop); the card's scroller ends in a padding that is also its end scroll padding, so the last row ends clear of the border and a row the keys select parks above it.
+- **A tmux pane drag rests where it is left.** chan asks tmux for a window size only when the box around the pane tree changes, read from a resize observer on that box, and holds the ask from a divider's press until the layout answering its release (or a second when none comes); the fold of the panes' hosts over tmux's layout moved with every divider, so a drag's preview, the layout tmux answered with and each layout chan adopted all asked for a new window size and tmux re-laid the panes out over the resize, the two correcting each other.
+- **Windows keys on the ghostty engine: a dead-key apostrophe before Enter or Tab, Alt+Numpad.** On Windows, Chromium types a dead key's pending character (an apostrophe on US-International) only after the next key's keydown and drops it when that keydown is cancelled, so a ghostty terminal submitted a command line ending in a quote without the quote; a plain Enter after a dead key now keeps its default, the browser types the character first and the CR follows with Enter's own line-break input, or at its keyup, focus loss or the next keydown. Numpad digits typed with Alt alone held are a Windows Alt code whose character the browser types when Alt is released; with Num Lock off they read as arrows, which chan sent as word motions ahead of the character; they now send nothing. Tab after a dead key still drops the character. The xterm.js engine keeps its behaviour.
+
 ## [v0.120.0] - 2026-11-01
 
 v0.120.0 fixes the ghostty terminal's minor defects the v0.119.0 review left open; gives the editor a date badge before a full stop, keeps a hash inside a list item or a quote at body size, and makes the first click on a URL edit the link; gives Hybrid Nav its `f` and `e` stage keys; makes `o` the launcher's on and off key with `t` opening a workspace window with a terminal; and lets a tmux window's panes be resized from chan.

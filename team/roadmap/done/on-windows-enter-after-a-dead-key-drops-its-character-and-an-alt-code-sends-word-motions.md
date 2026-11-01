@@ -1,6 +1,8 @@
 # On Windows, Enter after a dead key drops its character and an Alt code sends word motions
 
-Status: found by the owner's Windows guest readings on 2026-11-01, accepted for v0.120.1 by the owner's word the same day ("if there are fixes, i want to land them too"), built; the patch cut closes it.
+Status: shipped in [v0.120.1](../../release/release-v0.120.1.md).
+
+Record before the release: found by the owner's Windows guest readings on 2026-11-01, accepted for v0.120.1 by the owner's word the same day ("if there are fixes, i want to land them too"), built; the patch cut closes it.
 
 ## What was asked
 
