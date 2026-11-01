@@ -180,6 +180,9 @@ pub struct WindowRecord {
     /// existing rows stay native.
     #[serde(default, skip_serializing_if = "WindowOrigin::is_native")]
     pub origin: WindowOrigin,
+    /// A workspace window asks its first page to open a terminal when no layout is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_terminal: bool,
 }
 
 impl std::fmt::Debug for WindowRecord {
@@ -203,6 +206,7 @@ impl std::fmt::Debug for WindowRecord {
             .field("tmux", &self.tmux)
             .field("hidden", &self.hidden)
             .field("origin", &self.origin)
+            .field("start_terminal", &self.start_terminal)
             .finish()
     }
 }
@@ -318,6 +322,9 @@ pub struct CreateWindow {
     /// absent on a legacy / desktop-launcher caller, which the gate allows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acting_window_id: Option<String>,
+    /// A workspace window asks its first page to open a terminal when no layout is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_terminal: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +386,9 @@ pub struct PersistedWindow {
     /// unchanged; absent reads as native.
     #[serde(default, skip_serializing_if = "WindowOrigin::is_native")]
     pub origin: WindowOrigin,
+    /// A workspace window asks its first page to open a terminal when no layout is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_terminal: bool,
 }
 
 impl PersistedWindow {
@@ -419,6 +429,7 @@ impl PersistedWindow {
             tmux: self.tmux.clone(),
             hidden: self.hidden,
             origin: self.origin,
+            start_terminal: self.start_terminal,
         }
     }
 }
@@ -599,6 +610,17 @@ impl WindowRegistry {
         workspace_path: Option<String>,
         origin: WindowOrigin,
     ) -> PersistedWindow {
+        self.create_with_origin_and_start(kind, workspace_path, origin, false)
+    }
+
+    /// Mint a workspace window with its optional first-load terminal request.
+    pub fn create_with_origin_and_start(
+        &self,
+        kind: WindowKind,
+        workspace_path: Option<String>,
+        origin: WindowOrigin,
+        start_terminal: bool,
+    ) -> PersistedWindow {
         let (row, snapshot) = {
             let mut windows = self.lock();
             let window_id = mint_id(&windows, &self.unreadable);
@@ -616,6 +638,7 @@ impl WindowRegistry {
                 library_id: None,
                 hidden: false,
                 origin,
+                start_terminal,
             };
             windows.push(row.clone());
             (row, self.save_snapshot(&windows))
@@ -648,6 +671,7 @@ impl WindowRegistry {
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         self.throwaway_ids().insert(row.window_id.clone());
         windows.push(row.clone());
@@ -687,6 +711,7 @@ impl WindowRegistry {
             hidden: false,
             // A control terminal is a desktop-native window.
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         {
             let mut windows = self.lock();
@@ -773,6 +798,7 @@ impl WindowRegistry {
                 library_id: None,
                 hidden,
                 origin: WindowOrigin::Native,
+                start_terminal: false,
             };
             windows.push(row.clone());
             row
@@ -1522,6 +1548,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let v = serde_json::to_value(&rec).unwrap();
         assert_eq!(
@@ -1567,6 +1594,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         assert_eq!(
             serde_json::to_value(&rec).unwrap(),
@@ -1680,6 +1708,7 @@ mod tests {
                 tmux: None,
                 hidden: false,
                 origin: WindowOrigin::Native,
+                start_terminal: false,
             }],
             leaders: BTreeMap::new(),
             tmux_connections: Vec::new(),
@@ -1740,6 +1769,7 @@ mod tests {
             library_id: Some("lib-0f1e2d3c4b5a6978".into()),
             hidden: true,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let rec = row.to_record(
             "lib-0f1e2d3c4b5a6978".into(),
@@ -1767,6 +1797,7 @@ mod tests {
             kind: WindowKind::Terminal,
             workspace_path: None,
             origin: WindowOrigin::Native,
+            start_terminal: false,
             acting_window_id: None,
         };
         assert_eq!(
@@ -1782,11 +1813,64 @@ mod tests {
             kind: WindowKind::Workspace,
             workspace_path: Some("/home/u/notes".into()),
             origin: WindowOrigin::Native,
+            start_terminal: false,
             acting_window_id: None,
         };
         assert_eq!(
             serde_json::to_value(&ws).unwrap(),
             json!({ "kind": "workspace", "workspace_path": "/home/u/notes" })
+        );
+    }
+
+    #[test]
+    fn terminal_start_intent_round_trips_and_defaults_off() {
+        let plain: CreateWindow = serde_json::from_value(json!({
+            "kind": "workspace",
+            "workspace_path": "/home/u/notes"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap().get("start_terminal"),
+            None
+        );
+
+        let requested: CreateWindow = serde_json::from_value(json!({
+            "kind": "workspace",
+            "workspace_path": "/home/u/notes",
+            "start_terminal": true
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&requested).unwrap()["start_terminal"],
+            true
+        );
+
+        let (registry, dir) = registry();
+        let row = registry.create_with_origin_and_start(
+            WindowKind::Workspace,
+            Some("/home/u/notes".into()),
+            WindowOrigin::Browser,
+            true,
+        );
+        let restored = WindowRegistry::open(dir.path().join("windows.json"))
+            .snapshot()
+            .into_iter()
+            .find(|saved| saved.window_id == row.window_id)
+            .expect("persisted window");
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap()["start_terminal"],
+            true
+        );
+        let record = restored.to_record(
+            "local".into(),
+            "/notes".into(),
+            "token".into(),
+            false,
+            vec![],
+        );
+        assert_eq!(
+            serde_json::to_value(record).unwrap()["start_terminal"],
+            true
         );
     }
 
@@ -1808,6 +1892,7 @@ mod tests {
             kind: WindowKind::Workspace,
             workspace_path: Some("/n".into()),
             origin: WindowOrigin::Browser,
+            start_terminal: false,
             acting_window_id: None,
         };
         assert_eq!(
@@ -1831,6 +1916,7 @@ mod tests {
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Browser,
+            start_terminal: false,
         }
         .to_record(
             "local".into(),
@@ -1865,6 +1951,7 @@ mod tests {
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -1897,6 +1984,7 @@ mod tests {
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         assert_eq!(
             serde_json::to_value(&t).unwrap(),
@@ -1916,6 +2004,7 @@ mod tests {
             library_id: Some("lib-f81913a8ca0a6ff6".into()),
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let cv = serde_json::to_value(&c).unwrap();
         assert_eq!(
@@ -1944,6 +2033,7 @@ mod tests {
             library_id: None,
             hidden: true,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let hv = serde_json::to_value(&h).unwrap();
         assert_eq!(hv["hidden"], true);
@@ -2804,6 +2894,7 @@ mod tests {
             library_id: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let rec = p.to_record(
             "local".into(),
@@ -2846,6 +2937,7 @@ mod tests {
             library_id: Some("lib-remote".into()),
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         };
         let crec = c.to_record(
             "lib-remote".into(),

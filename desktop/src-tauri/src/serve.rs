@@ -334,6 +334,7 @@ pub(crate) fn open_watched_local_window(
             url: &url,
             connecting: None,
             kind,
+            start_terminal: record.start_terminal,
         },
         completion,
     )
@@ -367,6 +368,7 @@ pub(crate) fn open_watched_remote_window(
             url,
             connecting: Some(url),
             kind,
+            start_terminal: record.start_terminal,
         },
         completion,
     )
@@ -472,7 +474,10 @@ pub(crate) async fn retarget_watched_remote_window(
         &record.library_id,
         url,
         kind,
-        desktop_holder_tag(),
+        WindowTargetOptions {
+            holder: desktop_holder_tag(),
+            start_terminal: record.start_terminal,
+        },
     )?;
     // The window was built transparent; the page it navigates to must know.
     mark_transparent_window(&mut target);
@@ -608,6 +613,7 @@ pub async fn spawn_control_terminal_window(
                 // second tab. It also tags the window kind in `cs window list`,
                 // keeping it distinct from persisted standalone terminals.
                 kind: Some("control"),
+                start_terminal: false,
             },
             Box::new(move |result| {
                 let _ = built_tx.send(result);
@@ -670,6 +676,7 @@ pub(crate) async fn spawn_terminal_mode_window(
             url,
             connecting: None,
             kind: Some("control"),
+            start_terminal: false,
         },
         Box::new(move |result| {
             let _ = built_tx.send(result);
@@ -853,6 +860,7 @@ struct WindowSpec<'a> {
     /// singleton control sub-mode (hidden chrome, one PTY); `None` is full
     /// workspace mode. Also the kind `cs window list` shows.
     kind: Option<&'a str>,
+    start_terminal: bool,
 }
 
 pub(crate) type WindowBuildCompletion = Box<dyn FnOnce(Result<(), String>) + Send>;
@@ -966,6 +974,7 @@ fn build_workspace_window_with_completion(
         url,
         connecting,
         kind,
+        start_terminal,
     } = spec;
     if !library_id.is_empty() {
         let pane = app
@@ -991,7 +1000,10 @@ fn build_workspace_window_with_completion(
         library_id,
         url,
         kind,
-        desktop_holder_tag(),
+        WindowTargetOptions {
+            holder: desktop_holder_tag(),
+            start_terminal,
+        },
     )?;
     // Before the connecting payload is assembled, so its navigate target
     // carries the flag as a direct load does.
@@ -1399,7 +1411,10 @@ pub(crate) fn browser_window_url<R: Runtime>(
         &record.library_id,
         &url,
         kind,
-        None,
+        WindowTargetOptions {
+            holder: None,
+            start_terminal: record.start_terminal,
+        },
     )
 }
 
@@ -1428,6 +1443,11 @@ fn append_gpu_signal(url: &mut tauri::Url, gpu_available: bool) {
         .append_pair("chan-gpu", if gpu_available { "1" } else { "0" });
 }
 
+struct WindowTargetOptions<'a> {
+    holder: Option<&'a str>,
+    start_terminal: bool,
+}
+
 fn workspace_window_target_url<R: Runtime>(
     app: &AppHandle<R>,
     window_label: &str,
@@ -1435,8 +1455,12 @@ fn workspace_window_target_url<R: Runtime>(
     library_id: &str,
     url: &str,
     kind: Option<&str>,
-    holder: Option<&str>,
+    options: WindowTargetOptions<'_>,
 ) -> Result<tauri::Url, String> {
+    let WindowTargetOptions {
+        holder,
+        start_terminal,
+    } = options;
     let Ok(mut parsed) = url.parse::<tauri::Url>() else {
         return Err(format!("bad chan URL for {window_label}: {url}"));
     };
@@ -1491,6 +1515,9 @@ fn workspace_window_target_url<R: Runtime>(
     // workspace mode.
     if let Some(kind) = kind {
         parsed.query_pairs_mut().append_pair("kind", kind);
+    }
+    if kind.is_none() && start_terminal {
+        parsed.query_pairs_mut().append_pair("start", "terminal");
     }
     // `lib=<library_id>` next to `?w=`/`?kind=` tells the SPA which chan-library
     // this window belongs to, so cross-window tab d&d accepts a drop only from
@@ -2441,7 +2468,10 @@ mod tests {
                         library,
                         &entry,
                         kind,
-                        holder,
+                        WindowTargetOptions {
+                            holder,
+                            start_terminal: false,
+                        },
                     )
                     .unwrap();
                     let names: Vec<_> = target
@@ -2492,7 +2522,10 @@ mod tests {
                     "remote",
                     base,
                     Some("control"),
-                    holder,
+                    WindowTargetOptions {
+                        holder,
+                        start_terminal: false,
+                    },
                 )
                 .unwrap();
                 let mut expected = tauri::Url::parse(base).unwrap();
@@ -2532,7 +2565,10 @@ mod tests {
                 "",
                 "http://localhost/",
                 None,
-                Some("desktop")
+                WindowTargetOptions {
+                    holder: Some("desktop"),
+                    start_terminal: false
+                },
             )
             .unwrap_err(),
             expected
@@ -2544,7 +2580,10 @@ mod tests {
             "",
             "http://localhost/?client_name=foreign",
             None,
-            None
+            WindowTargetOptions {
+                holder: None,
+                start_terminal: false
+            },
         )
         .unwrap()
         .query_pairs()
@@ -2569,7 +2608,10 @@ mod tests {
             "lib-test",
             "http://127.0.0.1:1234/terminal/index.html",
             Some("terminal"),
-            Some(tag),
+            WindowTargetOptions {
+                holder: Some(tag),
+                start_terminal: false,
+            },
         )
         .expect("watched target");
         let holders = url
@@ -2597,6 +2639,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Browser,
+            start_terminal: false,
         };
         let browser_url = browser_window_url(
             app.handle(),
@@ -2608,6 +2651,23 @@ mod tests {
             !browser_url.query_pairs().any(|(key, _)| key == "h"),
             "the system browser has no desktop holder tag"
         );
+
+        let workspace_record = WindowRecord {
+            kind: chan_server::WindowKind::Workspace,
+            workspace_path: Some("/notes".into()),
+            prefix: "/notes".into(),
+            start_terminal: true,
+            ..browser_record
+        };
+        let seeded = browser_window_url(
+            app.handle(),
+            "127.0.0.1:1234".parse().expect("address"),
+            &workspace_record,
+        )
+        .expect("seeded workspace target");
+        assert!(seeded
+            .query_pairs()
+            .any(|(key, value)| key == "start" && value == "terminal"));
 
         const SOURCE: &str = include_str!("serve.rs");
         for (start, end) in [
@@ -2632,6 +2692,49 @@ mod tests {
                 "{start} passes the desktop holder tag"
             );
         }
+    }
+
+    #[test]
+    fn native_workspace_target_seeds_only_when_requested() {
+        let app = tauri::test::mock_app();
+        app.manage(empty_state());
+        for (start_terminal, expected) in [(true, Some("terminal")), (false, None)] {
+            let target = workspace_window_target_url(
+                app.handle(),
+                "local::w-1",
+                "w-1",
+                "local",
+                "http://127.0.0.1:1234/ws/index.html?t=secret",
+                None,
+                WindowTargetOptions {
+                    holder: Some("desktop"),
+                    start_terminal,
+                },
+            )
+            .expect("workspace target");
+            let value = target
+                .query_pairs()
+                .find(|(key, _)| key == "start")
+                .map(|(_, value)| value.into_owned());
+            assert_eq!(value.as_deref(), expected);
+            assert!(target
+                .query_pairs()
+                .any(|(key, value)| key == "w" && value == "w-1"));
+        }
+        let control = workspace_window_target_url(
+            app.handle(),
+            "local::w-2",
+            "w-2",
+            "local",
+            "http://127.0.0.1:1234/terminal/index.html",
+            Some("terminal"),
+            WindowTargetOptions {
+                holder: Some("desktop"),
+                start_terminal: true,
+            },
+        )
+        .expect("terminal target");
+        assert!(control.query_pairs().all(|(key, _)| key != "start"));
     }
 
     #[test]

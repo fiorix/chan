@@ -8872,6 +8872,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: crate::WindowOrigin::Native,
+            start_terminal: false,
         }
     }
 

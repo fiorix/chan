@@ -3761,10 +3761,22 @@ impl WorkspaceHost {
         workspace_path: Option<String>,
         origin: WindowOrigin,
     ) -> Result<WindowRecord, Error> {
+        self.mint_window_with_origin_and_start(kind, workspace_path, origin, false)
+    }
+
+    /// Mint a window with a first-load terminal request for workspace windows.
+    pub fn mint_window_with_origin_and_start(
+        &self,
+        kind: WindowKind,
+        workspace_path: Option<String>,
+        origin: WindowOrigin,
+        start_terminal: bool,
+    ) -> Result<WindowRecord, Error> {
         let registry = self
             .window_registry()
             .ok_or_else(|| Error::Config("window registry not installed".into()))?;
-        let row = registry.create_with_origin(kind, workspace_path, origin);
+        let row =
+            registry.create_with_origin_and_start(kind, workspace_path, origin, start_terminal);
         // A Terminal window's session lives in the shared terminal tenant and is
         // auto-opened by the watcher, so the SPA never PUTs a layout blob to
         // persist it -- without a durable blob it would be orphan-reaped on the
@@ -3806,6 +3818,16 @@ impl WorkspaceHost {
         key: &Path,
         origin: WindowOrigin,
     ) -> Result<WindowRecord, Error> {
+        self.mint_workspace_window_with_start(key, origin, false)
+    }
+
+    /// Mint a workspace window whose first empty layout opens a terminal.
+    pub fn mint_workspace_window_with_start(
+        &self,
+        key: &Path,
+        origin: WindowOrigin,
+        start_terminal: bool,
+    ) -> Result<WindowRecord, Error> {
         let root = self
             .mounted_root(key)
             .or_else(|| {
@@ -3816,10 +3838,11 @@ impl WorkspaceHost {
                     .map(|row| row.root_path)
             })
             .unwrap_or_else(|| key.to_path_buf());
-        self.mint_window_with_origin(
+        self.mint_window_with_origin_and_start(
             WindowKind::Workspace,
             Some(root.to_string_lossy().into_owned()),
             origin,
+            start_terminal,
         )
     }
 
@@ -7168,6 +7191,7 @@ mod last_tmux_window_hidden_tests {
             library_id: None,
             hidden,
             origin: WindowOrigin::default(),
+            start_terminal: false,
         }
     }
 

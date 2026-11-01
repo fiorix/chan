@@ -180,7 +180,7 @@ describe("the Gateways deck", () => {
 });
 
 describe("the Gateways deck's connection letter", () => {
-  it("c presses Connect, Disconnect, Cancel and lost-connection controls once", async () => {
+  it("o presses Connect, Disconnect, Cancel and lost-connection controls once; c does nothing", async () => {
     await addGateway({ url: "https://keys.example.com", label: "keys" });
     mountDeck();
     const header = target!.querySelector<HTMLElement>(".gateway-header")!;
@@ -191,13 +191,15 @@ describe("the Gateways deck's connection letter", () => {
       library.gateways[0].status = status;
       flushSync();
       const before = clicked.mock.calls.length;
+      press("o", header);
+      expect(clicked).toHaveBeenCalledTimes(before + 1);
       press("c", header);
       expect(clicked).toHaveBeenCalledTimes(before + 1);
       header.dispatchEvent(new KeyboardEvent("keydown", { key: "c", repeat: true, bubbles: true, cancelable: true }));
       expect(clicked).toHaveBeenCalledTimes(before + 1);
     }
     control.disabled = true;
-    press("c", header);
+    press("o", header);
     expect(clicked).toHaveBeenCalledTimes(4);
   });
 });

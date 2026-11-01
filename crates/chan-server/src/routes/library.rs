@@ -1561,11 +1561,17 @@ fn create_window_root_error(error: crate::Error) -> Response {
     crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
-/// `POST /api/library/windows` `{kind, workspace_path?, origin?, acting_window_id?}`:
+/// `POST /api/library/windows` `{kind, workspace_path?, origin?, acting_window_id?, start_terminal?}`:
 /// mint a window. The library assigns the id and persists the record; the
 /// registry change bridge fires the watch. Returns the assembled record in the
 /// feed shape. Leader-gated (honest-client, see [`leader_gate`]).
 async fn handle_create_library_window(Host(host): Host, Json(req): Json<CreateWindow>) -> Response {
+    if req.start_terminal && req.kind != WindowKind::Workspace {
+        return crate::error::err(
+            StatusCode::BAD_REQUEST,
+            "start_terminal requires a workspace window".into(),
+        );
+    }
     // A workspace window is minted by the key of the root the client names,
     // one the window feed finds the runtime by without asking any root's
     // filesystem. Resolving the client's spelling asks this root's, so it
@@ -1606,7 +1612,7 @@ async fn handle_create_library_window(Host(host): Host, Json(req): Json<CreateWi
     // the path the launcher lists the workspace by and nests its windows
     // under.
     let minted = match key {
-        Some(key) => host.mint_workspace_window(&key, req.origin),
+        Some(key) => host.mint_workspace_window_with_start(&key, req.origin, req.start_terminal),
         None => host.mint_window_with_origin(req.kind, req.workspace_path, req.origin),
     };
     match minted {
@@ -1958,9 +1964,11 @@ async fn handle_devserver_terminal(Host(host): Host, AxumPath(id): AxumPath<Stri
 #[derive(Deserialize)]
 struct OpenDevserverWorkspace {
     path: String,
+    #[serde(default)]
+    start_terminal: bool,
 }
 
-/// `POST /api/library/devservers/{id}/workspaces/open` `{path}`: open (or focus)
+/// `POST /api/library/devservers/{id}/workspaces/open` `{path, start_terminal?}`: open (or focus)
 /// a workspace window rooted at the remote `path` on a connected devserver
 /// through the desktop bridge. 204/409.
 async fn handle_open_devserver_workspace(
@@ -1971,6 +1979,7 @@ async fn handle_open_devserver_workspace(
     dispatch_window_op(&host, |reply| DesktopWindowOp::OpenDevserverWorkspace {
         id,
         path: body.path,
+        start_terminal: body.start_terminal,
         reply,
     })
     .await
@@ -5151,6 +5160,7 @@ mod devserver_route_tests {
         let body = serde_json::json!({
             "kind": "workspace",
             "workspace_path": ws.path().to_string_lossy(),
+            "start_terminal": true,
         })
         .to_string();
 
@@ -5181,6 +5191,7 @@ mod devserver_route_tests {
         .expect("mount workspace");
 
         let running = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -5193,6 +5204,31 @@ mod devserver_route_tests {
             .unwrap();
         assert_eq!(running.status(), StatusCode::OK);
         assert_eq!(host.assemble_window_records().len(), 1);
+        assert!(host.assemble_window_records()[0].start_terminal);
+
+        let ordinary = serde_json::json!({
+            "kind": "workspace",
+            "workspace_path": ws.path().to_string_lossy(),
+        })
+        .to_string();
+        let (status, _) = request(&app, "POST", "/api/library/windows", Some(&ordinary)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            host.assemble_window_records()
+                .iter()
+                .filter(|record| record.start_terminal)
+                .count(),
+            1
+        );
+
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/library/windows",
+            Some(r#"{"kind":"terminal","start_terminal":true}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -6599,6 +6635,50 @@ mod window_op_route_tests {
     }
 
     #[tokio::test]
+    async fn devserver_workspace_open_forwards_terminal_start_intent() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(1);
+        let bridge = DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            library(),
+            bridge,
+            crate::route_builder(),
+        ));
+        let router = launcher_router(host, None, None);
+        for (body, expected) in [
+            (r#"{"path":"/remote/ws","start_terminal":true}"#, true),
+            (r#"{"path":"/remote/ws"}"#, false),
+        ] {
+            let app = router.clone();
+            let request = tokio::spawn(async move {
+                send(
+                    &app,
+                    "POST",
+                    "/api/library/devservers/ds1/workspaces/open",
+                    Some(body),
+                )
+                .await
+            });
+            let Some(DesktopWindowOp::OpenDevserverWorkspace {
+                id,
+                path,
+                start_terminal,
+                reply,
+            }) = rx.recv().await
+            else {
+                panic!("expected workspace open op");
+            };
+            assert_eq!(id, "ds1");
+            assert_eq!(path, "/remote/ws");
+            assert_eq!(start_terminal, expected);
+            reply.send(Ok(())).unwrap();
+            assert_eq!(request.await.unwrap().0, StatusCode::NO_CONTENT);
+        }
+    }
+
+    #[tokio::test]
     async fn close_discards_a_saved_local_row_even_without_a_live_native_window() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(4);
         let bridge = DesktopBridge {
@@ -6712,6 +6792,7 @@ mod window_op_route_tests {
             tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         })));
         let router = launcher_router(host, None, None);
 
@@ -6777,6 +6858,7 @@ mod window_op_route_tests {
             tmux: None,
             hidden: false,
             origin: WindowOrigin::Native,
+            start_terminal: false,
         })));
         let received = tokio::spawn(async move {
             let Some(DesktopWindowOp::SetWindowLabel { id, label, reply }) = rx.recv().await else {

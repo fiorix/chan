@@ -455,8 +455,8 @@ export async function openDevserverTerminal(id: string): Promise<void> {
 
 /** Open a window onto a connected devserver's served workspace by its remote
  * path. The window feed updates through the watch subscription. */
-export async function openDevserverWorkspace(id: string, path: string): Promise<void> {
-  await backend.openDevserverWorkspace(id, path);
+export async function openDevserverWorkspace(id: string, path: string, startTerminal = false): Promise<void> {
+  await backend.openDevserverWorkspace(id, path, startTerminal);
 }
 
 /** Turn a connected devserver's served workspace on/off by its mounted prefix.
@@ -511,8 +511,8 @@ export async function openTerminal(): Promise<void> {
 /** Open a window onto an on workspace: mint a workspace window of the local
  * library (the desktop embed focuses an existing one for the same path). The
  * window feed updates through the watch subscription, so nothing to refresh. */
-export async function openWorkspaceWindow(path: string): Promise<void> {
-  await backend.createWindow("workspace", { workspacePath: path });
+export async function openWorkspaceWindow(path: string, startTerminal = false): Promise<void> {
+  await backend.createWindow("workspace", { workspacePath: path, startTerminal });
 }
 
 /** Toggle a window's visibility (the feed's SHOW/HIDE Eye): hide it if it is

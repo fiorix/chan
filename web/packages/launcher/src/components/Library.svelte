@@ -53,6 +53,7 @@
     canOpenWorkspaceWindow,
     detachTmux,
     newTerminal,
+    newWorkspaceTerminalWindow,
     newTmuxWindow,
     newWorkspaceWindow,
     openTmuxWindow,
@@ -375,6 +376,20 @@
         </button>
         <button
           class="icon-btn"
+          type="button"
+          disabled={workspaceCondition(ws.status) !== "ready" ||
+            spinning(ws) ||
+            !canOpenWorkspaceWindow(ws)}
+          title={!canOpenWorkspaceWindow(ws)
+            ? "The session leader manages this workspace's windows"
+            : `New terminal window of ${displayName(ws)} (t)`}
+          data-deck-key="t"
+          aria-label={`New terminal window of ${displayName(ws)}`}
+          onclick={() => run(newWorkspaceTerminalWindow(ws))}>
+          <SquareTerminal size={16} />
+        </button>
+        <button
+          class="icon-btn"
           class:on={ws.on && !degraded(ws)}
           class:degraded={degraded(ws)}
           class:locked={locked(ws)}
@@ -386,14 +401,15 @@
               ? "Workspace is open in another Chan process"
               : spinning(ws)
               ? "Working…"
-              : powerAction(ws)}
+              : `${powerAction(ws)} (o)`}
+          data-deck-key="o"
           aria-label={lockUnknown(ws)
             ? `Lock state of ${displayName(ws)} could not be read`
             : locked(ws)
               ? `${displayName(ws)} is open in another Chan process`
               : spinning(ws)
               ? `Working on ${displayName(ws)}`
-              : powerAction(ws, displayName(ws))}
+              : `${powerAction(ws, displayName(ws))} (o)`}
           onclick={() => run(setWorkspacePower(ws, !ws.on))}>
           {#if spinning(ws)}
             <LoaderCircle class="spin" size={16} />
@@ -560,7 +576,7 @@
            exists only while the connection does; the identity block names
            where tmux runs over its session and version, with a mark for the
            errors tmux reported. The actions mirror a connected devserver's:
-           t asks for a new tmux window and c detaches in the disconnect
+           t asks for a new tmux window and o detaches in the disconnect
            slot; ending the server is the selection's turn off or remove,
            through the same check the other cards carry. A node whose record
            has not arrived yet has nothing to ask of, so it carries its rows
@@ -607,8 +623,8 @@
             <button
               class="icon-btn on"
               type="button"
-              title="Detach (c)"
-              data-deck-key="c"
+              title="Detach (o)"
+              data-deck-key="o"
               aria-label={`Detach ${title}`}
               onclick={() => run(detachTmux(entry.connection))}>
               <Unplug size={16} />
@@ -676,7 +692,7 @@
                 type="button"
                 disabled
                 title="Working…"
-                data-deck-key="c"
+                data-deck-key="o"
                 aria-label={`Working on ${devserverName(ds)}`}>
                 <LoaderCircle class="spin" size={16} />
               </button>
@@ -691,8 +707,8 @@
                 class:on={!connectionLost(ds)}
                 class:lost={connectionLost(ds)}
                 type="button"
-                title={connectionLost(ds) ? "Disconnect lost connection (c)" : "Disconnect (c)"}
-                data-deck-key="c"
+                title={connectionLost(ds) ? "Disconnect lost connection (o)" : "Disconnect (o)"}
+                data-deck-key="o"
                 aria-label={`Disconnect ${devserverName(ds)}`}
                 onclick={() => run(disconnectDevserver(ds.id))}>
                 <Unplug size={16} />
@@ -713,9 +729,9 @@
                 title={controlOpen
                   ? "Close the control terminal to reconnect"
                   : ds.pending_signin
-                    ? "Re-open sign-in in your browser (c)"
-                    : "Connect (c)"}
-                data-deck-key="c"
+                    ? "Re-open sign-in in your browser (o)"
+                    : "Connect (o)"}
+                data-deck-key="o"
                 aria-label={controlOpen
                   ? `Close the control terminal to reconnect ${devserverName(ds)}`
                   : ds.pending_signin

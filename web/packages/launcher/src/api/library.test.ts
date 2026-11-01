@@ -84,6 +84,34 @@ describe("liveApi.tmuxRequest", () => {
   });
 });
 
+describe("workspace terminal-start requests", () => {
+  it("sends the intent on a local workspace mint and omits it for w", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    vi.stubGlobal("fetch", fetch);
+
+    await liveApi.createWindow("workspace", { workspacePath: "/notes", origin: "browser", startTerminal: true });
+    await liveApi.createWindow("workspace", { workspacePath: "/notes", origin: "browser" });
+
+    expect(fetch.mock.calls.map(([, init]) => JSON.parse(init.body))).toEqual([
+      { kind: "workspace", workspace_path: "/notes", origin: "browser", start_terminal: true },
+      { kind: "workspace", workspace_path: "/notes", origin: "browser" },
+    ]);
+  });
+
+  it("sends the intent through the remote desktop bridge and omits it for w", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 204 });
+    vi.stubGlobal("fetch", fetch);
+
+    await liveApi.openDevserverWorkspace("ds-1", "/notes", true);
+    await liveApi.openDevserverWorkspace("ds-1", "/notes", false);
+
+    expect(fetch.mock.calls.map(([, init]) => JSON.parse(init.body))).toEqual([
+      { path: "/notes", start_terminal: true },
+      { path: "/notes" },
+    ]);
+  });
+});
+
 describe("liveApi.removeWorkspace", () => {
   const remove: (id: string, force?: boolean) => Promise<void> = liveApi.removeWorkspace;
 

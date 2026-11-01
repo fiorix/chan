@@ -1509,6 +1509,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
         }
     }
 

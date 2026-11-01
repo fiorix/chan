@@ -529,7 +529,7 @@ export const mockApi: LibraryApi = {
 
   // Open a window onto one of a connected devserver's served workspaces (by its
   // remote path): mint a remote workspace window and push the feed.
-  openDevserverWorkspace: (id, path) => {
+  openDevserverWorkspace: (id, path, startTerminal) => {
     const ds = devservers.find((d) => d.id === id);
     if (ds?.library_id) {
       const base = path.split("/").filter(Boolean).pop() ?? "workspace";
@@ -546,6 +546,7 @@ export const mockApi: LibraryApi = {
         connected: true,
         active_transfer: false,
         control: false,
+        ...(startTerminal ? { start_terminal: true } : {}),
       });
       notify();
     }
@@ -666,6 +667,7 @@ export const mockApi: LibraryApi = {
       active_transfer: false,
       control: false,
       ...(opts?.origin ? { origin: opts.origin } : {}),
+      ...(opts?.startTerminal ? { start_terminal: true } : {}),
     };
     windows.push(rec);
     notify();

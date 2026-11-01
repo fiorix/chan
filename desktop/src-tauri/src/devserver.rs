@@ -2156,11 +2156,21 @@ pub async fn mint_library_window(
     kind: chan_server::WindowKind,
     workspace_path: Option<String>,
 ) -> Result<chan_server::WindowRecord, String> {
+    mint_library_window_with_start(conn, kind, workspace_path, false).await
+}
+
+pub async fn mint_library_window_with_start(
+    conn: &DevserverConn,
+    kind: chan_server::WindowKind,
+    workspace_path: Option<String>,
+    start_terminal: bool,
+) -> Result<chan_server::WindowRecord, String> {
     let body = chan_server::CreateWindow {
         kind,
         workspace_path,
         // The desktop mints native windows on a connected devserver.
         origin: chan_server::WindowOrigin::Native,
+        start_terminal,
         // The desktop launcher is a legacy caller (the gate allows a missing
         // acting id); leadership is honest-client only.
         acting_window_id: None,
@@ -3643,6 +3653,7 @@ mod tests {
             tmux: None,
             hidden: false,
             origin: chan_server::WindowOrigin::default(),
+            start_terminal: false,
         }
     }
 

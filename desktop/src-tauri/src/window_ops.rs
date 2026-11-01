@@ -114,8 +114,14 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
         DesktopWindowOp::OpenDevserverTerminal { id, reply } => {
             let _ = reply.send(crate::open_devserver_terminal_impl(&state, id).await);
         }
-        DesktopWindowOp::OpenDevserverWorkspace { id, path, reply } => {
-            let _ = reply.send(crate::open_devserver_workspace_impl(&state, id, path).await);
+        DesktopWindowOp::OpenDevserverWorkspace {
+            id,
+            path,
+            start_terminal,
+            reply,
+        } => {
+            let _ = reply
+                .send(crate::open_devserver_workspace_impl(&state, id, path, start_terminal).await);
         }
         DesktopWindowOp::SetDevserverWorkspaceOn {
             id,

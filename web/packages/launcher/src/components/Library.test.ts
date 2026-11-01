@@ -143,11 +143,11 @@ describe("Library: Local group", () => {
     // one, the control says both rather than leaving the two to disagree.
     mountList();
     const cases: Array<[boolean, WorkspaceEntry["status"], string]> = [
-      [false, "running", "Turn on (Off, running)"],
-      [true, "stopped", "Turn off (On, stopped)"],
-      [true, "error", "Turn off (On, failed)"],
-      [true, "running", "Turn off"],
-      [false, "stopped", "Turn on"],
+      [false, "running", "Turn on (Off, running) (o)"],
+      [true, "stopped", "Turn off (On, stopped) (o)"],
+      [true, "error", "Turn off (On, failed) (o)"],
+      [true, "running", "Turn off (o)"],
+      [false, "stopped", "Turn on (o)"],
     ];
     const seen = cases.map(([on, status]) => {
       library.workspaces = library.workspaces.map(
@@ -268,7 +268,7 @@ describe("Library: Local group", () => {
 
     const toggle = byAria("Turn off notes")!;
     expect(toggle.disabled).toBe(false);
-    expect(toggle.title).toBe("Turn off");
+    expect(toggle.title).toBe("Turn off (o)");
     // Degraded, not healthy: the accent tint the running row carries is gone.
     expect(toggle.classList.contains("degraded")).toBe(true);
     expect(toggle.classList.contains("on")).toBe(false);
@@ -468,7 +468,7 @@ describe("Library: devserver groups", () => {
     expect(disconnect).toBeTruthy();
     expect(disconnect!.classList.contains("lost")).toBe(true);
     expect(disconnect!.classList.contains("on")).toBe(false);
-    expect(disconnect!.title).toBe("Disconnect lost connection (c)");
+    expect(disconnect!.title).toBe("Disconnect lost connection (o)");
     expect(byAria("Connect prod")).toBeUndefined();
   });
 
@@ -605,7 +605,7 @@ describe("Library: workspace OFF confirm-and-retry", () => {
   }
   function offButton(label: string): HTMLButtonElement {
     const btn = [...(target?.querySelectorAll("button[aria-label]") ?? [])].find(
-      (b) => b.getAttribute("aria-label") === label,
+      (b) => b.getAttribute("aria-label")?.startsWith(label),
     );
     if (!btn) throw new Error(`no button labelled "${label}"`);
     return btn as HTMLButtonElement;
@@ -1046,7 +1046,7 @@ describe("Library: tmux connection cards", () => {
     expect(badge(remoteCard)).toBe("3 windows");
   });
 
-  it("asks the connection for a new window with t and detaches with c", async () => {
+  it("asks the connection for a new window with t and detaches with o", async () => {
     const { backend } = await import("../api/backend");
     const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
     try {
@@ -1056,7 +1056,7 @@ describe("Library: tmux connection cards", () => {
       newWindow.click();
       await settle();
       const detach = byAria(`Detach ${REMOTE_TITLE}`)!;
-      expect(detach.dataset.deckKey).toBe("c");
+      expect(detach.dataset.deckKey).toBe("o");
       expect(detach.classList.contains("on")).toBe(true);
       detach.click();
       await settle();
