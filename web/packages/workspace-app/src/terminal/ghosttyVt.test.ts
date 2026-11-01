@@ -270,6 +270,44 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(t.getScrollbackHyperlinkUri(0, 0)).toBe("https://example.com/a");
   });
 
+  test("a failed write-buffer growth preserves the allocation for later writes", async () => {
+    type Wasm = {
+      fn: { ghostty_wasm_alloc(len: number): number };
+      free(ptr: number, len: number): void;
+    };
+    const t = (await upstream()).createTerminal(80, 24) as unknown as GhosttyTerminal & {
+      wasm: Wasm;
+      writeBuf: number;
+      writeCap: number;
+    };
+    t.write("first");
+    const oldBuf = t.writeBuf;
+    const oldCap = t.writeCap;
+    const { ghostty_wasm_alloc: alloc } = t.wasm.fn;
+    const { free } = t.wasm;
+    const frees: [number, number][] = [];
+    t.wasm.free = (ptr, len) => {
+      frees.push([ptr, len]);
+      free.call(t.wasm, ptr, len);
+    };
+    t.wasm.fn.ghostty_wasm_alloc = (len) => len > oldCap ? 0 : alloc(len);
+    try {
+      expect(() => t.write(new Uint8Array(oldCap + 1))).toThrow(/out of memory/);
+    } finally {
+      t.wasm.fn.ghostty_wasm_alloc = alloc;
+    }
+    expect(frees, "the live buffer must not be freed on allocation failure").not.toContainEqual([oldBuf, oldCap]);
+    expect(t.writeBuf).toBe(oldBuf);
+    expect(t.writeCap).toBe(oldCap);
+    t.write(" second");
+    expect(t.writeBuf, "a smaller write reuses the intact buffer").toBe(oldBuf);
+    expect(text(t.getLine(0))).toBe("first second");
+    t.write("x".repeat(oldCap + 1));
+    expect(t.writeBuf).not.toBe(oldBuf);
+    t.free();
+    expect(frees.filter(([ptr]) => ptr === oldBuf), "the old buffer is freed exactly once").toEqual([[oldBuf, oldCap]]);
+  });
+
   test("a grapheme cluster takes one cell and reads back whole", async () => {
     const t = (await upstream()).createTerminal(20, 3);
     const family = "👨‍👩‍👧";
@@ -281,6 +319,20 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(String.fromCodePoint(row[2].codepoint)).toBe("x");
     t.write("\r\n\r\n\r\n");
     expect(t.getScrollbackGraphemeString(0, 0)).toBe(family);
+  });
+
+  test.each(["screen", "history"])("a cluster beyond the scratch capacity reads whole from %s", async (surface) => {
+    const t = (await upstream()).createTerminal(20, 3);
+    const cluster = "e" + "\u0301".repeat(33);
+    t.write(`${cluster}x`);
+    if (surface === "history") t.write("\r\n\r\n\r\n");
+    const row = surface === "history" ? t.getScrollbackLine(0) : t.getLine(0);
+    const read = surface === "history" ? t.getScrollbackGraphemeString(0, 0) : t.getGraphemeString(0, 0);
+    expect(read).toBe(cluster);
+    expect(row?.[0].grapheme_len).toBe(33);
+    expect(row?.[0].width).toBe(1);
+    expect(row?.[1].codepoint).toBe("x".codePointAt(0));
+    t.free();
   });
 
   test("scrollback keeps the configured number of lines, not bytes", async () => {
@@ -334,7 +386,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     expect(frees, "freed with its length").toContainEqual(own[0]);
     const cell = [...t.getGraphemeString(0, 0)];
     expect(cell[0]).toBe("e");
-    expect(cell.length).toBe(32);
+    expect(cell.length).toBe(n);
   });
 
   test("a resize reflows and redraws everything", async () => {

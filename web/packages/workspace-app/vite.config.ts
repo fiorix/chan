@@ -30,6 +30,24 @@ const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/
 // (src/terminal/xtermKeyboard.ts, src/terminal/keyboardProtocolStream.ts).
 const xtermSrc = join(dirname(require.resolve("@xterm/xterm/package.json")), "src");
 
+// Terminal receives chan's vendored core through its ghostty option; the
+// library's default loader is unused. Its published JS embeds its own wasm
+// as a URL literal, so a module alias cannot remove those bytes.
+function ghosttyExternalWasm(): Plugin {
+  const entry = join(dirname(require.resolve("ghostty-web")), "ghostty-web.js");
+  return {
+    name: "ghostty-external-wasm",
+    apply: "build",
+    enforce: "pre",
+    transform(code, id) {
+      if (normalize(id) !== entry) return;
+      const inlineWasm = /"data:application\/wasm;base64,[A-Za-z0-9+/=]+"/g;
+      if (!inlineWasm.test(code)) this.error("ghostty-web's inline wasm was not found");
+      return { code: code.replace(inlineWasm, '"data:,"'), map: null };
+    },
+  };
+}
+
 // Self-host excalidraw's canvas fonts. Excalidraw fetches label fonts at
 // runtime from `EXCALIDRAW_ASSET_PATH + fonts/<Family>/<file>.woff2`;
 // without a local copy it falls through to the esm.sh CDN, so offline
@@ -102,7 +120,7 @@ function sourceCodeProLicense(): Plugin {
 
 export default defineConfig({
   base: "./",
-  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense()],
+  plugins: [svelte(), excalidrawFonts(), sourceCodeProLicense(), ghosttyExternalWasm()],
   resolve: {
     alias: {
       "@chan/web-shared/command-deck": join(dirname(fileURLToPath(import.meta.url)), "../web-shared/src/command-deck/model.ts"),

@@ -555,9 +555,11 @@ export class VtTerminal {
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
     if (bytes.length === 0) return;
     if (bytes.length > this.writeCap) {
+      const cap = Math.max(bytes.length, 4096);
+      const buf = this.wasm.alloc(cap);
       this.wasm.free(this.writeBuf, this.writeCap);
-      this.writeCap = Math.max(bytes.length, 4096);
-      this.writeBuf = this.wasm.alloc(this.writeCap);
+      this.writeCap = cap;
+      this.writeBuf = buf;
     }
     this.wasm.bytes().set(bytes, this.writeBuf);
     this.stale = true;
@@ -958,8 +960,7 @@ export class VtTerminal {
       if (raw.tag === T.CODEPOINT_GRAPHEME) {
         fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_LEN, s + SCRATCH.slot);
         const len = this.wasm.view().getUint32(s + SCRATCH.slot, true);
-        const total = Math.min(len, GRAPHEME_CAP);
-        if (total > 1) {
+        if (len > 1) {
           // GRAPHEMES_BUF writes the whole cluster, which can outgrow the
           // scratch's room, so a longer one is read into a buffer of its own.
           const own = len > GRAPHEME_CAP ? this.wasm.alloc(len * 4) : 0;
@@ -968,12 +969,12 @@ export class VtTerminal {
             fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_BUF, buf);
             const view = this.wasm.view();
             const cps: number[] = [];
-            for (let i = 0; i < total; i++) cps.push(view.getUint32(buf + i * 4, true));
+            for (let i = 0; i < len; i++) cps.push(view.getUint32(buf + i * 4, true));
             graphemes.set(x, String.fromCodePoint(...cps));
           } finally {
             this.wasm.free(own, len * 4);
           }
-          graphemeLen = total - 1;
+          graphemeLen = len - 1;
         }
       }
       const cell = row[x];
@@ -1070,19 +1071,30 @@ export class VtTerminal {
   /// The full cluster at the scratch grid ref, base codepoint first.
   private gridGraphemes(): string | null {
     const s = this.scratch;
-    const result = this.wasm.fn.ghostty_grid_ref_graphemes(
-      s + SCRATCH.gridRef,
-      s + SCRATCH.graphemes,
-      GRAPHEME_CAP,
-      s + SCRATCH.slot,
-    );
-    if (result !== ABI.GhosttyResult.SUCCESS) return null;
-    const view = this.wasm.view();
-    const count = Math.min(view.getUint32(s + SCRATCH.slot, true), GRAPHEME_CAP);
-    if (count === 0) return null;
-    const cps: number[] = [];
-    for (let i = 0; i < count; i++) cps.push(view.getUint32(s + SCRATCH.graphemes + i * 4, true));
-    return String.fromCodePoint(...cps);
+    let want = GRAPHEME_CAP;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cap = want;
+      const own = cap > GRAPHEME_CAP ? this.wasm.alloc(cap * 4) : 0;
+      const buf = own || s + SCRATCH.graphemes;
+      try {
+        const result = this.wasm.fn.ghostty_grid_ref_graphemes(
+          s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot,
+        );
+        const view = this.wasm.view();
+        const len = view.getUint32(s + SCRATCH.slot, true);
+        if (result === ABI.GhosttyResult.OUT_OF_SPACE && len > cap) {
+          want = len;
+          continue;
+        }
+        if (result !== ABI.GhosttyResult.SUCCESS || len === 0) return null;
+        const cps: number[] = [];
+        for (let i = 0; i < Math.min(len, cap); i++) cps.push(view.getUint32(buf + i * 4, true));
+        return String.fromCodePoint(...cps);
+      } finally {
+        this.wasm.free(own, cap * 4);
+      }
+    }
+    return null;
   }
 
   private hyperlinkAt(tag: number, x: number, y: number): string | null {
