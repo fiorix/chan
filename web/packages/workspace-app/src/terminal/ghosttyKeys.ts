@@ -1,6 +1,8 @@
 // Keyboard encoding for ghostty terminals follows xterm.js and chan's own
 // key handling. Non-text keys after a dead key send their encoded bytes
-// even when the browser emits no keypress for them.
+// even when the browser emits no keypress for them; on Windows, a plain
+// Enter's CR follows the dead key's character, which the browser types only
+// after Enter's keydown.
 //
 // ghostty-web encodes keys differently from xterm.js. Among other things it
 // never prefixes Alt with ESC (Alt+B sends "b"), passes no text to the encoder
@@ -31,6 +33,11 @@ import {
 
 export type GhosttyKeyAction =
   | { kind: "send"; data: string }
+  /// The browser keeps the key's default and types any pending dead-key text
+  /// first; `data` is sent with the key's own line-break input.
+  | { kind: "line-break"; data: string }
+  /// Cancelled with nothing sent.
+  | { kind: "cancel" }
   | { kind: "scroll"; lines: number }
   | { kind: "select-all" }
   | { kind: "ghostty" }
@@ -42,6 +49,15 @@ export type GhosttyKeyAction =
 export function ghosttyTypesKey(ev: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "metaKey">): boolean {
   if ((ev.ctrlKey && !ev.altKey) || (ev.altKey && !ev.ctrlKey) || ev.metaKey) return false;
   return ev.key.length === 1;
+}
+
+/// A numpad digit typed with Alt alone held: on Windows, part of an Alt code.
+function isAltCodeDigit(ev: Pick<KeyboardEvent, "code" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">): boolean {
+  return ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && /^Numpad[0-9]$/.test(ev.code);
+}
+
+function isPlainEnter(ev: Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">): boolean {
+  return ev.key === "Enter" && !ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey;
 }
 
 /// One printable ASCII character other than the space, which stays Meta.
@@ -70,6 +86,11 @@ export function ghosttyKeydownAction(
   // An IME owns the key; ghostty-web's own keydown returns early for it and
   // its composition listeners deliver the text.
   if (ev.isComposing || ev.keyCode === 229) return { kind: "ghostty" };
+  // Windows types an Alt code's character when Alt is released, as browser
+  // text. Its digits type nothing; with Num Lock off they read as arrows, and
+  // Alt+ArrowLeft is the browser's Back, so they are cancelled ahead of chan's
+  // own Alt+Arrow bytes.
+  if (ctx.platform.isWindows && isAltCodeDigit(ev)) return { kind: "cancel" };
   if (ctx.chanBytes !== null) return { kind: "send", data: ctx.chanBytes };
   // Option is Meta on macOS, as chan runs xterm.js, except where a layout
   // puts a printable ASCII character on Option (@, [ and | on a German or a
@@ -84,6 +105,14 @@ export function ghosttyKeydownAction(
   // Windows AltGraph is a modifier, not a pending dead-key composition.
   // Its next key either carries a layout character or encodes a Ctrl+Alt chord.
   if (ctx.platform.isWindows && ev.key === "AltGraph") return { kind: "browser" };
+  // Windows Chromium types a dead key's pending character (an apostrophe on
+  // US-International) only after Enter's keydown, and drops it when that
+  // keydown is cancelled. Enter keeps its default, so the character comes
+  // first and Enter's own line break follows it.
+  if (ctx.platform.isWindows && state.deadKey && isPlainEnter(ev)) {
+    state.deadKey = false;
+    return { kind: "line-break", data: "\r" };
+  }
   // Windows Chromium can supply the base key here and the composed text in
   // beforeinput, including two characters for an apostrophe then a consonant.
   if (ctx.platform.isWindows && state.deadKey && ghosttyTypesKey(ev)) {
@@ -161,7 +190,19 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
   const state = createXtermKeydownState();
   let pendingText: string | null = null;
   let composing = false;
+  // A key left to the browser whose bytes go with its line-break input. If
+  // that input never comes, the key's keyup, focus loss or the next keydown
+  // sends them, so the key is not lost.
+  let lineBreak: { code: string; data: string } | null = null;
+  const sendLineBreak = (): void => {
+    if (!lineBreak) return;
+    const { data } = lineBreak;
+    lineBreak = null;
+    deps.terminal.clearSelection();
+    deps.send(data);
+  };
   const onKeydown = (e: KeyboardEvent): void => {
+    sendLineBreak();
     pendingText = null;
     if (deps.claimed(e)) return;
     const term = deps.terminal;
@@ -185,6 +226,12 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
         deps.send(action.data);
         pendingText = e.key.length === 1 ? e.key : action.data;
         break;
+      case "line-break":
+        lineBreak = { code: e.code, data: action.data };
+        e.stopImmediatePropagation();
+        return;
+      case "cancel":
+        break;
       case "scroll":
         term.scrollLines(action.lines);
         break;
@@ -199,7 +246,14 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
     e.preventDefault();
     e.stopImmediatePropagation();
   };
-  const clearPendingText = (): void => { pendingText = null; };
+  const onKeyup = (e: KeyboardEvent): void => {
+    pendingText = null;
+    if (lineBreak?.code === e.code) sendLineBreak();
+  };
+  const onFocusout = (): void => {
+    pendingText = null;
+    sendLineBreak();
+  };
   const onCompositionStart = (): void => {
     composing = true;
     pendingText = null;
@@ -212,6 +266,14 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
     pendingText = e.data;
   };
   const onBeforeInput = (e: InputEvent): void => {
+    // The pending key's own input, on the host or ghostty-web's textarea,
+    // after any dead-key text the browser typed ahead of it.
+    if (lineBreak && !e.defaultPrevented && (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak")) {
+      sendLineBreak();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
     // ghostty-web owns textarea input and composition. Its host listener
     // only cancels beforeinput, so text aimed at the focused host goes here.
     if (e.target !== host || e.defaultPrevented || composing || e.isComposing || e.inputType !== "insertText" || !e.data) return;
@@ -226,15 +288,15 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
     e.stopImmediatePropagation();
   };
   host.addEventListener("keydown", onKeydown, true);
-  host.addEventListener("keyup", clearPendingText, true);
-  host.addEventListener("focusout", clearPendingText, true);
+  host.addEventListener("keyup", onKeyup, true);
+  host.addEventListener("focusout", onFocusout, true);
   host.addEventListener("compositionstart", onCompositionStart, true);
   host.addEventListener("compositionend", onCompositionEnd, true);
   host.addEventListener("beforeinput", onBeforeInput, true);
   return () => {
     host.removeEventListener("keydown", onKeydown, true);
-    host.removeEventListener("keyup", clearPendingText, true);
-    host.removeEventListener("focusout", clearPendingText, true);
+    host.removeEventListener("keyup", onKeyup, true);
+    host.removeEventListener("focusout", onFocusout, true);
     host.removeEventListener("compositionstart", onCompositionStart, true);
     host.removeEventListener("compositionend", onCompositionEnd, true);
     host.removeEventListener("beforeinput", onBeforeInput, true);
