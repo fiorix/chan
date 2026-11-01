@@ -16,7 +16,7 @@
   import { api } from "../api/client";
   import { activeLayout, type LeafNode, type SplitNode } from "../state/tabs.svelte";
   import { tmuxResizeForSplit } from "../state/tmuxResize";
-  import { tmuxLayout } from "../state/tmuxWindowSize.svelte";
+  import { endTmuxDrag, startTmuxDrag, tmuxLayout } from "../state/tmuxWindowSize.svelte";
   import {
     schedulePersistStateToHash,
     scheduleSessionSave,
@@ -42,6 +42,9 @@
     if (total <= 0) return;
     const startCoord = isRow ? e.clientX : e.clientY;
     const startRatio = split.ratio;
+    // tmux lays its panes out inside the window size this page asks for, so
+    // the ask waits from here until tmux has answered the drag's resize.
+    if (tmuxTree) startTmuxDrag();
 
     const onMove = (ev: MouseEvent) => {
       const coord = isRow ? ev.clientX : ev.clientY;
@@ -62,14 +65,19 @@
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
       if (tmuxTree) {
-        if (split.ratio === startRatio) return;
-        const resize = tmuxResizeForSplit(split, viewLayout.nodes, tmuxLayout() ?? tmuxTree, split.ratio);
+        const resize =
+          split.ratio === startRatio
+            ? null
+            : tmuxResizeForSplit(split, viewLayout.nodes, tmuxLayout() ?? tmuxTree, split.ratio);
         if (!resize) {
           split.ratio = startRatio;
+          endTmuxDrag(false);
           return;
         }
+        endTmuxDrag(true);
         void api.tmuxRequest(resize.sessionId, resize.request).catch(() => {
           split.ratio = startRatio;
+          endTmuxDrag(false);
         });
         return;
       }

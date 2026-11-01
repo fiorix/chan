@@ -154,7 +154,13 @@
     toggleActiveTerminalBroadcastSelectAll,
     type PaneModeStagedDraftEditor,
   } from "./state/tabs.svelte";
-  import { tmuxLayout, tmuxWindowGrid } from "./state/tmuxWindowSize.svelte";
+  import {
+    setTmuxPaneArea,
+    tmuxLayout,
+    tmuxPaneArea,
+    tmuxWindowGrid,
+    tmuxWindowSizeHeld,
+  } from "./state/tmuxWindowSize.svelte";
   import { tmuxResizeForSplit, type TmuxPaneResize } from "./state/tmuxResize";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
@@ -650,27 +656,57 @@
 
   // tmux owns a tmux window's geometry: this window tells it the grid its
   // panes can show together, each pane's host folded over tmux's layout with
-  // a cell per divider, once per change and shortly after the last one, so a
-  // window drag asks once; tmux lays the panes out inside it and each pane
-  // session learns its size from the layout, which its renderer adopts.
-  let tmuxWindowSizeSent: string | null = null;
-  let tmuxWindowSizeTimer: ReturnType<typeof setTimeout> | null = null;
+  // a cell per divider; tmux lays the panes out inside it and each pane
+  // session learns its size from the layout, which its renderer adopts. The
+  // ask follows the box around the pane tree alone, read whenever it
+  // resizes: the fold moves with every divider, so a fold change inside an
+  // unchanged box, as the layout tmux answers with makes, asks nothing back,
+  // and a divider drag holds the ask until tmux has answered it. While the
+  // box has moved since the last ask, each fold change re-arms the 150 ms
+  // wait, so the hosts settle before the ask, which carries the fold as it
+  // stands when the wait ends.
+  const showsTmuxPanes = $derived(tmuxPaneTabs().length > 0);
   $effect(() => {
-    const grid = tmuxWindowGrid();
+    const area = workspaceBackdrop;
+    if (!area || !showsTmuxPanes) return;
+    const measure = () => {
+      const box = area.getBoundingClientRect();
+      setTmuxPaneArea({ width: box.width, height: box.height });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(area);
+    measure();
+    return () => {
+      observer.disconnect();
+      setTmuxPaneArea(null);
+    };
+  });
+  let tmuxWindowSizeSentArea: string | null = null;
+  let tmuxWindowSizePending: { key: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  $effect(() => {
+    const area = tmuxPaneArea();
     const carrier = tmuxPaneTabs()[0];
-    if (!grid || !carrier?.tmuxPane || !carrier.terminalSessionId) return;
-    const sessionId = carrier.terminalSessionId;
-    const pane = carrier.tmuxPane.pane;
-    const key = `${sessionId}:${grid.cols}x${grid.rows}`;
-    if (tmuxWindowSizeSent === key) return;
-    if (tmuxWindowSizeTimer) clearTimeout(tmuxWindowSizeTimer);
-    tmuxWindowSizeTimer = setTimeout(() => {
-      tmuxWindowSizeTimer = null;
-      tmuxWindowSizeSent = key;
+    const pane = carrier?.tmuxPane;
+    const sessionId = carrier?.terminalSessionId;
+    const areaKey = area && pane ? `${pane.connection}:${Math.round(area.width)}x${Math.round(area.height)}` : null;
+    const moved = areaKey !== null && areaKey !== tmuxWindowSizeSentArea && !tmuxWindowSizeHeld();
+    // The fold is read only while the box has moved since the last ask, so a
+    // fold change inside an unchanged box runs nothing here.
+    const grid = moved ? tmuxWindowGrid() : null;
+    const key = grid ? `${areaKey}@${grid.cols}x${grid.rows}` : null;
+    if (tmuxWindowSizePending?.key === key) return;
+    if (tmuxWindowSizePending) clearTimeout(tmuxWindowSizePending.timer);
+    tmuxWindowSizePending = null;
+    if (!key || !grid || !areaKey || !pane || !sessionId) return;
+    const timer = setTimeout(() => {
+      tmuxWindowSizePending = null;
+      const fold = untrack(tmuxWindowGrid) ?? grid;
+      tmuxWindowSizeSentArea = areaKey;
       void api
-        .tmuxRequest(sessionId, { request: "window-size", pane, cols: grid.cols, rows: grid.rows })
+        .tmuxRequest(sessionId, { request: "window-size", pane: pane.pane, cols: fold.cols, rows: fold.rows })
         .catch(() => {});
     }, 150);
+    tmuxWindowSizePending = { key, timer };
   });
   function spawnBrowserFromContext(): void {
     // A window whose tenant serves no filesystem has no browser surface
