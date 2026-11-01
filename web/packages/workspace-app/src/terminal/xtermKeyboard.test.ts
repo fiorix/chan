@@ -183,4 +183,19 @@ describe("the keydown decisions around the evaluator", () => {
     expect(decide({ keyCode: 37, key: "ArrowLeft", ctrlKey: true, altKey: true }, WINDOWS))
       .toEqual({ kind: "send", data: "\x1b[1;7D" });
   });
+
+  test.each([false, true])("Windows Ctrl+Alt plus a bare letter sends the control-Meta chord (AltGraph=%s)", (altGraph) => {
+    expect(decide({ keyCode: 66, key: "b", code: "KeyB", ctrlKey: true, altKey: true, altGraph }, WINDOWS))
+      .toEqual({ kind: "send", data: "\x1b\x02" });
+    expect(decide({ keyCode: 66, key: "B", code: "KeyB", ctrlKey: true, altKey: true, shiftKey: true, altGraph }, WINDOWS))
+      .toEqual({ kind: "send", data: "\x1b\x02" });
+  });
+
+  test.each([
+    ["\u0131", "KeyI", 73],
+    ["\u017f", "KeyS", 83],
+  ] as const)("an AltGr layout character %s is not its ASCII uppercase equivalent", (key, code, keyCode) => {
+    expect(decide({ keyCode, key, code, ctrlKey: true, altKey: true }, WINDOWS))
+      .toEqual({ kind: "pass", deadKey: false });
+  });
 });

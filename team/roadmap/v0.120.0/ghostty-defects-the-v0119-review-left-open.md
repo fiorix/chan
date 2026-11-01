@@ -1,6 +1,6 @@
 # Ghostty defects the v0.119.0 review left open
 
-Status: raised on 2026-10-31 by the lead from the adversarial review the owner asked for before the v0.119.0 GA ("sure you can do a round of code review"), with the review's should-fix findings fixed in v0.119.0 and these left open as minor; triaged and accepted by the owner the same day (the section Triage), not started.
+Status: the terminal findings are implemented on their lane, with every finding's outcome recorded below; finding 3's separate lane and the native platform readings remain pending as noted.
 
 ## What was asked
 
@@ -57,3 +57,22 @@ Deferred:
 ## Acceptance
 
 Each finding to fix is fixed with a test or a build check that was red before it; 7 and 9 also carry the Windows reading before and after. 8 and 10 close here with the reasons above, and 13 moves on as above.
+
+## Outcomes, 2026-11-01
+
+1. Fixed in `0b7086ec0`: focus reporting skips a repeated state. The automated Chrome reading observes exactly CSI O then CSI I through a tab switch and back, with matching `cat -v` output (`dev/v0120-team/evidence/Term120/stage2-focus-live.json`); native WebView behaviour is not measured.
+2. Fixed in `0b7086ec0`: chan answers `CSI ? u` from the flags its encoder uses, and drops the core's answer. Tests cover cut replay, DECSTR, stack depth, flags above 31, alternate-screen restore and byte-split queries; the terminal design describes the same authority.
+3. The by-name machine lookup for plain and tmux windows belongs to its separate lane; its accepted commit is pending and is named at the row's close.
+4. Fixed in `0b7086ec0`: the binding drops the core's XTVERSION reply, while DSR and DA replies still pass.
+5. Fixed in `7ef78f7d9`: host `insertText` sends browser text once through the user-input path, with composition and textarea input owned by ghostty-web. Before/after Chrome readings show an emoji reaching the PTY once only with the fix (`dev/v0120-team/evidence/Term120/stage3-input-before.json` and `stage3-input-after.json`); the native macOS emoji picker and dictation readings remain pending.
+6. Fixed in `7ef78f7d9`: a non-text key after Dead sends its encoded bytes, including CR and HT. The installed xterm.js measurement does not establish the finding's "as xterm.js does" premise: with synthetic Dead then Enter or Tab, its keydown cancels the key before the pending-dead-key return, and no keypress or bytes follow, while ordinary Enter and Tab controls pass (`dev/v0120-team/evidence/Term120/stage3-xterm-reading.json`). A native dead-key source is not traced; the explicit non-text-key contract is implemented.
+7. Fixed in the row's final commit: on Windows, a printable key after Dead stays with the browser so host `insertText` supplies either the composed character or apostrophe-plus-letter text once. The tests and Chrome probe model the next `key` as the base key and as composed text, including apostrophe then consonant or space (`dev/v0120-team/evidence/Term120/stage4-windows-before.json` and `stage4-windows-after.json`). Not verified on Windows: the W3C key event viewer reading of apostrophe then e, including the second keydown's `key`, remains open for a Windows machine.
+8. Closed: the owner's printable-ASCII Option rule makes Option+Shift+backquote type the backquote on a US Mac layout.
+9. Fixed in the row's final commit: Windows Ctrl+Alt plus a bare ASCII letter sends its control-Meta encoding; a layout character types itself, and AltGr+V bypasses ghostty-web's paste early return. Ctrl+V remains 0x16 on Linux and Windows, where Ctrl+Shift+V retains native paste; macOS uses Cmd+V. Modeled Windows events are exercised in tests and Chrome; native Windows before/after readings remain unverified.
+10. Closed as a rare cosmetic defect in the Ghostty core, without a chan workaround. The upstream report is drafted for the owner at `dev/v0120-team/reports/drafts/ghostty-finding-10-upstream.md`; it is not filed.
+11. Fixed in `eee284c03`: write-buffer growth allocates before freeing or swapping, so allocation failure leaves the live buffer usable and freed exactly once later. The injected failure test covers recovery and subsequent growth.
+12. Fixed in `eee284c03`: wasm compile failure stays cached for the page's life, while failed fetches retry. Compile-rejection and fetch-retry tests pass; the behaviour on an old WebKit without SIMD is not measured on such a machine.
+13. Deferred to the next version as a separate performance item, with its own measurements required; the row's close moves it to v0.121.0.
+14. Fixed in `eee284c03`: history retries an out-of-space grapheme read using the returned length, and screen rendering reads the whole cluster. Tests preserve a base letter plus 33 combining marks on screen and in history, its width and the following cell.
+15. Fixed in `0b7086ec0`: a resize supplies current cell pixel dimensions and drains the core's reply immediately through the generated-input path. Tests cover both the binding and its kit/component wiring.
+16. Fixed in `eee284c03`: the build removes ghostty-web's unused inline wasm data URL. The lazy chunk measures 648,962 bytes before and 83,687 after, a 565,275-byte reduction; the vendored wasm remains 1,191,241 bytes and is byte-identical. The build test fails if the inline wasm returns or the vendored asset changes.
