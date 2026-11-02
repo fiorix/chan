@@ -159,6 +159,24 @@ export function ghosttyKeydownAction(
   }
 }
 
+/// What chan's xterm.js path sends for the key behind a delete input:
+/// Backspace, Delete, and their word chords (Option on macOS, where chan
+/// treats Option as Meta, and Ctrl elsewhere). Null for any other input.
+export function ghosttyDeleteInputBytes(inputType: string, platform: XtermPlatform): string | null {
+  switch (inputType) {
+    case "deleteContentBackward":
+      return "\x7f";
+    case "deleteContentForward":
+      return "\x1b[3~";
+    case "deleteWordBackward":
+      return platform.isMac ? "\x1b\x7f" : "\b";
+    case "deleteWordForward":
+      return platform.isMac ? "\x1bd" : "\x1b[3;5~";
+    default:
+      return null;
+  }
+}
+
 /// The slice of ghostty-web's Terminal the listener drives.
 export type GhosttyKeyTerminal = {
   readonly rows: number;
@@ -274,7 +292,27 @@ export function installGhosttyKeyParity(host: HTMLElement, deps: GhosttyKeyDeps)
       e.stopImmediatePropagation();
       return;
     }
-    // ghostty-web owns textarea input and composition. Its host listener
+    // A delete whose keydown the browser's text input took (WebKit flags it
+    // keyCode 229, and both keydown paths leave it alone) arrives as delete
+    // input. ghostty-web reads it only on its textarea and has no word
+    // deletes, while focus() puts the focus on the host, so every delete
+    // aimed at either is sent here as its key, once. A composition's own
+    // deletes stay with the composition.
+    const deleteBytes = ghosttyDeleteInputBytes(e.inputType, deps.platform());
+    if (deleteBytes !== null) {
+      const aimed = e.target === host || (e.target instanceof HTMLTextAreaElement && e.target.parentElement === host);
+      if (!aimed || e.defaultPrevented || composing || e.isComposing) return;
+      const duplicate = pendingText === deleteBytes;
+      pendingText = null;
+      if (!duplicate) {
+        deps.terminal.clearSelection();
+        deps.send(deleteBytes);
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    // ghostty-web owns textarea text input and composition. Its host listener
     // only cancels beforeinput, so text aimed at the focused host goes here.
     if (e.target !== host || e.defaultPrevented || composing || e.isComposing || e.inputType !== "insertText" || !e.data) return;
     const duplicate = pendingText === e.data;

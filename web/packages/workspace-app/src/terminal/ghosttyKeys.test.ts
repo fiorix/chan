@@ -559,6 +559,94 @@ describe("browser text on the ghostty host", () => {
   });
 });
 
+// WebKit can flag a delete key keyCode 229, as taken by its text input, with
+// no composition under way. chan and ghostty-web both leave such a keydown to
+// the browser, whose delete input then carries the key.
+describe("delete input on the ghostty host", () => {
+  const deleteInput = (
+    term: ReturnType<typeof inputTerminal>,
+    inputType: string,
+    target: HTMLElement,
+    init: InputEventInit = {},
+  ) => term.beforeinput(null, { inputType, ...init }, target);
+
+  test.each([
+    ["the host", LINUX],
+    ["the textarea", LINUX],
+    ["the host", MAC],
+    ["the textarea", MAC],
+  ] as const)("a Backspace the text input took sends DEL once, aimed at %s (%j)", (where, platform) => {
+    const term = inputTerminal(false, platform);
+    const target = where === "the host" ? term.host : term.textarea;
+    const key = keydown({ key: "Backspace", code: "Backspace", keyCode: 229 });
+    target.dispatchEvent(key);
+    expect(term.data, "the keydown is the text input's").toEqual([]);
+    expect(key.defaultPrevented).toBe(false);
+    expect(deleteInput(term, "deleteContentBackward", target).defaultPrevented).toBe(true);
+    expect(term.data).toEqual(["\x7f"]);
+    term.dispose();
+  });
+
+  test.each([
+    ["deleteContentBackward", { key: "Backspace", code: "Backspace", keyCode: 8 }, LINUX],
+    ["deleteContentForward", { key: "Delete", code: "Delete", keyCode: 46 }, LINUX],
+    ["deleteWordBackward", { key: "Backspace", code: "Backspace", keyCode: 8, ctrlKey: true }, LINUX],
+    ["deleteWordForward", { key: "Delete", code: "Delete", keyCode: 46, ctrlKey: true }, LINUX],
+    ["deleteContentBackward", { key: "Backspace", code: "Backspace", keyCode: 8 }, MAC],
+    ["deleteContentForward", { key: "Delete", code: "Delete", keyCode: 46 }, MAC],
+    ["deleteWordBackward", { key: "Backspace", code: "Backspace", keyCode: 8, altKey: true }, MAC],
+    ["deleteWordForward", { key: "Delete", code: "Delete", keyCode: 46, altKey: true }, MAC],
+  ] as const)("%s sends what its key sends (%j, %j)", (inputType, init, platform) => {
+    const want = xterm(init, platform).data;
+    expect(want).not.toBe("");
+    const term = inputTerminal(false, platform, (e) => terminalMetaKeyBytes(e, createTerminalKeyboardProtocolState()));
+    term.textarea.dispatchEvent(keydown({ ...init, keyCode: 229 }));
+    deleteInput(term, inputType, term.textarea);
+    expect(term.data).toEqual([want]);
+    term.dispose();
+  });
+
+  test.each([
+    ["Backspace", 8, "deleteContentBackward", "\x7f"],
+    ["Delete", 46, "deleteContentForward", "\x1b[3~"],
+  ] as const)("a %s the keydown sent is not sent again by its delete input", (key, keyCode, inputType, bytes) => {
+    const term = inputTerminal();
+    const down = keydown({ key, code: key, keyCode });
+    term.textarea.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    deleteInput(term, inputType, term.textarea);
+    expect(term.data).toEqual([bytes]);
+    term.textarea.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key }));
+    deleteInput(term, inputType, term.textarea);
+    expect(term.data, "a later delete input is its own").toEqual([bytes, bytes]);
+    term.dispose();
+  });
+
+  test("a composition's own deletes stay with it", () => {
+    const term = inputTerminal();
+    term.host.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    term.textarea.dispatchEvent(keydown({ key: "Backspace", code: "Backspace", keyCode: 229, isComposing: true }));
+    expect(deleteInput(term, "deleteContentBackward", term.textarea).defaultPrevented).toBe(false);
+    expect(deleteInput(term, "deleteContentBackward", term.textarea, { isComposing: true }).defaultPrevented).toBe(false);
+    expect(deleteInput(term, "deleteCompositionText", term.textarea, { isComposing: true }).defaultPrevented).toBe(false);
+    term.host.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
+    expect(term.data).toEqual([]);
+    term.dispose();
+  });
+
+  test("a delete input already cancelled, or aimed elsewhere, is left alone", () => {
+    const term = inputTerminal();
+    const cancelled = new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "deleteContentBackward" });
+    cancelled.preventDefault();
+    term.host.dispatchEvent(cancelled);
+    const field = document.createElement("input");
+    term.host.append(field);
+    expect(deleteInput(term, "deleteContentBackward", field).defaultPrevented).toBe(false);
+    expect(term.data).toEqual([]);
+    term.dispose();
+  });
+});
+
 type Outcome = { data: string; scrolled: number; prevented: boolean };
 
 /// What a ghostty terminal does with a keydown under chan's listener.
