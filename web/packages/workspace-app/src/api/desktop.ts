@@ -411,18 +411,32 @@ export async function requestCloseWindow(): Promise<void> {
 /// prevented the close and asked the SPA; picking Hide invokes the
 /// `hide_window_from_close_confirm` command, which buries the window (its
 /// sessions stay warm, reopenable from the Window menu) instead of destroying
-/// it. No-op off-desktop (the overlay is desktop-only by construction). INERT if
-/// the ACL withholds the command (best-effort: a failed IPC logs and leaves the
-/// window as-is rather than throwing into the overlay).
-export async function hideWindowFromCloseConfirm(): Promise<void> {
-  if (!isTauriDesktop()) return;
+/// it. No-op off-desktop (the overlay is desktop-only by construction).
+/// Resolves with why the window stayed shown when the desktop did not hide it
+/// (its last shown window guard refused, or the ACL withholds the command),
+/// and with `null` once the hide went ahead; it never throws into the overlay.
+export async function hideWindowFromCloseConfirm(): Promise<string | null> {
+  if (!isTauriDesktop()) return null;
   try {
     await tauriInvoke("hide_window_from_close_confirm");
+    return null;
   } catch (err) {
-    console.warn(
-      "hideWindowFromCloseConfirm: hide_window_from_close_confirm IPC failed",
-      err,
-    );
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/// Ask the desktop whether it would refuse to close THIS window: the
+/// sentence its last shown window guard refuses with, or `null`. The
+/// close-confirm overlay asks before its Close discards the window's
+/// session, since the discard reaps the window's terminals. `null` off the
+/// desktop and from a desktop that cannot answer, which has no such guard.
+export async function closeWindowRefusal(): Promise<string | null> {
+  if (!isTauriDesktop()) return null;
+  try {
+    return (await tauriInvoke<string | null>("close_window_refusal")) ?? null;
+  } catch (err) {
+    console.warn("closeWindowRefusal: close_window_refusal IPC failed", err);
+    return null;
   }
 }
 

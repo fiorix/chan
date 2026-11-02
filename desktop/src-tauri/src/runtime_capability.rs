@@ -89,6 +89,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "begin_generated_download",
     "cancel_generated_download",
     "cancel_native_transfer",
+    "close_window_refusal",
     "create_library_window",
     "download_file_native",
     "finish_generated_download",

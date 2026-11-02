@@ -52,17 +52,39 @@
     }
   });
 
+  const refusal = $derived(closeConfirmState.refusal);
+
   // Hide: bury the window (sessions stay warm, reopenable from the Window menu).
-  function hide(): void {
-    flushAndHideWindow();
+  // The desktop refuses chan's last shown window while terminals would end with
+  // it, and the prompt then stays up with its reason.
+  async function hide(): Promise<void> {
+    const prompt = closeConfirmState.resolve;
+    const refused = await flushAndHideWindow();
+    if (closeConfirmState.resolve !== prompt) return;
+    if (refused) {
+      closeConfirmState.refusal = refused;
+      return;
+    }
     resolveCloseConfirm("hide");
   }
 
   // Close: discard this window's session blob (the server reaps its terminals)
   // and ask the host to destroy the window, so it leaves no hidden/empty row.
-  function close(): void {
-    discardWindowSession({ reap: true });
-    flushAndCloseWindow();
+  // The desktop is asked first whether it refuses (flushAndCloseWindow), and
+  // a refusal keeps the prompt up with its reason; a prompt cancelled while
+  // the desktop answered closes nothing.
+  async function close(): Promise<void> {
+    const prompt = closeConfirmState.resolve;
+    const wanted = (): boolean => closeConfirmState.resolve === prompt;
+    const refused = await flushAndCloseWindow({
+      discard: () => discardWindowSession({ reap: true }),
+      stillWanted: wanted,
+    });
+    if (!wanted()) return;
+    if (refused) {
+      closeConfirmState.refusal = refused;
+      return;
+    }
     resolveCloseConfirm("close");
   }
 
@@ -138,9 +160,12 @@
           Hide it to keep its tabs and terminals warm, or close to discard
         {/if}
       </div>
+      {#if refusal}
+        <div class="refusal" role="alert">{refusal}</div>
+      {/if}
       <div class="actions">
-        <button class="hide" bind:this={hideBtn} onclick={hide}> Hide </button>
-        <button class="close" bind:this={closeBtn} onclick={close}> Close </button>
+        <button class="hide" bind:this={hideBtn} onclick={() => void hide()}> Hide </button>
+        <button class="close" bind:this={closeBtn} onclick={() => void close()}> Close </button>
         {#if tmuxWindow}
           <button class="detach" bind:this={detachBtn} onclick={detach}> Detach </button>
         {/if}
@@ -184,6 +209,11 @@
   .subline {
     font-size: 14px;
     color: var(--text-secondary);
+    line-height: 1.4;
+  }
+  .refusal {
+    font-size: 13px;
+    color: var(--warn-text);
     line-height: 1.4;
   }
   .actions {

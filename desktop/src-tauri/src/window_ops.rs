@@ -19,9 +19,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chan_server::{DesktopWindowOp, NewWindowKind};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::mpsc;
 
+use crate::last_window::{self, Gesture};
 use crate::{serve, AppState};
 
 /// Drain the window-ops channel until it closes (process exit drops the
@@ -195,17 +196,26 @@ async fn new_workspace_window(state: &Arc<AppState>, key: &str) -> Result<String
 /// restore key) runs. `close()` requests a close -- the handler hides SPA
 /// windows -- unlike `destroy()`, which `rm` uses to truly remove. Resolves the
 /// launcher's bare `window_id` to the composite native label first (see
-/// [`serve::resolve_window_label`]).
-fn hide_window(app: &AppHandle, id: &str) -> Result<(), String> {
+/// [`serve::resolve_window_label`]). Refused, with nothing hidden, when the
+/// window is chan's last shown one and terminals would end with the process
+/// ([`last_window`]).
+fn hide_window<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let label = serve::resolve_window_label(app, id);
     match app.get_webview_window(&label) {
         Some(w) => {
+            let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+            last_window::check(app, &state, &label, Gesture::Hide)?;
             // The launcher hide IS the explicit hide gesture, so suppress the
             // close handler's "was hidden, not closed" notice (that teaches the
             // red-button gesture). Flag the label before `close()` so the
             // CloseRequested bury consumes it; both run on the main thread.
-            app.state::<Arc<AppState>>().mark_silent_hide(&label);
-            w.close().map_err(|e| format!("hiding {id}: {e}"))
+            state.mark_silent_hide(&label);
+            w.close().map_err(|e| {
+                // No close request is coming to consume the flag, and a flag
+                // left behind would read as a hide under way.
+                state.take_silent_hide(&label);
+                format!("hiding {id}: {e}")
+            })
         }
         // A reaped / already-gone native window is an idempotent
         // silent no-op -- reply Ok(()) so the route returns 204, NOT Err (which maps
@@ -220,13 +230,19 @@ fn hide_window(app: &AppHandle, id: &str) -> Result<(), String> {
 
 /// Truly destroy a window after the caller applies its live-terminal guard or
 /// confirmation. Reply: `Ok(true)` destroyed, `Ok(false)` no live window (the
-/// server then deletes any saved layout), or an error when destruction fails.
+/// server then deletes any saved layout), or an error when destruction fails
+/// or [`close_refusal`] refuses it, which happens before anything is
+/// discarded or destroyed.
 async fn close_window(
     app: AppHandle,
     state: Arc<AppState>,
     id: String,
     reply: tokio::sync::oneshot::Sender<Result<bool, String>>,
 ) {
+    if let Err(refusal) = close_refusal(&app, &state, &id) {
+        let _ = reply.send(Err(refusal));
+        return;
+    }
     if let Some(devserver_id) = id.strip_prefix("control-terminal-") {
         crate::close_devserver_control_terminal(&app, &state, devserver_id).await;
         let _ = reply.send(Ok(true));
@@ -260,6 +276,14 @@ async fn close_window(
     .await
     .and_then(|inner| inner);
     let _ = reply.send(result);
+}
+
+/// The last shown window guard for a removal of window `id` (`cs window rm`,
+/// the launcher's Close): its native label resolves as the hide's does, and a
+/// control terminal's id is its label.
+fn close_refusal<R: Runtime>(app: &AppHandle<R>, state: &AppState, id: &str) -> Result<(), String> {
+    let label = serve::resolve_window_label(app, id);
+    last_window::check(app, state, &label, Gesture::Close)
 }
 
 async fn set_remote_window_label(
@@ -343,6 +367,112 @@ mod tests {
             [stored],
             "cs window new did not open a window under the registry row"
         );
+    }
+
+    /// `cs window hide` and the launcher's Hide on chan's last shown window
+    /// are refused while a hidden window's terminal lives: the reply carries
+    /// the guard's sentence and the window is neither flagged nor closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hide_of_the_last_shown_window_is_refused_with_the_reason() {
+        let desk = crate::last_window::tests::Desk::new().await;
+        let shown = desk.window("local::w-shown");
+        desk.window("local::w-hidden");
+        desk.state.bury_window("local::w-hidden", "Hidden");
+        let url = desk
+            .embedded()
+            .open_terminal_with_command("true".into())
+            .await
+            .unwrap()
+            .0;
+        desk.embedded()
+            .spawn_terminal_for_tests(&url, Some("w-hidden"))
+            .await;
+        let refused = hide_window(desk.app.handle(), "w-shown");
+        assert!(
+            matches!(&refused, Err(sentence) if sentence.starts_with("this is chan's last shown window: hiding it")),
+            "got {refused:?}"
+        );
+        assert!(
+            !desk.state.take_silent_hide("local::w-shown"),
+            "a refused hide flagged the window for a bury"
+        );
+        assert!(
+            shown.is_visible().unwrap_or(true),
+            "a refused hide closed the window"
+        );
+        // A second shown window lets the same hide go ahead.
+        desk.window("local::w-other");
+        assert_eq!(hide_window(desk.app.handle(), "w-shown"), Ok(()));
+    }
+
+    /// With no live terminal the hide of the last shown window goes ahead as
+    /// it always has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hide_of_the_last_shown_window_with_no_live_terminal_goes_ahead() {
+        let desk = crate::last_window::tests::Desk::new().await;
+        desk.window("local::w-last");
+        assert_eq!(hide_window(desk.app.handle(), "w-last"), Ok(()));
+        assert!(
+            desk.state.take_silent_hide("local::w-last"),
+            "the hide flagged the window for its bury"
+        );
+    }
+
+    /// `cs window rm` and the launcher's Close of chan's last shown window
+    /// ask the guard by the window's bare id, as the bridge sends it: the
+    /// sessions of other windows refuse it, its own do not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_removal_of_the_last_shown_window_is_refused_for_other_windows_terminals() {
+        let desk = crate::last_window::tests::Desk::new().await;
+        desk.window("local::w-last");
+        let url = desk
+            .embedded()
+            .open_terminal_with_command("true".into())
+            .await
+            .unwrap()
+            .0;
+        desk.embedded()
+            .spawn_terminal_for_tests(&url, Some("w-last"))
+            .await;
+        assert_eq!(
+            close_refusal(desk.app.handle(), &desk.state, "w-last"),
+            Ok(()),
+            "the window's own shell ends with the forced removal"
+        );
+        desk.embedded()
+            .spawn_terminal_for_tests(&url, Some("w-hidden"))
+            .await;
+        let refused = close_refusal(desk.app.handle(), &desk.state, "w-last");
+        assert!(
+            matches!(&refused, Err(sentence) if sentence.contains("end 1 other running terminal session(s)")),
+            "got {refused:?}"
+        );
+    }
+
+    /// The removal's reply is the guard's, before the close discards or
+    /// destroys anything; `close_window` takes the production app, which the
+    /// mock runtime cannot stand in for, so its order is pinned here.
+    #[test]
+    fn a_removal_asks_the_guard_before_it_discards_or_destroys() {
+        const WINDOW_OPS_RS: &str = include_str!("window_ops.rs");
+        let body = WINDOW_OPS_RS
+            .split_once("\nasync fn close_window(")
+            .expect("close_window")
+            .1;
+        let body = &body[..body.find("\n}\n").expect("close_window ends")];
+        let guard = body
+            .find("close_refusal(&app, &state, &id)")
+            .expect("guard call");
+        for later in [
+            "close_devserver_control_terminal",
+            "discard_window",
+            "destroy()",
+        ] {
+            let at = body
+                .find(later)
+                .unwrap_or_else(|| panic!("{later} in close_window"));
+            assert!(guard < at, "{later} runs before the guard");
+        }
     }
 
     /// `cs window new` in a relinked root the boot restored opens a window

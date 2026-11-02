@@ -2,10 +2,11 @@
 // Importing the module is the registration side effect;
 // allCommands()/availableCommands() then expose the catalog.
 //
-// Close window's row runs against the real store: it discards the window's
-// session before it asks the desktop to close the window, and the discard is
-// what stops every later save of the session by the page, so the desktop's
-// close of the record is not written back.
+// Close window's row runs against the real store: it asks the desktop whether
+// it refuses the close, then discards the window's session before it asks the
+// desktop to close the window, and the discard is what stops every later save
+// of the session by the page, so the desktop's close of the record is not
+// written back. A refused close discards nothing, and the page goes on saving.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -129,12 +130,16 @@ describe("Close window's row on the desktop", () => {
   /// desktop, in the order they are made.
   let events: string[];
 
+  /// What the desktop answers `close_window_refusal` with.
+  let refusal: string | null;
+
   beforeEach(() => {
     events = [];
+    refusal = null;
     (window as TauriWindow).__TAURI_INTERNALS__ = {
       invoke: (cmd: string) => {
         events.push(cmd);
-        return Promise.resolve();
+        return Promise.resolve(cmd === "close_window_refusal" ? refusal : undefined);
       },
     };
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
@@ -172,15 +177,28 @@ describe("Close window's row on the desktop", () => {
     expect(events).toEqual(["PUT session"]);
   });
 
-  it("discards the window's session before it asks the desktop, and no save of the page follows", async () => {
+  it("asks whether the desktop refuses, discards the session before it asks for the close, and no save follows", async () => {
     resetLayout([fileTab({ id: "closing", path: "notes/closing.md" })]);
 
     allCommands().find((command) => command.id === "app.window.close")!.run();
     await vi.advanceTimersByTimeAsync(0);
-    expect(events).toEqual(["DELETE session", "request_close_window"]);
+    expect(events).toEqual(["close_window_refusal", "DELETE session", "request_close_window"]);
 
     await pageSaves();
 
-    expect(events).toEqual(["DELETE session", "request_close_window"]);
+    expect(events).toEqual(["close_window_refusal", "DELETE session", "request_close_window"]);
+  });
+
+  it("a close the desktop refuses discards nothing, and the page goes on saving its session", async () => {
+    refusal = "this is chan's last shown window: closing it would quit chan and end 1 other running terminal session(s); show or open another window first";
+    resetLayout([fileTab({ id: "kept", path: "notes/kept.md" })]);
+
+    allCommands().find((command) => command.id === "app.window.close")!.run();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(["close_window_refusal"]);
+
+    await pageSaves();
+
+    expect(events).toEqual(["close_window_refusal", "PUT session"]);
   });
 });

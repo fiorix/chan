@@ -9,6 +9,7 @@ mod dropped_paths;
 mod embedded;
 mod gateway;
 mod handoff_registrations;
+mod last_window;
 mod launcher_panel;
 mod linux_gui_stack;
 mod native_dialog;
@@ -4535,12 +4536,36 @@ fn close_devserver_window<R: tauri::Runtime>(
 /// and evaled `app.window.confirmClose` into the webview; this is the "Hide"
 /// answer. Mirrors the launcher Hide action, minus the (now removed) teaching
 /// notice. "Close" is the sibling answer and rides `request_close_window`
-/// (discard + destroy).
+/// (discard + destroy). Refused with the last shown window guard's sentence,
+/// and nothing buried, when this is chan's last shown window and terminals
+/// would end with the process.
 #[tauri::command]
-fn hide_window_from_close_confirm(app: tauri::AppHandle, window: tauri::WebviewWindow) {
-    let state = app.state::<Arc<AppState>>();
-    let label = window.label().to_string();
-    serve::bury_window_now(&app, &state, &label);
+fn hide_window_from_close_confirm(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    hide_from_close_confirm(&app, window.label())
+}
+
+fn hide_from_close_confirm<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+) -> Result<(), String> {
+    last_window::check_window(app, label, last_window::Gesture::Hide)?;
+    let state = Arc::clone(app.state::<Arc<AppState>>().inner());
+    serve::bury_window_now(app, &state, label);
+    Ok(())
+}
+
+/// The close-confirm overlay's question before its CLOSE choice: the sentence
+/// the last shown window guard refuses closing THIS window with, or `None`.
+/// The overlay asks before it discards the window's session, which reaps the
+/// window's terminals, so a refused close loses nothing. `request_close_window`
+/// does not ask: it also closes a window whose page has already discarded its
+/// session, which a refusal would leave open with nothing saved.
+#[tauri::command]
+fn close_window_refusal(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Option<String> {
+    last_window::check_window(&app, window.label(), last_window::Gesture::Close).err()
 }
 
 /// Abandon the devserver backing a workspace window (the disconnect overlay's
@@ -5237,6 +5262,7 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         request_app_quit,
         request_close_window,
         hide_window_from_close_confirm,
+        close_window_refusal,
         abandon_devserver_for_window,
         reconnect_devserver_for_window,
         // The command deck's library-window actions. Both resolve the
@@ -9699,6 +9725,68 @@ mod tests {
         // A shown record the watcher has not opened yet holds the exit back.
         assert!(exit_arm.contains("if window_on_its_way(_app) {"));
         assert!(exit_arm.contains("schedule_exit_when_nothing_opened(_app.clone());"));
+    }
+
+    /// The close prompt's Hide on chan's last shown window, while a hidden
+    /// window's terminal lives, answers the guard's sentence and buries
+    /// nothing; with another shown window the same Hide buries it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_close_prompts_hide_of_the_last_shown_window_is_refused_and_buries_nothing() {
+        let desk = last_window::tests::Desk::new().await;
+        desk.window("local::w-shown");
+        let url = desk
+            .embedded()
+            .open_terminal_with_command("true".into())
+            .await
+            .unwrap()
+            .0;
+        desk.embedded()
+            .spawn_terminal_for_tests(&url, Some("w-hidden"))
+            .await;
+        let refused = hide_from_close_confirm(desk.app.handle(), "local::w-shown");
+        assert!(
+            matches!(&refused, Err(sentence) if sentence.starts_with("this is chan's last shown window: hiding it")),
+            "got {refused:?}"
+        );
+        assert!(
+            desk.state.buried_snapshot().is_empty(),
+            "a refused hide buried the window"
+        );
+        assert_eq!(
+            last_window::check_window(
+                desk.app.handle(),
+                "local::w-shown",
+                last_window::Gesture::Close
+            )
+            .err(),
+            refused_close_sentence(1),
+            "the prompt's Close asks the same guard"
+        );
+
+        desk.window("local::w-other");
+        assert_eq!(
+            hide_from_close_confirm(desk.app.handle(), "local::w-shown"),
+            Ok(())
+        );
+        assert_eq!(
+            desk.state
+                .buried_snapshot()
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>(),
+            ["local::w-shown"]
+        );
+    }
+
+    fn refused_close_sentence(others: usize) -> Option<String> {
+        last_window::refusal(
+            last_window::Gesture::Close,
+            &last_window::Reading {
+                others_shown: 0,
+                live: others,
+                own: 0,
+            },
+        )
     }
 
     #[cfg(not(target_os = "macos"))]

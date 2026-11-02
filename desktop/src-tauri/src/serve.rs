@@ -704,7 +704,7 @@ pub(crate) async fn spawn_terminal_mode_window(
 /// the feed. The view-driven un-bury in [`open_window_by_label`] needs the real
 /// `lib-<hex>::` label. Only a bare `w-` id matching none of these falls back to
 /// the `local::` composite.
-pub(crate) fn resolve_window_label(app: &AppHandle, id: &str) -> String {
+pub(crate) fn resolve_window_label<R: Runtime>(app: &AppHandle<R>, id: &str) -> String {
     // A live window whose exact label IS `id` wins.
     if app.get_webview_window(id).is_some() {
         return id.to_string();

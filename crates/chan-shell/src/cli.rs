@@ -622,6 +622,8 @@ pub enum WindowAction {
     /// Unlike the close button, which only hides. Refuses to kill a window
     /// hosted here when it has live terminals unless `--force` is passed. A
     /// connected devserver's window is removed without that local check.
+    /// The desktop refuses, even with `--force`, to remove its last shown
+    /// window while other terminals would end with chan.
     #[command(verbatim_doc_comment)]
     Rm {
         /// The window id (see `cs window list`).
@@ -633,6 +635,8 @@ pub enum WindowAction {
     /// Hide a window by id, keeping it reopenable
     ///
     /// The OS close-button behavior: terminals and layout stay warm.
+    /// Refused for the desktop's last shown window while any terminal
+    /// runs, since hiding it would quit chan and end them.
     #[command(verbatim_doc_comment)]
     Hide {
         /// The window id (see `cs window list`).

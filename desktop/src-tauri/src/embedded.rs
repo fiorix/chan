@@ -896,7 +896,87 @@ impl EmbeddedServer {
             .discard_window(window_id)
             .map_err(|e| format!("discarding window {window_id}: {e}"))
     }
+
+    /// How many terminal sessions are alive across every tenant this host
+    /// mounts: the workspaces, the shared terminal tenant and each control
+    /// terminal's tenant. Every one of them ends with the process, which is
+    /// what the last shown window guard counts.
+    pub fn live_terminal_sessions(&self) -> usize {
+        self.host
+            .mounted_prefixes()
+            .unwrap_or_default()
+            .iter()
+            .map(|prefix| self.host.tenant_terminal_session_count(prefix))
+            .sum()
+    }
+
+    /// How many live terminal sessions window `window_id` owns across this
+    /// host's tenants, the count behind the `cs window rm` guard.
+    pub fn window_terminal_sessions(&self, window_id: &str) -> usize {
+        self.host.live_terminal_count(window_id)
+    }
+
+    /// How many live terminal sessions the tenant mounted at `prefix` runs:
+    /// a control terminal's connect script runs in a tenant of its own.
+    pub fn tenant_terminal_sessions(&self, prefix: &str) -> usize {
+        self.host.tenant_terminal_session_count(prefix)
+    }
+
+    /// Spawn a terminal session running [`LONG_RUNNING_TEST_COMMAND`] in the
+    /// tenant `launch_url` names, owned by `window_id`, through the tenant's
+    /// own terminal route as a page does, and wait until the host counts it.
+    #[cfg(test)]
+    pub(crate) async fn spawn_terminal_for_tests(&self, launch_url: &str, window_id: Option<&str>) {
+        let url = reqwest::Url::parse(launch_url).expect("launch url");
+        let token = url
+            .query_pairs()
+            .find(|(key, _)| key == "t")
+            .map(|(_, value)| value.into_owned())
+            .expect("tenant token");
+        let prefix = url.path().trim_end_matches("/index.html").to_string();
+        let before = self.live_terminal_sessions();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("listener address");
+        let router = Arc::clone(&self.host).router();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let body = serde_json::json!({
+            "name": "test",
+            "command": LONG_RUNNING_TEST_COMMAND,
+            "window_id": window_id,
+        });
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}{prefix}/api/terminals"))
+            .bearer_auth(&token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .expect("terminal create request");
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        server.abort();
+        assert_eq!(
+            status,
+            reqwest::StatusCode::CREATED,
+            "terminal spawn: {text}"
+        );
+        assert_eq!(
+            self.live_terminal_sessions(),
+            before + 1,
+            "the host counts the spawned session"
+        );
+    }
 }
+
+/// A command that outlives any test that spawns it.
+#[cfg(test)]
+pub(crate) const LONG_RUNNING_TEST_COMMAND: &str = if cfg!(windows) {
+    "ping -n 60 127.0.0.1"
+} else {
+    "sleep 60"
+};
 
 impl Drop for EmbeddedServer {
     fn drop(&mut self) {

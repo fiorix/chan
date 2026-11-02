@@ -7,9 +7,17 @@
 // stayed open, so the earlier ask is moot). The asks the prompt's Hide and
 // Close make of the desktop live here too: every other way the page hides or
 // closes its window makes the same ask, and each first writes the tabs'
-// unsaved input to the recovery buffer.
+// unsaved input to the recovery buffer. The desktop refuses to hide or close
+// chan's last shown window while terminals would end with it; the prompt then
+// stays up and shows why.
 
-import { hideWindowFromCloseConfirm, isTauriDesktop, requestCloseWindow } from "../api/desktop";
+import {
+  closeWindowRefusal,
+  hideWindowFromCloseConfirm,
+  isTauriDesktop,
+  requestCloseWindow,
+} from "../api/desktop";
+import { setTransientStatus } from "./store.svelte";
 import { flushEditsToRecovery } from "./tabs.svelte";
 
 export type CloseConfirmChoice = "hide" | "close" | "cancel";
@@ -17,9 +25,13 @@ export type CloseConfirmChoice = "hide" | "close" | "cancel";
 export const closeConfirmState = $state<{
   open: boolean;
   resolve: ((choice: CloseConfirmChoice) => void) | null;
+  /// Why the desktop refused the choice just made, shown on the prompt
+  /// until it closes; `null` while nothing was refused.
+  refusal: string | null;
 }>({
   open: false,
   resolve: null,
+  refusal: null,
 });
 
 /// Open the close-confirm overlay and resolve when the user picks Hide / Close /
@@ -30,6 +42,7 @@ export function uiCloseConfirm(): Promise<CloseConfirmChoice> {
   return new Promise((resolve) => {
     closeConfirmState.resolve?.("cancel");
     closeConfirmState.resolve = resolve;
+    closeConfirmState.refusal = null;
     closeConfirmState.open = true;
   });
 }
@@ -40,6 +53,7 @@ export function resolveCloseConfirm(choice: CloseConfirmChoice): void {
   const r = closeConfirmState.resolve;
   closeConfirmState.resolve = null;
   closeConfirmState.open = false;
+  closeConfirmState.refusal = null;
   r?.(choice);
 }
 
@@ -54,19 +68,47 @@ export function cancelCloseConfirmForConnectionChange(): void {
 /// hide command and the command deck's row all hide through here. The bury
 /// closes a workspace window's webview, and the page cannot count on an
 /// unload event then; a control terminal's window is hidden in place, where
-/// the write costs nothing. Off the desktop only the write happens.
-export function flushAndHideWindow(): void {
+/// the write costs nothing. Off the desktop only the write happens. Resolves
+/// with why the desktop kept the window shown, which also goes to the status
+/// bar so a hide from the chord or the command deck reads it, or with `null`.
+export async function flushAndHideWindow(): Promise<string | null> {
   flushEditsToRecovery();
-  void hideWindowFromCloseConfirm();
+  const refusal = await hideWindowFromCloseConfirm();
+  if (refusal) setTransientStatus(refusal);
+  return refusal;
 }
 
 /// Write every tab's unsaved input to its recovery buffer, then ask the
 /// desktop to close this window. The close-window command, the red dot's
-/// ways to close and the command deck's row all close through here; a caller
-/// that discards the window's session does so first. A window whose last tab
-/// has closed closes through `closeEmptiedWindow` instead, each tab's own
-/// close having committed its input or, under force, dropped it.
-export function flushAndCloseWindow(): void {
+/// ways to close and the command deck's row all close through here. With
+/// `discard` the close also discards the window's session, which reaps its
+/// terminals, and the desktop is asked first whether it refuses the close:
+/// it does for chan's last shown window while terminals would end with
+/// chan. A refusal discards and closes nothing, goes to the status bar and
+/// is what this resolves with; `stillWanted` answering false once the
+/// desktop has answered (a prompt cancelled meanwhile) also leaves the
+/// window as it is. The discard waits for the answer because it cannot be
+/// taken back. Without `discard` the caller has discarded already and the
+/// close is not asked about: the red dot on a window with no tab or while
+/// reconnecting. A window whose last tab has closed closes through
+/// `closeEmptiedWindow` instead, each tab's own close having committed its
+/// input or, under force, dropped it.
+export async function flushAndCloseWindow(options?: {
+  /// The caller's discard of the window's session (`discardWindowSession`
+  /// with its options), run only once the desktop has not refused.
+  discard: () => void;
+  stillWanted?: () => boolean;
+}): Promise<string | null> {
   flushEditsToRecovery();
+  if (options) {
+    const refusal = await closeWindowRefusal();
+    if (options.stillWanted && !options.stillWanted()) return null;
+    if (refusal) {
+      setTransientStatus(refusal);
+      return refusal;
+    }
+    options.discard();
+  }
   if (isTauriDesktop()) void requestCloseWindow();
+  return null;
 }
