@@ -32,7 +32,7 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 | [Cmd+` does not switch chan windows on macOS][cmdbq] | raised | reading |
 | [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | landed | GA |
 | [hiding the last shown window quits chan][lastwin] | landed | reading |
-| [keys pass under an open confirm][confirmkeys] | accepted | build |
+| [keys pass under an open confirm][confirmkeys] | landed | GA |
 | [a window loses its drop highlights][dndloss] | raised | reading |
 
 [ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
