@@ -70,6 +70,11 @@ shuts down with its terminals. The --on arm carries the same refusal,
 coming from the remote devserver's own guard; it needs the chan desktop
 app running and the devserver connected.
 
+A close succeeds only once the workspace is let go or nothing holds
+it. When a live process holds the workspace's writer lock and answers
+on no control socket within five seconds, or answers the close with an
+error and keeps the lock, the command names that pid and exits nonzero.
+
 SEE ALSO:
 `chan serve` to serve it again, `chan ps` to see what is served, `chan
 workspace forget` to also drop it from the registry.
@@ -162,7 +167,10 @@ nonzero.
 A host that answers "workspace is still releasing; retry" has forgotten
 nothing, so the workspace stays registered here as well. That exit is
 75, not 1, so a script can tell a host that has not let go from a
-refusal. A desktop handoff is attempted when enabled. A second run
+refusal. A holder of the writer lock that answers on no control socket
+within five seconds, or answers with an error and keeps the lock, also
+leaves the workspace registered, with exit 1. A desktop handoff is
+attempted when enabled. A second run
 asks a matching discovered devserver even when the workspace is off;
 with no matching devserver, it forgets the unserved row on disk.
 

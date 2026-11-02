@@ -148,9 +148,17 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
             return Err(CloseStillReleasing(answer).into());
         }
         Ok(UnserveOutcome::DevserverFailure { reason }) => anyhow::bail!("{reason}"),
-        // A reachable-but-failed teardown is still "best effort": report it
-        // with what the server answered, then (on forget) drop the registry
-        // entry anyway.
+        Ok(UnserveOutcome::Unreachable { pid }) => {
+            let holder =
+                pid.map_or_else(|| "another process".to_string(), |pid| format!("pid {pid}"));
+            anyhow::bail!(
+                "refusing to report {} closed: {holder} holds its writer lock and answered on no control socket",
+                path.display()
+            );
+        }
+        // A failed teardown whose holder has let go of the workspace is still
+        // "best effort": report it with what the server answered, then (on
+        // forget) drop the registry entry anyway.
         Err(e) => eprintln!(
             "chan: could not reach the server for {} ({e:#}); treating as closed.",
             path.display()
@@ -175,8 +183,61 @@ enum UnserveOutcome {
     RemovalStillReleasing { answer: String },
     /// A live host answered that a close has not finished releasing this root.
     CloseStillReleasing { answer: String },
-    /// A discovered devserver for this library could not complete removal.
+    /// A discovered devserver for this library could not complete removal,
+    /// or a reached holder answered an error and kept the writer lock.
     DevserverFailure { reason: String },
+    /// The writer lock stayed held through [`LOCK_HOLDER_BOUND`] with no
+    /// control socket of its recorded holder answering, or with no holder
+    /// record to read: the workspace is held, and nothing was asked to let go.
+    Unreachable { pid: Option<u32> },
+}
+
+/// How long a close waits for a held writer lock's holder to answer on a
+/// control socket, and for the lock to be released after the holder was asked.
+const LOCK_HOLDER_BOUND: Duration = Duration::from_secs(5);
+
+/// Pause between looks for a held writer lock's holder. Each look asks every
+/// stable control socket it finds who it is.
+const LOCK_HOLDER_POLL: Duration = Duration::from_millis(200);
+
+/// Who holds a workspace's writer lock, as a close finds it.
+enum LockHolder {
+    /// The lock is free, including under a record a holder that is gone left.
+    Free,
+    /// The recorded holder's control socket.
+    Reachable { pid: u32, socket: PathBuf },
+    /// The lock stayed held through [`LOCK_HOLDER_BOUND`] with no control
+    /// socket of the recorded holder found.
+    Unreachable { pid: Option<u32> },
+}
+
+/// Find the holder of the writer lock at `lock_dir`. A held lock whose holder
+/// has no control socket yet, or no record yet, is looked at again until
+/// [`LOCK_HOLDER_BOUND`]: an acquirer publishes its record just after it
+/// locks and a server binds its control sockets as it starts, and a socket
+/// may miss one identity probe while its process is busy.
+async fn find_lock_holder(lock_dir: &Path) -> LockHolder {
+    let deadline = Instant::now() + LOCK_HOLDER_BOUND;
+    loop {
+        let record = chan_workspace::lock::read_lock_record(lock_dir);
+        if let Some(record) = &record {
+            if let Some(socket) = control_socket_for_pid(record.pid).await {
+                return LockHolder::Reachable {
+                    pid: record.pid,
+                    socket,
+                };
+            }
+        }
+        if chan_workspace::lock::is_free(lock_dir) {
+            return LockHolder::Free;
+        }
+        if Instant::now() >= deadline {
+            return LockHolder::Unreachable {
+                pid: record.map(|record| record.pid),
+            };
+        }
+        tokio::time::sleep(LOCK_HOLDER_POLL).await;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -400,26 +461,19 @@ async fn unserve_running(
     else {
         return Ok(UnserveOutcome::NotServed); // no row => no devserver removal
     };
-    let Some(record) = chan_workspace::lock::read_lock_record(&paths.lock) else {
-        return Ok(
-            if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
+    // A free lock reads not served: no holder, or a stale record whose holder
+    // is gone. Only a free lock permits asking the devserver to remove the row.
+    // A lock still held with no holder reached is not reported closed.
+    let (pid, socket) = match find_lock_holder(&paths.lock).await {
+        LockHolder::Reachable { pid, socket } => (pid, socket),
+        LockHolder::Free => {
+            return Ok(if remove && row.is_some() {
                 forget_on_library_devserver(lib, &requested, &paths.lock).await
             } else {
                 UnserveOutcome::NotServed
-            },
-        );
-    };
-    let Some(socket) = control_socket_for_pid(record.pid).await else {
-        // A record but no reachable control socket: the holder may be gone
-        // (stale record) or may still own the lock without a control socket.
-        // Only a free lock permits asking the devserver to remove the row.
-        return Ok(
-            if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
-                forget_on_library_devserver(lib, &requested, &paths.lock).await
-            } else {
-                UnserveOutcome::NotServed
-            },
-        );
+            });
+        }
+        LockHolder::Unreachable { pid } => return Ok(UnserveOutcome::Unreachable { pid }),
     };
     match chan_shell::send_control_request(
         &socket,
@@ -443,26 +497,37 @@ async fn unserve_running(
                     UnserveOutcome::CloseStillReleasing { answer: message }
                 });
             }
-            return Err(e)
-                .with_context(|| format!("asking the server (pid {}) to tear down", record.pid));
+            // A holder that answered an error and still holds the workspace
+            // has not let it go, so the close is not reported done.
+            if !wait_for_lock_release(&paths.lock) {
+                return Ok(UnserveOutcome::DevserverFailure {
+                    reason: format!(
+                        "could not close {}: pid {pid} still holds its writer lock and answered: {message}",
+                        path.display()
+                    ),
+                });
+            }
+            return Err(e).with_context(|| format!("asking the server (pid {pid}) to tear down"));
         }
     }
     wait_for_lock_release(&paths.lock);
     Ok(UnserveOutcome::Unserved)
 }
 
-/// Block (bounded) until the writer lock for `lock_dir` is free after a
-/// serve was asked to unserve. The server drops the flock asynchronously
-/// during graceful shutdown, so a `chan serve` racing right behind would
-/// otherwise see a transient `WorkspaceLocked`.
-fn wait_for_lock_release(lock_dir: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+/// Block (bounded by [`LOCK_HOLDER_BOUND`]) until the writer lock for
+/// `lock_dir` is free after a serve was asked to unserve, and say whether it
+/// is. The server drops the flock asynchronously during graceful shutdown, so
+/// a `chan serve` racing right behind would otherwise see a transient
+/// `WorkspaceLocked`.
+fn wait_for_lock_release(lock_dir: &Path) -> bool {
+    let deadline = Instant::now() + LOCK_HOLDER_BOUND;
     while !chan_workspace::lock::is_free(lock_dir) {
         if Instant::now() >= deadline {
-            break;
+            return false;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    true
 }
 
 /// `chan close` / `chan workspace close` / `chan workspace forget`: the
