@@ -1,43 +1,28 @@
-# chan-desktop notes
+# chan-desktop contributor guide
+
+The practical side of the desktop crate: building, debugging, signing, notarizing and packaging chan-desktop, the Tauri shell of chan. What the shell is and why it is shaped the way it is lives in [`desktop/design.md`](../desktop/design.md); this file holds the steps.
 
 ## Gateway-surface acceptance
 
-A gateway-served window couples two independently versioned builds: the SPA
-comes from the remote devserver over the tunnel, while the ACL gating its
-invokes belongs to the chan-desktop installed on this machine. The version
-string cannot tell them apart (version pins bump only at release cut), and
-launching from the Dock or `/Applications` runs the previously installed
-bundle regardless of what was just built. So any acceptance run on the
-gateway surface must:
+A gateway-served window couples two independently versioned builds: the SPA comes from the remote devserver over the tunnel, while the ACL gating its invokes belongs to the chan-desktop installed on this machine. The version string cannot tell them apart (version pins bump only at the release cut), and launching from the Dock or `/Applications` runs the installed bundle regardless of what was just built. So any acceptance run on the gateway surface must:
 
 1. Build BOTH ends from the same commit.
-2. Launch the freshly built bundle explicitly (by path), never through the
-   Dock or `/Applications`.
-3. Confirm the running build via its build id, which the version string does
-   not carry: the About window shows it (`build <id>`), the startup log line
-   `chan-desktop starting` carries it, and the `native_vocabulary` command
-   returns it to a served page. A `-dirty` suffix means the checkout had
-   uncommitted changes at compile time; `unknown` means the build ran outside
-   a git checkout.
+2. Launch the freshly built bundle explicitly (by path), never through the Dock or `/Applications`.
+3. Confirm the running build via its build id, which the version string does not carry: the About window shows it (`build <id>`), the startup log line `chan-desktop starting` carries it, and the `native_vocabulary` command returns it to a served page. A `-dirty` suffix means the checkout had uncommitted changes at compile time; `unknown` means the build ran outside a git checkout.
 
-A one-command ACL refusal on this surface (`Command <name> not allowed by
-ACL`) is what version skew looks like: an older bundle refuses exactly the
-commands added since it was built and serves everything else normally. Check
-the build id before investigating it as a capability defect.
+A one-command ACL refusal on this surface (`Command <name> not allowed by ACL`) is what version skew looks like: an older bundle refuses exactly the commands added since it was built and serves everything else normally. Check the build id before investigating it as a capability defect.
 
 ## Local serving and self-contained runtime
 
 chan-desktop is fully self-contained. It links `chan-workspace` and `chan-server` directly, embeds both web bundles (`web/dist` and the launcher's `web-launcher/dist`) via rust-embed at build time, and links the `chan` CLI, `chan-shell` (`cs`), and `chan-revtunnel` as libraries, dispatching them in-process (`Personality::Desktop`). No separate `chan` binary ships inside the app bundle; a desktop install still provides `chan` and `cs` on the PATH through a shim into the app binary. The `frontendDist` in `tauri.conf.json` is `../src`, a small static shell (the about and connecting pages), not the SPA.
 
-Local workspaces open through the embedded `WorkspaceHost` (owned by chan-library and re-exported as `chan_server::WorkspaceHost`), which owns a single `chan_workspace::Library`. Every registry mutation (add / remove) and feature toggle (semantic search, reports) runs in-process against that same `Library`, or against the live `Arc<Workspace>` the host already holds for a mounted workspace. Routing through one shared registry is what keeps a freshly-added workspace openable immediately: a subprocess `chan add` used to mutate only the on-disk registry, leaving the host's boot-time in-memory snapshot stale, which surfaced as a spurious "workspace not registered" error on first open.
-
-Blocking chan-workspace calls (`register_workspace`, `open_workspace`, `boot`, the feature setters) run via `tokio::task::spawn_blocking` so a slow initial scan never blocks the async executor. A workspace remove lands in the host's `remove_workspace_for_root` from the launcher's library DELETE route, the desktop `close_workspace_from_handoff` path, or `chan workspace forget` over the control socket. It unmounts first, so the workspace's flock is released before `unregister_workspace` runs, then unregisters, forgets the on/off overlay row, and discards the workspace's window records.
+Local workspaces open through the embedded `WorkspaceHost` (owned by chan-library and re-exported as `chan_server::WorkspaceHost`), which owns a single `chan_workspace::Library`. Every registry mutation (add / remove) and feature toggle (semantic search, reports) runs in-process against that same `Library`, or against the live `Arc<Workspace>` the host already holds for a mounted workspace, which is what keeps a freshly added workspace openable immediately. A workspace remove lands in the host's `remove_workspace_for_root` from the launcher's library DELETE route, the desktop `close_workspace_from_handoff` path, or `chan workspace forget` over the control socket. It unmounts first, so the workspace's flock is released before `unregister_workspace` runs, then unregisters, forgets the on/off overlay row, and discards the workspace's window records.
 
 External `chan serve` processes remain independent and are not a local serving dependency or an attachable desktop transport. When a standalone `chan serve` already holds a workspace's lock, opening that workspace in chan-desktop maps the `WorkspaceLocked` / `WorkspaceAlreadyOpen` error to a friendly "open in another chan process" message and reverts the row's On toggle rather than surfacing a raw error.
 
 ### No bundled binary
 
-There is no `chan-bin` Makefile step, no `bundle.macOS.files` entry, and no `bundle.externalBin`. `make dev` / `make build` depend only on the web bundles (the rust-embed inputs) and the tauri CLI; `app-signed` and `app-notarized` additionally check their signing and notarization prerequisites. Tauri's signing pass codesigns the `.app` directly, with no second binary to sign; the notarize recipe then signs, notarizes, and staples the `.dmg`, which is the artifact CI validates (`stapler validate` + `spctl`). The `.app` inside the updater payload is signed but unstapled. Multi-arch distribution is purely a matter of how the `.app` itself is built and merged. The desktop Makefile also carries `dmg-layout-proof` and the secret-free `ci-linux` / `ci-macos` / `ci-windows` package proofs.
+The bundle configuration names no `externalBin` and no extra `bundle.macOS.files`, and the Makefile stages no second binary. `make dev` / `make build` depend only on the web bundles (the rust-embed inputs) and the tauri CLI; `app-signed` and `app-notarized` additionally check their signing and notarization prerequisites. Tauri's signing pass codesigns the `.app` directly, with no second binary to sign; the notarize recipe then signs, notarizes, and staples the `.dmg`, which is the artifact CI validates (`stapler validate` + `spctl`). The `.app` inside the updater payload is signed but unstapled. Multi-arch distribution is purely a matter of how the `.app` itself is built and merged. The desktop Makefile also carries `dmg-layout-proof` and the secret-free `ci-linux` / `ci-macos` / `ci-windows` package proofs.
 
 ## Debugging
 
@@ -85,8 +70,7 @@ Developer ID Application certs expire every 5 years; rotation also applies if th
 
 1. Generate the new cert per the macOS signing procedure (see the [release signing notes](skills/release/SKILL.md); the detailed Developer ID certificate-generation steps are kept in the team's private dev/ tree).
 2. Update `bundle.macOS.signingIdentity` in `tauri.conf.json` to the new identity string. Single-field swap.
-3. Refresh `APPLE_CERTIFICATE_BASE64` + `APPLE_CERTIFICATE_PASSWORD`
-   + `APPLE_SIGNING_IDENTITY` + `APPLE_TEAM_ID` in GitHub Actions Secrets via the `populate-apple-secrets.sh` helper kept in the team's private dev/ tree (re-run the relevant steps).
+3. Refresh `APPLE_CERTIFICATE_BASE64` + `APPLE_CERTIFICATE_PASSWORD` + `APPLE_SIGNING_IDENTITY` + `APPLE_TEAM_ID` in GitHub Actions Secrets via the `populate-apple-secrets.sh` helper kept in the team's private dev/ tree (re-run the relevant steps).
 4. Refresh the local Keychain: import the new `.p12`; remove the old cert (`security delete-certificate -c "Developer ID Application: <Old Name> ..."`) so the `sign-prereqs` `grep -c "Developer ID Application:"` detection picks the new one unambiguously.
 
 No bridge release is needed for Developer ID cert rotation (unlike the minisign updater key rotation below). Gatekeeper trusts any Developer ID Application cert chained to Apple's root, regardless of which one signed the previous release, so the next signed bundle under the new identity is accepted by clients that had the old one.
@@ -99,7 +83,7 @@ The Windows CLI, desktop binary, NSIS plugins and installer are signed remotely 
 
 The desktop app verifies update bundles with a minisign signature. The production pubkey is embedded in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`. Matching private key material lives outside the repo in the release owner's secret store. Three payload shapes are signed with it at release time, each shipping with a detached `.sig` release asset: the macOS `Chan_<v>_aarch64.app.tar.gz` (the `macos-desktop-artifacts` job), each Linux `Chan_<v>_{amd64,aarch64}.AppImage` itself (the `linux-desktop-artifacts` job), and the Windows `Chan_<v>_x64-setup.exe` NSIS installer itself (the `windows-artifacts` job, minisigned after Authenticode so the signature covers the shipped bytes). All three jobs fail fast when `TAURI_SIGNING_PRIVATE_KEY` is absent.
 
-Runbook: [`desktop/updater-bridge.md`](../desktop/updater-bridge.md).
+Runbook, including the bridge release a rotation needs: [`desktop/updater-bridge.md`](../desktop/updater-bridge.md).
 
 ### Bridge release required after key rotation
 
@@ -115,7 +99,7 @@ When the updater pubkey rotates, existing installs still trust only the OLD pubk
 
 Client probes a single static manifest: `https://chan.app/dl/desktop/latest.json`
 
-That manifest is generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs` (driven by `.github/workflows/release.yml`) and deployed to GitHub Pages alongside the rest of chan.app; there is no separate dynamic server for `/dl`. It is a Tauri static updater manifest: a top-level `version` plus a `platforms` map keyed by `{os}-{arch}` (`darwin-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`), each carrying the minisign `signature` and the release-asset `url`. Tauri selects the entry for the running target and compares `version`; the Linux entries point at the AppImage release asset itself and the Windows entry at the NSIS installer itself. The platform-to-asset map is single-sourced in `web/packages/marketing/scripts/release-assets.mjs` (`updaterPayloads`). The endpoint is a flat static path; do not reintroduce a `{{target}}/{{current_version}}` templated URL, which the generator does not serve.
+That manifest is generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs` (driven by `.github/workflows/release.yml`) and deployed to GitHub Pages alongside the rest of chan.app; there is no separate dynamic server for `/dl`. It is a Tauri static updater manifest: a top-level `version` plus a `platforms` map keyed by `{os}-{arch}` (`darwin-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`), each carrying the minisign `signature` and the release-asset `url`. Tauri selects the entry for the running target and compares `version`; the Linux entries point at the AppImage release asset itself and the Windows entry at the NSIS installer itself. The platform-to-asset map is single-sourced in `web/packages/marketing/scripts/release-assets.mjs` (`updaterPayloads`). The endpoint is a flat static path; the generator serves no templated `{{target}}/{{current_version}}` URL.
 
 ## Release package version metadata
 
@@ -160,7 +144,6 @@ Returns the keychain item attributes if the profile exists, exits non-zero other
 
 `cargo tauri build --bundles app` signs the `.app` (via `codesign`, driven by `APPLE_SIGNING_IDENTITY`); the `.dmg` is packaged separately by `packaging/desktop/build-dmg.sh` (`dmgbuild`), because tauri-bundler's DMG step drives Finder over AppleScript and no-ops on headless CI. Tauri's bundler can ALSO notarize as part of the build command, but only when `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` are present in the env. `tauri-bundler` 2.x does not consume `notarytool` Keychain profiles directly. To support the local Keychain-profile path AND the CI env-var path under one recipe, the Makefile unsets the three notarize env vars during the `cargo tauri build` call (so tauri-bundler skips its own notarize step) and then runs `xcrun notarytool submit` + `xcrun stapler staple` itself with the appropriate flag set.
 
-CI behaviour is identical to the prior path: the credentials reach notarytool the same way, just via a manual invocation instead of tauri-bundler's internal one.
 
 ### CI does not need the Keychain profile
 

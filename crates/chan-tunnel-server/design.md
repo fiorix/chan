@@ -1,248 +1,146 @@
 # chan-tunnel-server design
 
-## Keying and authentication model
+chan-tunnel-server is the terminating side of the gateway tunnel: the library the gateway's devserver-proxy embeds to accept the long-lived h2c POSTs that `chan devserver` dials, authenticate them, run the `Hello` / `HelloAck` handshake, register each devserver in a shared registry, drive its yamux session for the life of the connection, and hand out one substream per public request. It exists so that a gateway can publish a devserver that only ever dials out, and so that the public-side proxy needs nothing from a devserver but a handle to open a substream on. The wire contract is [`chan-tunnel-proto`](../chan-tunnel-proto/design.md), whose design holds the cross-crate sequence; the dial side is [`chan-tunnel-client`](../chan-tunnel-client/design.md).
 
-The tunnel is per-DEVSERVER and always authenticated:
+## 1. Where it sits
 
-- The registry's second key is the token-resolved `devserver_id` (`Validated.devserver_id`, lowercase hex SHA-256 of the PAT), not the client's `Hello.workspace` (a validated name, conventionally `"devserver"`, refused if invalid). A devserver carries its whole library through one registration; the `{workspace}` path segment is tenant routing only. The registry's inner key and exported `workspace` fields carry the `devserver_id`; `run_tunnel` owns each registered tunnel's driver loop.
-- There is no `public` bit anywhere: `Hello.public`, `TUNNEL_PUBLIC_SCOPE`, `ServerError::MissingPublicScope`, the `missing_public_scope` refusal, and the `public` field on `TunnelHandle` / `WorkspaceInfo` / `TunnelInfo` do not exist. A viewer is authorized by the gateway's one `devserver_access(owner, devserver, caller)` check (a grant is the whole library).
-- The gateway consumer is `devserver-proxy`; the public tenant origin is `{owner}--{disc}.{proxy}.proxy.{domain}` (`disc` = the first 12 hex chars of the devserver id); it mounts its own segment-preserving reverse proxy. The forwarding, cap, and upgrade hygiene lives in that gateway layer; the public-side controls in section 6 document the contract it meets.
+devserver-proxy supplies three things and consumes one. It supplies a TCP listener bound to a tunnel-only port behind the gateway's TLS edge, a `Validator` that turns a bearer token into an identity (the proxy's identity-service client), and a `RegistrationAdmission` that asks the fleet controller for a permit. It consumes `TunnelHandle::open`, the one operation a registered tunnel exposes, and builds everything public on top of it: host routing, the viewer gate, forwarded-header hygiene, body and time limits, WebSocket bridging. Out of scope here: TLS termination (the edge does it; this listener is h2c only), token issuance, persistence (the registry is in memory, so a proxy restart drops every tunnel and the clients redial), and the wire format.
 
-## Cross-crate context
+The model is per devserver and always authenticated. The registry is keyed by `(username, devserver id)`, where the devserver id is resolved from the token, never from the client's `Hello`: its workspace label is validated and otherwise ignored, and one registration carries the devserver's whole library, with the `{workspace}` path segment routing between tenants inside it. The public tenant origin is `{owner}--{disc}.{proxy}.proxy.{domain}`, with the discriminator taken from the devserver id. There is no anonymous mode; a viewer is authorized by the gateway's single per-devserver access check, and one grant covers the library.
 
-chan-tunnel has three boundaries: shared wire contracts, a dial-side client driven by `chan devserver`, and this terminator embedded by the gateway.
-
-This document covers terminator-side design. The wire format is in chan-tunnel-proto's design.md.
-
-## 1. Problem and scope
-
-The terminator side of chan-tunnel needs to:
-
-- Accept long-lived h2c POSTs from arbitrary `chan devserver` clients.
-- Authenticate the bearer token before committing to the body, returning the same empty 401 for an invalid token and a valid token without tunnel scope.
-- Run the Hello / HelloAck round-trip and bind the registration to `(validated_user, token-resolved devserver_id)` (the requested workspace name is validated but ignored), emitting structured `HelloAck::Refused` frames for policy failures.
-- Multiplex per-public-request substreams over the resulting yamux session.
-- Expose live tunnels to a public-facing axum router so the host can route public requests at the registered peer.
-- Tolerate flap (a `chan devserver` restart should reclaim its registration without waiting for a TCP timeout).
-
-Out of scope:
-
-- TLS termination. The gateway's nginx does it. This crate runs h2c.
-- Token issuance / identity. The `Validator` trait is the seam.
-- Persistence. The registry is in-memory; a restart drops every tunnel and clients reconnect.
-- Wire format (chan-tunnel-proto).
-
-## 2. Architecture overview
+## 2. Architecture
 
 ```mermaid
 flowchart TD
-    client["chan devserver: dial POST /v1/tunnel + Bearer"]
-    nginx["nginx grpc_pass (h2c)"]
-    listener["serve_tunnel_listener: TCP accept + Semaphore permit"]
-    h2["h2 handshake, first stream POST /v1/tunnel"]
-    validate{"validator.validate_registration() BEFORE 200"}
-    reject["reply uniform auth 401 or upstream 5xx"]
-    ack["200, handshake_validated_with_admission Hello/HelloAck + admission"]
-    register["register_authorized_with_id_and_cap()"]
-    driver["run_tunnel: per-tunnel task owns yamux Connection"]
-    registry[("Registry: user -> devserver_id -> handle")]
-    proxy["devserver-proxy public request"]
-    get["registry devserver resolution -> TunnelHandle"]
-    open["TunnelHandle.open() -> yamux substream"]
-    h1["hyper h1 send_request over substream"]
+    client["chan devserver: POST /v1/tunnel + Bearer"]
+    edge["TLS edge (nginx grpc_pass, h2c inward)"]
+    listener["serve_tunnel_listener: accept + in-flight permit"]
+    h2["h2 handshake, first stream"]
+    validate{"Validator before the 200"}
+    reject["401 / 5xx, no body"]
+    ack["200, then Hello / HelloAck with admission"]
+    register["registry insert: the authoritative per-user cap"]
+    driver["run_tunnel: one task owns the yamux session"]
+    registry[("Registry: user -> devserver id -> handle")]
+    proxy["devserver-proxy: public request"]
+    get["registry lookup -> TunnelHandle"]
+    open["TunnelHandle::open -> substream"]
+    h1["hyper h1 request over the substream"]
 
-    client --> nginx --> listener --> h2 --> validate
+    client --> edge --> listener --> h2 --> validate
     validate -->|"fail"| reject
     validate -->|"ok"| ack --> register --> driver
-    register -. "insert handle" .-> registry
+    register -. "insert" .-> registry
     proxy --> get
     get -. "lookup" .-> registry
     get --> open
-    open -. "OpenRequest" .-> driver
+    open -. "open request" .-> driver
     open --> h1
     driver -. "yamux substream" .-> h1
-    h1 -. "forward to" .-> client
+    h1 -. "forwarded to" .-> client
 ```
 
-*Terminator data path: dial through nginx to the listener, the validate-before-200 handshake into the registry, and the public request path through devserver-proxy back over a yamux substream.*
+*The dial path from the edge into the registry, and the public request path back out over a substream.*
 
-## 3. Components / responsibilities
+## 3. Components
 
-### Listener flow
+### The listener
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as chan devserver
-    participant L as serve_tunnel_listener
-    participant H as handle_tunnel_conn
-    participant V as Validator
+    participant L as listener
+    participant H as connection handler
+    participant V as Validator and admission
     participant R as Registry
 
     C->>L: TCP connect
-    L->>L: try_acquire permit (MAX_INFLIGHT 1024)
-    Note over L: at cap drops socket and continues
-    L->>H: spawn task with owned permit
-    C->>H: h2 handshake (10s)
-    C->>H: first stream POST /v1/tunnel + Bearer (10s)
-
-    alt method != POST or path != /v1/tunnel
-        H-->>C: 404 Not Found
-    else missing or empty Bearer
-        H-->>C: 401 Unauthorized
-    else gates pass
-        H->>H: spawn frame driver (extra stream 409, then ENHANCE_YOUR_CALM)
-        H->>V: validate_registration(token) (10s)
-        alt validate timeout
-            H-->>C: 504 Gateway Timeout
-        else InvalidToken
-            H-->>C: 401 Unauthorized
-        else Identity error
-            H-->>C: 502 Bad Gateway
-        else Validated but no tunnel scope
-            H-->>C: 401 Unauthorized
-        else Validated with tunnel scope
-            V-->>H: Validated (user, devserver_id, scopes)
-            Note over H,C: validate-before-200 invariant: 200 only AFTER auth passes
-            H-->>C: 200 OK (body open)
-            H->>C: handshake_validated_with_admission reads Hello (15s)
-            C->>H: Hello frame
-            Note over H,C: protocol/workspace/admission failures refused in-band (HelloAck Refused)
-            H->>C: HelloAck Ok
-            H->>R: register_authorized_with_id_and_cap (authoritative per-user cap)
-            alt raced past cap
-                H->>H: drop yconn (client sees transport disconnect)
-            else registered
-                R-->>H: handle, open_rx, shutdown_rx
-                H->>H: drop permit, await run_tunnel inline
+    L->>L: take an in-flight permit, or drop the socket at the cap
+    L->>H: spawn with the permit
+    C->>H: h2 handshake, first stream POST /v1/tunnel + Bearer
+    alt wrong method or path, or no bearer
+        H-->>C: 404 or 401, permit released, connection drained and closed
+    else
+        H->>H: spawn the h2 frame driver before awaiting the validator
+        H->>V: validate the token for a fresh registration id
+        alt invalid, scopeless, identity down, or timed out
+            H-->>C: uniform 401 or a 5xx, connection drained and closed
+        else validated with the tunnel scope
+            H-->>C: 200, body left open
+            C->>H: Hello
+            H->>V: admit the registration
+            alt bad protocol, bad workspace name, admission refused
+                H-->>C: HelloAck Refused with a stable code
+            else
+                H-->>C: HelloAck Ok
+                H->>R: insert under the per-user cap, fenced by the admission epoch
+                H->>H: release the permit, run the tunnel driver
             end
         end
     end
 ```
 
-*Listener handshake ordering and the validate-before-200 invariant; the numbered steps below carry the per-stage contracts.*
+*The ordering the listener guarantees: authenticate before the 200, refuse in-band after it, insert last.*
 
-`serve_tunnel_listener(listener, validator, registry, max_registrations_per_user)`:
+Several of these steps are invariants rather than conveniences.
 
-1. `TcpListener::accept` through `chan_tunnel_proto::accept_next`: a failure that concerns one pending connection is retried at once, one that means the process is out of descriptors or memory (or is unrecognised) is logged at error and retried after one second, and only a failure that means the listening socket is unusable ends the loop (see the policy in [`chan-tunnel-proto/design.md`](../chan-tunnel-proto/design.md#accept-failures)). The embedding proxy treats the loop ending as the listener dying and stops every tunnel on the node, so a flood that exhausts descriptors must slow accepts, not end them. Try to acquire one permit from a per-listener `Semaphore::new(MAX_INFLIGHT_HANDSHAKES)` (1024). If the semaphore is empty, the TCP socket is dropped and the loop continues; this bounds memory against floods of half-open peers that have not yet hit a per-stage timeout. Otherwise spawn `handle_tunnel_conn` carrying the owned permit.
-2. The h2 server builder advertises the shared 16 MiB stream and 32 MiB connection receive windows, then handshakes under `H2_HANDSHAKE_TIMEOUT` (10s).
-3. First `conn.accept()` under `FIRST_STREAM_TIMEOUT` (10s).
-4. Reject `(method != POST) || (path != TUNNEL_PATH)` with 404.
-5. Parse `Authorization: Bearer ...` (case-insensitive scheme, SP/HTAB separator, trimmed token); reject missing / empty with 401.
-   Both pre-auth refusals release the in-flight permit the moment the response is queued, and only then keep polling the connection, for at most `REJECTION_DRAIN_TIMEOUT` (5s), so the peer receives the final frame and can close. h2 writes nothing unless the connection is polled, so the flush cannot be skipped; and `h2::server::Connection` has no idle timeout, so it cannot be unbounded either: no credential is needed to reach these branches, and a peer that simply holds the TCP open would otherwise hold an accept slot for as long as it liked.
-6. Spawn an h2 frame driver task BEFORE awaiting the validator: the validator may be a network round-trip and h2 only progresses while polled. For an admitted tunnel this task drives the h2 connection for the tunnel's life; the handler holds a second oneshot sender for that life and drops it when `run_tunnel` returns, which it does within a bound however the peer behaves (step 12), and the driver then starts an h2 graceful shutdown (a GOAWAY, then a second GOAWAY naming the last stream once the peer answers the shutdown PING) and lets the peer close within `REJECTION_DRAIN_TIMEOUT`, shutting the connection down abruptly otherwise: the tunnel's stream is closed by then, `h2::server::Connection` has no idle timeout, and a peer holding the TCP open would otherwise keep the task and its socket for its own lifetime. It rejects any subsequent stream on the same connection with 409 (clients must only ever open one) and `abrupt_shutdown(ENHANCE_YOUR_CALM)` after `MAX_DRAINER_REJECTIONS` (16) rejections. The handler reports its outcome over a oneshot that it sends on only as the last step before `run_tunnel`. Every earlier return (steps 7 to 11, or a panic) drops the sender unsent, and the task then drains the refusal the way step 5 does and closes the connection: nothing else owns the connection once the handler has returned, so a refused peer holding the TCP open would otherwise keep the task and its socket alive, and any syntactically valid bearer reaches these branches.
-7. Call `validator.validate_registration(token, registration_id).await` under `VALIDATE_TIMEOUT` (10s, independent of any timeout the `Validator` impl enforces internally). On timeout, reply 504. On error: 401 (`InvalidToken`), 502 (`Identity`), or 500. Validation runs before the 200 so authentication failures are not collapsed into generic transport failures.
-8. Verify the validated token's `scopes` contains `"tunnel"`; otherwise send an empty 401 and return `ServerError::MissingScope` to the listener.
-9. Send 200 (response headers, body open). Wrap `(SendStream, recv_body)` in `H2Duplex`.
-10. `handshake_validated_with_admission(duplex, validated, admission, registration_id)`:
-   - Defense-in-depth username check (`is_valid_username`).
-   - `read_frame::<Hello>` with `HELLO_READ_TIMEOUT` (15s) bound.
-   - Reject non-V1 protocol and invalid workspace names. Each rejection writes a `HelloAck::Refused { code, message }` frame (best-effort) before returning so the client receives a structured error instead of a transport disconnect.
-   - Run the admission check for post-validate policy: `LocalAdmission::admit_registration` does a best-effort per-user count over distinct `devserver_id`s (controller deployments substitute their own `RegistrationAdmission`), run under `VALIDATE_TIMEOUT` before the ack. On failure, the `ServerError` is mapped to a stable refusal code (`chan_tunnel_proto::error_code`) and a `HelloAck::Refused` is written before returning.
-   - On success, write `HelloAck::Ok(HelloAckOk { prefix: "/{devserver_id}", user, workspace, .. })` and wrap the duplex in yamux server mode with a 256-substream cap and 64 MiB aggregate receive window.
-11. `registry.register_authorized_with_id_and_cap(...)` returns a `TunnelHandle`, the open-request `mpsc::Receiver`, and the eviction `oneshot::Receiver`. This is the authoritative cap check: the admission count was best-effort, and two parallel dials could both pass it; `register_authorized_with_id_and_cap` does count + insert under one lock acquisition. A loser here has already received HelloAck; dropping the yamux connection on the early return surfaces as a transport disconnect. The in-flight semaphore permit is dropped after registration so a long-lived tunnel does not consume an accept slot.
-12. `run_tunnel(...)` runs until close or eviction. On exit it closes yamux under `REJECTION_DRAIN_TIMEOUT`: the close writes a GoAway down the tunnel's h2 stream, which waits on the peer's flow-control window, and yamux's closing state has no timer of its own, so a peer that stops granting window would otherwise keep `run_tunnel` from returning. On timeout it logs at warn and drops the connection anyway. Then `registry.deregister_if_owner(&handle)`, and the handler's return drops the sender that tells the h2 driver (step 6) to close the connection.
+- **Validate before the 200.** The token and the tunnel scope are checked before the response is sent, so an authentication failure is an HTTP status and not a transport error the client cannot tell from a network fault. Every authentication failure is the same empty 401, invalid token or missing scope alike, so a candidate token reveals neither; the internal error keeps the exact cause for logs.
+- **The frame driver is spawned before the validator is awaited.** h2 only makes progress while polled, and validation is a network round trip to identity; without a driver the connection would stall. The same task drives the admitted tunnel's h2 connection for its whole life. It answers any further stream on the connection with 409 (a correct client opens exactly one) and shuts the connection down after a bounded number of them.
+- **Refusals are drained and bounded.** h2 writes nothing unless polled, so a refused dial keeps the connection polled long enough for the final frame to reach the peer; and `h2::server::Connection` has no idle timeout, so that drain has a deadline, after which the connection is shut down. No credential is needed to reach the pre-auth branches, so anything a refused peer can park on is something any peer can exhaust. The handler reports its outcome to the driver over a channel it sends on only as the last step before the tunnel driver takes over; every earlier return, a panic included, drops the sender, which the driver reads as a refusal. A refusal path added later ends the connection without having to remember to.
+- **The in-flight permit covers only the handshake.** A bounded number of connections may be in the authenticate-and-handshake stages at once; above that the TCP socket is dropped at accept, so a flood of half-open or slow peers cannot exhaust memory. A pre-auth refusal releases the permit before its drain, and a registered tunnel releases it before the driver runs, so neither a refused peer sitting on an open connection nor a long-lived tunnel holds an accept slot. Each stage (the h2 handshake, the first stream, validation, the Hello read) has its own deadline, so a peer that completes one stage and stalls on the next is bounded by the next.
+- **Policy refusals after the 200 are in-band.** A bad protocol, a bad workspace name or an admission refusal is written as a `HelloAck` refusal with a stable code before the stream is dropped, so the client sees policy rather than a disconnect. A refusal at the registry insert comes after the acknowledgement and can only close the transport.
+- **The registry insert is the authoritative cap.** Local admission counts a user's registrations as a friendly pre-acknowledgement check; two parallel dials can both pass it. The registry repeats the count and the insert under one lock, so they cannot both succeed.
+- **Accept failures do not end the loop.** The accept loop uses the shared policy in [`chan-tunnel-proto`](../chan-tunnel-proto/design.md#accept-failures): a failure that concerns one connection is retried at once, resource exhaustion is retried after a pause, and only an unusable listening socket ends the loop, because the embedding proxy treats the loop ending as the listener dying and stops every tunnel on the node.
 
-### Driver loop
+### The driver
 
-One task per registered tunnel owns the yamux `Connection`. Its concerns are merged into a single `poll_fn`:
+One task per registered tunnel owns the yamux connection. A single `poll_fn` merges its five sources in priority order: the shutdown signal (an explicit send, or the registry dropping the sender on eviction), a finished lease refresh, the lease deadline, open requests from the public side, and inbound streams from the peer. One `poll_fn` rather than `select!` because two of the branches need the same mutable borrow of the connection.
 
-- Shutdown takes priority. The `oneshot::Receiver` resolves either on explicit `()` send or sender drop (the registry drops it on eviction). Either signal exits the loop and `poll_close`s yamux.
-- Drain pending `OpenRequest`s from the public side into a local queue and call `poll_new_outbound`; reply with the new substream over the oneshot in the request. The caller already holds a substream permit (see "Registry"), so the queue never grows past what yamux will hand out: `poll_new_outbound` refuses with `TooManyStreams` at `TUNNEL_YAMUX_MAX_STREAMS`, and that refusal has already put the connection into cleanup, so there is nothing left to salvage and the driver can only shut down.
-- Poll for the one client-opened control shape: admission-lease refresh. At most one refresh is pending; additional inbound streams are dropped. Refresh is handled outside the driver poll so identity validation does not stall public outbound stream allocation.
+Open requests are drained into a local queue and answered with `poll_new_outbound`. Inbound streams are the client's lease refresh; at most one refresh runs at a time, any further inbound stream is dropped, and the refresh itself is handled outside the poll so identity validation does not stall outbound allocation. On exit the driver closes yamux under a deadline (the close is a write that waits on the peer's h2 window, and yamux's closing state has no timer, so a peer that stops granting window would otherwise hold the task forever), answers every queued open with `Disconnected`, and deregisters itself only if it still owns the registry slot, so a driver shutting down after eviction cannot remove its successor. Its return drops the sender that tells the h2 driver to close the connection.
 
-On exit the driver replies `OpenError::Disconnected` to any open requests still queued, then deregisters itself if it still owns the registry slot.
+### Admission and the lease
 
-`poll_fn` rather than `select!` because two of the three branches need `&mut conn` and `select!` over multiple `poll_fn`s holding that borrow conflicts.
+With controller-backed admission, identity returns an opaque signed lease bound to the exact registration (owner, user, devserver id, registration id, proxy), and the proxy asks the controller to verify it and reserve capacity before acknowledging. The handler generates the registration id and passes the same id to validation and admission, so the lease and the permit name one registration. A synchronous epoch fence is checked immediately before and after the registry insert: losing the controller invalidates the epoch, so an already-admitted but stalled handshake cannot register after a fail-closed eviction has run.
 
-### Admission authority and lease refresh
+The lease expires on its own clock, independently of TCP or yamux liveness. Before it does, the client sends its token in a `LeaseRefreshRequest` on a stream it opens; the terminator revalidates it for the same registration under one absolute deadline covering the read, the identity round trip, the registry update and the reply. The refreshed identity must keep the same user id, username and devserver id, and the token is dropped the moment validation returns. A success updates the handle's lease and publishes a registry event the proxy forwards to the controller; reaching the deadline without one closes and deregisters the tunnel.
 
-Controller-backed embedding uses `serve_tunnel_listener_with_admission`. Identity validation returns an opaque signed admission lease bound to `(owner_user_id, user, devserver_id, registration_id, proxy_id)`. Before `HelloAck::Ok`, `RegistrationAdmission::admit_registration(hello, validated, registration_id)` asks the control plane to verify the lease and reserve capacity. This is the trait's sole admission method and is required: the caller supplies the same registration id to identity validation and admission, and the permit names that id. Local admission uses the supplied id as well. A synchronous admission epoch is checked immediately before and after registry insertion; losing control invalidates the epoch, so an already-admitted but stalled handshake cannot register after fail-closed eviction.
+### The registry
 
-The lease expires independently of TCP/yamux liveness. Before expiry, the client opens an inbound refresh stream and sends its PAT in `LeaseRefreshRequest`. One absolute 10-second deadline covers reading the frame, identity revalidation, registry update, and response write. The refreshed identity must preserve the existing user id, username, and devserver id, and must return a new lease for the same registration. The PAT is dropped after validation and every related `Debug` surface is redacted. A successful registry update publishes `RegistryEvent::LeaseRefresh`; devserver-proxy forwards only the signed lease to the controller as a generation-contiguous refresh. Failed refreshes can retry, but reaching lease expiry closes and deregisters the tunnel.
+The registry is a two-level map, user to devserver id to entry, under a mutex, with `Arc<str>` keys so a public-request lookup borrows plain strings without allocating. Each entry holds the handle and the driver's shutdown sender, so removing an entry is what ends a tunnel. The collision policy is last writer wins: a dial for a key already held evicts the previous entry (logging its age so flap is visible), which is how a restarted devserver reclaims its registration without waiting for a TCP timeout. The per-user cap counts distinct devserver ids and is skipped for a key the user already holds. Every insert and removal increments a generation and publishes an event, and `snapshot_and_subscribe` returns the current rows with the generation and a receiver, which is how the proxy keeps the controller's view contiguous. Admin views are sorted snapshots carrying the peer address and connect time; `evict` forces a tunnel offline.
 
-### Registry
+### The substream budget
 
-- Two-level map `user -> devserver_id -> Entry` (keys `Arc<str>`) under `parking_lot::Mutex`. The split lets `get(&str, &str)` resolve via `Borrow<str>` without allocating, and makes per-user enumeration a direct inner-map walk. Empty user buckets are removed. (The inner key is named `workspace` in the code; its value is the token-resolved `devserver_id`.)
-- `Entry { handle: TunnelHandle, _shutdown_tx: oneshot::Sender<()> }`. Dropping the entry drops the sender, which wakes the per-tunnel driver's receiver, which closes yamux.
-- Collision: last-writer-wins. `register_authorized_with_id_and_cap` evicts any prior entry for the same key, logs the prior registration's age (flap visibility), and returns the new handle. A devserver restart reclaims its registration.
-- Per-user cap: `register_authorized_with_id_and_cap` refuses (`RegisterCapped`) when the user already holds `max_registrations_per_user` distinct registrations (devserver ids) and this key is not among them; `0` disables the check. Count and insert happen under the same lock, so parallel dials cannot race past the cap.
-- `TunnelHandle::open()` sends an open request (`oneshot::Sender<Result<yamux::Stream, OpenError>>`) over the per-tunnel mpsc and awaits the reply; `OpenError::Disconnected` if either channel is gone.
-- `deregister_if_owner` removes the entry only if it still points at the same handle (matching `registration_id`), so a driver shutting down after eviction can't accidentally remove its successor.
-- Admin views: `list_workspaces_for(user)` and `list_all()`, both sorted, carrying the peer address and connect time for dashboard / `ps`-style tooling (the `public` bit is gone). `evict(user, devserver_id)` forces a tunnel offline.
+`TunnelHandle::open` sends an open request to the driver and awaits the stream, holding a permit from a per-tunnel semaphore for as long as the returned `TunnelStream` lives. The budget is well under yamux's own stream cap on purpose: asking yamux for a stream past its cap returns an error that has already put the whole session into cleanup, taking every other substream with it, so the count must never get there. A dropped substream frees its permit at once while yamux only drops it from its map on the driver's next poll, and the driver serves queued opens before that poll, so a burst of completions can leave up to twice the budget counted; the budget is therefore half of what the cap leaves after headroom for the streams the peer opens. A caller past the budget waits, bounded by its own request deadline, and nothing else on the tunnel notices. The single failure of `open` is `Disconnected`, which the proxy maps to a bad-gateway response.
 
-### Gateway forwarding path
+### Why h1 over yamux, and why h2c on the listener
 
-Public-side forwarding lives in the gateway; this crate exposes only `TunnelHandle::open`. The proxy parses `{owner}` and the optional `--{disc}` discriminator from the wildcard host (`{owner}--{disc}.{proxy}.proxy.{domain}`), gates the viewer with the opaque per-devserver `__Host-devserver_gate` session cookie (minted by the Ed25519 entry exchange), and forwards the full segment-preserving `/{workspace}/...` path over the substream. The forwarding contract it meets:
-
-- One outbound substream per public request, driven by `hyper::client::conn::http1` with `with_upgrades()`. h1 maps cleanly because the substream is already muxed (see "Why h1 over yamux").
-- A single deadline covers `handle.open()` (502 on `Disconnected`, 504 on timeout), the h1 handshake, and `send_request` up to response headers.
-- WebSockets: axum's `WebSocketUpgrade` is extracted after the gate; the proxy runs tungstenite's `client_async` handshake directly on a fresh substream and pumps frames both ways, resetting a monotonic idle deadline per frame so wall-clock jumps (NTP slew, suspend/resume) cannot register as activity.
-- Forwarded-header sanitisation and request/response body caps (section 6) bound what a public visitor can inject or stream through to chan-serve.
-
-See the gateway's `devserver-proxy/design.md` for the full layer.
-
-### Why h1 over yamux, not h2
-
-The substream is already a multiplexed channel; running h2 inside would be mux-on-mux. h1 maps cleanly: one substream is one request. WebSocket upgrades work with `with_upgrades()`. Body streaming works through the yamux flow-control window.
-
-### Why h2c (not TLS) on the listener
-
-The deployment in front owns transport security: nginx terminates TLS at the gateway and forwards h2c via `grpc_pass` on the `/v1/tunnel` path. Running rustls here would duplicate trust config and complicate cert rotation. The listener itself is h2c-only; any host can put its own TLS layer in front.
+A substream is already a multiplexed channel; one substream is one request, HTTP/1.1 maps onto it directly, WebSocket upgrades work with hyper's upgrade support, and bodies stream through yamux's flow-control window. The listener speaks h2c because the deployment in front owns transport security: the gateway's edge terminates TLS and forwards the tunnel path as h2c, and running rustls here would duplicate trust configuration and complicate rotation.
 
 ## 4. Embedding contracts
 
-The host supplies a `Validator`; this crate never issues or interprets tokens itself. Validation returns the authenticated user, username, token-resolved devserver id, and scopes. The listener requires the tunnel scope before sending 200, and post-200 policy failures are reported as structured HelloAck refusals.
+The listener is the only path that inserts into the registry; registration is crate-private, so an embedder cannot mint a handle that bypassed validation. `Validated` carries the authenticated user id, username, devserver id, scopes, the per-tunnel assertion key and, in controller deployments, the lease and its expiry; its `Debug` output redacts the secrets. A `Validator` may also receive the display name the client announced, as a best-effort follow-up that never fails the tunnel. The registry exposes lookup for forwarding, sorted snapshots and events for the controller, and explicit eviction. Public-side routing, authentication, caps and upgrade bridging belong to the embedder; this crate exposes no public router and no public configuration.
 
-The listener is the only path that inserts tunnels into the registry. It owns validate-before-200, Hello/HelloAck, per-user cap enforcement, and transition into the driver loop. Registration itself stays crate-private so embedders cannot mint handles that bypass validation.
+## 5. Wire notes
 
-The registry is keyed by user plus token-resolved devserver id. It exposes lookup for public forwarding, sorted snapshots for dashboard/admin views, and explicit eviction. A `TunnelHandle` opens one yamux substream for one public request, and `open` returns a `TunnelStream`: the substream plus the permit for the slot it occupies, released when the stream is dropped. Its single failure category is disconnected, which public callers map to 502.
+The 200 is sent after the validator and the scope gate and before the `Hello` is read, which is why the handshake function takes an already-validated identity. The acknowledged prefix is `/{devserver id}`; the devserver ignores it, since tenants prefix themselves, and the username travels in the public host. Policy errors map to the stable refusal codes in chan-tunnel-proto (the local cap and the fleet limit to the same code, an unavailable controller to its own, anything else to `internal` with the error's text). The yamux and h2 windows are the shared constants from the proto crate, so both peers are tuned identically.
 
-Public-side forwarding belongs to the gateway. This crate intentionally exposes no public router or public config; the gateway layers authentication, host routing, body caps, forwarded-header sanitation, rate limits, and upgrade bridging on top of `TunnelHandle::open`.
+## 6. Trust boundaries
 
-## 5. Wire format / framing
+- **The validator is the identity authority.** It must never log, echo or persist the token, in any error variant or URL; the listener logs its errors, so this seam is the only place that guarantee can break. Validation and the scope check run before the 200; after it, failures are in-band refusals.
+- **The controller is the capacity authority.** The proxy must hold a current permit before acknowledging or inserting; control loss invalidates permits and refuses new admissions, and there is no local fallback in the gateway deployment.
+- **What the proxy holds of the token, and for how long.** The handler holds a dial's raw token from the method and bearer gates through validation (whether or not it then refuses), the Hello read, admission and the registry insert, and when the Hello carries a display name a detached task holds it until the announcement returns. Each lease refresh holds the token only until validation returns. Separately, h2's HPACK decoder keeps the dial header's decoded value for the life of that h2 connection, so a memory capture of the proxy process can hold the token of every connected tunnel. The admission lease is not a trusted-execution boundary: a fully compromised proxy node can capture and reuse a token until identity revokes it or it expires, and node isolation plus token rotation and revocation are the incident response.
+- **What a captured tunnel token reaches.** The devserver id is the digest of the token and identity derives it on every validation, so a second dial with the same token arrives with the same registry key. Last writer wins and the per-user cap is skipped for a held key, so the second dial evicts the first, the controller classifies it as a reconnect, and public routing does not move: the tenant host and every entry credential name the same devserver id and owner. The owner's and every grantee's browser is served by whichever peer holds the registration, and two holders of one token displace each other for as long as both dial. A display name the second dialer announces also rewrites the roster label. The token carries the tunnel scope and not the desktop scopes the desktop's own credential carries, and a registration opens substreams only against its own connected peer, so nothing on this path reaches the real devserver's files or shell.
+- **Names.** The username the validator returns is checked for host-safety before it flows into public routing, and every `Hello` workspace label is checked even though clients check first.
+- **Floods.** The in-flight cap, the per-stage deadlines, the bounded refusal drain and the 409-then-shutdown treatment of extra streams bound what an unauthenticated peer can hold; the substream budget bounds what a public visitor can open on one tunnel; the per-user cap bounds registrations.
+- **Public-side controls** live in devserver-proxy: host routing accepts only the configured apex and wildcard, forwarded headers from the public side are stripped and re-injected, request and response bodies are capped, one deadline covers the open, the h1 exchange and the body, and a bridged WebSocket is cut after both directions go quiet. Per-visitor rate limiting is left to the edge, since behind it every visitor shares the proxy's peer address. The detail is in the gateway's devserver-proxy design.
 
-The wire format is owned by chan-tunnel-proto. See [`chan-tunnel-proto/design.md`](../chan-tunnel-proto/design.md) sections 2 and 5 for the byte layout, the JSON envelope rationale, the 64 KiB cap, and `H2Duplex`.
+## 7. Errors
 
-Server-specific notes:
+`ServerError` is one flat enum; frame and I/O errors from chan-tunnel-proto are flattened through `Display`, so `h2`, `serde_json` and `yamux` types stay inside. Before the acknowledgement, policy errors additionally map to the stable refusal codes. `OpenError::Disconnected` is the single failure of `TunnelHandle::open`: either the driver has exited or it could not allocate the stream because yamux is closing.
 
-- The 200 response is sent BEFORE the framed `Hello` is read but AFTER the validator and tunnel-scope gate run. This split is why `handshake_validated_with_admission` takes an already-validated identity: the listener needs to return a uniform 401 for authentication failures prior to committing to the body.
-- Failures after the 200 (bad protocol, bad workspace name, admission policy) are reported in-band as `HelloAck::Refused` with a stable code, written best-effort before the stream is dropped. `refusal_for` maps `TooManyRegistrations` and `AdmissionAtCapacity` to `too_many_workspaces` and `ControlUnavailable` to `control_unavailable`; anything else surfaces as `internal` with the error's `Display` as message.
-- `HELLO_READ_TIMEOUT = 15s` bounds slow-loris-style peers that connect, get the 200, and never frame a `Hello`. 15s is plenty for trans-pacific; tighter would risk false positives on slow mobile uplinks.
-- The yamux config caps each tunnel at 256 concurrent streams and a 64 MiB aggregate receive window. A visitor opening many slow requests is bounded without reducing normal browser concurrency.
-- `HelloAckOk.prefix` is `/{devserver_id}` (the resolved id the registration is keyed on; the devserver client ignores it; tenants self-prefix at their public slugs). The username travels in the wildcard host on the public side, not in the path.
+## 8. Open questions
 
-## 6. Trust boundaries / validation
-
-- **Token authentication**: the consumer's `Validator` impl is the identity authority. This crate calls it; on success it gets a redacted `Validated` carrying immutable ids, scopes, the per-tunnel assertion key, and (in controller deployments) a registration-bound admission lease with expiry. Order is fixed: validator and tunnel-scope checks run *before* the 200 response. Invalid and scopeless tokens receive the same empty 401, while the listener receives `ServerError::InvalidToken` or `ServerError::MissingScope`. After 200, policy failures are reported via `HelloAck::Refused`. The validator contract forbids logging, echoing, or persisting the token; listener error values are safe to log only because this seam honors that contract.
-- **Control-plane admission**: `RegistrationAdmission` is the fleet-capacity and liveness authority. The proxy must obtain a current permit before acknowledging or inserting a tunnel. Control loss invalidates permits and refuses new admissions; there is no local fallback in the production embedding.
-- **Residual assigned-node trust**: the proxy's own code holds a dial's raw PAT from the dial until the tunnel registers and, when the Hello carries a name, until `announce_devserver_name` returns. The bearer is bound once the method/path gate (404, `register_tunnel`'s `Method::POST` and `TUNNEL_PATH` check) and the missing-bearer 401 (the `None` arm of the `extract_bearer` match) have passed, and is held through the validator round-trip (`VALIDATE_TIMEOUT`, 10 s) even when validation then refuses the dial (401 for an invalid token, 502 for an identity error and 500 for any other validator error, from the status match on the validator's error; 401 for a missing scope, from the `TUNNEL_SCOPE` check on the returned scopes; 504 when `VALIDATE_TIMEOUT` elapses), then through the Hello read (`HELLO_READ_TIMEOUT`, 15 s), controller admission (`VALIDATE_TIMEOUT`, 10 s), and the registry insert before the announcement is spawned. With a Hello name, the gateway validator makes up to three posts with 0/1/3 s delays and 5 s client timeouts each, so the bearer can outlive registration by up to about 19 s. Each lease refresh's PAT is held only until `refresh_lease_inner`'s validation returns. Separately, h2 0.4.14's HPACK decoder keeps the dial header's decoded value in a 4 KiB scratch buffer for the tunnel's h2 connection, pinned both by the decoder's buffer handle and by the `:authority` dynamic-table entry that points into the same block, so a memory capture of the proxy process can hold the PAT of every connected tunnel. A fully compromised assigned node can capture and reuse a PAT until identity revokes it or it expires. Admission leases are not a TEE boundary; node isolation and PAT rotation/revocation remain required incident response.
-- **What a captured tunnel PAT reaches**: the devserver id is the lowercase hex SHA-256 of the raw PAT, and identity derives it from the token presented on each validate, so a second dial carrying the same PAT arrives with the same username and devserver id as the first. That pair is the registry key, the collision policy is last-writer-wins, and the per-user cap is skipped for a key the user already holds, so the second dial evicts the first rather than registering beside it. The control plane agrees: it classifies the same `(owner_user_id, devserver_id)` as a reconnect, admits it past the owner's connected-devserver limit, and issues a kill for the registration it displaced. The eviction does not move public routing either, because the tenant host's discriminator is the first 12 characters of that same devserver id, and an entry credential decodes against the proxy id, the tenant host, the devserver id and the registration's owner id, none of which the eviction changes. So the owner's and every grantee's browser is served by whichever peer currently holds the registration, under the same `{owner}--{disc}` tenant label and through the ordinary gate. The displaced client redials with backoff and evicts in turn, so two holders of one PAT displace each other for as long as both dial. A `Hello` name the second dialler announces also rewrites the devserver row's label. What the PAT does not reach: the `tunnel` scope satisfies no route on identity's public listener, where the only two routes that accept a PAT bearer both require a `desktop.*` scope and no route under `/api/*` reads an Authorization header, the account routes there resolving their caller from the cookie session, while the operator and internal trees sit on identity's internal listener behind configured bearers. A registration also opens substreams only against its own connected peer, so nothing on this path reaches the real devserver's files or shell.
-- **Tunnel scope**: the validator returns scopes; the listener refuses tokens missing `TUNNEL_SCOPE` (`"tunnel"`) with the same empty 401 used for an invalid token, while logging `ServerError::MissingScope` internally.
-- **Public scope**: REMOVED. The tunnel is always authenticated; there is no anonymous-readable path, so `TUNNEL_PUBLIC_SCOPE` / `Hello.public` / `MissingPublicScope` are gone. The gateway authorizes a viewer with one `devserver_access(owner, devserver, caller)` check (a grant is the whole library); see the gateway's `devserver-proxy/design.md` and ADR-0001.
-- **Username validation** (`is_valid_username`): defense-in-depth. The username flows into public routing; if the upstream identity service ever emits `..`, slashes, or whitespace, the public side would mis-route. The handshake refuses any username that wouldn't be URL-safe.
-- **Workspace name validation** (`is_valid_workspace_name`): every Hello's `workspace` field is checked; clients pre-check too but we don't trust them.
-- **Per-tunnel substream budget**: `MAX_TUNNEL_SUBSTREAMS` (120) bounds how many substreams one tunnel holds open at once, and `TunnelHandle::open` waits for a slot rather than asking yamux for a stream past its own cap. The margin under `TUNNEL_YAMUX_MAX_STREAMS` (256) is wide on purpose: a dropped substream frees its permit at once but yamux only drops it from its stream map on the driver's next poll, so the worst case in flight is twice the permit count (240), and the 16 slots left over are for the streams the peer opens. Public callers bound their own wait instead of taking the whole session down with one refused open: an HTTP request with its request deadline (504), a WebSocket bridge with its idle window (a 1011 Close).
-- **Per-user registration cap**: `max_registrations_per_user` bounds how many distinct registrations (distinct `devserver_id`s) one user can keep. Checked best-effort in admission (clean refusal on the wire) and authoritatively under the registry lock at insert.
-- **Method / path gate**: 404 for anything other than `POST /v1/tunnel`, and 401 for a missing bearer, each releasing the in-flight slot before the bounded flush (see step 5). The drainer task rejects additional streams on the same connection with 409 and abrupt-shutdowns the connection (ENHANCE_YOUR_CALM) after 16 rejections.
-- **Bearer parsing**: scheme name is case-insensitive (RFC 6750); the scheme/token separator is one or more SP / HTAB (RFC 7230 BWS); empty / whitespace-only tokens are rejected.
-- **Listener back-pressure cap**: at most `MAX_INFLIGHT_HANDSHAKES` (1024) connections may sit in the authenticate-and-handshake stages simultaneously. Above that the TCP socket is closed immediately so a flood of half-open peers cannot exhaust memory. Per-stage timeouts (h2 handshake 10s, first stream 10s, validate 10s, Hello read 15s) bound each slot.
-- **Public-side controls**: the items below describe the forwarding hygiene the gateway enforces; the knobs are devserver-proxy environment configuration.
-- **Public-side body policy**: `MAX_REQUEST_BYTES` and `MAX_RESPONSE_BYTES` default to 100 MiB and wrap general request and response bodies in `http_body_util::Limited`; zero disables the corresponding general cap. Exact multipart-upload and form-decoded download routes use explicit 100 GiB caps. The server-side copy route retains the general JSON byte caps. A non-HEAD response whose declared length exceeds its effective cap is refused with 502 before body forwarding; unknown-length responses remain bounded while streaming.
-- **Upstream request timeout**: `REQUEST_TIMEOUT_SECS` (default 60s, 0 disables) is one deadline across opening the substream, the h1 handshake, response headers, and body streaming (`DeadlineBody`), limited by the session expiry. Exact upload, download, and server-side copy routes use a 24-hour deadline. A miss before headers returns 504 and a mid-body miss errors the stream.
-- **WS idle window**: a bridged WebSocket is cut only after BOTH directions are quiet for `DEFAULT_WS_IDLE_TIMEOUT` (300s); any frame resets the window, and teardown sends a real Close frame to each half. Keeps a public client that 101'd and went silent from pinning the substream forever. The same window bounds the bridge's setup, the substream open and the upstream handshake, and a setup that outlasts it ends the client socket with a 1011 Close.
-- **Host routing**: the dispatcher accepts only the configured apex and the configured wildcard suffix (`{owner}` / `{owner}--{disc}` single label); any other Host is 404, so a misrouted listener exposes nothing.
-- **Per-visitor rate limit**: none in-process. Behind nginx the visible peer is always the proxy, so a peer-IP limiter would key every visitor into a single bucket; rate-limiting belongs upstream (`limit_req_zone $binary_remote_addr`).
-- **Forwarded-header sanitisation** (`strip_inbound_headers` + `apply_forwarded`): hop-by-hop and Connection-listed headers, `Host`, `Cookie`, `Authorization`, the CSRF header, and inbound `X-Forwarded-{For,Proto,Host}` are stripped before the proxy re-injects its own values; the public side does not get to dictate any of these to the devserver, and public visitors cannot inject bearer tokens or cookie state into it (public-side authentication is the proxy's job). `X-Forwarded-Proto` comes from `FORWARDED_PROTO` (default https), `X-Forwarded-Host` from the routed Host, and `X-Forwarded-For` is the socket peer only; inbound XFF is never trusted and there is no append knob.
-
-## 7. Error model
-
-Single umbrella enum `ServerError` with eight variants (see section 4). Conversions from `chan_tunnel_proto::FrameError` and `IoFrameError` flatten through `Display`, so the crate boundary stays free of `h2::Error`, `serde_json::Error`, and `yamux::Error`. On the wire, pre-ack policy errors additionally map to stable `HelloAck::Refused` codes via `refusal_for`.
-
-`OpenError::Disconnected` is the single failure mode of `TunnelHandle::open()`: either the request channel is gone (the driver has already exited) or the reply channel was dropped (the driver couldn't allocate the substream because yamux is closing). Public-side callers map both into 502.
-
-## 8. Open questions / future extensions
-
-- Persistent registry. Today a host restart drops every tunnel and clients reconnect. A small on-disk index would let the public side serve "tunnel offline since X" errors with context instead of a bare 502 during a restart.
-- Per-tunnel quotas. One tunnel is one devserver registration and carries every workspace that devserver serves (see chan-tunnel-proto's design.md section 8). `max_registrations_per_user` caps how many registrations (distinct devserver ids) one user holds, not workspaces; devserver-proxy passes `0` (no in-process cap) and leaves the per-owner limit to devserver-control's admission, whose capacity is `min(MAX_DEVSERVERS_PER_USER, signed max_connected_devservers)` (see devserver-control's design.md). Within a tunnel, concurrent substreams wait on `MAX_TUNNEL_SUBSTREAMS` permits under the 256-stream yamux cap; nothing caps its total bandwidth or request rate.
-- Health probe on the substream. The driver currently learns about a dead peer when yamux errors or an `open` fails. An explicit application-level ping over a control substream would give the public side faster failover.
+- A persistent registry would let the public side say "offline since" during a proxy restart instead of a bare bad-gateway response.
+- An application-level health probe over a control substream would detect a dead peer faster than waiting for yamux to error or an open to fail.
+- Nothing caps a tunnel's total bandwidth or request rate; the substream budget bounds concurrency only.

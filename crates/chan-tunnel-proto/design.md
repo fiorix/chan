@@ -1,176 +1,119 @@
 # chan-tunnel-proto design
 
-## Cross-crate context
+chan-tunnel-proto is the wire contract of the gateway tunnel: the control frames a devserver and a gateway exchange once per connection, the framing those frames use, the identifier rules both ends check, the adapter that turns one HTTP/2 stream into the byte stream yamux multiplexes, the signed caller assertion the gateway attaches to every request it forwards, and the accept-failure policy the gateway's raw accept loops share. It exists so that the dial side and the terminating side cannot drift apart: both depend on this crate, and a change to the bytes is made here, never in an I/O crate. The crate is mostly data and pure functions; the few async helpers run on the caller's tokio runtime and never start one.
 
-chan-tunnel has three boundaries: shared wire contracts, a dial-side client embedded by `chan devserver`, and a terminator embedded by the gateway.
+## Where it sits
 
-End to end, `chan devserver` embeds the client and dials the terminator at `POST {tunnel-host}/v1/tunnel`; after the control handshake the single h2 stream becomes a yamux session, and the terminator opens one substream per public request:
+[`chan-tunnel-client`](../chan-tunnel-client/design.md) is the dial side `chan devserver` embeds, and [`chan-tunnel-server`](../chan-tunnel-server/design.md) is the terminating side the gateway's devserver-proxy embeds. Both build their handshake, their yamux session and their error types on this crate. Two other consumers use parts of it without the tunnel: the devserver (chan-server) verifies the gateway assertion on each request a gateway forwards, and the gateway's devserver-control runs its proxy control listener on the same framed reads and writes, `H2Duplex` and accept-failure policy. The gateway's identity service derives the devserver id with the same function the devserver uses to check it.
+
+```mermaid
+flowchart LR
+  P["chan-tunnel-proto"]
+  C["chan-tunnel-client (dial side)"]
+  S["chan-tunnel-server (terminator)"]
+  D["chan-server: chan devserver"]
+  X["gateway: devserver-proxy"]
+  K["gateway: devserver-control, identity"]
+  C --> P
+  S --> P
+  D -->|"embeds; verifies assertions"| C
+  D --> P
+  X -->|"embeds; signs assertions"| S
+  K -->|"framed I/O, H2Duplex, accept policy, devserver id"| P
+```
+
+*Every tunnel crate and both gateway services that touch the tunnel depend on the contract; nothing depends on an I/O crate for its bytes.*
+
+## The tunnel end to end
+
+A devserver reaches a gateway with one long-lived HTTPS request. It POSTs to the tunnel path with its personal access token as the bearer; the gateway validates the token before answering; the request and response bodies then carry one control frame each, `Hello` and `HelloAck`; and from there both sides hand the HTTP/2 stream to yamux, with the gateway opening one substream per public request. The devserver keeps the token and periodically refreshes its admission lease over a stream it opens itself. The constraint behind this shape is that the devserver machine may sit behind NAT with HTTP-only egress, and must need no inbound port, no DNS and no TLS of its own.
 
 ```mermaid
 sequenceDiagram
-    participant V as Public visitor
-    participant C as chan devserver client
-    participant S as tunnel terminator
-    Note over C,S: Dial plus control handshake, once per tunnel
-    C->>S: POST /v1/tunnel plus Bearer token
-    S->>S: validate token and tunnel scope
-    S-->>C: 200 OK, h2 stream stays open
-    C->>S: Hello frame (protocol, workspace, display name)
-    S->>S: validate workspace and ask registration admission
-    S-->>C: HelloAck Ok frame (prefix, user, workspace, owner_user_id)
-    Note over C,S: h2 stream now belongs to yamux, both directions
-    V->>S: public HTTP request
-    S->>C: open one yamux substream
-    S->>C: forward h1 request over substream
-    C->>C: serve via axum router over hyper h1
-    C-->>S: h1 response over substream
-    S-->>V: public HTTP response
-    C->>S: periodic yamux control stream: LeaseRefreshRequest (PAT)
-    S->>S: revalidate exact registration authority
+    participant V as browser or desktop
+    participant C as chan devserver (chan-tunnel-client)
+    participant S as gateway devserver-proxy (chan-tunnel-server)
+    participant I as gateway identity and control
+    Note over C,S: once per tunnel
+    C->>S: POST /v1/tunnel, Authorization: Bearer PAT
+    S->>I: validate the PAT, mint an admission lease
+    I-->>S: owner id, username, devserver id, lease
+    S-->>C: 200, body left open
+    C->>S: Hello (protocol, workspace placeholder, display name)
+    S->>I: admit the registration
+    I-->>S: permit
+    S-->>C: HelloAck Ok (prefix, user, devserver id, owner id)
+    Note over C,S: the stream now belongs to yamux
+    V->>S: public request at the tenant origin
+    S->>C: new substream: one HTTP/1.1 request plus a signed assertion
+    C->>C: verify the assertion, serve through the devserver router
+    C-->>S: HTTP/1.1 response
+    S-->>V: public response
+    C->>S: client-opened substream: LeaseRefreshRequest (PAT)
+    S->>I: revalidate for the same registration
     S-->>C: LeaseRefreshResponse
 ```
 
-The control + data path: one control handshake per tunnel, then a yamux substream per public request.
+*One control handshake per tunnel, then a substream per public request and a periodic lease refresh in the other direction.*
 
-This document is the canonical reference for the wire format and framing. The client and server design.md files reference back here for any byte-level detail.
+A refusal before the 200 is an HTTP status with no body, so a bad or scopeless token looks the same to a caller probing it. A refusal after the 200 is a `HelloAck` refusal frame with a stable code, so the client can tell policy from a dropped transport.
 
-## 1. Problem and scope
+## Control frames
 
-A chan user wants their local workspace reachable on a public URL without opening a port, configuring DNS, or running a TURN/STUN stack. The constraint is "works through corporate NAT and HTTP-only egress." The shape that fits is one long-lived HTTPS request.
+`Hello` carries the protocol version, the client's version string for logs, a workspace name, and an optional display name for the gateway roster. The workspace name is a placeholder: the devserver sends a fixed label, the gateway keys the registration on the devserver id it resolves from the token, and one registration carries the devserver's whole library, with the `{workspace}` path segment routing between tenants inside it. The field stays in the type so the protocol itself does not assume a devserver on the other end.
 
-This crate owns:
+`HelloAck` is either the registration (the assigned path prefix, the username, the devserver id in the workspace slot, and the immutable owner id) or a refusal with a machine-readable code and a human-readable message. Codes are additive: a client matches the ones it knows and falls back to the message for the rest.
 
-- Control frames (`Hello`, `HelloAck`) and the one-shot yamux lease-refresh request/response, including structured refusal codes and redacted PAT debug behavior.
-- Length-prefixed framing (`[u32 BE len][json bytes]`) used only for the two control messages.
-- Workspace-name validation applied by both client and server, plus a defensive username check applied by the server after bearer-token validation.
-- `H2Duplex`: an `AsyncRead + AsyncWrite + Unpin` over an h2 `(SendStream<Bytes>, RecvStream)` pair, feeding the post-handshake byte stream into yamux on both ends.
-- `TUNNEL_PATH` and `MAX_CONTROL_FRAME_BYTES`.
-- The accept-failure policy (`AcceptFailure`, `accept_next`) shared by the tunnel terminator's listener and devserver-control's proxy control listener. See [Accept failures](#accept-failures).
-- The gateway caller assertion (`gateway_assertion`): per-tunnel key derivation, signed caller claims, `canonical_audience`, and the token-resolved devserver id (PAT SHA-256). The claims include `ClientType`, the client the caller's gateway session was minted for; the gateway's entry credential reuses the same type. A missing or unrecognised value deserializes as `Unknown` instead of failing the token, and is never `Desktop`.
+The protocol version travels inside `Hello`, so the path never changes with it. Only version 1 exists; a bump is reserved for incompatible changes, while additive fields use serde defaults and need no bump, which is how the optional display name rides along: a client that omits it decodes as none, and a server that does not know it ignores it.
 
-Out of scope here, owned by the I/O crates:
+There is no anonymous mode. Every tunnel is authenticated by the token, and a viewer is authorized by the gateway's per-devserver access check, where one grant covers the whole library.
 
-- TLS, h2 client/server setup, request routing.
-- yamux multiplexing, substream lifecycle.
-- Token validation, registry of live tunnels.
-- HTTP-level rewriting, X-Forwarded-* injection, upgrade bridging.
+### Why a length-prefixed JSON body, not headers
 
-## 2. Architecture overview
+The handshake fields could ride on the request line or in custom headers. They do not, for three reasons. A TLS edge that forwards h2 (nginx with `grpc_pass`) may strip or rewrite request headers, while the body is opaque to it. The reply needs structure of its own (a prefix and ids, or a code and a message), and a body keeps the two directions symmetric and additive instead of a header-name negotiation. And JSON in a body is testable without standing up h2.
 
-The end-to-end control and data path is the sequence diagram above (Cross-crate context). This section covers the on-wire framing the two control frames share.
+The frame is a big-endian `u32` length followed by that many JSON bytes. The prefix lets the decoder size its buffer before reading, instead of scanning for the end of a JSON document. The length is capped (`MAX_CONTROL_FRAME_BYTES`) and the cap is checked before any body bytes are read or allocated, because a hostile or broken peer could otherwise declare a gigabyte frame and either exhaust memory or hang the reader. Real frames are a few hundred bytes; the cap leaves room for additive growth.
 
-Framing for the two control messages is identical in both directions: a big-endian `u32` length prefix followed by that many JSON bytes.
+The sync codec (`encode_frame` and `decode_frame` over a `BytesMut`) is separate from the tokio helpers (`read_frame` and `write_frame`) on purpose: the codec is reusable from any I/O loop, and the helpers exist because both real callers run on tokio. `Incomplete` is the one recoverable decode error; everything else ends the handshake.
 
-After `HelloAck` is fully read on the client and fully written on the server, the outer byte stream belongs to yamux. The same bounded frame helper is later reused inside a dedicated one-shot yamux stream for `LeaseRefreshRequest` / `LeaseRefreshResponse`; it is never interleaved with public h1 substreams.
+## Identity and naming rules
 
-## 3. Components / responsibilities
+The devserver id is the lowercase hex SHA-256 of the raw token (`devserver_id_from_token`). The token is the secret and the digest is a public handle: identity returns it when it validates a token, the registry keys on `(username, devserver id)`, its first characters name the devserver in the tenant host `{owner}--{disc}.{proxy}.proxy.{domain}`, and it is the `drv` claim of every assertion. Both the gateway and the devserver compute it, so the encoding is a cross-service contract. Token rotation therefore yields a new devserver.
 
-The split between the sync codec (`BytesMut`-based `encode_frame` / `decode_frame`) and the async helpers (tokio `read_frame` / `write_frame` over `AsyncRead`/`AsyncWrite`) is deliberate: the sync codec is self-contained and reusable from any I/O loop. The async helpers exist because both real callers run on tokio; a caller on a different runtime would consume the sync codec directly.
+The assigned prefix is `/{devserver id}`. The username is not in the path because the host carries the owner; the devserver ignores the prefix, since each tenant already prefixes itself at its own path.
 
-## 4. Contract surface
+Two validators live here so both ends apply the same rule. `is_valid_workspace_name` accepts a short lowercase label with inner hyphens; the client refuses to send an invalid one (a local configuration error needs no round trip) and the server refuses to accept one (it does not trust clients). `is_valid_username` is the terminator's defence in depth on the name the validator returns: it rejects path separators, whitespace and leading punctuation, because the username flows into the public host label, while the gateway enforces its own stricter host-safe shape.
 
-This crate owns the stable tunnel path, the control-frame size cap, the Hello / HelloAck schemas, the refusal-code vocabulary, the shared identifier validators, the frame codec, the h2 duplex adapter, and the accept-failure policy. Client and server crates may orchestrate I/O differently, but they must use these shared contracts for the bytes and validation rules.
+## H2Duplex
 
-Control frames are owned serde values with plain strings and enums, no borrowed lifetimes. `Hello` carries protocol, client version for logs, workspace, and an optional display name; `HelloAck` is either success with the assigned prefix/user/workspace plus the immutable `owner_user_id` or refusal with a stable code plus safe message. `LeaseRefreshRequest` carries the PAT only for the duration of exact-registration revalidation and redacts it from `Debug`; its response is `Refreshed` or a safe refusal. Refusal codes are additive and machine-matchable.
+h2 exposes a request or response as a `SendStream` plus a `RecvStream`; yamux wants one `AsyncRead + AsyncWrite + Unpin`. `H2Duplex` is the glue, and it is symmetric: on the server the receive side is the request body and the send side is the response body, on the client the reverse, and the adapter does not care which.
 
-The codec split remains deliberate: the sync codec is reusable from any I/O loop, while the tokio helpers are convenience for the current callers. Errors flatten cleanly so client and server can convert them into their own umbrella enums without re-exporting h2 or serde internals.
+Three details are load-bearing. Reads release flow-control capacity for every chunk as soon as it is pulled, so the peer's window keeps moving; a zero-length DATA frame (padding, a proxy keepalive) is skipped rather than reported as end of stream, because an end of stream here ends the whole tunnel. Writes loop when h2 grants zero capacity, because returning Pending after a zero grant would leave no waker registered and hang the writer. Shutdown sends one empty end-of-stream frame to half-close the write side.
 
-## 5. Wire format / framing
+Both peers also advertise the same, larger-than-default HTTP/2 stream and connection windows and the same yamux stream cap and connection receive window, all defined here as shared constants: the h2 default window throttles bulk transfer over any real RTT whatever yamux does above it, and the windows are per direction, so both ends must raise them.
 
-### Why a length-prefixed JSON envelope, not HTTP headers
+## Lease refresh
 
-The handshake fields could in theory ride on the request line or custom headers (`X-Chan-Workspace: notes`, etc.). They don't, for three reasons:
+`LeaseRefreshRequest` carries the token, and only the token, on a yamux stream the client opens; `LeaseRefreshResponse` is refreshed or refused with a message. It reuses the control framing and is never interleaved with public substreams. The request's `Debug` output redacts the token, since the terminator logs errors around it. Why a refresh exists at all is the terminator's decision: admission authority expires on its own clock, independently of TCP liveness, without the token ever being stored on the gateway's control plane.
 
-1. The production terminator runs behind nginx with `grpc_pass`. nginx will strip or rewrite arbitrary request headers on h2-to-h2 forwarding depending on configuration; the body is opaque to it. Putting the contract in the body is invariant under proxy churn.
-2. The reverse direction (`HelloAck`) needs to carry structured data back to the client (success with `prefix` / `user` / `workspace`, or a refusal with `code` / `message`). HTTP responses could use headers, but then the schemas are asymmetric and adding a field on the response side is a header-name fight rather than a serde additive change.
-3. JSON in the body is symmetric, evolvable (`#[serde(default)]`), and trivially testable without standing up h2.
+## The gateway assertion
 
-### Why JSON
+The gateway has already authenticated a browser or desktop session before it forwards a request through the tunnel. `gateway_assertion` lets the devserver bind that request to a caller and to its own exact owner without trusting any client-supplied header. The key is derived from the raw token on both sides (`derive_assertion_key`), so no second secret is distributed: holding the tunnel's token is what makes a gateway able to speak for it.
 
-The control frames use the same length-prefixed codec for the life of the tunnel, including periodic lease refreshes; encode cost is irrelevant. JSON is debuggable on the wire, additive-friendly via serde, and avoids a transitive dep on a binary codec the rest of the workspace doesn't already use. A frame costs on the order of 200 B.
+The signed claims are the caller's user id, the immutable owner id, the audience (the host the browser hit, canonicalised), the devserver id, the client type the session was minted for, and a short issue and expiry window. `verify` checks the signature in constant time, then the audience, the devserver id, the owner id, that the issue time is not in the future beyond a small skew, that the assertion has not expired, and that its lifetime is within the cap. Display identity is excluded on purpose: credentials carry immutable authority only, and cosmetic data comes from a separate lookup.
 
-### Length prefix
+`ClientType` records whether the session was minted for the desktop app or a browser. A missing or unrecognised value verifies as unknown rather than failing the request, and is never the desktop, so a route that is desktop-only (the reverse tunnel legs) stays closed to anything a newer or older gateway did not explicitly mark. `canonical_audience` lower-cases the host and strips a port only when it is the default for the actual scheme, so a cross-default port stays authority-bearing.
 
-`u32` big-endian. The decoder reads the prefix first so it can size the read buffer before allocating. Without a prefix the decoder would have to scan for end-of-JSON, which is fragile (escaped quotes, embedded objects).
+## Accept failures
 
-`u32` instead of varint to keep the cap check trivial: any value above `MAX_CONTROL_FRAME_BYTES` is rejected immediately, before any body bytes hit memory.
+`accept(2)` fails for reasons that say nothing about the listening socket, and both gateway services that run a raw accept loop (devserver-proxy's tunnel listener and devserver-control's proxy control listener) take their whole service down when that loop returns. `AcceptFailure::classify` sorts a failure into three classes and `accept_next` applies the policy:
 
-### MAX_CONTROL_FRAME_BYTES
+- **Connection**: one pending connection failed before it was handed over (the peer reset or aborted, a firewall hook refused it, a network error was already pending on the new socket). Logged at debug and retried at once, because pausing here would let a flood of such connections throttle every other accept.
+- **Exhausted**: the process or the kernel is short of something a new socket needs (descriptors, buffers, memory), plus any failure not recognised. Logged at error and retried after a one-second pause, the same pause hyper and axum use: the pending connection stays queued, so an immediate retry fails the same way and spins, and an unknown error costs a second of accepts rather than a spin.
+- **Listener**: the listening socket itself is unusable. The loop ends and the supervisor replaces the service.
 
-64 KiB. Real frames are well under 1 KiB. The cap exists because a malicious or buggy peer could send `0xFFFFFFFF` followed by no data; without a cap, the receiver would either OOM trying to allocate a 4 GiB buffer or hang reading a non-existent body. 64 KiB is small enough that even the worst-case allocation is harmless on every target, and large enough for any plausible additive growth.
+Errnos without a stable `io::ErrorKind` are read through `libc` on unix; elsewhere only the kinds apply, so nothing is classified as a listener failure and every unrecognised failure pauses. The policy lives in this crate because it is the one both loops already depend on: pulling the terminator's yamux and hyper stack into the controller for one function would be the wrong trade.
 
-`encode_frame` checks the cap before writing; `decode_frame` checks it before allocating. Both refuse frames over the cap with `FrameError::TooLarge(len)`.
+## Errors
 
-### No `public` bit (always authenticated)
-
-Earlier revisions carried a `Hello.public` flag (`#[serde(default)]`, so absence decoded as `false`) that asked the terminator to skip its sign-in check for a public workspace; `true` was a privilege-escalation request, gated server-side on an extra token scope (`TUNNEL_PUBLIC_SCOPE`) and refused with `missing_public_scope` when the scope was absent. The per-devserver model removed all of it: the tunnel is always authenticated and there is no anonymous-readable path, so `Hello.public`, `TUNNEL_PUBLIC_SCOPE`, and the `missing_public_scope` refusal are gone. The gateway authorizes a viewer with a single `devserver_access(owner, devserver, caller)` check, where one grant covers the whole library; see `chan-tunnel-server/design.md` and the gateway's `devserver-proxy/design.md`. A legacy client that still sends a `public` key is harmless: `Hello` decoding ignores unknown fields.
-
-### Hello.name (display name, additive)
-
-`Hello` carries an optional `name` (`#[serde(default)] Option<String>`): the display name the devserver announces for the gateway roster (`chan devserver run --tunnel-devserver-name`, defaulting to the client host's hostname). It is display-only metadata, never part of routing or the registry key, which stay token-resolved, and rides the additive-field rule with no `ProtocolVersion` bump: an old client omits the key and decodes as `None` on a new server; an old server ignores the unknown key from a new client. The terminator hands a non-empty name to its validator hook (`Validator::announce_devserver_name`); the production gateway persists it as the devserver's label, deduped per owner with `-2`/`-3` suffixes.
-
-### HelloAck: Ok or Refused
-
-`HelloAck` is a `kind`-tagged enum. The success arm carries the registration; the `Refused` arm carries a stable machine-readable `code` plus a human-readable `message`, written into the same stream the success ack would have used. Without it, every pre-ack refusal (cap reached, bad workspace name, unsupported protocol) would surface to the client as a bare transport disconnect, indistinguishable from a network failure. Clients match on known codes and fall back to the `message` for unknown ones, keeping the refusal vocabulary additive.
-
-### HelloAckOk.prefix
-
-Server-assigned public path prefix, shape `/{devserver_id}`: one leading slash, no trailing slash. The username is not in the path: the fronting proxy routes tenant wildcard subdomains (`{owner}--{disc}.{proxy}.proxy.{domain}`), so the host carries the owner and devserver while the `{workspace}` path segment carries the tenant. The devserver client ignores the prefix; each tenant self-prefixes at its keyed pathspec via `<meta name="chan-prefix">`.
-
-### ProtocolVersion negotiation
-
-Carried inside `Hello` as a transparent `u16`. The path (`/v1/tunnel`) is a stable mount point and does not bump on version changes; bumping `ProtocolVersion` is reserved for incompatible changes, while additive ones use serde defaults. Only `V1` is defined; the server refuses anything else with the `unsupported_protocol` code, and the client rejects a non-V1 ack.
-
-### H2Duplex
-
-`h2` exposes a request/response as a `SendStream<Bytes>` plus a `RecvStream`. yamux wants a single `AsyncRead + AsyncWrite + Unpin`. `H2Duplex` is the glue:
-
-- `poll_read` pulls a `Bytes` chunk from `RecvStream::poll_data` into an internal pending buffer, copies into the caller's buffer piecemeal, and calls `release_capacity` for the chunk's length so the peer's flow-control window keeps moving. The release is best-effort: a stream the peer already reset errors here and the error is ignored; the next read surfaces it.
-- `poll_write` sends up to the currently granted capacity. At zero capacity it calls `reserve_capacity` and loops on `poll_capacity`: h2 can resolve that poll with a zero grant, and returning `Pending` then would hang the writer (the consumed waker is gone), so the loop re-polls until the grant is non-zero, the stream errors, or `poll_capacity` itself returns `Pending`.
-- `poll_flush` is a no-op; h2 has no explicit flush.
-- `poll_shutdown` issues `send_data(Bytes::new(), true)` once to half-close the write side; subsequent calls are no-ops.
-
-Symmetric: server side's `RecvStream` is the request body and `SendStream` is the response body; client side is the reverse. The adapter doesn't care which.
-
-Both peers advertise a 16 MiB HTTP/2 stream window and a 32 MiB HTTP/2 connection window. The yamux peers cap the connection at 256 concurrent substreams and a 64 MiB aggregate receive window. These values are protocol-level transport invariants owned by this crate, even though they do not change the serialized control frames.
-
-### Accept failures
-
-`accept(2)` fails for reasons that say nothing about the listening socket, and both gateway services that run a raw accept loop (devserver-proxy's tunnel listener, devserver-control's proxy control listener) end the whole service when that loop returns. `AcceptFailure::classify` sorts a failure into one of three classes, and `accept_next` applies the policy:
-
-- **Connection**: one pending connection failed before it was handed over. `ECONNABORTED`, `ECONNRESET`, `EINTR`, `EAGAIN`, `EPERM` (a firewall hook), `ETIMEDOUT`, and the network errors Linux passes through from the new socket and says to retry like `EAGAIN` (`ENETDOWN`, `EPROTO`, `ENOPROTOOPT`, `EHOSTDOWN`, `ENONET`, `EHOSTUNREACH`, `EOPNOTSUPP`, `ENETUNREACH`). Logged at debug and retried at once; pausing here would let a flood of such connections throttle every other accept.
-- **Exhausted**: the process or the kernel is short of something a new socket needs (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`), plus any failure not listed here. Logged at error and retried after `ACCEPT_RETRY_PAUSE` (1s). The pending connection stays queued, so an immediate retry would fail the same way and spin; an unknown error costs a second of accepts rather than risking a spin. The one-second pause is the one hyper's `AddrIncoming` used and axum's `serve` uses, so the controller's admin listener and its proxy control listener behave alike.
-- **Listener**: the listening socket itself is unusable (`EBADF`, `ENOTSOCK`, `EINVAL`, `EFAULT`). `accept_next` returns the error and the loop ends, so the supervisor replaces the service.
-
-The errnos with a stable `io::ErrorKind` are matched by kind; the rest need `libc`, which is a unix-only dependency. On other targets only the kinds apply, so nothing there is classified `Listener` and every failure without a connection kind pauses.
-
-The policy lives here because it is the one crate both loops already depend on: devserver-control uses `H2Duplex` and the framed I/O helpers but not the terminator, and pulling chan-tunnel-server's yamux and hyper stack into the controller for one function would be the wrong trade.
-
-## 6. Trust boundaries / validation
-
-This crate validates the client's `Hello.workspace` and the server's `Validated.username`. The gateway keys registration by `(username, devserver_id)` and builds the tunnel prefix with the devserver id resolved from the bearer token; `Hello.workspace` never reaches a URL. The username supplies the owner part of the public tenant host label `{owner}--{disc}`, subject to the gateway's stricter username validation.
-
-### Workspace name (`is_valid_workspace_name`)
-
-Rules: 1..=32 ASCII bytes; characters `[a-z0-9-]`; first and last character alphanumeric (no leading/trailing hyphen). Both sides call it: the client refuses to send an invalid name, and the server refuses to accept one (`invalid_workspace_name` refusal). The duplication is intentional; the server does not trust clients, and the client check surfaces a config error locally without a round-trip.
-
-### Username (`is_valid_username`)
-
-ASCII alphanumerics, `-`, `_`; first character alphanumeric (no leading punctuation); 1..=64. Applied by chan-tunnel-server after the validator returns, to refuse path separators, whitespace and leading punctuation in `Validated::username`. It permits uppercase, underscores and double hyphens; the gateway's `gateway_common::validators::valid_username` enforces the stricter shape required for public tenant host labels.
-
-### Frame-size cap
-
-64 KiB, enforced in both `encode_frame` and `decode_frame` (see section 5).
-
-## 7. Error model
-
-Two error categories, both flat: frame errors (`TooLarge`, recoverable `Incomplete`, JSON decode) and async I/O wrapper errors (frame or I/O).
-
-`FrameError::Incomplete` is recoverable: the caller leaves the `BytesMut` untouched, reads at least `need` more bytes, and tries again. Every other variant is terminal for the handshake; the caller closes the stream.
-
-The async helpers return `IoFrameError`; the sync codec returns `FrameError`. Client and server both convert into their own umbrella enums via `From`, flattening through `Display` so `h2::Error` and `serde_json::Error` never leak across crate boundaries.
-
-## 8. Open questions / future extensions
-
-- Multi-workspace over a single tunnel: already met above the protocol, so no wire change is planned. `chan devserver` registers one tunnel (keyed on its token-resolved devserver id) and the gateway's devserver-proxy routes workspaces by the preserved `{workspace}` path segment, so a whole library rides one h2/yamux session without a `Hello { workspaces: Vec<...> }` shape or a per-workspace registry rework.
-- Negotiated frame cap. Both sides hard-code 64 KiB; a larger cap negotiated inside `Hello` would let future versions carry richer initial metadata without a protocol bump.
+Errors are flat: `FrameError` from the codec, `IoFrameError` from the async helpers, and `AssertionError` for the assertion. The client and server crates convert the first two into their own umbrella enums through `Display`, so `h2::Error` and `serde_json::Error` never cross a crate boundary.

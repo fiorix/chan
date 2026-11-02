@@ -1,144 +1,74 @@
 # chan-tunnel-client design
 
-## Cross-crate context
+chan-tunnel-client is the dial side of the gateway tunnel. `chan devserver run --tunnel-url` with a personal access token hands this crate the devserver's axum router, and the crate dials the gateway, registers, serves every request the gateway forwards, keeps the registration's admission lease alive, and redials with backoff whenever the connection drops. It exists so a devserver on a machine with no inbound port, no DNS and no TLS of its own can be published by a gateway, with the devserver only ever dialing out. The wire contract is [`chan-tunnel-proto`](../chan-tunnel-proto/design.md), whose design holds the cross-crate sequence; the other end is [`chan-tunnel-server`](../chan-tunnel-server/design.md).
 
-chan-tunnel has three boundaries: shared wire contracts, this dial-side client embedded by `chan devserver`, and a terminator embedded by the gateway.
+## Where it sits
 
-End-to-end shape: `chan devserver` calls `chan_tunnel_client::run(cfg, router)`; the terminator accepts the connection in `serve_tunnel_listener` and registers the devserver in its `Registry`. The dial / handshake / yamux flow is the section-2 diagram below, set in the cross-crate system diagram in [`chan-tunnel-proto/design.md`](../chan-tunnel-proto/design.md).
+chan-server's devserver mode is the one real caller: it builds a `ClientConfig` from the tunnel URL, the token and a display name, and runs `run(cfg, router)` as a long-lived future beside the local listener. The router is the devserver's own router, so a request through the tunnel is served by the same routes as a request over `ssh -L`, with one difference: the registration is attached to every request as an extension, and the devserver checks each request's gateway assertion against the owner id and devserver id it carries. The crate depends on chan-tunnel-proto and on hyper, axum (without optional features, since the gateway workspace also builds it), rustls and yamux. It owns no token acquisition and no server-side policy.
 
-This document is the dial and handshake reference. The wire format itself lives in chan-tunnel-proto's design.md.
-
-## 1. Problem and scope
-
-A user running `chan devserver` on a box wants their library reachable on a public URL without opening a port or configuring DNS. The constraint is "dial out only, HTTPS only." The shape that fits is one long-lived `POST /v1/tunnel` carrying yamux frames after a short handshake.
-
-This crate owns:
-
-- The TLS + h2 dial path (rustls with native roots, ALPN h2).
-- The h2c branch for local dev, restricted to literal loopback or `localhost`; non-loopback tunnel origins must use HTTPS.
-- An optional outbound HTTP proxy leg: HTTP/1.1 CONNECT (with Basic auth from the proxy URL's userinfo) before TLS/h2.
-- The Hello / HelloAck round-trip over the resulting duplex, including structured server refusals.
-- yamux client mode over the post-handshake byte stream.
-- Per-substream HTTP/1.1 service via hyper, fed by a user-supplied `axum::Router`.
-- A reconnect loop with jittered exponential backoff and a per-attempt timeout.
-- A `tokio::sync::mpsc` event channel for "connected / disconnected / dial failed" UI hooks.
-
-Out of scope:
-
-- The wire format (chan-tunnel-proto).
-- Server-side validation, registry, or public routing (chan-tunnel-server).
-- Token acquisition (the user fetches it; this crate consumes it).
-
-## 2. Architecture overview
+## The connection lifecycle
 
 ```mermaid
 flowchart TD
-    Cfg["ClientConfig + axum::Router"] --> Run["run: validate config, build_tls_config once"]
-    Run --> Dial["dial_with_tls (within dial_timeout)"]
-    Dial --> Norm["normalize URL to /v1/tunnel"]
-    Norm --> Tcp["open_tcp: TCP, optional CONNECT proxy"]
-    Tcp --> Conn["TLS h2-ALPN (or h2c) + h2 client"]
-    Conn --> Post["POST /v1/tunnel, Authorization: Bearer"]
-    Post --> Status{"response status"}
-    Status -->|"401 / other"| Failed["emit DialFailed"]
-    Status -->|200| Hs["H2Duplex + handshake: Hello / HelloAck"]
-    Hs -->|refused| Failed
-    Hs -->|ok| Reg["emit Connected, reset backoff"]
-    Reg --> Serve["serve_substreams: yamux poll_next_inbound loop"]
-    Serve --> Sub["per substream: hyper h1 with_upgrades to axum oneshot"]
-    Sub --> Serve
-    Serve -->|"conn ends"| Disc["emit Disconnected"]
-    Failed --> Sleep["sleep jittered backoff, then double up to max_backoff"]
+    Cfg["ClientConfig + axum::Router"] --> Run["run: validate the config, build the TLS config once"]
+    Run --> Dial["one attempt under dial_timeout"]
+    Dial --> Tcp["TCP, optionally through an HTTP CONNECT proxy"]
+    Tcp --> Conn["TLS with ALPN h2, or h2c to a loopback peer"]
+    Conn --> Post["POST the tunnel path with the bearer"]
+    Post --> Status{"200?"}
+    Status -->|"no"| Failed["emit DialFailed"]
+    Status -->|"yes"| Hs["H2Duplex, then Hello / HelloAck"]
+    Hs -->|"refused"| Failed
+    Hs -->|"ok"| Reg["emit Connected, reset the backoff"]
+    Reg --> Serve["serve substreams; refresh the lease periodically"]
+    Serve -->|"connection ends"| Disc["emit Disconnected"]
+    Failed --> Sleep["sleep the jittered backoff, then double it"]
     Disc --> Sleep
     Sleep --> Dial
 ```
 
-*Dial loop: validate, connect, handshake, then serve yamux substreams; any failure or disconnect backs off and re-dials.*
+*Validate, connect, handshake, serve; any failure or disconnect backs off and redials.*
 
-Connection lifecycle:
+`run` validates the configuration first (a token is present, the workspace label is valid, the URL scheme is allowed) and returns only on an error retrying cannot fix. Everything transient (TLS, h2, a refused dial, the network) is reported as an event and retried. Dropping the future cancels the dial, the h2 driver and the yamux session at once, which is how the devserver shuts the tunnel down.
 
-1. `run` validates the config (token present, workspace name valid, scheme https/http) and builds the rustls config once (caches native roots).
-2. Loop: `dial_with_tls` opens TCP (optionally via an HTTP CONNECT proxy), runs TLS for https:// URLs, runs h2, sends `POST /v1/tunnel` with `Authorization: Bearer <token>`, awaits the 200 response, wraps `(SendStream, RecvStream)` in `H2Duplex`, runs `handshake()`.
-3. On success: emits `Connected(Registration)`, resets backoff, runs the shared substream loop (the engine behind `serve_substreams_with_limit`) with the PAT for lease refresh and the `Registration` layered onto the router, polling the yamux connection until it ends, then emits `Disconnected`.
-4. On failure: emits `DialFailed { error, retry_in }`.
-5. Sleep a jittered backoff (+/- 20%), double the base (capped at `max_backoff`), loop.
+## Dialing
 
-## 3. Components / responsibilities
+The dial is one attempt and the testable unit; `run` adds the retry loop. The TLS configuration uses the platform's native roots with ALPN forced to h2, and `run` builds it once and reuses it across reconnects, because walking the OS trust store (the macOS keychain in particular) is slow enough to matter on every retry.
 
-`handshake` and `serve_substreams` are free functions over a generic `S: AsyncRead + AsyncWrite + Unpin + Send + 'static` so wire tests can pass a duplex built from a raw h2 stream and exercise the Hello round-trip without standing up TLS. The same generic lets `dial` pass an `H2Duplex` produced from a real h2 stream.
+Cleartext h2 is allowed only when the connected TCP peer is a loopback address, which is what a local gateway stack dials. The check is on the peer, not the host name: a private DNS name is not proof of a protected route. Userinfo in the tunnel URL is refused because the token is the credential; accepting both would create an ambiguous credential channel. A URL with no path gets the tunnel path filled in, so a caller can pass a bare base and the wire constant stays single-sourced, while an explicit path is kept verbatim so a typo surfaces as a visible 404 instead of being corrected silently.
 
-### Per-substream serving
+An outbound HTTP proxy is optional and explicit: when configured, the client issues an HTTP/1.1 CONNECT to the proxy with Basic credentials from the proxy URL's userinfo, then runs TLS and h2 inside the tunnel. The response headers are read byte by byte up to their terminator so no bytes of the upstream (the TLS ClientHello or the h2 preface) are consumed by a buffered reader. Credentials are only ever sent to a proxy named by a loopback IP literal whose connected peer is loopback, and a failed CONNECT reports its status without echoing the proxy's text, so a hostile proxy cannot reflect credentials into logs. `HTTP_PROXY` and friends are not honoured automatically: the embedder decides, so the client's behaviour never depends on its environment.
 
-The loop polls `poll_next_inbound` unconditionally and the spawned per-substream task acquires the concurrency permit before it serves. That ordering is load-bearing: `poll_next_inbound` is the only yamux entry point that drives the connection, and that driver is the sole reader, writer and flusher of the socket, so gating the accept on a free permit stops serving every substream already in flight the moment the pool saturates. How many substreams can exist at all is yamux's own `TUNNEL_YAMUX_MAX_STREAMS` (256), which is what bounds the parked tasks. A 32-stream, one-permit flood regression pins the served bound; a saturated-pool regression pins that the connection still makes progress. For each accepted substream:
+The bearer header is marked sensitive, which makes h2 send it as a never-indexed HPACK literal: no decoder on the path may add the token to a compression table, and an intermediary that re-encodes the request must keep that representation.
 
-1. Wrap the futures-io stream into tokio via `compat()`, then into hyper's IO via `TokioIo::new`.
-2. Run `hyper::server::conn::http1::Builder::serve_connection(io, service).with_upgrades()`. The `with_upgrades()` is required so WebSocket 101 responses keep the substream alive.
-3. The service is a `tower::service_fn` that converts hyper's `Request<Incoming>` into `Request<axum::body::Body>` and runs the user's router via `tower::ServiceExt::oneshot`.
+The dial timeout wraps the whole attempt, proxy CONNECT to HelloAck included. Without it an unreachable host would hang each attempt for the OS TCP timeout and defeat the backoff.
 
-Each substream is one logical HTTP request from the public side. Stacking h2 here would be mux-on-mux; h1 over yamux is the right shape.
+## The handshake
 
-`serve_substreams` caps the substreams being served at `DEFAULT_MAX_CONCURRENT_SUBSTREAMS` (128) via a semaphore. `run` uses `ClientConfig::max_concurrent_substreams` (clamped to >= 1), and direct callers can use `serve_substreams_with_limit`. When the cap is full, further substreams are accepted and wait for a permit in their own task, so a flood becomes queued streams bounded by the yamux stream cap rather than unbounded h1 work, and the connection keeps being driven while they wait.
+Over the `H2Duplex` the client writes `Hello` (protocol version, its version string, the workspace label, the display name) and reads `HelloAck`. A refusal becomes `ClientError::RemoteRefusal` with the server's stable code and message preserved, so the devserver can report a specific cause; an unsupported protocol in the acknowledgement is a handshake error. The yamux session is then opened in client mode with the shared stream cap and receive window, matching the terminator so bulk transfer is tuned identically on both peers.
 
-### Admission-lease refresh
+## Serving substreams
 
-After registration, the client retains the PAT and periodically opens one outbound yamux control stream containing `LeaseRefreshRequest`. The server revalidates that PAT for the existing registration and replies `Refreshed` or `Refused`; refresh retries use bounded jittered backoff. This is the only client-opened stream. It keeps admission authority shorter-lived than the data connection without placing the PAT in controller state or logs. The request's `Debug` implementation is redacted.
+Each inbound yamux substream is one HTTP/1.1 request from the public side. The client wraps it for hyper, runs hyper's h1 server with upgrades enabled so a WebSocket's 101 keeps the substream alive, and dispatches the request to the router. HTTP/1.1 over yamux is the right shape because the substream is already multiplexed; h2 inside it would be mux on mux.
 
-### Reconnect loop and backoff
+How much work runs at once is bounded by a permit pool, and the ordering is load-bearing: the loop polls yamux for the next inbound stream unconditionally and the spawned task acquires its permit before serving. `poll_next_inbound` is the only entry point that drives the yamux connection (reads, writes, flushes and keepalives for every substream in flight), so gating it on a free permit would stall every request already being served the moment the pool saturated. Excess substreams are therefore accepted and parked waiting for a permit, and how many can exist at all is yamux's own stream cap. The pool size is configurable and never below one.
 
-Exponential, doubled per attempt, capped at `max_backoff`. Reset to `initial_backoff` after a successful registration (not after just the TCP connect, so a server that 200s and then immediately closes still backs off). Each sleep is jittered by +/- 20% so a fleet of clients disconnected by the same server restart does not synchronise into a thundering herd; the jitter source is the low bits of the system clock, which avoids a `rand` dependency.
+## Lease refresh
 
-`dial_timeout` wraps the entire single attempt; without it, an unreachable host hangs each attempt for the OS TCP timeout (minutes), defeating the backoff. Default 30s covers trans-pacific with margin.
+After registration the client keeps the token and periodically opens one outbound yamux stream carrying `LeaseRefreshRequest`. The terminator revalidates the token for the existing registration and answers refreshed or refused; a failed refresh retries on a jittered, doubling, bounded delay before the lease expires. This is the only stream the client opens. It keeps the gateway's admission authority shorter-lived than the TCP connection without the token ever living in the gateway's control plane, and the request's `Debug` output redacts the token.
 
-### Outbound HTTP proxy (CONNECT)
+## Reconnecting
 
-When `ClientConfig::proxy` is set, `open_tcp` connects to the proxy and issues an HTTP/1.1 `CONNECT host:port`, with `Proxy-Authorization: Basic ...` derived from the proxy URL's userinfo when present. The response headers are read byte-by-byte up to the `\r\n\r\n` terminator (hard-capped at 16 KiB) so no bytes belonging to the tunnelled upstream (the TLS ClientHello or h2 preface) are over-read by a buffered reader. Only 2xx CONNECT responses proceed. Only `http://` proxies are supported (plain CONNECT); HTTPS-to-proxy and SOCKS are out of scope. `HTTP_PROXY` / `NO_PROXY` env vars are not honoured automatically so embedders get a deterministic surface.
+The backoff doubles per attempt up to a cap and is reset only after a successful registration, not after the TCP connect, so a server that answers 200 and then closes still backs off. Each sleep is jittered by a fifth either way so a fleet disconnected by one gateway restart does not reconnect as a thundering herd; the jitter is seeded from the clock, which avoids a random-number dependency.
 
-### TunnelEvent channel
+Lifecycle events (connected with the registration, disconnected, dial failed with the retry delay) go to an optional channel with a non-blocking send: a slow consumer drops events rather than stalling the dial loop, since they are for logs and a UI, not for correctness.
 
-`ClientConfig::events` is an `Option<mpsc::Sender<TunnelEvent>>`. Backpressure: `run` uses `try_send`, so a slow consumer drops events rather than blocking the dial loop. The events are tee material for logs and a UI; missing one isn't load-bearing.
+## Errors
 
-## 4. Runtime contracts
+`ClientError` is one flat enum. `RemoteRefusal` is the structured variant and keeps the server's code; transport, TLS, frame and serialization details collapse into strings before crossing the crate boundary, so `h2`, `rustls` and `serde_json` types never leak. `run` itself fails only on configuration; everything else is an event.
 
-`run` is the long-lived future. Dropping it cancels everything (yamux, the h2 driver task, the in-flight dial). It returns only on configuration errors that retrying cannot recover from (empty token, invalid workspace name, unsupported URL scheme, no native CA roots available).
+## Open questions
 
-The config boundary carries connection policy, identity, retry policy, optional proxy settings, the event channel, and the substream concurrency cap. Defaults carry no usable public host; production callers pass the tunnel URL explicitly (`chan devserver` requires `--tunnel-url` or `CHAN_TUNNEL_URL`). Callers that bypass `run` can still reuse the same dial / handshake / serve phases for tests and embedded integrations.
-
-A successful registration carries the public prefix, user, workspace name, and immutable owner user id assigned by the terminator. Event delivery is best-effort: connected, disconnected, and dial-failed events are useful for UI/logs but never block reconnect progress.
-
-The error surface is intentionally flat. Structured remote refusals preserve the server's stable code for UI matching; transport, TLS, frame, and serialization details collapse before crossing this crate boundary.
-
-## 5. Wire format / framing
-
-The wire format is owned by chan-tunnel-proto. See [`chan-tunnel-proto/design.md`](../chan-tunnel-proto/design.md) sections 2 and 5 for the byte layout, the JSON envelope rationale, the 64 KiB cap, and `H2Duplex`.
-
-Client-specific notes:
-
-- URL normalization: when the configured URL has no path (or just `/`), the dial path substitutes `chan_tunnel_proto::TUNNEL_PATH`, so callers can pass a bare `http://host:port` base and the wire constant stays single-sourced. A non-trivial path is preserved verbatim, so a typo like `/v2/tunnel` still surfaces as a visible 404 instead of being silently corrected.
-- Request: `POST {tunnel_url}` with `Authorization: Bearer <token>`, empty body. The "body" is the bidirectional h2 stream the handshake then runs over.
-- Response codes that `dial` recognises:
-  - `200 OK`: handshake proceeds.
-  - `401 UNAUTHORIZED`: invalid token or missing tunnel scope. Mapped to `ClientError::Handshake("unauthorized (bad token or missing tunnel scope)")`.
-  - anything else: `ClientError::Handshake("unexpected status ...")`.
-- After the response headers arrive, `H2Duplex::new(send, recv)` becomes the duplex; `handshake` writes the `Hello` and reads the `HelloAck`. A `HelloAck::Refused` becomes `ClientError::RemoteRefusal { code, message }`; the codes are the `chan_tunnel_proto::error_code` strings, so callers can match known refusals and fall back to the message for unknown codes. A non-V1 ack protocol is a `Handshake` error.
-- The h2 client advertises the shared 16 MiB stream and 32 MiB connection receive windows for TLS and loopback h2c dials.
-- yamux client mode (`Mode::Client`) over the duplex, with the shared 256-substream cap and 64 MiB aggregate receive window. Data substreams are inbound; the only outbound stream is the admission-lease refresh protocol.
-
-## 6. Trust boundaries / validation
-
-- **Server certificate**: rustls with `rustls-native-certs` for the trust store, ALPN forced to `h2`. `run` builds the TLS config once and reuses it across reconnects (the macOS keychain walk is expensive); `dial_with_tls` lets other callers do the same.
-- **URL scheme gate**: only `https://` and `http://` are accepted, and cleartext is restricted to loopback. A private DNS name is not treated as proof of a protected route. Tunnel URL userinfo is forbidden because authentication is the separate PAT; accepting both would create an ambiguous credential channel and could forward userinfo through URI construction. Userinfo remains supported only on the separately configured loopback HTTP CONNECT proxy URL.
-- **Workspace name** (`is_valid_workspace_name` from chan-tunnel-proto): checked before sending `Hello`. The server checks again, but catching it locally avoids a round-trip and surfaces a config error to the user.
-- **Token**: empty token is rejected by `run` before the first dial. The token itself is opaque to this crate; the server's `Validator` decides whether it's valid.
-- **Proxy credentials**: taken from the proxy URL's userinfo and sent only as the Basic CONNECT header. CONNECT failure messages carry the numeric status but never echo proxy-supplied response text, so a hostile proxy cannot reflect credentials into logs.
-
-## 7. Error model
-
-Single umbrella enum `ClientError` with six variants (see section 4). `From` impls flatten `chan_tunnel_proto::FrameError` and `IoFrameError` through `Display` so the crate boundary stays free of `h2::Error`, `serde_json::Error`, and `rustls::Error`. `RemoteRefusal` is the one structured variant: it preserves the server's stable refusal code for UI matching.
-
-`run` itself returns `Result<(), ClientError>` and only errors on non-recoverable misconfiguration; transient failures (TLS, h2, 401, network) loop with backoff and are surfaced through `TunnelEvent::DialFailed` instead.
-
-## 8. Open questions / future extensions
-
-- Per-leg dial timeouts. Today `dial_timeout` is a single global cap on proxy CONNECT + TCP + TLS + h2 + Hello. Splitting into legs would give better diagnostics (which step stalled) but multiplies the config surface; punted until operators ask.
-- TLS session resumption. `build_tls_config` does not configure a session store; every reconnect re-runs the full TLS handshake. For a host that flaps frequently, a small in-process resumption store would shave a round trip.
-- HTTP/2 keep-alive (PING). Long idle periods can stall behind intermediaries that drop quiet TCP; today we rely on traffic. Add explicit pings if idle-NAT becomes an issue.
+- Per-leg dial timeouts would say which step stalled (proxy, TCP, TLS, h2, Hello), at the cost of more configuration surface.
+- No TLS session resumption: every reconnect runs a full handshake. A small in-process store would save a round trip for a host that flaps.
+- No HTTP/2 PING keepalive: a long idle tunnel relies on traffic to stay up through intermediaries that drop quiet TCP.
