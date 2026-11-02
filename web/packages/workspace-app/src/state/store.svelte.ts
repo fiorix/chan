@@ -5260,19 +5260,27 @@ export function topOverlay(): OverlayId | null {
 }
 
 /// True while something rendered over the panes owns the keyboard: an
-/// overlay (Search, the command launcher, Settings), an app-root dialog
-/// (the prompt, path prompt and confirm dialogs, the draft close and file
-/// conflict dialogs, the Team Work setup, the workspace warnings, the contacts
-/// import and the desktop's close prompt) or the window-wide survey. Ctrl+D
-/// and the pane flip read it and stand down rather than close or turn a tab
-/// the user cannot see. The window-wide slot counts whatever survey shows
-/// there, a terminal's survey whose `tabName` no terminal here carries
-/// included, since it covers the whole window until answered. A survey over
-/// one terminal does not count: it covers only that terminal and leaves the
-/// rest of the window usable. The full-window covers are `appInputBlocked`'s.
+/// overlay (Search, the command launcher, Settings) or a modal dialog
+/// (`modalDialogOpen`). Ctrl+D and the pane flip read it and stand down
+/// rather than close or turn a tab the user cannot see. The full-window
+/// covers are `appInputBlocked`'s.
 export function keyboardOwnedAbovePanes(): boolean {
+  return topOverlay() !== null || modalDialogOpen();
+}
+
+/// True while a modal dialog is open: an app-root dialog (the prompt, path
+/// prompt and confirm dialogs, the draft close and file conflict dialogs, the
+/// Team Work setup, the workspace warnings, the contacts import and the
+/// desktop's close prompt) or the window-wide survey. The window key handler,
+/// the host-command bridge and the pane's reopen-closed-tab listener read it
+/// and act on nothing under the dialog, which an overlay does not ask of
+/// them: an overlay's own chord still closes it. The window-wide slot counts whatever survey shows there, a terminal's
+/// survey whose `tabName` no terminal here carries included, since it covers
+/// the whole window until answered. A survey over one terminal does not
+/// count: it covers only that terminal and leaves the rest of the window
+/// usable.
+export function modalDialogOpen(): boolean {
   return (
-    topOverlay() !== null ||
     surveyFor(null) !== null ||
     promptState.open ||
     pathPromptState.open ||

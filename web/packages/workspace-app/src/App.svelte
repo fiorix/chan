@@ -84,6 +84,7 @@
     coverOwnsTextEntry,
     coverOwnsButton,
     keyboardOwnedAbovePanes,
+    modalDialogOpen,
     setTransientStatus,
     syncOverlayStack,
     toggleBrowserSidePane,
@@ -819,6 +820,17 @@
       e.stopPropagation();
       return;
     }
+    // A dialog answers its own keys and stops them inside its panel, so
+    // whatever arrives here is not the dialog's to act on, and nothing under
+    // it may: no app chord fires and Hybrid Nav neither starts nor takes the
+    // key, so a staged draft waits for the dialog to close. The default is
+    // left alone, so the dialog's fields keep their typing and editing chords
+    // and its buttons their native activation. Cmd+` passes untouched to the
+    // window cycler, as it does behind a cover.
+    if (modalDialogOpen()) {
+      if (e.code !== "Backquote") e.stopPropagation();
+      return;
+    }
     if (paneMode.active) {
       e.preventDefault();
       e.stopPropagation();
@@ -1488,20 +1500,23 @@
   /// window event to trigger actions by stable string id without depending
   /// on any in-app key chord. Unknown ids are a no-op so hosts can ship
   /// ahead of chan adding the command.
-  /// The one command a full-window cover must not swallow. The host has
-  /// already prevented an OS close and is asking the SPA what to do about it;
-  /// dropping it leaves the desktop holding a close nothing answers. Its own
-  /// arm below is cover-aware: the reconnect overlay closes straight away and
-  /// everything else, the screen lock included, raises the prompt.
+  /// The one command a full-window cover or a modal dialog must not swallow.
+  /// The host has already prevented an OS close and is asking the SPA what to
+  /// do about it; dropping it leaves the desktop holding a close nothing
+  /// answers. Its own arm below is cover-aware: the reconnect overlay closes
+  /// straight away and everything else, the screen lock included, raises the
+  /// prompt.
   const COVER_EXEMPT_COMMANDS = new Set(["app.window.confirmClose"]);
 
   function runCommand(name: string, detail: Record<string, unknown>): void {
     const commandName = name === "app.settings.toggle" ? "app.pane.flip" : name;
-    // A cover blocks host commands the way it blocks chords. Every native menu
-    // row reaches the SPA as a `chan:command` event, so this one gate covers
-    // the menu as well as the bridge; Tauri's predefined items act on the
-    // window or the OS and never come through here.
-    if (appInputBlocked() && !COVER_EXEMPT_COMMANDS.has(commandName)) return;
+    // A cover or a modal dialog blocks host commands the way it blocks chords.
+    // chan-desktop's key bridge turns its chords (Cmd+W, Cmd+/, Cmd+1 to
+    // Cmd+9) into `chan:command` events before the page sees the key, and
+    // every native menu row arrives the same way, so this one gate covers the
+    // bridge and the menu; Tauri's predefined items act on the window or the
+    // OS and never come through here.
+    if ((appInputBlocked() || modalDialogOpen()) && !COVER_EXEMPT_COMMANDS.has(commandName)) return;
     // Terminal-only and control windows drop the commands they can't run;
     // windowMode.ts is the single gate the command launcher's availability
     // reads too, so a hidden launcher row and a dropped dispatch never

@@ -120,7 +120,10 @@
   // to the blocked UI behind the backdrop.
   function onKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
+      // The cancel closes the prompt before the key would bubble on, so the
+      // key stops here: past the prompt, the window would read it as its own.
       e.preventDefault();
+      e.stopPropagation();
       cancel();
       return;
     }

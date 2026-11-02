@@ -9,7 +9,9 @@
 // and h. Outside it, the spawn commands and the new-terminal chord open at the
 // focused tab's folder, and the pane commands close tabs, panes and empty
 // sides. Cmd+W closes a tab the same way in a control-terminal window, so a
-// live terminal there asks first.
+// live terminal there asks first. While a dialog is open, the keys and host
+// commands meant for it stay with it: none of them enters, commits or drops
+// Hybrid Nav or acts on the layout under the dialog.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -37,9 +39,12 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
 import { api } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
-import { browserSidePanes, discardWindowSession, ui } from "./state/store.svelte";
+import { uiCloseConfirm } from "./state/closeConfirm.svelte";
+import { confirmState, uiConfirm } from "./state/confirm.svelte";
+import { browserSidePanes, discardWindowSession, ui, uiPathPrompt, uiPrompt } from "./state/store.svelte";
 import {
   cancelPaneMode,
+  clearRecentlyClosedTabsForTest,
   closePane,
   layout,
   paneMode,
@@ -507,5 +512,168 @@ describe("the pane commands", () => {
     expect(leaf(layout, "pane-test").side).toBe("b");
     expect(leaf(layout, "pane-test").bTabs?.map((tab) => tab.id)).toEqual(["doc"]);
     expect(paneSideToggleFlash.versions["pane-test"]).toBe(flashes + 1);
+  });
+});
+
+describe("keys under an open dialog", () => {
+  /// Press a key where the keyboard is, on the focused element, so it passes
+  /// through the dialog's own handlers on its way up as a keystroke does.
+  function pressFocused(init: KeyboardEventInit): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    (document.activeElement ?? document.body).dispatchEvent(event);
+    return event;
+  }
+
+  /// Wait for the confirm titled `title` to hold the focus on its OK button.
+  async function confirmFocused(title: string): Promise<void> {
+    await vi.waitFor(() => expect(document.querySelector(".modal .title")?.textContent).toBe(title));
+    await vi.waitFor(() => expect(document.activeElement).toBe(document.querySelector(".modal .actions button.ok")));
+  }
+
+  /// Record every answer the open confirm gets from here on.
+  function answersOfOpenConfirm(): boolean[] {
+    const answers: boolean[] = [];
+    const resolve = confirmState.resolve!;
+    confirmState.resolve = (value) => {
+      answers.push(value);
+      resolve(value);
+    };
+    return answers;
+  }
+
+  async function twoLiveTerminals(): Promise<void> {
+    resetLayout(
+      [terminalTab({ id: "first", terminalSessionId: "sess-first" }), terminalTab({ id: "second", terminalSessionId: "sess-second" })],
+      { activeTabId: "second" },
+    );
+    await settle();
+  }
+
+  test("Cmd+. under the close confirm does not enter Hybrid Nav, and Enter answers the confirm once", async () => {
+    await twoLiveTerminals();
+    hostCommand("app.tab.close");
+    await confirmFocused("Close tab?");
+    const answers = answersOfOpenConfirm();
+
+    pressFocused({ key: ".", code: "Period", metaKey: true });
+    await settle();
+    expect(paneMode.active).toBe(false);
+
+    pressFocused({ key: "Enter", code: "Enter" });
+
+    await vi.waitFor(() => expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["first"]));
+    expect(answers).toEqual([true]);
+    expect(confirmState.open).toBe(false);
+    expect(paneMode.active).toBe(false);
+    expect(layout.rootId).toBe("pane-test");
+    expect(Object.keys(layout.nodes)).toEqual(["pane-test"]);
+  });
+
+  test("Cmd+` under the close confirm passes to the window cycler", async () => {
+    await twoLiveTerminals();
+    hostCommand("app.tab.close");
+    await confirmFocused("Close tab?");
+    const reached: KeyboardEvent[] = [];
+    const listener = (event: KeyboardEvent) => reached.push(event);
+    window.addEventListener("keydown", listener);
+    try {
+      const event = pressFocused({ key: "`", code: "Backquote", metaKey: true });
+      expect(event.defaultPrevented).toBe(false);
+      expect(reached).toEqual([event]);
+    } finally {
+      window.removeEventListener("keydown", listener);
+    }
+
+    pressFocused({ key: "Escape", code: "Escape" });
+    await settle();
+    expect(confirmState.open).toBe(false);
+    expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["first", "second"]);
+  });
+
+  test("with a draft staged, Enter and Escape answer an open confirm and leave the draft staged", async () => {
+    await twoPanes();
+    await enterHybridNav();
+    await keys("t");
+
+    const accepted = uiConfirm({ title: "Go on?" });
+    await confirmFocused("Go on?");
+    pressFocused({ key: "Enter", code: "Enter" });
+    await expect(accepted).resolves.toBe(true);
+    await settle();
+    expect(paneMode.active).toBe(true);
+    expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["file", "terminal"]);
+
+    const declined = uiConfirm({ title: "Go on?" });
+    await confirmFocused("Go on?");
+    pressFocused({ key: "Escape", code: "Escape" });
+    await expect(declined).resolves.toBe(false);
+    await settle();
+    expect(paneMode.active).toBe(true);
+    expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["file", "terminal"]);
+    expect(kinds(leaf(layout, "pane-test").tabs)).toEqual(["file"]);
+
+    await keys("Enter");
+    expect(paneMode.active).toBe(false);
+    expect(kinds(leaf(layout, "pane-test").tabs)).toEqual(["file", "terminal"]);
+  });
+
+  test.each([
+    ["the bridged Cmd+/ split", () => hostCommand("app.pane.splitRight")],
+    ["the bridged Cmd+T new terminal", () => hostCommand("app.terminal.toggle")],
+    ["the bridged Cmd+Shift+T reopen", () => hostCommand("app.tab.reopenClosed")],
+    ["the page's Ctrl+Alt+/ split", () => pressFocused({ key: "/", code: "Slash", ctrlKey: true, altKey: true })],
+    ["the page's Ctrl+Alt+Shift+T reopen", () => pressFocused({ key: "T", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true })],
+  ])("%s under the close confirm acts on nothing", async (_, act) => {
+    clearRecentlyClosedTabsForTest();
+    resetLayout([DOC(), terminalTab({ id: "first", terminalSessionId: "sess-first" }), terminalTab({ id: "second", terminalSessionId: "sess-second" })]);
+    await settle();
+    hostCommand("app.tab.close");
+    await vi.waitFor(() => expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["first", "second"]));
+    leaf(layout, "pane-test").activeTabId = "second";
+    await settle();
+    hostCommand("app.tab.close");
+    await confirmFocused("Close tab?");
+    const answers = answersOfOpenConfirm();
+
+    act();
+    await settle();
+
+    expect(Object.keys(layout.nodes)).toEqual(["pane-test"]);
+    expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["first", "second"]);
+    expect(answers).toEqual([]);
+    expect(confirmState.open).toBe(true);
+
+    pressFocused({ key: "Escape", code: "Escape" });
+    await settle();
+    expect(answers).toEqual([false]);
+    expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["first", "second"]);
+  });
+
+  // Each dialog with the element its key handler answers on, the one it
+  // focuses when it opens. The key is pressed there rather than wherever the
+  // focus is: the close prompt is not on the modal stack, which holds the
+  // focus inside the other dialogs.
+  test.each([
+    ["a prompt answered with Enter", () => uiPrompt("Name?", "draft"), ".modal input", "Enter"],
+    ["a path prompt answered with Enter", () => uiPathPrompt({ title: "Path?", defaultValue: "notes/b.md", kind: "file", mode: "create" }), ".modal input", "Enter"],
+    ["the window's close prompt dismissed with Escape", () => uiCloseConfirm(), '[aria-modal="true"] button.cancel', "Escape"],
+  ] as const)("%s leaves the staged draft", async (_, open, at, key) => {
+    await twoPanes();
+    await enterHybridNav();
+    await keys("t");
+    const answer: Promise<unknown> = open();
+    const target = await vi.waitFor(() => {
+      const element = document.querySelector(at);
+      expect(element).not.toBeNull();
+      return element!;
+    });
+
+    target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key, code: key }));
+
+    await answer;
+    await settle();
+    expect(document.querySelector('[aria-modal="true"]')).toBeNull();
+    expect(paneMode.active).toBe(true);
+    expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["file", "terminal"]);
   });
 });
