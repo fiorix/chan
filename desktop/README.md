@@ -12,7 +12,7 @@ Notarized macOS builds, signed Windows installers, and Linux builds (`.AppImage`
 
 ## Build and run
 
-Requirements: stable Rust (pinned in `rust-toolchain.toml`) and npm for the embedded web build. The Makefile builds the embedded web bundle (`web/dist`) and installs `tauri-cli` v2 under `../target/tauri-cli` if `cargo-tauri` is not already on `$PATH`.
+Requirements: stable Rust (pinned in `rust-toolchain.toml`) and npm for the embedded web build. The Makefile builds the embedded web bundle (`web/dist`) and installs `tauri-cli` v2 under the repository's `.build-tools/tauri-cli` if `cargo-tauri` is not already on `$PATH`.
 
 ```bash
 make dev      # cargo tauri dev (launch the desktop app in dev mode)

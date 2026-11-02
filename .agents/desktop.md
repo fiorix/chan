@@ -1,50 +1,50 @@
 # chan-desktop contributor guide
 
-The practical side of the desktop crate: building, debugging, signing, notarizing and packaging chan-desktop, the Tauri shell of chan. What the shell is and why it is shaped the way it is lives in [`desktop/design.md`](../desktop/design.md); this file holds the steps.
+chan-desktop is the desktop edition of chan, a supercharged terminal emulator: a Tauri shell that puts chan's windows on the desktop, embeds the server for local work, reaches devservers over a TCP tunnel or through a self-hosted gateway, and is the `chan` and `cs` command line at the same time. What the shell is and why it is shaped that way is [`desktop/design.md`](../desktop/design.md). This guide is what a contributor does with it: build it, run it in dev mode, debug it, sign, notarize and package it, and keep its release artifacts consistent.
 
-## Gateway-surface acceptance
+## Layout and build inputs
 
-A gateway-served window couples two independently versioned builds: the SPA comes from the remote devserver over the tunnel, while the ACL gating its invokes belongs to the chan-desktop installed on this machine. The version string cannot tell them apart (version pins bump only at the release cut), and launching from the Dock or `/Applications` runs the installed bundle regardless of what was just built. So any acceptance run on the gateway surface must:
+- The crate is `desktop/src-tauri`, a member of the root Cargo workspace. `desktop/Makefile` owns every build recipe; the root Makefile's desktop targets (`chan-desktop`, `desktop-dev`, `macos-chan-app`, `macos-chan-dmg`, `macos-chan-dmg-notarised`, `windows-chan-installer`, `linux-chan-desktop`) delegate to it.
+- The binary links `chan-server` (and through it `chan-library` and `chan-workspace`), the `chan` CLI crate, `chan-shell` and `chan-revtunnel` as libraries, and embeds `web/dist` and `web-launcher/dist` through rust-embed at compile time. Both web bundles must exist before any cargo build of the crate, or the launcher bakes in empty; the Makefile's `web` prerequisite runs the root `make web`.
+- `frontendDist` in `src-tauri/tauri.conf.json` is `../src`, the small static shell of the About and connecting pages, not the SPA. The bundle declares no `externalBin` and no extra macOS files, so on macOS and Linux no second binary ships. The Windows configs (`tauri.windows.conf.json`, `tauri.ci.windows.conf.json`) add `target/release/chan.exe` as a resource, so `cargo build --release -p chan` runs first there.
+- `tauri-cli` and the dmgbuild venv install under `.build-tools/`, never `target/`: CI caches `target/`, and a cached copy would outrank the pinned tool a job just installed. Keep build tooling out of cached paths, and validate a tool by running it, not by testing for its file.
 
-1. Build BOTH ends from the same commit.
-2. Launch the freshly built bundle explicitly (by path), never through the Dock or `/Applications`.
-3. Confirm the running build via its build id, which the version string does not carry: the About window shows it (`build <id>`), the startup log line `chan-desktop starting` carries it, and the `native_vocabulary` command returns it to a served page. A `-dirty` suffix means the checkout had uncommitted changes at compile time; `unknown` means the build ran outside a git checkout.
+## Dev loop
 
-A one-command ACL refusal on this surface (`Command <name> not allowed by ACL`) is what version skew looks like: an older bundle refuses exactly the commands added since it was built and serves everything else normally. Check the build id before investigating it as a capability defect.
+```bash
+make -C desktop dev         # cargo tauri dev (or: make desktop-dev at the root)
+make -C desktop build       # cargo tauri build, every bundle for the host
+make -C desktop check       # cargo check
+make -C desktop lint        # clippy, all targets, warnings denied
+make -C desktop test        # cargo test --all-targets
+make -C desktop xwin-check  # compile-check the core crates for the MSVC target with cargo-xwin
+```
 
-## Local serving and self-contained runtime
+`xwin-check` needs the LLVM toolchain (`llvm-lib`, `clang-cl`) on PATH. It proves the `cfg(windows)` arms of chan-server, chan-shell and chan-workspace compile; the desktop's own Windows build is proven by `make ci-windows` on a native Windows host.
 
-chan-desktop is fully self-contained. It links `chan-workspace` and `chan-server` directly, embeds both web bundles (`web/dist` and the launcher's `web-launcher/dist`) via rust-embed at build time, and links the `chan` CLI, `chan-shell` (`cs`), and `chan-revtunnel` as libraries, dispatching them in-process (`Personality::Desktop`). No separate `chan` binary ships inside the app bundle; a desktop install still provides `chan` and `cs` on the PATH through a shim into the app binary. The `frontendDist` in `tauri.conf.json` is `../src`, a small static shell (the about and connecting pages), not the SPA.
+On Linux, `make build` splits a dashed candidate version: Tauri requires semver, so the deb and AppImage build with the dashed version and the RPM is bundled separately with the undashed `version` and `0~<suffix>` as `Release`, which sorts before the GA release `1`. The Fedora specs instead put `~<suffix>` in `Version`. `make linux-chan-desktop` builds the Linux bundles inside an sdme container (`packaging/sdme/build-chan-desktop.sh`), which is how a macOS workstation produces them.
 
-Local workspaces open through the embedded `WorkspaceHost` (owned by chan-library and re-exported as `chan_server::WorkspaceHost`), which owns a single `chan_workspace::Library`. Every registry mutation (add / remove) and feature toggle (semantic search, reports) runs in-process against that same `Library`, or against the live `Arc<Workspace>` the host already holds for a mounted workspace, which is what keeps a freshly added workspace openable immediately. A workspace remove lands in the host's `remove_workspace_for_root` from the launcher's library DELETE route, the desktop `close_workspace_from_handoff` path, or `chan workspace forget` over the control socket. It unmounts first, so the workspace's flock is released before `unregister_workspace` runs, then unregisters, forgets the on/off overlay row, and discards the workspace's window records.
+### Package proofs without secrets
 
-External `chan serve` processes remain independent and are not a local serving dependency or an attachable desktop transport. When a standalone `chan serve` already holds a workspace's lock, opening that workspace in chan-desktop maps the `WorkspaceLocked` / `WorkspaceAlreadyOpen` error to a friendly "open in another chan process" message and reverts the row's On toggle rather than surfacing a raw error.
-
-### No bundled binary
-
-The bundle configuration names no `externalBin` and no extra `bundle.macOS.files`, and the Makefile stages no second binary. `make dev` / `make build` depend only on the web bundles (the rust-embed inputs) and the tauri CLI; `app-signed` and `app-notarized` additionally check their signing and notarization prerequisites. Tauri's signing pass codesigns the `.app` directly, with no second binary to sign; the notarize recipe then signs, notarizes, and staples the `.dmg`, which is the artifact CI validates (`stapler validate` + `spctl`). The `.app` inside the updater payload is signed but unstapled. Multi-arch distribution is purely a matter of how the `.app` itself is built and merged. The desktop Makefile also carries `dmg-layout-proof` and the secret-free `ci-linux` / `ci-macos` / `ci-windows` package proofs.
+`make ci-linux`, `make ci-macos` and `make ci-windows` in `desktop/Makefile` build the native package on each host with no signing (`tauri.ci.macos.conf.json` signs ad hoc with `-`, `tauri.ci.windows.conf.json` sets `signCommand` to null) and smoke the result with `scripts/smoke-built-devserver.sh`. Each refuses to run off its native host. The root `make pre-push` and `ci.yml` run them. `make dmg-layout-proof` builds an unsigned `.app` and the Finder-less DMG so the layout can be inspected before a release.
 
 ## Debugging
 
-Logs go to stderr only; no file is written. The env var is `CHAN_LOG` (NOT `RUST_LOG`, which is ignored), default filter `warn,chan_desktop=info`. Launching the `.app` from Finder discards stderr, so see logs by launching the bundle binary from a terminal: `CHAN_LOG=chan_desktop=debug,warn /Applications/Chan.app/Contents/MacOS/chan-desktop`.
+- Logs go to stderr only; nothing is written to a file. The filter variable is `CHAN_LOG` (`RUST_LOG` is ignored), default `warn,chan_desktop=info`. A Finder launch discards stderr, so run the bundle binary from a terminal: `CHAN_LOG=chan_desktop=debug,warn /Applications/Chan.app/Contents/MacOS/chan-desktop`.
+- WebView DevTools ships in release builds (the `devtools` feature of the `tauri` dependency). Cmd+Opt+I on macOS, Ctrl+Alt+I elsewhere, opens it in workspace windows through the key bridge. The launcher is a wry webview placed outside Tauri (`launcher_panel.rs` builds it with DevTools enabled), so inspect it with right-click, Inspect Element, or from Safari's Develop menu.
+- The launcher's loopback library API can be called with curl using values from that console: `location.origin` is the ephemeral port, the `?t=` query parameter is the bearer for `Authorization: Bearer`, and `GET /api/library/windows` returns the records the window watcher reconciles (`origin`, `hidden`, `token`).
+- `devserver window feed disconnected; reconnecting` at WARN means that devserver's windows are dark: remote windows are learned only through the watch feed, so none opens and the launcher list goes stale until it reconnects.
+- Four other WARNs name one row or one frame of a live feed, usually a devserver on another release serving a shape this desktop cannot read. Each carries `devserver=<id>`; the row lines add `source=list` or `source=watch frame`, `row=window_id <id>` (or `row=index <n>` when the id itself is unreadable) and the serde error. `unreadable devserver window row is hidden from the desktop`: no window opens for it. `devserver window row turned unreadable; its window keeps the stale record last read`: the window stays on the last readable record until the row reads again or the feed reconnects. `unreadable devserver window frame is skipped; the view keeps its last snapshot`: the next frame repairs the view. `devserver window list failed; seeding no windows until the watch feed's first snapshot`: the connect-time list call failed outright. The row lines fire once per row per feed connection, so a reconnect repeats them.
+- Window placement: hidden-and-rebuilt windows (`local::*` and `lib-*::*`) have their geometry captured on every hide and reapplied on rebuild (`serve.rs`: `capture_window_geometry`, `resolve_geometry_plan`, `apply_geometry_plan`; the per-monitor-signature LRU and `to_points` in `config.rs`). All three log a `WINGEO` line (`capture`, `resolve`, `applied`) with the points rect, monitor signature, scale and monitors; read those on real multi-monitor hardware before changing the geometry code. Why geometry is in points rather than pixels is in the design document.
+- A build id tells builds apart where the version string cannot, since version pins move only at the release cut. `build.rs` stamps `CHAN_DESKTOP_BUILD_ID` as `git-<12 hex>`, with `-dirty` when the tree had uncommitted changes and `unknown` outside a git checkout. The About window shows it, the `chan-desktop starting` log line carries it, and the `native_vocabulary` command returns it to a served page.
 
-WebView DevTools ships in release builds (the `devtools` Tauri feature). Cmd+Opt+I works in workspace windows via the key bridge but is NOT wired in the launcher, a wry webview chan-desktop places inside the window outside Tauri (`launcher_panel.rs` builds it with DevTools enabled); inspect it via right-click -> Inspect Element on the launcher, or Safari -> Develop -> the machine's Chan webview. The launcher's loopback library API is curl-able with the values from that console: `location.origin` is the ephemeral port, the `?t=` query param is the bearer for `Authorization: Bearer`, and `GET /api/library/windows` dumps the exact records the window watcher reconciles (`origin`, `hidden`, `token`).
+### Acceptance on the gateway surface
 
-A `devserver window feed disconnected; reconnecting` WARN means that devserver's whole window surface is dark: the desktop learns about remote windows only through the `/watch` feed, so while it loops no remote window opens and the launcher list goes stale.
-
-Three WARNs name one row or one frame of a feed that is otherwise live, usually a devserver on another release serving something this desktop cannot read; each carries `devserver=<id>`, and the row lines add `source=list` or `source=watch frame`, `row=window_id <id>` (or `row=index <n>` for a row without a readable id) and the serde error. `unreadable devserver window row is hidden from the desktop` means a row the connection never read is left out, so no window opens for it. `devserver window row turned unreadable; its window keeps the stale record last read` means a row the connection had read stopped reading, and its window stays open on that record until the row reads again or the feed reconnects. `unreadable devserver window frame is skipped; the view keeps its last snapshot` means a whole frame did not parse, and the next frame repairs the view. The row lines fire once per row per feed connection, so a reconnect repeats them; a row without a readable id cannot be tracked and fires on every frame. A fourth, `devserver window list failed; seeding no windows until the watch feed's first snapshot`, means the connect-time list call failed outright and the watch feed's first frame is the first view of that devserver.
-
-## Window geometry
-
-Watcher-managed workspace (`local::*`) and devserver (`lib-*::*`) windows are destroyed when hidden and rebuilt when shown, so their OS size and position are desktop-owned state. `capture_window_geometry` records a window's rect on every bury, and `resolve_geometry_plan` + `apply_geometry_plan` reapply it when the window is rebuilt (`serve.rs`), keyed by the native label under a monitor signature (a small per-signature LRU in `config.rs`). Standalone terminals keep their native window and let the OS hold the geometry.
-
-Geometry is captured, clamped, and applied in logical points (the global AppKit window coordinate space), not physical pixels, because two macOS behaviors make points the only unit that round-trips across mixed-DPI monitors. A `Restore` builds the window hidden, and a hidden NSWindow has no screen, so tao's `scale_factor()` reports the main display's scale: a `PhysicalSize` apply is converted through that scale, so a window bound for a different-scale monitor renders at `target_scale / main_scale` of its size, while a `LogicalSize` passes through `dpi` untouched and renders correctly on whatever monitor the window opens on. Separately, tao reports each monitor's bounds as points times that monitor's own scale, so monitors of different scales overlap in physical space and `monitor_for_rect` cannot tell which one a window sits on; `config::to_points` divides every monitor's bounds by its scale so the monitors tile without overlap and the containing monitor resolves unambiguously.
-
-`monitor_signature` stays in physical units because it only fingerprints the hardware layout. Capture reads the window's live `scale_factor()` (the window is still shown at bury time) to convert its physical rect to points, and the `WINGEO` tracing lines (`capture`, `resolve`, `applied`) carry the points rect, signature, scale, and monitors for diagnosing placement on real multi-monitor hardware.
+A gateway-served window couples two builds: the page comes from the remote devserver over the tunnel, while the ACL gating its invokes belongs to the chan-desktop installed on this machine, and launching from the Dock or `/Applications` runs the installed bundle regardless of what was just built. An acceptance run on that surface therefore builds both ends from the same commit, launches the fresh bundle by path, and confirms the running build by its build id. A single-command ACL refusal (`Command <name> not allowed by ACL`) on this surface is what version skew looks like: an older bundle refuses exactly the commands added since it was built and serves everything else. Check the build id before treating it as a capability defect.
 
 ## Apple Developer ID signing
 
-The chan-desktop `.app` (and the bundled `.dmg`) are codesigned with an Apple Developer ID Application certificate so Gatekeeper accepts the install on default-configured macOS. The signing identity is named in `src-tauri/tauri.conf.json` under `bundle.macOS.signingIdentity`:
+The `.app` and the `.dmg` are codesigned with an Apple Developer ID Application certificate so Gatekeeper accepts the install on a default macOS. The identity name lives in `src-tauri/tauri.conf.json` under `bundle.macOS.signingIdentity`:
 
 ```json
 "bundle": {
@@ -54,70 +54,33 @@ The chan-desktop `.app` (and the bundled `.dmg`) are codesigned with an Apple De
 }
 ```
 
-The identity NAME is a public identifier (the same string that `security find-identity -v -p codesigning` prints), safe to land in the repo. The matching private key + cert blob stay outside the repo entirely: in the developer's macOS Keychain for local builds; in `secrets.APPLE_CERTIFICATE_BASE64` + `secrets.APPLE_CERTIFICATE_PASSWORD` for CI (imported into a temp keychain by `apple-actions/import-codesign-certs@v7` in `release.yml`'s desktop job, and likewise in the manual `release-desktop.yml` dry run). See the [release signing notes](skills/release/SKILL.md); the full per-secret table is kept in the team's private, gitignored dev/ tree.
+The identity name is public (it is what `security find-identity -v -p codesigning` prints) and safe in the repo. The private key and certificate stay outside it: in the developer's Keychain for local builds, and in GitHub Actions Secrets for CI, where `apple-actions/import-codesign-certs@v7` imports `APPLE_CERTIFICATE_BASE64` and `APPLE_CERTIFICATE_PASSWORD` into a temporary keychain. The secret names the workflows require are declared in `.github/workflows/release.yml`; the per-secret table is kept in the team's private, gitignored dev/ tree. The release cycle itself is the [release skill](skills/release/SKILL.md).
 
-`bundle.macOS.providerShortName` is omitted because chan-desktop's Apple Developer account is Individual enrollment with a single ASC team. Populate the field only if the account is associated with multiple teams.
+`bundle.macOS.providerShortName` is omitted because the Apple Developer account is an Individual enrollment with a single team; set it only for an account that belongs to several teams.
 
-### Local-build vs CI-build behaviour
+The Makefile auto-detects `APPLE_SIGNING_IDENTITY` when the keychain holds exactly one `Developer ID Application:` certificate and derives `APPLE_TEAM_ID` from the trailing `(TEAMID)`; pin both explicitly when there is more than one certificate or the name does not follow that convention. An empty identity is never exported, because Tauri treats a present-but-empty `APPLE_SIGNING_IDENTITY` as an explicit identity and fails instead of taking its unsigned path.
 
-* **Local build with the cert in your Keychain**: `make app-signed` and `make app-notarized` codesign the .app with the named identity. Works out of the box.
-* **Local build WITHOUT the cert**: `make app-signed` / `make app-notarized` fail at the codesign step with `identity '...' not in keychain` (the `sign-prereqs` check in `desktop/Makefile`). That is expected; it just means you cannot produce a signed bundle on a workstation that does not hold the signing key. `make build` (the unsigned path) still works for general development.
-* **CI build**: `release.yml` (job `macos-desktop-artifacts`, the tag-triggered release path) imports the cert into a temp keychain via secrets, then runs `make macos-chan-dmg-notarised` (the root-Makefile alias for the desktop `app-notarized` recipe) with the env vars populated. `release-desktop.yml` is the manual `workflow_dispatch` dry run of the same lane. Same identity, just supplied differently.
+- Local build with the certificate in the Keychain: `make app-signed` and `make app-notarized` sign the `.app` with the named identity.
+- Local build without it: both fail at `sign-prereqs` with `identity '...' not in keychain`. That is expected; `make build` still works for everyday development.
+- CI: `release.yml` (job `macos-desktop-artifacts`, the tag-triggered path) imports the certificate and runs `make macos-chan-dmg-notarised`, the root alias of `app-notarized`, with the env vars populated. `release-desktop.yml` is the manual `workflow_dispatch` dry run of the same lane.
 
-### Rotation (if the Developer ID identity ever changes)
+### Rotating the Developer ID certificate
 
-Developer ID Application certs expire every 5 years; rotation also applies if the cert is revoked or replaced. Steps:
+Developer ID Application certificates expire after five years; the same steps apply to a revoked or replaced one.
 
-1. Generate the new cert per the macOS signing procedure (see the [release signing notes](skills/release/SKILL.md); the detailed Developer ID certificate-generation steps are kept in the team's private dev/ tree).
-2. Update `bundle.macOS.signingIdentity` in `tauri.conf.json` to the new identity string. Single-field swap.
-3. Refresh `APPLE_CERTIFICATE_BASE64` + `APPLE_CERTIFICATE_PASSWORD` + `APPLE_SIGNING_IDENTITY` + `APPLE_TEAM_ID` in GitHub Actions Secrets via the `populate-apple-secrets.sh` helper kept in the team's private dev/ tree (re-run the relevant steps).
-4. Refresh the local Keychain: import the new `.p12`; remove the old cert (`security delete-certificate -c "Developer ID Application: <Old Name> ..."`) so the `sign-prereqs` `grep -c "Developer ID Application:"` detection picks the new one unambiguously.
+1. Generate the new certificate (the generation steps are in the private dev/ tree).
+2. Update `bundle.macOS.signingIdentity` in `tauri.conf.json`: a single-field swap.
+3. Refresh `APPLE_CERTIFICATE_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY` and `APPLE_TEAM_ID` in GitHub Actions Secrets.
+4. Import the new `.p12` into the local Keychain and delete the old certificate (`security delete-certificate -c "Developer ID Application: <Old Name> ..."`), so the Makefile's single-certificate detection resolves unambiguously.
 
-No bridge release is needed for Developer ID cert rotation (unlike the minisign updater key rotation below). Gatekeeper trusts any Developer ID Application cert chained to Apple's root, regardless of which one signed the previous release, so the next signed bundle under the new identity is accepted by clients that had the old one.
-
-## Windows Authenticode signing
-
-The Windows CLI, desktop binary, NSIS plugins and installer are signed remotely through SSL.com eSigner by `src-tauri/scripts/windows/sign.ps1`, which `release.yml` (job `windows-artifacts`) and the `release-desktop.yml` dry run call directly and through tauri's `signCommand`. The bundler's uninstaller hook passes its PE stub under an `nst*.tmp` name; `sign.ps1` signs a sibling `.exe` copy and writes the signed bytes back before the stub is embedded. It runs SSL.com CodeSignTool, pinned to a GitHub release, and the tool runs the JDK bundled in its archive rather than the runner's trust store. That JDK's truststore predates `SSL.com TLS RSA Root CA 2022`, the root SSL.com's signing endpoint chains to, so both workflows' `Install SSL.com CodeSignTool` step imports the committed [`ssl-com-tls-rsa-root-ca-2022.pem`](../desktop/src-tauri/scripts/windows/ssl-com-tls-rsa-root-ca-2022.pem) into it with the JDK's own `keytool`, after checking the file against its pinned SHA256 fingerprint. CodeSignTool exits 0 even when a sign fails (a TLS handshake it cannot complete, for one), so its exit code is not a signal: `sign.ps1` reads the Authenticode signature back with `Get-AuthenticodeSignature` for every `.exe`, `.dll` and `.msi` it signs and throws unless the status is `Valid`. Right after the install, both workflows' `Probe SSL.com eSigner credentials` step runs CodeSignTool's `get_credential_ids` from the tool root, which authenticates and lists the account's credential ids without signing (SSL.com's [eSigner CodeSignTool command guide](https://www.ssl.com/guide/esigner-codesigntool-command-guide/)), and fails unless the listing names `CREDENTIAL_ID`, never printing the tool's output. A TLS trust, username, password or credential id break therefore fails before the release build. The command takes no TOTP secret, so a bad `ES_TOTP_SECRET` still fails at the first signed file, not at the later `Verify Windows Authenticode signatures` step.
-
-## Auto-upgrade signing (tauri-plugin-updater)
-
-The desktop app verifies update bundles with a minisign signature. The production pubkey is embedded in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`. Matching private key material lives outside the repo in the release owner's secret store. Three payload shapes are signed with it at release time, each shipping with a detached `.sig` release asset: the macOS `Chan_<v>_aarch64.app.tar.gz` (the `macos-desktop-artifacts` job), each Linux `Chan_<v>_{amd64,aarch64}.AppImage` itself (the `linux-desktop-artifacts` job), and the Windows `Chan_<v>_x64-setup.exe` NSIS installer itself (the `windows-artifacts` job, minisigned after Authenticode so the signature covers the shipped bytes). All three jobs fail fast when `TAURI_SIGNING_PRIVATE_KEY` is absent.
-
-Runbook, including the bridge release a rotation needs: [`desktop/updater-bridge.md`](../desktop/updater-bridge.md).
-
-### Bridge release required after key rotation
-
-When the updater pubkey rotates, existing installs still trust only the OLD pubkey and need a bridge release:
-
-1. Ship one bridge release that embeds the NEW pubkey but signs the update bundle with the OLD private key, so existing installs accept it.
-2. Sign every release after the bridge with the NEW private key.
-3. If the OLD private key is unavailable, existing installs cannot auto-update across the rotation. Users need a manual DMG install for the first new-key release.
-4. Old installs that never picked up the bridge release will fail to verify new-key-signed bundles and stall on their last good version until the user manually reinstalls. Plan the bridge window for how long you're willing to support that tail. A Homebrew cask install recovers with `brew reinstall --cask fiorix/chan/chan-desktop`: the cask is `auto_updates` so brew never refreshes it on its own, but every GA rewrites it to the current DMG. A Linux AppImage install recovers by downloading the current AppImage over the old file by hand; a Windows install by running the current `-setup.exe` by hand.
-5. The signing identity used at build time is selected via `TAURI_SIGNING_PRIVATE_KEY` (key contents) or `TAURI_SIGNING_PRIVATE_KEY_PATH` (file path), with optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. CI should pull these from a secrets store, never from the repo.
-
-### Manifest endpoint
-
-Client probes a single static manifest: `https://chan.app/dl/desktop/latest.json`
-
-That manifest is generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs` (driven by `.github/workflows/release.yml`) and deployed to GitHub Pages alongside the rest of chan.app; there is no separate dynamic server for `/dl`. It is a Tauri static updater manifest: a top-level `version` plus a `platforms` map keyed by `{os}-{arch}` (`darwin-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`), each carrying the minisign `signature` and the release-asset `url`. Tauri selects the entry for the running target and compares `version`; the Linux entries point at the AppImage release asset itself and the Windows entry at the NSIS installer itself. The platform-to-asset map is single-sourced in `web/packages/marketing/scripts/release-assets.mjs` (`updaterPayloads`). The endpoint is a flat static path; the generator serves no templated `{{target}}/{{current_version}}` URL.
-
-## Release package version metadata
-
-Tauri bundle artifact names are derived from `src-tauri/tauri.conf.json`:
-
-* `productName` supplies the `Chan` prefix.
-* `version` supplies the semantic version in bundle names: the local DMG builds as `Chan_${VERSION}_${ARCH}.dmg`, and `release.yml` normalizes the published assets to `Chan_${VERSION}.dmg` plus `Chan_${VERSION}_aarch64.app.tar.gz`.
-
-On Linux, a dashed candidate version builds the deb and AppImage with that semantic version. Tauri's RPM bundle uses the undashed version as `Version` and `0~<suffix>` as `Release`, so it sorts before the GA RPM's release `1`; the Fedora specs instead put `~<suffix>` in `Version`. The candidate RPM and deb are diagnostic workflow artifacts, while the AppImage is the published desktop payload.
-
-The `tauri.conf.json` `version` is a manual pin in the release version-pin bump; `release.yml` asserts at tag time that the tag, the workspace Cargo version, this field, and the gateway version all match. The Rust package version for `chan-desktop` is inherited from the workspace, so the `.app` version and the workspace stay aligned once this field matches.
+No bridge release is needed: Gatekeeper trusts any Developer ID Application certificate chained to Apple's root, whichever one signed the previous release. The updater key below is different.
 
 ## Local notarization setup
 
-`make app-notarized` (in `desktop/Makefile`) accepts notarization credentials from two sources, in this precedence order:
+`make app-notarized` reads notarization credentials from two sources, in this order:
 
-1. **Environment variables** (`APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID`). What CI uses; populated from GitHub Actions Secrets in `.github/workflows/release.yml` (and the manual `release-desktop.yml` dry run). Wins when present, so a one-off `APPLE_ID=... APPLE_PASSWORD=... APPLE_TEAM_ID=... make app-notarized` shadows whatever Keychain profile is configured locally.
-2. **`notarytool` Keychain profile** (Apple's blessed mechanism for local dev). One-time setup on the workstation:
+1. The environment variables `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID`, which is what CI uses from GitHub Actions Secrets. They win when present, so a one-off `APPLE_ID=... APPLE_PASSWORD=... APPLE_TEAM_ID=... make app-notarized` shadows the Keychain profile.
+2. A `notarytool` Keychain profile, Apple's mechanism for local development. One-time setup on the workstation:
 
    ```
    xcrun notarytool store-credentials chan \
@@ -126,25 +89,40 @@ The `tauri.conf.json` `version` is a manual pin in the release version-pin bump;
        --password <app-specific-password>
    ```
 
-   Stashes the Apple ID + Team ID + app-specific password in the default macOS Keychain under a profile named `chan`. After this, plain `make app-notarized` runs from a bare shell with no env exports; the Makefile detects the profile and passes `--keychain-profile chan` to `xcrun notarytool submit`. Override the profile name via `NOTARIZE_PROFILE=othername make app-notarized` if you store it under a different label.
+   After this a plain `make app-notarized` runs from a bare shell: the Makefile detects the profile and passes `--keychain-profile chan` to `xcrun notarytool submit`. `NOTARIZE_PROFILE=othername make app-notarized` selects a profile stored under another label.
 
-The app-specific password (option 2 above) is generated at <https://account.apple.com/> -> Sign-In and Security -> App-Specific Passwords -> Generate. It is NOT the iCloud account password; the iCloud password will not work for `notarytool` because of two-factor auth.
+The app-specific password comes from <https://account.apple.com/>, Sign-In and Security, App-Specific Passwords. It is not the iCloud password, which `notarytool` refuses because of two-factor auth.
 
-### Verifying the Keychain profile is in place
+`security find-generic-password -s "com.apple.gke.notary.tool" -a chan` confirms the profile exists; it exits non-zero otherwise and never prints the password, since there is no `-g` or `-w`. `xcrun notarytool history --keychain-profile chan` is the network check: it lists the account's submissions and fails on a bad profile.
 
-```
-security find-generic-password -s "com.apple.gke.notary.tool" -a chan
-```
+### Why build and notarize are separate steps
 
-Returns the keychain item attributes if the profile exists, exits non-zero otherwise. The actual password value never leaves the Keychain (no `-g`/`-w` flag).
+`cargo tauri build --bundles app` signs the `.app` through `codesign`, driven by `APPLE_SIGNING_IDENTITY`. The `.dmg` is then built by `packaging/desktop/build-dmg.sh` with `dmgbuild`, because tauri-bundler's DMG step lays the Finder window out over AppleScript, which no-ops on a headless runner and ships a flat default layout; dmgbuild writes the layout programmatically from `packaging/desktop/dmg_settings.py`, so local and CI match. tauri-bundler can notarize during the build, but only from `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID`; it does not read Keychain profiles. To serve the local profile path and the CI env-var path with one recipe, the Makefile unsets the three variables for the `cargo tauri build` call, then signs the DMG, runs `xcrun notarytool submit --wait` with whichever credential source it found, and staples the ticket to the DMG. The DMG is the artifact CI validates (`stapler validate`, `spctl -a -t install`); the `.app` inside the updater payload is signed but not stapled. CI needs no Keychain profile.
 
-`xcrun notarytool history --keychain-profile chan` is the network-dependent variant: lists Apple-side notary submissions and fails on a bad / non-existent profile. Useful as an end-to-end "is this profile actually valid against Apple" check.
+## Windows Authenticode signing
 
-### Why the Makefile splits build from notarize
+The Windows CLI, the desktop binary, the NSIS plugins and the installer are signed remotely through SSL.com eSigner by `src-tauri/scripts/windows/sign.ps1`, which `release.yml` (job `windows-artifacts`) and the `release-desktop.yml` dry run call directly and through the `signCommand` in `tauri.windows.conf.json`. The script needs `ES_USERNAME`, `ES_PASSWORD`, `CREDENTIAL_ID` and `ES_TOTP_SECRET`, plus `CODESIGNTOOL` and `CODE_SIGN_TOOL_PATH` from the install step; with none of the signing variables set it leaves the input unsigned and exits 0, so a local `make windows-installer` builds an unsigned installer.
 
-`cargo tauri build --bundles app` signs the `.app` (via `codesign`, driven by `APPLE_SIGNING_IDENTITY`); the `.dmg` is packaged separately by `packaging/desktop/build-dmg.sh` (`dmgbuild`), because tauri-bundler's DMG step drives Finder over AppleScript and no-ops on headless CI. Tauri's bundler can ALSO notarize as part of the build command, but only when `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` are present in the env. `tauri-bundler` 2.x does not consume `notarytool` Keychain profiles directly. To support the local Keychain-profile path AND the CI env-var path under one recipe, the Makefile unsets the three notarize env vars during the `cargo tauri build` call (so tauri-bundler skips its own notarize step) and then runs `xcrun notarytool submit` + `xcrun stapler staple` itself with the appropriate flag set.
+Rules the script and the workflows enforce, each with its reason:
 
+- CodeSignTool is pinned to a GitHub release and runs the JDK bundled in its archive, whose truststore predates `SSL.com TLS RSA Root CA 2022`, the root the signing endpoint chains to. The `Install SSL.com CodeSignTool` step checks the committed [`ssl-com-tls-rsa-root-ca-2022.pem`](../desktop/src-tauri/scripts/windows/ssl-com-tls-rsa-root-ca-2022.pem) against its pinned SHA-256 fingerprint and imports it with that JDK's own `keytool`.
+- CodeSignTool exits 0 even when a sign fails, so its exit code is not a signal: `sign.ps1` reads every `.exe`, `.dll` and `.msi` back with `Get-AuthenticodeSignature` and throws unless the status is `Valid`.
+- The NSIS uninstaller stub reaches the bundler's sign hook under an `nst*.tmp` name, which CodeSignTool refuses by extension; `sign.ps1` signs a sibling `.exe` copy and writes the signed bytes back before the stub is embedded.
+- The `Probe SSL.com eSigner credentials` step runs CodeSignTool's `get_credential_ids` before the release build and fails unless the listing names `CREDENTIAL_ID`, without printing the tool's output, so a TLS trust, username, password or credential id problem fails before the build rather than after it. The probe takes no TOTP secret, so a bad `ES_TOTP_SECRET` still fails at the first signed file.
+- The `Verify Windows Authenticode signatures` step checks `chan.exe`, `chan-desktop.exe` and the installer with `Get-AuthenticodeSignature` and `signtool verify /pa`, installs the installer silently, verifies the installed `uninstall.exe` the same way, and uninstalls with `_?=<install dir>` so the step waits for the uninstall to finish. A headless `chan serve` boot of `chan-desktop.exe` then smokes `/api/health`.
 
-### CI does not need the Keychain profile
+## Updater signing (tauri-plugin-updater)
 
-The release workflows read `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` straight from `secrets.APPLE_*` (per the macOS signing procedure; see the release signing notes in `skills/release/SKILL.md`). The env-var path runs unchanged on the runner; no `xcrun notarytool store-credentials` step is needed in CI.
+The desktop verifies update payloads with a minisign signature against `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. The private key stays in the release owner's secret store and in CI secrets. Three payloads are signed at release time, each with a detached `.sig` asset: the macOS `Chan_<v>_aarch64.app.tar.gz` (`macos-desktop-artifacts`), each Linux `Chan_<v>_{amd64,aarch64}.AppImage` itself (`linux-desktop-artifacts`), and the Windows `Chan_<v>_x64-setup.exe` installer itself (`windows-artifacts`, minisigned after Authenticode so the signature covers the shipped bytes). All three jobs fail fast when `TAURI_SIGNING_PRIVATE_KEY` is absent. The key is selected by `TAURI_SIGNING_PRIVATE_KEY` (contents) or `TAURI_SIGNING_PRIVATE_KEY_PATH` (a file), with an optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; CI reads them from secrets, never from the repo.
+
+Key inspection, signing a payload by hand, and the bridge release a rotation needs are in [`desktop/updater-bridge.md`](../desktop/updater-bridge.md). In short: an install trusts only the public key it was built with, so a rotation ships one release that embeds the new key but is signed with the old one, and every later release is signed with the new key.
+
+### The manifest
+
+The client probes one static manifest, `https://chan.app/dl/desktop/latest.json`, generated at release time by `web/packages/marketing/scripts/generate-release-metadata.mjs` and deployed to GitHub Pages with the rest of chan.app; there is no dynamic `/dl` server. It is a Tauri static manifest: a top-level `version` and a `platforms` map keyed `{os}-{arch}` (`darwin-aarch64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`), each carrying the `signature` and the release-asset `url`. The platform-to-asset map is single-sourced in `web/packages/marketing/scripts/release-assets.mjs` (`updaterPayloads`); add a platform there, not in the generator.
+
+## Release artifact names and versions
+
+Bundle names derive from `src-tauri/tauri.conf.json`: `productName` gives the `Chan` prefix and `version` the semantic version. The local DMG builds as `Chan_<version>_<arch>.dmg`; `release.yml` renames it to `Chan_<version>.dmg`, the name the Homebrew cask template and the site's asset list expect, and publishes `Chan_<version>_aarch64.app.tar.gz` beside it. A dashed candidate version ships the AppImage as the desktop payload; its deb and RPM are uploaded as diagnostic workflow artifacts on a prerelease only.
+
+`version` is a manual pin in the release version-pin bump; `release.yml`'s `context` job asserts that the tag, the workspace Cargo version, this field and the gateway version all match. The crate's Rust version is inherited from the workspace, so once this field matches, the `.app` and the workspace agree.
