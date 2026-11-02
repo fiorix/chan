@@ -18,7 +18,7 @@ Install the headless CLI and devserver output without the desktop closure:
 nix profile install github:fiorix/chan#chan
 ```
 
-The flake supports `x86_64-linux` and `aarch64-linux`. It does not provide a NixOS module, Home Manager module, or systemd unit.
+The flake supports `x86_64-linux` and `aarch64-linux`. It does not provide a NixOS module, a Home Manager module, or a systemd unit.
 
 ## Package shape
 
@@ -37,9 +37,9 @@ The headless output deliberately omits `chan-desktop`, GTK, WebKitGTK, the GTK r
 - the shared desktop entry and hicolor icons
 - the license and top-level release documentation
 
-It deliberately does not install `chan-devserver.service`. A profile path is not a stable systemd `ExecStart` target, and service/module design is outside this package's scope.
+It deliberately does not install `chan-devserver.service`: a profile path is not a stable systemd `ExecStart` target, and service and module design is outside this package's scope.
 
-Both derivations export `CHAN_PACKAGED=nix` while compiling. That makes the update probe and banner silent and makes every `chan upgrade` personality refuse with a Nix-specific package-manager hint. The desktop also recognizes a Nix store executable as an install it must not mirror into `~/.local/bin`; each output's own `chan` and `cs` paths are authoritative.
+Both derivations export `CHAN_PACKAGED=nix` while compiling. That keeps the update probe and banner silent and makes every `chan upgrade` personality refuse with a Nix-specific package-manager hint. The desktop also recognizes a Nix store executable as an install it must not mirror into `~/.local/bin`; each output's own `chan` and `cs` paths are authoritative.
 
 ## Build and check
 
@@ -61,19 +61,19 @@ make nix-sdme-check NIX_PACKAGE=chan
 make nix-sdme-check NIX_PACKAGE=chan-desktop
 ```
 
-`NIX_SDME_ROOTFS` selects the explicitly imported Ubuntu rootfs. The driver verifies the guest identity, installs Ubuntu's `nix-bin` and `nix-setup-systemd` packages inside the disposable overlay, initializes the local store, enables flakes, and keeps Nix build directories and smoke-test temporary files under `/var/tmp`. The guest-only `/var/tmp` mode is narrowed to 0755 because Nix refuses a build path with a world-writable component. The host `/var/tmp` mode is unchanged. `NIX_PACKAGE=all` delegates to the native `make nix-check` contract; either named package evaluates the flake, builds and validates exactly that output, and runs its package smoke without first building the other package.
+`NIX_SDME_ROOTFS` selects the imported Ubuntu rootfs. The driver verifies the guest identity, installs Ubuntu's `nix-bin` and `nix-setup-systemd` packages inside the disposable overlay, initializes the local store, enables flakes, and keeps Nix build directories and smoke-test temporary files under `/var/tmp` (narrowed to 0755 in the guest, because Nix refuses a build path with a world-writable component; the host `/var/tmp` is untouched). `NIX_PACKAGE=all` delegates to the native `make nix-check` contract; either named package evaluates the flake, builds and validates exactly that output, and runs its package smoke without first building the other package.
 
-The driver copies the current contents of indexed files into a tracked-source snapshot under `/var/tmp`, omitting tracked deletions, Git metadata, ignored files, and untracked files. That snapshot is mounted read-only at `/src` and evaluated as a path flake, so linked worktrees need no Git metadata inside the guest and ignored build products cannot enter the Nix source. The only writable host mount is the selected output directory at `/out`, `/var/tmp/chan-nix-sdme-check` by default. The driver rejects repository/output and snapshot/output overlap. Combined guest output is retained as `build.log` beside the guest status file. Container or snapshot cleanup failure is reported and fails an otherwise successful run without replacing an earlier failure. This check never publishes to Cachix or creates release artifacts.
+The driver copies the current contents of indexed files into a tracked-source snapshot under `/var/tmp`, omitting tracked deletions, Git metadata, ignored files, and untracked files. That snapshot is mounted read-only at `/src` and evaluated as a path flake, so linked worktrees need no Git metadata inside the guest and ignored build products cannot enter the Nix source. The only writable host mount is the selected output directory at `/out`, `/var/tmp/chan-nix-sdme-check` by default; the driver rejects repository/output and snapshot/output overlap. Combined guest output is retained as `build.log` beside the guest status file. A container or snapshot cleanup failure fails an otherwise successful run without replacing an earlier failure. This check never publishes to Cachix or creates release artifacts.
 
-Run `make nix-sdme-contract-check` to exercise rootfs, bind, store setup, status, failure, and cleanup behavior against a stub. It does not start a container or install Nix.
+`make nix-sdme-contract-check` exercises the rootfs, bind, store setup, status, failure, and cleanup behaviour against a stub. It does not start a container or install Nix.
 
-The packages follow the repository's pinned Rust toolchain. They use Node.js 22 from nixpkgs because Node.js 20 is end-of-life and has been removed from the current nixpkgs input; the rest of the project's existing CI remains on its own Node version.
+The packages follow the repository's pinned Rust toolchain and use Node.js 22 from nixpkgs, the major `.nvmrc` declares.
 
 ## Fixed-output maintenance
 
-Both packages feed `${src}/web` to `fetchNpmDeps`, so they share the `npmDeps.hash` derived from `web/package-lock.json`. Both also build from the same flake source and vendor the same root `Cargo.lock` (`cargoBuildFlags` selects the crate to build, not the crates to vendor), so they share the `cargoHash`: one harvested value goes into both derivations, and `make nix-hash-check` fails when the two differ. Harvesting each package independently cross-checks that value; it never yields a second one.
+Both packages feed `${src}/web` to `fetchNpmDeps`, so they share the `npmDeps.hash` derived from `web/package-lock.json`. Both also build from the same flake source and vendor the same root `Cargo.lock` (`cargoBuildFlags` selects the crate to build, not the crates to vendor), so they share the `cargoHash`: one harvested value goes into both derivations, and `make nix-hash-check` fails when the two differ.
 
-`packaging/nix/cargo-lock.sha256` records, in `sha256sum` format, the digest of the `Cargo.lock` the pinned `cargoHash` was harvested for. `make nix-hash-check`, a `make pre-push` step on every host, compares the live lock with it, so any lock change fails the gate until the hash is harvested again, and `make nix-hash-pin CARGO_HASH=sha256-...` writes the harvested value into both derivations and rewrites the digest file from the live lock in one step. The pin helper refuses a placeholder, a malformed value, a value the same derivation pins as `npmDeps.hash`, and the value both derivations already carry when the digest file does not name the live lock (that is the `specified:` line a Nix build prints beside `got:`, and the `got:` line of the `-vendor-staging` mismatch is the value to copy), leaving every file untouched when it does; it cannot prove the value it accepts, which only a Nix build can. That last refusal needs a digest file: a well-formed one names the lock the pins were harvested for, and a malformed one (a merge or rebase conflict left in it, say) names none, so the helper refuses the value over it as well and says to restore the file from the commit whose pins were kept, or to harvest; only an absent digest file, the bootstrap case, lets the value both derivations carry pin, and the helper says so when it does. `npmDeps.hash` has no such record: a stale npm hash passes the gate and fails only in the Nix build, which reports its `-npm-deps` mismatch before the cargo one, so when both lockfiles changed the first `got:` line a build prints is the npm value.
+`packaging/nix/cargo-lock.sha256` records, in `sha256sum` format, the digest of the `Cargo.lock` the pinned `cargoHash` was harvested for. `make nix-hash-check`, a `make pre-push` step on every host, compares the live lock with it, so any lock change fails the gate until the hash is harvested again. `make nix-hash-pin CARGO_HASH=sha256-...` writes the harvested value into both derivations and rewrites the digest file from the live lock in one step. The pin helper refuses a placeholder, a malformed value, a value the same derivation pins as `npmDeps.hash`, and the value both derivations already carry when the digest file does not name the live lock (that is the `specified:` line a Nix build prints beside `got:`; the `got:` line of the `-vendor-staging` mismatch is the value to copy); it leaves every file untouched when it refuses, and it cannot prove the value it accepts, which only a Nix build can. A malformed digest file (a conflict marker left in it, say) also makes the helper refuse: restore the file from the commit whose pins were kept, or harvest again. `npmDeps.hash` has no such record: a stale npm hash passes the gate and fails only in the Nix build, which reports its `-npm-deps` mismatch before the cargo one.
 
 When a new package's `cargoHash` has not been harvested yet, use this deliberately failing placeholder rather than inventing a plausible hash:
 
@@ -90,21 +90,13 @@ Dependency changes intentionally make the affected build fail with a replacement
 - update the `cargoHash` in both derivations after `Cargo.lock` changes, with `make nix-hash-pin`, which also records the lock digest
 - update `flake.lock` deliberately when changing nixpkgs or rust-overlay
 
-Replace only the hash named by Nix's mismatch, which the derivation name selects: `-npm-deps` is `npmDeps.hash`, and `-vendor-staging` is `cargoHash` (a new `cargoHash` goes into both derivations, through `make nix-hash-pin`); then run `make nix-check` again. Do not refresh the flake inputs as part of an unrelated package repair. On a host without Nix, or where the harvest must not run as root, the release procedure's section "Nix hashes on a host without Nix (sdme)" describes the capped-guest harvest as a user who is not root with a real `/nix` owned by that user, and the bounds it was measured under.
+Replace only the hash named by Nix's mismatch, which the derivation name selects: `-npm-deps` is `npmDeps.hash`, and `-vendor-staging` is `cargoHash`; then run `make nix-check` again. Do not refresh the flake inputs as part of an unrelated package repair. On a host without Nix, or where the harvest must not run as root, the release skill (`.agents/skills/release/SKILL.md`, "Nix hashes on a host without Nix") describes the capped-guest harvest as a non-root user with a real `/nix` owned by that user.
 
 ## Cachix release path
 
-The public cache is named `chan`. Once its external bootstrap is complete, the root flake declares its substituter and public signing key, so consumers can accept the flake configuration and fetch published closures without a Cachix account.
+The public cache is named `chan`. The root flake declares its substituter and public signing key, so consumers can accept the flake configuration and fetch published closures without a Cachix account. Accept that configuration only from the reviewed upstream flake; CI configures the same named cache explicitly and does not auto-accept cache settings from a pull request.
 
-Accept that configuration only from the reviewed upstream flake. CI configures the same named cache explicitly and does not auto-accept cache settings from a pull request.
-
-The one-time external setup is:
-
-1. Create a public Cachix cache named `chan`.
-2. Copy its public signing key into `flake.nix`.
-3. Store a write token as the GitHub Actions secret `CACHIX_AUTH_TOKEN`.
-
-Never commit or print the write token. The public signing key is not secret.
+The cache depends on three things outside the repository: the public Cachix cache named `chan`, its public signing key in `flake.nix`, and a write token stored as the GitHub Actions secret `CACHIX_AUTH_TOKEN`. Never commit or print the write token; the public signing key is not secret.
 
 `.github/workflows/publish-downstream.yml` builds and smokes both packages on native x86_64 and aarch64 runners. A `publish=false`, `targets=cachix` dispatch does everything except authenticate and push, and prints the pins a GA would make. A GA run pushes each complete closure into the `chan` cache and pins it under one stable name per package and system:
 
@@ -115,6 +107,6 @@ chan-desktop-x86_64-linux
 chan-desktop-aarch64-linux
 ```
 
-Each GA adds a revision to each of the four pins, and `scripts/cachix-pin.sh` pins with `cachix pin --keep-revisions`, so Cachix keeps the newest revisions of each name and drops the older ones; a pin keeps its closure out of Cachix's garbage collection, and a dropped revision's closure falls to it once nothing else holds it. The number kept is the workflow's `cachix_keep` input, 10 by default and on every tag-triggered run; raise it on a `workflow_dispatch` retry, or change the default in the workflow (the input's `default` and the `|| '10'` fallback of the pin step, which a tag-triggered run reads). Revisions are kept by when they were pinned, not by version, so a patch release of an older line counts as the newest. Release candidates are never pinned. The pushes run before the pins, so a publication's closures are pushed while the previous revisions still hold theirs. Pins named after a version (`vX.Y.Z-...`) are no longer made; any left in the cache are removed on the cache's Pins page.
+Each GA adds a revision to each of the four pins, and `scripts/cachix-pin.sh` pins with `cachix pin --keep-revisions`, so Cachix keeps the newest revisions of each name and drops the older ones; a pin keeps its closure out of Cachix's garbage collection, and a dropped revision's closure falls to it once nothing else holds it. The number kept is the workflow's `cachix_keep` input, 10 by default and on every tag-triggered run; raise it on a `workflow_dispatch` retry, or change the default in the workflow. Revisions are kept by when they were pinned, not by version, so a patch release of an older line counts as the newest. Release candidates are never pinned. The pushes run before the pins, so a publication's closures are pushed while the previous revisions still hold theirs.
 
 Fresh runners then invoke `nix build` with local jobs disabled. That final job proves all four system/package closures substitute from the configured caches rather than merely existing in the first runner's local store.

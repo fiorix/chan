@@ -1,109 +1,134 @@
-# Chan extensions
+# chan extensions
 
-How Chan uses extensions, and how to build one. The field-level contract for the declaration file lives in the [configuration reference](config-reference.md); this document is the design and the authoring guide. Source of the mechanism: `crates/chan-server/src/extensions.rs` (discovery, spawn, handshake, supervision) and `crates/chan-server/src/routes/extensions.rs` (catalog and reverse proxy).
+How chan runs extensions, and how to write one. This is the design and the authoring guide; the field-level contract for the declaration file and the proxy's header, redirect and timeout rules are in the [configuration reference](config-reference.md). The mechanism lives in `crates/chan-server/src/extensions.rs` (discovery, spawn, handshake, supervision) and `crates/chan-server/src/routes/extensions.rs` (catalog and reverse proxy); the tab and the host bridge are in the workspace app's `ExtensionTab.svelte`.
 
-An extension is a local program the operator declares in `<chan-home>/extensions/<id>.toml` (`~/.chan/extensions/` by default). Chan spawns it when serving starts, the program serves an ordinary loopback HTTP app, and Chan reverse-proxies that app into a sandboxed iframe tab with a launcher entry under Apps. Chan itself stays one binary with no plugin ABI: an extension is a separate process behind a narrow web contract, so it can be written in any language, crash without taking Chan down, and never inherits Chan's API authority. Declaring one is an explicit local-code-execution grant; treat every file in that directory accordingly.
+## What an extension is
+
+An extension is a local program declared by one TOML file under `<chan-home>/extensions/` (`~/.chan/extensions/` by default). chan spawns it when serving starts, the program serves an ordinary HTTP app on loopback, and chan reverse-proxies that app into a sandboxed iframe tab with an entry under Apps in the command launcher.
+
+The design is a separate process behind a narrow web contract rather than a plugin ABI, for four reasons. chan stays one binary. An extension can be written in any language that can serve HTTP. It can crash without taking chan down. And it never inherits chan's API authority: all it gets is its own loopback port and a `postMessage` channel. Declaring an extension is an explicit grant to run local code as the serving user, so the declaration file is the security decision, and every file in that directory deserves the same care as a shell profile.
 
 ## The model
 
-Four pieces carry the whole design:
+Four pieces carry the design.
 
-- **A declaration.** One `.toml` per extension; the lowercase file stem is the stable ID. `name` titles the tab and launcher row, `command` and `args` say what to spawn (bare names resolve through `PATH`, `./name` resolves from the config directory, installers write absolute paths), and `capabilities` lists the host grants the extension wants. Malformed or oversized declarations, spawn failures, and failed handshakes warn and are skipped without failing Chan startup.
-- **A handshake.** The child inherits Chan's environment (see [The environment](#the-environment)), starts in the config directory, gets null stdin and inherited stderr, and must print one newline-terminated line on stdout within five seconds and 32 bounded lines: `CHAN_EXTENSION_V1={"url":"http://127.0.0.1:<port>/","token":"<unguessable>", ...}`. The URL must be plain HTTP on `127.0.0.1` or `localhost` (pinned to `127.0.0.1` after validation, so a mutable hosts file cannot re-target the proxy), with a usable port, no userinfo, and no pre-existing `t` query parameter. Optional fields: `singleton` and up to 32 static `commands`.
-- **A capability-path proxy.** Each ready extension gets a random 256-bit path under `/_chan/extensions/<id>/<capability>/...` inside the workspace tenant. The browser only ever sees that path: the loopback address and token stay process-private, and the proxy adds the token on the private upstream leg only. Because everything rides Chan's existing port, one route serves every deployment shape unchanged: standalone server, chan-desktop, a devserver, an SSH port forward, and the gateway tunnel.
-- **A sandboxed tab.** The iframe runs with `allow-forms allow-scripts` and without `allow-same-origin`, so extension scripts execute at an opaque origin: they cannot touch Chan's DOM, storage, or APIs even though their network requests share Chan's port. The only host channel is `postMessage`, and Chan accepts bridge messages only from that tab's exact `contentWindow`.
+- **A declaration.** One `.toml` per extension; the lowercase file stem is the stable id. `name` titles the tab and the launcher row, `command` and `args` say what to spawn (a bare name resolves through the serving process's `PATH`, `./name` resolves from the config directory, installers write absolute paths), and `capabilities` lists the host grants the extension asks for. A malformed declaration, a failed spawn or a failed handshake is logged and skipped; it never fails chan's startup.
+- **A handshake.** The child prints one line on stdout, `CHAN_EXTENSION_V1={...}`, naming its loopback URL and an unguessable token, and optionally `singleton` and a static list of `commands`. The URL must be plain HTTP on `127.0.0.1` or `localhost`; chan pins it to `127.0.0.1` after validation so a hosts-file entry cannot re-target the proxy. The handshake is bounded in time and in lines, and a child that does not produce it is terminated and ignored.
+- **A capability-path proxy.** Each ready extension gets a random, unguessable path segment under `/_chan/extensions/<id>/<capability>/` inside the tenant that serves it. The browser only ever sees that path. The loopback address and the token stay inside the chan process, and the proxy appends the token on the upstream leg only. Because the proxy rides chan's own port, one route works unchanged in every deployment shape: `chan serve`, chan-desktop, a devserver over a TCP tunnel, and a devserver through a gateway.
+- **A sandboxed tab.** The iframe runs with `allow-forms allow-scripts` and without `allow-same-origin`, so the extension's scripts execute at an opaque origin: they cannot read chan's DOM, storage or bearer token even though their requests share chan's port. The only host channel is `postMessage`, and chan accepts bridge messages only from that tab's own `contentWindow`.
 
-The proxy is also the trust boundary in the other direction: it strips browser credential headers and upstream cookies, applies no-store and no-referrer response policy, stamps every upstream request with `X-Chan-Extension-Scope`, and serves only signed-in callers over the gateway: the owner and a grantee use the proxy alike, and the gateway binds each extension frame's link to the user who opened it, so a capability link with no session reaches nothing. The gateway makes that binding only on the navigation that loads the link into the tab's frame, which it recognises by the browser's Fetch Metadata request headers (exactly `Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: iframe`), so opening an extension tab through the gateway needs a browser that sends them: in a browser that does not, the frame gets the gateway's not-found response instead of the extension. Served without the gateway, an extension tab does not depend on these headers. The full header, redirect, and timeout hygiene is in the [configuration reference](config-reference.md).
+```mermaid
+flowchart LR
+  subgraph Browser["browser or desktop window"]
+    App["workspace app"]
+    Frame["sandboxed iframe, opaque origin"]
+  end
+  subgraph Server["chan serving process"]
+    Runtime["extension runtime: spawn, handshake, supervise"]
+    Catalog["catalog: id, name, capability path"]
+    Proxy["capability-path proxy"]
+  end
+  Ext["extension process: loopback HTTP app"]
+  Runtime -->|"spawn, read CHAN_EXTENSION_V1"| Ext
+  Runtime --> Catalog
+  App -->|"list extensions"| Catalog
+  App <-->|"postMessage bridge"| Frame
+  Frame -->|"/_chan/extensions/id/capability/..."| Proxy
+  Proxy -->|"same request plus the token, loopback only"| Ext
+```
 
-One word of warning about vocabulary: "capability" means three unrelated things in Chan. An extension's manifest `capabilities` are host grants (`session-context`, `presentation`); the proxy path capability is the unguessable URL segment above; and window capabilities (`windowCaps`) are an unrelated mechanism deciding which surfaces a window family may mount. This document only uses the first two.
+*The browser sees only the capability path; the upstream address and the token never leave the serving process.*
+
+The proxy is the trust boundary in both directions. Toward the extension it strips the browser's credentials (the chan bearer, cookies, origin and referrer, forwarding headers) and stamps every upstream request with a scope header naming the serving instance. Toward the browser it drops upstream cookies, applies a no-store and no-referrer policy, and strips redirects that point at loopback. Through a gateway the proxy routes are reachable only by signed-in callers, the owner and grantees alike: the gateway never forwards a bare capability link but binds it to the signed-in user on the iframe navigation that loads it, which it recognises by the browser's Fetch Metadata request headers. A leaked capability link alone therefore reaches nothing, a browser that sends no Fetch Metadata gets the gateway's not-found page instead of the extension, and a devserver refuses a tunnel request that names no user. Served without a gateway, an extension tab does not depend on those headers.
+
+One word about vocabulary: "capability" means three unrelated things in chan. An extension's declared `capabilities` are host grants (`session-context`, `presentation`); the proxy path capability is the unguessable URL segment above; and window capabilities decide which surfaces a window family may mount. This document uses only the first two.
 
 ## Lifecycle
 
-Chan discovers and starts extensions once per serving process, not once per workspace tenant. Successful children live until Chan shuts down, when each child's process group receives TERM and then KILL after a grace period. A child that exits is not respawned; fix it and restart the serving Chan process. Extension stderr is inherited, so an extension's own logs land in Chan's stderr stream, which is what you watch while developing one.
+chan discovers and starts extensions once per serving process, not once per workspace tenant, so a devserver with many workspaces runs one copy of each. Children live until chan shuts down, when each child's process group receives TERM and then KILL after a grace period. A child that exits is not respawned: a crashed extension stays down until the serving chan process restarts. That keeps supervision simple and makes a flapping extension visible instead of hiding it behind retries. Extension stderr is inherited, so an extension's own logs land in chan's stderr stream, which is what you watch while developing one; a child that fails before its handshake is logged once as `extension ignored` with the cause.
+
+```mermaid
+sequenceDiagram
+  participant S as chan server
+  participant E as extension process
+  participant B as browser tab
+  S->>E: spawn with the config directory as cwd and the inherited environment
+  E-->>S: CHAN_EXTENSION_V1 line with url, token and options
+  S->>S: validate, pin 127.0.0.1, mint the capability path, list under Apps
+  B->>S: open the Apps entry: GET the capability path
+  S->>E: proxied request with the token added
+  E-->>S: HTML, assets and API responses
+  S-->>B: response with no-store and no-referrer
+  B-->>S: postMessage chan:extension-ready:v1
+```
 
 ## The environment
 
-An extension is spawned without a shell, so nothing reads a shell profile for it: it inherits the serving Chan process's environment verbatim, and a bare `command` and every helper the extension runs by name resolve through that process's `PATH`. A Chan started from a terminal passes on the terminal's `PATH`.
+An extension is spawned without a shell, so nothing reads a shell profile for it: it inherits the serving chan process's environment as is, and a bare `command`, like every helper the extension runs by name, resolves through that process's `PATH`. A chan started from a terminal passes on the terminal's `PATH`.
 
-A devserver running as a service, the systemd user service on Linux or the launchd agent on macOS (`chan devserver start`, `join` or `restart`, whose default backend is the platform's), runs with the `PATH` its service definition records, and that `PATH` is also the one every terminal the service opens starts from, not only its extensions. `chan devserver restart` always rewrites the definition, `~/.config/systemd/user/chan-devserver.service` or `~/Library/LaunchAgents/app.chan.devserver.plist`, and `start` and `join` do when the service is not running. A run from a terminal copies the `PATH` of the shell it runs in into the unit's `Environment="PATH=..."` line or the plist's `EnvironmentVariables`, keeping absolute entries only: it drops relative and empty entries, every repeat of an entry after its first, and any entry containing `"`, `\`, a control character or bytes that are not UTF-8. A run with no terminal on standard input, such as a desktop connect script or any other script, keeps the `PATH` the definition already records and records its own only when it has none, and a run whose `PATH` has no usable entry keeps the recorded one too. So after adding a directory an extension needs, run `chan devserver restart` from a shell that has it, and from a plain one: a restart from inside an activated virtualenv or a `nix develop` shell records that environment's `PATH` for every terminal the service opens.
+A devserver running as a service (the systemd user service on Linux, the launchd agent on macOS) runs with the `PATH` its service definition records, and that `PATH` is also the one every terminal the service opens starts from. `chan devserver restart` rewrites the definition, and `start` and `join` do when the service is not running; a run from a terminal records that shell's `PATH` (absolute entries only), while a run with no terminal on standard input, such as a desktop connect script, keeps the `PATH` already recorded. So after adding a directory an extension needs, run `chan devserver restart` from a plain shell that has it: a restart from inside an activated virtualenv or a `nix develop` shell records that environment's `PATH` for every terminal the service opens.
 
-Two service definitions Chan does not write record no `PATH`, so their extensions see the service manager's default: the distro packages' `/usr/lib/systemd/user/chan-devserver.service` when it is enabled with `systemctl --user` directly, and the unit `packaging/sdme/chan-devserver-provision.sh` writes into an sdme container. For those, and for any `PATH` the recorded copy should not decide, a systemd drop-in sets it: run `systemctl --user edit chan-devserver.service`, add
+Two service definitions chan does not write record no `PATH`, so their extensions see the service manager's default: the distro packages' `/usr/lib/systemd/user/chan-devserver.service` when it is enabled with `systemctl --user` directly, and the unit `packaging/sdme/chan-devserver-provision.sh` writes into an sdme container. For those, and for any `PATH` the recorded copy should not decide, a systemd drop-in sets it: run `systemctl --user edit chan-devserver.service`, add
 
 ```ini
 [Service]
 Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin
 ```
 
-and restart the service. systemd reads a drop-in after the unit, so its assignment wins over the unit's own, and Chan never writes or inspects drop-ins. The launchd agent has no drop-in: its `PATH` is the one the plist records.
-
-An extension that fails before its handshake is logged once, as `extension ignored`, with the whole cause. For a helper missing from `PATH` that is the closed stdout and the child's exit status, `reading handshake (child <status>): extension stdout closed before the handshake marker`, where 127 is a shell's "command not found"; for a bare `command` missing from `PATH` it is the failed spawn, `spawning <command>: <error>`. The status and the error read as the platform prints them: on Linux and macOS, `exit status: 127` and `No such file or directory (os error 2)`.
+and restart the service. systemd reads a drop-in after the unit, so its assignment wins over the unit's own, and chan never writes or inspects drop-ins. The launchd agent has no drop-in: its `PATH` is the one the plist records.
 
 ## The host bridge
 
-All host communication is `postMessage` between the iframe and its parent. Messages from the host arrive on `window.parent`; messages to the host are posted to `window.parent`. The types:
+All host communication is `postMessage` between the iframe and its parent. Messages from the host arrive on `window`; messages to the host are posted to `window.parent`.
 
-| Message                          | Direction | Meaning                            |
-|----------------------------------|-----------|------------------------------------|
-| `chan:extension-host-keymap:v2`  | host->ext | The shell chords Chan currently    |
-|                                  |           | claims, as key tokens with         |
-|                                  |           | modifier booleans                  |
-| `chan:extension-keydown:v2`      | ext->host | A matched keydown's raw fields;    |
-|                                  |           | Chan resolves them and honors the  |
-|                                  |           | keydown only if it was advertised  |
-| `chan:extension-ready:v1`        | ext->host | The iframe is ready; unblocks      |
-|                                  |           | queued singleton command delivery  |
-| `chan:extension-command:v1`      | host->ext | A declared command was invoked     |
-| `chan:extension-command-result:v1` | ext->host | The command's outcome            |
-| `chan:extension-session-context:v1` | host->ext | Participant snapshots           |
-|                                  |           | (`session-context` grant only)     |
-| `chan:extension-view-state:v1`   | host->ext | The tab's visibility state         |
-| `chan:extension-presentation:v1` | ext->host | Enter, exit, or toggle request     |
-|                                  |           | (`presentation` grant only)        |
+| Message                             | Direction | Meaning                                        |
+|-------------------------------------|-----------|------------------------------------------------|
+| `chan:extension-host-keymap:v2`     | host->ext | The shell chords chan claims, as key tokens    |
+| `chan:extension-keydown:v2`         | ext->host | A matched keydown's raw fields                 |
+| `chan:extension-ready:v1`           | ext->host | The UI accepts commands; unblocks queued ones  |
+| `chan:extension-command:v1`         | host->ext | A declared command was invoked                 |
+| `chan:extension-command-result:v1`  | ext->host | The command's outcome                          |
+| `chan:extension-session-context:v1` | host->ext | Participant snapshots (`session-context` only) |
+| `chan:extension-view-state:v1`      | host->ext | The tab's visibility state                     |
+| `chan:extension-presentation:v1`    | ext->host | Enter, exit or toggle full-surface mode        |
 
-Keyboard events inside an iframe never bubble to the parent document, which is why the keymap relay exists: Chan advertises the chords its shell owns, the extension matches only those, calls `preventDefault()`, and posts the keydown back. An extension that skips the relay works fine but swallows shell shortcuts while focused.
+Declared commands register under Apps as `extension.<id>.<command-id>` beside the base `extension.<id>` Open command. They have no default chords and are assignable through the shortcut settings. A `singleton` extension's commands focus or create its one tab and queue delivery until that exact iframe posts `chan:extension-ready:v1`.
 
 ### The keyboard relay
 
-Each advertised chord is a `key` token with `ctrlKey`, `altKey`, `metaKey` and `shiftKey`. The token names what the active keyboard layout types, not where the key sits, so a relay resolves each keydown to a token the way Chan does:
+Keyboard events inside an iframe never bubble to the parent document, which is why the keymap relay exists. chan advertises the chords its shell owns, each as a key token with the four modifier booleans. The extension resolves every keydown to a token the way chan does (the token names what the active keyboard layout types, not where the key sits), matches only the advertised chords, calls `preventDefault()` for a match, and posts the event's raw fields back as `chan:extension-keydown:v2`. chan resolves those fields itself, checks the result against the chords it advertised, and ignores any token or command a message carries, so a relay that matches too much only costs itself keystrokes. An extension that skips the relay works, but swallows shell shortcuts while it has focus. The in-tree fixture's relay is a complete implementation of the resolution rules; copy it rather than deriving them again.
 
-- A lone modifier (`key` of `Shift`, `Control`, `Alt`, `Meta` or `AltGraph`), an `Unidentified` key, an IME composition (`isComposing`, or a `key` of `Process`), a dead key outside the Option fallback below, and AltGr character entry off macOS (`getModifierState("AltGraph")`) name no token and are never relayed. Windows reports AltGr as Ctrl+Alt, so a keydown with both `ctrlKey` and `altKey` that reports AltGraph but whose `key` is still a plain ASCII letter or digit typed no AltGr character and resolves as usual: Ctrl+Alt+P on German QWERTZ is `P`, while AltGr+S typing `ś` on Polish names no token. On macOS Option is Alt, even where the browser also reports it as AltGraph.
-- A top-row digit is its position: `Digit1` is `1` whatever it types, so the digit row still selects tabs on AZERTY.
-- A letter is the letter `key` reports, upper-cased, so Colemak T on `KeyF` is `T` and Caps Lock changes nothing.
-- One of the nine symbols `` ` [ ] , = - . ; / `` is itself. A US shifted glyph names Shift plus its base symbol: `?` is `/` with Shift, and so are `~ { } < + _ > :` for theirs.
-- With Option (Alt) held, a key that typed none of the above falls back to its physical position: `KeyG` is `G`, `BracketLeft` is `[`.
-- Any other key is its `key`, upper-cased when it is one character (`Enter`, `ArrowLeft`).
+### The grants
 
-A keydown matches an advertised chord when the token and all four modifiers are equal, or, when Shift is held and the token is one of the nine symbols typed by `key`, when the same chord without Shift is advertised: AZERTY types `.` with Shift, and that keydown still reaches Cmd+. unless Cmd+Shift+. is bound to a command of its own. Relay a match as `chan:extension-keydown:v2` with the event's raw `key`, `code`, the four modifier booleans, `repeat`, `isComposing` and `altGraph` (`getModifierState("AltGraph")`). Chan resolves those fields itself, checks the result against the chords it advertised, and ignores any token or command a message carries, so a relay that matches too much only costs itself keystrokes. The fixture's relay is a complete implementation.
-
-The two grants are deliberately narrow. `session-context` streams reactive participant snapshots with opaque IDs, display names, Chan roles, statuses, and the receiving window ID; the labels are informational, not authenticated identities. `presentation` lets the extension request promotion of its iframe wrapper into the browser top layer without reparenting, so the browsing context (and any WebGL or WASM state) survives entering and leaving full-surface mode; Chan supplies Restore and Close controls and leaves Escape to the extension. No grant exposes workspace files, native APIs, or a general host message bus.
+The two grants are deliberately narrow. `session-context` streams participant snapshots with opaque ids, display names, chan roles, statuses and the receiving window id; the labels are informational, not authenticated identities. `presentation` lets the extension ask for its iframe wrapper to be promoted into the browser top layer without reparenting, so the browsing context, and any WebGL or WASM state in it, survives entering and leaving full-surface mode; chan supplies the Restore and Close controls and leaves Escape to the extension. No grant exposes workspace files, native APIs or a general host message bus.
 
 ## Creating an extension
 
-The in-tree fixture is the smallest complete example: `crates/chan-server/examples/echo-extension.rs`. The walkthrough below is the same shape in any language.
+The in-tree fixture is the smallest complete example: `crates/chan-server/examples/echo-extension.rs` with its `echo-extension.html`. The walkthrough is the same shape in any language.
 
 1. **Serve a loopback app.** Bind `127.0.0.1` on an ephemeral port, mint an unguessable token, and serve your UI and API from one HTTP server. Reject requests whose `t` query parameter does not match the token: the proxy appends it on every upstream request, and checking it means a stray local process cannot drive your extension.
-2. **Print the handshake.** Emit `CHAN_EXTENSION_V1={json}` on stdout, newline-terminated, before anything else you might print there, and within five seconds of spawn. Everything after the handshake can go to stderr.
-3. **Declare it.** Write `<chan-home>/extensions/<id>.toml` with `name`, `command`, and any `args` and `capabilities`, then restart the serving Chan process. Your launcher entry appears under Apps; opening it loads the iframe tab through the capability path.
-4. **Write the frontend against relative URLs.** The app is served under the capability path, so an origin-rooted `/asset.js` targets Chan's tenant root, not your extension; every asset and API URL must be relative. Implement the keymap relay if you want shell shortcuts to keep working while your extension has focus, and post `chan:extension-ready:v1` when your UI can accept commands.
-5. **Drive Chan through `cs`.** An extension backend that wants to act on Chan (open terminals, write to them, run surveys) shells out to the `cs` control client rather than speaking any private API; Chan's own command semantics and typed exit codes are the contract. This is the pattern both published extensions use, and it keeps the extension honest about what the operator could do themselves.
-6. **Prove the contract in your own tests.** Assert that your handshake line parses under Chan's validation rules (marker prefix, URL shape, token bounds, command ID grammar), so a contract drift fails your suite instead of your users' startup.
+2. **Print the handshake.** Emit `CHAN_EXTENSION_V1={json}` on stdout, newline-terminated, before anything else you might print there, and promptly after spawn. Everything after the handshake can go to stderr.
+3. **Declare it.** Write `<chan-home>/extensions/<id>.toml` with `name`, `command`, and any `args` and `capabilities`, then restart the serving chan process. Your launcher entry appears under Apps; opening it loads the iframe tab through the capability path.
+4. **Write the frontend against relative URLs.** The app is served under the capability path, so an origin-rooted `/asset.js` targets chan's tenant root, not your extension; every asset and API URL must be relative. Implement the keymap relay if you want shell shortcuts to keep working while your extension has focus, and post `chan:extension-ready:v1` when your UI can accept commands.
+5. **Drive chan through `cs`.** An extension backend that wants to act on chan (open terminals, write to them, run surveys) shells out to the `cs` control client rather than speaking any private API; `cs`'s command semantics and exit codes are the contract. This is the pattern both published extensions use, and it keeps the extension honest about what the operator could do themselves.
+6. **Prove the contract in your own tests.** Assert that your handshake line parses under chan's validation rules (marker prefix, URL shape, token bounds, command id grammar), so a contract drift fails your suite instead of your users' startup.
 
-To exercise the in-tree fixture end to end: `cargo build -p chan-server --example echo-extension`, point a declaration's `command` at the built binary's absolute path, and restart Chan. Chan releases ship no extension binaries or declarations; the example compiles only when a developer builds it explicitly.
+To exercise the fixture end to end: `cargo build -p chan-server --example echo-extension`, point a declaration's `command` at the built binary's absolute path, and restart chan. chan releases ship no extension binaries or declarations; the example compiles only when a developer builds it explicitly.
 
 ## Packaging and distribution
 
-Chan has no marketplace or installer, so distribution is the extension repo's job. The published extensions converged on one convention, and new extensions should follow it:
+chan has no marketplace or installer, so distribution is the extension repository's job. The published extensions share one convention, and new extensions should follow it:
 
-- The repo is named `chan-ext-<name>` and carries its extension ID as the file stem it installs.
-- `packaging/chan-extension/<id>.toml` is the declaration template. Its `command` is a placeholder: Chan spawns extensions with the config directory as the working directory, so the installed declaration wants the real absolute path, and only the installer knows it.
-- An `install.sh` detects OS and architecture, verifies the release archive against `SHA256SUMS` before extracting, installs under `~/.local/lib/<name>`, writes `<chan-home>/extensions/<id>.toml` with the path it just installed (honoring `CHAN_HOME`), and leaves the Chan restart to the operator.
-- The repo carries its own gate (fmt, lints, tests) and the contract tests from the walkthrough above.
+- The repository is named `chan-ext-<name>` and carries its extension id as the file stem it installs.
+- `packaging/chan-extension/<id>.toml` is the declaration template. Its `command` is a placeholder: the installed declaration wants the real absolute path, and only the installer knows it.
+- An `install.sh` detects OS and architecture, verifies the release archive against `SHA256SUMS` before extracting, installs under `~/.local/lib/<name>`, writes `<chan-home>/extensions/<id>.toml` with the path it just installed (honouring `CHAN_HOME`), and leaves the chan restart to the operator.
+- The repository carries its own gate (fmt, lints, tests) and the contract tests from the walkthrough above.
 
 ## Reference extensions
 
-- [chan-ext-doom](https://github.com/fiorix/chan-ext-doom): DOOM, embeddable; a merged-lineage engine fork with browser and native targets and a Rust server role. The only extension exercising both grants, and the worked example for `presentation`: full-surface play with engine state surviving enter and restore.
-- [chan-ext-mobile-chat](https://github.com/fiorix/chan-ext-mobile-chat): a chat surface for driving agents from a phone through the desktop's Chan. A single Rust binary serving hand-written assets, `session-context` for the roster, and every action on Chan delegated to `cs`.
+- [chan-ext-doom](https://github.com/fiorix/chan-ext-doom): DOOM, embeddable; an engine fork with browser and native targets and a Rust server role. The only extension exercising both grants, and the worked example for `presentation`: full-surface play with engine state surviving enter and restore.
+- [chan-ext-mobile-chat](https://github.com/fiorix/chan-ext-mobile-chat): a chat surface for driving agents from a phone through the desktop's chan. A single Rust binary serving hand-written assets, `session-context` for the roster, and every action on chan delegated to `cs`.
 
 ## Boundaries
 
-There is no marketplace, installer, remote fetch, lazy start, or `cs` opener for extensions. Extensions are per-machine operator declarations: Chan starts what the directory declares, contains it behind the proxy and the sandbox, and nothing else. A crashed extension stays down until the operator restarts Chan, and an extension's authority over Chan is exactly the authority of a local process run by the same user, which is why the declaration itself is the security decision.
+There is no marketplace, installer, remote fetch, lazy start, or `cs` opener for extensions. Extensions are per-machine operator declarations: chan starts what the directory declares, contains it behind the proxy and the sandbox, and nothing else. A crashed extension stays down until the operator restarts chan, and an extension's authority over chan is exactly the authority of a local process run by the same user, which is why the declaration itself is the security decision.

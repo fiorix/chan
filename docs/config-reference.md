@@ -1,49 +1,46 @@
-# Chan Config Reference
+# chan configuration reference
 
-Canonical schema for every persisted config in chan.
+Every persisted configuration file chan writes, where it lives, what each field means, and which surface sets it. The tables are the schema; the code they describe is named at the top of each section. A schema change updates the matching row in the same commit.
 
-This doc tracks **what gets persisted, where, and who consumes it**. Per-field rows note serde defaults, the user-facing surface (CLI subcommand / Settings field / launcher panel), and any open findings.
-
-When adding a new persisted field: extend the relevant section here in the same commit that lands the schema change so this reference stays in lockstep with the code.
+In the Reachability columns, CLI means `chan config get/set`, API means `PATCH /api/config`, and Settings means the Settings overlay in the workspace app. The surface column names the Settings section a field lives in, or says why it is not surfaced; the workspace app's settings inventory test reads those cells.
 
 ## chan-server
 
-### `~/.chan/server.toml` -- `ServerConfig`
+### `~/.chan/server.toml`: `ServerConfig`
 
-Source: `crates/chan-server/src/config.rs`.
+Source: `crates/chan-server/src/config.rs`, with `TerminalConfig` in `crates/chan-library/src/config.rs`.
 
-`CHAN_LIBRARY_ID` is a spawn environment value, not persisted config: devserver terminals receive the library id of their serving process, and desktop and standalone serve terminals omit it. A moved terminal uses it only when both it and a candidate devserver identify a library; unequal ids reject that candidate even when the workspace root matches.
+The CLI serializes these under the `server.*` namespace, so terminal fields are `server.terminal.*`; `chan config get` and `chan config set` also accept `terminal.*` as a shorthand. The HTTP aggregate keeps the owner-relative `terminal.*` spelling. `chan config set KEY none` clears an optional key. List fields take a JSON string array on CLI set.
 
-The CLI serializes these under the canonical `server.*` namespace, so terminal fields are `server.terminal.*`. `chan config get` and `chan config set` also accept `terminal.*` as a shorthand alias. The HTTP aggregate keeps its existing owner-relative `terminal.*` spelling. Every scalar row below is reachable through `chan config get/set`. The suffix list uses a JSON string array on CLI set, with at most 100 unique values matching `[A-Za-z0-9_]+`.
+| Field | Type | Default | Reachability | Surface and use |
+|-------|------|---------|--------------|-----------------|
+| `search.aggression` | `SearchAggression` | `Balanced` | CLI, API, Settings | Settings → Search → indexing profile; the search route's default mode |
+| `terminal.idle_timeout_secs` | `u64` | `1800` | CLI, API | Not surfaced in Settings; idle prune of terminal sessions, zero selects the default |
+| `terminal.session_cap` | `usize` | `32` | CLI, API | Not surfaced in Settings; the terminal registry's create gate |
+| `terminal.ring_bytes` | `usize` | `2 << 20` | CLI, API | Not surfaced in Settings; the server-side scrollback ring per session |
+| `terminal.scrollback_mb` | `u32` | `10`, clamped `10..=50` | CLI, API, Settings | Settings → Terminal → scrollback; the renderer's scrollback line cap |
+| `terminal.default_term` | `String` | `xterm-256color` | CLI, API, Settings | Settings → Terminal → TERM; the `TERM` a PTY spawns with |
+| `terminal.font` | `TerminalFontChoice` | `os-default` | CLI, API, Settings | Settings → Terminal → font; `source-code-pro` opts into the bundled font |
+| `terminal.font_size` | `u32` | `14`, clamped `8..=32` | CLI, API, Settings | Settings → Terminal → font size; read when a terminal renderer is constructed |
+| `terminal.background_opacity` | `u32` | `100`, clamped `80..=100` | CLI, API, Settings | Settings → Terminal → background opacity; below 100 chan-desktop paints every terminal tab at this alpha so the desktop shows through. The desktop's own `server.toml` decides for desktop windows and a change applies live; a browser tab stays opaque; Linux needs a compositing window manager |
+| `terminal.mcp_env` | `bool` | `false` | CLI, API, Settings | Settings → Terminal → MCP discovery; whether new non-team terminals export `CHAN_MCP_*` (team spawns follow the team config's own `mcp_env`) |
+| `terminal.mouse_capture` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → mouse capture; off strips the mouse-enable sequences so drag selection keeps working in full-screen programs, for new terminals |
+| `terminal.ghostty` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → ghostty backend; `false` renders with xterm.js instead, new terminals at once and open ones when their window reloads |
+| `terminal.secret_masking` | `Option<bool>` | unset | CLI, API, Settings | Settings → Terminal → secret masking; unset masks by window kind (on in a control terminal, off elsewhere), `true` or `false` is the user's choice everywhere. The per-tab toggle is ephemeral |
+| `terminal.program_status` | `bool` | `true` | CLI, API, Settings | Settings → Terminal → Program status (OSC 7501); whether chan reads the reports programs write, keeps their records and marks its own waits; off clears live records |
+| `terminal.tmux.enabled` | `bool` | `false` | CLI, API, Settings | Settings → Terminal → tmux control mode; whether a terminal honours the marker a `tmux -CC` client prints. A local tmux enters at once; any other foreground program raises a question first |
+| `terminal.tmux.trust` | `Vec<String>` | empty | CLI, API | Not surfaced in Settings; foreground program names (`ssh`, `mosh`) that enter control mode without the question, matched against the PTY's foreground job |
+| `terminal.profiles` | `Vec<TerminalProfile>` | empty | CLI get, API | Not surfaced in Settings: profiles are authored by hand (see below) and the pane's shell picker consumes the merged list |
+| `terminal.default_profile` | `Option<String>` | unset | CLI, API | Not surfaced in Settings; id of the profile new terminals spawn with. Unset keeps the built-in resolution (`CHAN_SHELL`, then pwsh, powershell, cmd on Windows; `$SHELL` on Unix); an unknown id is ignored with a warning |
+| `terminal.secret_mask_suffixes` | `Vec<String>` | stock list | CLI, API | Read-only display in Settings → Terminal; case-insensitive suffixes of `NAME=value` output whose values the terminal masks, launch-URL tokens included |
+| `transfer.stall_timeout_secs` | `u64` | `300` | CLI | Not surfaced in Settings (file-only `[transfer]` table); the longest time without progress a file transfer tolerates, zero selects the default |
+| `tunnel.max_live` | `usize` | `32` | CLI | Not surfaced in Settings (file-only `[tunnel]` table); live `cs tunnel` tunnels a devserver admits across every terminal, zero selects the default |
 
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `search.aggression` | `SearchAggression` | `Balanced` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Search → search indexing profile; search route default mode |
-| `terminal.idle_timeout_secs` | `u64` | `1800` (30 min) | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (sanitize replaces only a literal 0, so a slider offering 1s would reap live sessions); terminal registry idle prune |
-| `terminal.session_cap` | `usize` | `32` | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (sanitize replaces only a literal 0, no clamp); terminal registry create-gate |
-| `terminal.ring_bytes` | `usize` | `2 << 20` (2 MB) | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (zero-only sanitize, no user-facing unit); terminal ring buffer alloc |
-| `terminal.scrollback_mb` | `u32` | `10` (clamped `10..=50`) | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → scrollback slider; SPA xterm.js scrollback line cap |
-| `terminal.default_term` | `String` | `"xterm-256color"` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → TERM field; PTY spawn `TERM` env |
-| `terminal.font` | `TerminalFontChoice` | `os-default` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → terminal font; xterm.js fontFamily chain; `source-code-pro` opts into the bundled font (download flow on non-embed builds) |
-| `terminal.font_size` | `u32` | `14` (clamped `8..=32`) | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → font size; captured when xterm.js or ghostty-web constructs a renderer; both backends and ghostty's xterm-compatible cell measurement use the same pixel size |
-| `terminal.background_opacity` | `u32` | `100` (clamped `80..=100`, percent; `100` is opaque) | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → background opacity; chan-desktop's own setting. Below 100 every terminal tab of every window chan-desktop builds (standalone terminal windows, the default-terminal `terminal-exec` window, workspace windows, devserver windows and control terminals) paints its background at this alpha, so the desktop behind the window shows through while text, chrome and non-terminal tabs stay opaque. The value is the one in the desktop's own `server.toml`: a desktop window reads it through the desktop and follows the event the desktop sends to every window on a change, so a devserver's own key plays no part in a desktop window. Every window is built transparent and paints itself opaque at 100, so a change applies live to every open window, whether it comes from Settings in any desktop window (which writes the desktop's file), `chan config set` or a hand edit. A browser tab stays opaque; its Settings row writes the tenant's key. On Linux the see-through effect needs a compositing window manager |
-| `terminal.mcp_env` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → MCP discovery; whether new non-team terminals export `CHAN_MCP_*`; per-request `?mcp_env=on` overrides, team spawns use the team config's own `mcp_env` |
-| `terminal.mouse_capture` | `bool` | `true` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → mouse capture; whether full-screen TUIs may capture the mouse; off strips the DECSET mouse-enable sequences in the SPA so click-drag selection keeps working (new terminals only) |
-| `terminal.ghostty` | `bool` | `true` on every platform | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → ghostty backend; terminals use ghostty-web (Ghostty's WASM VT parser, ~420 KB fetched the first time a ghostty terminal opens) and a stored `false` makes them use xterm.js, new terminals at once and open ones when their window reloads, control terminals included; on Linux desktops using xterm.js DOM, box drawing loses a scanline per cell (96.0% rule continuity, 95.2% block coverage) while ghostty measures 100%; secret masking paints over the ghostty canvas as it decorates xterm.js; a server older than the key omits it and the SPA then uses xterm.js |
-| `terminal.secret_masking` | `Option<bool>` | `None` (omitted from the file) | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → secret masking toggle; when enabled, the terminal visually obscures secret-looking assignment values on either backend: xterm.js with decorations, ghostty by painting over its canvas. Neither the setting nor the per-tab toggle changes the backend. Unset is a third state, not `false`: the key is left out of `server.toml` and of the preferences a page reads, and a terminal then masks by the kind of its window, on in a control terminal and off in every other. `true` or `false` is the user's choice and decides in both. `chan config get` reads an unset key as `null` and `chan config set KEY none` clears it; in a `PATCH /api/config` `terminal` object `"secret_masking": null` clears it and an object that leaves the key out keeps the stored choice. A stored `false` is a choice of `false`, whatever wrote it. Settings shows the effective value for this window, and Use default writes `null` to clear a stored choice. The per-tab launcher/context-menu toggle is ephemeral and affects only the mounted tab |
-| `terminal.program_status` | `bool` | `true` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → Program status (OSC 7501); whether chan reads the OSC 7501 reports programs write, keeps their records, answers the query and marks its own waits (survey, export, tunnel); on by default, so a fresh install reads reports with no setting; off clears the records of the saving tenant's live sessions at once and refuses the control-socket report, while a devserver's other tenants follow at their next build; a PATCH that leaves the key out keeps the stored value |
-| `terminal.tmux.enabled` | `bool` | `false` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → tmux control mode (tmux -CC); whether a terminal honors the control-mode marker a `tmux -CC` client prints; off (the default), the marker passes through as ordinary bytes; on, a local `tmux` foreground enters at once and any other foreground program asks first (Allow, Allow for this tab, Deny; no answer in 60 seconds is Deny); a change applies to new markers in live terminals and leaves a running connection alone; a PATCH that leaves the `tmux` object out keeps the stored table |
-| `terminal.tmux.trust` | `Vec<String>` | empty (max 32, `[A-Za-z0-9._-]+`, 64 bytes each) | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (a habit of `ssh` and `mosh` users, set in `server.toml`); foreground program names that enter control mode without the question, beside `tmux` itself; compared against the first word of the process name the OS reports for the PTY's foreground job (tmux titles itself `tmux: client`); a `tmux` object in a PATCH that leaves `trust` out keeps the stored list |
-| `terminal.profiles` | `Vec<TerminalProfile>` | empty (omitted from the file) | `chan config get` + `PATCH /api/config` | Not surfaced in Settings: profiles are **authored by hand in `server.toml`** (or through `PATCH /api/config`), deliberately, because the discovered profiles already cover the common case and an editor would have to mirror the server's drop/dedupe/cap normalization -- the same reasoning that keeps `secret_mask_suffixes` read-only. The SPA *consumes* the merged list: the pane's new-terminal button carries a shell picker fed by `GET /api/terminal/shells`, and the chosen profile persists per tab. Layered over the shells the server discovers on its own machine, which is a Windows-only list (Windows PowerShell, PowerShell 7, cmd, Git BASH, each WSL distribution). macOS and Linux discover nothing, so a declared entry there is the whole list. An entry whose `id` matches a discovered profile overrides its fields or hides it, and a new `id` adds a shell; `args` replaces the discovered vector rather than appending, and an entry matching no discovered id and naming no `program` is dropped. TOML load drops entries with a blank `id` with a warning, trims ids, dedupes first-wins, and caps the list at 50 |
-| `terminal.default_profile` | `Option<String>` | `None` | `chan config get/set` + `PATCH /api/config` | Not surfaced in Settings (set it in `server.toml`); the pane's shell picker marks the resolved default rather than offering to change it. Id of the profile new terminals spawn with; unset keeps the built-in resolution (`CHAN_SHELL` then pwsh, powershell, cmd on Windows; `$SHELL` on unix). An id naming no known profile is ignored with a warning rather than failing, so deleting a profile cannot strand the terminal |
-| `terminal.secret_mask_suffixes` | `Vec<String>` | stock literal suffix list (max 100) | `chan config get/set` + `PATCH /api/config` | Read-only display in Settings → Terminal (suffix list only; a chip editor would have to mirror the server's drop/dedupe/truncate normalization); case-insensitive suffix matcher for terminal `NAME=value` output, and while a listed suffix ends `CHAN_DEVSERVER_TOKEN` the `t` value of an `http` or `https` URL on a loopback or unspecified host (`0.0.0.0`, `[::]`), a launch URL's token, is masked too; CLI set accepts a JSON string array and rejects invalid or duplicate entries, while TOML load drops invalid entries with a warning and removes duplicates |
-| `tunnel.max_live` | `usize` | `32` | `chan config get/set` (file-only `[tunnel]` table; a `PATCH /api/config` keeps the stored value) | Not surfaced in Settings (the `[tunnel]` table is file-only: an admission bound for `cs tunnel`, not a preference); live `cs tunnel` tunnels the devserver admits across every terminal and every command, checked when a command's tunnels are admitted as one group; a command that would exceed it is refused whole, naming the counts; zero selects the default; captured when a tenant starts, so a running devserver reads a change at its next tenant build |
-
-`/api/attachments` uploads require an explicit workspace or draft destination; `server.toml` has no attachment directory setting. A valid legacy `attachments_dir` entry has no effect and is omitted by the next save; a value other than the old default `attachments` warns on load. API PATCH and CLI get/set reject the retired key.
+`attachments_dir` is a retired key: a value in the file has no effect, the next save drops it, and the CLI and the API reject it.
 
 #### Authoring terminal profiles
 
-On Windows the server discovers what is installed -- Windows PowerShell, PowerShell 7, cmd, Git BASH and every WSL distribution -- so most Windows machines need no `[[terminal.profiles]]` at all. Entries exist to override, hide, or add to that list, and are matched to a discovered profile by `id`:
+On Windows the server discovers the installed shells (Windows PowerShell, PowerShell 7, cmd, Git BASH and every WSL distribution), so most Windows machines need no `[[terminal.profiles]]` at all; macOS and Linux discover nothing, so a declared entry there is the whole list. Entries override, hide, or add to the discovered list and match a discovered profile by `id`:
 
 ```toml
 [terminal]
@@ -64,22 +61,22 @@ program = "C:\\Users\\me\\AppData\\Local\\Programs\\nu\\nu.exe"
 kind = "posix"
 ```
 
-`kind` is `powershell`, `cmd`, `posix`, or `wsl`, and decides the argument convention; omitted, it is inferred from the program's file stem. `wsl` exists as its own kind because `-l` to `wsl.exe` means "list distributions", not "login shell". `args` replaces the discovered vector wholesale rather than appending, since appending could not express "spawn PowerShell without `-NoLogo`". An entry matching no discovered id and naming no `program` is dropped with a warning -- there would be nothing to spawn. Malformed entries are dropped, ids trimmed, duplicates resolved first-wins, and the list capped at 50; a bad entry costs you that profile, never the rest of your config.
+`kind` is `powershell`, `cmd`, `posix`, or `wsl` and decides the argument convention; omitted, it is inferred from the program's file stem. `wsl` is its own kind because `-l` to `wsl.exe` lists distributions rather than starting a login shell. `args` replaces the discovered vector rather than appending, since appending could not express "spawn PowerShell without `-NoLogo`". An entry matching no discovered id and naming no `program` is dropped with a warning, as are malformed entries; a bad entry costs that profile, never the rest of the file.
 
-`GET /api/config` returns the editor and server preference aggregate with a revision. `PATCH /api/config` accepts one owner-specific partial preferences object plus `expected_revision`; a stale revision returns 409 with a sentence in `error`, `code: "config_conflict"` and the current aggregate in `current`.
+`GET /api/config` returns the editor and server preference aggregate with a revision, and `PATCH /api/config` takes one owner-specific partial object plus the revision it was read at; a stale revision is refused with the current aggregate.
 
-### `~/.chan/extensions/<id>.toml` -- local extensions
+### `~/.chan/extensions/<id>.toml`: local extensions
 
-Source: `crates/chan-server/src/extensions.rs`.
+Source: `crates/chan-server/src/extensions.rs`; the design and the authoring guide are in [extensions.md](extensions.md).
 
-Each regular `.toml` file declares one local subprocess. The lowercase file stem is its stable extension ID and must match `[a-z0-9][a-z0-9_-]{0,63}`. Files are read in lexical order. Malformed files, unknown fields, invalid IDs, oversized configs, spawn failures, and failed handshakes warn and are ignored without failing Chan startup. Display-name collisions are allowed because command and tab identity use the file-stem ID.
+Each regular `.toml` file declares one local subprocess. The lowercase file stem is its stable extension id and must match `[a-z0-9][a-z0-9_-]{0,63}`. Files are read in lexical order. Malformed files, unknown fields, invalid ids, oversized files, spawn failures, and failed handshakes warn and are ignored without failing chan's startup. Display names may collide because command and tab identity use the id.
 
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
 | `name` | `String` | required | Launcher row and tab title, 1 to 128 characters after trimming |
-| `command` | `String` | required | Executable to spawn; bare names use the serving process's `PATH` (for a devserver service, the one its systemd unit or launchd plist records; see [the environment](extensions.md#the-environment)), while `./name` resolves from the extension config directory |
+| `command` | `String` | required | Executable to spawn; a bare name resolves through the serving process's `PATH` (for a service-run devserver, the one its unit or plist records; see [the environment](extensions.md#the-environment)), and `./name` resolves from the extension config directory |
 | `args` | `String[]` | `[]` | Arguments passed verbatim after `command` |
-| `capabilities` | `String[]` | `[]` | Explicit host grants: `session-context` and/or `presentation`; unknown values reject the declaration |
+| `capabilities` | `String[]` | `[]` | Host grants: `session-context` and/or `presentation`; an unknown value rejects the declaration |
 
 ```toml
 name = "Echo test"
@@ -88,31 +85,21 @@ args = []
 capabilities = []
 ```
 
-Chan discovers and starts extensions once per serving process, not once per workspace tenant. The subprocess inherits Chan's environment verbatim with no shell in between, so the helpers it runs by name resolve through the same `PATH` as `command`; it starts with the config directory as its working directory, receives null stdin, and owns its stderr. It must print a newline-terminated handshake within five seconds and 32 bounded stdout lines:
+The subprocess starts with the config directory as its working directory, inherits chan's environment with no shell in between, gets null stdin, and owns its stderr. It must print a newline-terminated handshake within a few seconds and a bounded number of stdout lines:
 
 ```text
 CHAN_EXTENSION_V1={"url":"http://127.0.0.1:49152/","token":"unguessable-secret","singleton":true,"commands":[{"id":"run","title":"Run"}]}
 ```
 
-The URL must use plain HTTP on exact host `127.0.0.1` or `localhost`; IPv6, remote hosts, userinfo, port zero, HTTPS, and a pre-existing `t` query parameter are rejected. Chan keeps that upstream URL and token process-private. Each ready entry gets a random 256-bit path capability under `/_chan/extensions/<id>/<capability>/...`; the authenticated catalog gives the SPA only that tenant-relative path. Chan reverse-proxies the iframe, assets, and HTTP API calls through the workspace's existing IP and port, adding the extension token only on the private upstream leg. Standalone servers, chan-desktop, local devservers, SSH port forwards, and gateway tunnels therefore use the same one-port route. Persisted and cross-window tab state contains the extension ID and title only, never the capability, upstream address, or token.
+The URL must use plain HTTP on exactly `127.0.0.1` or `localhost`; IPv6, remote hosts, userinfo, port zero, HTTPS, and a pre-existing `t` query parameter are rejected. `singleton` and `commands` are optional; each command declares a lowercase-hyphen local `id`, a title, and a short list of keywords, and registers under Apps as `extension.<id>.<command-id>`.
 
-The optional handshake fields are `singleton: bool` and a bounded static `commands` array. Each command declares a lowercase-hyphen local `id`, a title, and up to eight keywords. Chan retains the base `extension.<id>` Open command and registers declared commands as `extension.<id>.<command-id>` under Apps. They have no default chords but are assignable through the existing shortcut settings. Singleton commands focus or create one tab and queue delivery until that exact iframe sends `chan:extension-ready:v1`.
+Proxy hygiene, for reference: the proxy strips browser credential headers on the upstream leg (`Authorization`, cookies, `Origin`, `Referer`, forwarding headers, `X-Chan-*`) and upstream cookies on the response, adds a no-store and no-referrer response policy, stamps every upstream request with `X-Chan-Extension-Scope` equal to the serving instance id (a tenant discriminator, not a secret), applies a per-direction idle timeout to proxied bodies with no total deadline and no size cap, and strips `Location` headers that target loopback rather than reflecting them. Persisted and cross-window tab state carries the extension id and title only, never the capability path, the upstream address, or the token.
 
-The iframe omits `allow-same-origin`, so extension scripts have an opaque browser origin even though their network requests share Chan's port. The proxy strips browser credential headers on the upstream leg (`Authorization`, cookies, `Origin`, `Referer`, forwarding headers, `X-Chan-*`) and upstream cookies on the response, adds no-store and no-referrer response policy, and permits the opaque iframe to call its own capability-scoped HTTP and WebSocket routes. Both proxied body directions carry a 60-second per-item idle timeout; there is no total request deadline and no body size cap. Off-origin `Location` headers targeting loopback (`127.0.0.1`, `localhost`, `[::1]`) are stripped rather than reflected to the browser; external targets pass through unchanged. Every upstream request receives an `X-Chan-Extension-Scope` equal to the server `instance_id` already disclosed by `/api/health` (a tenant discriminator, not a secret) after browser-provided `X-Chan-*` headers are stripped. The owner and a grantee use the proxy routes alike over the gateway tunnel, and nobody else reaches them: the gateway never forwards an extension capability link, and instead binds it to the signed-in user whose tab navigates the iframe to it, redirecting the frame to a bound path that carries that user's authority for as long as they hold a live gateway session. A leaked bound path is usable as that user until then; a leaked capability link alone reaches nothing. The devserver refuses a tunnel request whose gateway assertion names no user with 401. Extension HTML must use relative asset/API URLs; an origin-rooted `/asset.js` targets Chan's tenant root, not the extension capability path.
-
-Browser key events inside an iframe do not bubble to Chan. An extension that wants shell shortcuts while focused implements the v2 keyboard relay used by the in-tree fixture: accept `chan:extension-host-keymap:v2` from `window.parent`, resolve each keydown to a key token by the layout-aware rules in [the keyboard relay](extensions.md#the-keyboard-relay), match only the supplied key tokens and modifier booleans, call `preventDefault()` for a match, and post `chan:extension-keydown:v2` with `key`, `code`, the four modifier booleans, `repeat`, `isComposing` and `altGraph`. Chan resolves the relayed fields itself before acting on them, and accepts every bridge message only from that tab's exact `contentWindow`.
-
-The `session-context` grant sends reactive participant snapshots with opaque IDs, display names, Chan roles, statuses, and the receiving window ID. These labels are not authenticated extension identities. The `presentation` grant accepts enter, exit, and toggle requests and promotes the same iframe wrapper into the browser top layer without reparenting it, preserving its browsing context. Chan supplies Restore and Close controls and leaves Escape to the extension. No grant exposes workspace files, native APIs, or a general host message bus.
-
-Successful children live until Chan shuts down. On Unix each child gets its own process group so descendants receive TERM and then KILL during shutdown. A child that exits is not respawned; restart Chan after fixing it. There is no marketplace, installer, remote fetch, lazy start, or `cs` opener in v1. Treat every file in this directory as an explicit local-code-execution grant.
-
-Chan releases install no extension declarations or extension binaries. The in-tree `echo-extension` is test source only: no echo binary is built into or installed by the `chan` and `chan-desktop` release artifacts, and it is compiled only when a developer explicitly builds the example. To exercise the contract, run `cargo build -p chan-server --example echo-extension`, put its absolute binary path in a config like the example above, and restart Chan. Its launcher command appears under Apps as `Echo test` and opens the extension iframe tab.
-
-### `~/.chan/submit.toml` -- agent submit templates
+### `~/.chan/submit.toml`: agent submit templates
 
 Source: `crates/chan-server/src/submit_config.rs` and `crates/chan-shell/src/submit.rs`.
 
-Each optional agent table has one `template` string containing at most one `{}` placeholder for the normalized prompt body: trailing newlines are removed, then one newline is appended when the body is non-empty. An empty body stays chord-only. A template without `{}` is appended as a suffix after that same normalized body. Escapes include `\e`, `\xHH`, `\r`, `\n`, `\t`, `\0`, and `\\`. Resolution is `CHAN_SUBMIT_<AGENT>` environment variable, then this file, then the built-in default.
+Each optional agent table has one `template` string containing at most one `{}` placeholder for the normalized prompt body: trailing newlines are removed, then one newline is appended when the body is non-empty. An empty body stays chord-only. A template without `{}` is appended as a suffix after the normalized body. Escapes are `\e`, `\xHH`, `\r`, `\n`, `\t`, `\0`, and `\\`. Resolution order is the `CHAN_SUBMIT_<AGENT>` environment variable, then this file, then the built-in default.
 
 ```toml
 [agy]
@@ -137,67 +124,67 @@ template = '{}\r'
 template = '\e[200~{}\e[201~\r'
 ```
 
-The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. Gemini and muse alone split their normalized body and submit chord into two ordered PTY writes; overriding either template does not change that write-splitting contract. `agy` is Google Antigravity, gemini's successor, and submits in one write.
+The environment equivalents are `CHAN_SUBMIT_AGY`, `CHAN_SUBMIT_CLAUDE`, `CHAN_SUBMIT_CODEX`, `CHAN_SUBMIT_GEMINI`, `CHAN_SUBMIT_KIMI`, `CHAN_SUBMIT_MUSE`, and `CHAN_SUBMIT_OPENCODE`. gemini and muse split their normalized body and submit chord into two ordered PTY writes; overriding either template does not change that.
 
-### `~/.chan/preferences.toml` -- `EditorPrefs`
+### `~/.chan/preferences.toml`: `EditorPrefs`
 
 Source: `crates/chan-server/src/preferences.rs`.
 
-The CLI prefixes every serialized leaf below with `editor.`. Every scalar leaf is reachable through `chan config get/set`, including optional leaves when present; `none` clears `editor_font_size` and the five Hybrid surface overrides. `shortcuts` is the documented collection exception (read with the CLI; edit through Settings or `PATCH /api/config`).
+The CLI prefixes every leaf below with `editor.`. Every scalar leaf is reachable through `chan config get/set`, optional leaves included; `none` clears `editor_font_size` and the five Hybrid surface overrides. `shortcuts` is the one collection the CLI only reads; edit it through Settings or `PATCH /api/config`.
 
-| Field | Type | Reachability | Consumers |
-|-------|------|--------------|-----------|
-| `editor_theme` | `EditorTheme` | `chan config get/set` + `PATCH /api/config` | Settings → Editor → theme selector |
-| `editor_font_size` | `Option<u32>` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Editor → font size; optional absolute editor body size, clamped `10..=32`; unset uses the active theme, while `N` sets body/source to `Npx`/`(N - 2)px` |
-| `terminal_colors.mode` | `TerminalColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours toggle; `standard` uses the terminal surface's Inherit/Light/Dark choice; `custom` activates the complete custom payload |
-| `terminal_colors.custom.background` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours; optional dormant custom payload; accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
-| `terminal_colors.custom.foreground` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours; custom terminal foreground, validated with the complete object |
-| `terminal_colors.custom.cursor` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → custom terminal colours; custom terminal cursor, validated with the complete object |
-| `terminal_colors.custom.contrast` | `TerminalContrast` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Terminal → ANSI contrast; `auto`, `dark`, or `light`; auto chooses the existing ANSI palette and chrome from WCAG background luminance at the fixed `0.179` threshold |
-| `theme` | `ThemeChoice` | `chan config get/set` + `PATCH /api/config` | Settings → Global → theme |
-| `pane_widths.inspector` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
-| `pane_widths.graph` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
-| `pane_widths.browser` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
-| `pane_widths.search` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
-| `pane_widths.outline` | `u32` | `chan config get/set` + drag-resize | Not surfaced in Settings (drag-owned continuous geometry); resize handle persistence |
-| `browser_side_panes.left` | `bool` | `chan config get/set` + FB toggle + Settings | Settings → File browser → side panes; left side-pane visibility |
-| `browser_side_panes.right` | `bool` | `chan config get/set` + FB toggle + Settings | Settings → File browser → side panes; right side-pane visibility |
-| `line_spacing` | `LineSpacing` | `chan config get/set` + Settings | Settings → Editor → line spacing; editor line-height |
-| `date_format` | `String` | `chan config get/set` + Settings | Settings → Editor → date format; date rendering across SPA |
-| `strip_trailing_whitespace_on_save` | `bool` | `chan config get/set` + Settings | Settings → Editor → strip on save; editor save hook |
-| `bubble_overlay_mode` | `BubbleOverlayMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Global → watcher bubbles radio; overlay rendering |
-| `hybrid_surface_themes.editor` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Editor → body theme; optional Hybrid Editor body-theme override (`light` or `dark`) |
-| `hybrid_surface_themes.terminal` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Terminal → body theme; optional Terminal body-theme override |
-| `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → File browser → body theme; optional File Browser body-theme override |
-| `hybrid_surface_themes.graph` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Graph → body theme; optional Graph body-theme override |
-| `hybrid_surface_themes.dashboard` | `Option<SurfaceThemeChoice>` | `chan config get/set` + Settings | Settings → Dashboard → body theme; optional Dashboard body-theme override; legacy `infographics` deserializes to this canonical field |
-| `graph_colors.mode` | `GraphColorMode` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours toggle; `standard` renders the theme graph palette and keeps stored overrides dormant; `custom` applies the per-scheme palettes to the graph surface only |
-| `graph_colors.dark.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-doc` override (markdown nodes); accepts `#rgb` or `#rrggbb` and persists lowercase `#rrggbb` |
-| `graph_colors.dark.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-source` override (source / config nodes) |
-| `graph_colors.dark.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-binary` override (opaque-file nodes) |
-| `graph_colors.dark.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-img` override (media nodes) |
-| `graph_colors.dark.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-folder` override (directory nodes) |
-| `graph_colors.dark.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-tag` override (hashtag nodes) |
-| `graph_colors.dark.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-language` override (tokei language nodes) |
-| `graph_colors.dark.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; optional `--g-contact` override; covers contact AND mention nodes together (one token, defaults to `--warn-text`) |
-| `graph_colors.light.doc` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; same eight optional overrides for the light scheme |
-| `graph_colors.light.source` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `graph_colors.light.binary` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `graph_colors.light.img` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `graph_colors.light.folder` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `graph_colors.light.tag` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `graph_colors.light.language` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `graph_colors.light.contact` | `String` | `chan config get/set` + `PATCH /api/config` + Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `empty_pane_carousel_cycling` | `bool` | `chan config get/set` + Settings | Settings → Global → empty-pane carousel; empty-pane behavior |
-| `page_width_ratio` | `f64` | `chan config get/set` + Settings | Settings → Editor → page width; editor page-width cap, constrained to `0.25..=1.0` by the CLI |
-| `overlay_maximized` | `bool` | `chan config get/set` + overlay control | Not surfaced as a Settings row (it already has a control: the Settings overlay header's maximize button); global overlay-maximize preference |
-| `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | `chan config get` + `PATCH /api/config` | Settings → Keyboard Shortcuts → assignment grid; keymap override layer (opaque chord strings, sparse); CLI set refuses with the supported edit route |
+| Field | Type | Reachability | Surface and use |
+|-------|------|--------------|-----------------|
+| `editor_theme` | `EditorTheme` | CLI, API | Settings → Editor → theme |
+| `editor_font_size` | `Option<u32>` | CLI, API, Settings | Settings → Editor → font size; absolute editor body size, clamped `10..=32`; unset uses the active theme's sizes |
+| `terminal_colors.mode` | `TerminalColorMode` | CLI, API, Settings | Settings → Terminal → custom terminal colours; `standard` follows the terminal surface's theme choice, `custom` activates the custom payload |
+| `terminal_colors.custom.background` | `String` | CLI, API, Settings | Settings → Terminal → custom terminal colours; `#rgb` or `#rrggbb`, persisted as lowercase `#rrggbb` |
+| `terminal_colors.custom.foreground` | `String` | CLI, API, Settings | Settings → Terminal → custom terminal colours; validated with the whole object |
+| `terminal_colors.custom.cursor` | `String` | CLI, API, Settings | Settings → Terminal → custom terminal colours; validated with the whole object |
+| `terminal_colors.custom.contrast` | `TerminalContrast` | CLI, API, Settings | Settings → Terminal → ANSI contrast; `auto`, `dark`, or `light`; auto picks the palette from the background's WCAG luminance |
+| `theme` | `ThemeChoice` | CLI, API | Settings → Global → theme |
+| `pane_widths.inspector` | `u32` | CLI, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
+| `pane_widths.graph` | `u32` | CLI, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
+| `pane_widths.browser` | `u32` | CLI, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
+| `pane_widths.search` | `u32` | CLI, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
+| `pane_widths.outline` | `u32` | CLI, drag-resize | Not surfaced in Settings (drag-owned geometry); resize handle persistence |
+| `browser_side_panes.left` | `bool` | CLI, file browser toggle, Settings | Settings → File browser → side panes; left pane visibility |
+| `browser_side_panes.right` | `bool` | CLI, file browser toggle, Settings | Settings → File browser → side panes; right pane visibility |
+| `line_spacing` | `LineSpacing` | CLI, Settings | Settings → Editor → line spacing; editor line height |
+| `date_format` | `String` | CLI, Settings | Settings → Editor → date format; date rendering across the app |
+| `strip_trailing_whitespace_on_save` | `bool` | CLI, Settings | Settings → Editor → strip on save; editor save hook |
+| `bubble_overlay_mode` | `BubbleOverlayMode` | CLI, API, Settings | Settings → Global → watcher bubbles; overlay rendering |
+| `hybrid_surface_themes.editor` | `Option<SurfaceThemeChoice>` | CLI, Settings | Settings → Editor → body theme; optional `light` or `dark` override for the Hybrid theme |
+| `hybrid_surface_themes.terminal` | `Option<SurfaceThemeChoice>` | CLI, Settings | Settings → Terminal → body theme; optional override |
+| `hybrid_surface_themes.browser` | `Option<SurfaceThemeChoice>` | CLI, Settings | Settings → File browser → body theme; optional override |
+| `hybrid_surface_themes.graph` | `Option<SurfaceThemeChoice>` | CLI, Settings | Settings → Graph → body theme; optional override |
+| `hybrid_surface_themes.dashboard` | `Option<SurfaceThemeChoice>` | CLI, Settings | Settings → Dashboard → body theme; optional override; the on-disk spelling `infographics` loads as this field |
+| `graph_colors.mode` | `GraphColorMode` | CLI, API, Settings | Settings → Graph → custom graph colours; `standard` keeps stored overrides dormant, `custom` applies the per-scheme palettes to the graph surface only |
+| `graph_colors.dark.doc` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-doc` override (markdown nodes); `#rgb` or `#rrggbb`, persisted lowercase |
+| `graph_colors.dark.source` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-source` override (source and config nodes) |
+| `graph_colors.dark.binary` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-binary` override (opaque-file nodes) |
+| `graph_colors.dark.img` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-img` override (media nodes) |
+| `graph_colors.dark.folder` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-folder` override (directory nodes) |
+| `graph_colors.dark.tag` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-tag` override (hashtag nodes) |
+| `graph_colors.dark.language` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-language` override (language nodes) |
+| `graph_colors.dark.contact` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; optional `--g-contact` override, covering contact and mention nodes together |
+| `graph_colors.light.doc` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; the same eight optional overrides for the light scheme |
+| `graph_colors.light.source` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.binary` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.img` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.folder` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.tag` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.language` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `graph_colors.light.contact` | `String` | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
+| `empty_pane_carousel_cycling` | `bool` | CLI, Settings | Settings → Global → empty-pane carousel |
+| `page_width_ratio` | `f64` | CLI, Settings | Settings → Editor → page width; editor page-width cap, `0.25..=1.0` |
+| `overlay_maximized` | `bool` | CLI, overlay control | Not surfaced as a Settings row (the overlay header's maximize button is its control); global overlay-maximize preference |
+| `shortcuts` | `Map<command-id, {web?,macos?,linux?,windows?}>` | CLI get, API | Settings → Keyboard Shortcuts → assignment grid; sparse keymap override layer of opaque chord strings |
 
-`editor_font_size` is unset by default. The Settings `Use theme` action clears it, restoring the exact body and source sizes supplied by `editor_theme`. Inline and block code keep the theme's existing `em` ratios. The root override and the document/slide token paths update mounted editor surfaces without a reload.
+`editor_font_size` is unset by default; the Settings `Use theme` action clears it, restoring the body and source sizes the theme supplies.
 
-`terminal_colors` defaults to `mode = "standard"` with no custom payload. First activation snapshots the currently resolved standard background, foreground, and cursor into one custom owner write with `contrast = "auto"`. Returning to standard mode retains that payload without changing `hybrid_surface_themes.terminal`; later custom activation reuses it. Invalid custom fields reject the whole object, so no partial colour update is persisted or broadcast.
+`terminal_colors` defaults to `mode = "standard"` with no custom payload. First activation snapshots the resolved standard background, foreground, and cursor into one custom payload with `contrast = "auto"`; returning to standard keeps that payload for the next activation. Invalid custom fields reject the whole object, so no partial colour update is persisted or broadcast.
 
-`graph_colors` is sparse: an unconfigured library serializes no `[graph_colors]` table at all, and every hue inside a per-scheme palette is independently optional so overriding one hue does not take ownership of the rest. Overrides apply to the graph surface only (the canvas, legend and filter dots); the file tree, kind chips, inspector refs and every other surface keep the theme palette, because the override lands on the graph subtree and never on `:root`. The Settings control commits the whole composite per change, mirroring `terminal_colors`; an invalid hue rejects the whole object. A hand-edited `preferences.toml` carrying a non-hex value drops that one hue back to the theme default on load, per key, rather than painting a stale colour.
+`graph_colors` is sparse: an unconfigured library serializes no `[graph_colors]` table, and every hue in a per-scheme palette is independently optional. Overrides apply to the graph surface only (canvas, legend and filter dots), never to `:root`. An invalid hue rejects the whole object through Settings; a hand-edited non-hex value falls back to the theme default for that one hue on load.
 
 ```toml
 editor_font_size = 20
@@ -214,117 +201,112 @@ contrast = "auto"
 
 ## chan-workspace
 
-### `~/.chan/config.toml` -- `Registry` (`KnownWorkspace[]`)
+### `~/.chan/config.toml`: `Registry`
 
 Source: `crates/chan-workspace/src/registry.rs`.
 
-Per-workspace entry persisted at registration time:
+Per-workspace entry, persisted at registration time:
 
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `root_path` | `PathBuf` | required | `chan workspace add <path>` | workspace enumeration / open |
-| `metadata_key` | `String` | minted on add | (internal identity) | stable storage key under `~/.chan/workspaces/` |
-| `created_at` | `DateTime<Utc>` | now() on add | (internal) | registry bookkeeping |
+| Field | Type | Default | Reachability | Use |
+|-------|------|---------|--------------|-----|
+| `root_path` | `PathBuf` | required | `chan workspace add <path>` | the user-content boundary; enumeration and open |
+| `metadata_key` | `String` | minted on add | internal | stable storage key under `~/.chan/workspaces/` |
+| `created_at` | `DateTime<Utc>` | now on add | internal | registry bookkeeping |
 | `last_seen_at` | `DateTime<Utc>` | refreshed on open | `chan workspace ls --json` | recency sort |
-| `canonical_path` | transient (`#[serde(skip)]`) | n/a | (internal cache) | symlink-stable comparison |
+| `display_name` | `Option<String>` | unset | the launcher's Display name field at add time | a label the UI prefers over the `root_path` basename; omitted from the file when unset |
+| `canonical_path` | transient | n/a | internal cache, never written | symlink-stable comparison |
 
-Workspaces have no persisted display name: the UI titles a workspace by its directory basename.
+Global fields in the same file:
 
-Global registry fields (not per-workspace), persisted in the same `~/.chan/config.toml`:
+| Field | Type | Default | Reachability | Use |
+|-------|------|---------|--------------|-----|
+| `index_excluded_dirs` | `Vec<String>` | VCS, dependency and build-output names | hand-edited TOML; shown read-only in Settings → This workspace → Excluded directories | walk filter for the index, the graph rebuild and (on Linux) the watch registration; matched by basename at any depth, case-insensitive |
+| `transfer.max_bytes` | `u64` | 10 GiB, at most 100 GiB | hand-edited TOML | the bound on one file transfer; loaded once per library, so a running process keeps its value until restart |
 
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `index_excluded_dirs` | `Vec<String>` | dev-junk + build-output set | hand-edited TOML only (shown read-only in Settings) | walk filter for index + graph rebuild + (Linux) watch registration; the read-only Always excluded baseline in Settings → This workspace → Excluded directories |
+`.git` and `.chan` are always skipped regardless of the list. `.gitignore` (nested, anchored and negation patterns) is the base exclusion layer beneath `index_excluded_dirs`, unified in one `IndexScopePolicy` across walk, index, report, and the Linux watch registration. A list that still equals the previous stock default is upgraded to the current default on open; any customized list, an empty one included, is left alone. The Settings control in the This workspace section edits the per-workspace `excluded_dirs` additions (`IndexConfig` below) and shows `index_excluded_dirs` as the read-only baseline.
 
-In Settings, the Excluded directories control in the This workspace band edits the per-workspace `excluded_dirs` additions (the `IndexConfig` field below) and shows `index_excluded_dirs` as the read-only Always excluded baseline. The `index_excluded_dirs` default covers VCS dirs, dependency and build-output trees (`node_modules`, `target`, `dist`, `build`, `buck-out`, `.buckos`, `downloads`, `distfiles`, `prebuilt`, `vendor`, `prelude`, ...); names match by basename at any depth, case-insensitive, and on Linux excluded subtrees are not even registered with inotify. chan honors `.gitignore` (nested, anchored, and negation patterns) as the base exclusion layer beneath `index_excluded_dirs`, unified in one `IndexScopePolicy` across walk, index, report, and the Linux watch registration. A config whose list matches the pre-v0.76.0 default exactly is upgraded to the current default on open; any customized list (including an empty one) is left alone.
+Workspace drafts live in the per-workspace metadata sidecar under `Drafts/`, with discarded drafts under its sibling `drafts-trash/`; both are created lazily, and an in-root `.Drafts/` or `Drafts/` is ordinary user content. The standalone terminal window's draft store is per library: `~/.chan/Drafts` on a desktop host, `~/.chan/devserver/Drafts` on a devserver. `drafts_dir` is a retired key with the same handling as `attachments_dir` above.
 
-Workspace drafts live in the per-workspace metadata sidecar `Drafts/`, with discarded drafts under its sibling `drafts-trash/`; both are created lazily. An existing in-root `.Drafts/` or `Drafts/` is ordinary user content. A valid legacy `drafts_dir` entry in `config.toml` has no effect and is omitted by the next save; a value other than the old default `.Drafts` warns on load. The standalone terminal window's per-library draft store remains at `~/.chan/Drafts` on a desktop host or `~/.chan/devserver/Drafts` on a devserver, with a sibling `drafts-trash/`.
-
-### `<state_dir>/index/<uuid>/config.toml` -- `IndexConfig`
+### `<state_dir>/index/<uuid>/config.toml`: `IndexConfig`
 
 Source: `crates/chan-workspace/src/index/config.rs`.
 
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `schema_version` | `u32` | `SCHEMA_VERSION` const | (internal) | version-mismatch wipe gate |
-| `model` | `String` | `BAAI/bge-small-en-v1.5` | `chan workspace index download-model --model` | embedder resolver |
-| `chunking` | `Chunking` enum | `Headings` | (internal; no user surface yet) | indexer chunking strategy |
-| `vectors_model` | `Option<String>` | `None` | (internal stamp) | mismatch-wipe trigger on `Index::open` |
-| `vectors_dim` | `Option<u32>` | `None` | (internal stamp) | build-time defensive cross-check |
-| `excluded_dirs` | `Vec<String>` | `[]` | `GET`/`PUT /api/index/excluded-dirs` | per-workspace additions to the global walk blocklist (exact basenames, any depth, case-insensitive) |
+| Field | Type | Default | Reachability | Use |
+|-------|------|---------|--------------|-----|
+| `schema_version` | `u32` | `SCHEMA_VERSION` | internal | a mismatch wipes and rebuilds the index |
+| `model` | `String` | `BAAI/bge-small-en-v1.5` | `chan workspace index download-model --model` | embedder selection |
+| `chunking` | `Chunking` | `Headings` | internal | indexer chunking strategy |
+| `vectors_model` | `Option<String>` | unset | internal stamp | mismatch wipe on `Index::open` |
+| `vectors_dim` | `Option<u32>` | unset | internal stamp | build-time cross-check |
+| `excluded_dirs` | `Vec<String>` | `[]` | `GET`/`PUT /api/index/excluded-dirs`, Settings | per-workspace additions to the global exclusion list (exact basenames, any depth, case-insensitive) |
 
-### `<state_dir>/workspaces/<metadata_key>/dashboard.toml` -- `DashboardConfig`
+### `<state_dir>/workspaces/<metadata_key>/dashboard.toml`: `DashboardConfig`
 
 Source: `crates/chan-workspace/src/dashboard.rs`.
 
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `semantic_enabled` | `bool` | `false` | `chan workspace index enable-semantic/disable-semantic --path <workspace>` + Settings | `Workspace::search` Hybrid default mode |
-| `reports_enabled` | `bool` | `true` | `chan workspace reports enable/disable --path <workspace> [-y]` + `chan workspace add --reports` | `Workspace::report()` lazy init + `Workspace::boot()` |
-| `screensaver_enabled` | `bool` | `false` | `PATCH /api/screensaver/state` + Settings | SPA screensaver overlay arming |
-| `screensaver_timeout_secs` | `u32` | `300` | `PATCH /api/screensaver/state` | SPA client-side idle threshold |
-| `screensaver_theme` | `ScreensaverTheme` | `plain` | `PATCH /api/screensaver/state` | overlay scene |
-| `screensaver_pin_hash` | `Option<Vec<u8>>` | `None` | `POST /api/screensaver/pin` | overlay PIN gate; the wire only ever reports `pin_set: bool` |
+| Field | Type | Default | Reachability | Use |
+|-------|------|---------|--------------|-----|
+| `semantic_enabled` | `bool` | `false` | `chan workspace index enable-semantic/disable-semantic`, Settings | Hybrid search default mode |
+| `reports_enabled` | `bool` | `true` | `chan workspace reports enable/disable`, `chan workspace add --reports` | code reports at boot and on demand |
+| `screensaver_enabled` | `bool` | `false` | `PATCH /api/screensaver/state`, Settings | arms the screensaver overlay |
+| `screensaver_timeout_secs` | `u32` | `300` | `PATCH /api/screensaver/state` | the client-side idle threshold |
+| `screensaver_theme` | `ScreensaverTheme` | `plain` | `PATCH /api/screensaver/state` | the overlay scene |
+| `screensaver_pin_hash` | `Option<Vec<u8>>` | unset | `POST /api/screensaver/pin` | the overlay PIN gate; the wire reports only whether a PIN is set |
 
-### `.Drafts/team-{name}/config.toml` -- `TeamConfig`
+### `<team dir>/config.toml`: `TeamConfig`
 
-Source: `crates/chan-workspace/src/teams.rs`.
+Source: `crates/chan-workspace/src/teams.rs`; validation in `crates/chan-server/src/routes/team_config.rs`.
 
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `team_name` | `String` | required | `chan-server /api/teams/{name}/load + .../unload + GET .../loaded` | team identification |
-| `host_name` | `String` | required | (set at create time) | UI rendering |
-| `host_handle` | `String` | required | (set at create time) | @@-prefix policy |
-| `tab_group` | `String` | team name | (set at create time) | terminal tab grouping for the team's members |
-| `auto_prefix_at` | `bool` | `true` | (set at create time; future Settings) | bubble overlay @@-auto-prefix |
-| `mcp_env` | `bool` | `false` | (set at create time) | whether team-spawned terminals export `CHAN_MCP_*` |
-| `created_at` | `String` (ISO 8601) | required | (set at create time) | sort + display |
-| `members[]` | `Vec<Member>` | empty | (future Settings) | team roster + position grid |
+| Field | Type | Default | Reachability | Use |
+|-------|------|---------|--------------|-----|
+| `team_name` | `String` | required | `cs terminal team new`, the Team Work dialog | team identification |
+| `host_name` | `String` | required | set at create time | UI rendering |
+| `host_handle` | `String` | required | set at create time | the `@@` prefix policy |
+| `tab_group` | `String` | team name | set at create time | the terminal tab group of the members |
+| `auto_prefix_at` | `bool` | `true` | set at create time | bubble overlay `@@` auto-prefix |
+| `mcp_env` | `bool` | `false` | set at create time, `--mcp-env` | whether team terminals export `CHAN_MCP_*` |
+| `created_at` | `String` (ISO 8601) | stamped on write | set at create time | sort and display |
+| `members[]` | `Vec<Member>` | empty | config | the roster, 1 to 9 members with exactly one lead |
 
-`Member`: `handle: String`, `command: String`, `env: BTreeMap<String, String>`, `is_lead: bool`, `position: Option<Position>`. The submit agent is derived from a case-insensitive whole-word `agy`, `claude`, `codex`, `gemini`, `kimi`, `muse`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it and `none` / `shell` forces shell behavior.
-
-`Position`: `row: u32`, `col: u32` (airplane-grid coordinate). Consumed by both team surfaces: the Team Work dialog carves its split layout from it, and `cs terminal team new|load` passes it through the `team_spawned` push so the SPA carves the same grid (`--tabs` opts out). Validation caps the derived grid at 9 panes.
+`Member` is `handle`, `command`, `env` (a string map), `is_lead`, and an optional `position` of `row` and `col`. The submit agent is derived from a whole-word `agy`, `claude`, `codex`, `gemini`, `kimi`, `muse`, or `opencode` in `command`; `env.CHAN_AGENT` overrides it, and `none` or `shell` forces plain shell behaviour. Positions place members on a pane grid that both the Team Work dialog and `cs terminal team new|load` carve (`--tabs` stacks them instead); validation caps the grid at nine panes. The team directory and its conventions are in [.agents/orchestration/teams.md](../.agents/orchestration/teams.md).
 
 ## chan-desktop
 
-### Desktop `Config`
+### `~/.chan/desktop/config.json`: `Config`
 
-Path: `~/.chan/desktop/config.json` (or `$CHAN_HOME/desktop/config.json` when `CHAN_HOME` is set).
+Source: `desktop/src-tauri/src/config.rs`. `CHAN_HOME` moves it with the rest of the chan home.
 
-Source: `desktop/src-tauri/src/config.rs`.
-
-| Field | Type | Default | Reachability | Consumers |
-|-------|------|---------|--------------|-----------|
-| `devservers[]` | `Vec<Devserver>` | empty | launcher Devserver form | connection recipes and per-devserver presentation state |
-| `gateways[]` | `Vec<Gateway>` | empty | launcher Gateway form | gateway recipes and exact shared-devserver trust records |
-| `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window bury/quit | per-label, per-monitor-signature OS window geometry LRU |
-| `local_color` | `Option<String>` | `null` | launcher local colour route | local library pane highlight |
-| `launcher_theme` | `Option<String>` | `null` | launcher theme route | `dark`, `light`, or follow OS when absent |
+| Field | Type | Default | Reachability | Use |
+|-------|------|---------|--------------|-----|
+| `client_session_name` | `String` | empty | hand-edited | the client session name native windows present, appended as `client_name` to their URLs; empty keeps automatic naming |
+| `embedded_port` | `Option<u16>` | unset | written by the desktop on its first bind | preferred loopback port for the embedded local server; a port that cannot be bound falls back to an ephemeral one |
+| `devservers[]` | `Vec<Devserver>` | empty | the launcher's Devserver form | connection recipes (URL, connect script, label, token) and per-devserver presentation state; per-workspace URLs and tokens are not persisted |
+| `gateways[]` | `Vec<Gateway>` | empty | the launcher's Gateway form | gateway recipes and the native-trust records of shared devservers; rostered rows are volatile |
+| `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window close and quit | per-label, per-monitor-signature OS window geometry, newest first |
+| `local_color` | `Option<String>` | unset | the launcher's local colour route | the local library's pane highlight |
+| `launcher_theme` | `Option<String>` | unset | the launcher's theme route | `dark`, `light`, or follow the OS when absent |
 
 ## Layout pointers
 
-* Per-user config dir: `.chan` under the OS-provided home on every platform, so `~/.chan/` in practice. Where Unix resolves no home directory chan uses `/var/tmp/chan-<uid>`, rather than resolving state against the process working directory, and Windows falls back to `C:\ProgramData\chan`. Holds the global `config.toml` (workspace registry). The state and cache roots resolve to the same directory.
-* `CHAN_HOME=/path/to/chan-home` replaces `~/.chan` for the whole process. The override is the chan home directory itself, not a parent. It carries the workspace registry, devserver config, per-workspace metadata, locks, tokens, and the desktop-installed `chan`/`cs` shims under `CHAN_HOME/.local/bin`.
+- The per-user chan home is `.chan` under the OS home on every platform, so `~/.chan/` in practice; where Unix resolves no home chan uses `/var/tmp/chan-<uid>`, and Windows falls back to `C:\ProgramData\chan`. It holds the global `config.toml` (the workspace registry); the state and cache roots resolve to the same directory.
+- `CHAN_HOME=/path/to/chan-home` replaces `~/.chan` for the whole process. The override is the chan home itself, not a parent. It carries the registry, the devserver config, per-workspace metadata, locks, tokens, and the desktop-installed `chan` and `cs` shims under `CHAN_HOME/.local/bin`.
 
-Two Chan processes that share one chan home also share one workspace registry and one per-workspace writer lock. If `chan-desktop` is serving a registered workspace and a foreground `chan devserver run` is started from the same `~/.chan`, the devserver launcher lists that workspace as locked rather than off. This is expected: the workspace is open in another Chan process and cannot be turned on by the devserver until the desktop releases it. Run the devserver with a separate `CHAN_HOME` when you want an independent library:
+Two chan processes that share one chan home share one registry and one per-workspace writer lock. If chan-desktop is serving a registered workspace and a foreground `chan devserver run` starts from the same `~/.chan`, the devserver's launcher lists that workspace as locked rather than off: it is open in another chan process and cannot be turned on until the desktop releases it. Run the devserver with a separate `CHAN_HOME` when you want an independent library:
 
 ```sh
 CHAN_HOME=/tmp/chan-devserver-home \
   ./target/debug/chan devserver run --service=none --bind 127.0.0.1 --port 8787
 ```
 
-Per-workspace metadata lives under `~/.chan/workspaces/<metadata_key>/`, where `metadata_key` is a readable slug of the canonical workspace path plus an 8-hex hash suffix:
+Per-workspace metadata lives under `~/.chan/workspaces/<metadata_key>/`, where `metadata_key` is a readable slug of the canonical workspace path plus a short hash suffix:
 
-* `sessions/` -- session blobs (window/pane layout).
-* `Drafts/` -- workspace draft content and companions (lazy, created on first draft).
-* `drafts-trash/` -- discarded workspace drafts (lazy, created on first discard).
-* `index/` -- tantivy search-index segments + `config.toml` (`IndexConfig` above).
-* `graph/` -- graph DB (sqlite) + sidecar markers (`rebuild.inprogress`, `rename_log.json`).
-* `locks/` -- per-workspace index-writer lockfile.
-* `tokens/` -- chan-server bearer token (mode 0600).
-* `trash/` -- soft-deleted files (lazy GC).
-* `report/report.jsonl` -- chan-report state (lazy, created on reports opt-in).
+- `sessions/`: session blobs (window and pane layout).
+- `Drafts/` and `drafts-trash/`: workspace drafts and discarded drafts, created lazily.
+- `index/`: tantivy search-index segments plus `config.toml` (`IndexConfig` above).
+- `graph/`: the graph database (sqlite) and its sidecar markers.
+- `locks/`: the per-workspace index-writer lockfile.
+- `tokens/`: the chan-server bearer token (mode 0600).
+- `trash/`: soft-deleted files, garbage-collected lazily.
+- `report/report.jsonl`: chan-report state, created on reports opt-in.
 
-The standalone terminal window's draft store is per-library and outside `workspaces/<metadata_key>/`; its path is listed above.
-
-See `crates/chan-workspace/src/paths.rs::WorkspacePaths` for the canonical computation.
+The standalone terminal window's draft store is per library and sits outside `workspaces/<metadata_key>/`; its path is given above. `crates/chan-workspace/src/paths.rs` (`WorkspacePaths`) is the canonical computation.

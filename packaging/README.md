@@ -1,6 +1,6 @@
 # packaging
 
-Build, package, and deploy infrastructure for chan, one directory per concern. The public command surface is still the root `Makefile` (`make linux-deb`, `make chan-desktop`, `make gateway-build`, ...); these directories hold the scripts, manifests, and templates those targets drive. CI keys off the Makefile target names, not these paths.
+Build, package, and deploy infrastructure for chan, one directory per concern. The public command surface is the root `Makefile` (`make linux-deb`, `make chan-desktop`, `make gateway-build`, ...); these directories hold the scripts, manifests, and templates those targets drive. CI keys off the Makefile target names, not these paths.
 
 | Path | Concern |
 |---|---|

@@ -4,12 +4,12 @@ chan-server exposes its MCP bridge over a Unix-domain socket (a named pipe on Wi
 
 In particular, chan does not write:
 
-* `~/.claude.json`
-* `~/.codex/config.toml`
-* `~/.gemini/settings.json`
-* `~/.config/opencode/opencode.json`
+- `~/.claude.json`
+- `~/.codex/config.toml`
+- `~/.gemini/settings.json`
+- `~/.config/opencode/opencode.json`
 
-Chan-launched terminal sessions are the supported discovery path, and the env descriptor is OFF by default (a stray descriptor makes codex fail to start; it wants file-based config). Opt in per server (the `terminal.mcp_env` config key), per attach (`?mcp_env=on` on the terminal WebSocket), or per team member (`cs terminal team new --mcp-env on`). When opted in, terminal processes receive:
+chan-launched terminal sessions are the supported discovery path, and the env descriptor is off by default: a stray descriptor makes codex fail to start, since it wants file-based config. Opt in per server (the `terminal.mcp_env` config key), per attach (`?mcp_env=on` on the terminal WebSocket), or per team member (`cs terminal team new --mcp-env on`). When opted in, terminal processes receive:
 
 ```text
 CHAN_MCP_SERVER_NAME=chan
@@ -19,7 +19,7 @@ CHAN_MCP_COMMAND_JSON=...
 CHAN_MCP_SERVER_JSON=...
 ```
 
-External agent CLIs launched from that terminal can translate the `CHAN_` descriptor into their own MCP configuration shape.
+External agent CLIs launched from that terminal translate the `CHAN_` descriptor into their own MCP configuration shape.
 
 ## Descriptor shape
 
@@ -33,5 +33,5 @@ The socket path is the running server's MCP bridge endpoint, rebound on each sta
 
 ## Out of scope
 
-* Publishing chan into global or user-scoped agent config files.
-* Auto-discovery for processes outside chan-launched terminal sessions.
+- Publishing chan into global or user-scoped agent config files.
+- Auto-discovery for processes outside chan-launched terminal sessions.
