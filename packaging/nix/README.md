@@ -106,13 +106,15 @@ The one-time external setup is:
 
 Never commit or print the write token. The public signing key is not secret.
 
-`.github/workflows/publish-downstream.yml` builds and smokes both packages on native x86_64 and aarch64 runners. A `publish=false`, `targets=cachix` dispatch does everything except authenticate and push. A GA run pushes each complete closure into the `chan` cache and creates these pins:
+`.github/workflows/publish-downstream.yml` builds and smokes both packages on native x86_64 and aarch64 runners. A `publish=false`, `targets=cachix` dispatch does everything except authenticate and push, and prints the pins a GA would make. A GA run pushes each complete closure into the `chan` cache and pins it under one stable name per package and system:
 
 ```text
-vX.Y.Z-chan-x86_64-linux
-vX.Y.Z-chan-aarch64-linux
-vX.Y.Z-chan-desktop-x86_64-linux
-vX.Y.Z-chan-desktop-aarch64-linux
+chan-x86_64-linux
+chan-aarch64-linux
+chan-desktop-x86_64-linux
+chan-desktop-aarch64-linux
 ```
+
+Each GA adds a revision to each of the four pins, and `scripts/cachix-pin.sh` pins with `cachix pin --keep-revisions`, so Cachix keeps the newest revisions of each name and drops the older ones; a pin keeps its closure out of Cachix's garbage collection, and a dropped revision's closure falls to it once nothing else holds it. The number kept is the workflow's `cachix_keep` input, 10 by default and on every tag-triggered run; raise it on a `workflow_dispatch` retry, or change the default in the workflow (the input's `default` and the `|| '10'` fallback of the pin step, which a tag-triggered run reads). Revisions are kept by when they were pinned, not by version, so a patch release of an older line counts as the newest. Release candidates are never pinned. The pushes run before the pins, so a publication's closures are pushed while the previous revisions still hold theirs. Pins named after a version (`vX.Y.Z-...`) are no longer made; any left in the cache are removed on the cache's Pins page.
 
 Fresh runners then invoke `nix build` with local jobs disabled. That final job proves all four system/package closures substitute from the configured caches rather than merely existing in the first runner's local store.

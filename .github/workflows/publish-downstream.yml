@@ -73,6 +73,10 @@ on:
         description: AUR pkgrel (raise for a packaging-only repair)
         required: false
         default: "1"
+      cachix_keep:
+        description: Cachix release revisions kept per pin name
+        required: false
+        default: "10"
 
 concurrency:
   group: publish-downstream-${{ github.event.workflow_run.head_branch || inputs.tag }}
@@ -703,10 +707,13 @@ jobs:
   # ---- Nix binary cache (Cachix) -------------------------------------------
   # The flake's default output is chan-desktop. Build both Nix packages natively
   # on each Linux architecture, smoke the exact outputs, then publish both
-  # closures and versioned pins to the shared cache. Dry runs execute the full
-  # builds and smokes without requiring a write token. GA publication is
-  # followed by a new-runner build with local builds disabled, proving both
-  # closures can actually substitute from caches.
+  # closures to the shared cache and pin each under its stable name
+  # (scripts/cachix-pin.sh): every release adds a revision, and Cachix keeps the
+  # newest cachix_keep of each name, so older closures fall to its garbage
+  # collection. Dry runs execute the full builds and smokes, and print the pins,
+  # without requiring a write token. GA publication is followed by a new-runner
+  # build with local builds disabled, proving both closures can actually
+  # substitute from caches.
   cachix-build:
     name: Cachix build (${{ matrix.system }})
     needs: context
@@ -786,16 +793,25 @@ jobs:
           cachix push chan "$CHAN_OUT"
           cachix push chan "$CHAN_DESKTOP_OUT"
 
+      # A publishing run pins; any other run prints the pins it would make, so
+      # a dry run shows the names and the retention a GA would set.
       - name: Pin released closures
-        if: needs.context.outputs.publish == 'true' && env.CACHIX_PUSHABLE == '1'
         env:
           CHAN_OUT: ${{ steps.build.outputs.chan_out }}
           CHAN_DESKTOP_OUT: ${{ steps.build.outputs.chan_desktop_out }}
-          CHAN_PIN: v${{ needs.context.outputs.version }}-chan-${{ matrix.system }}
-          CHAN_DESKTOP_PIN: v${{ needs.context.outputs.version }}-chan-desktop-${{ matrix.system }}
+          CACHIX_KEEP: ${{ github.event_name == 'workflow_dispatch' && inputs.cachix_keep || '10' }}
+          PUBLISH: ${{ needs.context.outputs.publish }}
+          SYSTEM: ${{ matrix.system }}
         run: |
-          cachix pin chan "$CHAN_PIN" "$CHAN_OUT"
-          cachix pin chan "$CHAN_DESKTOP_PIN" "$CHAN_DESKTOP_OUT"
+          set -euo pipefail
+          mode=plan
+          if [ "$PUBLISH" = "true" ] && [ "${CACHIX_PUSHABLE:-0}" = "1" ]; then
+            mode=pin
+          else
+            echo "Pins a publication would make; Cachix keeps the newest $CACHIX_KEEP revisions of each name:" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          scripts/cachix-pin.sh "$mode" chan "$CACHIX_KEEP" "$SYSTEM" \
+            "chan=$CHAN_OUT" "chan-desktop=$CHAN_DESKTOP_OUT" | tee -a "$GITHUB_STEP_SUMMARY"
 
   cachix-substitute:
     name: Cachix substitute (${{ matrix.system }})
