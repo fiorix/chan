@@ -648,7 +648,11 @@
     tabId: string;
     fromWindow?: string;
   };
-  const activeDragSourceSides = new Map<string, PaneSide>();
+  // Where each tab drag started, by tab id. The drag's dragend reads it rather
+  // than the live `pane` prop: a drop that splits this pane at the layout root
+  // destroys this component, the tab element keeps its dragend listener, and
+  // by the time that fires the prop resolves through the root to the split.
+  const activeDragSources = new Map<string, { paneId: string; side: PaneSide }>();
   // The drag's scope (window kind + workspace identity) is carried as a MIME
   // TYPE so a target can read it during `dragover` (when payload VALUES are
   // not readable). The human-readable scope carries `:`/`|`, which WKWebView
@@ -703,7 +707,7 @@
     draggedTerminalPress = wasPressed ? { tabId, side: fromSide } : null;
     localTabDrag = { fromPaneId: pane.id, fromSide, tabId };
     tabDragInFlight = true;
-    activeDragSourceSides.set(tabId, fromSide);
+    activeDragSources.set(tabId, { paneId: pane.id, side: fromSide });
     e.dataTransfer.effectAllowed = "move";
     // `fromWindow` is what actually separates an intra-window move from a
     // cross-window one: pane IDs are a per-window counter (tabs.svelte.ts
@@ -813,23 +817,25 @@
   /// still in this pane after a successful move, the drop must have
   /// landed in another window - close it locally so the visual
   /// matches the cross-window result.
-  function onDragEnd(e: DragEvent, tabId: string, fallbackSide: PaneSide): void {
+  function onDragEnd(e: DragEvent, tabId: string): void {
     clearPendingTerminalPress();
     const draggedPress = draggedTerminalPress?.tabId === tabId ? draggedTerminalPress : null;
     draggedTerminalPress = null;
     localTabDrag = null;
     tabDragInFlight = false;
-    const fromSide = activeDragSourceSides.get(tabId) ?? fallbackSide;
-    activeDragSourceSides.delete(tabId);
-    if (paneMode.stale) return;
-    const movedOut = shouldCloseTabAfterDragEnd(pane.id, tabId, e.dataTransfer?.dropEffect, fromSide);
-    if (draggedPress && !movedOut && allPaneTabs(pane).some((tab) => tab.id === tabId)) {
-      if (layout.activePaneId !== pane.id || paneActiveTabId(pane, draggedPress.side) !== tabId) {
-        selectTabInPane(pane.id, tabId);
+    const source = activeDragSources.get(tabId);
+    activeDragSources.delete(tabId);
+    if (!source || paneMode.stale) return;
+    const movedOut = shouldCloseTabAfterDragEnd(source.paneId, tabId, e.dataTransfer?.dropEffect, source.side);
+    const node = layout.nodes[source.paneId];
+    if (node?.kind !== "leaf") return;
+    if (draggedPress && !movedOut && allPaneTabs(node).some((tab) => tab.id === tabId)) {
+      if (layout.activePaneId !== node.id || paneActiveTabId(node, draggedPress.side) !== tabId) {
+        selectTabInPane(node.id, tabId);
       }
     }
     if (!movedOut) return;
-    const t = allPaneTabs(pane).find((tab) => tab.id === tabId);
+    const t = allPaneTabs(node).find((tab) => tab.id === tabId);
     if (t?.kind === "terminal") {
       // Cross-window MOVE: the target window re-attached to this SAME live PTY
       // (shared `/terminal` registry), or, for a tab with no session, opened a
@@ -839,17 +845,17 @@
       // `force` skips the "live terminal still running, close anyway?" confirm
       // (a move is not a destroy, and a tab with no session runs nothing).
       markTerminalMovingOut(tabId);
-      void closeTab(pane.id, tabId, { force: true });
+      void closeTab(node.id, tabId, { force: true });
       return;
     }
     if (t?.kind === "file") {
       // Same distinction one kind over: the target window now owns this file,
       // so the source must let it go without running the draft promote /
       // discard flow, which would delete or relocate the file mid-move.
-      void closeFileTabAfterMove(pane.id, tabId);
+      void closeFileTabAfterMove(node.id, tabId);
       return;
     }
-    void closeTab(pane.id, tabId);
+    void closeTab(node.id, tabId);
   }
 
   /// Open a cross-window tab payload in this pane. Used by the
@@ -1412,7 +1418,7 @@
         title={tabTooltip(t)}
         draggable={!paneMode.stale}
         ondragstart={(e) => onDragStart(e, t.id, visibleSide)}
-        ondragend={(e) => onDragEnd(e, t.id, visibleSide)}
+        ondragend={(e) => onDragEnd(e, t.id)}
         ondragover={(e) => onTabDragOver(e, i)}
         ondrop={(e) => onTabDrop(e, i)}
       >

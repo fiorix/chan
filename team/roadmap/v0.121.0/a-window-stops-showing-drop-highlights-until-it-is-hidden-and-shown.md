@@ -53,3 +53,11 @@ The probe used for the reading, pasted into the window's console (`__dndProbe()`
 ## Next
 
 The owner's reading of the next broken window: install the probe before hiding the window, drag a tab across a pane body and its tab strip, and record whether `dragover` arrives, which types it carries and whether it is prevented. That decides whether the fix is in the page or in the WebView. The `dragend` defect can be fixed first, test red first.
+
+## Closing
+
+The `dragend` defect (contracts 2 and 3) is fixed, built from `762f95240`. `Pane.svelte` records where each tab drag started, the pane id and the side, at `dragstart`, and the source's `dragend` settles the drag by that record instead of the live `pane` prop: `shouldCloseTabAfterDragEnd` consumes the `localTabDrops` entry under the pane id it was recorded with, and the pressed-tab selection and the cross-window close look the source pane up in the layout by that id, stopping when it is no longer a pane. The tab's `ondragend` no longer reads `visibleSide`, so a `dragend` on the tab element of a destroyed `Pane` reads no derived.
+
+`components/Pane.dragEnd.test.ts` is the item's test over the mounted App: one pane with two terminal tabs, the second pressed, dragged to the pane body's right edge and dropped, then `dragend` dispatched on the tab element the split detached. Against the base code it read red on three counts: `TypeError: p.tabs is not iterable` from the listener (jsdom's wording of the spread error), a `[svelte] derived_inert` console warning, and `localTabDrops` still holding `pane-test:a:second`; the two-pane layout was already right. With the fix all four expectations hold. Putting back the live prop in the consume, the `visibleSide` read in the template and the live prop in the selection branch each turns its own expectation red again. The Pane, cross-window terminal move and tabs state suites pass, and `make web-check` gates the commit.
+
+Open: contract 1, the lost drop highlights. Its trigger is still unknown, and no broken window has been read since the fix; whether this `dragend` throw was the trigger is not established, since every drag variable the handler resets was already reset before the throw. The probe above, installed in the next broken window before it is hidden, decides whether a fix belongs in the page or in the WebView.
