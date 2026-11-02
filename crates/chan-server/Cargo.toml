@@ -19,10 +19,10 @@ default = ["embeddings"]
 embeddings = ["chan-workspace/embeddings"]
 # Bundle the default BGE-small model into the binary via
 # `include_bytes!`. Opt-in (default-off) so a plain `cargo build`
-# produces a ~26 MB binary instead of ~89 MB. With the feature off
-# the chan-workspace runtime resolver looks for the model under
-# `<user-config>/chan/models/<model-name>/`; the CLI / API layer
-# downloads it on demand. With the feature on
+# produces a binary without the model. With the feature off the
+# chan-workspace runtime resolver looks for the model in the
+# per-machine cache (`dirs::cache_dir()/chan/models`); the CLI / API
+# layer downloads it on demand. With the feature on
 # `make models` prefetches the tarball into
 # `resources/models.tar.zst` and the seeder extracts it into the
 # per-machine cache on first server launch. Implies `embeddings`:

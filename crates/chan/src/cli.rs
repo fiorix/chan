@@ -402,7 +402,7 @@ pub(super) struct DevserverServeArgs {
     #[arg(long, env = "CHAN_TUNNEL_URL", verbatim_doc_comment)]
     pub(super) tunnel_url: Option<String>,
     /// Personal access token (chan_pat_*) from the gateway identity
-    /// origin (gw.chan.app for the hosted gateway). Setting this
+    /// origin (gw.{domain} of the gateway you run). Setting this
     /// enables tunnel mode: the devserver dials the gateway and publishes
     /// every mounted workspace behind one registration. The devserver
     /// identity is resolved backend-side from the token; the display

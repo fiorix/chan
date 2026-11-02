@@ -9,9 +9,10 @@
 //! `embeddings` controls the candle stack; `embed-model` controls
 //! whether the bundle ships in the binary. With `embeddings` on but
 //! `embed-model` off, `chan-workspace::index::embeddings::resolve_model`
-//! looks for an already-downloaded model under
-//! `<user-config>/chan/models/<model-name>/` and the CLI / API layer
-//! handles on-demand download.
+//! looks for an already-downloaded model in the per-machine cache
+//! (`chan_workspace::index::embeddings::global_models_dir`, under
+//! `dirs::cache_dir()/chan/models`) and the CLI / API layer handles
+//! on-demand download.
 
 #![cfg(feature = "embed-model")]
 

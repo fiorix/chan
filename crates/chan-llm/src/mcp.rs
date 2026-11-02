@@ -52,9 +52,10 @@ const MCP_FRAME_BODY_LIMIT: usize = 16 * 1024 * 1024;
 /// standalone binary.
 pub const DEFAULT_MCP_MEDIA_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Extension -> MIME table for `read_media` image responses. This
-/// mirrors chan-workspace's `FileClass::Image` set; BMP remains outside
-/// the media class and is refused by classification.
+/// Extension -> MIME table for `read_media` image responses: the
+/// chan-workspace `FileClass::Image` set minus BMP, which classifies
+/// as an image there but has no entry here, so `read_media` refuses
+/// it as an unsupported media extension.
 const IMAGE_EXTENSIONS: &[(&str, &str)] = &[
     ("png", "image/png"),
     ("jpg", "image/jpeg"),

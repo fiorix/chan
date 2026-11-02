@@ -1,6 +1,7 @@
 # Build-time helper that pre-fetches the default embedding model
-# into `crates/chan-server/resources/models/` so chan-server's
-# rust-embed bundles it into the release binary. Lives in its own
+# into `crates/chan-server/resources/models.tar.zst`, which chan-server
+# bakes into the release binary with `include_bytes!` under its
+# `embed-model` feature. Lives in its own
 # crate so dev `cargo build` does not pull a 130 MB download for
 # every contributor: only `make models` (or `make build-release`)
 # triggers it.

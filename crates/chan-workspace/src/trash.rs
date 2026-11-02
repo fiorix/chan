@@ -4,9 +4,10 @@
 // every `trash_*` call (no background thread; matches the codebase's
 // sync-only API rule).
 //
-// Layout (under `paths.trash`, which is `state_dir/trash/<key>/`):
+// Layout (under `paths.trash`, the `trash/` directory of the workspace's
+// metadata root under the chan home):
 //
-//   trash/<key>/
+//   trash/
 //     <id>/
 //       payload | payload/   the moved file or directory
 //       meta.json            written LAST so a half-written entry
