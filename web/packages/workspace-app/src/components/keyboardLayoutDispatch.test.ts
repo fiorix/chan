@@ -509,14 +509,16 @@ describe("Settings, pane flip and pane navigation keep their guards", () => {
     expect(pane().side).toBe(side);
   });
 
-  test("with a modal over the pane, Ctrl+` is swallowed and flips nothing", async () => {
+  // Under a dialog the window handler acts on no chord and leaves each key's
+  // default alone, so the dialog's fields keep their editing chords.
+  test("with a modal over the pane, Ctrl+` flips nothing and keeps its default", async () => {
     await mountApp();
     conflictDialog.open = true;
     const side = pane().side;
     const event = press({ key: "`", code: "Backquote", ctrlKey: true });
     await settle();
     expect(pane().side).toBe(side);
-    expect(event.defaultPrevented).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
   });
 
   test("Alt+[ and Alt+] select the previous and next pane", async () => {

@@ -636,9 +636,13 @@
     });
   }
 
+  // Enter can answer the dialog, which closes it before the key would bubble
+  // on, so Enter stops here: past the dialog, the window would read it as
+  // its own.
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Enter") {
       e.preventDefault();
+      e.stopPropagation();
       if (highlightIdx >= 0 && highlightIdx < suggestions.length) {
         applySuggestion(suggestions[highlightIdx]);
         return;

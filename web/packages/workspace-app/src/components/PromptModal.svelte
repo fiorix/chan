@@ -29,9 +29,12 @@
   function cancel(): void {
     resolvePrompt(null);
   }
+  // The answer closes the dialog before the key would bubble on, so the key
+  // stops here: past the dialog, the window would read it as its own.
   function onKey(e: KeyboardEvent): void {
     if (e.key === "Enter") {
       e.preventDefault();
+      e.stopPropagation();
       ok();
     }
   }
