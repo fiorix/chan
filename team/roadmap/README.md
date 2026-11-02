@@ -29,11 +29,11 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 | --- | --- | --- |
 | [Copy scrollback of a long history blocks the page][ghscroll] | landed | GA |
 | [a tmux divider between nested splits][tmuxnest] | landed | GA |
-| [Cmd+` does not switch chan windows on macOS][cmdbq] | raised | reading |
+| [Cmd+` does not switch chan windows on macOS][cmdbq] | closed | GA |
 | [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | landed | GA |
 | [hiding the last shown window quits chan][lastwin] | landed | reading |
 | [keys pass under an open confirm][confirmkeys] | landed | GA |
-| [a window loses its drop highlights][dndloss] | raised | reading |
+| [a window loses its drop highlights][dndloss] | landed | GA |
 | [the editor's URL bubble overlaps its label][urlbubble] | landed | GA |
 
 [ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
