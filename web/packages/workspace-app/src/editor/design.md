@@ -154,6 +154,8 @@ stateDiagram-v2
 
 A document or selection change recomputes the bubble spec; the host mounts or reuses one popover and commits a range replace through a high-precedence keymap, never stealing focus from the document. A bubble that closes itself (Escape, a click away, a pick) is not opened again while the caret stays in the trigger that opened it, since the next keystroke there only changes the query; a caret that leaves that trigger, or a new trigger, clears that memory. The closes the host makes for its own reasons (another trigger, no trigger, a read-only flip) are not remembered. The open bubble re-reads its anchor when the reveal selection changes, the release of a held press included: a widget kept drawn under the button shows its source then, which moves the trigger the bubble opened at.
 
+The file-tab host and the terminal's Rich Prompt pass whether their editor is shown separately from whether it has keyboard focus. Hiding the editor dismisses its active bubble, calendars and file previews, including their body-attached caret anchors and document listeners; unmounting does the same. A hidden editor's document updates cannot open a bubble, and showing it again does not reopen the dismissed trigger. Calendar and preview lifetimes belong to their editor through `overlays/lifetime.ts`; synthetic calendar anchors retain that owner so a deferred opener also closes when its editor is hidden or destroyed. Moving focus to another pane leaves a still-shown editor's popovers alone. In an external URL's OPEN row the label cannot shrink; the URL ellipsizes before the copy button.
+
 ```mermaid
 sequenceDiagram
     actor User

@@ -21,6 +21,7 @@
 import { api } from "../../api/client";
 import { renderMarkdown } from "../../api/markdown";
 import { resolveImageSrc } from "../extensions/image";
+import { trackEditorOverlay } from "./lifetime";
 
 const IMAGE_EXTS = new Set([
   ".png",
@@ -68,6 +69,7 @@ export function openPreviewPopover(
 ): { dismiss: () => void } {
   dismissCurrent?.();
   let alive = true;
+  let stopTracking = () => {};
   const wrap = document.createElement("div");
   wrap.className = "md-preview-popover";
   wrap.style.position = "absolute";
@@ -217,6 +219,7 @@ export function openPreviewPopover(
   function dismiss(): void {
     if (!alive) return;
     alive = false;
+    stopTracking();
     if (dismissCurrent === dismiss) dismissCurrent = null;
     document.removeEventListener("mousedown", outsideClick, true);
     document.removeEventListener("keydown", keyHandler, true);
@@ -235,5 +238,6 @@ export function openPreviewPopover(
   }, 0);
 
   dismissCurrent = dismiss;
+  stopTracking = trackEditorOverlay(opts.anchor, dismiss);
   return { dismiss };
 }

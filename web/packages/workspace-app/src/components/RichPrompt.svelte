@@ -132,7 +132,7 @@
   // refocus effect below: the bubble stays mounted while its tab is hidden
   // (keep-alive, like the terminal body), so an ungated focus would let a
   // background tab's composer steal the keyboard.
-  let { tab, focused = false }: { tab: TerminalTab; focused?: boolean } =
+  let { tab, focused = false, shown = true }: { tab: TerminalTab; focused?: boolean; shown?: boolean } =
     $props();
 
   let rootEl = $state<HTMLDivElement>();
@@ -953,6 +953,7 @@
         bind:value={content}
         currentPath={draftPath}
         autoFocus={focused}
+        {shown}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
         onSelectionChange={() => (selVer += 1)}

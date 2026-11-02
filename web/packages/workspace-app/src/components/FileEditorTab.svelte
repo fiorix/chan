@@ -1590,6 +1590,7 @@
           bind:this={wysiwygRef}
           bind:value={() => tab.content, (content) => setTabContent(tab, content)}
           autoFocus={focused}
+          shown={active}
           readonly={readOnly}
           extraExtensions={docExtensions}
           highlightTrailingWhitespace={tab.highlightTrailingWhitespace}

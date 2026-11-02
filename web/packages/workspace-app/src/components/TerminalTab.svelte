@@ -3334,7 +3334,7 @@
        steals the keyboard. Toggled by Cmd+Shift+P / the right-click menu. -->
   {#if isRichPromptVisible(tab.id)}
     <div class="terminal-composer" bind:this={composerEl}>
-      <RichPrompt bind:this={composer} {tab} {focused} />
+      <RichPrompt bind:this={composer} {tab} {focused} shown={active} />
     </div>
   {/if}
   <!-- Per-terminal survey overlay: a survey raised on THIS terminal
