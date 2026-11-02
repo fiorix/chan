@@ -1,0 +1,22 @@
+<section class="manual-block" id="shared-workspace">
+  <h2><a class="heading-anchor" href="#shared-workspace">Share a workspace session</a></h2>
+  <p>Chan's collaboration protocol coordinates presence, document and drawing updates, and leadership across connected workspace windows. Participants have leader or follower roles, with explicit handover between them. The same protocol works locally and over a remote connection.</p>
+  <p>Each client connects to the machine serving the workspace. For remote access, use <a href="/devserver/">ssh or Eternal Terminal</a>, or a <a href="/gateway/">gateway</a> for account-based access and devserver sharing. The <a href="/devserver/#collaboration">connection diagram</a> shows how clients reach the shared workspace.</p>
+</section>
+
+<section class="manual-block" id="client-sessions">
+  <h2><a class="heading-anchor" href="#client-sessions">Identify and manage clients</a></h2>
+  <p><code>cs session</code> lists clients across the server's terminal and workspace windows. A client can hold several windows; workspace leadership belongs to windows.</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs session list</b></code>{{copyButton}}</div>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs session self --name "laptop"</b></code>{{copyButton}}</div>
+  <p><code>self --name</code> names your client and, in a workspace, its participant. If several clients view the same shell, Chan asks you to identify yours. Scripts can select a client explicitly with <code>--id CLIENT_ID</code>.</p>
+  <p>Use an ID from <code>cs session list</code> with <code>cs session info CLIENT_ID</code> to inspect its windows, terminals, and connections. <code>cs session detach CLIENT_ID</code> disconnects that client while keeping shared terminals, running programs, and saved layouts. The client can explicitly reconnect; detaching does not revoke its access.</p>
+</section>
+
+<section class="manual-block" id="leadership">
+  <h2><a class="heading-anchor" href="#leadership">Hand over workspace leadership</a></h2>
+  <p>From a workspace terminal, request leadership from the current leader:</p>
+  <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>cs session handover</b></code>{{copyButton}}</div>
+  <p>The leader answers with <code>cs session handover --accept</code> or <code>--reject</code>. When the leader is disconnected, use <code>cs session takeover</code>. Adding <code>--force</code> takes leadership even from a live leader, without a confirmation prompt.</p>
+  <p>Agent coordination uses the separate <a href="/manual/terminal/#teams">Team Work</a> tools: named terminals, groups, and the <code>cs</code> command surface. For the client and participant model, read the <a href="https://github.com/fiorix/chan/blob/main/design.md#client-sessions">session design</a>.</p>
+</section>

@@ -36,6 +36,9 @@ const requiredInputs = [
   path.join(srcRoot, "templates", "base.html"),
   path.join(srcRoot, "templates", "demo-embed.html"),
   path.join(srcRoot, "pages", "home.html"),
+  path.join(srcRoot, "pages", "devserver.html"),
+  path.join(srcRoot, "pages", "gateway.html"),
+  path.join(srcRoot, "guides.css"),
   path.join(srcRoot, "pages", "install.html"),
   path.join(srcRoot, "pages", "manual.html"),
   path.join(srcRoot, "manual-pages.json"),
@@ -75,17 +78,37 @@ async function main() {
   };
   const launcherDemoHead =
     '<link rel="stylesheet" href="/assets/launcher-demo.css" />\n<script type="module" src="/assets/launcher-demo.js"></script>';
+  const homeHead = '<link rel="stylesheet" href="/assets/home.css" />';
   await writePage(
     "index.html",
     renderPage(baseTemplate, {
       active: "home",
-      bodyClass: "home-page",
-      title: "chan - a new kind of IDE",
+      bodyClass: "home-page entry-page",
+      title: "chan - A supercharged terminal emulator",
       description:
-        "Chan is a new kind of IDE: drive AI agents to ship faster. Local and remote, on macOS, Windows, and Linux, on x86 and arm64.",
+        "A supercharged terminal emulator for local and remote work. Bring tmux, Chan devservers, and always-on gateway environments together in the Computers window.",
       content: fillTemplate(homeTemplate, { version, ...sharedTemplateValues }),
+      headExtra: homeHead,
     }),
   );
+
+  for (const guide of [
+    { slug: "devserver", title: "Chan devserver - ssh, Eternal Terminal, and remote tools", description: "Connect over ssh or Eternal Terminal. Move files, forward remote ports to your desktop, and manage collaborative workspace sessions with cs." },
+    { slug: "gateway", title: "Chan gateway - Always-on environments on your domain", description: "Provision managed devservers with your tools and PATs. Use OAuth2 access, admission control, live policy, and a scalable proxy fleet on your infrastructure." },
+  ]) {
+    const template = await fs.readFile(path.join(srcRoot, "pages", `${guide.slug}.html`), "utf8");
+    await writePage(
+      `${guide.slug}/index.html`,
+      renderPage(baseTemplate, {
+        active: "guide",
+        bodyClass: "home-page guide-page",
+        title: guide.title,
+        description: guide.description,
+        content: fillTemplate(template, sharedTemplateValues),
+        headExtra: '<link rel="stylesheet" href="/assets/home.css" />\n<link rel="stylesheet" href="/assets/guides.css" />',
+      }),
+    );
+  }
 
   await writePage(
     "install/index.html",
@@ -147,8 +170,17 @@ async function main() {
     }),
   );
 
+  await writePage(
+    "demo/computers/index.html",
+    fillTemplate(demoEmbedTemplate, {
+      title: "Computers window preview",
+      variant: "populated",
+    }),
+  );
+
   await buildLauncherDemo();
   await buildAnimationGallery();
+  await buildSiteMotion();
   await validateDist(version);
   console.log(`built marketing dist for chan ${version}`);
 }
@@ -174,6 +206,8 @@ async function copyStaticAssets() {
   await fs.copyFile(path.join(siteRoot, "chan-mark.png"), path.join(distRoot, "chan-mark.png"));
   await fs.copyFile(path.join(srcRoot, "styles.css"), path.join(distRoot, "assets", "site.css"));
   await fs.copyFile(path.join(srcRoot, "site.js"), path.join(distRoot, "assets", "site.js"));
+  await fs.copyFile(path.join(srcRoot, "home.css"), path.join(distRoot, "assets", "home.css"));
+  await fs.copyFile(path.join(srcRoot, "guides.css"), path.join(distRoot, "assets", "guides.css"));
   await copyDir(path.join(siteRoot, "assets"), path.join(distRoot, "assets"));
 }
 
@@ -208,6 +242,7 @@ async function writePage(output, html) {
 function renderPage(template, { active, bodyClass, title, description, content, headExtra = "" }) {
   return fillTemplate(template, {
     bodyClass,
+    backgroundAnimation: active === "home" ? "morph" : "waves",
     content,
     description: escapeHtml(description),
     headExtra,
@@ -287,6 +322,27 @@ async function buildLauncherDemo() {
   await scopeDemoCss("launcher-demo.css", ".launcher-demo-frame");
 }
 
+async function buildSiteMotion() {
+  await viteBuild({
+    configFile: false,
+    root: siteRoot,
+    base: "/assets/",
+    plugins: [svelte()],
+    build: {
+      emptyOutDir: false,
+      outDir: path.join(distRoot, "assets"),
+      rollupOptions: {
+        input: { "site-motion": path.join(srcRoot, "site-motion.ts") },
+        output: {
+          entryFileNames: "[name].js",
+          chunkFileNames: "site-motion-[name]-[hash].js",
+          assetFileNames: "site-motion.[ext]",
+        },
+      },
+    },
+  });
+}
+
 async function buildAnimationGallery() {
   await viteBuild({
     configFile: false,
@@ -333,7 +389,8 @@ function renderSiteNav(active) {
   ];
   return links
     .map(([key, href, label]) => {
-      const attrs = key === active ? ' class="active" aria-current="page"' : "";
+      const classes = [key === active ? "active" : "", key === "github" ? "nav-secondary" : ""].filter(Boolean);
+      const attrs = (classes.length ? ` class="${classes.join(" ")}"` : "") + (key === active ? ' aria-current="page"' : "");
       return `<a${attrs} href="${href}">${label}</a>`;
     })
     .join("\n        ");
@@ -393,7 +450,7 @@ async function validateDist(version) {
     }
   }
 
-  for (const required of ["index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "animations/index.html", "install.sh", "install.ps1", "CNAME"]) {
+  for (const required of ["index.html", "devserver/index.html", "gateway/index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "demo/computers/index.html", "animations/index.html", "install.sh", "install.ps1", "CNAME"]) {
     if (!allDistPaths.has(required)) throw new Error(`dist is missing ${required}`);
   }
 

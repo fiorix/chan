@@ -50,6 +50,16 @@
     "description": "Find content, files, tags, and relationships through the search UI and terminal."
   },
   {
+    "slug": "collaboration",
+    "title": "Collaboration & sessions",
+    "description": "Share workspace sessions, identify clients, and hand over leadership locally or remotely."
+  },
+  {
+    "slug": "extensions",
+    "title": "Extensions",
+    "description": "Add your own applications as sandboxed tabs and integrate them through the host bridge and cs."
+  },
+  {
     "slug": "settings",
     "title": "Settings & defaults",
     "description": "Configure appearance, editing, terminals, shortcuts, and workspace preferences."

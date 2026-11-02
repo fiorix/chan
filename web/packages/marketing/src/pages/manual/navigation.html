@@ -7,7 +7,7 @@
     <li><code>Up</code> and <code>Down</code> select a row on the front card.</li>
     <li><code>Left</code> and <code>Right</code> walk the selected row's controls; past its first or last control they turn to the previous or next card. <code>Shift+Left</code> and <code>Shift+Right</code> turn the cards directly.</li>
     <li><code>Enter</code> runs the row's main action, such as focusing a window. <code>Tab</code> moves through the front card's controls.</li>
-    <li><code>c</code> connects or disconnects a devserver or gateway; while a gateway is connecting, it cancels.</li>
+    <li><code>o</code> activates the selected row's on/off control: connect or disconnect a devserver or gateway, turn a workspace on or off, or detach a tmux connection. While a gateway is connecting, it cancels.</li>
     <li><code>t</code> opens a terminal on This machine or a connected devserver.</li>
     <li><code>w</code> opens another window of a ready workspace.</li>
     <li><code>h</code> shows or hides a window, including from the All windows card.</li>
@@ -32,6 +32,18 @@
   <figure class="inline-shot">
     <img src="/assets/manual/terminal-panes.png" alt="A terminal window split into two panes; a cs terminal survey command in the left pane drives a Pick-your-choice prompt in the right pane" />
     <figcaption>A terminal window split into two panes. Each pane's top bar carries the A/B side toggle and the hamburger menu.</figcaption>
+  </figure>
+</section>
+
+<section class="manual-block" id="hybrid-nav">
+  <h2><a class="heading-anchor" href="#hybrid-nav">Hybrid Nav</a></h2>
+  <p>Open <strong>Hybrid Nav</strong> from a pane menu or the command launcher, or press <code>Cmd+.</code> on macOS and <code>Ctrl+.</code> elsewhere. Use arrow keys to move focus, <code>/</code> to split right, <code>?</code> to split down, and <code>t</code> to add a terminal. Press <code>h</code> for the full key reference. Changes are staged until <code>Enter</code> commits them; <code>Esc</code> discards them.</p>
+  <figure class="inline-shot">
+    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/hybrid-nav.jpg" aria-label="Arrange split panes and move between terminals with Hybrid Nav.">
+      <source src="/assets/home/videos/hybrid-nav.mp4" type="video/mp4" />
+      <a href="/assets/home/videos/hybrid-nav.mp4">Watch the video.</a>
+    </video>
+    <figcaption>Arrange split panes and move between terminals with Hybrid Nav.</figcaption>
   </figure>
 </section>
 

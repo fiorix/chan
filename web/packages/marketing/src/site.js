@@ -1,22 +1,4 @@
 (function () {
-  const key = "chan-site-mode";
-  const button = document.getElementById("theme-toggle");
-  const saved = window.localStorage.getItem(key);
-  if (saved === "dark" || saved === "light") {
-    document.body.dataset.mode = saved;
-  } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-    document.body.dataset.mode = "dark";
-  }
-  if (button) {
-    button.addEventListener("click", () => {
-      const next = document.body.dataset.mode === "dark" ? "light" : "dark";
-      document.body.dataset.mode = next;
-      window.localStorage.setItem(key, next);
-    });
-  }
-})();
-
-(function () {
   document.querySelectorAll("[data-copy-block]").forEach((block) => {
     const button = block.querySelector("button");
     const value = block.querySelector("[data-copy-value]");
@@ -145,81 +127,5 @@
         open(img.currentSrc || img.src, img.alt);
       }
     });
-  });
-})();
-
-(function () {
-  // The home hero carousel: play one silent product video at a time, advancing
-  // after it finishes. Reduced-motion visitors opt in with the native controls;
-  // arrows and dots remain available to everyone.
-  document.querySelectorAll("[data-carousel]").forEach((carousel) => {
-    const slides = Array.from(carousel.querySelectorAll("[data-carousel-slide]"));
-    const caption = carousel.querySelector(".carousel-caption");
-    const dotsHost = carousel.querySelector(".carousel-dots");
-    if (slides.length < 2 || !dotsHost) return;
-
-    const dots = slides.map((_slide, i) => {
-      const dot = document.createElement("button");
-      dot.type = "button";
-      dot.className = "carousel-dot";
-      dot.setAttribute("aria-label", `Video ${i + 1} of ${slides.length}`);
-      dot.addEventListener("click", () => show(i));
-      dotsHost.appendChild(dot);
-      return dot;
-    });
-
-    let index = Math.max(
-      slides.findIndex((slide) => slide.classList.contains("active")),
-      0,
-    );
-
-    function show(i) {
-      const next = (i + slides.length) % slides.length;
-      const changed = next !== index;
-      index = next;
-      slides.forEach((slide, n) => {
-        const active = n === index;
-        slide.classList.toggle("active", active);
-        if (!(slide instanceof HTMLVideoElement)) return;
-        if (!active) {
-          slide.pause();
-          if (slide.currentTime !== 0) slide.currentTime = 0;
-        } else if (changed && slide.currentTime !== 0) {
-          slide.currentTime = 0;
-        }
-      });
-      dots.forEach((dot, n) => {
-        if (n === index) dot.setAttribute("aria-current", "true");
-        else dot.removeAttribute("aria-current");
-      });
-      if (caption) caption.textContent = slides[index].dataset.caption || "";
-      const active = slides[index];
-      if (autoPlay && active instanceof HTMLVideoElement) {
-        void active.play().catch(() => {});
-      }
-    }
-
-    const autoPlay = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    slides.forEach((slide, i) => {
-      if (!(slide instanceof HTMLVideoElement)) return;
-      slide.addEventListener("ended", () => {
-        if (autoPlay && i === index) show(index + 1);
-      });
-    });
-
-    carousel.querySelector(".carousel-prev")?.addEventListener("click", () => show(index - 1));
-    carousel.querySelector(".carousel-next")?.addEventListener("click", () => show(index + 1));
-    carousel.addEventListener("keydown", (event) => {
-      if (event.target instanceof HTMLVideoElement) return;
-      if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        show(index - 1);
-      } else if (event.key === "ArrowRight") {
-        event.preventDefault();
-        show(index + 1);
-      }
-    });
-
-    show(index);
   });
 })();

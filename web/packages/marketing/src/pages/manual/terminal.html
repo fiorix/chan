@@ -19,6 +19,17 @@
   </div><p><code>chan open .</code> registers and serves the current directory as a workspace; use <code>--here</code> when intentionally opening a subdirectory of a repository. <code>cs open README.md</code> opens a file in the current window, and <code>cs open .</code> opens its file browser. Paths refer to the machine hosting the terminal, including on a devserver.</p>
 </section>
 
+<section class="manual-block" id="terminal-walkthrough">
+  <h2><a class="heading-anchor" href="#terminal-walkthrough">Terminal walkthrough</a></h2>
+  <figure class="inline-shot">
+    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/terminal-commands.jpg" aria-label="Running commands in a Chan terminal.">
+      <source src="/assets/home/videos/terminal-commands.mp4" type="video/mp4" />
+      <a href="/assets/home/videos/terminal-commands.mp4">Watch the video.</a>
+    </video>
+    <figcaption>Running commands in a Chan terminal.</figcaption>
+  </figure>
+</section>
+
 <section class="manual-block" id="terminal-tabs">
   <h2><a class="heading-anchor" href="#terminal-tabs">Control terminal tabs</a></h2>
 <div class="command-copy" data-copy-block>
@@ -33,6 +44,13 @@
     <code><span>$</span><b data-copy-value>cs terminal scrollback --tab-name build</b></code>
     {{copyButton}}
   </div><p>Give a terminal a name to address it later. <code>cs terminal write</code> sends input, <code>cs terminal restart</code> restarts a session, and <code>cs terminal close</code> ends it. Use <code>--tab-name</code> to select a named session, or <code>--tab-group</code> for a group where supported. <code>scrollback</code> selects one tab by name, not a group. <code>cs terminal list --json</code> provides the session roster for scripts.</p>
+  <figure class="inline-shot">
+    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/terminal-write-scrollback.jpg" aria-label="Write into another terminal and read its scrollback with cs.">
+      <source src="/assets/home/videos/terminal-write-scrollback.mp4" type="video/mp4" />
+      <a href="/assets/home/videos/terminal-write-scrollback.mp4">Watch the video.</a>
+    </video>
+    <figcaption>Write into another terminal and read its scrollback with cs.</figcaption>
+  </figure>
 <p>Clipboard shortcuts in the terminal are <code>Cmd+C</code>/<code>Cmd+V</code> on macOS and <code>Ctrl+Shift+C</code>/<code>Ctrl+Shift+V</code> on Windows and Linux. The <code>cs</code> commands below also transfer images and rich text.</p>
 </section>
 
@@ -46,6 +64,13 @@
   </figure>
   <h3 id="copy-paste"><a class="heading-anchor" href="#copy-paste">Copy and paste freely</a></h3>
   <p>The commands <code>cs copy</code> and <code>cs paste</code> integrate every chan terminal, standalone or workspace, local or on a devserver, with your clipboard: <code>cs copy &lt; photo.png</code> puts stdin on the clipboard (plain text, HTML, or an image), and <code>cs paste &gt; file.png</code> writes it back out as raw bytes. The clipboard belongs to the machine viewing the window, while the command runs wherever the terminal lives: use it locally like <code>pbcopy</code>/<code>pbpaste</code>, copy on a devserver and paste into any app, or move content across devservers by copying on one and pasting on another.</p>
+  <figure class="inline-shot">
+    <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/copy-paste.jpg" aria-label="Copy text from one terminal and paste it into a file in another.">
+      <source src="/assets/home/videos/copy-paste.mp4" type="video/mp4" />
+      <a href="/assets/home/videos/copy-paste.mp4">Watch the video.</a>
+    </video>
+    <figcaption>Copy text from one terminal and paste it into a file in another.</figcaption>
+  </figure>
   <h3 id="download-upload"><a class="heading-anchor" href="#download-upload">Download and upload freely</a></h3>
   <p>Similarly, <code>cs download {path}</code> downloads a file or a tarball of the target directory, and <code>cs upload {path}</code> imports files into the target directory through a file picker. Both show the same progress UI as the Inspector, and <code>.</code> means the current directory. This works in local and devserver terminals alike, so files flow between your machine and any chan session.</p>
 </section>
@@ -104,14 +129,29 @@
   <h2><a class="heading-anchor" href="#tmux-control-mode">tmux control mode: tmux -CC</a></h2>
 <p>A <code>tmux -CC</code> client prints a marker when it enters control mode, and from then on its output is the control protocol, not screen bytes. Chan reads the marker on the server and keeps the protocol off the screen. A <code>tmux</code> you ran in the terminal enters at once. Any other program in the foreground, such as <code>ssh</code> or <code>mosh</code> running a remote <code>tmux -CC</code>, or a program printing the marker on its own, raises a banner over the terminal naming that program and its command line, with <strong>Allow</strong>, <strong>Allow for this tab</strong> and <strong>Deny</strong>. Nothing is written to the terminal until you answer; every window attached to the terminal shows the banner, the first answer wins, and no answer in 60 seconds is a deny. A deny writes one newline, which detaches a real tmux, and the terminal draws again. After an allow chan sends a harmless first command and checks the tmux version; a peer that does not answer like tmux, or a tmux older than 3.2, is detached with a note in the terminal.</p>
 <p>It is <strong>off by default</strong>, and the marker is ordinary output until you turn it on in <strong>Settings → Terminal → tmux control mode (tmux -CC)</strong> or with <code>chan config set terminal.tmux.enabled true</code>. Turning it off again leaves a connection already running alone. To skip the question for a program you run as a habit, list its name in <code>terminal.tmux.trust</code> in <code>server.toml</code> (for example <code>trust = ["ssh"]</code>); <code>tmux</code> itself is always trusted. tmux 3.2 or newer is required.</p>
-<p>Once connected, the connection is a card on the Computers screen beside this machine and the devservers, titled <code>tmux -CC on this machine</code> when the tmux you ran is local and <code>tmux -CC from <em>command</em></code> otherwise, <code>tmux -CC from ssh geekom</code> for one reached over ssh. The card works like a devserver's: <code>t</code> asks tmux for a new window, <code>c</code> detaches, and its rows are the connection's windows with focus and show/hide; to end the tmux server, select the card with the check and turn it off or remove it, as with any card. Hiding the connection's last shown window detaches it. The terminal that ran <code>tmux -CC</code> becomes the card's control terminal and stays listed on the card. On the desktop it moves to a hidden control window while the connection runs. In a browser it stays as a tab in the source window, and no separate control page opens. It takes no typing while connected and shows chan's notices. Each tmux window opens as a chan window of its own, whose panes are tmux's panes split as tmux lays them out. The first eight tmux windows open at connect; a window past that is listed hidden on the card, and showing it opens it. None of these windows is saved: they last as long as the connection.</p>
+<p>Once connected, the connection is a card on the Computers screen beside this machine and the devservers, titled <code>tmux -CC on this machine</code> when the tmux you ran is local and <code>tmux -CC from <em>command</em></code> otherwise, <code>tmux -CC from ssh geekom</code> for one reached over ssh. The card works like a devserver's: <code>t</code> asks tmux for a new window, <code>o</code> detaches, and its rows are the connection's windows with focus and show/hide; to end the tmux server, select the card with the check and turn it off or remove it, as with any card. Hiding the connection's last shown window detaches it. The terminal that ran <code>tmux -CC</code> becomes the card's control terminal and stays listed on the card. On the desktop it moves to a hidden control window while the connection runs. In a browser it stays as a tab in the source window, and no separate control page opens. It takes no typing while connected and shows chan's notices. Each tmux window opens as a chan window of its own, whose panes are tmux's panes split as tmux lays them out. The first eight tmux windows open at connect; a window past that is listed hidden on the card, and showing it opens it. None of these windows is saved: they last as long as the connection.</p>
 <p>A tmux window's panes are tmux's panes and nothing else: they carry no tab strip, nothing drags into or out of them, and the window's splits are tmux's layout. A split (<code>Cmd+/</code> or <code>Cmd+Shift+/</code> on macOS, <code>Ctrl+Alt+/</code> and <code>Ctrl+Alt+?</code> elsewhere) splits the tmux pane, and the new pane appears where tmux put it. Clicking a pane makes it tmux's active pane. New terminal (<code>Cmd+T</code> on the desktop, or the command launcher) and <strong>Window → New Window</strong> each ask tmux for a new window, which opens in a chan window of its own. tmux owns the geometry: chan tells tmux the grid the window can show, tmux lays the panes out inside it and sizes each one, and the panes draw at tmux's size. Dragging a divider resizes tmux's panes: chan asks tmux when the drag ends, and the divider settles where tmux lays it out, within tmux's minimum pane size. chan moves a divider by resizing one tmux pane, so a divider between nested splits that no single pane's resize reaches does not drag. Each tmux pane is a terminal session of the same tenant: <code>cs terminal list</code> lists it under its tmux window's name in the <code>tmux</code> group, <code>cs terminal write</code> types into it, and it ends when its pane or the connection does.</p>
-<p>Closing a pane (<code>Cmd+W</code>, or its program exiting) kills the tmux pane and closing a tmux window kills the tmux window; the window's close prompt offers <strong>Detach</strong> beside Hide and Close, and Hide buries the window and leaves tmux alone. Detach, from the prompt or the card, drops the whole connection and leaves the tmux server running, and so does hiding the connection's last shown window; ending the server, with every session it holds, is the selection's turn off or remove on the card. The connection also ends when tmux exits, when you close the control terminal's window, or when the control process ends. Every tmux window it opened closes with it and the card goes. The desktop's control terminal returns as an ordinary terminal window; the browser's source tab accepts normal shell typing again, where <code>tmux -CC</code> returned.</p>  <div class="command-copy" data-copy-block>
+<p>Closing a pane (<code>Cmd+W</code>, or its program exiting) kills the tmux pane and closing a tmux window kills the tmux window; the window's close prompt offers <strong>Detach</strong> beside Hide and Close, and Hide buries the window and leaves tmux alone. Detach, from the prompt or the card, drops the whole connection and leaves the tmux server running, and so does hiding the connection's last shown window; ending the server, with every session it holds, is the selection's turn off or remove on the card. The connection also ends when tmux exits, when you close the control terminal's window, or when the control process ends. Every tmux window it opened closes with it and the card goes. The desktop's control terminal returns as an ordinary terminal window; the browser's source tab accepts normal shell typing again, where <code>tmux -CC</code> returned.</p>
 </section>
 
 <section class="manual-block" id="teams">
   <h2><a class="heading-anchor" href="#teams">Teams and orchestration</a></h2>
 <p>Open <strong>New team</strong> from the workspace's pane menu or command launcher to configure a team of agents in named terminal tabs. The dialog and <code>cs terminal team</code> use the same saved configuration. Agents run as ordinary terminal programs; their commands must already be installed on the host. Team commands require a workspace terminal.</p>
+  <details class="manual-examples">
+    <summary>See the team setup and running terminals</summary>
+    <figure class="inline-shot">
+      <img src="/assets/home/team-spawn.png" alt="The Spawn agents dialog with a team directory, terminal group, and optional brief" loading="lazy" />
+      <figcaption>Choose a team directory and group, then add a brief for the agents.</figcaption>
+    </figure>
+    <figure class="inline-shot">
+      <img src="/assets/home/team-layout.png" alt="Four named agents assigned to a two-by-two grid of terminal panes" loading="lazy" />
+      <figcaption>Choose the lead and member commands, then arrange agents in tabs or split panes.</figcaption>
+    </figure>
+    <figure class="inline-shot">
+      <img src="/assets/home/team-poke.png" alt="A lead and three worker agents exchanging task-file references in named terminals" loading="lazy" />
+      <figcaption>Named terminals let the lead and workers send messages and share task references through cs.</figcaption>
+    </figure>
+  </details>
 <p>For the CLI, save a configuration such as this to <code>team.toml</code>. A team has one to nine members, with exactly one lead:</p>
 <pre><code>team_name = "review"
 host_name = "You"

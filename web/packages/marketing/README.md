@@ -12,11 +12,13 @@ web/packages/marketing/
 +-- src/
 |   +-- install.sh              public Unix CLI installer source
 |   +-- install.ps1             public Windows CLI installer source
-|   +-- pages/                  homepage, install, manual, and animation credits
+|   +-- pages/                  homepage, remote access guides, install, manual, and animation credits
 |   +-- animation-credits.json  public attribution and original references
 |   +-- AnimationGallery.svelte live workspace animation preview
 |   +-- site.js
 |   +-- styles.css
+|   +-- site-motion.ts          shared homepage morph and site wave background
+|   +-- home.css                homepage and shared landing-page layouts
 |   +-- launcher-demo.ts        eager entry: mounts the launcher demo widget
 |   `-- templates/
 |       `-- base.html
@@ -39,7 +41,7 @@ npm run check
 
 The build/check gate:
 
-- renders `/`, `/install/`, `/manual/` and its section pages, `/animations/`, `/install.sh`, and `/install.ps1`
+- renders `/`, `/devserver/`, `/gateway/`, `/install/`, `/manual/` and its section pages, `/animations/`, `/install.sh`, and `/install.ps1`
 - writes `CNAME` for `chan.app`
 - copies static assets into `dist/`
 - fails on missing required inputs
@@ -64,10 +66,19 @@ python3 -m http.server 8080 -d dist
 
 Then open `http://localhost:8080/`.
 
+## Homepage
+
+The homepage opens with a compact hero and the interactive Computers preview, followed by short sections for tmux control mode, Chan devserver, and Chan gateway. Local and ssh tmux examples are copyable; remote access links lead to the dedicated guides. A closing link points to the manual for terminal scripting, applications, and workspaces. All site pages share the neutral dark palette in `styles.css`; the site has no light theme or theme selector.
+
+`site-motion.ts` mounts `HomeAtmosphere.svelte` once per site page. The homepage moves the workspace's Beaded Torus geometry into Dotted Waves as Computers enters the viewport; other pages start with the settled waves, with the horizon near the middle of the viewport. The shared canvas runner owns frame pacing, visibility, and cleanup; reduced motion shows a static wave, and unavailable WebGL falls back to canvas waves. `site-motion.js` and `site-motion.css` load through the shared template, separately from the animation gallery. `home.css` owns the landing-page layouts. Page content and links remain usable without JavaScript. Manual videos use native controls and play only when requested.
+
+The remote access guides at `/devserver/` and `/gateway/` share `guides.css` and static, responsive block diagrams. The devserver guide covers ssh/ET connections, file transfer, desktop port forwarding, and workspace collaboration; the gateway guide covers managed environments, OAuth2, the control plane, and self-hosting, with links to the source design and deployment documentation. These pages load the shared wave background without a launcher bundle.
+
 ## Embedded Demo
 
-The site runs the launcher SPA frontend-only, with no backend, so the manual can show a live launcher widget. The animation page also embeds the workspace's empty-pane welcome component; it does not mount the workspace app or connect to a chan server.
+The site runs the launcher SPA frontend-only, with no backend, so the homepage and manual can show a live Computers widget. The animation page also embeds the workspace's empty-pane welcome component; it does not mount the workspace app or connect to a chan server.
 
+- `/` lazy-loads the populated Computers preview in an isolated document at `/demo/computers/`.
 - `/manual/install/` eager-loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed. `/manual/devserver/` embeds the devserver form in an isolated document under `/manual/demo/devserver/`. Other manual pages do not load the launcher bundle.
 - The launcher widget is mounted without an `onOpenWindow` hook, so clicking a window row opens nothing.
 
@@ -79,7 +90,9 @@ The build serves the demo bundle from `base: "/assets/"` and scopes the launcher
 
 ## Manual
 
-`src/manual-pages.json` defines the manual's section order, titles, descriptions, and route slugs. The overview is `src/pages/manual.html`; each section's HTML lives under `src/pages/manual/`. The generator wraps each page with shared section navigation, an active-page marker, an index of its linked headings, and previous/next links. Keep section headings as self-links so the page index and shareable anchors agree. All guide content and navigation work without JavaScript.
+`src/manual-pages.json` defines the manual's section order, titles, descriptions, and route slugs. The overview is `src/pages/manual.html`; each section's HTML lives under `src/pages/manual/`. The generator wraps each page with shared section navigation, an active-page marker, an index of its linked headings, and previous/next links. Keep section headings as self-links so the page index and shareable anchors agree. All guide content and navigation work without JavaScript. The manual covers terminal commands, editor screenshots and walkthroughs, workspace indexing and search, collaboration and client sessions, and extensions; the overview links to these chapters.
+
+The original homepage videos are placed beside their manual topics: terminal commands, terminal write/scrollback and clipboard in Terminal; Hybrid Nav in Navigation; opening the editor in Editor; graph navigation in Graph; and empty-workspace animation in Screensavers. Videos use native controls, `preload="none"`, and still-frame JPEG posters under `assets/manual/video-posters/`. The three `assets/home/team-*.png` screenshots form an expandable team example. Older duplicate team shots and `home-hero.png`, which shows the previous launcher, are not linked.
 
 ## Animation credits and previews
 

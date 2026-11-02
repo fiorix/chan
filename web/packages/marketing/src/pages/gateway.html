@@ -1,0 +1,64 @@
+<a class="home-skip" href="#guide-content">Skip to content</a>
+<nav class="guide-nav" aria-label="Remote access guides"><a href="/#devserver">&#8592; Back to Chan</a><div><a href="/devserver/">Devserver</a><a href="/gateway/" aria-current="page">Gateway</a></div></nav>
+<article class="remote-guide" id="guide-content">
+  <header class="guide-hero">
+    <p class="section-label">CHAN-GATEWAY / SELF-HOSTED ACCESS</p>
+    <h1>Always-on environments.<br />Your domain<span class="orange">.</span></h1>
+    <p>Provision managed devservers with your team's tools and a personal access token (PAT). People sign in with OAuth2 and reach their environment from Chan Desktop or a browser, without ssh.</p>
+    <nav class="guide-jump" aria-label="On this page"><a href="#access">Access &amp; data flow</a><a href="#integrations">Integration points</a><a href="#operations">Control plane</a><a href="#setup">Set it up</a></nav>
+  </header>
+
+  <section id="access" aria-labelledby="gateway-flow-title">
+    <figure class="flow-diagram">
+      <figcaption id="gateway-flow-title">Devservers dial out. People sign in.</figcaption>
+      <div class="flow-row">
+        <div class="flow-node"><span class="node-label">YOUR DEVICE</span><strong>Desktop / browser</strong><small>Sign in, select a devserver,<br />open its windows</small></div>
+        <div class="flow-arrow"><span aria-hidden="true"></span><small>HTTPS +<br />WebSocket</small></div>
+        <div class="flow-node accent-node"><span class="node-label">YOUR DOMAIN</span><strong>Gateway proxy</strong><small>Checks access and<br />forwards traffic</small></div>
+        <div class="flow-arrow reverse"><span aria-hidden="true"></span><small>Devserver opens<br />a TLS tunnel</small></div>
+        <div class="flow-node"><span class="node-label">MANAGED MACHINES</span><strong>Chan devservers</strong><small>Your tools + runtime + PAT</small></div>
+      </div>
+      <p class="flow-note">After admission, data flows both ways through the tunnel. Files and processes live on the devserver; their traffic passes through your gateway. Access grants cover a devserver's entire library. <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">Read the gateway design doc &#8594;</a></p>
+    </figure>
+    <ul class="guide-benefits four-benefits"><li><strong>Always on.</strong><span>Keep builds, agents, and shells running on managed hosts. Disconnect your client and return to your work.</span></li><li><strong>OAuth2, without ssh.</strong><span>Manage access through accounts, devserver grants, and tokens.</span></li><li><strong>Provision once.</strong><span>Prepare tools and dependencies on each host. Its PAT connects it to your gateway.</span></li><li><strong>Scale the proxy fleet.</strong><span>Add proxy nodes as usage grows. Terminal and file traffic bypasses the central controller.</span></li></ul>
+  </section>
+
+  <section class="guide-section" id="integrations" aria-labelledby="integrations-title">
+    <div class="guide-section-heading"><p class="section-label">01 / INTEGRATION POINTS</p><h2 id="integrations-title">Sign-in, access, and traffic.</h2></div>
+    <figure class="flow-diagram service-diagram" aria-labelledby="service-flow-title">
+      <figcaption id="service-flow-title">The gateway's account and control services.</figcaption>
+      <div class="flow-row"><div class="flow-node"><span class="node-label">OAUTH2</span><strong>GitHub / Google / GitLab</strong><small>Your configured sign-in providers</small></div><div class="flow-arrow forward"><span aria-hidden="true"></span><small>Sign-in</small></div><div class="flow-node accent-node"><span class="node-label">IDENTITY</span><strong>Accounts &amp; entry</strong><code>gw.example.com</code></div><div class="flow-arrow"><span aria-hidden="true"></span><small>Access checks</small></div><div class="flow-node"><span class="node-label">PROFILE + POSTGRES</span><strong>Users &amp; grants</strong><small>Policy and audit records</small></div></div>
+      <div class="flow-row control-flow"><div class="flow-node"><span class="node-label">IDENTITY / PROFILE / ADMIN</span><strong>Policy &amp; operations</strong></div><div class="flow-arrow"><span aria-hidden="true"></span><small>Inventory +<br />revocation</small></div><div class="flow-node"><span class="node-label">DEVSERVER-CONTROL</span><strong>Fleet coordination</strong><small>Admission and proxy directory</small></div><div class="flow-arrow"><span aria-hidden="true"></span><small>Metadata +<br />commands</small></div><div class="flow-node accent-node"><span class="node-label">DEVSERVER-PROXY</span><strong>Tunnels &amp; traffic</strong><small>One or more proxy nodes</small></div></div>
+      <p class="flow-note">Identity also stores account sessions in Postgres. Workspace traffic travels through the proxy; the controller carries only metadata and commands. Internal APIs stay private.</p>
+    </figure>
+  </section>
+
+  <section class="guide-section" id="operations" aria-labelledby="operations-title">
+    <div class="guide-section-heading"><p class="section-label">02 / CONTROL PLANE</p><h2 id="operations-title">Access is an operational control.</h2></div>
+    <div class="operator-controls">
+      <article><span class="node-label">ADMISSION CONTROL</span><h3>Decide what connects.</h3><p>Set per-user devserver limits, suspend access, and pause fleet admissions. Every tunnel passes signed admission checks.</p></article>
+      <article><span class="node-label">ACCESS POLICY</span><h3>Keep authority in one place.</h3><p>Manage enrolment, devserver grants, and PATs. Durable policy and audit records live in Postgres.</p></article>
+      <article><span class="node-label">LIVE SWITCHES</span><h3>Act on running connections.</h3><p>Inspect proxies and tunnels, revoke sessions, or pause the fleet with <code>fleet pause --drain</code>. A drain disconnects active sessions and tunnels; resume reopens admission.</p></article>
+    </div>
+    <div class="guide-code" data-copy-block><pre><code data-copy-value>chan-gateway-admin fleet status
+chan-gateway-admin proxy ps
+chan-gateway-admin tunnel ps</code></pre>{{copyButton}}</div>
+    <p class="guide-note">Work runs on the devservers independently of client connections. Proxy nodes scale the data path; a singleton controller coordinates admission and policy. On loss of control connectivity, admission stops and existing tunnels close after a bounded grace period. See the <a href="https://github.com/fiorix/chan/blob/main/gateway/docs/adr/0002-control-plane-owns-proxy-fleet-state.md">scaling and recovery design</a> and <a href="https://github.com/fiorix/chan/tree/main/gateway/crates/admin">operator commands</a>.</p>
+  </section>
+
+  <section class="guide-section" id="setup" aria-labelledby="gateway-setup-title">
+    <div class="guide-section-heading"><p class="section-label">03 / SETUP</p><h2 id="gateway-setup-title">Bring your domain.</h2><p>Start with one proxy node, <code>p1</code>. These example names show the DNS and TLS boundaries.</p></div>
+    <dl class="domain-map"><div><dt><code>gw.example.com</code></dt><dd>Sign-in, accounts, and desktop discovery.</dd></div><div><dt><code>p1.proxy.example.com</code></dt><dd>Proxy node and outbound tunnel ingress.</dd></div><div><dt><code>*.p1.proxy.example.com</code></dt><dd>A separate origin for each devserver.</dd></div></dl>
+    <ol class="setup-steps">
+      <li><span>01</span><div><h3>Deploy the services and database.</h3><p>Run identity, profile, devserver-control, devserver-proxy, and Postgres. Configure distinct service credentials and signing keys. Apply the database schema jobs before starting runtime services. Use the <a href="https://github.com/fiorix/chan/tree/main/packaging/kube#apply-to-a-real-cluster">deployment guide and manifests</a>.</p></div></li>
+      <li><span>02</span><div><h3>Connect DNS, TLS, and OAuth.</h3><p>Point the names above to your TLS edge and configure a sign-in provider. Route account requests to identity, tenant HTTP/WebSockets to the proxy, and <code>/v1/tunnel</code> to its HTTP/2 ingress. Keep internal listeners on loopback or an authenticated, encrypted private network.</p></div></li>
+      <li><span>03</span><div><h3>Provision tools and publish the devserver.</h3><p>Enrol users and grant the sign-in and devserver feature flags, which default to off. Install Chan and your team's tools on each managed host. Create a PAT with the <code>tunnel</code> scope in your gateway and supply it as <code>CHAN_TUNNEL_TOKEN</code> on the devserver. Then run:</p><div class="guide-code" data-copy-block><pre><code data-copy-value>chan devserver run \
+  --tunnel-url https://p1.proxy.example.com/v1/tunnel \
+  --tunnel-devserver-name build-host</code></pre>{{copyButton}}</div><p>Each devserver uses its own token. The token identifies that devserver's registration.</p></div></li>
+      <li><span>04</span><div><h3>Add your gateway to Chan.</h3><p>In Computers, press <code>g</code> to open Gateways. Choose <strong>Add gateway</strong>, enter <code>https://gw.example.com</code>, connect, and sign in. Return to Computers to open owned and shared devservers.</p></div></li>
+    </ol>
+    <p class="guide-note">The <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway design</a> explains the architecture. The <a href="https://github.com/fiorix/chan/tree/main/gateway#whats-here">service documentation</a> covers configuration, and the <a href="https://github.com/fiorix/chan/tree/main/packaging/gateway/scripts/dev#first-time-sign-in-enrol-yourself">enrolment guide</a> covers first sign-in.</p>
+  </section>
+  <aside class="guide-callout"><h2>The same remote tools.</h2><p>File transfers, desktop port forwarding, and collaborative workspace sessions travel through the gateway connection too.</p><a class="text-link" href="/devserver/#remote-tools">Explore <code>cs</code>, files, and shared sessions &#8594;</a></aside>
+  <footer class="guide-footer"><a href="/devserver/">&#8592; ssh &amp; Eternal Terminal</a><a href="/#devserver">Back to Chan &#8594;</a></footer>
+</article>

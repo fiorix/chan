@@ -1,0 +1,89 @@
+<a class="home-skip" href="#guide-content">Skip to content</a>
+<nav class="guide-nav" aria-label="Remote access guides"><a href="/#devserver">&#8592; Back to Chan</a><div><a href="/devserver/" aria-current="page">Devserver</a><a href="/gateway/">Gateway</a></div></nav>
+<article class="remote-guide" id="guide-content">
+  <header class="guide-hero">
+    <p class="section-label">CHAN DEVSERVER / ssh + ETERNAL TERMINAL</p>
+    <h1>Your machine.<br />From anywhere<span class="orange">.</span></h1>
+    <p>Run Chan where your code lives. Connect your desktop through ssh or Eternal Terminal; terminals, files, and workspace state stay on the remote machine.</p>
+    <nav class="guide-jump" aria-label="On this page"><a href="#connect">Connect</a><a href="#remote-tools">Remote tools</a><a href="#collaboration">Shared sessions</a></nav>
+  </header>
+
+  <figure class="flow-diagram" aria-labelledby="direct-flow-title">
+    <figcaption id="direct-flow-title">One connection carries your environment.</figcaption>
+    <div class="flow-row">
+      <div class="flow-node"><span class="node-label">YOUR COMPUTER</span><strong>Chan Desktop</strong><code>http://localhost:9901</code><small>Windows and tools</small></div>
+      <div class="flow-arrow"><span aria-hidden="true"></span><small>HTTP +<br />WebSocket</small></div>
+      <div class="flow-node accent-node"><span class="node-label">ENCRYPTED TRANSPORT</span><strong>ssh or ET</strong><small>Local port 9901<br />&#8596; remote port 8787</small></div>
+      <div class="flow-arrow"><span aria-hidden="true"></span><small>Forwarded<br />connection</small></div>
+      <div class="flow-node"><span class="node-label">REMOTE MACHINE</span><strong>Chan devserver</strong><code>127.0.0.1:8787</code><small>Shells, files, workspaces</small></div>
+    </div>
+    <p class="flow-note">Input and requests travel to the host. Terminal output, file bytes, and workspace updates return over the same tunnel. The devserver listens on the remote machine's loopback address.</p>
+  </figure>
+  <ul class="guide-benefits"><li><strong>Your existing access</strong><span>Use your ssh account and keys.</span></li><li><strong>Compute stays remote</strong><span>Build and run on the host with your code.</span></li><li><strong>Sessions keep running</strong><span>Reconnect after a client disconnect.</span></li></ul>
+
+  <section class="guide-section" id="connect" aria-labelledby="connect-title">
+    <div class="guide-section-heading"><p class="section-label">01 / CONNECT</p><h2 id="connect-title">Install there. Connect here.</h2></div>
+    <ol class="setup-steps">
+      <li><span>01</span><div><h3>Install Chan on the remote machine.</h3><p>Use the <a href="/install/#server">CLI installer</a>. The examples below use a Unix host and <code>~/.local/bin/chan</code>.</p></div></li>
+      <li><span>02</span><div><h3>Add it in Computers.</h3><p>Choose <strong>Add devserver</strong>, set a name, then copy the <strong>Address</strong> and <strong>Connect script</strong> from either example below. Replace <code>user@host</code> with your ssh destination.</p></div></li>
+      <li><span>03</span><div><h3>Connect and open a terminal.</h3><p>The script runs in a control terminal. <code>join</code> starts or attaches to the devserver; keep the script running to hold the tunnel. Enable <strong>Auto-hide control terminal on success</strong> to tuck it away.</p></div></li>
+    </ol>
+    <div class="guide-columns connection-scripts">
+      <article class="guide-card" id="ssh">
+        <p class="card-kicker">ssh</p><h3>A direct connection.</h3>
+        <dl class="connection-config">
+          <dt>Address (URL)</dt>
+          <dd><div class="guide-code" data-copy-block><pre><code data-copy-value>http://localhost:9901</code></pre>{{copyButton}}</div></dd>
+          <dt>Connect script</dt>
+          <dd><div class="guide-code" data-copy-block><pre><code data-copy-value>ssh -L localhost:9901:127.0.0.1:8787 user@host \
+  '~/.local/bin/chan devserver join --port 8787'</code></pre>{{copyButton}}</div></dd>
+        </dl>
+        <div class="port-mapping" role="img" aria-label="Local tunnel port 9901 forwards to the remote devserver on port 8787"><div><span>LOCAL TUNNEL</span><code>localhost:9901</code></div><span class="port-arrow" aria-hidden="true"></span><div><span>REMOTE DEVSERVER</span><code>127.0.0.1:8787</code></div></div>
+      </article>
+      <article class="guide-card" id="et">
+        <p class="card-kicker">ETERNAL TERMINAL</p><h3>Reconnect across interruptions.</h3>
+        <dl class="connection-config">
+          <dt>Address (URL)</dt>
+          <dd><div class="guide-code" data-copy-block><pre><code data-copy-value>http://localhost:9901</code></pre>{{copyButton}}</div></dd>
+          <dt>Connect script</dt>
+          <dd><div class="guide-code" data-copy-block><pre><code data-copy-value>et --tunnel 9901:8787 \
+  --command '~/.local/bin/chan devserver join --port 8787' \
+  user@host</code></pre>{{copyButton}}</div></dd>
+        </dl>
+        <div class="port-mapping" role="img" aria-label="Local tunnel port 9901 forwards to the remote devserver on port 8787"><div><span>LOCAL TUNNEL</span><code>localhost:9901</code></div><span class="port-arrow" aria-hidden="true"></span><div><span>REMOTE DEVSERVER</span><code>127.0.0.1:8787</code></div></div>
+        <p>Install ET on both ends. It uses ssh to establish access and its own TCP connection, normally port 2022, to reconnect after interruptions. See the <a href="https://eternalterminal.dev/usermanual/">ET setup guide</a> and <a href="https://github.com/MisterTea/EternalTerminal">command reference</a>.</p>
+      </article>
+    </div>
+    <p class="guide-note">These are alternative configurations for the same address. The URL's port <code>9901</code> matches the local end of the tunnel; its remote end <code>8787</code> matches <code>--port 8787</code>. For another simultaneous connection, choose a free local port and update both the URL and the tunnel mapping. <a href="/manual/devserver/">Full devserver manual &#8594;</a></p>
+  </section>
+
+  <section class="guide-section" id="remote-tools" aria-labelledby="remote-tools-title">
+    <div class="guide-section-heading"><p class="section-label">02 / THE REMOTE TERMINAL</p><h2 id="remote-tools-title">More than a shell connection.</h2><p>Run these commands inside the remote Chan terminal. The same tools also work through a gateway.</p></div>
+    <div class="guide-columns">
+      <div class="guide-card-stack">
+        <article class="guide-card" id="file-transfers"><h3>Upload. Download.</h3><dl class="guide-commands"><dt><code>cs upload .</code></dt><dd>Choose local files to upload here.</dd><dt><code>cs download report.md</code></dt><dd>Save a remote file to your computer.</dd></dl><a class="text-link" href="/manual/files/#transfers">File transfers &#8594;</a></article>
+        <article class="guide-card" id="clipboard"><h3>Seamless clipboard integration.</h3><p>Copy and paste text, rich text, and images between your remote shell and desktop apps.</p><dl class="guide-commands"><dt><code>cs copy &lt; report.md</code></dt><dd>Copy to your desktop clipboard.</dd><dt><code>cs paste</code></dt><dd>Read your clipboard in the remote shell.</dd></dl><a class="text-link" href="/manual/terminal/#copy-paste">Clipboard integration &#8594;</a></article>
+      </div>
+      <article class="guide-card" id="port-forwarding"><h3><code>cs tunnel</code></h3><p>Forward a remote service to your desktop. In one remote Chan terminal, keep this running:</p><div class="guide-code" data-copy-block><pre><code data-copy-value>cs tunnel 8080</code></pre>{{copyButton}}</div><p>In another remote pane, serve the current directory with <a href="https://docs.python.org/3/library/http.server.html#command-line-interface">Python 3</a>:</p><div class="guide-code" data-copy-block><pre><code data-copy-value>python -m http.server 8080 \
+  --bind 127.0.0.1 --directory .</code></pre>{{copyButton}}</div><p>Open <code>http://127.0.0.1:8080</code> in your desktop browser. Chan forwards desktop port 8080 to port 8080 on the remote host. Keep both commands running; <code>Ctrl+C</code> in the tunnel pane closes the forward.</p><p class="guide-note">Requires Chan Desktop. Through a gateway, use the devserver owner's desktop connection.</p></article>
+    </div>
+  </section>
+
+  <section class="guide-section" id="collaboration" aria-labelledby="collaboration-title">
+    <div class="guide-section-heading"><p class="section-label">03 / SHARED SESSIONS</p><h2 id="collaboration-title">One host. Multiple participants.</h2><p>Chan's workspace protocol coordinates presence, document and drawing updates, and leadership across connected windows. Each client reaches the same devserver through its authorized connection.</p></div>
+    <figure class="flow-diagram compact-flow" aria-labelledby="collaboration-flow-title">
+      <figcaption id="collaboration-flow-title">The devserver coordinates shared state.</figcaption>
+      <div class="flow-row"><div class="flow-node"><span class="node-label">CLIENT A</span><strong>Your window</strong></div><div class="flow-arrow"><span aria-hidden="true"></span><small>Events + edits</small></div><div class="flow-node accent-node"><span class="node-label">DEVSERVER</span><strong>Shared workspace</strong><small>Presence, documents, terminals</small></div><div class="flow-arrow"><span aria-hidden="true"></span><small>Events + edits</small></div><div class="flow-node"><span class="node-label">CLIENT B</span><strong>Another window</strong></div></div>
+    </figure>
+    <div class="session-commands">
+      <div><code>cs session list</code><p>List this server's clients across terminal and workspace windows.</p></div>
+      <div><code>cs session self --name "laptop"</code><p>Name this client and its workspace participant.</p></div>
+      <div><code>cs session info CLIENT_ID</code><p>Inspect a client's windows, terminals, and connections.</p></div>
+      <div><code>cs session detach CLIENT_ID</code><p>Disconnect that client while keeping terminals and saved layouts. It can explicitly reconnect.</p></div>
+      <div><code>cs session handover</code><p>Request workspace leadership. The current leader answers with <code>cs session handover --accept</code> or <code>--reject</code>.</p></div>
+      <div><code>cs session takeover</code><p>Take leadership when the leader is gone. <code>--force</code> also permits taking over from a live leader.</p></div>
+    </div>
+    <p class="guide-note">Client IDs come from <code>cs session list</code>; workspace leadership belongs to windows. If a shell has multiple viewers, <code>self</code> asks you to identify your client. See <a href="/manual/collaboration/">Collaboration &amp; sessions</a> in the manual. For account-based access and devserver sharing, <a href="/gateway/">set up a gateway</a>.</p>
+  </section>
+  <footer class="guide-footer"><a href="/#devserver">&#8592; Back to Chan</a><a href="/gateway/">Your own gateway &#8594;</a></footer>
+</article>

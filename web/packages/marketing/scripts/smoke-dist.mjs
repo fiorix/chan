@@ -12,14 +12,35 @@ const siteRoot = path.resolve(path.dirname(scriptPath), "..");
 const distRoot = path.join(siteRoot, "dist");
 
 const checks = [
-  { path: "/", status: 200, includes: "data-carousel" },
-  { path: "/", status: 200, includes: 'src="/assets/home/videos/workspace-animation.mp4"' },
-  { path: "/", status: 200, includes: 'src="/assets/home/videos/terminal-commands.mp4"' },
+  { path: "/product/", status: 404 },
+  { path: "/", status: 200, includes: 'data-site-animation="morph"' },
+  ...["/", "/install/", "/devserver/", "/gateway/", "/animations/"].flatMap((path) => [
+    { path, status: 200, includes: 'data-mode="dark"' },
+    { path, status: 200, excludes: 'href="/product/"' },
+    { path, status: 200, excludes: 'id="theme-toggle"' },
+    { path, status: 200, includes: 'src="/assets/site-motion.js"' },
+    ...(path === "/" ? [] : [{ path, status: 200, includes: 'data-site-animation="waves"' }]),
+  ]),
+  { path: "/", status: 200, includes: 'href="#computers">Explore Chan' },
+  { path: "/", status: 200, before: ['id="computers"', 'id="tmux"'] },
+  { path: "/", status: 200, includes: 'src="/demo/computers/"' },
+  { path: "/demo/computers/", status: 200, includes: 'data-variant="populated"' },
+  { path: "/", status: 200, before: ['id="tmux"', 'id="devserver"'] },
+  { path: "/", status: 200, before: ['id="devserver"', 'id="gateway"'] },
+  { path: "/devserver/", status: 200, includes: 'id="remote-tools"' },
+  { path: "/devserver/", status: 200, includes: 'id="collaboration"' },
+  { path: "/devserver/", status: 200, includes: 'data-mode="dark"' },
+  { path: "/gateway/", status: 200, includes: 'id="operations"' },
+  { path: "/gateway/", status: 200, includes: 'id="setup"' },
+  { path: "/gateway/", status: 200, includes: 'data-mode="dark"' },
+  { path: "/assets/guides.css", status: 200 },
+  { path: "/", status: 200, before: ['id="gateway"', 'id="manual"'] },
+  { path: "/", status: 200, excludes: "data-carousel" },
   { path: "/", status: 200, excludes: 'src="/assets/home/team-spawn.png"' },
-  { path: "/", status: 200, includes: "A new kind of" },
+  { path: "/", status: 200, includes: "A supercharged" },
   { path: "/", status: 200, excludes: "launcher-demo.js" },
   { path: "/", status: 200, includes: 'href="/install/">Install' },
-  { path: "/", status: 200, includes: 'href="/animations/">Animations' },
+  { path: "/", status: 200, includes: 'href="/animations/"' },
   { path: "/", status: 200, excludes: "animation-gallery.js" },
   { path: "/animations/", status: 200, includes: "Room for motion." },
   { path: "/animations/", status: 200, includes: 'src="/assets/animation-gallery.js"' },
@@ -78,7 +99,7 @@ async function main() {
 }
 
 async function checkManual(port) {
-  const sections = ["", "install", "navigation", "devserver", "terminal", "editor", "files", "graph", "dashboard", "search", "settings", "screensavers"];
+  const sections = ["", "install", "navigation", "devserver", "terminal", "editor", "files", "graph", "dashboard", "search", "collaboration", "extensions", "settings", "screensavers"];
   const routes = sections.map((slug) => `/manual/${slug ? `${slug}/` : ""}`);
   const documents = new Map();
   try {
@@ -88,6 +109,10 @@ async function checkManual(port) {
       const dom = new JSDOM(await response.text(), { url: `http://127.0.0.1:${port}${route}` });
       documents.set(route, dom);
       const doc = dom.window.document;
+      assert.equal(doc.body.dataset.mode, "dark", `${route}: dark theme`);
+      assert.equal(doc.querySelector("#theme-toggle"), null, `${route}: no theme selector`);
+      assert.equal(doc.querySelector("[data-site-animation]")?.getAttribute("data-site-animation"), "waves", `${route}: settled wave background`);
+      assert.equal(doc.querySelector('a[href="/product/"]'), null, `${route}: no Product navigation`);
       assert.equal(doc.querySelectorAll("h1").length, 1, `${route}: one page title`);
       const ids = [...doc.querySelectorAll("[id]")].map((el) => el.id);
       assert.equal(new Set(ids).size, ids.length, `${route}: unique anchors`);

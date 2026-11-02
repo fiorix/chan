@@ -9,5 +9,14 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/AnimationGallery.svelte", "src/animation-gallery.ts", "src/animation-credits.test.ts", "src/AnimationGallery.test.ts"]
+  "include": [
+    "src/AnimationGallery.svelte",
+    "src/animation-gallery.ts",
+    "src/animation-credits.test.ts",
+    "src/AnimationGallery.test.ts",
+    "src/HomeAtmosphere.svelte",
+    "src/homeAtmosphere.ts",
+    "src/homeAtmosphere.test.ts",
+    "src/site-motion.ts"
+  ]
 }

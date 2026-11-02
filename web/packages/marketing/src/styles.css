@@ -1,31 +1,22 @@
 :root {
-  /* Cyan / orange / black / white. White + near-black are the base; orange is
-     the primary accent (CTA, brand hover) and cyan is the secondary accent
-     (eyebrow, list markers). Dark mode flips the base to black + white and
-     brightens both accents. */
-  --bg: #ffffff;
-  --panel: #ffffff;
-  --fg: #0b0c0e;
-  --muted: #5b626b;
-  --rule: #e4e7ec;
-  --accent: #e8590c;
-  --accent-2: #0c87a3;
-  --code-bg: #f1f3f6;
-  --shadow: 0 16px 48px rgba(8, 12, 18, 0.1);
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --surface: #101010;
+  --panel: #141414;
+  --surface-raised: #1c1c1c;
+  --fg: #f0f0f0;
+  --text: #d4d4d4;
+  --muted: #ababab;
+  --subtle: #909090;
+  --faint: #707070;
+  --rule: #2c2c2c;
+  --border-strong: #404040;
+  --accent: #e28b59;
+  --accent-2: #9aabad;
+  --code-bg: #1c1c1c;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-[data-mode="dark"] {
-  --bg: #0a0b0d;
-  --panel: #121419;
-  --fg: #f2f5f8;
-  --muted: #97a0aa;
-  --rule: #222831;
-  --accent: #ff7a33;
-  --accent-2: #29d3ee;
-  --code-bg: #161a20;
-  --shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
 }
 
 *,
@@ -67,6 +58,8 @@ code {
 }
 
 .site-shell {
+  position: relative;
+  isolation: isolate;
   margin: 0 auto;
   max-width: 1120px;
   padding: 0 24px 56px;
@@ -76,7 +69,7 @@ code {
   align-items: center;
   display: grid;
   gap: 16px;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr;
   min-height: 72px;
 }
 
@@ -89,9 +82,6 @@ code {
 }
 
 .brand-mark {
-  /* Grey logo: reads as grey-on-white in light mode and grey-on-black in dark,
-     using the per-mode neutral so it stays grey on either base, independent of
-     the accent. */
   background: var(--muted);
   display: inline-block;
   height: 30px;
@@ -109,13 +99,15 @@ code {
 }
 
 .site-nav a,
-.theme-button,
 .button {
   border-radius: 6px;
   text-decoration: none;
 }
 
 .site-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   color: var(--muted);
   font-size: 0.9rem;
   padding: 8px 10px;
@@ -126,41 +118,50 @@ code {
   color: var(--accent);
 }
 
-.theme-button {
-  align-items: center;
-  background: transparent;
-  border: 1px solid var(--rule);
-  color: var(--muted);
-  cursor: pointer;
-  display: inline-flex;
-  height: 34px;
-  justify-content: center;
-  width: 34px;
-  padding: 0;
+.site-header :focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 5px;
 }
 
-.theme-button:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+@media (max-width: 720px) {
+  .site-header { gap: 12px; }
+  .brand { font-size: 16px; gap: 6px; }
+  .brand-mark { width: 23px; height: 23px; }
+  .site-nav { gap: 8px; }
+  .site-nav a { font-size: 12px; padding: 8px 4px; }
+  .site-nav .nav-secondary { display: none; }
 }
 
-.theme-sun,
-.theme-moon {
-  display: block;
-  width: 16px;
-  height: 16px;
+/* Fixed decoration stays behind every surface and never captures input. */
+.site-background {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
 }
-
-/* Show the icon for the theme you switch TO: moon while light (tap
-   for dark), sun while dark (tap for light). Matches chan-desktop
-   and the SPA per-surface toggle. */
-.theme-sun,
-[data-mode="dark"] .theme-moon {
-  display: none;
+.site-grid {
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(color-mix(in srgb, var(--fg) 2%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--fg) 2%, transparent) 1px, transparent 1px);
+  background-size: 80px 80px;
 }
-
-[data-mode="dark"] .theme-sun {
-  display: block;
+.site-atmosphere {
+  position: absolute;
+  inset: 0;
+  opacity: .65;
+  --canvas-animation-speed: .35;
+}
+.site-background::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--bg) 70%, transparent), color-mix(in srgb, var(--bg) 20%, transparent) 75%), linear-gradient(0deg, color-mix(in srgb, var(--bg) 60%, transparent), transparent 25%, transparent 85%, color-mix(in srgb, var(--bg) 40%, transparent));
+}
+@media (max-width: 720px) {
+  .site-background::after {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--bg) 53%, transparent), color-mix(in srgb, var(--bg) 33%, transparent)), linear-gradient(0deg, color-mix(in srgb, var(--bg) 80%, transparent), transparent 65%);
+  }
 }
 
 .hero {
@@ -251,9 +252,9 @@ code {
 }
 
 .button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--fg);
+  border-color: var(--fg);
+  color: var(--bg);
 }
 
 .button.secondary {
@@ -317,9 +318,16 @@ code {
 }
 
 .hero-shot img,
-.inline-shot img {
+.inline-shot img,
+.inline-shot video {
   display: block;
   width: 100%;
+}
+
+.inline-shot video {
+  aspect-ratio: 16 / 9;
+  background: #000;
+  object-fit: contain;
 }
 
 /* When a figure stacks more than one screenshot (e.g. the scriptable
@@ -333,113 +341,6 @@ code {
   color: var(--muted);
   font-size: 0.82rem;
   padding: 10px 12px;
-}
-
-/* The home carousel: silent product videos crossfade in a fixed-ratio frame,
-   with the active video's caption and dot/arrow controls below. */
-.hero-carousel {
-  margin: 0 auto;
-  max-width: 980px;
-}
-
-.carousel-frame {
-  aspect-ratio: 16 / 9;
-  background: #000;
-  border: 1px solid var(--rule);
-  border-radius: 8px;
-  box-shadow: var(--shadow);
-  overflow: hidden;
-  position: relative;
-}
-
-/* Visibility rides along with opacity so inactive video controls drop out of
-   the tab order. */
-.carousel-frame [data-carousel-slide] {
-  display: block;
-  height: 100%;
-  inset: 0;
-  object-fit: contain;
-  opacity: 0;
-  pointer-events: none;
-  position: absolute;
-  transition: opacity 0.4s ease, visibility 0.4s;
-  visibility: hidden;
-  width: 100%;
-}
-
-.carousel-frame [data-carousel-slide].active {
-  opacity: 1;
-  pointer-events: auto;
-  visibility: visible;
-}
-
-.carousel-caption {
-  color: var(--muted);
-  font-size: 0.82rem;
-  margin: 10px auto 0;
-  max-width: 72ch;
-  min-height: 2.6em;
-  text-align: center;
-}
-
-.carousel-controls {
-  align-items: center;
-  display: flex;
-  gap: 16px;
-  justify-content: center;
-}
-
-.carousel-arrow {
-  align-items: center;
-  background: transparent;
-  border: 1px solid var(--rule);
-  border-radius: 999px;
-  color: var(--muted);
-  cursor: pointer;
-  display: inline-flex;
-  height: 30px;
-  justify-content: center;
-  padding: 0;
-  width: 30px;
-}
-
-.carousel-arrow:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.carousel-arrow svg {
-  height: 16px;
-  width: 16px;
-}
-
-.carousel-dots {
-  display: flex;
-  gap: 8px;
-}
-
-.carousel-dot {
-  background: var(--rule);
-  border: 0;
-  border-radius: 50%;
-  cursor: pointer;
-  height: 8px;
-  padding: 0;
-  width: 8px;
-}
-
-.carousel-dot:hover {
-  background: var(--accent-2);
-}
-
-.carousel-dot[aria-current="true"] {
-  background: var(--accent);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .carousel-frame [data-carousel-slide] {
-    transition: none;
-  }
 }
 
 .feature-grid {
@@ -1006,6 +907,16 @@ code {
   margin: 18px 0;
 }
 
+.manual-examples {
+  margin: 24px 0;
+}
+
+.manual-examples > summary {
+  color: var(--text);
+  cursor: pointer;
+  padding: 12px 0;
+}
+
 .manual-block .inline-shot {
   margin: 24px 0;
 }
@@ -1203,8 +1114,8 @@ code {
 
 .command-copy button:hover,
 .command-copy.copied button {
-  background: var(--accent);
-  color: #fff;
+  background: var(--fg);
+  color: var(--bg);
 }
 
 /* Clickable screenshots open enlarged in a full-screen lightbox (site.js). */

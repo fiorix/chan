@@ -1,74 +1,63 @@
-<section class="hero">
-  <h1 class="hero-headline">chan</h1>
-  <p class="hero-category">A new kind of <span class="hero-accent">IDE</span></p>
-  <p class="lede hero-lede">Where you drive the work with agents at the speed of thought</p>
-  <figure class="hero-carousel" data-carousel>
-    <div class="carousel-frame">
-      <video class="active" controls muted playsinline preload="metadata" data-carousel-slide data-caption="Opening the workspace graph from a terminal." aria-label="Opening the workspace graph from a terminal">
-        <source src="/assets/home/videos/open-graph.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/open-graph.mp4">Watch the workspace graph video.</a>
-      </video>
-      <video controls muted playsinline preload="none" data-carousel-slide data-caption="Opening the editor from a terminal." aria-label="Opening the editor from a terminal">
-        <source src="/assets/home/videos/open-editor.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/open-editor.mp4">Watch the editor video.</a>
-      </video>
-      <video controls muted playsinline preload="none" data-carousel-slide data-caption="Writing to split terminals and scrolling through their history." aria-label="Writing to split terminals and scrolling through their history">
-        <source src="/assets/home/videos/terminal-write-scrollback.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/terminal-write-scrollback.mp4">Watch the terminal scrollback video.</a>
-      </video>
-      <video controls muted playsinline preload="none" data-carousel-slide data-caption="Copying and pasting between split terminal panes." aria-label="Copying and pasting between split terminal panes">
-        <source src="/assets/home/videos/copy-paste.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/copy-paste.mp4">Watch the copy and paste video.</a>
-      </video>
-      <video controls muted playsinline preload="none" data-carousel-slide data-caption="Navigating a terminal window with Hybrid Nav." aria-label="Navigating a terminal window with Hybrid Nav">
-        <source src="/assets/home/videos/hybrid-nav.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/hybrid-nav.mp4">Watch the Hybrid Nav video.</a>
-      </video>
-      <video controls muted playsinline preload="none" data-carousel-slide data-caption="Running commands in a Chan terminal." aria-label="Running commands in a Chan terminal">
-        <source src="/assets/home/videos/terminal-commands.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/terminal-commands.mp4">Watch the terminal commands video.</a>
-      </video>
-      <video controls muted playsinline preload="none" data-carousel-slide data-caption="A Chan workspace in motion." aria-label="A Chan workspace in motion">
-        <source src="/assets/home/videos/workspace-animation.mp4" type="video/mp4" />
-        <a href="/assets/home/videos/workspace-animation.mp4">Watch the workspace animation video.</a>
-      </video>
+<a class="home-skip" href="#intro">Skip to content</a>
+<section class="terminal-hero" id="intro" aria-labelledby="hero-title">
+  <div class="hero-copy">
+    <h1 id="hero-title">A supercharged<br />terminal emulator<span class="orange">.</span></h1>
+    <p>Interfacing humans and machines, local and remote.</p>
+    <div class="hero-actions">
+      <a class="home-button solid" href="/install/">Get Chan <span aria-hidden="true">&#8595;</span></a>
+      <a class="home-button outline" href="#computers">Explore Chan <span aria-hidden="true">&#8594;</span></a>
     </div>
-    <figcaption class="carousel-caption">Opening the workspace graph from a terminal.</figcaption>
-    <div class="carousel-controls">
-      <button type="button" class="carousel-arrow carousel-prev" aria-label="Previous video">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <polyline points="15 18 9 12 15 6" />
-        </svg>
-      </button>
-      <div class="carousel-dots"></div>
-      <button type="button" class="carousel-arrow carousel-next" aria-label="Next video">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
-      </button>
-    </div>
-  </figure>
-  <ul class="value-points hero-points">
-    <li>Drive agents to ship faster</li>
-    <li>No in-app chatbot, just terminals</li>
-    <li>A powerful markdown + slides editor</li>
-    <li>Mermaid and Excalidraw diagrams</li>
-    <li>Local and remote, major OSes supported</li>
-  </ul>
-  <div class="button-row">
-    <a class="button primary" href="/install/">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-        <polyline points="7 10 12 15 17 10" />
-        <line x1="12" y1="15" x2="12" y2="3" />
-      </svg>
-      Install
-    </a>
-    <a class="button secondary" href="https://github.com/fiorix/chan">
-      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.5.5.09.68-.22.68-.48 0-.24-.01-.87-.01-1.7-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.89 1.52 2.34 1.08 2.91.83.09-.65.35-1.08.63-1.33-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02.8-.22 1.65-.33 2.5-.33.85 0 1.7.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.94.36.31.68.92.68 1.85 0 1.34-.01 2.42-.01 2.75 0 .27.18.58.69.48A10.01 10.01 0 0 0 22 12c0-5.52-4.48-10-10-10z" />
-      </svg>
-      GitHub
-    </a>
+    <p class="platform-note"><span class="platforms">macOS / Linux / Windows / FreeBSD</span><span class="license-note">Free &amp; open source</span></p>
   </div>
+</section>
+
+<section class="computers-tour" id="computers" aria-labelledby="computers-title" data-home-morph-target>
+  <header class="computers-tour-heading">
+    <p class="section-label"><span>01 /</span> COMPUTERS</p>
+    <h2 id="computers-title">The Computers Window<span class="orange">.</span></h2>
+    <p>The Computers window gives you access to all your Chan windows, local and remote, and your tmux sessions. Open it from any Chan window with <span class="key-chord"><kbd>Cmd</kbd> + <kbd>P</kbd></span> on macOS, or <span class="key-chord"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></span> on Linux, FreeBSD, and Windows.</p>
+  </header>
+  <figure class="computers-demo">
+    <iframe src="/demo/computers/" title="Interactive Computers window preview" loading="lazy"></iframe>
+    <figcaption>Try the Computers window from a keyboard. Use shift left and right for machine navigation.</figcaption>
+  </figure>
+</section>
+
+<section class="connection-section" id="tmux" aria-labelledby="tmux-title">
+  <div class="connection-intro">
+    <p class="section-label"><span>02 /</span> TMUX -CC</p>
+    <h2 id="tmux-title">Your tmux, in Chan<span class="orange">.</span></h2>
+    <p>Run <code>tmux -CC</code> locally or over ssh. Each tmux window opens as a Chan window, with its terminal and panes and layout. Use Chan's shortcuts and hybrid nav to split and resize panes, create new windows. Manage tmux sessions from the Computers window.</p>
+    <a class="text-link" href="/manual/terminal/#tmux-control-mode">tmux setup and controls <span aria-hidden="true">&#8594;</span></a>
+  </div>
+  <div class="connection-detail">
+    <p class="card-kicker">LOCAL</p>
+    <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>tmux -CC new -A -s dev</b></code>{{copyButton}}</div>
+    <p class="card-kicker">OVER ssh</p>
+    <div class="command-copy" data-copy-block><code><span>$</span><b data-copy-value>ssh -t user@host tmux -CC new -A -s dev</b></code>{{copyButton}}</div>
+    <p class="connection-note">Enable tmux control mode in Terminal settings. Requires tmux 3.2+.</p>
+  </div>
+</section>
+
+<section class="connection-section" id="devserver" aria-labelledby="devserver-title">
+  <div class="connection-intro"><p class="section-label"><span>03 /</span> CHAN DEVSERVER</p><h2 id="devserver-title">Your tools, on any machine<span class="orange">.</span></h2></div>
+  <div class="connection-detail">
+    <p>Install Chan on a remote machine and use <strong>Add devserver</strong> in Computers to configure access. Connect over ssh or Eternal Terminal, as in the examples above. Your terminals, files, and workspaces live on that machine, ready when you reconnect.</p>
+    <div class="connection-route" role="img" aria-label="Chan Desktop connects to a remote devserver over ssh or Eternal Terminal"><span>Chan Desktop</span><span aria-hidden="true">&#8596;</span><span>ssh / ET</span><span aria-hidden="true">&#8596;</span><span>Devserver</span></div>
+    <a class="text-link" href="/devserver/">Connect over ssh or Eternal Terminal <span aria-hidden="true">&#8594;</span></a>
+  </div>
+</section>
+
+<section class="connection-section" id="gateway" aria-labelledby="gateway-title">
+  <div class="connection-intro"><p class="section-label"><span>04 /</span> CHAN GATEWAY</p><h2 id="gateway-title">Always-on environments.<br />Your domain<span class="orange">.</span></h2></div>
+  <div class="connection-detail">
+    <p>Provision managed devservers with your tools and a PAT. Give people access through OAuth2, without ssh. Run the gateway on your own infrastructure, with admission control, access policy, live switches, and a scalable proxy fleet.</p>
+    <div class="connection-route" role="img" aria-label="Chan Desktop or a browser connects through your gateway to managed devservers"><span>Desktop / browser</span><span aria-hidden="true">&#8596;</span><span>Your gateway</span><span aria-hidden="true">&#8596;</span><span>Devservers</span></div>
+    <a class="text-link" href="/gateway/">Gateway architecture and setup <span aria-hidden="true">&#8594;</span></a>
+  </div>
+</section>
+
+<section class="manual-cta" id="manual" aria-labelledby="manual-title">
+  <div><h2 id="manual-title">More in the manual<span class="orange">.</span></h2><p>Terminal scripting, files, editing, workspaces, and collaboration.</p></div>
+  <a class="home-button outline" href="/manual/">Read the manual <span aria-hidden="true">&#8594;</span></a>
 </section>
