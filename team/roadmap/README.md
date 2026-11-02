@@ -21,19 +21,22 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.122.0
+### v0.123.0
 
-Opened 2026-11-02 at the v0.121.0 close with the see-through terminal bodies row that version carried ([seethru]), withdrawn by the owner the same day; it closes to `done/` at this version's GA.
+Opened 2026-11-02 at the v0.122.0 close with no rows.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [terminal bodies turn see-through][seethru] | withdrawn | GA |
-| [the Computers launcher takes no keys after an app switch][launcherkeys] | landed | GA |
 
-[seethru]: v0.122.0/terminal-bodies-turn-see-through-after-an-app-switch.md
-[launcherkeys]: v0.122.0/the-computers-launcher-takes-no-keys-after-an-app-switch.md
 
 ## Completed
+
+### v0.122.0
+
+Shipped 2026-11-02; see [release-v0.122.0](../release/release-v0.122.0.md). A no-rc release by the owner's word: the documents sweep rebased onto the website redesign, and the launcher keys fix from the Mac seat on top with a fix the merger's review added; that row is in [`done/`](done/). The see-through terminal bodies row closed as withdrawn by the owner, who found that the bug he had seen was the launcher's keyboard.
+
+- [terminal-bodies-turn-see-through-after-an-app-switch](done/terminal-bodies-turn-see-through-after-an-app-switch.md) - withdrawn, did not ship: Terminal bodies turn see-through after an app switch.
+- [the-computers-launcher-takes-no-keys-after-an-app-switch](done/the-computers-launcher-takes-no-keys-after-an-app-switch.md) - The Computers launcher takes no keys after an app switch.
 
 ### v0.121.0
 

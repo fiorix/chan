@@ -1,6 +1,8 @@
 # The Computers launcher takes no keys after an app switch
 
-Status: raised by the owner on 2026-11-02 after the v0.121.0 tag ("when we change focus to another application and back to Chan the computer's window no longer takes input from the keyboard until you click on it").
+Status: shipped in [v0.122.0](../../release/release-v0.122.0.md).
+
+Record before the release: raised by the owner on 2026-11-02 after the v0.121.0 tag ("when we change focus to another application and back to Chan the computer's window no longer takes input from the keyboard until you click on it").
 
 ## What is there now
 

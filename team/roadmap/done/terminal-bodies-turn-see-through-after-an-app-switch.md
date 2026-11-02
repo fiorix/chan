@@ -1,6 +1,8 @@
 # Terminal bodies turn see-through after an app switch
 
-Status: withdrawn by the owner on 2026-11-02, with no code ("i dont think seethru even exists; we can remove it from the roadmap"); it closes to `done/` at the v0.122.0 GA. Carried into v0.122.0 at the v0.121.0 GA the same day.
+Status: withdrawn, and it did not ship; closed at [v0.122.0](../../release/release-v0.122.0.md), which records the decision.
+
+Record before the release: withdrawn by the owner on 2026-11-02, with no code ("i dont think seethru even exists; we can remove it from the roadmap"); it closes to `done/` at the v0.122.0 GA. Carried into v0.122.0 at the v0.121.0 GA the same day.
 
 Record before the release: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS 27.0.1; accepted for v0.121.0 by the owner the same day ("lets fix these items"). The trigger is not known.
 

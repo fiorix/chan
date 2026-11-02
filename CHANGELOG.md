@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.122.0] - 2026-11-02
+
+v0.122.0 keeps the keyboard with the Computers launcher on macOS after a switch to another application and back, and describes chan as a supercharged terminal emulator across its package descriptions, help, documentation and site.
+
+### Changed
+
+- **chan is described as a supercharged terminal emulator.** The package descriptions (deb, rpm, AUR, Homebrew, Nix, the desktop bundle and its desktop entry), `chan --help`, the README and the site's title, hero and manual overview describe chan in layers: a terminal emulator; scriptable from `cs`, the keyboard and the mouse; a multiplexer of its own plus tmux control mode; the same locally and on remote machines; devservers reached over a TCP tunnel or through a gateway you host. The site's build refuses the old "IDE" and "workspace manager" copy.
+
+### Fixed
+
+- **The Computers launcher keeps the keyboard after an app switch on macOS.** With the launcher shown over a window whose terminal runs on the ghostty engine, switching to another application and back left the launcher deaf to keys until clicked, because the terminal underneath refocused itself when the window came back. A window's page now knows while its launcher covers it, and its terminal refocuses once the launcher hides; a window hidden while its launcher shows refocuses its terminal as before when it is shown again.
+
+### Documentation
+
+- The design documents of every crate, the desktop shell, the web apps and the gateway are rewritten for human readers: what each component is, where it sits, its main flows and the decisions behind them, with diagrams, corrected against the code.
+- The configuration reference is rebuilt from the code, and the extensions, contributing and packaging guides and the agent playbook, guides and skills are refreshed against the Makefile and the workflows.
+- The site at chan.app is redesigned around terminals and remote access, with guides for the devserver and the gateway; its manual pages say "directory" and link each topic to the design document behind it.
+- Stale code comments are corrected: where the trash and the embedding model cache live, the model archive the server bakes in, `read_media`'s image formats, and the gateway named as one you run.
+
 ## [v0.121.0] - 2026-11-02
 
 v0.121.0 refuses to take away chan-desktop's last shown window while terminals would die with it, keeps keys under an open dialog from acting on the window below, restores tab-drag highlights on macOS after the Computers launcher was shown, copies a long ghostty history in one core call, sends Delete in a ghostty terminal when WebKit takes the key as text input, closes the editor's popovers when their tab is hidden, and makes `chan close` stop reporting a workspace closed while a live process holds it.
