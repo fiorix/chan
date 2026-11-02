@@ -526,6 +526,10 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
         if let Ok(launchers) = launchers.try_borrow() {
             if let Some(webview) = launchers.get(host) {
                 let _ = webview.set_visible(false);
+                #[cfg(target_os = "macos")]
+                if let Some(host_window) = host_window {
+                    park(host_window, webview);
+                }
             }
         }
     });
@@ -574,12 +578,43 @@ fn content_rect(size: tauri::PhysicalSize<u32>, scale: f64) -> wry::Rect {
     }
 }
 
+/// The content area's size, placed wholly left of it: the frame a hidden
+/// launcher keeps, so no point of the content area is over it whatever size
+/// the window takes later, and the launcher page keeps its layout size.
+#[cfg(any(target_os = "macos", test))]
+fn parked_rect(size: tauri::PhysicalSize<u32>, scale: f64) -> wry::Rect {
+    let logical = size.to_logical::<f64>(scale);
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(-logical.width, 0.0).into(),
+        size: wry::dpi::LogicalSize::new(logical.width, logical.height).into(),
+    }
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn fit(host: &WebviewWindow, webview: &wry::WebView) {
     if let Some(bounds) = content_bounds(host) {
         if let Err(e) = webview.set_bounds(bounds) {
             tracing::warn!(host = host.label(), error = %e, "sizing the launcher failed");
         }
+    }
+}
+
+/// Move a hidden launcher off the host's content area. On macOS a hidden
+/// launcher left over the host's webview takes every drag in the window, so
+/// the host's page sees no dragenter or dragover and shows no drop target
+/// until the window is rebuilt. `fit` brings it back on show.
+#[cfg(target_os = "macos")]
+fn park(host: &WebviewWindow, webview: &wry::WebView) {
+    let Some(bounds) = host
+        .inner_size()
+        .ok()
+        .zip(host.scale_factor().ok())
+        .map(|(size, scale)| parked_rect(size, scale))
+    else {
+        return;
+    };
+    if let Err(e) = webview.set_bounds(bounds) {
+        tracing::warn!(host = host.label(), error = %e, "parking the launcher failed");
     }
 }
 
@@ -604,12 +639,18 @@ fn swap_gtk<R: tauri::Runtime>(
     });
 }
 
-/// Re-fit a host's launcher to the host's content area.
+/// Re-fit a host's launcher to the host's content area; on macOS a hidden
+/// one stays parked off it.
 fn sync_for_host(host: &WebviewWindow) {
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
             if let Some(webview) = launchers.get(host.label()) {
+                #[cfg(target_os = "macos")]
+                if !panel_is_visible(host.label()) {
+                    park(host, webview);
+                    return;
+                }
                 fit(host, webview);
             }
         }
@@ -743,10 +784,14 @@ fn build_panel(
     let webview = {
         let bounds =
             content_bounds(host).ok_or_else(|| format!("reading {label}'s content size failed"))?;
-        builder
+        let webview = builder
             .with_bounds(bounds)
             .build_as_child(host)
-            .map_err(|e| format!("building the launcher for {label}: {e}"))?
+            .map_err(|e| format!("building the launcher for {label}: {e}"))?;
+        // Built hidden, so parked until its first show fits it.
+        #[cfg(target_os = "macos")]
+        park(host, &webview);
+        webview
     };
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let webview = {
@@ -949,6 +994,29 @@ mod tests {
         );
         let rect = content_rect(tauri::PhysicalSize::new(1280, 720), 1.0);
         assert_eq!(rect.size, wry::dpi::LogicalSize::new(1280.0, 720.0).into());
+    }
+
+    #[test]
+    fn a_parked_launcher_keeps_its_size_and_never_overlaps_the_content() {
+        for (size, scale) in [
+            (tauri::PhysicalSize::new(2400, 1600), 2.0),
+            (tauri::PhysicalSize::new(1280, 720), 1.0),
+        ] {
+            let content = content_rect(size, scale);
+            let parked = parked_rect(size, scale);
+            assert_eq!(parked.size, content.size);
+            let logical = size.to_logical::<f64>(scale);
+            assert_eq!(
+                parked.position,
+                wry::dpi::LogicalPosition::new(-logical.width, 0.0).into()
+            );
+            // Its right edge is the content's left edge, so a window of any
+            // later width still has no point over it.
+            let wry::dpi::Position::Logical(at) = parked.position else {
+                panic!("parked position is logical");
+            };
+            assert_eq!(at.x + logical.width, 0.0);
+        }
     }
 
     #[test]

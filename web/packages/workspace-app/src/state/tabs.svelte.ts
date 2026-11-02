@@ -1451,6 +1451,11 @@ export function clearRecentlyClosedTabsForTest(): void {
   localTabDrops.clear();
 }
 
+/// The local drops a source's dragend has not yet consumed, for tests.
+export function localTabDropKeysForTest(): string[] {
+  return [...localTabDrops];
+}
+
 function rememberClosedTab(
   paneId: string,
   side: PaneSide,
