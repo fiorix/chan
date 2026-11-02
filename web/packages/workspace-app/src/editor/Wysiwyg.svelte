@@ -48,6 +48,7 @@
   import { openTagBubble } from "./bubbles/tag";
   import { openContactBubble } from "./bubbles/contact";
   import { openImageBubble } from "./bubbles/image";
+  import { EditorOverlayLifetime } from "./overlays/lifetime";
   import { imageDropHandlers } from "./bubbles/image_drop";
   import { imageDragIndicator } from "./image_drag_indicator";
   import { pasteHandler } from "./paste_html";
@@ -93,6 +94,7 @@
     highlightTrailingWhitespace = false,
     initialCaret = null,
     autoFocus = true,
+    shown = true,
     placeholderText,
     extraExtensions = [],
     surface = "editor",
@@ -114,6 +116,8 @@
     /// editor unfocused on mount; otherwise the unconditional mount
     /// focus would race past the host's gate.
     autoFocus?: boolean;
+    /// Whether the host shows this editor, independently of keyboard focus.
+    shown?: boolean;
     /// Empty-state placeholder text. When set the editor adds CM6's
     /// `placeholder` extension which renders at the cursor position
     /// (cursor + placeholder share the same x/y). Unset = no
@@ -162,6 +166,7 @@
 
   let host: HTMLDivElement | undefined;
   let view: EditorView | undefined;
+  let overlayLifetime: EditorOverlayLifetime | undefined;
   const sync = createValueSync();
   // Seed the theme with the surface's current light/dark; the $effect below
   // keeps it in sync on theme flips, and `surface` itself is fixed per mount.
@@ -237,7 +242,7 @@
   }
 
   function handleSpec(spec: BubbleSpec | null): void {
-    if (!view) return;
+    if (!view || !shown) return;
     if (spec === null) {
       dismissedTrigger = null;
       closeActiveBubble();
@@ -749,6 +754,7 @@
       ],
     });
     view = new EditorView({ state, parent: host });
+    overlayLifetime = new EditorOverlayLifetime(view.dom, () => shown);
     view.dispatch({ selection: { anchor: 0 } });
     if (autoFocus) view.focus();
     // Force a viewport re-measure after mount. The editor frequently
@@ -812,7 +818,16 @@
 
   onDestroy(() => {
     if (activeBubble) activeBubble.dismiss();
+    overlayLifetime?.destroy();
     view?.destroy();
+  });
+
+  $effect(() => {
+    if (shown) return;
+    // Remember this dismissal like a click away, so showing the tab again
+    // does not reopen the picker at the unchanged caret.
+    activeBubble?.dismiss();
+    overlayLifetime?.dismiss();
   });
 
   $effect(() => {
@@ -1973,6 +1988,9 @@
   :global(.md-bubble .md-bubble-row-external) {
     display: flex;
     align-items: center;
+  }
+  :global(.md-bubble .md-bubble-row-external > .md-bubble-row-level) {
+    flex-shrink: 0;
   }
   :global(.md-bubble .md-bubble-row-external > span:nth-child(2)) {
     min-width: 0;

@@ -33,6 +33,7 @@ import {
   type DateFormatId,
 } from "../dateFormats";
 import { openDatePopover } from "../overlays/date_popover";
+import { inheritEditorOverlayLifetime } from "../overlays/lifetime";
 import { enclosingFence } from "./fence";
 
 /// Resolve the active default format id. Preference field is a free
@@ -100,6 +101,7 @@ function makeAnchorAtPos(view: EditorView, pos: number): HTMLElement | null {
   anchor.style.height = `${coords.bottom - coords.top}px`;
   anchor.style.pointerEvents = "none";
   document.body.appendChild(anchor);
+  inheritEditorOverlayLifetime(anchor, view.dom);
   return anchor;
 }
 

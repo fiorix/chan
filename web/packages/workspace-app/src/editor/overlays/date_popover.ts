@@ -19,6 +19,7 @@ import {
   formatDate,
   type DateFormatId,
 } from "../dateFormats";
+import { trackEditorOverlay } from "./lifetime";
 
 export interface DatePopoverOpts {
   /// The DOM element to anchor the popover under. Typically the date
@@ -65,6 +66,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
   let viewMonth = new Date(selected.getFullYear(), selected.getMonth(), 1);
   let formatId = opts.initialFormatId;
   let alive = true;
+  let stopTracking = () => {};
 
   const wrap = document.createElement("div");
   wrap.className = "md-date-popover";
@@ -264,6 +266,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
   function dismiss(): void {
     if (!alive) return;
     alive = false;
+    stopTracking();
     if (dismissCurrent === dismiss) dismissCurrent = null;
     document.removeEventListener("mousedown", outsideClick, true);
     document.removeEventListener("keydown", escListener, true);
@@ -335,6 +338,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
 
   render();
   dismissCurrent = dismiss;
+  stopTracking = trackEditorOverlay(opts.anchor, dismiss);
   return { dismiss };
 }
 
