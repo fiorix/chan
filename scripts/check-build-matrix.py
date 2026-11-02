@@ -600,8 +600,8 @@ def check_workflow_contract() -> None:
         'scripts/smoke-nix-package.sh "$out" "$package"',
         'cachix push chan "$CHAN_OUT"',
         'cachix push chan "$CHAN_DESKTOP_OUT"',
-        "-chan-${{ matrix.system }}",
-        "-chan-desktop-${{ matrix.system }}",
+        'scripts/cachix-pin.sh "$mode" chan "$CACHIX_KEEP" "$SYSTEM"',
+        '"chan=$CHAN_OUT" "chan-desktop=$CHAN_DESKTOP_OUT"',
     ):
         require(
             cachix_build,

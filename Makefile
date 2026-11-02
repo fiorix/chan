@@ -349,8 +349,9 @@ nix-hash-check: ## Fail when Cargo.lock is not the lock the Nix cargoHash pins w
 	scripts/check-nix-cargo-hash.sh
 
 .PHONY: nix-hash-contract-check
-nix-hash-contract-check: ## Check the Nix cargoHash checker and pin helper against a throwaway tree.
+nix-hash-contract-check: ## Check the Nix cargoHash checker and pin helper, and the Cachix pin helper, against throwaway trees.
 	scripts/test-check-nix-cargo-hash.sh
+	scripts/test-cachix-pin.sh
 
 .PHONY: nix-hash-pin
 nix-hash-pin: ## Pin CARGO_HASH in both Nix derivations and record the Cargo.lock digest it was harvested for.
