@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.121.0] - 2026-11-02
+
+v0.121.0 refuses to take away chan-desktop's last shown window while terminals would die with it, keeps keys under an open dialog from acting on the window below, restores tab-drag highlights on macOS after the Computers launcher was shown, copies a long ghostty history in one core call, sends Delete in a ghostty terminal when WebKit takes the key as text input, closes the editor's popovers when their tab is hidden, and makes `chan close` stop reporting a workspace closed while a live process holds it.
+
+### Changed
+
+- **chan-desktop refuses to take away its last shown window while terminals would die with it.** Closing the last native window quits chan and ends every terminal of the library, the hidden windows' shells and agents among them. `cs window hide`, the launcher's Hide and its `h` key and the close prompt's Hide refuse the last shown window while any terminal session lives; `cs window rm` (with or without `--force`), the launcher's Close, the close prompt's Close, Cmd+Shift+W and the command deck's Close window refuse it while sessions of other windows live. The refusal says why and to show or open another window first, at the gesture, in the prompt or in the status bar. A window whose last tab closes still closes, and chan with it.
+- **`chan close` no longer reports a workspace closed while a live process still holds it.** While its writer lock is held with no holder answering, the close looks for the holder every 200 ms for five seconds and then exits 1 naming the pid; a holder that answers with an error and keeps the lock also fails the close or forget with exit 1. A free lock still reads not served.
+- **The Cachix release pins have stable names and keep the last 10 releases.** Each GA adds a revision to `chan-{x86_64,aarch64}-linux` and `chan-desktop-{x86_64,aarch64}-linux` with `cachix pin --keep-revisions`, so Cachix drops the older closures instead of keeping every release's; `publish-downstream`'s `cachix_keep` input sets the count, and a dry run prints the pins it would make.
+
+### Fixed
+
+- **Keys under an open dialog act on nothing beneath it.** With a confirm, a prompt or the close prompt open, no app chord, host command or Hybrid Nav key acts on the window under it, and the Enter or Escape that answers the dialog stops there, so one Enter can no longer answer a "Close tab?" confirm and commit a staged Hybrid Nav draft. Cmd+` still cycles windows.
+- **Tab drags keep their drop highlights on macOS after the Computers launcher was shown.** A hidden launcher webview stayed laid over the window and took every drag; it now parks off the window's content while hidden. A terminal tab dragged onto an edge of a window's only pane no longer throws in its `dragend`.
+- **Copy Scrollback and Select all on the ghostty engine.** A long history copies in one core call (55,000 rows at 200 columns in about 35 ms, from 3.6 s), Select all selects the history and the screen instead of one screenful from the top of the history, and every selection copy reads a wide character once and a cluster whole.
+- **Delete reaches the program in a ghostty terminal when WebKit takes the key as text input.** Backspace, Delete and the word deletes arriving as delete input on the terminal are sent as their keys, once, outside a composition.
+- **The editor's URL bubble keeps its label apart and closes with its tab.** The `OPEN` label no longer runs into a long URL, and the editor's bubbles, date calendar and file preview close when their tab is hidden by a tab switch, a pane flip or Hybrid Nav, in a file tab and in the terminal's Rich Prompt.
+
+### Documentation
+
+- The manual's tmux paragraph describes the divider drag v0.120.0 shipped: it resizes tmux's panes, and a divider between nested splits that no single pane's resize reaches does not drag.
+
 ## [v0.120.1] - 2026-11-01
 
 v0.120.1 is a patch over v0.120.0 for three defects found on the day of the release: the Computers card scrolls with the mouse and shows its last workspace whole, a tmux pane drag no longer fights tmux, and two Windows key sequences on the ghostty engine send what was typed.

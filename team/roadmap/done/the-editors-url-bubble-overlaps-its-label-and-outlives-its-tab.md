@@ -1,6 +1,8 @@
 # The editor's URL bubble overlaps its label and outlives its tab
 
-Status: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS, with two screenshots; filed by the owner the same day ("a couple minor UI fixes, you could write for another agent to fix") and accepted for v0.121.0 ("yes on v121").
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS, with two screenshots; filed by the owner the same day ("a couple minor UI fixes, you could write for another agent to fix") and accepted for v0.121.0 ("yes on v121").
 
 ## What is there now
 

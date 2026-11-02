@@ -1,6 +1,8 @@
 # Copy scrollback of a long ghostty history blocks the page
 
-Status: deferred from v0.120.0 at its close, where it was finding 13 of the ghostty row the v0.119.0 review raised; a speed item that needs its own measurement, not started.
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: deferred from v0.120.0 at its close, where it was finding 13 of the ghostty row the v0.119.0 review raised; a speed item that needs its own measurement, not started.
 
 ## What was seen
 

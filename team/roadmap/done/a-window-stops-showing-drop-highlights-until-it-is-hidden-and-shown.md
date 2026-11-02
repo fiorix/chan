@@ -1,6 +1,8 @@
 # A window stops showing drop highlights until it is hidden and shown
 
-Status: raised by the owner on 2026-11-01 from daily use of chan-desktop 0.120.1 on macOS; read live in a broken window's Web Inspector and in the code at v0.120.1, drafted for v0.121.0. The trigger is not known.
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised by the owner on 2026-11-01 from daily use of chan-desktop 0.120.1 on macOS; read live in a broken window's Web Inspector and in the code at v0.120.1, drafted for v0.121.0. The trigger is not known.
 
 ## What is there now
 

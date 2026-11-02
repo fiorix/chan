@@ -1,6 +1,8 @@
 # chan close can answer before the devserver records the workspace off
 
-Status: raised by the Mac seat on 2026-11-02 from a pre-push hook run on macOS, where the test below read the old state once in twenty runs on unchanged code; accepted for v0.121.0 by the owner the same day ("lets fix these items").
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised by the Mac seat on 2026-11-02 from a pre-push hook run on macOS, where the test below read the old state once in twenty runs on unchanged code; accepted for v0.121.0 by the owner the same day ("lets fix these items").
 
 ## What is there now
 

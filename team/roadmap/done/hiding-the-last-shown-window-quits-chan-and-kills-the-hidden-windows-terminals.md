@@ -1,6 +1,8 @@
 # Hiding the last shown window quits chan and kills the hidden windows' terminals
 
-Status: raised by the owner on 2026-11-01 after it ended a screencast dry take ("if we're hiding the last local window and there are terminals open, we cannot close chan - we must refuse until there's at least one window open"); filed as [fiorix/chan#8](https://github.com/fiorix/chan/issues/8); drafted for v0.121.0, with contract 2 decided by the owner on 2026-11-02 (the section Decisions); not started.
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised by the owner on 2026-11-01 after it ended a screencast dry take ("if we're hiding the last local window and there are terminals open, we cannot close chan - we must refuse until there's at least one window open"); filed as [fiorix/chan#8](https://github.com/fiorix/chan/issues/8); drafted for v0.121.0, with contract 2 decided by the owner on 2026-11-02 (the section Decisions); not started.
 
 ## What is there now
 

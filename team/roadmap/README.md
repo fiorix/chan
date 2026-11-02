@@ -21,37 +21,32 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.121.0
+### v0.122.0
 
-Opened 2026-11-01 at the v0.120.0 close with three items that version left: the ghostty row's Copy scrollback speed finding, deferred by the owner's triage as an item that needs its own measurement ([ghscroll]), and the tmux divider between nested splits that the one-command resize of v0.120.0 cannot reach ([tmuxnest]), raised from that row's recorded limit. The third is the Cmd+` half of the navkeys row, which waited for the owner's macOS reading ([cmdbq]).
+Opened 2026-11-02 at the v0.121.0 close with the see-through terminal bodies row that version carried ([seethru]), which waits for a reading on macOS.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Copy scrollback of a long history blocks the page][ghscroll] | landed | GA |
-| [a tmux divider between nested splits][tmuxnest] | landed | GA |
-| [Cmd+` does not switch chan windows on macOS][cmdbq] | closed | GA |
-| [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | landed | GA |
-| [hiding the last shown window quits chan][lastwin] | landed | reading |
-| [keys pass under an open confirm][confirmkeys] | landed | GA |
-| [a window loses its drop highlights][dndloss] | landed | GA |
-| [the editor's URL bubble overlaps its label][urlbubble] | landed | GA |
-| [chan close can answer before the devserver][forgetflake] | landed | GA |
-| [Delete stops working in a ghostty terminal][ghdelete] | landed | GA |
 | [terminal bodies turn see-through][seethru] | raised | reading |
 
-[ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
-[tmuxnest]: v0.121.0/a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan.md
-[cmdbq]: v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md
-[cachixpins]: v0.121.0/the-cachix-publication-keeps-every-releases-pins-and-fills-the-cache.md
-[lastwin]: v0.121.0/hiding-the-last-shown-window-quits-chan-and-kills-the-hidden-windows-terminals.md
-[confirmkeys]: v0.121.0/keys-pass-under-an-open-confirm-so-one-enter-answers-it-and-commits-hybrid-nav.md
-[dndloss]: v0.121.0/a-window-stops-showing-drop-highlights-until-it-is-hidden-and-shown.md
-[urlbubble]: v0.121.0/the-editors-url-bubble-overlaps-its-label-and-outlives-its-tab.md
-[forgetflake]: v0.121.0/chan-close-can-answer-before-the-devserver-records-the-workspace-off.md
-[ghdelete]: v0.121.0/delete-stops-working-in-a-ghostty-terminal-while-typing-still-works.md
-[seethru]: v0.121.0/terminal-bodies-turn-see-through-after-an-app-switch.md
+[seethru]: v0.122.0/terminal-bodies-turn-see-through-after-an-app-switch.md
 
 ## Completed
+
+### v0.121.0
+
+Shipped 2026-11-02; see [release-v0.121.0](../release/release-v0.121.0.md). Nine of the version's eleven rows shipped with no release candidate, by the owner's word, each built on its own branch, reviewed against its item with its tests replayed red on the old code, and merged after the full gate; those rows are in [`done/`](done/). The Cmd+` row closed with no code change on the owner's reading, and the see-through terminal bodies row moved to v0.122.0 for its reading on macOS.
+
+- [a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan](done/a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan.md) - A tmux divider between nested splits cannot be resized from chan.
+- [a-window-stops-showing-drop-highlights-until-it-is-hidden-and-shown](done/a-window-stops-showing-drop-highlights-until-it-is-hidden-and-shown.md) - A window stops showing drop highlights until it is hidden and shown.
+- [chan-close-can-answer-before-the-devserver-records-the-workspace-off](done/chan-close-can-answer-before-the-devserver-records-the-workspace-off.md) - chan close can answer before the devserver records the workspace off.
+- [cmd-backquote-does-not-switch-chan-windows-on-macos](done/cmd-backquote-does-not-switch-chan-windows-on-macos.md) - closed with no code change, read working on macOS: Cmd+` does not switch chan windows on macOS.
+- [copy-scrollback-of-a-long-ghostty-history-blocks-the-page](done/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md) - Copy scrollback of a long ghostty history blocks the page.
+- [delete-stops-working-in-a-ghostty-terminal-while-typing-still-works](done/delete-stops-working-in-a-ghostty-terminal-while-typing-still-works.md) - Delete stops working in a ghostty terminal while typing still works.
+- [hiding-the-last-shown-window-quits-chan-and-kills-the-hidden-windows-terminals](done/hiding-the-last-shown-window-quits-chan-and-kills-the-hidden-windows-terminals.md) - Hiding the last shown window quits chan and kills the hidden windows' terminals.
+- [keys-pass-under-an-open-confirm-so-one-enter-answers-it-and-commits-hybrid-nav](done/keys-pass-under-an-open-confirm-so-one-enter-answers-it-and-commits-hybrid-nav.md) - Keys pass under an open confirm, so one Enter answers it and commits Hybrid Nav.
+- [the-cachix-publication-keeps-every-releases-pins-and-fills-the-cache](done/the-cachix-publication-keeps-every-releases-pins-and-fills-the-cache.md) - The Cachix publication keeps every release's pins and fills the cache.
+- [the-editors-url-bubble-overlaps-its-label-and-outlives-its-tab](done/the-editors-url-bubble-overlaps-its-label-and-outlives-its-tab.md) - The editor's URL bubble overlaps its label and outlives its tab.
 
 ### v0.120.1
 

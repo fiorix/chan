@@ -1,6 +1,8 @@
 # Cmd+` does not switch chan windows on macOS
 
-Status: carried into v0.121.0 at the v0.120.0 GA. The row it came from ([Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS](../done/hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md)) shipped its stage letters in v0.120.0 (`4dfcdb2c3`); this half waited for the owner's macOS reading, which had not arrived by the cut.
+Status: closed at [v0.121.0](../../release/release-v0.121.0.md) with no code change: the owner's macOS reading on the v0.120.1 code found Cmd+` cycling chan's windows from every focus.
+
+Record before the release: carried into v0.121.0 at the v0.120.0 GA. The row it came from ([Hybrid Nav's stage keys miss their mnemonics, and Cmd+` does not switch chan windows on macOS](hybrid-nav-stage-keys-miss-their-mnemonics-and-cmd-backquote-does-not-switch-chan-windows-on-macos.md)) shipped its stage letters in v0.120.0 (`4dfcdb2c3`); this half waited for the owner's macOS reading, which had not arrived by the cut.
 
 ## What was asked
 

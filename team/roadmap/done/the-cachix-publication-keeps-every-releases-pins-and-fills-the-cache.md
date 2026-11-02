@@ -1,6 +1,8 @@
 # The Cachix publication keeps every release's pins and fills the cache
 
-Status: raised by the owner on 2026-11-01 during the v0.120.1 cut ("our cachix step should delete old releases like keep the last 5 or 10 before we hit the quota"); drafted by the lead for v0.121.0, with N decided by the owner on 2026-11-02 (the section Decisions); not started.
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised by the owner on 2026-11-01 during the v0.120.1 cut ("our cachix step should delete old releases like keep the last 5 or 10 before we hit the quota"); drafted by the lead for v0.121.0, with N decided by the owner on 2026-11-02 (the section Decisions); not started.
 
 ## What is there now
 

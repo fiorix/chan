@@ -46,4 +46,4 @@ Acceptance 2 remains pending Alex's Mac reading of Cmd+` from the listed focuses
 
 ## 2026-11-01 close
 
-The stage letters shipped in v0.120.0 (`4dfcdb2c3`). The Cmd+` half waited for the owner's macOS reading (the round's check 1), not received by the GA cut; it is carried into v0.121.0 as its own item ([cmdbq](../v0.121.0/cmd-backquote-does-not-switch-chan-windows-on-macos.md)), with the reading as its first step.
+The stage letters shipped in v0.120.0 (`4dfcdb2c3`). The Cmd+` half waited for the owner's macOS reading (the round's check 1), not received by the GA cut; it is carried into v0.121.0 as its own item ([cmdbq](cmd-backquote-does-not-switch-chan-windows-on-macos.md)), with the reading as its first step.

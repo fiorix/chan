@@ -1,6 +1,8 @@
 # A tmux divider between nested splits cannot be resized from chan
 
-Status: raised at the v0.120.0 close from the limit the tmux pane resize row recorded; the nested divider accepted as a limitation and the item retargeted to the manual by the owner on 2026-11-02 (the section Decisions); landed, closes at the GA.
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised at the v0.120.0 close from the limit the tmux pane resize row recorded; the nested divider accepted as a limitation and the item retargeted to the manual by the owner on 2026-11-02 (the section Decisions); landed, closes at the GA.
 
 ## What was seen
 

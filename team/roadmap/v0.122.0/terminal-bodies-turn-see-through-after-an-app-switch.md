@@ -1,6 +1,8 @@
 # Terminal bodies turn see-through after an app switch
 
-Status: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS 27.0.1; accepted for v0.121.0 by the owner the same day ("lets fix these items"). The trigger is not known.
+Status: carried into v0.122.0 at the v0.121.0 GA on 2026-11-02, still raised for a decision.
+
+Record before the release: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS 27.0.1; accepted for v0.121.0 by the owner the same day ("lets fix these items"). The trigger is not known.
 
 ## What is there now
 

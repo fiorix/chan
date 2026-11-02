@@ -1,6 +1,8 @@
 # Delete stops working in a ghostty terminal while typing still works
 
-Status: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS 27.0.1; accepted for v0.121.0 by the owner the same day ("lets fix these items"). The trigger is not known; the owner suspects the window's Computers launcher toggle.
+Status: shipped in [v0.121.0](../../release/release-v0.121.0.md).
+
+Record before the release: raised by the owner on 2026-11-02 from chan-desktop 0.120.1 on macOS 27.0.1; accepted for v0.121.0 by the owner the same day ("lets fix these items"). The trigger is not known; the owner suspects the window's Computers launcher toggle.
 
 ## What is there now
 
