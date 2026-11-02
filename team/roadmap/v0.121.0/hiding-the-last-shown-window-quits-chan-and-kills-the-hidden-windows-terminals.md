@@ -19,6 +19,8 @@ Hiding takes the same path. `bury_window_now` (`desktop/src-tauri/src/serve.rs`)
 
 The owner's word of 2026-11-02 on contract 2, between refusing and asking through the quit confirmation, on the lead's recommendation to refuse: "refuse". That `--force` does not override the refusal follows the owner's words in the status line ("we must refuse until there's at least one window open").
 
+The owner's word of 2026-11-02 on the close of a window whose last tab closed, which the review left to the owner beside the close-window command it asked to guard: "i think f2 as recorded is fine.. if the user gets the dialog and still choses to close, they should know the app will close". That close stays outside the guard, as the Closing records.
+
 ## Next
 
 Review and merge, then the owner's macOS hand check.
