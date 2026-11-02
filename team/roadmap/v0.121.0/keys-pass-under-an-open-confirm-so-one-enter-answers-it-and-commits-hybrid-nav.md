@@ -1,6 +1,6 @@
 # Keys pass under an open confirm, so one Enter answers it and commits Hybrid Nav
 
-Status: raised by the owner on 2026-11-01 from a screencast dry take, where it killed a running terminal; read from that take's recording and the code at v0.120.1, drafted for v0.121.0.
+Status: raised by the owner on 2026-11-01 from a screencast dry take, where it killed a running terminal; read from that take's recording and the code at v0.120.1, drafted for v0.121.0, and accepted by the owner on 2026-11-02 ("yes", to the lead's question whether to accept it for the build); not started.
 
 ## What is there now
 

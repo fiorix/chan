@@ -1,6 +1,6 @@
 # The Cachix publication keeps every release's pins and fills the cache
 
-Status: raised by the owner on 2026-11-01 during the v0.120.1 cut ("our cachix step should delete old releases like keep the last 5 or 10 before we hit the quota"); drafted by the lead for v0.121.0.
+Status: raised by the owner on 2026-11-01 during the v0.120.1 cut ("our cachix step should delete old releases like keep the last 5 or 10 before we hit the quota"); drafted by the lead for v0.121.0, with N decided by the owner on 2026-11-02 (the section Decisions); not started.
 
 ## What is there now
 
@@ -8,11 +8,15 @@ Status: raised by the owner on 2026-11-01 during the v0.120.1 cut ("our cachix s
 
 ## Desired contract
 
-1. The publication keeps the pins of the last N released versions (N a workflow input defaulting to 10, the owner's "5 or 10") and removes the older pins before pushing the new closures, so Cachix's garbage collection reclaims the unpinned closures and a release never meets the quota because of its predecessors.
+1. The publication keeps the pins of the last N released versions (N a workflow input defaulting to 10, the owner's decision; rc pins, none of which are made today, do not count toward N) and removes the older pins before pushing the new closures, so Cachix's garbage collection reclaims the unpinned closures and a release never meets the quota because of its predecessors.
 2. Versions are ordered by their semantic version, not by pin creation time, and a dry run (`publish=false`) lists what it would remove without removing anything; a removal failure stays red and attributable in its own step and fails nothing else, like every downstream target.
 3. The removal uses Cachix's own interface for pins (the CLI's pin commands or the API's pin deletion, read from Cachix's documentation when the row is built) with the existing `CACHIX_AUTH_TOKEN`; the README's Cachix section states the retention and how to raise it.
 4. A test pins the selection (which pin names fall outside the last N for a given list, including rc and patch versions) without touching Cachix.
 
+## Decisions
+
+The owner's word of 2026-11-02 on N: "keep the last 10 versions". The same exchange carried the lead's recommendation that rc pins not count toward N; the owner's answer did not take it up separately, and with no rc pins made today it changes nothing until one is.
+
 ## Next
 
-A decision on N and whether rc pins (none are made today) count; then the row.
+The row.

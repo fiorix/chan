@@ -1,6 +1,6 @@
 # A tmux divider between nested splits cannot be resized from chan
 
-Status: raised at the v0.120.0 close from the limit the tmux pane resize row recorded; not started.
+Status: raised at the v0.120.0 close from the limit the tmux pane resize row recorded; the nested divider accepted as a limitation and the item retargeted to the manual by the owner on 2026-11-02 (the section Decisions); landed, closes at the GA.
 
 ## What was seen
 
@@ -8,11 +8,13 @@ v0.120.0 resizes a tmux window's panes from chan with one `resize-pane` per divi
 
 ## Desired contract
 
-1. Every divider of a tmux window is resizable from chan: chan serializes its layout tree with the dragged sizes into tmux's layout string (the form `list-windows -F '#{window_layout}'` prints, with its checksum) and applies it with `select-layout`, so tmux lays the window out exactly as dragged within its own bounds and answers with the layout change chan already reconciles.
-2. The one-command path stays for the dividers it reaches, or goes, as the measurement of the two prefers.
+1. The nested divider stays a limitation: a divider that no single pane's `resize-pane` reaches does not drag (`startResize` in `Workspace.svelte` returns before the drag starts), as v0.120.0 shipped it.
+2. The manual's tmux paragraph (`web/packages/marketing/src/pages/manual/terminal.html`) states what v0.120.0 shipped instead of "dragging a divider moves nothing in tmux yet": a divider drag resizes tmux's panes and settles where tmux lays them out, and a divider between nested splits that no single pane's resize reaches does not drag.
 
 ## Acceptance
 
-1. chan-tmux tests pin the layout string and its checksum against tmux's own for a set of trees (a plain client's `#{window_layout}` as the oracle), and the `select-layout` command's text.
-2. Web tests pin a drag of a nested divider sending the layout and taking the sizes from the layout change.
-3. By hand with a real tmux: a nested divider moves in tmux and in chan alike.
+1. The manual paragraph reads as contract 2, checked against `startResize` and its release handler in `Workspace.svelte`.
+
+## Decisions
+
+The owner's word of 2026-11-02 on the lead's recommendation to build the layout-string resize through `select-layout`: "accept it as limitation". Then "yes" to the lead's question whether the item should become the fix for the stale manual sentence, which v0.120.0's resize left describing a drag that moves nothing in tmux, instead of being withdrawn. The layout-string resize is not built.

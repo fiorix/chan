@@ -1,6 +1,6 @@
 # Hiding the last shown window quits chan and kills the hidden windows' terminals
 
-Status: raised by the owner on 2026-11-01 after it ended a screencast dry take ("if we're hiding the last local window and there are terminals open, we cannot close chan - we must refuse until there's at least one window open"); filed as [fiorix/chan#8](https://github.com/fiorix/chan/issues/8); drafted for v0.121.0.
+Status: raised by the owner on 2026-11-01 after it ended a screencast dry take ("if we're hiding the last local window and there are terminals open, we cannot close chan - we must refuse until there's at least one window open"); filed as [fiorix/chan#8](https://github.com/fiorix/chan/issues/8); drafted for v0.121.0, with contract 2 decided by the owner on 2026-11-02 (the section Decisions); not started.
 
 ## What is there now
 
@@ -11,10 +11,14 @@ Hiding takes the same path. `bury_window_now` (`desktop/src-tauri/src/serve.rs`)
 ## Desired contract
 
 1. Hiding the last shown local window is refused while any terminal session of the library is alive. `cs window hide` exits non-zero with a sentence that says why and what to do (show or open another window first); the close-confirm overlay's Hide and the launcher's Hide action and `h` key refuse it the same way, with the reason shown where the gesture was made. With no live terminal the hide behaves as today.
-2. The same holds for `cs window rm` and the overlay's Close on the last shown window while hidden windows hold live terminals: refused with the reason, or routed through the quit confirmation; which of the two is the decision below.
+2. The same holds for `cs window rm` and the overlay's Close on the last shown window while hidden windows hold live terminals: refused with the reason, as the hide is, and not routed through the quit confirmation. `cs window rm --force` overrides the window's own live shells, as today, but not this refusal.
 3. `desktop/design.md`, Quitting, states the guard next to the last-window exit it qualifies.
 4. Tests pin the rule where it is decided (shown local windows counted against live sessions) and the `cs window hide` refusal; the last-window exit with no live terminal keeps its current test.
 
+## Decisions
+
+The owner's word of 2026-11-02 on contract 2, between refusing and asking through the quit confirmation, on the lead's recommendation to refuse: "refuse". That `--force` does not override the refusal follows the owner's words in the status line ("we must refuse until there's at least one window open").
+
 ## Next
 
-A decision on contract 2 (refuse, or ask through the quit confirmation), then the row.
+The row, tests red first.
