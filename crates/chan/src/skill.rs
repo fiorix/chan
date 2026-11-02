@@ -511,7 +511,7 @@ when_to_use: >-
 const SKILL_LEAD: &str = "\
 # Working in chan
 
-chan is an IDE in a single binary, with terminals and workspace tools.
+chan is a supercharged terminal emulator with workspace tools around it.
 Fetch a topic with its command below; no server or terminal is required.
 `chan dump-skill` and `cs dump-skill` print the same manual. Topics over
 8 KiB list parts: fetch each with `--topic <slug> --part <number>`.

@@ -2,8 +2,16 @@
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#what-is-chan">What is chan?</a></h2>
   </div>
-  <p>Chan is a scriptable terminal emulator for local and remote development. Arrange windows with split panes, switch each pane between its A and B sides, and open tabs for terminals, files, and other applications. Use the mouse, keyboard, or <code>cs</code> commands to control your environment. The <a href="/manual/terminal/">terminal chapter</a> covers shell tools and tmux control mode; <a href="/manual/devserver/">Devserver</a> covers remote connections.</p>
-  <p>A directory can become a workspace with its own index, <a href="/manual/search/">BM25 search</a>, document links, and graph. The <a href="/manual/editor/">editor</a> supports Markdown, Excalidraw, and slide decks. <a href="/manual/collaboration/">Shared sessions</a> coordinate participants and leadership, while <a href="/manual/extensions/">extensions</a> add your own applications as tabs.</p>
+  <p>chan is a supercharged terminal emulator. It is easiest to understand as layers, each one built on the previous:</p>
+  <ul>
+    <li><strong>A terminal emulator.</strong> Terminals open in tabs and split panes inside windows. The shell and its scrollback live in a server process, not in the window, so a window can close or reload and the shell keeps running.</li>
+    <li><strong>Scriptable.</strong> Every chan terminal has the <code>cs</code> command, which drives the window it runs in: open a file, split a pane, start a named terminal, type into another tab and read its output, copy to your clipboard, transfer files. The same actions are on the keyboard through the command launcher and on the mouse through pane menus and drag and drop. Programs report their state back to the tab, and the Rich Prompt composes Markdown and images into a program's input.</li>
+    <li><strong>A multiplexer, and tmux.</strong> chan's own multiplexer is windows, panes, tabs, and named sessions that outlive the window. It also speaks tmux control mode: a <code>tmux -CC</code> run in a chan terminal, locally or over ssh, turns that tmux server's windows and panes into chan windows and panes.</li>
+    <li><strong>Local and remote, the same.</strong> Chan Desktop runs the server on your machine. Chan Devserver runs the same server on another machine, and your desktop connects to it over any TCP tunnel you already have: an <code>ssh -L</code> port forward, a VM, a container. Disconnecting leaves everything running there.</li>
+    <li><strong>Always on, through a gateway.</strong> A devserver can also dial out to a chan gateway, which publishes it behind sign-in to you and to the people you share it with, from any browser or desktop. The gateway is software you host yourself; chan is not an online service.</li>
+  </ul>
+  <p>Around the terminal, chan turns any directory into a workspace: it indexes the content for search, gives Markdown files autocompletion for linking to each other, builds a graph of the project, and adds built-in apps (editor, file browser, graph, dashboard, and more) as tabs beside your terminals, so you and your coding agents work on the same project side by side. <a href="/manual/collaboration/">Shared sessions</a> coordinate participants and leadership, while <a href="/manual/extensions/">extensions</a> add your own applications as tabs. chan is free and open source.</p>
+  <p>This manual describes chan from the outside. The <a href="https://github.com/fiorix/chan/blob/main/design.md">design documents</a> in the repository describe the same layers from the inside, component by component.</p>
 </section>
 
 <div class="manual-chapters">

@@ -11,7 +11,7 @@ Each scenario states behavior that must hold today. Where an executable check or
 - a terminal moves its running shell rather than spawning a new one;
 - a moved file is flushed first, and a moved draft is released rather than discarded or promoted;
 - a move the target cannot complete is refused, and refusing leaves the source tab untouched;
-- moves that must not happen — across workspaces, across libraries, between mismatched surfaces — still do not;
+- moves that must not happen (across workspaces, across libraries, between mismatched surfaces) still do not;
 - the same holds in the shipped desktop WebViews, which are not Chrome.
 
 ## Why this pack exists
@@ -75,7 +75,7 @@ A kind with no cross-window representation would have to refuse the drag outrigh
 
 The rebuilt tab carries a freshly minted id, so a move can never collide with a tab already live in the target window.
 
-**Why this is load-bearing.** The view-state kinds cross through the SESSION serializer — the same `SerTab` a window reload writes, rebuilt by the same `restore*FromSer` functions. That is deliberate: a moved tab is exactly as faithful as a reload, and a newly persisted field has to be taught to one mapping instead of two that drift apart. The coupling is the point, and it is also the risk: anything that narrows what a reload preserves silently narrows what a move preserves.
+**Why this is load-bearing.** The view-state kinds cross through the SESSION serializer: the same `SerTab` a window reload writes, rebuilt by the same `restore*FromSer` functions. That is deliberate: a moved tab is exactly as faithful as a reload, and a newly persisted field has to be taught to one mapping instead of two that drift apart. The coupling is the point, and it is also the risk: anything that narrows what a reload preserves silently narrows what a move preserves.
 
 **Run.** Set each kind to a non-default state, drag it to the other window, and compare every field named above. Reload the target window afterwards and confirm the moved tab survives that too.
 
@@ -87,7 +87,7 @@ The rebuilt tab carries a freshly minted id, so a move can never collide with a 
 
 **Expectation.** Moving a terminal moves the RUNNING shell. The target re-attaches to the same PTY by session id, keeping scrollback, working directory, group and environment; it does not spawn a fresh shell. The source releases the tab without killing the process, and no confirmation prompt appears, since a move is not a destroy. A terminal that never spawned, or whose shell exited, carries no session id: it arrives with the state a reload restores, under its name, group and working directory, with a new shell, and the target's status names what did not move, the session and, when the tab held them, its start command and environment, never their values. The source closes it without asking and keeps its Rich Prompt draft, which the moved tab names.
 
-**Why this is load-bearing.** A terminal may hold a long-running agent. Respawning it instead of moving it destroys work that has no undo, and the visual result — a terminal tab in the target window — looks identical either way.
+**Why this is load-bearing.** A terminal may hold a long-running agent. Respawning it instead of moving it destroys work that has no undo, and the visual result, a terminal tab in the target window, looks identical either way.
 
 **Run.** Start a distinctive long-running process, note the PID and scrollback, drag the terminal to the other window, and compare PID, scrollback and cwd. Confirm the source window shows no close confirmation.
 
@@ -97,7 +97,7 @@ The rebuilt tab carries a freshly minted id, so a move can never collide with a 
 
 ### TD-04 - a moved file is flushed; a moved draft is released
 
-**Expectation.** Moving a file tab with unsaved edits flushes the buffer to disk first, because the target window reads the file from disk — an unflushed move would silently roll the edits back. If that save fails, the tab stays in the source window rather than disappearing: a tab visible in two windows is recoverable, a buffer that reached neither disk nor a window is not.
+**Expectation.** Moving a file tab with unsaved edits flushes the buffer to disk first, because the target window reads the file from disk; an unflushed move would silently roll the edits back. If that save fails, the tab stays in the source window rather than disappearing: a tab visible in two windows is recoverable, a buffer that reached neither disk nor a window is not.
 
 Moving a DRAFT releases it. The draft's promote / discard / cancel flow must not run: the discard would delete the file the target just opened, the promote would move it out from under the target's path, and the cancel would leave the same draft open in both windows. An empty or pristine-seed draft is the sharpest case, because the ordinary close path discards it with no prompt at all.
 
@@ -111,11 +111,11 @@ Moving a DRAFT releases it. The draft's promote / discard / cancel flow must not
 
 ### TD-05 - a move the target cannot complete is refused
 
-**Expectation.** When the target cannot rebuild what it was handed — a snapshot naming a kind it does not know, an extension id it rejects — it refuses the drop rather than accepting an empty one. Refusing means not calling `preventDefault`, which leaves `dropEffect` at `"none"`, which is what tells the source to keep its tab. Nothing is created in the target and nothing is lost in the source.
+**Expectation.** When the target cannot rebuild what it was handed (a snapshot naming a kind it does not know, an extension id it rejects), it refuses the drop rather than accepting an empty one. Refusing means not calling `preventDefault`, which leaves `dropEffect` at `"none"`, which is what tells the source to keep its tab. Nothing is created in the target and nothing is lost in the source.
 
 **Why this is load-bearing.** `preventDefault` is the entire acceptance signal, and it used to be called BEFORE the target knew whether the rebuild worked. Any failure past that point destroyed the tab. Two windows on different builds is the realistic way to reach it.
 
-**Run.** Point two windows at one workspace from different builds — one that knows a kind the other does not — and drag that kind across. Then drag an extension tab whose id the target rejects.
+**Run.** Point two windows at one workspace from different builds, one that knows a kind the other does not, and drag that kind across. Then drag an extension tab whose id the target rejects.
 
 **Backing.** `an unrebuildable snapshot is refused instead of swallowing the tab` and `a drop is claimed only after the adopt succeeds` in `Pane.test.ts`. No browser check drives a version-mismatched pair.
 
@@ -149,9 +149,9 @@ Moving a DRAFT releases it. The draft's promote / discard / cancel flow must not
 
 **Expectation.** Everything above holds in the shipped desktop apps, between two `chan-desktop` windows: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows.
 
-**Why this cannot be automated.** Two distinct limits stack. No browser automation protocol can perform a drag between two top-level windows — CDP's drag interception is per-page, so even the Chrome arm replays the payload rather than performing the gesture. And the desktop shells expose no automation endpoint at all: `terminal-pixels.mjs` reaches WebView2 only by hosting a page inside a built `chan-desktop.exe`, which is enough to measure pixels and not enough to drive a two-window drag.
+**Why this cannot be automated.** Two distinct limits stack. No browser automation protocol can perform a drag between two top-level windows: CDP's drag interception is per-page, so even the Chrome arm replays the payload rather than performing the gesture. And the desktop shells expose no automation endpoint at all: `terminal-pixels.mjs` reaches WebView2 only by hosting a page inside a built `chan-desktop.exe`, which is enough to measure pixels and not enough to drive a two-window drag.
 
-**Why it must still be checked.** These engines have already diverged from Chrome on this exact surface. WKWebView mangles a MIME type containing `:` or `|`, which is why the drag scope is hex-encoded through `dragScopeMimeToken` — without that encoding every drop is rejected, and no Chrome check can see it. `webview-flip-render.py` exists because WebKitGTK ignores a CSS property Chrome honors. A green web suite is not evidence about these engines; it is evidence about Chrome.
+**Why it must still be checked.** These engines have already diverged from Chrome on this exact surface. WKWebView mangles a MIME type containing `:` or `|`, which is why the drag scope is hex-encoded through `dragScopeMimeToken`; without that encoding every drop is rejected, and no Chrome check can see it. `webview-flip-render.py` exists because WebKitGTK ignores a CSS property Chrome honors. A green web suite is not evidence about these engines; it is evidence about Chrome.
 
 **Run.** On each of the three platforms, with a release desktop build: open two windows on one workspace (`cs window new`), and perform TD-01 for every kind, TD-03, TD-04's draft case, and TD-06's refusal, using a real pointer drag. Record the platform, the OS version, the app version and the commit.
 

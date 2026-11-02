@@ -13,7 +13,7 @@
 Name:           chan-desktop
 Version:        %(echo %{upstream_version} | tr - '~')
 Release:        1%{?dist}
-Summary:        Desktop terminal multiplexer and workspace manager
+Summary:        Supercharged terminal emulator, desktop app
 License:        Apache-2.0
 URL:            https://chan.app
 Source0:        chan-vendored-%{upstream_version}.tar.xz
@@ -46,11 +46,11 @@ Requires:       systemd
 Conflicts:      chan
 
 %description
-chan-desktop is the native shell for chan, an IDE in a single binary: a
-terminal emulator and multiplexer plus a workspace manager. It embeds the
-chan server and web app in a WebKitGTK window and doubles as the chan/cs
-command line: invoked as chan or cs it dispatches the CLI before any GUI
-init.
+chan-desktop is the native shell for chan, a supercharged terminal
+emulator: scriptable, multiplexed, the same locally and on remote
+machines, with workspaces for any directory. It embeds the chan server
+and web app in a WebKitGTK window and doubles as the chan/cs command
+line: invoked as chan or cs it dispatches the CLI before any GUI init.
 
 %prep
 %autosetup -n chan-%{upstream_version}

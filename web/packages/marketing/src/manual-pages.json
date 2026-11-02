@@ -2,12 +2,12 @@
   {
     "slug": "",
     "title": "Overview",
-    "description": "A guide to chan: from your first window to remote workspaces and agent teams."
+    "description": "A guide to chan: from your first terminal to remote devservers, gateways, and agent teams."
   },
   {
     "slug": "install",
     "title": "Install & first run",
-    "description": "Install chan, open the Computers window, and turn a directory into a workspace."
+    "description": "Install chan, open the Computers screen, and turn a directory into a workspace."
   },
   {
     "slug": "navigation",

@@ -4,7 +4,7 @@ The canonical home for agent and contributor standards in this repo. Read this f
 
 ## What This Project Is
 
-`chan` is an IDE in a single binary. It is a terminal emulator and multiplexer, usable locally or over a remote connection, together with a workspace manager that provides search, terminals, a text editor, file browser, graph, and dashboard as tiling tabs and panes. A workspace can be any directory and is commonly associated with a git repository; a window can also run without one, as terminals and a file surface over the machine's own filesystem.
+`chan` is a supercharged terminal emulator: scriptable from the shell (`cs`), the keyboard and the mouse; the same locally and on remote machines; a multiplexer of its own plus tmux control mode; devservers reached over a TCP tunnel or through a self-hosted gateway. Around the terminal it turns any directory into a workspace (search, editor, file browser, graph, dashboard, agent teams) served as tiling tabs and panes. A workspace is commonly a git repository; a window can also run without one, as terminals and a file surface over the machine's own filesystem. The product framing and its layers are stated once, in [`../design.md`](../design.md); every other description of chan in this repository follows it.
 
 External agents run in embedded terminals and can connect through the in-process MCP server; they coordinate through `cs` (the chan-shell control client), and Team Work provisions agent teams into named tabs. The CLI manages the workspace registry and contents, search, the devserver, and self-upgrade.
 

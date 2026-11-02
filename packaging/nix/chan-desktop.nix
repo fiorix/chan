@@ -121,7 +121,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   '';
 
   meta = {
-    description = "Desktop terminal multiplexer and workspace manager";
+    description = "Supercharged terminal emulator, desktop app";
     homepage = "https://chan.app";
     license = lib.licenses.asl20;
     mainProgram = "chan-desktop";

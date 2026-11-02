@@ -84,9 +84,9 @@ async function main() {
     renderPage(baseTemplate, {
       active: "home",
       bodyClass: "home-page entry-page",
-      title: "chan - A supercharged terminal emulator",
+      title: "chan - a supercharged terminal emulator",
       description:
-        "A supercharged terminal emulator for local and remote work. Bring tmux, Chan devservers, and always-on gateway environments together in the Computers window.",
+        "Chan is a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces and agent teams. Free and open source on macOS, Windows, Linux, and FreeBSD.",
       content: fillTemplate(homeTemplate, { version, ...sharedTemplateValues }),
       headExtra: homeHead,
     }),
@@ -529,6 +529,9 @@ function distPathForUrl(url) {
 function validateNoStalePublicCopy(file, text) {
   const forbidden = [
     /\bCLI[- ]only\b/i,
+    /\bIDE\b/,
+    /workspace manager/i,
+    /a new kind of/i,
     /assistant pane/i,
     /in-app assistant/i,
     /no telemetry/i,

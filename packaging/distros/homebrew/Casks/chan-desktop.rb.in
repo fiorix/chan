@@ -8,7 +8,7 @@ cask "chan-desktop" do
 
   url "https://github.com/fiorix/chan/releases/download/v#{version}/Chan_#{version}.dmg"
   name "Chan"
-  desc "Desktop terminal multiplexer and workspace manager"
+  desc "Supercharged terminal emulator, desktop app"
   homepage "https://chan.app/"
 
   livecheck do

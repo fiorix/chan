@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "chan is an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager for directories on disk."
+description = "chan is a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces for any directory on disk."
 publish = false
 
 [[bin]]
@@ -118,10 +118,12 @@ maintainer = "Alexandre Fiori <fiorix@gmail.com>"
 copyright = "2026 Alexandre Fiori"
 license-file = ["../../LICENSE", "0"]
 extended-description = """
-chan is an IDE in a single binary: a terminal emulator and multiplexer
-plus a workspace manager for directories on disk. It provides search,
-terminals, a text editor, file browser, graph, and dashboard as tiling
-tabs and panes."""
+chan is a supercharged terminal emulator: scriptable from the shell,
+the keyboard and the mouse; the same locally and on remote machines; a
+multiplexer of its own plus tmux control mode. It turns any directory
+into a workspace with search, a Markdown editor, a file browser, a
+graph and a dashboard as tiling tabs and panes. This package is the
+headless server and command line."""
 section = "utility"
 priority = "optional"
 assets = [
@@ -132,7 +134,7 @@ assets = [
 
 [package.metadata.generate-rpm]
 license = "Apache-2.0"
-summary = "Headless terminal multiplexer and workspace manager"
+summary = "Supercharged terminal emulator, headless server and CLI"
 # cargo-generate-rpm resolves asset `source` paths relative to
 # the package directory (`crates/chan/`), unlike cargo-deb which
 # is workspace-aware. The binary lives at the workspace target

@@ -764,17 +764,20 @@ the focused tab's kind.
 
 /// One line of `chan --help`. Kept separate from the Cargo description,
 /// which is package metadata with its own downstream constraints.
-pub(super) const CHAN_ABOUT: &str = "Terminal multiplexer and workspace manager";
+pub(super) const CHAN_ABOUT: &str = "Supercharged terminal emulator: scriptable, local and remote";
 
 /// Orientation for anyone (or anything) meeting chan for the first time.
 /// This is the opening section of `chan dump-skill`, so it carries the one
 /// distinction everything else depends on: whether you are in a workspace
 /// window or a standalone terminal.
 pub(super) const CHAN_LONG_ABOUT: &str = "\
-An IDE in a single binary: a terminal emulator and multiplexer plus a
-workspace manager.
+A supercharged terminal emulator: scriptable from the shell, the keyboard
+and the mouse; the same locally and on remote machines; a multiplexer of
+its own plus tmux control mode (tmux -CC); devservers reached over a TCP
+tunnel or through a self-hosted gateway. Around the terminal, any
+directory becomes a workspace.
 
-`chan serve PATH` registers a folder as a workspace and serves it. The
+`chan serve PATH` registers a directory as a workspace and serves it. The
 workspace indexes its content for search, builds a graph from the links,
 tags, and mentions in your documents, and hosts the editor, terminals,
 file browser, graph, dashboard, and Team Work over that one tree.

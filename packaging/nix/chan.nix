@@ -77,7 +77,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   '';
 
   meta = {
-    description = "Headless terminal multiplexer and workspace manager";
+    description = "Supercharged terminal emulator, headless server and CLI";
     homepage = "https://chan.app";
     license = lib.licenses.asl20;
     mainProgram = "chan";

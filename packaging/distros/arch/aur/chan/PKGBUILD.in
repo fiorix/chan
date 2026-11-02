@@ -6,7 +6,7 @@
 pkgname=chan
 pkgver=@PKGVER@
 pkgrel=@PKGREL@
-pkgdesc='Headless terminal multiplexer and workspace manager'
+pkgdesc='Supercharged terminal emulator, headless server and CLI'
 # Native CI builds both architectures; aarch64 is observed-only for v0.73.0.
 arch=('x86_64' 'aarch64')
 url='https://chan.app'

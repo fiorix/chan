@@ -33,6 +33,7 @@
   <h2><a class="heading-anchor" href="#code-reports">Code reports and analysis</a></h2>
 <p>Chan's <strong>chan-reports</strong> code analysis appears in <strong>Details</strong>. A source file shows its detected language and counts of code, comments, blank lines, and complexity. A directory shows a rollup for its subtree, with a per-language breakdown. The workspace's total is also available in the <a href="/manual/dashboard/">Dashboard</a>.</p>
 <p>Choose a language in the report to open its graph view. These reports help locate the size and distribution of code across a repository. Counts follow the workspace's included files and update as files change. Manage them in <strong>Settings → This workspace → chan-reports</strong>. Turning the feature off removes generated report data; enabling it again rebuilds the reports.</p>
+  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/crates/chan-report/design.md">crates/chan-report/design.md</a> describes the counting rules and the COCOMO model.</p>
 </section>
 
 <section class="manual-block" id="cocomo">

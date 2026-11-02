@@ -71,7 +71,7 @@
     <figcaption>The Add devserver card, turned over to its form. This is a live mock too: fill it in, add, and connect.</figcaption>
   </figure>
   <h3 id="gateways"><a class="heading-anchor" href="#gateways">Connect through a gateway</a></h3>
-  <p>A gateway reaches your devservers, and devservers shared with you, through its tunnel instead of a connect script. Press <code>g</code> on the Computers screen, or click its title, to flip to the <strong>Gateways</strong> screen, then:</p>
+  <p>A gateway is a set of services you host yourself; it is not an online service. It reaches your devservers, and devservers shared with you, through its tunnel instead of a connect script. Press <code>g</code> on the Computers screen, or click its title, to flip to the <strong>Gateways</strong> screen, then:</p>
   <ol>
     <li>Turn to the <strong>Add gateway</strong> card and enter the gateway's URL (<code>https://...</code>) and an optional name.</li>
     <li>Click the gateway card's on/off connection control, or select its header and press <code>o</code>, then sign in in your browser. One sign-in covers the whole account.</li>
@@ -83,4 +83,5 @@
   <p>The clipboard and file transfer work across the connection too: see <a href="/manual/terminal/#copy-paste">Copy and paste freely</a> and <a href="/manual/terminal/#download-upload">Download and upload freely</a> on the Terminal page.</p>
   <p>To inspect connected clients and manage workspace leadership, see <a href="/manual/collaboration/">Collaboration &amp; sessions</a>.</p>
   <p>On Linux devservers managed by systemd with fdstore support, you can restart the devserver process without losing your shells: the PTY file descriptors are parked in the systemd fdstore while the devserver restarts, then loaded back up, so your agents continue working and your terminals are always alive.</p>
+  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/design.md#runtime-shapes">design.md</a> describes the devserver over a TCP tunnel and through a gateway, and <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway/design.md</a> the gateway you host.</p>
 </section>

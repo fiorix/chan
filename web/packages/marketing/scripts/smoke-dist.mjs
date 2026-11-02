@@ -38,6 +38,7 @@ const checks = [
   { path: "/", status: 200, excludes: "data-carousel" },
   { path: "/", status: 200, excludes: 'src="/assets/home/team-spawn.png"' },
   { path: "/", status: 200, includes: "A supercharged" },
+  { path: "/", status: 200, excludes: "IDE" },
   { path: "/", status: 200, excludes: "launcher-demo.js" },
   { path: "/", status: 200, includes: 'href="/install/">Install' },
   { path: "/", status: 200, includes: 'href="/animations/"' },

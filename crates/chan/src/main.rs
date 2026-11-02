@@ -1,4 +1,4 @@
-// chan: a terminal emulator and multiplexer plus a workspace manager.
+// chan: a supercharged terminal emulator; the layers are in the root design.md.
 //
 // The standalone `chan` binary. The whole CLI surface lives in the `chan`
 // library (`src/lib.rs`) so chan-desktop can dispatch `chan` in-process too;

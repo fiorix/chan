@@ -15,7 +15,7 @@
 Name:           chan
 Version:        %(echo %{upstream_version} | tr - '~')
 Release:        1%{?dist}
-Summary:        Headless terminal multiplexer and workspace manager
+Summary:        Supercharged terminal emulator, headless server and CLI
 License:        Apache-2.0
 URL:            https://chan.app
 Source0:        chan-vendored-%{upstream_version}.tar.xz
@@ -36,10 +36,12 @@ BuildRequires:  systemd-rpm-macros
 Requires:       systemd
 
 %description
-chan is an IDE in a single binary: a terminal emulator and multiplexer
-plus a workspace manager for directories on disk. It provides search,
-terminals, a text editor, file browser, graph, and dashboard as tiling
-tabs and panes.
+chan is a supercharged terminal emulator: scriptable from the shell,
+the keyboard and the mouse; the same locally and on remote machines; a
+multiplexer of its own plus tmux control mode. It turns any directory
+into a workspace with search, a Markdown editor, a file browser, a
+graph and a dashboard as tiling tabs and panes. This package is the
+headless server and command line.
 
 %prep
 %autosetup -n chan-%{upstream_version}

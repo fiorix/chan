@@ -37,8 +37,8 @@
       "icons/icon.png"
     ],
     "category": "Productivity",
-    "shortDescription": "Terminal multiplexer and workspace manager",
-    "longDescription": "Chan Desktop is an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager.",
+    "shortDescription": "Supercharged terminal emulator",
+    "longDescription": "Chan Desktop is a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces for any directory.",
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "Developer ID Application: Alexandre Fiori (W73XV5CK3N)"

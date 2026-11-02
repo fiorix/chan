@@ -1,6 +1,6 @@
 # chan-desktop
 
-Desktop edition of [chan](https://chan.app), an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager.
+Desktop edition of [chan](https://chan.app), a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces for any directory. The product framing is in [`../design.md`](../design.md).
 
 chan-desktop is a Tauri shell that embeds `chan-server` for normal local workspaces. Non-CLI users get a familiar app icon, a launcher for managing workspaces that toggles inside every window, and a one-click "open workspace" flow without a separate per-workspace `chan serve` process.
 

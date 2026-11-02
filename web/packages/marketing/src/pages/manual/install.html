@@ -34,7 +34,7 @@
   <p>The Computers screen is a carousel of cards. Turn it with the arrows at its sides or the Left and Right keys:</p>
   <ul>
     <li><strong>All windows</strong>, the first card, lists every window on every machine, shown or hidden.</li>
-    <li><strong>This machine</strong> has two buttons: <strong>New terminal</strong> opens a standalone terminal window, and <strong>New workspace</strong> registers a folder as a workspace. Its terminals and workspaces are listed below them.</li>
+    <li><strong>This machine</strong> has two buttons: <strong>New terminal</strong> opens a standalone terminal window, and <strong>New workspace</strong> registers a directory as a workspace. Its terminals and workspaces are listed below them.</li>
     <li>Each devserver you add gets its own card, and <strong>Add devserver</strong> is the last card. See <a href="/manual/devserver/#connect">Connect from the main window</a>.</li>
   </ul>
   <p>The screen works from the keyboard too; see <a href="/manual/navigation/#windows">Windows and the Computers screen</a>.</p>
@@ -44,7 +44,7 @@
       <div class="launcher-fallback shot-placeholder-frame">interactive demo (enable JavaScript)</div>
       <div class="manual-callouts" aria-hidden="true">
         <p class="manual-callout callout-terminal"><strong>New terminal</strong> opens a standalone terminal window.</p>
-        <p class="manual-callout callout-workspace"><strong>New workspace</strong> turns a folder into a workspace.</p>
+        <p class="manual-callout callout-workspace"><strong>New workspace</strong> turns a directory into a workspace.</p>
       </div>
     </div>
     <figcaption>The Computers screen before any workspace exists. This is a live mock: click the buttons.</figcaption>
@@ -80,4 +80,5 @@
   </ul>
   <p>You can quit and reopen Chan Desktop and your windows and layouts are restored. Local terminals keep their layout, but their shells are restarted.</p>
   <p>Everything you can do in Chan Desktop, standalone terminals and workspaces alike, also works on a remote machine through Chan Devserver.</p>
+  <p class="minor">Under the hood: <a href="https://github.com/fiorix/chan/blob/main/design.md#the-workspace">design.md</a> describes what a workspace is made of and how it is served, and <a href="https://github.com/fiorix/chan/blob/main/crates/chan-workspace/design.md">crates/chan-workspace/design.md</a> the core behind it.</p>
 </section>
