@@ -28,8 +28,10 @@ Opened 2026-11-02 at the v0.121.0 close with the see-through terminal bodies row
 | Item | State | Next |
 | --- | --- | --- |
 | [terminal bodies turn see-through][seethru] | withdrawn | GA |
+| [the Computers launcher takes no keys after an app switch][launcherkeys] | landed | GA |
 
 [seethru]: v0.122.0/terminal-bodies-turn-see-through-after-an-app-switch.md
+[launcherkeys]: v0.122.0/the-computers-launcher-takes-no-keys-after-an-app-switch.md
 
 ## Completed
 
