@@ -100,9 +100,16 @@
     state.animation.finished.then(finish, () => {});
     state.timer = setTimeout(finish, delay + SLIDE_MS);
   }
+  // While the launcher shows, the host page carries this marker on its root.
+  // The launcher is the window's first responder; the host's terminal reads
+  // the marker and leaves the keyboard with it on a resume. hostUncovered
+  // runs before the hide refocuses the host's own webview.
+  const COVERED = 'data-launcher-shown';
   window.__chanLauncherTransition = {
     hostFocusColor,
     motionEnabled,
+    hostCovered() { document.documentElement.setAttribute(COVERED, ''); },
+    hostUncovered() { document.documentElement.removeAttribute(COVERED); },
     hostPrimeOut() { return prepare(false, 0); },
     hostOut(startAt) { slide(false, 0, 100, startAt); },
     hostReset() { reset(); },

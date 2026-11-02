@@ -21,7 +21,11 @@
 //!
 //! The toggle animates each page in its own webview (launcher_transition.js)
 //! with a shared start time: the host slides right as the launcher enters
-//! from the left; hiding reverses both cards.
+//! from the left; hiding reverses both cards. While a launcher shows, its
+//! host page carries `data-launcher-shown` on its root (`hostCovered`), so
+//! the page's terminal leaves the keyboard with the launcher when the window
+//! comes back from another application; `hostUncovered` clears it before
+//! the hide refocuses the host's own webview.
 //!
 //! A wry webview is not `Send`, so every launcher lives in a main-thread map
 //! and every touch of one runs on the main thread.
@@ -432,6 +436,9 @@ async fn show_async(app: &AppHandle, host: &str) -> Result<(), String> {
             eval_launcher(app, host, "launcherPrimeIn", 0),
         );
     }
+    // Marked before the launcher takes the keyboard, so a host resume between
+    // the two cannot hand it back.
+    eval_host(&host_window, "hostCovered", 0).await;
     let app_for_main = app.clone();
     let host_for_main = host_window.clone();
     window_ops::on_main(app, move || show_now(&app_for_main, &host_for_main)).await?;
@@ -462,6 +469,11 @@ async fn hide_async(app: &AppHandle, host: &str) -> Result<(), String> {
             eval_launcher(app, host, "launcherPrimeOut", 0).await;
             slide_together(app, host_window, false).await;
         }
+    }
+    // Unmarked before the hide gives the host's webview the keyboard, so the
+    // host's own focus event refocuses its terminal as on any resume.
+    if let Some(host_window) = &host_window {
+        eval_host(host_window, "hostUncovered", 0).await;
     }
     let app_for_main = app.clone();
     let host_label = host.to_string();
@@ -1025,6 +1037,8 @@ mod tests {
         // are the animation lengths they cover.
         assert!(TRANSITION_JS.contains(&format!("const SLIDE_MS = {SLIDE_MS};")));
         for stage in [
+            "hostCovered",
+            "hostUncovered",
             "hostOut",
             "hostPrimeOut",
             "hostReset",
@@ -1051,6 +1065,22 @@ mod tests {
         assert!(TRANSITION_JS.contains("getElementById('app')"));
         assert!(WORKSPACE_HTML.contains("<div id=\"app\"></div>"));
         assert!(LAUNCHER_HTML.contains("<div id=\"app\"></div>"));
+    }
+
+    #[test]
+    fn the_covered_marker_is_the_one_the_terminal_reads() {
+        // The host page's terminal skips its resume refocus on this root
+        // attribute; both sides spell it from the script's one constant.
+        const TERMINAL_TAB: &str =
+            include_str!("../../../web/packages/workspace-app/src/components/TerminalTab.svelte");
+        assert!(TRANSITION_JS.contains("const COVERED = 'data-launcher-shown';"));
+        assert!(TRANSITION_JS
+            .contains("hostCovered() { document.documentElement.setAttribute(COVERED, ''); }"));
+        assert!(TRANSITION_JS
+            .contains("hostUncovered() { document.documentElement.removeAttribute(COVERED); }"));
+        assert!(
+            TERMINAL_TAB.contains("document.documentElement.hasAttribute(\"data-launcher-shown\")")
+        );
     }
 
     #[test]

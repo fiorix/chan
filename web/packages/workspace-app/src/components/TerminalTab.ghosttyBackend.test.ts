@@ -613,6 +613,33 @@ describe("focus recovery after a host resume", () => {
     expect(document.activeElement, "the input keeps the focus").toBe(input);
     input.remove();
   });
+
+  // chan-desktop marks the page's root while the window's Computers launcher
+  // is shown over it. The launcher is a second webview holding the keyboard;
+  // a focus change in this page would move the window's first responder back
+  // here and leave the launcher deaf, so the resume refocus waits for the
+  // launcher to hide.
+  test("with the launcher shown over the window, the resume leaves the host alone until it hides", async () => {
+    const { target } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    host.tabIndex = 0;
+    host.focus();
+    const blurred = vi.spyOn(host, "blur");
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    ghostty.record.events.splice(0);
+    try {
+      await resume();
+      expect(blurred, "the host is not blurred under the launcher").not.toHaveBeenCalled();
+      expect(ghostty.record.events, "the terminal is not focused under the launcher").not.toContain("focus");
+      expect(document.activeElement, "the host keeps the DOM focus").toBe(host);
+    } finally {
+      document.documentElement.removeAttribute("data-launcher-shown");
+    }
+
+    await resume();
+    expect(blurred, "once the launcher hides, a resume blurs the host").toHaveBeenCalledTimes(1);
+    expect(ghostty.record.events, "and focuses the terminal").toContain("focus");
+  });
 });
 
 test("the VT reads current renderer metrics and sends a resize reply to its own PTY", async () => {

@@ -920,15 +920,26 @@
     }
   }
 
+  // chan-desktop marks the page's root while the window's Computers launcher
+  // is shown over it (launcher_transition.js hostCovered). The launcher is a
+  // second webview holding the keyboard; a focus change in this page would
+  // move the window's first responder back here and leave the launcher deaf.
+  function launcherShownOverWindow(): boolean {
+    return document.documentElement.hasAttribute("data-launcher-shown");
+  }
+
   // Renderer recovery cannot restore the DOM/native keyboard bridge. A host
   // resume therefore reasserts focus for the one terminal that still owns the
   // pane, but never steals it from an editor, prompt, menu, find box, or other
-  // focused surface. Re-focus even when xterm's textarea still appears active:
-  // WKWebView can retain document.activeElement while detaching keyboard input.
+  // focused surface, and never from the launcher shown over the window: the
+  // desktop refocuses this webview itself when the launcher hides. Re-focus
+  // even when xterm's textarea still appears active: WKWebView can retain
+  // document.activeElement while detaching keyboard input.
   function recoverTerminalFocusAfterHostResume(): void {
     queueMicrotask(() => {
       if (!active || !focused) return;
       if (findOpen || menuOpen || isRichPromptVisible(tab.id)) return;
+      if (launcherShownOverWindow()) return;
       const owner = document.activeElement;
       if (
         owner !== null &&

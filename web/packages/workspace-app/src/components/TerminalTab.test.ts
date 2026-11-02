@@ -267,6 +267,34 @@ describe("TerminalTab initial fit", () => {
   });
 });
 
+// chan-desktop marks the page's root while the window's Computers launcher
+// is shown over it; the launcher is a second webview holding the keyboard. A
+// host resume (an app switch back, a wake) refocuses the terminal only once
+// the launcher has hidden, so the window's first responder stays with it.
+describe("TerminalTab host resume under the launcher", () => {
+  const resume = async (): Promise<void> => {
+    window.dispatchEvent(new Event("pageshow"));
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  test("a resume refocuses the terminal only after the launcher hides", async () => {
+    await renderTerminal(terminalTab(), true);
+    const term = xterm.terminals.at(-1)!;
+    const focused = vi.spyOn(term, "focus");
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    try {
+      await resume();
+      expect(focused, "no refocus while the launcher is shown").not.toHaveBeenCalled();
+    } finally {
+      document.documentElement.removeAttribute("data-launcher-shown");
+    }
+
+    await resume();
+    expect(focused, "the resume after the launcher hid refocuses").toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("TerminalTab activity frames", () => {
   test("attaches with side and reports placement on the live socket", async () => {
     const tab = terminalTab();
