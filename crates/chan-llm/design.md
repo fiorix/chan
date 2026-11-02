@@ -1,23 +1,14 @@
 # chan-llm design
 
-`chan-llm` is the MCP-facing tool sandbox for chan workspaces: shared tool descriptions, JSON tool dispatch, and an MCP server that exposes both to external agents. It does not own an in-app chat session, transcript persistence, agent subprocess management, or app settings.
+`chan-llm` is how coding agents reach a chan workspace: a small set of file, search and report tools, sandboxed through `chan-workspace`, and an MCP server that exposes them. Agents connect over MCP and nothing else. There is no in-app chat, no agent transcript, no model or provider configuration, and no HTTP surface; chan spawns no agent and writes no agent CLI's config file.
 
-## Scope
+## What it is and where it sits
 
-In scope:
+The crate sits between `chan-workspace` below it and three hosts above it. The standalone `chan-llm-mcp` binary, and the hidden `chan __mcp` subcommand, open a workspace through the registry and serve MCP on stdio for any client that spawns a process (Claude Code, Codex, Cursor and the like). chan-server's MCP bridge hosts the same service in-process over a local socket (a Unix-domain socket, a named pipe on Windows), and `chan __mcp-proxy` pipes an agent's stdio to that socket. The bridge exists because the serving process already holds the workspace's writer lock: a second process reopening the workspace would be refused, so the tools must run where the lock is.
 
-  - Shared tool descriptions for chan workspace access: one description constant per tool, used by the standard tool schemas and the MCP server alike.
-  - Direct tool dispatch through `tools::execute`.
-  - MCP stdio / async-I/O hosting behind the optional `mcp` feature, including the standalone `chan-llm-mcp` binary.
-  - Media reads for MCP clients, capped by server policy.
-  - Typed error passthroughs for chan-workspace write conflicts, write-size limits, listing limits, and refused paths.
+In scope: one description per tool shared by every surface; JSON tool dispatch through `tools::execute`; the MCP service over stdio or any async read/write pair, behind the `mcp` feature; media reads capped by server policy; and typed passthroughs for the chan-workspace errors a host branches on.
 
-Out of scope:
-
-  - HTTP routes, WebSocket events, and frontend state.
-  - API key storage and model/provider configuration.
-  - Agent transcript/history storage.
-  - Spawning or supervising model CLIs.
+Out of scope: routes and frontend state (chan-server), API keys and model choice (nothing in chan holds them), transcripts, and spawning or supervising agent processes (the terminal and Team Work do that, through `cs`).
 
 ## Architecture
 
@@ -27,14 +18,14 @@ flowchart TD
 
     subgraph standalone["Standalone (no server holds the lock)"]
         Stdio["chan __mcp / chan-llm-mcp"]
-        OpenWs["open_workspace (takes flock)"]
+        OpenWs["open_workspace (takes the writer lock)"]
         ServeStdio["serve_stdio: stdio -> serve_io"]
     end
 
     subgraph inproc["In-process (chan-server holds the lock)"]
         Proxy["chan __mcp-proxy"]
         Sock["Unix socket / named pipe"]
-        Bridge["bridge accept loop (reuses held flock)"]
+        Bridge["bridge accept loop (reuses the held lock)"]
     end
 
     ServeIo["serve_io(reader, writer)"]
@@ -60,64 +51,56 @@ flowchart TD
     Rmcp --> Ws
 ```
 
-Both transport entry paths converge on `serve_io`, which sniffs the framing and dispatches JSON tool calls through `tools::execute` on the blocking pool.
+*Both entry paths converge on `serve_io`, which sniffs the framing and dispatches tool calls on the blocking pool.*
 
-`mcp::Server` stores a workspace resolver. `Server::new(Arc<Workspace>)` captures an owner for `chan __mcp` and `chan-llm-mcp`; the tenant bridge uses `Server::from_resolver` with its workspace cell lookup. JSON tool calls and `read_media` resolve only inside their `spawn_blocking` closures and release the strong handle when the tool body returns. The resolver reads the cell only long enough to clone its current workspace: a tool call waits behind a reset or metadata import's cell write guard, then uses the replacement workspace. Waiting requests, idle sessions, response serialization and stalled response writes do not retain the bridge workspace. A cleared cell returns the MCP error `workspace is closed` without touching the workspace. Synchronous reads, writes, graph, search and report work stay off the async transport worker, and `read_media` opens its file through `Workspace::read_bytes_bounded`, with the same path sandbox and regular-file checks as the editor.
+The server accepts either newline-delimited JSON-RPC or LSP-style `Content-Length` frames by sniffing the first byte of the stream; framed clients are adapted through an internal duplex pump. Clients of both conventions exist, and asking the user to configure which one their client speaks would be a wiring failure waiting to happen.
 
-Tool bodies check the MCP request cancellation token before resolving the workspace and again after a potentially blocked cell read. A cancelled request returns `request cancelled` before starting its workspace operation. Once a JSON tool body runs, `run_tool` sets the body's cancel flag (`ToolContext::with_cancel`) when the token fires or the request future is dropped, including during runtime shutdown. A dropped MCP service cancels its requests. If the peer closes the transport without a cancel notification, rmcp first drains handler responses for up to five seconds. A root close gives tenant tasks up to five seconds of shutdown grace before dropping the bridge keepalive and aborting its sessions, which drops their services and cancels requests.
+## Workspace ownership
 
-`list_files`, `workspace_search` and `repo_report` read the flag at walked-entry, report-file and search-seed boundaries. A body stopped there answers `request cancelled` and has dropped its workspace by the reply. A body that finishes answers its result, so a write that landed is reported even when its request was cancelled. A failed body answers `request cancelled` while its flag is set; chan-llm does not log the replaced failure.
-
-Cancellation is cooperative. A search reads the flag at each entry of its tree walk and each file of a report rescan, after each of the catalog's graph queries, before content retrieval, entity matching and seed resolution, before each seed, at each hop of a seed and before a seed's closure work, and before the final induced-relationship query. One graph or search query, with the pass over the rows it returns, runs without a flag read, as does the report cache's load or snapshot. Measured in a release build on a generated workspace of 20,000 notes and 100,000 links, no such unit took longer than 91 milliseconds. At 200,000 notes and 1,000,000 links the longest hop took 1.1 seconds, the catalog's three graph queries 1.0 second together, and the induced-relationship pass 0.4 seconds; no flag read bounds a unit, so a cancelled search can delay its root's close by that long. Cell lock waits, the workspace's write serialization lock wait before a report rescan, individual filesystem calls, and whole reads and writes also run to completion. This includes the one bounded read `read_file` makes for each page and the one read `read_media` makes of a file; neither read gains in-flight cancellation, and each is bounded by its tool's cap rather than by the file's size. These operations can delay workspace release.
-
-`serve_stdio` is used by the standalone `chan-llm-mcp` binary and by `chan __mcp`. `serve_io` is used by chan-server's MCP bridge: the server already holds the workspace lock, so it hosts the MCP service in-process over a Unix-domain socket and lets child processes proxy stdio to that socket (`chan __mcp-proxy`).
-
-Both transports sniff the first bytes of the stream and accept either newline-delimited JSON-RPC or LSP-style `Content-Length` framing; framed clients are adapted through an internal duplex pump, so clients of either convention connect without configuration.
+`mcp::Server` holds a workspace resolver rather than a workspace. `Server::new(Arc<Workspace>)` captures an owner for the standalone paths; the bridge uses `Server::from_resolver` with a lookup into the tenant's workspace cell, so a reset or a metadata import that replaces the workspace is seen by the next tool call. A tool body resolves the workspace only inside its blocking closure and drops the strong handle when it returns; waiting requests, idle sessions and stalled response writes retain nothing, and a cleared cell answers `workspace is closed`. Reads, writes, graph and search work run on the blocking pool, never on the async transport task.
 
 ## Tools
 
-Text tools are defined as `StandardTool` and dispatched by name:
+The JSON tools are `read_file`, `write_file`, `list_files`, `resolve_path`, `workspace_search` and `repo_report`, dispatched by name through `tools::execute`, which tests and hosts can also call directly. `read_media` is MCP-only because it returns image content blocks or embedded PDF resources rather than JSON text; it accepts PNG, JPEG, GIF, WebP, SVG, AVIF and PDF.
 
-  - `read_file`
-  - `write_file`
-  - `list_files`
-  - `resolve_path`
-  - `workspace_search`
-  - `repo_report`
+Every content tool routes through `chan_workspace::Workspace`, so the path sandbox, the special-file refusal, the editable-text gate and atomic writes apply without the tool doing anything. `write_file` replaces a whole file and accepts an expected mtime for compare-and-swap; a conflict surfaces as `WriteConflict` so the agent re-reads before retrying. `resolve_path` is metadata-only: it maps a public path to the host path for a shell tool that needs a working directory, without reading or writing. `workspace_search` is a mechanical translation of one typed request into the core's unified search, so agents, the HTTP routes and `cs` get identical results; its parameter type generates both the standard schema and the rmcp schema, and a test pins them equal.
 
-`read_media` is exposed only by the MCP server because it returns MCP image content blocks or embedded PDF blob resources rather than a JSON text result. Supported media matches chan-workspace's Image and Pdf classes: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.avif`, and `.pdf`.
+Responses are capped so a runaway call cannot bloat a model turn: `read_file` pages text (256 KiB per page, with `truncated` and `next_offset` when bytes follow, and the whole file's size from its stat), `read_media` refuses a file past the media cap rather than downscaling it, `list_files` and `repo_report` truncate their lists and say so, and `write_file` rejects content over chan-workspace's text-write limit before crossing the dispatch boundary. A tool never reads a file to learn its size; every read is bounded by its tool's cap, not the file's length.
 
-Writes are full-file replacements. `write_file` accepts `expected_mtime_ns` for compare-and-swap semantics and maps chan-workspace conflicts into `LlmError::WriteConflict`. `resolve_path` is metadata-only: it maps a chan public path to the physical host path (for shell tools that need a cwd) without reading or writing content.
+Tool descriptions are constants in `prompts` shared by the schemas and the MCP server. The rmcp macros accept only string literals, so the descriptions are duplicated inside the `#[tool]` attributes and a test pins the copies together; drift breaks the build rather than the agent's understanding of a tool.
 
-`workspace_search` is the one active-workspace retrieval surface. It accepts typed selector objects and mechanically converts `WorkspaceSearchParams` into the core request; it does not select or fan out across tenants. The same `JsonSchema` type generates the standard tool schema and rmcp input schema, and the parity test compares them exactly. Results are serialized from the core result unchanged.
+## Cancellation
 
-Responses are capped so a runaway call cannot bloat a model turn: `read_file` pages text at at most 256 KiB per call (with `truncated` and `next_offset` when bytes follow), `read_media` refuses a file past its cap (10 MiB unless the host sets another) with `media too large`, `list_files` caps at 2,000 entries, workspace search applies the core content/node/edge caps, `repo_report` returns at most 200 per-file rows, and `write_file` rejects content above the 2 MiB chan-workspace text-write limit before crossing the dispatch boundary. A tool's read of one file is bounded by its cap, and a file is not read to learn its size, which comes from the stat of the open handle: `read_media` reads none of a file over its cap, and `read_file` reads no more than its cap (`Workspace::read_text_with_stat_bounded_from`), cuts back to a character boundary, and answers the whole file's size. A caller passes the returned `next_offset` to read another page; an offset inside a character is refused with that character's first byte, and an offset at or past the end answers empty content with the current size. Each page has the open handle's `mtime_ns`, when available, so a caller can detect a change between pages. `read_file` validates the page bytes it returns and checks the boundary prefix of a later page; it does not validate bytes outside the page. A file whose text is valid up to the first cap and whose bytes past it are not UTF-8 is answered with its text up to that cap, not refused. Neither read takes in bytes a file gains after it is opened.
+```mermaid
+sequenceDiagram
+  participant C as MCP client
+  participant S as rmcp service
+  participant B as tool body (blocking pool)
+  participant W as Workspace
+  C->>S: tools/call
+  S->>B: spawn_blocking with the request's cancellation token
+  B->>B: token cancelled? answer "request cancelled"
+  B->>W: resolve the workspace (waits behind a reset)
+  B->>B: token cancelled? answer "request cancelled"
+  B->>W: run the tool with a shared cancel flag
+  C-->>S: notifications/cancelled, or the transport closes
+  S-->>B: token fires: set the flag
+  W-->>B: next walked entry, report file or search seed reads the flag
+  B-->>S: "request cancelled", workspace handle dropped
+```
 
-Tool descriptions live as constants in the shared prompt catalog and are duplicated as string literals inside the MCP `#[tool(description = ...)]` attributes (the rmcp macros only accept literals); the `mcp_descriptions_match_prompts` test pins the copies together and also pins the generated workspace-search schemas, so drift breaks the build.
+*Cancellation is cooperative: the flag is read at tool-defined boundaries, and whatever unit is in flight runs to completion.*
+
+A tool body checks the request's token before resolving the workspace and again after a potentially blocked cell read, so a cancelled request never starts its workspace operation. Once the body runs, the token firing, or the request future being dropped (including at shutdown), sets the body's cancel flag. `list_files`, `workspace_search` and `repo_report` read the flag at walked-entry, report-file and search-seed boundaries and answer `request cancelled`; a body that finishes answers its result, so a write that landed is reported even when its request was cancelled.
+
+What runs to completion: one graph or search query with the pass over its rows, one report load or snapshot, one bounded read, a lock wait, and any individual filesystem call. None of these gains in-flight cancellation; each is bounded by its tool's cap rather than the file's size, and together they bound how long a cancelled request can delay the release of its workspace, which matters to a bridge that is unmounting a tenant. A dropped MCP service cancels its requests, and a peer that closes the transport without a cancel notification gets a short drain of pending responses first.
 
 ## Configuration
 
-The library has no model/provider config. MCP media size is server policy:
+The library has no model or provider configuration. The one policy knob is the media cap: `DEFAULT_MCP_MEDIA_MAX_BYTES` by default, `Server::with_max_media_bytes` for a host, `--max-media-bytes` on the standalone binary. `chan-llm-mcp --config` points at the chan-workspace registry, not at any LLM settings.
 
-  - default: `DEFAULT_MCP_MEDIA_MAX_BYTES` (10 MiB)
-  - override: `Server::with_max_media_bytes(bytes)`
-  - standalone binary: `--max-media-bytes <N>`
+## Error boundary
 
-`chan-llm-mcp --config <path>` points at the chan-workspace registry config, not an LLM settings file.
+`LlmError` is deliberately small: `Tool`, `Core`, `WriteConflict`, `WriteTooLarge`, `ListingTooLarge`, `PathRefused`, `Io` and `Mcp`. The typed passthroughs preserve the chan-workspace kinds a host branches on (a reload prompt for a conflict, a too-large dialog for a budget), and every other core error flattens into `Core` with its display text.
 
-## Error Boundary
-
-`LlmError` is intentionally small:
-
-  - `Tool`
-  - `Core`
-  - `WriteConflict`
-  - `WriteTooLarge`
-  - `ListingTooLarge`
-  - `PathRefused`
-  - `Io`
-  - `Mcp`
-
-Public error variants stay matchable for hosts while preserving the original chan-workspace display text for user-facing messages.
-
-The MCP layer additionally scrubs outgoing error strings (`mcp_safe_message`): chan-workspace Display text can carry host absolute paths (`SpecialFile`, `SymlinkEscape`), and the MCP client may be a third-party process. Across that boundary errors surface as the variant category plus model-actionable numbers (sizes, mtimes, caps), never the host filesystem layout.
+The MCP layer scrubs outgoing error strings. chan-workspace's display text can carry host absolute paths (a refused special file, a symlink escape), and the MCP client may be a third-party process, so across that boundary an error surfaces as its category plus the numbers an agent can act on (sizes, mtimes, caps), never the host's filesystem layout.

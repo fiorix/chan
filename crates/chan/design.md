@@ -1,148 +1,177 @@
 # chan design
 
-## 1. Problem and scope
+`chan` is the binary crate at the top of the Cargo workspace: the command line of the product. It parses arguments, sets up tracing, dispatches one subcommand and exits, except for the two subcommands that become a resident server, `chan serve` and `chan devserver`. It owns almost no domain logic of its own. Every registry mutation and workspace-content operation goes through `chan_workspace::Library` and `Workspace`; every HTTP, WebSocket and embedded-app concern goes through `chan-server`; MCP goes through `chan-llm`; the `cs` control client is `chan-shell`. This crate is the thin seam that wires those libraries to a command line and to a process lifecycle.
 
-`chan` is the binary crate at the top of the workspace: the CLI entrypoint, the subcommand dispatcher, and the place that mounts the embedded `chan-server` for a local serve. It owns argument parsing, tracing setup, the dispatch `match`, the per-subcommand handlers, and self-upgrade. It deliberately owns almost no domain logic of its own; every registry mutation and workspace-content operation routes through `chan_workspace::Library` / `Workspace`, every HTTP / WebSocket / SPA concern routes through `chan-server`, every MCP concern routes through `chan-llm`, and the `cs` control surface lives in `chan-shell`. This crate is the thin seam that wires those libraries to a command line and to a process lifecycle.
+The help text in `src/help.rs` and the clap doc comments in `src/cli.rs` are the authoritative reference for every command, flag and example, and `chan dump-skill` renders the agent manual from the same text. This document stays at the level of the dispatch model, the handoff order, the supervision backends and the decisions behind them.
+
+## Scope
 
 In scope:
 
-  - The `clap` surface: the top-level `Cli` / `Command` enums and their per-subcommand sub-enums, plus the help text that is the source of truth for options.
-  - One async entry point, `run(args, Personality)`, dispatched in-process by both the standalone `chan` binary and `chan-desktop`.
-  - The per-subcommand handlers (`cmd_*`), which are orchestration glue: resolve a workspace, call a library, print a result.
-  - Mounting `chan-server` for `chan serve {PATH}` (a local serve) and for `chan devserver run` (the headless multi-workspace mode).
-  - Self-upgrade: the startup update banner / probe and the `chan upgrade` archive replacement, plus the Windows `--service` devserver supervision backend.
+- The clap surface: `Cli`, `Command`, the per-noun sub-enums and the help text.
+- One async entry point, `run(args, Personality)`, dispatched in-process by both the standalone `chan` binary and chan-desktop.
+- The per-subcommand handlers, one module each: orchestration that resolves a workspace, calls a library and prints a result.
+- Mounting `chan-server` for a standalone `chan serve PATH` and for the headless `chan devserver`.
+- The devserver supervision backends (systemd, launchd, chan's own daemon) and the token they hand to a connecting client.
+- Self-upgrade: the startup banner and probe, and `chan upgrade`.
 
-Out of scope (owned by the libraries this crate drives):
+Out of scope, owned by the libraries this crate drives: the filesystem sandbox, registry, search, graph and watcher ([chan-workspace](../chan-workspace/design.md)); routes, the embedded web apps, the in-process MCP host, the devserver builder and the handoff transports to the desktop and to a devserver ([chan-server](../chan-server/design.md)); MCP tool schemas and the stdio server ([chan-llm](../chan-llm/design.md)); the `cs` actions and the control-socket client ([chan-shell](../chan-shell/design.md)); the native window, the webview and the desktop updater ([chan-desktop](../../desktop/design.md)).
 
-  - Filesystem sandbox, registry, search, graph, watcher (`chan-workspace`).
-  - HTTP / WebSocket routes, SPA serving, the in-process MCP host, the devserver builder, the desktop / devserver handoff transports (`chan-server`).
-  - MCP tool schemas and stdio server (`chan-llm`).
-  - The `cs` clap actions and the control-socket client (`chan-shell`).
-  - The native window, webview, and `tauri-plugin-updater` (`chan-desktop`).
+## Where it sits
 
-The dispatcher is organized strictly by subcommand dispatch: one `cmd_*` handler per branch of the `match`. This document stays at the dispatch level and does not enumerate every handler or every flag; the `_HELP` / `long_about` text in the clap structs is the authoritative reference for options.
+Two binaries drive the same CLI. The standalone `chan` binary (`src/main.rs`) is a shim that builds the tokio runtime and calls `chan::run` with `Personality::Standalone`. chan-desktop links the `chan` library and calls `run` with `Personality::Desktop` when it is invoked through a `chan` name, which is how a desktop install is also the CLI. The whole command surface lives in the library so the two front ends cannot drift.
 
-## 2. Architecture overview
+The standalone shim makes three choices at the process edge, each for a reason. It runs the CLI on a thread with an explicit 8 MiB stack, because the main thread's stack is the linker's choice and the debug-profile future of `run` does not fit the 1 MB Windows default. It builds one multi-threaded runtime with a small worker ceiling and a declared blocking-thread ceiling, because chan is a loopback single-user server whose heavy work (index walks, file transfers) runs on the blocking pool, and more async workers only make a thread dump unreadable. On exit it calls `shutdown_background()` so an uncancellable reindex in `chan-workspace` cannot hold the process after Ctrl-C. The runtime is built outside `run` because `run` is async and a runtime cannot be built from inside one.
 
-The whole CLI surface lives behind the same `run` function so two binaries can drive it: the standalone `chan` binary and `chan-desktop`, which dispatches `chan` in-process when it is invoked through a `~/.local/bin/chan` shim. The only behavioural fork between the two is the `Personality` value threaded into `run`.
+## Dispatch
 
 ```mermaid
 flowchart TB
-  Standalone["chan binary, Personality::Standalone"] --> Run
-  Desktop["chan-desktop in-process, Personality::Desktop"] --> Run
-  Run["run(args, personality): parse_cli + init_tracing"] --> Dispatch{"match Command"}
-  Dispatch --> ServeCmd["serve"]
-  Dispatch --> Dev["devserver: run/start/stop/restart/status/join/rotate-token + register/ls/connect/disconnect/forget"]
-  Dispatch --> Ws["workspace: add/ls/serve/close/forget/index/reports/search/graph/status/metadata/contacts"]
-  Ws -->|"serve/close/forget --on TARGET"| Remote["remote workspace arms (desktop handoff to a registered devserver)"]
+  Standalone["chan binary: Personality::Standalone"] --> Run
+  Desktop["chan-desktop in-process: Personality::Desktop"] --> Run
+  Run["run(args, personality): parse_cli + tracing"] --> Alias{"invoked as cs?"}
+  Alias -->|"yes"| Cs["chan_shell::parse_cs -> Command::Shell"]
+  Alias -->|"no"| Dispatch{"match Command"}
+  Cs --> Dispatch
+  Dispatch --> ServeCmd["serve (alias open) / close"]
+  Dispatch --> Ws["workspace: add ls serve close forget index reports search graph status metadata contacts"]
+  Dispatch --> Dev["devserver: run start stop restart status join rotate-token | register ls connect disconnect forget"]
   Dispatch --> Sh["shell (cs)"]
-  Dispatch --> Up["upgrade"]
-  Dispatch --> Mcp["__mcp / __mcp-proxy"]
-  Dispatch --> Other["close / ps / config / completions / dump-skill"]
-  ServeCmd --> Serve["cmd_serve"]
-  Dev -->|"register URL"| RegDev["register a devserver (desktop handoff)"]
-  Serve --> CS["chan_server::serve: per-tenant HTTP/WS + embedded SPA"]
-  Dev --> RunDev["chan_server::run_devserver"]
+  Dispatch --> Other["ps / config / completions / dump-skill / upgrade"]
+  Dispatch --> Hidden["__mcp / __mcp-proxy / __devserver-daemon"]
+  ServeCmd --> Serve["cmd_serve: decide the route, hand off or bind"]
+  Ws -->|"serve/close/forget --on TARGET"| Remote["desktop handoff to a registered remote devserver"]
+  Serve --> CS["chan_server::serve: per-tenant HTTP/WS + embedded apps"]
+  Dev -->|"server-side verbs"| RunDev["chan_server::run_devserver under a supervision backend"]
+  Dev -->|"client-side verbs"| Remote
   Ws --> Lib["chan_workspace::Library / Workspace"]
   Sh --> ShDisp["chan_shell::dispatch"]
-  Up --> UpFork["tarball replace (Standalone) | tauri updater (Desktop)"]
-  Mcp --> Llm["chan_llm::mcp / chan_server::run_mcp_stdio_proxy"]
+  Hidden --> Llm["chan_llm MCP on stdio / chan_server MCP proxy / the chan daemon child"]
 ```
 
-The standalone binary builds one multi-threaded tokio runtime for the whole process (`serve` needs it; the sync subcommands run inline on it fine), `block_on`s `run`, and then calls `shutdown_background()` so the process can exit without waiting on `chan-workspace`'s uncancellable reindex pool after Ctrl-C. The runtime is built at the process edge because `run` is async and you cannot build a runtime from inside an async context.
+*Every front end reaches one `run`; each subcommand is orchestration over a library.*
 
-## 3. Frontend boundary
+The top-level surface is deliberately narrow. The noun families `chan workspace` and `chan devserver` are the structural layer. Exactly two family verbs carry elevated top-level spellings, `serve` (with `open` as a visible alias) and `close`, each a flattened args struct shared with its family form so the two spellings cannot drift, and a test pins the elevation list so it does not grow by habit. `chan close --forget` dispatches to the same teardown-then-drop handler as `chan workspace forget`. Every noun family turns on `infer_subcommands`, so an unambiguous prefix resolves iproute2 style (`chan de status`, `chan w ls`), the same grammar `cs` speaks.
 
-This crate ships no frontend code. `chan serve` serves the SPA through `chan-server`'s build-time bundle, so the editor / terminal / launcher assets reach the user without this crate owning web assets.
+`cs` is the same binary under another name. `parse_cli` reads the invocation name (`argv[0]`, or the `$ARGV0` a Windows shim passes) and, when its stem is `cs`, parses the argv with chan-shell's own `cs` parser and dispatches it as `Command::Shell`; `chan shell <action>` and `cs <action>` are one command with one help rendering.
 
-## 4. Subcommand dispatch
+The families:
 
-The CLI entry point parses arguments, sets up tracing from `-v` count, and dispatches the parsed `Command` to a handler. The top-level surface is intentionally narrow: the noun families (`chan workspace`, `chan devserver`) are the structural layer, and exactly two family verbs carry elevated top-level spellings, `serve` and `close`, pinned by test (`flat_workspace_subcommands_are_rejected`) so the elevation list never grows by habit.
+- `serve PATH` registers a workspace and serves it, or hands it to a running desktop or devserver (next section). `--on TARGET` instead mounts the path on a registered remote devserver through the desktop handoff. A URL-shaped argument is refused with a pointer at `chan devserver register`, because reading it as a relative directory would serve nothing.
+- `close PATH` stops serving; `--forget` and `chan workspace forget` also drop the registration and chan's metadata for it, never the files. Both take `--on TARGET` for a workspace mounted on a remote devserver.
+- `devserver` is one noun with two faces, told apart by argument shape. The server-side verbs manage this machine's devserver, a per-chan-home singleton, so they take no target. The client-side verbs manage chan-desktop's registry of remote devservers over the CLI-to-desktop handoff socket, so each needs a URL or label and a running desktop.
+- `workspace` holds the registry and content operations, every one routed through `chan_workspace` so the sandbox, atomic writes, special-file refusal and the cross-process writer lock apply uniformly.
+- `shell` is the `cs` surface, dispatched to `chan_shell::dispatch`. `ps`, `config`, `completions` and `dump-skill` are the served-workspace listing, the preferences that live outside any workspace, shell completions, and the agent manual. `upgrade` is self-upgrade, forked by `Personality`.
+- Three hidden commands exist only to be spawned by chan itself. `__mcp` runs chan-llm's MCP server on stdio against a registered workspace. `__mcp-proxy` bridges an agent's stdio to the MCP server a running `chan serve` hosts in-process, so an agent child reaches the live workspace without reopening it and deadlocking on the writer lock. `__devserver-daemon` is the child of the `chan` supervision backend.
 
-The real top-level set:
+Each handler opens a `Library`, resolves a `Workspace` when it needs one, calls into the owning library and prints text or `--json`. Handlers do not re-implement library invariants; they depend on them.
 
-`chan open PATH` is a visible alias of `chan serve PATH`, using the same parsed arguments and URL refusal. `cs open` opens a file or directory in a window. `chan close --forget PATH` dispatches to the same teardown and registry removal as `chan workspace forget PATH`, including `--on` and the live-terminal refusal. A local forget whose host answers over its control socket or the desktop handoff `workspace is still releasing; retry` prints that answer, leaves the registry on disk as the host holds it and exits 75 (`EX_TEMPFAIL`), where the live-terminal refusal exits 1. A local close answered still releasing also prints the host answer, keeps the registry row and exits 75. Another error from a lock-record holder that lets go of the writer lock within five seconds is printed with the `could not reach the server` warning; the forget then drops the registry entry on disk and exits 0. A holder that answers an error and still holds the lock fails the close or forget with exit 1, naming its pid and its answer, and leaves the registry as it is. A held writer lock whose recorded holder answers on no control socket, or that has no record to read, is looked at again every 200 ms for five seconds, because an acquirer publishes its record just after it locks and a server binds its sockets as it starts; if it is still held with no holder reached, the close or forget exits 1 naming the pid rather than reading the workspace as not served. A free lock reads not served, a record its gone holder left included. Another desktop handoff error falls through unprinted. A local forget names a stored registry root when the typed absolute path matches it lexically and every `..` removes a plain directory; other paths use the resolved lookup, as does `chan close`. When a stored row has no reachable lock-record holder and its writer lock is free, forget asks the one discovered devserver whose library root matches the CLI's, even if the workspace is off. A held lock prevents unregistering and leaves the row, overlay and windows intact. Multiple matches or no reachable control socket refuse with exit 1 and leave the registry intact. Another error or failed request exits 1 without confirming whether the host completed removal; the user can run forget again to check the row. With no matching devserver it forgets the unserved row on disk. `chan workspace open` is not a spelling.
+### Who serves a workspace
 
-The exact stored-row handoff and exit 75 through that handoff require a CLI and desktop of this version. A v0.101.0 CLI with this desktop sends the resolved path and removes the other workspace for a relinked root. This CLI with a v0.101.0 desktop sends the stored root, but the desktop resolves it to the other workspace; a mounted stored row then leads to a 5 s wait and `WorkspaceLocked`, while an off stored row can be unregistered from the CLI's registry snapshot taken before the handoff, restoring the other row after its metadata was wiped. The older CLI ignores a still-releasing handoff answer, and the older desktop does not send one; both continue to the control-socket path. The handoff wire and protocol number are unchanged, so neither pairing is refused. These outcomes are read from source and have no mixed-process test.
+`chan ps`, `chan workspace status`, `chan close` and `chan workspace forget` all need to know which process holds a workspace, and they read the same two facts. The writer lock's record names the holder's pid, and a control socket of that pid, found in the validated runtime directory, answers an `Identify` with its serving kind: standalone, desktop or devserver. A window-spawned server's sockets carry the pid in their name; a devserver's are stable-named so that `$CHAN_CONTROL_SOCKET` survives its restarts, so each candidate is asked who it is with a bounded round trip. A lock whose state cannot be determined is reported as such rather than guessed free or held.
 
-  - `serve {PATH}`: register a workspace and serve it, the elevated spelling of `chan workspace serve` (one flattened args struct, so the two spellings cannot drift). With `--on TARGET` it mounts PATH on a registered remote devserver through the desktop handoff instead of serving here; `--on` and `--devserver=<port|url>` are distinct flags, each refusing the other's value shape. A URL-shaped value (`://` with a non-empty scheme and authority, using a small string check rather than a URL crate) is refused with a pointer at `chan devserver register` rather than read as a relative path.
-  - `close {PATH}`: stop serving, the elevated spelling of `chan workspace close` (one flattened args struct). With `--on TARGET` both unmount a workspace on a registered remote devserver through the desktop handoff, keeping it registered there; `chan workspace forget --on TARGET` drops it, and the devserver's own live-terminal refusal applies to both.
-  - `devserver`: one noun, two faces, told apart by argument shape. The server-side verbs (`run`, `start`, `stop`, `restart`, `status`, `join`, `rotate-token`) manage this machine's headless multi-workspace server, dispatch to `chan_server::run_devserver` with the `--service` supervision and the tunnel options, and take no target, because the process is a per-CHAN_HOME singleton. A running `status` prints its persisted-token launch URL when stdout is a terminal or `--url` is given; otherwise it prints the address without the token and names `--url`. The client-side verbs (`register`, `ls`, `connect`, `disconnect`, `forget`) manage the desktop launcher's registry of remote devservers over the CLI-to-desktop handoff socket; each requires a URL or label target and a running desktop.
-  - `workspace {add,ls,serve,close,forget,index,reports,search,graph,status,metadata,contacts}`: the registry, lifecycle, and content operations, every one routed through `chan_workspace::Library` / `Workspace` so the sandbox, atomic writes, special-file refusal, and the cross-process writer lock apply uniformly. `forget` is the teardown-then-drop verb (the registry entry and chan's metadata go; the files never do).
-  - `shell`: the `cs` control surface (`infer_subcommands`, so `cs o` / `cs g` resolve by first letter), dispatched to `chan_shell::dispatch`.
-  - `ps`, `config`, `completions`, `dump-skill`: the served-workspace listing, persisted preferences, shell-completion generation, and the agent-facing manual rendered from chan's own help text. `dump-skill` installs an index by default; `--list` omits its frontmatter, `--topic SLUG` reads a page or its part index, and `--topic SLUG --part N` reads one numbered part. Each output fits in 8 KiB except the explicit `--full` export. Parts concatenate byte-for-byte to the complete page. `cs dump-skill` uses the same selectors and renderer without a running server.
-  - `upgrade`: self-upgrade, forked by `Personality` (section 7).
-  - `__mcp` and `__mcp-proxy`: hidden, internal-only. `__mcp` runs the `chan-llm` MCP server on stdio against a registered workspace (`chan_llm::mcp::Server::serve_stdio`); `__mcp-proxy` bridges an agent subprocess's stdio to the MCP server hosted in-process by a running `chan serve` (`chan_server::run_mcp_stdio_proxy`). The proxy exists so agent child processes reach the live workspace without trying to reopen it, which would deadlock against the per-workspace flock. Both are hidden because they are spawned by MCP clients, never typed by a user.
+`chan close` sends the `Close` request over that socket and the server decides the scope: a standalone serve exits, a desktop or devserver unmounts just that tenant. A host that would end live terminals refuses, and the refusal carries the count. Under the desktop personality the close goes through the desktop's own handoff socket first, because the embedded host's control socket closes the window but never updates the desktop's runtime map. A host still releasing an earlier close answers so, and the CLI reports that as a temporary failure distinct from a refusal, leaving the registry as the host holds it. A forget whose holder has let go drops the registry row and the metadata directory; a held lock keeps everything intact.
 
-Each subcommand handler is orchestration only: it opens a `Library`, resolves a `Workspace` when needed, calls into the owning library, and prints text or `--json`. The handlers do not re-implement library invariants; they depend on them.
+### dump-skill
 
-### Lock probe refusal
+`chan dump-skill` renders the agent-facing manual live from the two clap trees, so every byte it emits is reachable from some `--help` and the manual cannot drift from the commands. The default output is an installable topic index; a topic over the output budget is served as numbered parts that concatenate byte for byte to the whole page. The budget exists because an agent reads the manual through a tool call of bounded size; `--full` is the one unbounded export. `cs dump-skill` is the same renderer, passed into chan-shell as a function so the manual stays with the crate that owns the help text.
 
-Workspace search and status distinguish an observed foreign writer from a lock whose state cannot be determined. An open failure or a lock-test failure other than contention refuses the command with a diagnostic instead of treating the workspace as free or claiming a live holder. Search returns `workspace_lock_unknown`; status reports `cannot determine workspace lock status`. A real holder keeps the live-server path, and a free workspace keeps the local-open path.
+## chan serve: one writer per workspace
 
-### Devserver HTTP refusals
-
-The terminal drain used by systemd `stop` and destructive `restart --force`, and the running-server arm of `rotate-token`, show a refusal envelope's nonempty `error` sentence after its HTTP status. The sentence is preserved verbatim; an optional `code` is not displayed. Other bodies keep each command's fallback: drain includes the raw body after the status, while token rotation shows the status alone. Token rotation's 401 response always gives the persisted-token mismatch explanation and the instructions to restart the devserver and rotate again.
-
-### Workspace status
-
-`chan workspace status PATH` looks up an existing registration without registering or refreshing it. An unregistered path fails with the `chan workspace add` hint. If the writer lock is held, including a holder that wins between lookup and open, status reports that holder and exits successfully. It reads the lock record for the pid and uses the same control-socket identity and devserver HTTP activity probes as `chan ps`. Each identity probe and each HTTP request, including its response body, has a two-second budget. An unreachable holder or activity endpoint leaves those details unknown. A free workspace is opened for the existing readiness and derived-state snapshots; missing metadata lock directories take this normal open path and are recreated.
-
-`--json` returns one object with `root`, `metadata_key`, `served`, `served_by` and `pid`. `served_by` is `standalone`, `desktop`, `devserver` or null; `pid` is null when unavailable or free. `readiness` is optional: free workspaces include it, while held workspaces include it only when a devserver answers. Optional `indexer` telemetry has the same fields as `chan ps` activity (`status`, `queue_depth`, `last_event_at`, `last_settled_at`). `index`, `graph` and `report` appear only for a free, ready workspace; they are absent for held or recovering workspaces. Unknown optional snapshots are omitted, not reported as zero counts.
-
-## 5. serve: mounting chan-server and the embedded frontend
-
-`cmd_serve` is where `chan` becomes a running editor. It does more than bind a socket because a workspace has exactly one writer-lock holder, and `chan serve` has to cooperate with whatever might already own that lock on the box. The order of operations encodes that single-writer invariant:
+A workspace has exactly one writer-lock holder, and `chan serve` has to cooperate with whatever may already own that lock on the machine: chan-desktop, or a devserver. `cmd_serve` therefore does more than bind a socket. It decides one route first, and every handoff path returns early, so only the standalone tail ever takes the lock.
 
 ```mermaid
 flowchart TB
-  Start["cmd_serve(path, personality)"] --> Abs["absolutize_serve_root(root)"]
-  Abs --> Vcs{"--here, or no parent VCS?"}
-  Vcs -->|"parent repo found"| Exit70["print_vcs_parent_error + exit 70"]
-  Vcs -->|"ok"| Route["decide_open_route -> OpenTarget"]
-  Route --> Mkdir["create_dir_all(root): only after route settled"]
-  Mkdir --> Target{"match OpenTarget"}
+  Start["cmd_serve(root, personality)"] --> Abs["absolutize the root"]
+  Abs --> Vcs{"inside a VCS tree and no --here?"}
+  Vcs -->|"yes"| Exit70["structured vcs-parent refusal"]
+  Vcs -->|"no"| Probe["detect parentage; discover devservers; probe the desktop"]
+  Probe --> Route["decide_open_route: Standalone | Desktop | Devserver"]
+  Route --> Settings{"--no-settings and the route hands off?"}
+  Settings -->|"yes"| Refuse1(["refuse before creating or sending anything"])
+  Settings -->|"no"| Mkdir["create the root only now"]
+  Mkdir --> Target{"target"}
   Target -->|"Desktop"| Hand["maybe_handoff_to_desktop"]
-  Hand -->|"Some: desktop owns flock"| Ret1(["return early"])
-  Hand -->|"None: no desktop / refused / skew"| Serve
+  Hand -->|"handed off or GUI launched: the desktop owns the lock"| Ret1(["exit"])
+  Hand -->|"no desktop, skew, refused, no GUI session, opted out"| Serve
   Target -->|"Devserver"| Reg["try_register_devserver"]
-  Reg -->|"Registered: devserver owns flock"| Ret2(["return Ok early"])
-  Reg -->|"ReplyTimedOut: mount may still be running"| Refuse(["print error + exit 1"])
-  Reg -->|"ReplyLost: mount may still be running, or the devserver died"| Refuse
-  Reg -->|"NoDevserver"| Explicit{"--devserver=PORT?"}
-  Explicit -->|"yes: selected devserver is no longer live"| Refuse
-  Explicit -->|"no"| Serve
-  Reg -->|"skew / error"| Serve
+  Reg -->|"mounted: the devserver owns the lock"| Ret2(["exit"])
+  Reg -->|"reply timed out or lost; same-library lock refusal; mount overtaken; selected port gone"| Refuse2(["refuse"])
+  Reg -->|"no devserver, version skew, other mount error"| Serve
   Target -->|"Standalone"| Serve
-  Serve["open_workspace: acquire writer flock exactly once"] --> Run["chan_server::serve: HTTP/WS + embedded SPA"]
+  Serve["register; take the writer lock once"] --> Run["chan_server::serve"]
 ```
 
-*cmd_serve resolves one open route, then every handoff path returns early so only the standalone tail acquires the writer flock.*
+*One route is settled before any side effect; the standalone tail is the only path that takes the lock.*
 
-  1. **Absolutize and gate.** The serve root is made absolute against the CLI's cwd (the desktop handoff runs with cwd `/`, and the registry is keyed by canonical path, so a relative root must not leak). Unless `--here` is passed, a root inside a Git / Mercurial / Subversion working tree is refused with a structured marker on stderr and exit 70, so a wrapping shell can offer the repo root instead.
-  2. **Desktop handoff.** When the `Desktop` personality is active (or `CHAN_DESKTOP_HANDOFF=1` forces it, which is how the Windows desktop bundle re-execs the standalone console binary into a handoff), a same-user `chan-desktop` in a GUI session is asked to open the workspace in a native window, and the CLI exits. The desktop then owns the flock; the CLI must not also open it.
-  3. **Devserver registration.** Otherwise, unless opted out, a same-user local `chan devserver` is offered the workspace; if it mounts it, the CLI prints a note and exits, again leaving one flock owner. Registration has a 75-second reply budget, exceeding the devserver's 60-second mount budget; identity requests keep a three-second budget. The server first waits on its mount lock without a bound, and startup restore can hold that lock for minutes, so `chan serve` just after a devserver start can exhaust its reply budget. After three seconds without an answer the CLI prints `chan: waiting for the devserver to mount <root>`. If a sent request exhausts the registration budget, the CLI reports that the devserver did not answer within 75 seconds and may still be mounting the workspace, then exits 1 with a hint to check `chan ps` or retry with `--standalone`. If the request was sent but the connection then closes or fails, or the reply is malformed or answers another verb, the CLI reports that the devserver sent no valid reply and may still be mounting the workspace or may have died, then exits 1 with the same hint. It never opens the workspace itself after either. A devserver of this command's library that refuses because another chan process holds the workspace ends the command with its sentence, since a standalone server would meet the same lock. Other definitive `Error` replies and version skew still fall back to standalone, and a failure before the request is written (no socket, refused connect, failed write) still means no devserver. This path runs for the standalone binary too and needs no GUI, because devservers are exactly where SSH-only boxes live.
-  4. **Standalone serve.** When no handoff takes the workspace, the CLI registers and opens it itself and calls `chan_server::serve(lib, workspace, config)`, which mounts the per-tenant HTTP / WebSocket app and the embedded SPA. The update banner and the background probe fire here, a non-loopback bind prints a plaintext-exposure warning, and a bind collision on the shared default port (`8787`) against an already-running devserver is recognized and turned into an actionable hint rather than a bare "address already in use".
+The order of operations:
 
-Every successful handoff returns early and never double-opens. A sent registration whose reply times out, never arrives or is invalid refuses a competing standalone open because the devserver may still finish mounting. Other failures (no desktop, refusals other than a same-library lock refusal, stale socket, version skew, GUI absent) drop through to the standalone serve; an explicitly selected devserver that is no longer live is also refused. `chan devserver` reuses the same `chan-server` machinery through `run_devserver` for the multi-workspace case.
+1. **Absolutize and gate.** The root is made absolute against the CLI's cwd, because the desktop handoff runs with cwd `/` and the registry is keyed by canonical path. Unless `--here` is given, a root inside a Git, Mercurial or Subversion working tree is refused with a structured marker line on stderr that a wrapping shell parses to offer the repository root instead; the repository root is almost always the better workspace boundary for links, the graph and search.
+2. **Decide the route.** `decide_open_route` is a pure function over the explicit target flags (`--standalone`, `--desktop`, `--devserver`), the parentage of the shell (which chan instance spawned it, read by an `Identify` on `$CHAN_CONTROL_SOCKET`), the binary's personality, and a snapshot of live instances. An explicit flag wins. A devserver parent registers with that devserver, which beats a forced-desktop variable leaked into the shell; a desktop parent hands off. With no parent, a sole live kind wins; with both live, the desktop personality keeps its desktop and the standalone personality prefers the devserver; with neither, the desktop personality launches the GUI and the standalone personality serves itself. `--devserver` from inside a devserver shell is refused, because a devserver nested in a devserver is not a shape the registry models. Every probe lives in the caller, so the decision table is unit-tested without a desktop or a devserver.
+3. **Select the devserver.** With several devservers live, the shell's parent pid is a stronger signal than the CLI's library root, which is stronger than candidate order. A parent that is not among the candidates refuses rather than adopting the only one visible, and an explicit `--devserver=PORT` must name exactly one.
+4. **Create the root only now.** A refused route leaves no empty directory behind.
+5. **Desktop handoff.** A same-user chan-desktop in a GUI session is asked to open the workspace in a native window and the CLI exits; the desktop owns the lock. Only a forced-desktop invocation (the desktop personality, or the Windows console `chan.exe` carrying `CHAN_DESKTOP_HANDOFF=1`) launches the GUI when none is running, and only on Unix, because only its own executable is the desktop. No desktop, a desktop of another version, a refusal, no GUI session, or the `CHAN_NO_DESKTOP_HANDOFF` opt-out fall through to the standalone tail.
+6. **Devserver registration.** The selected devserver is asked to mount the workspace; if it does, the CLI prints a note and exits, leaving one lock owner. This path runs for the standalone binary too and needs no GUI, because devservers are exactly where SSH-only machines live; `CHAN_NO_DEVSERVER_HANDOFF` opts out. Version skew, a definite mount error and no devserver fall back to standalone. Four outcomes refuse instead: a sent request whose reply timed out or never arrived, because the mount may still complete and a standalone open would race it; a lock refusal from a devserver of this same library, because a standalone open would meet the same lock; a mount that a later request in the devserver overtook, because the directory was just turned off or forgotten there; and an explicitly selected devserver that is no longer live.
+7. **Standalone serve.** The CLI registers the workspace, takes the writer lock once and calls `chan_server::serve`. The update banner and probe fire here. A non-loopback bind prints a plaintext-exposure warning, because there is no TLS and only a bearer token. `--no-settings` is enforced only by a server this command binds, so a route that would hand the workspace to a desktop or a devserver is refused under it before anything is created or sent.
 
-## 6. The Personality split
+`chan serve` and `chan devserver` share one default port, single-sourced so the two cannot drift. A bind collision on it is recognized and turned into a hint that names the user's own devserver on that port, or says that none of theirs was found, instead of a bare "address in use".
 
-`Personality` exists because the same CLI code runs from two binaries that must behave differently in exactly two places, and threading one enum is cheaper and clearer than two code paths or a build flag. `Standalone` is the `chan` binary from `install.sh` or `install.ps1` (and their `cs` aliases); `Desktop` is `chan-desktop` dispatching `chan` in-process through its shim. The forks:
+## The Personality split
 
-  - **`chan serve`**: `Standalone` always runs its own server (or registers with a local devserver) and never hands off to a desktop; `Desktop` integrates with the running desktop, handing the workspace to a native window.
-  - **`chan upgrade`**: `Standalone` replaces its CLI archive in place, including the standalone Windows ZIP; `Desktop` drives the desktop's `tauri-plugin-updater`, since a desktop install is not a loose binary it can overwrite. The Windows NSIS install's console `chan.exe` carries `CHAN_DESKTOP_HANDOFF=1`, so it follows the desktop arm despite being the standalone binary.
+`Personality` exists because the same CLI runs from two binaries that must differ in exactly two places, and threading one enum is cheaper and clearer than two code paths or a build flag. `Standalone` is the `chan` binary from the install scripts, and its `cs` alias; `Desktop` is chan-desktop dispatching `chan` in-process through its shim.
 
-Everywhere else the two personalities run identical code. Keeping the fork down to one threaded value is the reason the desktop can share the entire subcommand surface without forking the dispatcher.
+- `chan serve`: `Standalone` serves itself or registers with a local devserver and never launches a desktop; `Desktop` hands the workspace to the running desktop or launches it.
+- `chan upgrade`: `Standalone` replaces its own archive in place; `Desktop` drives the desktop's `tauri-plugin-updater`, since a desktop install is not a loose binary it may overwrite. The Windows NSIS install's console `chan.exe` is the standalone binary marked with `CHAN_DESKTOP_HANDOFF=1`, so it follows the desktop arm for both verbs; Windows publishes no CLI tarball for it to replace.
 
-## 7. Self-upgrade
+Everywhere else the two personalities run identical code. Keeping the fork down to one threaded value is why the desktop shares the entire subcommand surface without forking the dispatcher.
 
-The self-upgrade path keeps the running CLI current without a package manager. It has three pieces, all pointed at hardcoded `chan.app` metadata URLs in production builds (self-hosted mirrors are not supported for the CLI path). Native Windows CI uses a compile-time-only loopback metadata seam:
+## The devserver verbs and supervision
 
-  - **Banner**: on `chan serve` startup, a one-line stderr notice is printed from a cached state file. No network access, so an air-gapped host pays nothing.
-  - **Probe**: a detached tokio task on `chan serve` reads release metadata with short timeouts, refreshes the cache, and prints the banner inline when the fetched version is newer. Throttled to once per day across restarts; failures are swallowed at debug level. `CHAN_UPDATE_CHECK=0` disables the probe.
-  - **`chan upgrade`** (`Standalone`): resolves the running binary via `current_exe`, reads metadata, downloads the target archive into a sibling temp file, verifies its SHA-256 against the metadata, and extracts the exact `chan` binary. Unix atomically renames the staged binary over the running executable; Windows renames the mapped executable aside, installs the staged binary, rolls back if that second rename fails, and schedules the old image for deletion after exit. Size-capped and proxy-aware via the standard `*_PROXY` env vars. A distro-packaged build refuses `chan upgrade` and defers to the package manager.
+`chan devserver` runs the headless multi-workspace server that `chan_server::run_devserver` builds. The server-side verbs take one `--service` backend, and a pure plan validates the `(backend, verb)` pair before any service manager is touched.
 
-The self-managed `--service=chan` backend is the cross-OS analog of the systemd user service on Linux and the launchd LaunchAgent on macOS, used where no OS supervisor exists (Windows, other Unix) and available as the explicit portable choice everywhere. It runs a detached child command, `__devserver-daemon`, redirects stdout/stderr to `~/.chan/devserver/devserver.log`, and guards the child with a single-instance pidfile + flock (`daemon.json` + `daemon.lock`, the `chan-workspace` `daemon_lock` primitive). `chan devserver start --service=chan` starts that daemon in the background and returns idempotently (`run --service=chan` resolves the same way); `chan devserver join --service=chan` starts it if needed, then attaches as a health watchdog until Ctrl-C or its non-TTY stdin closes, which detaches without stopping the daemon. `stop` / `restart` / `status` act on the same pidfile and corroborate its identity before signalling. On Linux, a readable `/proc/locks` entry matching the device and inode the kernel prints for the probed lock file, read from the prober's own momentary OFD read lock in `/proc/self/fdinfo`, corroborates the recorded pid against the kernel's flock owner. A missing or ambiguous owner triggers one fresh table read with the same anchor key; an unavailable second reading keeps its reason and the two-fact verdict. The retry does not make the proc table a snapshot. An unavailable or unmatched reading uses lock contention plus process identity and records that fallback at debug level. Other Unixes and Windows use the same two-fact check; Windows also compares a recorded creation time. Separate reads and later signalling are not atomic, and the fallback does not identify the lock owner. A hard stop is safe because the devserver drains HTTP per request and the writer lock self-heals. `--service` defaults to `auto`, which resolves per-OS at runtime: under a management verb it supervises under systemd (Linux), launchd (macOS), or the `chan` daemon (Windows), and under `run` it is the plain foreground server, so `chan devserver run` works on every host. `--service=none` forces that unsupervised foreground server and only `run` accepts it; `--service=systemd` / `--service=launchd` name a specific OS backend explicitly, each requiring a management verb (`start` / `stop` / `restart` / `status` / `join`). A management verb on a host where auto cannot resolve a manager (an unrecognized OS, or a Linux box with no `/run/systemd/system`) fails with a clear message pointing at `--service=chan`.
+```mermaid
+flowchart TB
+  Verb["chan devserver VERB [--service=KIND]"] --> Auto["auto: run is the foreground server; a management verb picks the OS supervisor"]
+  Auto --> Plan{"plan_devserver(KIND, VERB)"}
+  Plan -->|"none + run"| Fg["foreground server in this terminal, Ctrl-C stops"]
+  Plan -->|"systemd + verb, Linux"| Sd["systemd user unit: notify, fd store, unit at mode 0600"]
+  Plan -->|"launchd + verb, macOS"| Ld["launchd LaunchAgent in the user's GUI domain"]
+  Plan -->|"chan + verb, any OS"| Chan["chan daemon: detached __devserver-daemon child, pidfile + flock"]
+  Sd --> Token["start and join print the launch URL, then the CHAN_DEVSERVER_TOKEN marker"]
+  Ld --> Token
+  Chan --> Token
+  Token --> Join["join stays attached as a health watchdog; Ctrl-C detaches, the service keeps running"]
+```
 
-Stop waits for the daemon flock to become free within its fifteen-second budget; disappearance of the pidfile alone does not complete shutdown. It probes every 100 ms and rereads the live record until a corroborated pid can be signalled once, including a record published during the wait. A holder with no live record through the bound refuses with the lock path and instructions to stop that process (on Linux, `fuser` can identify it) and retry. Start probes the lock and live record every 50 ms for up to two seconds: a free lock permits a spawn, a live holder uses the existing-daemon path, and an unrecorded holder at the bound refuses. Each wait probes before checking its deadline, and the probe releases its temporary hold before waiting. Restart and start with `--force` finish the bounded stop before starting a replacement. The boolean probe treats an open or unexpected lock-test error as free, so stop may report completion on an unreadable anchor; the child's own acquire still refuses a conflicting holder or an open error.
+*`--service=auto` is the default: a bare `run` is the plain foreground server on every host, and a management verb resolves to the OS supervisor.*
+
+- `none` is the foreground server; `run` is its only form and it takes no management verb.
+- `systemd` installs a user unit on Linux and is what `auto` picks there. The unit is `Type=notify` with an fd store, so a plain `restart` keeps every live PTY: the masters and scrollback are parked in the store and picked up by the new process. `restart --force` is the destructive form; it drains every terminal through the management API first and falls back to stop-then-start, so a wedged devserver restarts without resurrecting its terminals. `stop` also disables the unit, and linger is enabled so the service outlives the login session. Tunnel mode is supported here because the unit is written at mode 0600 and carries the token in its environment; a flagless `restart` reads the token, the endpoint and the address pins back out of the installed unit, so the service comes back as the registration it went down as, and `--no-tunnel` is the deliberate way back to a local devserver.
+- `launchd` installs a LaunchAgent in the user's GUI domain on macOS and is what `auto` picks there. Tunnel mode is refused under it, because the plist would persist the token world-readable.
+- `chan` is chan's own daemon: the portable backend where no OS supervisor exists, chosen by `auto` on Windows and FreeBSD, and an explicit choice everywhere. It spawns a detached `__devserver-daemon` child with stdout and stderr redirected to the devserver log under the chan home, and guards it with a single-instance pidfile and flock (`chan-workspace`'s `daemon_lock`). `stop`, `restart` and `status` corroborate the recorded pid against the lock's owner before signalling, so a recycled pid is never signalled: on Linux the kernel's lock table is the witness, elsewhere lock contention plus process identity.
+
+Under `auto`, an OS that resolves to no supervisor, or a Linux host without a running systemd, fails with a message pointing at `--service=chan`. Explicit `systemd` and `launchd` each require a management verb and refuse off their OS.
+
+### The token contract
+
+A devserver listens on loopback behind a persisted bearer token, and the point of supervision is to hand that token to whoever connects. Every backend's `start` and `join`, and `rotate-token`, print the same block on stdout: the launch URL when the bound address is known, then the `CHAN_DEVSERVER_TOKEN=` marker line last. The token is read from the persisted config under the chan home, stored at mode 0600 and polled briefly after a start, and never from the unit's journal, which a user may not be able to read. The desktop's control terminal scrapes the last marker to authenticate; the line above it is for a person to open in a browser. The foreground `run` prints the marker itself. An active service whose token cannot be surfaced is reported as a failure, because a devserver nobody can reach is worse than a loud one.
+
+`join` is the form connect scripts use. It starts the service if it is down, prints the token, then stays attached as a health watchdog (the backend's own liveness probe plus the health endpoint) until Ctrl-C, or until a non-terminal stdin reaches EOF, and detaches without stopping the service. The watchdog tolerates a restart bounce and, for the `chan` backend, re-pins to a restarted daemon on the same address.
+
+`rotate-token` reaches the running devserver's management API so the old token stops authorizing at once, or rewrites the persisted config when no server answers.
+
+### Tunnel mode
+
+`--tunnel-url` with a personal access token, preferably from the environment so the secret stays out of `ps`, puts the devserver in tunnel mode: it dials the gateway and publishes every mounted workspace behind one registration, named by `--tunnel-devserver-name` or the hostname. In tunnel mode the loopback listener is off by default, since the gateway is the surface, except under systemd notify, where it stays on so a restart can reach the local management API; `CHAN_DEVSERVER_LISTEN` overrides either way.
+
+## Self-upgrade
+
+The upgrade path keeps the running CLI current without a package manager. It has three pieces, all pointed at the maintainer's release metadata in production builds; a compile-time seam exists only for the native Windows installer smoke.
+
+- **Banner.** `chan serve` prints a one-line stderr notice from a cached state file when a newer release is known. No network access, so an air-gapped host pays nothing.
+- **Probe.** A detached task on `chan serve` fetches the latest release metadata with short timeouts, refreshes the cache and prints the banner inline when the fetched version is newer. It runs at most once a day across restarts, and failures are swallowed at debug level. `CHAN_UPDATE_CHECK=0` disables it.
+- **`chan upgrade`.** Resolves the running binary through `current_exe`, reads the metadata (latest, or a pinned `--version`), downloads the archive for the current target into a sibling temp file while hashing it, verifies the SHA-256 against the metadata, extracts only the `chan` binary beside the executable, and installs it. Unix renames the staged binary over the running one atomically. Windows cannot rename over a mapped executable, so it renames the old image aside, installs the staged one, rolls back if that fails, and schedules the old image for deletion after exit. The download is size-capped and honours the standard proxy variables, and a binary directory that is not writable is refused before anything is downloaded.
+
+A build a package manager owns (the distro packages export a build-time marker) refuses `chan upgrade` and names the package manager's own command, and its banner and probe stay silent, because the check cannot name an update that build could install. The refusal is decided before the personality, so neither install path can skip it.
+
+On the desktop route, `chan upgrade` asks the running desktop over the handoff socket to check for or start its updater, and launches the desktop first when none is running. `--check` does not launch one, since opening a window to answer a question is not what a check means.

@@ -1,8 +1,8 @@
 # chan-report
 
-Per-file language and SLOC report for a directory tree, with per-language roll-ups and a Basic COCOMO summary on top. Maintains state incrementally so a single filesystem event re-counts one file instead of the whole tree.
+Per-file language and line-count report for a directory tree, with per-language roll-ups and a Basic COCOMO summary on top. The index is maintained incrementally, so a single filesystem event re-counts one file instead of the whole tree.
 
-Built to be embedded in `chan-workspace`. The crate is I/O-free for state: it walks, counts, and computes; persistence is the consumer's responsibility. chan-workspace atomically writes the JSONL to `workspaces/<metadata_key>/report/report.jsonl` under the chan home (`~/.chan` by default).
+Built to be embedded in `chan-workspace`. The crate is I/O-free for state: it walks, counts and computes; persistence is the consumer's responsibility. chan-workspace writes the JSONL atomically to `workspaces/<metadata_key>/report/report.jsonl` under the chan home (`~/.chan` by default).
 
 ## Public API at a glance
 
@@ -40,4 +40,4 @@ cargo test  -p chan-report
 
 ## See also
 
-- `design.md` for the on-disk JSONL schema, walker rules, COCOMO formula, and the invariants the incremental code preserves.
+- [design.md](design.md) for the JSONL schema, the walker rules, the COCOMO model, and the invariants the incremental code preserves.
