@@ -8,6 +8,7 @@ permissions = [
   "allow-request-app-quit",
   "allow-request-close-window",
   "allow-hide-window-from-close-confirm",
+  "allow-close-window-refusal",
   "allow-abandon-devserver-for-window",
   "allow-reconnect-devserver-for-window",
   "allow-zoom-in",
@@ -45,6 +46,7 @@ permissions = [
   "allow-request-app-quit",
   "allow-request-close-window",
   "allow-hide-window-from-close-confirm",
+  "allow-close-window-refusal",
   "allow-abandon-devserver-for-window",
   "allow-reconnect-devserver-for-window",
   "allow-zoom-in",
@@ -120,6 +122,11 @@ commands.allow = ["request_close_window"]
 identifier = "allow-hide-window-from-close-confirm"
 description = "Enables the hide_window_from_close_confirm command (close-confirm overlay Hide)."
 commands.allow = ["hide_window_from_close_confirm"]
+
+[[permission]]
+identifier = "allow-close-window-refusal"
+description = "Enables the close_window_refusal command (close-confirm overlay Close asks the last shown window guard first)."
+commands.allow = ["close_window_refusal"]
 
 [[permission]]
 identifier = "allow-abandon-devserver-for-window"

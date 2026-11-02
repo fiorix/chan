@@ -32,6 +32,7 @@ vi.mock("./api/desktop", async (importOriginal) => ({
   isTauriDesktop: () => host.desktop,
   requestCloseWindow: vi.fn(async () => {}),
   hideWindowFromCloseConfirm: vi.fn(async () => {}),
+  closeWindowRefusal: vi.fn(async (): Promise<string | null> => null),
   reloadWindow: vi.fn(async () => {}),
 }));
 
@@ -41,7 +42,7 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
   persistLayoutToHash: vi.fn(),
 }));
 
-import { hideWindowFromCloseConfirm, reloadWindow, requestCloseWindow } from "./api/desktop";
+import { closeWindowRefusal, hideWindowFromCloseConfirm, reloadWindow, requestCloseWindow } from "./api/desktop";
 import { hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { drawableBoard, drawableBoards } from "./__tests__/excalidraw";
 import { fileTab, readTab, resetLayout } from "./__tests__/tabs";
@@ -230,6 +231,12 @@ describe("what a window that goes leaves for the next open", () => {
     allCommands().find((command) => command.id === id)!.run();
   }
 
+  /// A close asks the desktop whether it refuses before it discards; let the
+  /// stand-in's answer land. Microtasks only, so a test's fake timers stay put.
+  async function desktopAnswered(): Promise<void> {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  }
+
   function pressAssignedChord(id: string): void {
     assignOverride(id, "Ctrl+Alt+J", "web");
     press({ key: "j", code: "KeyJ", ctrlKey: true, altKey: true });
@@ -254,6 +261,7 @@ describe("what a window that goes leaves for the next open", () => {
     async (_way, go, asks) => {
       await strokeAndEditInWait();
       await go();
+      await desktopAnswered();
 
       expect({
         asked: {
@@ -274,6 +282,7 @@ describe("what a window that goes leaves for the next open", () => {
     "%s discards the window's session before it asks the desktop only where it closes",
     async (_way, go, asks) => {
       await go();
+      await desktopAnswered();
 
       const discard = vi.mocked(discardWindowSession).mock;
       const ask = vi.mocked(requestCloseWindow).mock;
@@ -295,3 +304,41 @@ describe("what a window that goes leaves for the next open", () => {
     expect(nextOpenOffers("README.md", "hello")).toBe("hello, edited");
   });
 });
+
+describe("a close the desktop refuses on chan's last shown window", () => {
+  const REFUSAL =
+    "this is chan's last shown window: closing it would quit chan and end 2 other running terminal session(s); show or open another window first";
+
+  const CLOSES: [way: string, go: () => void][] = [
+    ["the close-window command", () => hostCommand("app.window.close")],
+    ["the command deck's Close window", () => allCommands().find((command) => command.id === "app.window.close")!.run()],
+    ["a chord assigned to Close window", () => {
+      assignOverride("app.window.close", "Ctrl+Alt+J", "web");
+      press({ key: "j", code: "KeyJ", ctrlKey: true, altKey: true });
+    }],
+  ];
+
+  test.each(CLOSES)("%s discards nothing, closes nothing and shows why", async (_way, go) => {
+    vi.mocked(closeWindowRefusal).mockResolvedValueOnce(REFUSAL);
+    go();
+    await settle();
+
+    expect(closeWindowRefusal).toHaveBeenCalledTimes(1);
+    expect(discardWindowSession).not.toHaveBeenCalled();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
+    expect(ui.status).toBe(REFUSAL);
+  });
+
+  test.each(CLOSES)("%s asks first and, with no refusal, discards and closes", async (_way, go) => {
+    go();
+    await settle();
+
+    const ask = vi.mocked(closeWindowRefusal).mock;
+    const discard = vi.mocked(discardWindowSession).mock;
+    expect(ask.calls).toHaveLength(1);
+    expect(discard.calls).toEqual([[]]);
+    expect(requestCloseWindow).toHaveBeenCalledTimes(1);
+    expect(ask.invocationCallOrder[0]).toBeLessThan(discard.invocationCallOrder[0]!);
+  });
+});
+

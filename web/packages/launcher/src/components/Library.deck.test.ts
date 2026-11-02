@@ -520,6 +520,30 @@ describe("the Computers deck's letter actions", () => {
     expect(key("t", row).defaultPrevented).toBe(false);
   });
 
+  it("h on a row the desktop refuses to hide shows the desktop's reason", async () => {
+    const { backend } = await import("../api/backend");
+    const { ApiError } = await import("../api/library");
+    const { notices } = await import("../state/notices.svelte");
+    const reason =
+      "this is chan's last shown window: hiding it would quit chan and end 2 running terminal session(s); show or open another window first";
+    const hide = vi
+      .spyOn(backend, "hideWindow")
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: reason })));
+    try {
+      mountDeck();
+      decks.computers.activeKey = "local";
+      flushSync();
+      const row = target!.querySelector<HTMLElement>('.slot[data-key="local"] .term-list .row')!;
+      key("h", row);
+      await settleAll();
+      expect(hide).toHaveBeenCalledOnce();
+      expect(library.error).toBe(reason);
+      expect(notices.items.some((notice) => notice.message === reason)).toBe(true);
+    } finally {
+      hide.mockRestore();
+    }
+  });
+
   it("All windows rows use h for shown, hidden, workspace and control windows, and ignore t, w, o and c", () => {
     mountDeck();
     const rows = [...target!.querySelectorAll<HTMLElement>(".all-windows [data-window-id]")];

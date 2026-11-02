@@ -11,7 +11,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("../api/desktop", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/desktop")>()),
-  hideWindowFromCloseConfirm: vi.fn(async () => {}),
+  hideWindowFromCloseConfirm: vi.fn(async (): Promise<string | null> => null),
+  closeWindowRefusal: vi.fn(async (): Promise<string | null> => null),
   requestCloseWindow: vi.fn(async () => {}),
 }));
 
@@ -26,7 +27,7 @@ vi.mock("../api/client", async (importOriginal) => {
   return { ...actual, api: { ...actual.api, tmuxRequest } };
 });
 
-import { hideWindowFromCloseConfirm, requestCloseWindow } from "../api/desktop";
+import { closeWindowRefusal, hideWindowFromCloseConfirm, requestCloseWindow } from "../api/desktop";
 import { resolveCloseConfirm, uiCloseConfirm } from "../state/closeConfirm.svelte";
 import { discardWindowSession, ui } from "../state/store.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
@@ -62,6 +63,16 @@ async function ask(): Promise<{ answer: Promise<string> }> {
   await tick();
   await Promise.resolve();
   return { answer };
+}
+
+/// The desktop's refusal of chan's last shown window, as a stand-in answers it.
+const REFUSAL =
+  "this is chan's last shown window: hiding it would quit chan and end 2 running terminal session(s); show or open another window first";
+
+/// Let the prompt's awaited desktop answer land and redraw.
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  await tick();
 }
 
 function action(label: string): HTMLButtonElement {
@@ -101,6 +112,60 @@ describe("the close prompt", () => {
     await expect(answer).resolves.toBe("close");
     expect(discardWindowSession).toHaveBeenCalledWith({ reap: true });
     expect(requestCloseWindow).toHaveBeenCalledTimes(1);
+  });
+
+  test("Hide refused by the desktop keeps the prompt up with its reason and the session", async () => {
+    vi.mocked(hideWindowFromCloseConfirm).mockResolvedValueOnce(REFUSAL);
+    const { answer } = await ask();
+    let settled = false;
+    void answer.then(() => (settled = true));
+
+    action("Hide").click();
+    await settle();
+
+    expect(hideWindowFromCloseConfirm).toHaveBeenCalledTimes(1);
+    expect(target.querySelector(".overlay")).not.toBeNull();
+    expect(target.querySelector('[role="alert"].refusal')?.textContent?.trim()).toBe(REFUSAL);
+    expect(settled).toBe(false);
+    expect(discardWindowSession).not.toHaveBeenCalled();
+  });
+
+  test("Close asks the desktop first, and its refusal discards nothing", async () => {
+    vi.mocked(closeWindowRefusal).mockResolvedValueOnce(REFUSAL);
+    const { answer } = await ask();
+    let settled = false;
+    void answer.then(() => (settled = true));
+
+    action("Close").click();
+    await settle();
+
+    expect(closeWindowRefusal).toHaveBeenCalledTimes(1);
+    expect(discardWindowSession).not.toHaveBeenCalled();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
+    expect(target.querySelector('[role="alert"].refusal')?.textContent?.trim()).toBe(REFUSAL);
+    expect(settled).toBe(false);
+
+    // The reason goes with the prompt: the next red dot asks afresh.
+    resolveCloseConfirm("cancel");
+    await ask();
+    expect(target.querySelector(".refusal")).toBeNull();
+  });
+
+  test("a Close whose prompt was cancelled while the desktop answered closes nothing", async () => {
+    let answerRefusal: (refusal: string | null) => void = () => {};
+    vi.mocked(closeWindowRefusal).mockImplementationOnce(
+      () => new Promise((resolve) => (answerRefusal = resolve)),
+    );
+    const { answer } = await ask();
+
+    action("Close").click();
+    resolveCloseConfirm("cancel");
+    answerRefusal(null);
+    await settle();
+
+    await expect(answer).resolves.toBe("cancel");
+    expect(discardWindowSession).not.toHaveBeenCalled();
+    expect(requestCloseWindow).not.toHaveBeenCalled();
   });
 
   test("Close in a browser discards the session and leaves the tab to the browser", async () => {

@@ -233,6 +233,25 @@ describe("WindowRow", () => {
     open.mockRestore();
   });
 
+  it("HIDE the desktop refuses shows the desktop's reason", async () => {
+    const { backend } = await import("../api/backend");
+    const { ApiError } = await import("../api/library");
+    const { notices } = await import("../state/notices.svelte");
+    const reason =
+      "this is chan's last shown window: hiding it would quit chan and end 1 running terminal session(s); show or open another window first";
+    const hide = vi
+      .spyOn(backend, "hideWindow")
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: reason })));
+    const el = render(win({ window_id: "w-last", library_id: "local" }));
+    (el.querySelector('[aria-label="Hide window"]') as HTMLButtonElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(hide).toHaveBeenCalledWith("w-last");
+    expect(library.error).toBe(reason);
+    expect(notices.items.some((notice) => notice.message === reason)).toBe(true);
+    hide.mockRestore();
+  });
+
   it("FOCUS drives openWindow through the bridge", async () => {
     const { backend } = await import("../api/backend");
     const open = vi.spyOn(backend, "openWindow");

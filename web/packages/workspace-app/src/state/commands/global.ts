@@ -311,9 +311,10 @@ registerCommands([
     // Desktop-only: the browser owns its window lifecycle and the wrapper
     // no-ops there. Shares the SHORTCUTS id so the row renders its chord;
     // allowedInWindow keeps the launcher aligned with the host bridge. The
-    // discard comes first, as in the close-window command: it deletes the
-    // window's session and stops every later save of it by the page, which
-    // would otherwise write back the record the desktop's close removes.
+    // close discards the window's session, as the close-window command does,
+    // once the desktop has not refused it: the discard deletes the session
+    // and stops every later save of it by the page, which would otherwise
+    // write back the record the desktop's close removes.
     id: "app.window.close",
     title: "Close window",
     category: "Global",
@@ -327,10 +328,7 @@ registerCommands([
     },
     available: (ctx) =>
       isTauriDesktop() && allowedInWindow("app.window.close", ctx),
-    run: () => {
-      discardWindowSession();
-      flushAndCloseWindow();
-    },
+    run: () => void flushAndCloseWindow({ discard: () => discardWindowSession() }),
   },
   {
     // The status bar's Transfers launcher can be closed while a transfer

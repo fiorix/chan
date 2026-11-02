@@ -1645,8 +1645,7 @@
       // window can be re-surfaced.
       case "app.window.close":
         if (closeActiveEmptyPane()) return;
-        discardWindowSession();
-        flushAndCloseWindow();
+        void flushAndCloseWindow({ discard: () => discardWindowSession() });
         return;
       // The desktop OS red-dot on a LIVE window. The host prevented the close
       // and asked us. Two fast paths close straight away (no prompt): while the

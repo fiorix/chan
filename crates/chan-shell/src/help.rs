@@ -1928,9 +1928,11 @@ pub(crate) const CS_WINDOW_AFTER: &str = r#"EXAMPLES:
 SIDE EFFECTS:
   `new` spawns an OS window; `open` and `hide` change a window's
   visibility. `rm` drops the persisted registry row, reaps that
-  window's terminal sessions and its saved layout, then closes any
-  live native window. Each verb prints one line on stdout (`new`
-  prints the id); failures go to stderr and exit non-zero.
+  window's terminal sessions and its saved layout, and closes any
+  live native window; with the desktop attached the desktop answers
+  first, so a refused `rm` changes nothing. Each verb prints one
+  line on stdout (`new` prints the id); failures go to stderr and
+  exit non-zero.
 
 CAUTIONS:
   `rm` is destructive and has no undo: the saved layout is gone, so
@@ -1940,6 +1942,13 @@ CAUTIONS:
   them" -- so a removal never kills a running agent by surprise.
   `--force` removes it and those shells with it. The guard runs
   server-side, so it holds headless too.
+  Closing chan's last shown window quits the desktop and ends every
+  terminal it holds, the hidden windows' too, so the desktop refuses
+  `hide` of its last shown window while any terminal runs, and `rm`
+  of it while terminals of other windows run, `--force` or not:
+  "this is chan's last shown window: hiding it would quit chan and
+  end N running terminal session(s); show or open another window
+  first". Show or open another window, then retry.
   `rm` of an id with neither a window nor a saved layout errors:
   "no window or saved layout for <id>".
 

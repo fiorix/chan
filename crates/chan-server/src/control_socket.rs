@@ -3977,7 +3977,10 @@ async fn handle_window_new(
 /// the window watch so any live native window closes -- so an offline/dead row is
 /// removable even with no desktop attached. Live shells are guarded server-side:
 /// without `force`, a window with live terminals is refused, so a removal never
-/// kills a running agent by surprise. A stale saved layout with no row is still
+/// kills a running agent by surprise. An attached desktop answers before the
+/// host discards anything and can refuse the removal whatever `force` says:
+/// it does when the window is chan's last shown one and terminals elsewhere
+/// would end with the process. A stale saved layout with no row is still
 /// cleaned; an unknown id errors.
 async fn handle_window_close(
     desktop: &crate::desktop_window_ops::DesktopBridge,
@@ -4015,25 +4018,40 @@ async fn handle_window_close(
         }
     }
 
-    // Authoritative removal: drop the registry row + reap sessions + blob. The
-    // window watch fires, so any live native window closes from the registry
-    // change. `false` ⇒ this host owns no such row (e.g. a connected devserver
-    // owns it).
-    let discarded = host
-        .as_ref()
-        .map(|host| host.discard_window(&id).unwrap_or(false))
-        .unwrap_or(false);
-
-    // Best-effort fast close of a live native window. The server already guarded;
-    // the desktop op has no second confirmation. A headless host answers
-    // NO_DESKTOP and relies on the watcher reconcile above.
-    let destroyed = desktop
+    // The desktop answers first, as it does for the launcher's close route. It
+    // refuses to take away chan's last shown window while terminals elsewhere
+    // would end with the process, which no `force` overrides, and otherwise
+    // discards a local row itself before it destroys the native window, so the
+    // host's discard below then finds that row gone. Read the rows first to tell
+    // that apart from an id nothing knows. A headless host answers NO_DESKTOP:
+    // it has no window to lose, and the discard below closes any view through
+    // the window watch.
+    let listed = host.as_ref().is_some_and(|host| {
+        host.assemble_window_records()
+            .iter()
+            .any(|record| record.window_id == id)
+    });
+    let (destroyed, desktop_closed) = match desktop
         .dispatch(|reply| DesktopWindowOp::Close {
             id: id.clone(),
             reply,
         })
         .await
-        .unwrap_or(false);
+    {
+        Ok(destroyed) => (destroyed, true),
+        Err(message) if message == crate::NO_DESKTOP => (false, false),
+        Err(message) => return ControlResponse::Error { message },
+    };
+
+    // Authoritative removal: drop the registry row + reap sessions + blob. The
+    // window watch fires, so any live native window closes from the registry
+    // change. `false` ⇒ this host owns no such row (e.g. a connected devserver
+    // owns it, or the desktop discarded it above).
+    let discarded = host
+        .as_ref()
+        .map(|host| host.discard_window(&id).unwrap_or(false))
+        .unwrap_or(false)
+        || (desktop_closed && listed);
 
     // Fallback only when nothing was discarded: a stale saved layout blob with no
     // feed row (discard_window already deletes the blob of any row it owns).
@@ -9162,6 +9180,10 @@ mod tests {
         /// The live-terminal count a close and a removal are refused for:
         /// `None` stands for a host with nothing to refuse them over.
         teardown_refusal: Option<usize>,
+        /// The window records the host lists.
+        rows: Vec<WindowRecord>,
+        /// What a discard answers: `false` stands for a row already gone.
+        discards: bool,
     }
 
     impl FakeHost {
@@ -9177,6 +9199,8 @@ mod tests {
                 open_requests: std::sync::Mutex::new(Vec::new()),
                 refuse_open: std::sync::atomic::AtomicBool::new(false),
                 teardown_refusal: None,
+                rows: Vec::new(),
+                discards: true,
             }
         }
 
@@ -9235,12 +9259,12 @@ mod tests {
                 .unwrap_or(chan_library::WorkspaceLifecycleOutcome::NotFound))
         }
         fn assemble_window_records(&self) -> Vec<WindowRecord> {
-            Vec::new()
+            self.rows.clone()
         }
         fn discard_window(&self, _window_id: &str) -> Result<bool, chan_library::Error> {
             self.discarded
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(true)
+            Ok(self.discards)
         }
         fn live_terminal_count(&self, _window_id: &str) -> usize {
             self.live
@@ -9344,6 +9368,135 @@ mod tests {
             fake.discarded.load(std::sync::atomic::Ordering::SeqCst),
             "an offline row must be discarded"
         );
+    }
+
+    /// The sentence a desktop stand-in refuses a gesture with.
+    const LAST_WINDOW_REFUSAL: &str = "this is chan's last shown window: closing it would quit \
+         chan and end 2 other running terminal session(s); show or open another window first";
+
+    /// `cs window rm` with a desktop attached that answers the bridge's Close
+    /// with `answer`. Also returns whether the host had discarded the row when
+    /// the desktop was asked, `None` when it never was.
+    async fn run_window_rm_beside_a_desktop(
+        fake: FakeHost,
+        force: bool,
+        answer: Result<bool, String>,
+    ) -> (ControlResponse, Arc<FakeHost>, Option<bool>) {
+        let cell = Arc::new(RwLock::new(None));
+        let mut ctx = test_ctx(cell, ControlTenant::Workspace);
+        let fake = Arc::new(fake);
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        ctx.unserve = UnserveScope::Host(Arc::downgrade(&host));
+        let (ops_tx, mut ops_rx) = tokio::sync::mpsc::channel(1);
+        ctx.desktop = crate::desktop_window_ops::DesktopBridge {
+            window_ops: Some(ops_tx),
+            window_titles: ctx.desktop.window_titles.clone(),
+        };
+        let seen = Arc::clone(&fake);
+        let desktop = tokio::spawn(async move {
+            match ops_rx.recv().await {
+                Some(DesktopWindowOp::Close { reply, .. }) => {
+                    let discarded = seen.discarded.load(std::sync::atomic::Ordering::SeqCst);
+                    let _ = reply.send(answer);
+                    Some(discarded)
+                }
+                _ => None,
+            }
+        });
+        let resp = handle_request(
+            ControlRequest::WindowClose {
+                id: "w-1".into(),
+                force,
+            },
+            &ctx,
+        )
+        .await;
+        drop(ctx);
+        let asked = desktop.await.expect("desktop stand-in");
+        (resp, fake, asked)
+    }
+
+    /// The desktop is asked before the host discards anything, and its
+    /// refusal of chan's last shown window is the answer, with or without
+    /// `--force`: forcing overrides the window's own shells, not this.
+    #[tokio::test]
+    async fn window_rm_stops_on_the_desktops_last_window_refusal_with_or_without_force() {
+        for (live, force) in [(0, false), (2, true)] {
+            let (resp, fake, asked) = run_window_rm_beside_a_desktop(
+                FakeHost::new(live),
+                force,
+                Err(LAST_WINDOW_REFUSAL.into()),
+            )
+            .await;
+            assert_eq!(
+                asked,
+                Some(false),
+                "force={force}: the desktop must answer before the host discards"
+            );
+            match resp {
+                ControlResponse::Error { message } => assert_eq!(message, LAST_WINDOW_REFUSAL),
+                other => panic!("force={force}: expected the refusal, got {other:?}"),
+            }
+            assert!(
+                !fake.discarded.load(std::sync::atomic::Ordering::SeqCst),
+                "force={force}: a refused removal discarded the row"
+            );
+        }
+    }
+
+    /// A removal the desktop lets through still reaches the host's discard,
+    /// and a row the desktop already discarded, which the host listed before
+    /// the desktop ran, reads as removed rather than as unknown.
+    #[tokio::test]
+    async fn window_rm_beside_a_desktop_removes_the_row_it_listed() {
+        let (resp, fake, asked) =
+            run_window_rm_beside_a_desktop(FakeHost::new(0), false, Ok(true)).await;
+        assert_eq!(asked, Some(false));
+        assert!(fake.discarded.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            matches!(&resp, ControlResponse::Ok { message } if message == "removed window w-1"),
+            "got {resp:?}"
+        );
+
+        let listed = FakeHost {
+            rows: vec![window_record(
+                "w-1",
+                crate::WindowKind::Terminal,
+                false,
+                false,
+            )],
+            discards: false,
+            ..FakeHost::new(0)
+        };
+        let (resp, _, _) = run_window_rm_beside_a_desktop(listed, false, Ok(false)).await;
+        assert!(
+            matches!(&resp, ControlResponse::Ok { message } if message == "removed window w-1"),
+            "a hidden row the desktop discarded read as {resp:?}"
+        );
+    }
+
+    /// `cs window hide` answers the desktop's refusal as its error, so the CLI
+    /// exits non-zero with the guard's sentence.
+    #[tokio::test]
+    async fn window_hide_answers_the_desktops_refusal() {
+        let cell = Arc::new(RwLock::new(None));
+        let mut ctx = test_ctx(cell, ControlTenant::Workspace);
+        let (ops_tx, mut ops_rx) = tokio::sync::mpsc::channel(1);
+        ctx.desktop = crate::desktop_window_ops::DesktopBridge {
+            window_ops: Some(ops_tx),
+            window_titles: ctx.desktop.window_titles.clone(),
+        };
+        let desktop = tokio::spawn(async move {
+            if let Some(DesktopWindowOp::Hide { reply, .. }) = ops_rx.recv().await {
+                let _ = reply.send(Err(LAST_WINDOW_REFUSAL.into()));
+            }
+        });
+        let resp = handle_request(ControlRequest::WindowHide { id: "w-1".into() }, &ctx).await;
+        desktop.await.expect("desktop stand-in");
+        match resp {
+            ControlResponse::Error { message } => assert_eq!(message, LAST_WINDOW_REFUSAL),
+            other => panic!("expected the refusal, got {other:?}"),
+        }
     }
 
     /// A `/`-rooted capability over a temp tree, standing in for the machine
