@@ -43,7 +43,7 @@ limactl shell default sudo sdme fs import docker.io/ubuntu --name ubuntu
 
 ## Core: run the CI gate in a Linux container
 
-CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri build dependencies and the Windows Rust target. The target runs `make pre-push`, then the CLI, library, server and workspace suites under a symlinked `TMPDIR`, then the Windows test-target check. Mirror it locally:
+CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri build dependencies and the Windows Rust target. The target runs `make pre-push`, then the CLI, library, server and workspace suites under a symlinked `TMPDIR` (`make test-symlink-tmpdir`), then the Windows test-target check. Mirror it locally:
 
 ```sh
 # create + start a build container from the ubuntu base
@@ -101,7 +101,7 @@ limactl shell default sudo sdme exec chan-build /usr/sbin/runuser -u ubuntu -- /
   make ci-linux'
 ```
 
-The bundle checks out the committed HEAD with its Git index, which the static linters need for `git ls-files`. For a later commit, create and copy a new bundle, then run `git fetch /tmp/chan-src.bundle HEAD && git checkout --detach FETCH_HEAD` as `ubuntu` in `/home/ubuntu/chan` before repeating the gate. The `ubuntu` user owns that checkout, so Cargo writes its target there and permission-sensitive tests run without root. A cold `make ci-linux` also installs the Tauri CLI under `target/tauri-cli`, then builds and boots the release devserver and produces an AppImage after the compile and test gates. The toolchain version in the rustup line is the one `rust-toolchain.toml` pins.
+The bundle checks out the committed HEAD with its Git index, which the static linters need for `git ls-files`. For a later commit, create and copy a new bundle, then run `git fetch /tmp/chan-src.bundle HEAD && git checkout --detach FETCH_HEAD` as `ubuntu` in `/home/ubuntu/chan` before repeating the gate. The `ubuntu` user owns that checkout, so Cargo writes its target there and permission-sensitive tests run without root. A cold `make ci-linux` also installs the Tauri CLI under `.build-tools/tauri-cli` when none is on `PATH`, then builds the AppImage and boots it as a release devserver after the compile and test gates. The Node major is the one `.nvmrc` pins and the toolchain version in the rustup line is the one `rust-toolchain.toml` pins.
 
 ## Desktop: build the chan-desktop AppImage and .deb
 
@@ -123,7 +123,7 @@ make linux-chan-desktop DISTRO=ubuntu
 4. runs `make chan-desktop` inside it, and
 5. copies the bundles out to `target/linux-desktop/<distro>/`.
 
-The container is reused between runs so the cargo target cache survives (a cold compile takes tens of minutes; an incremental rebuild a minute or two). Force a clean container with `REBUILD_CONTAINER=1 make linux-chan-desktop`.
+The container is reused between runs so the cargo target cache survives. Force a clean container with `REBUILD_CONTAINER=1 make linux-chan-desktop`.
 
 How sdme is reached is the `SDME` variable (a lima VM on macOS by default, `sudo sdme` directly on a Linux host):
 
@@ -174,7 +174,7 @@ file /tmp/chan          # -> ... statically linked
 # on Linux: ldd /tmp/chan -> "not a dynamic executable"
 ```
 
-CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/setup-zig` plus cargo-zigbuild). The `chan-tarball` Make target uses `cargo zigbuild` for musl targets and plain `cargo build` for gnu.
+CI builds these in `release.yml`'s `linux-cli-artifacts` job (zig via `mlugg/setup-zig` plus cargo-zigbuild). `packaging/linux/Makefile`'s `chan-tarball` target, which `make linux-chan-tarball` drives, uses `cargo zigbuild` for musl targets and plain `cargo build` for gnu.
 
 ## CLI: the FreeBSD standalone target
 
@@ -184,11 +184,11 @@ Releases publish `chan-x86_64-unknown-freebsd.tar.gz` and `chan-aarch64-unknown-
 fetch -o - https://chan.app/install.sh | sh
 ```
 
-The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux and macOS standalone builds, `chan upgrade` included. Release CI cross-builds both architectures against a pinned FreeBSD sysroot: amd64 uses the rustup-distributed standard library for the tier-2 `x86_64-unknown-freebsd` target, while the tier-3 `aarch64-unknown-freebsd` target builds the standard library from source with `-Z build-std`. The release checklist requires end-to-end installer and upgrade checks against the published artifacts on stock FreeBSD amd64 and arm64 hosts.
+The installed binary uses the same `/dl/cli/latest.json` metadata as the Linux and macOS standalone builds, `chan upgrade` included. Release CI cross-builds both architectures against a pinned FreeBSD sysroot: amd64 uses the rustup-distributed standard library for the tier-2 `x86_64-unknown-freebsd` target, while the tier-3 `aarch64-unknown-freebsd` target builds the standard library from source with `-Z build-std` on a pinned nightly. Locally, `make freebsd-chan-tarball` and `make freebsd-arm64-chan-tarball` run the same recipes given a `FREEBSD_SYSROOT`.
 
 ## Devserver: the `--service=systemd` user-service path
 
-`chan devserver` supervision is per OS, and `--service` defaults to `auto`, which resolves to systemd on a systemd Linux host, so a bare `chan devserver join` and the explicit `join --service=systemd` below are equivalent there; the examples name the backend to make clear which path they exercise. `chan devserver join --service=systemd` runs the server under a `chan-devserver.service` systemd user service (it ensures linger, starts the unit, re-attaches to an already-running one, and stays attached on the health watchdog), and the `chan serve PATH` discovery socket that registers workspaces with it is Unix-only. `start --service=systemd` does the same setup but returns instead of attaching, `stop --service=systemd` stops and disables the unit, and `restart --service=systemd` bounces it. On macOS `--service=systemd` errors (use `--service=launchd` or `--service=chan` there), so to exercise the systemd path on a Mac you run it inside lima/sdme. The supervision shape and the token-delivery contract are in [`design.md`](../../design.md).
+`chan devserver` supervision is per OS, and `--service` defaults to `auto`, which resolves to systemd on a systemd Linux host, so a bare `chan devserver join` and the explicit `join --service=systemd` below are equivalent there; the examples name the backend to make clear which path they exercise. `chan devserver join --service=systemd` runs the server under a `chan-devserver.service` systemd user service: it ensures linger, starts the unit or re-attaches to a running one, and stays attached on the health watchdog until you detach. `start --service=systemd` does the same setup but returns instead of attaching, `stop --service=systemd` stops and disables the unit, and `restart --service=systemd` bounces it. On macOS `--service=systemd` errors (use `--service=launchd` or `--service=chan` there), so to exercise the systemd path on a Mac you run it inside lima/sdme. The supervision shape and the token-delivery contract are in [`design.md`](../../design.md).
 
 The one thing this needs beyond the core gate's container is a systemd user manager: `--service=systemd` drives `loginctl enable-linger` and `systemctl --user`, which need a regular (non-root), lingering user with a live user session, not the root shell `sdme join` drops you into. Stand one up once:
 
@@ -204,9 +204,9 @@ limactl shell default sudo sdme exec chan-devserver-dev /bin/bash -c '
   loginctl enable-linger dev'
 ```
 
-> `scripts/e2e/devserver-fdstore.sh` additionally needs `python3` and `node`, and SKIPs with exit 0 when either is missing, so a guest without them yields a run that looks green and proves nothing. Its Node must accept `--experimental-websocket`; apt's Node on a noble (24.04) base does not, so install Node 22 from the official tarball as the core gate does. See the table in [`windows-and-linux.md`](windows-and-linux.md#the-systemd-fd-store-suite), which is platform-independent despite living in the Windows page.
+The same container runs `scripts/e2e/devserver-fdstore.sh`, which additionally needs `python3` and a Node that accepts `--experimental-websocket` (install Node 22 from the official tarball as the core gate does; apt's Node on a noble base is too old). The suite skips with exit 0 when either is missing, so read its log for a `SKIP:` line before believing a green run. Its traps are tabulated in [`windows-and-linux.md`](windows-and-linux.md#the-systemd-fd-store-suite), which is platform-independent despite living in the Windows page.
 
-Seed the `chan` binary into the container the way the core gate seeds the tree (`git archive HEAD` plus `sdme cp`, then build inside with the aarch64 flag from the build note below), and put it at a stable path such as `/usr/local/bin/chan`: the unit's `ExecStart` records the binary's resolved path, so a moving target directory would break a restart. Then run the devserver as the dev user, exporting that user's runtime directory and bus so `systemctl --user` resolves:
+Seed the `chan` binary into the container the way the core gate seeds the tree (`git archive HEAD` plus `sdme cp`, then build inside), and put it at a stable path such as `/usr/local/bin/chan`: the unit's `ExecStart` records the binary's resolved path, so a moving target directory would break a restart. Then run the devserver as the dev user, exporting that user's runtime directory and bus so `systemctl --user` resolves:
 
 ```sh
 limactl shell default sudo sdme exec chan-devserver-dev /bin/bash -c '
@@ -217,7 +217,7 @@ limactl shell default sudo sdme exec chan-devserver-dev /bin/bash -c '
     chan devserver join --service=systemd --bind 127.0.0.1 --port 7777'
 ```
 
-Expect the launch URL line before the `CHAN_DEVSERVER_TOKEN=<token>` marker on stdout when the running address is known (the marker is the contract the desktop control terminal scrapes), the unit at `~dev/.config/systemd/user/chan-devserver.service`, and `systemctl --user status chan-devserver.service` reporting active; a second `join` re-attaches to the running unit and re-emits the URL and the marker, or the marker alone when the bound address cannot be read. The token reaches stdout even when the user cannot read the unit journal (a uid below `SYS_UID_MAX`, or a user outside the `systemd-journal` and `adm` groups), because the supervisor reads the persisted token and emits the marker itself rather than following the journal; this container is where you reproduce that case. `--service=systemd` is not reachable from CI (the runner has no systemd user manager), so this local flow is how you exercise it.
+Expect the launch URL line before the `CHAN_DEVSERVER_TOKEN=<token>` marker on stdout when the running address is known (the marker is the contract the desktop control terminal scrapes), the unit at `~dev/.config/systemd/user/chan-devserver.service`, and `systemctl --user status chan-devserver.service` reporting active; a second `join` re-attaches to the running unit and re-emits the URL and the marker, or the marker alone when the bound address cannot be read. The supervisor prints the marker from the persisted token rather than by following the unit's journal, so a user who cannot read the journal still gets it. `--service=systemd` is not reachable from CI (the runner has no systemd user manager), so this local flow is how you exercise it.
 
 The macOS counterpart, `--service=launchd`, runs natively on your Mac. `chan devserver join --service=launchd` writes `~/Library/LaunchAgents/app.chan.devserver.plist`, bootstraps it into your `gui/$(id -u)` session, and emits the launch URL before the same `CHAN_DEVSERVER_TOKEN=` marker on stdout when the address is known; inspect it with `launchctl print gui/$(id -u)/app.chan.devserver` and tear it down with `chan devserver stop --service=launchd`, which boots it out and disables it. Like `--service=systemd`, it is not reachable from CI (the runner has no GUI launchd domain), so exercise it locally.
 
@@ -328,16 +328,12 @@ for p in 7001 7000 7002 7003; do curl -fsS "http://127.0.0.1:$p/healthz"; echo; 
 
 CI does not run `sdme`. GitHub Actions runs directly on its ubuntu runners with the dependencies installed natively; the `sdme` flow above is the local way to reproduce that environment on your machine.
 
-- `.github/workflows/ci.yml` runs native Linux, macOS, and Windows lanes in parallel. Linux builds and boots the release devserver and emits an AppImage; macOS emits and verifies an ad-hoc-signed `.app`; Windows emits an unsigned NSIS installer and boots the desktop binary as a devserver.
-- The same workflow builds the direct `.deb` and `.rpm`, both AUR packages in clean Arch containers, the COPR and PPA source packages, the Nix packages, and the chan OCI image.
+- `.github/workflows/ci.yml` runs native Linux, macOS, and Windows lanes in parallel. Linux emits an AppImage and boots it as a release devserver; macOS emits and verifies an ad-hoc-signed `.app`; Windows emits an unsigned NSIS installer and boots the desktop binary as a devserver.
+- The same workflow builds the direct-download `.deb` and `.rpm`, both AUR packages in clean Arch containers, the COPR and PPA source packages, the Nix packages, and the chan OCI image.
 - `.github/workflows/gateway-ci.yml` runs the gateway gate directly on the runner against a `postgres:16` service container (not `chan-psql`) and separately builds the four gateway OCI images.
 
 Local `sdme` is the fast loop; CI is the canonical lane, and owns x86_64.
 
 ## aarch64 Linux build note
 
-chan does not compile for aarch64-linux out of the box: gemm-common 0.19 (a candle dependency) uses fp16 inline asm (`fmla .8h`) that the default `aarch64-unknown-linux-gnu` target lacks. On Apple-Silicon-hosted VMs (the lima/sdme flow above) the CPU supports it; build with:
-
-    RUSTFLAGS="-C target-feature=+fp16" cargo build ...
-
-x86_64, CI's lane, is unaffected.
+aarch64 Linux builds need no extra flags. gemm's fp16 kernels (a candle dependency) reach `fmla .8h` instructions through inlined helpers that only assemble when they are inlined into their feature-carrying callers, which an unoptimized build does not do on an aarch64 baseline without fp16. The workspace `Cargo.toml` therefore raises `gemm-f16` to `opt-level = 1` in the dev profile, so `cargo test` in an Apple-Silicon-hosted container builds like any other; shipped artifacts keep their instruction-set baseline.

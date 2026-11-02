@@ -16,7 +16,7 @@ The fast local proof that the `cfg(windows)` arms compile is a cross-compile fro
 make -C desktop xwin-check
 ```
 
-This checks the core crates for `x86_64-pc-windows-msvc`. The chan-desktop crate's full Windows build pulls the whole Tauri plus WebView2 toolchain and is not part of `xwin-check`; the `windows-latest` job in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) builds the CLI and desktop with native MSVC, emits a secret-free NSIS installer, and boots the desktop binary as a foreground devserver. [`.github/workflows/release-desktop.yml`](../../.github/workflows/release-desktop.yml) is the signed package rehearsal whose `chan-desktop-windows-x86_64` artifact is suitable for a real Windows smoke.
+This checks `chan-server`, `chan-shell` and `chan-workspace` for `x86_64-pc-windows-msvc` with warnings denied; it needs the LLVM tools (`llvm-lib`, `clang-cl`) on `PATH`. The chan-desktop crate's full Windows build pulls the whole Tauri plus WebView2 toolchain and is not part of `xwin-check`; the `windows-latest` job in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) builds the CLI and desktop with native MSVC, emits a secret-free NSIS installer, and boots the desktop binary as a foreground devserver. [`.github/workflows/release-desktop.yml`](../../.github/workflows/release-desktop.yml) is the signed package rehearsal whose `chan-desktop-windows-x86_64` artifact is suitable for a real Windows smoke.
 
 A clean Windows 11 needs the WebView2 evergreen runtime. It ships with current Windows 10 and 11 and the `windows-latest` runner has it; for an older or stripped image, install Microsoft's Evergreen Bootstrapper (`MicrosoftEdgeWebview2Setup.exe`). The NSIS installer can also bundle the bootstrapper check via Tauri's `webviewInstallMode`.
 
@@ -67,9 +67,9 @@ The Makefiles parameterize this with the `SDME` variable (how `sdme` is invoked)
   ```
 
   then `wsl --shutdown` and reopen. Install a distro (`wsl --install -d Ubuntu`) and the systemd/nspawn host tooling `sdme` needs inside it, the same as on a Linux host.
-- **nspawn inside WSL2 works.** A current WSL2 kernel exposes a unified `cgroup2` hierarchy, `/dev/kmsg` and user namespaces, `systemd-machined` is D-Bus activated, and a guest boots systemd as PID 1 in a couple of seconds. `sudo apt install systemd-containers` provides nspawn; then install sdme itself.
+- **nspawn inside WSL2 works.** A current WSL2 kernel exposes a unified `cgroup2` hierarchy, `/dev/kmsg` and user namespaces, `systemd-machined` is D-Bus activated, and a guest boots systemd as PID 1. `sudo apt install systemd-containers` provides nspawn; then install sdme itself.
 - **Hyper-V alternative.** A full Linux guest under Hyper-V behaves as a plain Linux host. It is heavier than WSL2 and not the expected path.
-- **Git line endings.** Set `git config --global core.autocrlf input` (or rely on the repo's `.gitattributes`) so shell scripts and the `.cmd` shims keep their intended endings across the Windows/WSL boundary.
+- **Git line endings.** The repo's `.gitattributes` checks every file out as LF on every platform (the `include_str!` pins depend on it); set `git config --global core.autocrlf input` as well so a file you add keeps LF across the Windows/WSL boundary.
 
 ### Running the gate and building artifacts
 
@@ -112,7 +112,7 @@ sudo sdme start chan-fdstore
 
 Then inside the guest: install `dbus-user-session sudo bash git curl procps python3 build-essential pkg-config libssl-dev`, create the `dev` user at uid 1000, `loginctl enable-linger dev`, and run the suite as `dev` with `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1`, correct here and only here, because nothing else in a throwaway container owns `chan-devserver.service`.
 
-Six things bite in practice:
+The traps, and what each one means:
 
 | symptom | cause and fix |
 |---|---|
@@ -123,7 +123,7 @@ Six things bite in practice:
 | `/repo/target/debug/chan: No such file or directory` | The suite resolves the binary through `CARGO_TARGET_DIR` when it is set. Point it at a writable guest-local path such as `/var/tmp/chan-target` when the source is read-only; otherwise leave it unset to use `$REPO/target`. |
 | `fatal: not a git repository: /repo/C:/...` | The Windows linked-worktree `.git` pointer; see the filesystem notes below. Use a WSL clone. |
 
-A passing run prints `PASS: all <n> cases at <sha>` and asserts the fd-store count after every phase it drives (restarts, the watchdog, a crash restore, session close, stop).
+A passing run prints `PASS: all <n> cases at <sha>`, the sha being the `git rev-parse HEAD` of the checkout under test.
 
 ### Filesystem and performance notes
 
@@ -136,13 +136,13 @@ A passing run prints `PASS: all <n> cases at <sha>` and asserts the fd-store cou
   ```
 
   A plain (non-worktree) Windows checkout has a real `.git` directory and does not hit this, but the 9p performance caveat still applies.
-- **x86_64 by default.** A Windows dev host is x86_64, so the WSL2 containers are x86_64 Linux, matching CI's `ubuntu-latest` lane. The aarch64 fp16 build note affects only the Apple-Silicon lima/sdme flow.
+- **x86_64 by default.** A Windows dev host is x86_64, so the WSL2 containers are x86_64 Linux, matching CI's `ubuntu-latest` lane.
 
 ## How this maps to CI
 
 CI does not use WSL2 or `sdme`. As on the other platforms, GitHub Actions runs natively:
 
-- `.github/workflows/ci.yml` runs Linux, macOS, and Windows on native runners. Its `windows-latest` job builds the release CLI, builds an unsigned NSIS package from the same Tauri configuration shape as release, and runs the headless devserver `/api/health` smoke through `chan-desktop.exe`.
+- `.github/workflows/ci.yml` runs Linux, macOS, and Windows on native runners. Its `windows-latest` job (`make ci-windows`) builds the release CLI and smokes it, runs the Windows-meaningful test subset, builds an unsigned NSIS package from the same Tauri configuration shape as release, boots `chan-desktop.exe` as a headless devserver against `/api/health`, and smokes the installer.
 - The `windows-latest` arm of [`release-desktop.yml`](../../.github/workflows/release-desktop.yml) repeats the NSIS build with Authenticode signing and uploads the package for a real-hardware smoke.
 
 The WSL2 plus `sdme` flow above is the local way to reproduce the Linux environment on a Windows machine; `cargo-xwin` is the local way to compile-check the native Windows build. Both are the fast loop; CI is the canonical lane and owns the authoritative Windows artifact.
