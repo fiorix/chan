@@ -17,11 +17,11 @@ Copy, sanitize, verify, then commit. Never commit the copy first and clean it up
 
 ## What the round tree carries that the archive must not
 
-Agents are routed by absolute path, so briefs, `config.toml`, task files, and journals name the worktree they ran in. Archived verbatim, every one of those becomes a literal home path in public history. This is the single largest source of drift and it recurs every round.
+Agents are routed by absolute path, so briefs, `config.toml`, task files, and journals name the worktree they ran in. Archived verbatim, every one of those becomes a literal home path in public history. It is the largest source of leaks, so it is the first thing to rewrite.
 
 | in the round tree | in the archive |
 | --- | --- |
-| `/home/<user>/dev/github.com/<user>/chan-v0840` | `<checkout-root>/chan-v0840` |
+| `/home/<user>/dev/github.com/<user>/chan-<worktree>` | `<checkout-root>/chan-<worktree>` |
 | any other path under the home directory | `$HOME/...` |
 | the chan checkout itself, referenced from an archived doc | `<chan-source>/...` |
 | maintainer display name or personal email | `@@Alex` |

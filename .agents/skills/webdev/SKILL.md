@@ -13,13 +13,17 @@ when_to_use: >-
 
 Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and the app's interaction model as the platform. Add framework and package weight only when it earns its keep.
 
+## The web workspace
+
+`web/` is one npm workspace with five packages: `@chan/workspace-app` (the per-workspace SPA chan-server embeds), `@chan/launcher` (the Computers screen, built into `web-launcher/dist`), `@chan/profile` (the gateway identity SPA), `@chan/web-shared` (the API client, keyboard model, command deck and shared chrome the SPAs import), and `@chan/marketing` (the chan.app site and manual). Each package runs `svelte-check` as `check` and `vitest run` as `test`; `make web-check` gates all four app packages and `make web-marketing-check` the site. The workspace app's design is `web/packages/workspace-app/src/design.md`.
+
 ## Current Default Stack
 
 - Vite, Svelte 5, TypeScript, CodeMirror 6.
-- SvelteKit only when routing, SSR, server actions, or file-based app structure are actually useful. For a Rust-served SPA, plain Vite is usually enough.
-- Component CSS plus shared CSS variables. Tailwind only if already present.
+- SvelteKit only when routing, SSR, server actions, or file-based app structure are actually useful. For a Rust-served SPA, plain Vite is enough.
+- Component CSS plus shared CSS variables (`@chan/web-shared/theme.css`). Tailwind only if already present.
 - Native `fetch` behind a typed transport/client boundary. No Axios by default.
-- @lucide/svelte for icons where available.
+- `@lucide/svelte` for icons.
 - Vitest for unit tests, svelte-check for Svelte/TypeScript validation.
 
 ## Svelte 5 Rules
@@ -56,26 +60,17 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 ## Baseline App Shell
 
 - A workspace acts like a small window manager: panes, tabs, split panes, active focus, drag resize, session restore.
-- Feature surfaces are window-level overlays: files, search, graph, assistant, settings, history, diff, modal prompts, disconnect/auth states.
+- Feature surfaces are window-level overlays: files, search, graph, settings, modal prompts, disconnect and auth states.
 - Overlays share shell behavior: backdrop, stacking, Escape handling, safe-area gutters, maximized/restored sizing, animation policy.
-- Overlay chrome convention:
-  - maximize/restore on the left,
-  - primary title/context in the center,
-  - hamburger/actions and close on the right,
-  - optional right inspector,
-  - optional left navigation/outline pane.
-- Design for future detachable/floating overlays, minimize-to-dock, z-order, persistent placement, and theme skins such as CDE, WindowMaker, or macOS. Do not bake modal assumptions into feature internals.
+- Overlay chrome convention: maximize/restore on the left, primary title/context in the center, hamburger/actions and close on the right, an optional right inspector, an optional left navigation/outline pane.
+- Do not bake modal assumptions into feature internals; an overlay may later float, detach, or change z-order and placement.
 
 ## Shell Architecture
 
-- Separate shell primitives from feature bodies:
-  - `OverlayShell`: backdrop, stacking, panel sizing, safe-area rules.
-  - `Inspector`: resizable side-pane chrome only.
-  - `HamburgerMenu` or equivalent: one triggerless/triggered menu primitive.
-  - Feature components: own data loading, body rendering, and action lists.
-- App root owns global overlays and global keyboard handling.
-- Overlay stack is central; Escape closes one topmost overlay, not every mounted overlay.
-- Menus are command surfaces. Header hamburger and right-click context menu should render the same action list.
+- Separate shell primitives from feature bodies: `OverlayShell` (backdrop, stacking, panel sizing, safe-area rules), `Inspector` (resizable side-pane chrome only), `HamburgerMenu` (one menu primitive), and feature components, which own data loading, body rendering, and action lists.
+- The app root owns global overlays and global keyboard handling.
+- The overlay stack is central; Escape closes the one topmost overlay, not every mounted overlay.
+- Menus are command surfaces. The header hamburger and the right-click context menu render the same action list.
 - Preserve native context menus in text inputs unless the app provides a better editor-specific command menu.
 - Use portals for fixed menus/popovers when transformed ancestors would break viewport positioning.
 
@@ -83,20 +78,15 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 
 - Maintain a central shortcut/command registry.
 - Stable command ids are the contract. Chords are platform-specific bindings to those ids.
-- The registry should feed:
-  - browser key handling,
-  - native/Tauri key remapping,
-  - visible menu chord labels,
-  - shortcut tables,
-  - generated CLI/help text.
+- The registry feeds browser key handling, native/Tauri key remapping, visible menu chord labels, shortcut tables, and the generated CLI help text (`make shortcuts-check` diffs the generator's output against the `chan serve --help` table).
 - Match browser-reserved chords honestly. Use web fallbacks where browsers own shortcuts; let native shells intercept OS/browser-reserved chords and dispatch command events.
 - Prefer `KeyboardEvent.code` when modifier keys can change `key`, especially Option/Alt on macOS.
-- Commands should be invokable from keyboard, menu, context menu, and host bridge without duplicating behavior.
+- Commands are invokable from keyboard, menu, context menu, and host bridge without duplicating behavior.
 
 ## Tauri And Host Readiness
 
 - Keep the SPA usable in a normal browser.
-- Native wrappers should add capabilities through a small host bridge that dispatches stable command events and injects platform metadata.
+- Native wrappers add capabilities through a small host bridge that dispatches stable command events and injects platform metadata.
 - Prefer one HTTP/WebSocket transport and one typed API surface across browser and native. Do not split protocol paths unless it removes real complexity.
 - Avoid `window.prompt` and `window.confirm`; use in-app modals that work in WebViews.
 - Keep native detection localized to host integration and presentation labels.
@@ -104,7 +94,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 ## Organization
 
 - Keep modules aligned by responsibility, not by framework artifact type.
-- Shared state modules should expose a small domain API, not a junk drawer of writable globals.
+- Shared state modules expose a small domain API, not a junk drawer of writable globals.
 - Prefer explicit domain types for pane ids, overlay ids, command ids, tab state, inspector targets, and file kinds.
 - Split large components when there is a real boundary: shell vs body, chrome vs content, data loading vs rendering, command list vs menu primitive.
 - Avoid barrels unless the project already uses them and tree-shaking impact is understood.
@@ -131,7 +121,6 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
   - `editor/widgets/widgetWritable.test.ts`: every widget module that dispatches a document change imports the write predicate, so a widget added later is checked the moment it lands.
   - The launcher's `themeTokens.test.ts`: both themes define the same tokens and no source spells a token's colour as a literal, which `var()` resolution hides from every runtime check.
   - The launcher's `buttonStyles.test.ts`: the top bar's two toggles keep their tint under the pointer, resolved from the top bar's compiled rules and the launcher's sheet by specificity and source order, and the top bar's icon buttons and the update and confirm buttons take their box from the sheet's `.icon-btn` and `.btn` rules, with no rule of their own for it. jsdom applies no stylesheet and has no pointer, so no mounted test can see which rule a button wears. It reads `src/styles.css`, `TopBar.svelte`, `App.svelte` and `ConfirmDialog.svelte` with `node:fs`.
-  - `state/paneMouseSplit.test.ts`: the edge-split size gate's chrome constant equals one split divider plus two pane margins as the Workspace and Pane stylesheets set them, and jsdom lays out nothing, so no mounted test can measure either.
   - The launcher's `components/AddCard.layout.test.ts`: a deck's Add card's flip wrappers shrink below their content (`min-height: 0`) so the card, not an ancestor, scrolls a form taller than its slot, and the deck's stage clips with `overflow: clip` so focus moving past its edge cannot scroll a box that has no scrollbar. jsdom lays out nothing, so no mounted test can see either. It reads `AddCard.svelte` and `Carousel.svelte` with `?raw`.
   - The launcher's `components/Carousel.scroll.test.ts`: the deck card's scroller ends in a bottom padding and names the same length as its end scroll padding, so the wheel's end of range and the keyboard's last-row alignment (`scrollIntoView`, which otherwise aligns the row to the padding edge) leave one margin under the last row. jsdom lays out nothing, so no mounted test can see either. It reads `Carousel.svelte` with `?raw`.
   - `the back face never paints at rest` in `components/Pane.test.ts` and in the launcher's `lib/flip.test.ts`: the flip's back face is held off the screen at rest by a `visibility` gate, handed over at the easing's 90deg crossing, gated again under reduced motion, and named so the `animationend` substring match finds only its own keyframe. WebKitGTK ignores `backface-visibility` and jsdom applies no component CSS, so no mounted test can see which face paints (`scripts/e2e/scenarios/desktop-webview-rendering.md`).
@@ -143,7 +132,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
   - `components/contextMenuChrome.test.ts`: no rule on the pane element, in any state, scales it, since a scaled pane corrupts xterm's WebGL glyph atlas.
   - `components/dragFocusColour.test.ts`: the pane's drag-and-drop highlights (the tab strip under a dragged tab, the insertion marker, the edge-split overlay, the moved pane's outline, the move target and the split preview), the floating cards' resize bar on hover and keyboard focus, and the docked resize handle on hover read the window's focus colour expression and no fixed accent, link colour or literal, the handle's hover rule follows its idle-invisible rule so that it wins, the app root (`<div class="app">`) carries the window's preset as `data-focus-color`, and its four focus colour presets equal the pane's. jsdom applies no component stylesheet, so no mounted test can see which colour a rule paints; the browser check `176-drag-focus-colour` reads the painted colours. It reads `App.svelte`, `Pane.svelte`, `Inspector.svelte` and `ResizeHandle.svelte` with `?raw`.
   - `editor/wysiwygLayerOrder.test.ts`: the z-index order of Wysiwyg's negative-z paint layers, or selections paint under the page fill.
-  - `editor/decorations/blocks.test.ts`: Wysiwyg's rule for a decorated line's class reads each `--cm-md-*` variable the decorations set on that line (today `--cm-md-list-level` on `cm-md-list-hang`), or nested lists lose their indent.
+  - `editor/decorations/blocks.test.ts`: Wysiwyg's rule for a decorated line's class reads each `--cm-md-*` variable the decorations set on that line (`--cm-md-list-level` on `cm-md-list-hang`), or nested lists lose their indent.
   - `editor/widgets/table.test.ts`: Wysiwyg's stylesheet scrolls a wide table inside its wrap (`min-width: 0` on the content, `overflow-x: auto` and `contain: inline-size` on `cm-md-table-wrap`) so prose still wraps at page width, and gives the block-widget roots (the table wrap, a rendered diagram, an image being edited, a page break) no vertical margin, since CodeMirror's height map measures a block widget without its margins and a margin sends clicks below the widget to the wrong line. jsdom lays out nothing, so no mounted test can see either. It reads `src/editor/Wysiwyg.svelte` with `node:fs`.
   - `state/graphPalette.test.ts`: the literal CSS palette blocks in `App.svelte` and `GraphTuner.svelte` equal the TypeScript palette defaults.
   - `components/TerminalTab.font.test.ts`: the app entry imports `fonts.css` so the terminal face starts loading at boot, its `@font-face` src is relative, since an absolute src resolves to the launcher's `index.html` under a tenant prefix, and the family `fonts.css` declares is the family the terminal asks for. It reads `src/fonts.css` with `node:fs`; its reads of the bundled font and `OFL.txt` are shipped assets, not source.
@@ -154,7 +143,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
   - `graph/workspaceSearchParity.test.ts` reads its JSON fixtures.
   - `state/desktopBridgeLayout.test.ts`: the desktop's injected keyboard scripts follow the same layout contract as the workspace app's `shortcutKey` over the shared layout vectors. It runs the key bridge and the launcher's bridge from `desktop/src-tauri/src/key_bridge.js` and `launcher_bridge.js`, which the desktop includes with `include_str!`, and the connecting page from `desktop/src/connecting.js` and `connecting.html`.
   - `state/keyboardLayout.test.ts`: the key bridge dispatches a letter chord by the layout's letter; it runs `key_bridge.js`.
-  - `state/extensionRelayLayout.test.ts`: the echo extension's keyboard relay forwards exactly the keydowns Chan's validation accepts; it runs the script blocks of `crates/chan-server/examples/echo-extension.html`, the page the example serves.
+  - `state/extensionRelayLayout.test.ts`: the echo extension's keyboard relay forwards exactly the keydowns chan's validation accepts; it runs the script blocks of `crates/chan-server/examples/echo-extension.html`, the page the example serves.
 - No assertion on comment text. A comment is documentation; rewording it to follow the writing rules must never turn the suite red.
 - No absence assertion on an identifier that exists nowhere in the tree: a `not.toMatch` on a name nobody spells passes against an empty file and cannot fail for a real reason. A negative stays only where it guards a shape someone could plausibly re-add and no positive assertion can express it.
 - Test files are named `<module>[.<concern>].test.ts` beside the module they test (`tabs.test.ts`, `shortcuts.windows.test.ts`), not after the incident, round or feature that prompted them. Re-homing a file is two commits, a rename with no content change and then the edit, so history follows the file.
