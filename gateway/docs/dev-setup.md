@@ -2,7 +2,7 @@
 
 The gateway can run as a set of `sdme` containers, but a private bridge alone is not a trusted transport. This guide describes the production-shaped layout for hosts that also provide an authenticated, encrypted service overlay.
 
-It mirrors the reference deployment in the sibling `chan-prod-setup` repo. Per "show the pattern, copy little", it describes the topology and one worked flow end to end, and points at the checked-in manifests ([`packaging/kube/`](../../packaging/kube/README.md)) and `chan-prod-setup` for the rest, rather than duplicating every config here.
+It mirrors the maintainer's reference deployment (the `chan-prod-setup` repo). It describes the topology and one worked flow end to end, and points at the checked-in manifests ([`packaging/kube/`](../../packaging/kube/README.md)) for the rest rather than duplicating every config here.
 
 > A faster inner loop exists for rapid iteration: `packaging/gateway/scripts/dev/run.sh` runs the services as host `cargo run` binaries over `*.localtest.me` (see [`packaging/gateway/scripts/dev/README.md`](../../packaging/gateway/scripts/dev/README.md)). That is handy while editing code, but it is NOT the prod-like shape. This guide is the containerized stack.
 
@@ -25,11 +25,11 @@ flowchart TB
     browser["browser (https)"]
     devsrv["chan devserver (tunnel dial)"]
     subgraph account["account + control plane"]
-        gwnginx["TLS edge: gw.<domain>"]
+        gwnginx["TLS edge: gw.{domain}"]
         pod["gateway pod: postgres + profile + identity + control (loopback)"]
     end
     subgraph node["proxy node"]
-        pnginx["TLS edge: proxy.<domain> apex + *.p1.proxy.<domain>"]
+        pnginx["TLS edge: proxy.{domain} apex + *.p1.proxy.{domain}"]
         proxy["devserver-proxy"]
     end
     browser -->|"sign-in"| gwnginx --> pod
@@ -37,6 +37,8 @@ flowchart TB
     devsrv -->|"/v1/tunnel (h2c)"| pnginx
     proxy -->|"overlay: control session + token validate ONLY"| pod
 ```
+
+*The production shape: one TLS edge per plane, the account pod on loopback, and a proxy node that reaches exactly two internal listeners over the overlay.*
 
 Admission fails closed: the proxy admits a tunnel registration only after identity validates the PAT and devserver-control verifies the identity-signed admission lease, so a proxy that cannot reach the control plane serves nothing. devserver-control also rejects a proxy whose package version differs from its own, so every service and every node must run the same release tag.
 
@@ -62,7 +64,7 @@ nginx terminates TLS for both host families; locally one nginx container can wea
 
 The tunnel location needs idle timeouts that fit a tunnel. A registered tunnel is one long-lived `POST /v1/tunnel` whose request body is the devserver-to-proxy direction, and that body is idle for long stretches when nothing is using the devserver, so nginx's `client_body_timeout` (60s by default) expires and ends it: no error on either side, a `200` in the access log, and a devserver that re-registers about once a minute forever. Raise `client_body_timeout` on that location. `grpc_read_timeout` is an idle deadline on the same request's upstream leg, which is quiet for the same stretches, and nginx ends the request with a `504` and an `upstream timed out` line in the error log when it expires, so raise it alongside. `grpc_send_timeout` is armed only while a write to the upstream is still pending, so it is not an idle deadline on a tunnel. [`nginx-edge.sh`](../../packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/nginx-edge.sh) in the tunnel e2e rig renders the shape.
 
-Both edges decode a bearer they then forward. The tunnel edge decodes every dial's `Authorization: Bearer <PAT>` header; the identity edge decodes the desktop PATs that `/desktop/v1/*` carries. In nginx 1.28.3 the decoded header field is allocated out of the HTTP/2 stream's memory pool, which for a tunnel lives as long as the tunnel does, and that pool is freed without being cleared, so the plaintext stays in the worker's heap until the worker reuses the block. The detail is nginx's; the property is not, and any TLS-terminating edge holds the bearers it decodes. Isolate an edge host the way the gateway pod is isolated, and keep PAT rotation and revocation as the control. Section 6 of [`crates/chan-tunnel-server/design.md`](../../crates/chan-tunnel-server/design.md) says what a captured tunnel PAT reaches.
+Both edges decode a bearer they then forward. The tunnel edge decodes every dial's `Authorization: Bearer <PAT>` header; the identity edge decodes the desktop PATs that `/desktop/v1/*` carries. Any TLS-terminating edge holds the bearers it decodes, and nginx in particular keeps a tunnel's decoded header in the HTTP/2 stream's memory pool for as long as the tunnel lives and frees that pool without clearing it. Isolate an edge host the way the gateway pod is isolated, and keep PAT rotation and revocation as the control. The trust-boundary section of [`crates/chan-tunnel-server/design.md`](../../crates/chan-tunnel-server/design.md) says what a captured tunnel PAT reaches.
 
 The one dev difference is the certificate. Production uses certbot with a dns-01 plugin for the wildcard (http-01 cannot issue wildcards; any DNS provider with a certbot plugin works). Locally, issue a local-CA wildcard with [`mkcert`](https://github.com/FiloSottile/mkcert) and mount it into the nginx container:
 
@@ -98,7 +100,7 @@ Clicking Open on the dashboard lands on the tenant origin, `https://<owner>--<di
 
 ## From local to a real host
 
-Because the local stack already has the prod shape, going to a real host changes only what is environment-specific, exactly as `chan-prod-setup` automates (`configure.sh`, then `make secrets` / `make all` / `make proxy-node`):
+Because the local stack already has the prod shape, going to a real host changes only what is environment-specific:
 
 - **DNS.** Real records for `gw.<domain>`, the `proxy.<domain>` tunnel apex, and each node's `*.{proxy}.proxy.<domain>` wildcard.
 - **Certificates.** Swap mkcert for certbot with your DNS provider's dns-01 plugin on each edge.
@@ -129,7 +131,7 @@ export TEST_DATABASE_URL=postgres://chan:chan@127.0.0.1:5432/chan_gateway_test
 cargo test                             # profile + identity need the DB
 ```
 
-`devserver-proxy` and all `cargo test --lib` unit tests need no database; only `profile` and `identity` integration tests do. The pod's postgres is internal to the pod, so host-run tests use a separately published local Postgres (the dev runner's, or a one-off container with `-p 5432:5432` seeding `chan_gateway` and `chan_gateway_test`). Per-test schema isolation means a `cargo test` run never clobbers the `chan_gateway` DB a running stack uses. CI (`gateway-ci.yml`) runs the same gate with a `postgres:16` service on `ubuntu-latest` (x86_64), the canonical lane; local sdme is the fast loop.
+`devserver-proxy` and all `cargo test --lib` unit tests need no database; only `profile` and `identity` integration tests do. The pod's postgres is internal to the pod, so host-run tests use a separately published local Postgres (the dev runner's, or a one-off container with `-p 5432:5432` seeding `chan_gateway` and `chan_gateway_test`). Per-test schema isolation means a `cargo test` run never clobbers the `chan_gateway` DB a running stack uses. CI (`gateway-ci.yml`) runs the same gate with a `postgres:16` service on `ubuntu-latest` (x86_64), the reference run; local sdme is the fast loop.
 
 ### Connection reaper (test infra)
 
@@ -151,8 +153,8 @@ Safe whenever no live stack is connected to `chan_gateway`.
 
 ## Troubleshooting
 
-- **A service can't reach another** -- inside the pod they resolve over loopback; across containers they resolve by name only on the shared zone. Check `sdme ps` and the hostname-based URLs in each unit's env.
-- **Browser rejects the local cert** -- run `mkcert -install` so the local CA is trusted, and reissue the wildcard if you changed the domain.
-- **Signed-in but the tenant 404s** -- confirm nginx serves https and `FORWARDED_PROTO=https` is set on devserver-proxy; a scheme mismatch makes the `__Host-devserver_gate` cookie fail to attach.
-- **The proxy admits nothing** -- fail-closed is working: check that the proxy reaches devserver-control over the overlay, that its bearer matches control's per-proxy credential map, and that both sides run the same release tag.
-- **Tests pass locally but break on CI** -- same migration set must run (`migrations/0001..N` in order); a forgotten file shows up as missing-column errors on first use.
+- **A service can't reach another**: inside the pod they resolve over loopback; across containers they resolve by name only on the shared zone. Check `sdme ps` and the hostname-based URLs in each unit's env.
+- **Browser rejects the local cert**: run `mkcert -install` so the local CA is trusted, and reissue the wildcard if you changed the domain.
+- **Signed-in but the tenant 404s**: confirm nginx serves https and `FORWARDED_PROTO=https` is set on devserver-proxy; a scheme mismatch makes the `__Host-devserver_gate` cookie fail to attach.
+- **The proxy admits nothing**: fail-closed is working. Check that the proxy reaches devserver-control over the overlay, that its bearer matches control's per-proxy credential map, and that both sides run the same release tag.
+- **Tests pass locally but break on CI**: the same migration set must run (`migrations/0001..N` in order); a forgotten file shows up as missing-column errors on first use.

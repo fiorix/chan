@@ -1,36 +1,28 @@
 # identity-service design
 
-This document owns identity-service's component boundaries, invariants, rationale, and failure behavior. The executable contract (how to run it, the exact route and environment catalogs) lives in [README.md](README.md); routes appear here only where a flow needs them.
+identity is the public sign-in surface of the gateway and its only user-facing UI. It runs OAuth2 sign-in with PKCE against GitHub, Google and GitLab, holds the one browser session cookie in the suite, mints and validates personal access tokens, serves the account SPA, and mints the short-lived entry credential that hands a signed-in user off to a devserver's exact proxy origin. This document covers its boundaries, flows, invariants and the reasons behind them. How to run it and its exact route and configuration catalogs live in [README.md](README.md).
 
-## Problem
+## Where it sits
 
-Public sign-in surface plus the only user-facing UI in the chan-gateway suite. Owns:
+Callers: browsers (the SPA, OAuth callbacks, share landings), chan-desktop (discovery, authorize, roster, entry), devserver-proxy (PAT validation and admission leases on the internal listener), and the admin CLI (the operator admin tree). Callees: the OAuth providers, profile-service for every user, grant, flag and policy question, and devserver-control for live-tunnel reads and for tunnel kills and session revocations.
 
-- OAuth2 + PKCE sign-in against multiple providers.
-- The session cookie. Host-only on the identity origin, `gw.{domain}` (ex `gw.chan.app`); it never spans subdomains.
-- Personal access tokens for the chan CLI / chan-tunnel.
-- The dashboard: profile management plus the live-devserver list.
-- Devserver-gate entry-credential mint for the cross-origin handoff to the proxy fleet's per-tenant origins.
+identity owns only its own auth artifacts: the `tower_sessions` rows, the `identity_session_index` and the `api_tokens` tables. It does not own user data. The canonical user record, identities and audit live in profile-service and are reached over HTTP; because identity and profile share one Postgres, the PAT queries join the shared `users` table directly. identity never applies schema changes at serve time; migrations are the dedicated `CHAN_GATEWAY_MIGRATIONS=only` step, run by the same binary under the database-owner credential.
 
-Profile data (canonical user record, identities, audit) lives in profile-service; identity must not race with itself or duplicate user rows on concurrent first-time logins.
+## Surfaces
 
-## Architecture
+Two routers on two listeners. The public listener carries the session layer at its outermost edge; the internal listener never mounts it and never loads caller cookies.
 
-axum HTTP server with five routing surfaces:
+1. `/auth/*`: the pre-session OAuth flow. It stashes the CSRF state and PKCE verifier in the anonymous session; the callback consumes them and either upgrades the session to authenticated or fails.
+2. `/api/*`: the session-gated JSON API for the embedded SPA: `me`, profile management, PAT lifecycle, owned and incoming devservers, and sharing grants.
+3. Public discovery and the desktop surface: `/.well-known/chan-gateway`, the `/desktop/authorize` consent flow, the PAT-gated roster and entry routes.
+4. `/s/{owner}` and `/s/{owner}/{workspace}`: the share landings that mint the browser entry credential.
+5. `/internal/v1/*` and `/admin/v1/*` on the internal listener: PAT validation for the proxies, OAuth-session `whoami` for the account caller, and the operator and account-composite admin trees, each behind its own bearer.
 
-1. `/auth/*`: pre-session OAuth flow. Sets a transient session key (`pending_oauth`) carrying CSRF state and the PKCE verifier; the callback consumes it and either upgrades the session to authenticated (`user_id`) or fails.
-2. `/api/*`: session-gated JSON API for the embedded SPA. Covers `me`, profile management, PAT lifecycle, the devserver lists (`/api/devservers/owned|incoming`), and the sharing grants. The devserver-gate mint lives on the share landings and the desktop entry, not under `/api/*`.
-3. `/internal/v1/*`: PAT validation uses `IDENTITY_INTERNAL_TOKEN`; OAuth-session `whoami` uses `IDENTITY_SESSION_INTERNAL_TOKEN`. This listener never loads caller cookies implicitly.
-4. `/admin/v1/*`: Operator routes use `IDENTITY_ADMIN_TOKEN`; access revoke, profile delete, and per-user devserver policy additionally accept `IDENTITY_ACCOUNT_ADMIN_TOKEN`.
-5. Public discovery and desktop endpoints: `GET /.well-known/chan-gateway` returns unauthenticated discovery JSON (`kind`, `api_version: 1`, `identity_origin`, `desktop_authorize_url`, `desktop_entry_url`, `roster_url`, `devserver_proxy_origin`, `devserver_proxy_host_depth: 2` (tenant hosts sit two labels below the proxy apex), and `tunnel_url`). The PAT-gated desktop surface is `/desktop/authorize`, `POST /desktop/v1/devserver/entry` (below), and `GET /desktop/v1/devservers`, the roster: Bearer PAT with `desktop.account`, ETag/If-None-Match 304 polling; 401 is terminal for the desktop, 502 means keep the last roster.
+The SPA is baked in at build time with `rust_embed` and served by the shared static-file handler; unmatched paths without an extension fall through to `index.html`. HTML responses carry an application-layer CSP and `X-Frame-Options: DENY`; the production edge adds `nosniff` and a referrer policy.
 
-Static SPA assets are baked in at build time via `rust_embed` and served by `gateway_common::static_files::serve`. Anything not matched by an explicit route falls through to the static handler; paths without an extension serve `index.html` (SPA fallback). At the application layer, HTML responses, including the fallback and missing-bundle banner, carry `X-Frame-Options: DENY` and `default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`. The `https:` image source admits the provider-hosted avatar URL that the SPA renders directly while refusing cleartext images. The static shell contains no embedded user or authorization state and does not set `Cache-Control`; asset responses retain only their normal MIME metadata. Production nginx adds `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin` with `always`. Deployments without an equivalent edge policy lack those two defense-in-depth headers.
+## Flows
 
-The session layer (`SessionManagerLayer` from `tower_sessions`) sits at the outermost edge of the public listener and applies to every public route; the internal listener never mounts it. **Cookie scope is host-only on the identity origin, `gw.{domain}` (ex `gw.chan.app`).** No `Domain` attribute. devserver-proxy does not share this cookie.
-
-## User-facing flows
-
-### OAuth flow
+### OAuth sign-in
 
 ```mermaid
 sequenceDiagram
@@ -45,12 +37,12 @@ sequenceDiagram
     B->>P: authorize + consent
     P-->>B: redirect /callback?code&state
     B->>I: GET /auth/{provider}/callback
-    Note over I: consume pending_oauth (remove)<br/>ct_eq(state) BEFORE provider compare
+    Note over I: consume pending_oauth<br/>constant-time state check before provider compare
     I->>P: exchange code + PKCE verifier
     P-->>I: tokens + userinfo
     I->>PR: upsert_by_identity
     PR-->>I: user record
-    alt user.is_blocked()
+    alt user is blocked
         I->>PR: audit login_denied
         I-->>B: 403 Forbidden
     end
@@ -59,92 +51,44 @@ sequenceDiagram
         I->>PR: audit login_denied
         I-->>B: 303 /?denied=oauth_login
     end
-    Note over I: session.cycle_id() at privilege boundary<br/>stamp authenticated_at and user_id<br/>index final store id
-    I->>PR: audit login + claim_grants (sweep)
-    I-->>B: 303 post-login dest
+    Note over I: session.cycle_id() at the privilege boundary<br/>stamp authenticated_at and user_id, index the store id
+    I->>PR: audit login + claim pending grants
+    I-->>B: 303 post-login destination
 ```
 
-*Sign-in flow: stash `pending_oauth`, consume it on callback, constant-time state check and the `oauth_login` gate run before `cycle_id`, then upsert and claim grants.*
+*Sign-in: the stash is consumed on first read, the state check and the `oauth_login` gate run before the session id rotates, then the user is upserted and pending grants are claimed.*
 
-`IDENTITY_OAUTH_ENDPOINTS_BASE` (env, unset in production) points the GitHub provider's OAuth + API endpoints at an alternate origin so a local test harness can stub the sign-in flow end to end; absent means the stock github.com / api.github.com endpoints (unit-test pinned) and nothing but the endpoint URLs ever changes.
+The callback consumes `pending_oauth` on first read, so a reloaded callback is a bad request, not a fresh flow. The constant-time state comparison runs before the plain provider comparison so timing on the provider field cannot oracle the session's expected provider. A blocked user is refused with an audit row. A user whose `oauth_login` flag resolves false is refused before the session id rotates, so a denied callback never carries an authenticated session; the SPA reads the `denied` marker and explains that sign-in is closed. The optional `return_to` is accepted only as one same-origin, origin-relative path and is consumed exactly once.
 
-`/auth/{provider}` (GET):
+After the upsert, identity asks profile to claim pending grants for the user's primary email and the provider's email. The claim is best-effort: a failure logs and continues so an unhealthy profile call does not block sign-in.
 
-1. Look up the provider config. Unknown provider returns 404.
-2. Generate `(authorize_url, csrf_state, pkce_verifier)`.
-3. Validate optional `return_to` as one same-origin, origin-relative path and store it separately from provider state. Absolute, scheme-relative, encoded-slash/backslash, fragment, control-character, and malformed-percent forms return 400.
-4. Insert `PendingOauth { provider, state, verifier }` into the session under `pending_oauth`.
-5. Redirect to `authorize_url`.
+### Personal access tokens
 
-`/auth/{provider}/callback` (GET):
+A PAT is `chan_pat_` followed by random bytes from the OS. Identity stores only its SHA-256 digest and emits the plaintext exactly once: in the SPA or admin creation response, or the desktop redemption response. Each token carries a scope list; `tunnel` (dial the tunnel) is the default and the only scope the SPA can mint. The desktop-authorize flow and the operator mint issue the `desktop.*` scopes. The audit row records which path minted the token.
 
-1. Read `code` and `state` from query params; refuse on `?error=...`.
-2. Remove `pending_oauth` from the session (consume on read).
-3. Compare `state` with `pending.state` constant-time. State check runs before the non-constant-time provider compare so timing on the provider field cannot be used to oracle the session's expected provider.
-4. Compare `provider` (URL path) with `pending.provider`.
-5. Exchange the code at the provider with the PKCE verifier.
-6. Fetch user info from the provider's REST endpoint.
-7. `profile.upsert_by_identity` (one HTTP round trip, one Postgres transaction). Returns the user record.
-8. If `user.is_blocked()`, write a `login_denied` audit row and return 403 (`Error::Forbidden`).
-9. Resolve `profile.get_user_flags(user.id)`. If `oauth_login` resolves false, write a `login_denied` audit row (with note `oauth_login flag not granted`) and 303 to `/?denied=oauth_login`. The SPA's Login view reads the query param and renders a "sign-in is closed" panel. The gate runs *before* `cycle_id` so a denied callback never carries an authenticated session.
-10. **Rotate the session id (`session.cycle_id()`)** at the privilege boundary.
-11. Stamp microsecond-normalized `authenticated_at`, insert `user_id`, and upsert `identity_session_index` with the post-cycle tower store id. Public authentication and `whoami` require the index to match the session record.
-12. Write a `login` audit row, claim pending grants, consume `return_to` exactly once, and 303 there (or `/`). An `oauth_login` denial appends its stable marker to the same validated target.
+Validation (`/internal/v1/tokens/validate`) is what the proxy calls at dial, for the Hello-name announcement and at every lease refresh. One statement joins the token, the user, the fleet policy singleton and the optional per-user policy while bumping `last_used_at`. Every failure (unknown, revoked, expired, blocked user, paused fleet, disabled or missing-but-required policy) is the same unauthorized answer, so the outside cannot tell them apart. A successful admission validation signs the user's connected-devserver limit into a short-lived Ed25519 admission lease bound to owner, devserver id, registration id and proxy id. It also ensures the owner's `devservers` row in profile on a task the response does not wait for, so a row the sweeper removed while the devserver was offline is back on the next dial, and no profile failure can fail a validate.
 
-### PAT lifecycle
+Validation runs behind a per-token-fingerprint throttle of its own, mirroring the proxy's. Throttled requests are indistinguishable from an unknown token. The proxy's throttle catches the typical case; this one catches a leaked internal bearer being used to brute-force PATs directly.
 
-PAT shape: `chan_pat_<32 random bytes, base64url, no pad>`.
+Revocation is a composition. Profile atomically verifies ownership, marks the row revoked, writes the audit row and reserves a durable revocation generation; identity then makes a best-effort immediate cut of the owner's live tunnels and browser sessions through devserver-control and answers accepted. Identity cuts every tunnel the owner has rather than the revoked PAT's alone: the revoke path does not map the token to its devserver id, although the id is derivable from the same digest and devserver-control exposes an exact kill. Other PATs simply redial. Profile's worker confirms the cut again after the entry-credential quiet window. The operator revoke is the same composition without a session and writes a distinct audit action so the owner's history does not attribute it to them.
 
-- Random bytes from `rand::rngs::OsRng`.
-- Hash: `SHA-256(token)` stored in `api_tokens.token_hash`. Plaintext leaves identity only through the one-time SPA/admin creation response or desktop redemption response and is never persisted there.
-- Scopes: each token carries a scope list (`api_tokens.scopes`), defaulting to `["tunnel"]` (dial chan-tunnel). `tunnel` is the only live tunnel scope. `POST /api/tokens` refuses every `desktop.*` scope; the desktop-authorize flow and the operator mint (`POST /admin/v1/tokens`) mint `desktop.connect` / `desktop.account`. Validate returns the list and chan-tunnel-server enforces it.
-- Origin: mints record `created` (SPA), `created_via_desktop` (desktop-authorize flow), or `created_via_admin` (operator) in `api_token_audit`, so operators can tell them apart.
-- Validate (`/internal/v1/tokens/validate`):
-  - Per-token-fingerprint throttle (4 rps refill, 16 burst, 4096-entry LRU map). Throttled requests return 401, identical on the wire to an unknown token.
-  - One statement joins the user, seeded fleet singleton, and optional user policy while bumping `last_used_at`. Blocked, paused, disabled, required-but-missing, unreadable, and invalid-limit states all preserve the uniform 401.
-  - A successful admission validation signs the positive finite user limit into the 120-second admission lease. No-policy compatibility mode signs the protocol maximum, leaving `MAX_DEVSERVERS_PER_USER` as the effective controller ceiling.
-  - A successful admission validation of a `tunnel`-scope PAT also ensures the owner's `devservers` row in profile, the registry row used for devserver listings. The ensure runs on a task the response does not wait for, so no profile failure and no profile delay can fail a validate; a failed ensure only warns, and the next lease refresh, a minute later for a live tunnel, attempts it again. devserver-proxy omits the display name from the admission call and forwards it on the follow-up validate, which labels the same row, so the admission ensure is label-less. Both are best-effort.
-  - Append `used` to `api_token_audit`.
-- Revoke (`DELETE /api/tokens/{id}`):
-  - Profile atomically verifies ownership, marks the row revoked, writes its audit row, and reserves a durable subject-revocation generation.
-  - Identity makes a best-effort immediate owner-tunnel/session cut and returns `202`; profile's worker confirms a post-commit first cut and a second fleet cut after the full entry-credential quiet window. Identity does not evict the revoked PAT's tunnels alone: the revoke path calls `kill_owner_tunnels`, which cuts every tunnel the owner has. Registrations carry the digest-derived devserver id, not the token id, and that devserver id is enough to target one PAT's tunnel because `devserver-control` exposes `POST /admin/v1/tunnels/{owner_user_id}/{devserver_id}/kill` and identity is authorized to call it. Identity could derive the devserver id from the token (it is the lowercase hex of the same SHA-256 digest that `api_tokens.token_hash` stores as unpadded base64url, so the two strings differ), but it does not today, so the conservative scope remains the whole subject.
-- Operator revoke (`POST /admin/v1/tokens/{id}/revoke`): the same composition without a session. Identity resolves the owner by token id (404 unknown), profile's admin surface soft-revokes and writes `revoked_via_admin` so the owner's audit does not attribute the action to them, then the same best-effort first cut runs and the route answers `202`. Retry-safe: an already-revoked token re-reserves settlement without a duplicate audit row.
+Minting runs the same policy projection as validation and locks the user and fleet rows, so a concurrent block, suspend or pause has one serialization point. The credential digest and its creation audit commit together; a failed audit rolls back the mint, so a failed mint cannot leave an undelivered active credential.
 
-PAT minting uses the same policy projection. The insert locks the canonical user and fleet singleton, so concurrent block, suspend, or pause has a linear serialization point. Public mint returns 403 `devserver_access_disabled`; admin mint returns 409 with the same stable reason. Listing and revoking existing PATs remain available.
+### Desktop authorize
 
-SPA and operator PAT expiry arithmetic is checked: a positive lifetime accepted by the request schema whose expiry cannot be represented as a duration or UTC instant returns 400 `invalid expires_in`. A JSON integer outside the field's type fails extraction with 422. There is no lifetime cap on these routes; absent or non-positive `expires_in` (and absent or zero operator `expires_days`) means no expiry. Desktop authorize retains its separate 90-day clamp.
+chan-desktop obtains its PAT through an OAuth-style consent flow rather than copying a token by hand. The desktop is an RFC 8252 loopback client: it binds an ephemeral `127.0.0.1` listener and opens the system browser at `/desktop/authorize` with that loopback `redirect_uri` and a PKCE S256 challenge. An unauthenticated entry bounces through the SPA sign-in and resumes at the consent page. On allow, identity mints the PAT and navigates the browser to the loopback callback with a single-use redemption code, not the PAT secret; the desktop exchanges code plus verifier at `/desktop/authorize/redeem`, and the PAT is released only when the verifier hashes to the stored challenge. The PAT secret never rides the browser.
 
-PAT creation commits the credential hash and creation audit together. An audit insertion failure rolls back the PAT, so a failed mint cannot leave an undelivered active credential.
+The handoff to the loopback listener is a page the browser navigates from, not a redirect answering the form post, because a redirect chain off a form post falls under the page's `form-action` policy in Chrome. Deny and blocked outcomes reach the loopback target with a stable `error` reason. The redirect URI is validated structurally as a loopback URI (loopback host, `http`, the fixed callback path, a port, nothing else) rather than as a literal, the lifetime is required and clamped, and the scopes must come from a strict allowlist with `desktop.account` only ever alone. PKCE binds the redemption to the requesting process but does not close the login-CSRF residual on a shared multi-user host, which is why the consent copy presents the requester as an unverifiable local app; the `desktop_authorize` module doc carries the full hardening posture.
 
-### OAuth-session and product control plane
+Redemption delivers the PAT once even when its audit write fails: the code stays consumed and the failure is logged without the secret, so audit availability cannot strand an already-minted credential.
 
-Every successful post-cycle OAuth session has a random public `admin_session_id` mapped to its secret tower `store_id`. Inventory joins the index to live, unexpired tower rows and returns only admin id, user id, authentication time, and expiry. List/revoke lazily prune missing or expired tower rows. Exact and user-wide revoke delete both records and are idempotent.
+### Desktop roster
 
-Every public session-authenticated request resolves the store id through `identity_session_index` and requires matching `user_id` and `authenticated_at`, as `whoami` does. This adds one lookup by the unique `store_id` column (migration 0016) to a well-formed authenticated request. An authenticated record without matching index authority is flushed and returns 401, or follows the anonymous branch on share landings and desktop authorize. An unindexed session is signed out on its next authenticated request.
+`GET /desktop/v1/devservers` (PAT with `desktop.account`) lists every devserver the account may enter, owned and shared, each with its immutable identity, label, liveness and exact proxy origin while online. The body carries an `ETag` and an unchanged roster answers not-modified. Only a dead or wrongly scoped PAT is a terminal failure for the desktop; an upstream failure tells it to keep the last roster, and a degraded all-offline roster is never served. Roster polls validate the PAT without writing `used` audit rows, since a poll every few seconds is not a use worth recording.
 
-Anonymous pre-auth sessions keep their OAuth state and redirect stashes; desktop authorize validates authentication before saving its new stash. Logout always flushes, even if index resolution fails, removes its own index row, and audits only a resolved user.
+### Entry credential mint
 
-Identity is the composition boundary for product mutations:
-
-- user policy persists to profile first; disable and non-increasing retries revoke owner tenant sessions and kill owner tunnels;
-- fleet pause persists `admissions_enabled=false`, then revokes every tenant session and kills every tunnel; resume only persists true;
-- access revoke durably revokes PATs/audits in profile, then revokes OAuth and subject tenant sessions and kills owner tunnels; and
-- admin delete establishes pending-delete denial, performs the same live cut, and waits for profile's quiet-window worker to remove the row.
-
-Durable state is never rolled back after a partial drain. A 502 contains only the durable projection and confirmed counts, making a retry convergent without exposing a downstream body.
-
-### Dashboard
-
-`/api/me`:
-
-1. Resolve `user_id` from the session and its matching index row.
-2. `profile.get_user(uid)`. Flush session and 401 if the user is gone underneath the cookie.
-3. Call devserver-control admin `GET /admin/v1/owners/{owner_user_id}/tunnels` (immutable owner id, not username) for the live-devserver list (one row per live devserver; a user can hold several). Empty for blocked users, and empty (with a log line, not a 500) on a devserver-control outage so the rest of the dashboard still loads from profile.
-4. Return `{user, devservers: [{devserver_id, status}], flags}`, where `flags` is the per-user resolved feature-flag map.
-
-The dashboard renders one card per devserver and flips it online/offline against that list. The card's "Open" navigates to `/s/{username}?d=<disc>` (the whole-devserver share landing, below, qualified with the card's devserver); the entry credential is minted server-side at click time, not at page render, so a short-exp token can't go stale before the click.
-
-### Devserver-gate mint
+The entry credential is how a signed-in principal crosses from `gw.{domain}` to a devserver's exact tenant origin without any cookie sharing. Two routes mint it: the share landings for the browser and `POST /desktop/v1/devserver/entry` for the desktop. Both follow the same order.
 
 ```mermaid
 sequenceDiagram
@@ -166,208 +110,98 @@ sequenceDiagram
         alt caller missing or blocked
             ID-->>Browser: 404
         end
-        ID->>Control: admin list_owner_tunnels immutable owner id
+        ID->>Control: list the owner's live tunnels by immutable owner id
         Control-->>ID: live devserver_id + proxy_base_url or empty
         ID->>Profile: devserver_access owner devserver caller
         Profile-->>ID: access true or 404
-        Note over ID: sign 30s Ed25519 entry credential bound to caller, owner, devserver, proxy, audience, and path
-        ID-->>Browser: no-store form handoff with entry credential
+        Note over ID: sign a short-lived Ed25519 entry credential bound to caller, owner, devserver, proxy, audience and path
+        ID-->>Browser: no-store form handoff with the credential
         Browser->>Proxy: POST /_chan/entry (credential body)
-        Note over Proxy: verify Ed25519 exact bindings and consume replay id
-        Proxy-->>Browser: 303 clean URL, Set-Cookie opaque __Host-devserver_gate + __Host-devserver_csrf
-        Browser->>Proxy: GET /workspace/ with __Host-devserver_gate cookie
-        Proxy-->>Browser: cookie verified, proxied to live devserver
+        Note over Proxy: verify bindings, consume the replay id
+        Proxy-->>Browser: 303 clean URL, Set-Cookie __Host-devserver_gate + __Host-devserver_csrf
+        Browser->>Proxy: GET /workspace/ with the gate cookie
+        Proxy-->>Browser: proxied to the live devserver
     end
 ```
 
-*Share-landing handoff: resolve owner and live devserver, run the profile access check, mint a 30s entry JWT, then devserver-proxy verifies it and sets the gate cookies.*
+*Share-landing handoff: resolve the owner and a live devserver, run the profile access check, mint the credential, and let devserver-proxy exchange it for its own host-only cookies.*
 
-The share landings (below) mint the entry credential; there is no standalone open endpoint. Both routes use this order, and the mint targets one of the owner's live devservers (`?d=` selector, single live, else first accessible):
+1. Validate the path and sanitize the optional `?d=` devserver selector. Without a session, stash the share URL and send the caller to sign-in; the callback consumes the stash and lands the user back here.
+2. Resolve the owner handle through profile. `/s/{owner}` is owner-only: the caller must be the owner, otherwise the answer is the same not-found as an unknown handle, so ownership is not revealed. The per-workspace landing admits an owner or a grantee. A missing or blocked caller gets the same not-found.
+3. Resolve the owner's live devservers from devserver-control by immutable owner id, never by username. Pick the `?d=` match, the single live one, or the first the caller can access; an ambiguous selector is refused. Every controller row must carry a lease that verifies under the admission ring and the owning node's base URL.
+4. Ask profile `devserver_access(owner, devserver, caller)`. The owner or an accepted grantee passes; anything else is the uniform not-found. A grant is whole-devserver, so the `{workspace}` segment never enters the check.
+5. Sign the credential. Its subject is the caller, not the owner, so the opaque session minted on the next leg carries the right identity for upstream attribution. Its audience is the exact tenant origin `{owner}--{disc}.<node base>`, built from the controller row's node base after checking that the base sits exactly one DNS label below the configured proxy apex with the same scheme and port; a row that fails that check is an upstream error, never a fallback to the shared apex. Its `client` claim names the route that minted it, `browser` or `desktop`; the proxy keeps it on the session and signs it into every gateway assertion, and chan-server opens the reverse-tunnel legs only to the owner on a `desktop` session. Every mint states its client in code, so a new mint cannot omit it.
+6. Return a no-store handoff. The browser gets an auto-submitting form whose nonce-bound script posts the credential to `{tenant origin}/_chan/entry`; the desktop gets JSON with the proxy origin, the exchange URL and the credential, and performs the post itself. The credential never appears in a navigation URL.
 
-1. Validate the route path and sanitize the optional devserver selector. If the caller has no session, stash the sanitized share URL and 303 to the sign-in SPA.
-2. Resolve the owner handle to a user record via profile `GET /v1/users/by-username`. Unknown handle returns 404 (same shape as no-access).
-3. On `GET /s/{owner}`, require the session user to be that owner before resolving the caller profile. The per-workspace route has no owner-only check. Resolve the caller via profile and refuse a missing or blocked caller with the same 404.
-4. Resolve the owner's live devserver id from devserver-control's immutable per-owner endpoint; no live devserver returns 404. Every row must carry a valid signed admission lease and the owning proxy's `proxy_base_url`, which anchors the handoff origin below.
-5. Call profile `GET /v1/users/{owner_id}/devservers/{devserver_id}/access?as={session.user_id}`. The owner or an accepted grantee returns binary `access: true`; anything else is 404. A grant is whole-devserver, so the `{workspace}` segment never enters the access check.
-6. Sign a 30s Ed25519 `entry` credential with `{sub: session.user_id, owner_user_id: owner_id, client: "browser", drv: <devserver_id>, aud: "{owner}--{disc}.{proxy}.<proxy-apex>", proxy_id, next_path, jti, iat, exp}`. The `aud` authority is built from the controller row's `proxy_base_url`: `{owner}--{disc}.` prefixed to the node base host, scheme and effective port preserved, canonicalized lowercase with default ports stripped. The node base must validate as a canonical origin exactly one DNS label below the configured `DEVSERVER_PROXY_ORIGIN` apex with matching scheme and effective port; a row that fails the check is a 502 upstream error, never a fallback to the shared apex. `sub` is the *caller's* id, not the owner's, so the opaque session minted on the next leg carries the right identity for upstream collab attribution. `client` names the client the credential is for: the share landings answer a browser navigation on the identity session and always mint `browser`; the desktop entry below always mints `desktop`. No other route mints an entry credential, and each mint states its client in code (`encode_entry` takes it as an argument), so a new mint cannot omit it. The proxy keeps it on the session and signs it into every gateway assertion; chan-server opens the reverse-tunnel legs only to the owner on a `desktop` session.
-7. Return a no-store HTML handoff whose nonce-bound script POSTs the credential to `{tenant-origin}/_chan/entry`; the proxy can redirect only to the credential's signed clean path.
+The desktop entry may name an explicit target (owner id, owner, devserver id), its own or one shared with it; absent, the caller's own live list resolves as above. An explicit foreign target is authorized before any live-tunnel lookup, so an absent grant reads the same whether the devserver is online or not. Because the desktop surface is self-scoped (a PAT-authenticated caller asking about its own account), its not-found answers carry a stable reason the desktop can narrate (`no_devserver`, `devserver_offline`, `access_denied`); the cross-user share landings stay uniform on purpose.
 
-devserver-proxy verifies and consumes the Ed25519 entry credential, creates a bounded revocable opaque session (maximum one hour), sets the host-only `__Host-devserver_gate` (HttpOnly) and readable `__Host-devserver_csrf` cookies, and 303s to the signed clean path. The shared entry envelope lives in `gateway_common::devserver_gate`.
+### Dashboard and sharing
 
-### Share landing
+`/api/me` returns the user, the per-user resolved feature-flag map, and the live-devserver list read from devserver-control by immutable owner id. A controller outage empties the list with a log line rather than failing the dashboard. The dashboard renders one card per devserver; its Open action navigates to the whole-devserver share landing, so the credential is minted at click time, not at page render.
 
-`GET /s/{owner}/{workspace}` is the public entry for copied share links. It is intentionally unauthenticated at the door so the owner can mint a URL that works for any recipient.
-
-1. Validate `owner` (username shape) and `workspace` (1-64 lowercase alnum + `[._-]`); malformed values 404. An optional `?d=<disc-or-full-id>` (lowercase hex) picks one of the owner's devservers; malformed selectors 404.
-2. No session: stash `/s/{owner}/{workspace}` (with the sanitized `?d=` when present) under `post_login_redirect` and 303 to `/`. The SPA renders the OAuth picker; on callback, the stash is consumed and the user lands back here with a fresh session.
-3. With a session: resolve owner -> refuse a missing or blocked caller -> pick the target devserver (`?d=` match, single live, or the first live one the caller can access) -> profile access check -> mint entry JWT -> return the auto-submitting no-store POST handoff aimed at the owning node's tenant origin (`{owner}--{disc}.{proxy}.<proxy-apex>`). This is the devserver-gate mint above; the `{workspace}` is only the redirect path, not part of the access check.
-
-The post-login redirect is validated to start with a single `/` and to contain no `:` or `//` prefix, so a hostile stash cannot point the callback at another origin.
-
-`GET /s/{owner}` is the whole-devserver open: it lands the caller on the launcher served at the devserver root instead of a single workspace. Same shape as the per-workspace landing: validate `owner`, stash + login if unauthenticated, then pick the target devserver (`?d=` or single/first-accessible live), mint a 30s entry credential bound to `/`, and return the body-only exchange handoff. It is restricted to the **owner**: the caller must equal `{owner}`, otherwise 404 (the same shape as an unknown handle, so it does not reveal ownership). The launcher's `/api/library/*` surface is gated only at the proxy edge, so grantees use the per-workspace landing (`/s/{owner}/{workspace}`).
-
-### Devserver sharing grants (SPA surface)
-
-The owner manages grants from the dashboard. A grant is whole-devserver, the sharing unit, giving the grantee the owner's entire library. A devserver is not created or deleted from the dashboard: it appears when a `chan devserver` registers over the tunnel and goes offline when it disconnects. Routes (all session-gated; the session user is implicitly the owner):
-
-- `POST /api/devservers/{devserver_id}/grants` body `{grantee_email}` (idempotent create)
-- `GET  /api/devservers/{devserver_id}/grants`
-- `DELETE /api/grants/{id}`
-- `GET  /api/devservers/owned` (devservers I own, with grant counts)
-- `GET  /api/devservers/incoming` (devservers shared with me)
-
-All forward to profile-service over the service bearer. Validation re-runs in profile; identity does only the cheap shape check before the round trip.
+Grants are managed from the dashboard and forwarded to profile over the service bearer; identity does only a cheap shape check before the round trip. A devserver is not created or deleted from the dashboard: its row appears when a tunnel-scope PAT is minted and it goes online when a `chan devserver` registers over the tunnel.
 
 ### Feature flags
 
-identity reads the per-user resolved flag map from profile (`GET /v1/users/{id}/flags`) at two points:
+identity reads the per-user resolved flag map from profile at two points: the OAuth callback (`oauth_login`, the sign-in allowlist) and `/api/me` (the full map, so the SPA can gate affordances such as the Devservers tab behind `share_workspaces`). The map is re-read on every `/api/me`, so a rollout takes effect on the next dashboard load. A profile failure degrades to an empty map, which is the safe default: every flag off means no sign-in and no UI features, and the denial audit distinguishes an unavailable lookup from an explicit policy denial.
 
-- OAuth callback (`oauth_login`): the allowlist gate described in the callback flow above. Fresh deploys ship `default_enabled = false`, so the operator must `chan-gateway-admin flag grant oauth_login <ident>` for the first user before they can sign in.
-- `/api/me` (full map): the SPA gates UI affordances on the resolved values. Today that's `share_workspaces` (hides the Devservers tab, and with it the grant-management UI, when off). The map is re-fetched on every `/api/me`, so a rollout takes effect on the next dashboard reload; no SPA logout / login dance.
+### Composite account mutations
 
-Profile errors on either call degrade-soft: identity falls back to an empty flag map, which is the safe default (every flag off = no sign-in, no UI features). Tracing log captures the failure so the operator can see why callers were getting denied.
+identity is the composition boundary for product mutations that span durable state and the live fleet. Each one persists the denial in profile first and then cuts live authority through devserver-control: a stricter user policy or a fleet pause revokes the affected tenant sessions and kills the affected tunnels; access revoke durably revokes PATs and then cuts OAuth sessions, tenant sessions and tunnels; account delete establishes a pending-delete denial, performs the same live cut, and lets profile's quiet-window worker remove the row after a second confirmed cut. Durable state is never rolled back after a partial drain. An unconfirmed downstream cut is reported as an upstream failure carrying only the durable projection and the confirmed counts, which makes a retry convergent without exposing a downstream body.
 
-Feature flag lookup failures keep login denied and profile flags empty, and emit warnings. Login denial audits distinguish an unavailable flag lookup from an explicit policy denial.
-
-### Claim sweep on OAuth callback
-
-After `upsert_by_identity`, identity calls `POST /v1/users/{id}/grants/claim` with the user's primary email plus the freshly-observed provider email (deduped). Pending grants whose `grantee_email` matches any of those addresses are assigned to `{id}` and stamped `accepted_at = now()`. Best-effort: a failure logs and continues so an unhealthy profile call does not block sign-in. Previous providers' emails are not resent; they were swept on their own callbacks.
-
-### Desktop authorize (PAT mint for chan-desktop)
-
-OAuth-style consent flow at `/desktop/authorize` (entry, validates the query and stashes it in the session), `/desktop/authorize/consent` (server-rendered HTML consent page, CSRF nonce), and `POST /desktop/authorize/confirm` (allow / deny). The desktop is an RFC 8252 loopback client: it binds an ephemeral `127.0.0.1` listener and passes `redirect_uri=http://127.0.0.1:<port>/auth/callback` plus a PKCE `code_challenge` (`code_challenge_method=S256`). On allow, a PAT is minted with `TokenOrigin::Desktop`, and confirm answers 200 with a handoff page that navigates the browser to `http://127.0.0.1:<port>/auth/callback?code=...&state=...` via a zero-delay meta refresh plus a manual fallback link; a 3xx answering the form POST would put the hop under the page's `form-action` CSP in Chrome, so the handoff never rides a form redirect chain. The `code` in the query is a single-use server-minted redemption code, NOT the PAT secret: the desktop exchanges it at `POST /desktop/authorize/redeem` with `{code, code_verifier}`, and the store returns the PAT only when `SHA256(code_verifier)` matches the stored challenge (constant-time). The PAT secret never rides the browser. Deny and blocked-on-confirm answer the same handoff shape with a stable `error=` reason; the GET-path denies (blocked at entry or at the consent render, `oauth_denied` / `account_blocked` in the OAuth callback) still 303 straight to the loopback target with the `error=` query. Both server-rendered pages share the `pages` module's shell (SPA palette, inline CSS) under one strict CSP (`default-src 'none'` + `img-src 'self'`, `style-src 'unsafe-inline'`, `form-action 'self'`, `frame-ancestors 'none'`). The `redirect_uri` is validated as a loopback URI by `validate_loopback_redirect_uri` (parsed-enum `127.0.0.1`/`[::1]` host equality, `http` scheme, exact `/auth/callback` path, `port > 0`, no query/fragment/userinfo) rather than an exact literal; `expires_in` is required and clamped to 90 days; and scopes are checked against a strict allowlist (`tunnel`, `desktop.connect`, `desktop.account`, the last of which must be the sole scope). PKCE binds the redemption but does NOT close the login-CSRF residual that the argv-leaked challenge enables on a shared multi-user host; the consent copy therefore presents the requester as an unverifiable local app, and the `desktop_authorize` module doc carries the full hardening posture. Unauthenticated entries bounce through the SPA sign-in; the OAuth callback resumes the flow at the consent page.
-
-Desktop redemption delivers the PAT once even when its audit write fails. The one-time code remains consumed and the audit failure is logged without the code or secret; audit availability cannot strand the already-minted credential.
-
-### Desktop devserver entry
-
-`POST /desktop/v1/devserver/entry` (Bearer PAT carrying `desktop.connect` or `desktop.account`) is how chan-desktop opens a devserver through the gateway. The body optionally carries `{owner_user_id, owner, devserver_id}` to target an explicit devserver (its owner's, or one shared with the caller); absent, the caller's own live list resolves as in the share landings (single live, else first accessible). It runs the same `devserver_access` check and returns `{owner_user_id, username, devserver_id, proxy_origin, entry_exchange_url, entry_credential, expires_at}`; `username` is the devserver OWNER, while the two URLs are pinned to the exact tenant origin built from the controller row's node base (the same `{owner}--{disc}.{proxy}.<proxy-apex>` construction as the share landings). The fresh 30s credential, minted with `client: "desktop"`, is returned in JSON and chan-desktop exchanges it in a POST body; it never appears in a navigation URL. The client type records which route minted the credential, not which program presents it: a credential minted for a PAT carrying either desktop scope is a `desktop` one. A controller row whose node base fails the proxy-namespace check is a 502 upstream error, never a mint. An explicit target that is not live 404s with reason `devserver_offline`; a target the caller cannot access 404s with reason `access_denied`.
-
-Failures keep HTTP 404 but the body is a superset of the plain `{"error": msg}` shape: `{"error": "not found", "reason": <token>, "username": <caller>, "label": <owned label>}` with `label` present only for `devserver_offline`. The reason tokens are a stable desktop-facing contract (like the `desktop_authorize` `?error=` reasons): `no_devserver` (nothing registered), `devserver_offline` (registered, no live tunnel; `label` is the first owned row's), `access_denied` (`devserver_access` refused). Classification is best-effort: a profile failure on the owned-devserver lookup degrades to the plain 404 body. This narration is safe because the surface is self-scoped (a PAT-authenticated caller asking about their own account); the cross-user share-landing 404s stay uniform on purpose.
-
-Explicit foreign desktop entry selections are authorized before any live-tunnel lookup. Full identifiers use the profile access check; prefixes must select exactly one distinct granted devserver and then pass that check. An absent or revoked grant returns the same `access_denied` response whether the devserver is online or offline.
-
-Desktop entry validates the normalized navigation path with the shared entry signer validator. Invalid paths return 400 before signing, including backslashes, controls, invalid URI syntax, and paths longer than 2048 bytes. A `://` later in the path or query is accepted, because a path that starts with a single `/` has no scheme or authority and its redirect stays on the tenant origin.
-
-### Account delete
-
-`DELETE /api/profile`:
-
-1. Profile atomically blocks the user, revokes every PAT, audits the pending deletion, and reserves a durable `AccountDelete` revocation job. The user and dependent rows remain present.
-2. Identity makes a best-effort immediate tunnel/session cut to reduce latency and returns `202 Accepted` after flushing the web session.
-3. Profile's durable worker confirms a first post-commit fleet cut, waits the full entry-credential lifetime plus symmetric clock skew, then requires a second fleet-wide cut before deleting the user. The FK cascades happen only at that confirmed finalization point.
-4. Generic admin unblock refuses the account while the `AccountDelete` job exists; deletion cancellation requires a future explicit transaction.
+Every authenticated OAuth session also has a public admin session id mapped to its secret store id. Operators list and revoke sessions by that id, exactly or user-wide; both are idempotent and prune expired rows lazily.
 
 ## Key decisions
 
-### Pluggable providers
+### Pluggable providers, two deliberately absent
 
-A small `Provider` trait (authorize_url, exchange, fetch user info) backs each one. Adding a new provider is one new file plus wiring in `Config::from_env`.
-
-Not wired:
-
-- **Microsoft**: tenant admins can mint accounts whose verified email is unverifiable from the SaaS side. Email-based linking (used by `upsert_by_identity`) would let those accounts attach to existing users.
-- **Apple**: high setup friction (signing key + team id + key id + JWT rotation) for the projected user share.
+A small `Provider` trait (authorize URL, code exchange, user info) backs each provider; adding one is a new file under `providers/` plus wiring in `Config::from_env`. Microsoft is not wired because tenant admins can mint accounts whose verified email is unverifiable from the outside, and email-based linking would let those accounts attach to existing users. Apple is not wired because its setup friction (signing key, team id, key id, JWT rotation) outweighs the projected share.
 
 ### Email-based identity linking lives in profile
 
-Handled by profile-service's `upsert_by_identity`. identity passes the email along; profile decides whether the provider context warrants linking. Server-side decision blocks two identity callers from racing on the link.
+identity passes the provider email along; profile's `upsert_by_identity` decides, in one transaction, whether to link to an existing user. A server-side decision is what stops two concurrent first-time logins from racing on the link.
 
 ### Username rules
 
-`valid_username` (shared, in `gateway_common::validators`):
-
-- 3-32 chars total
-- first and last char in `[a-z0-9]`
-- inner chars in `[a-z0-9-]`
-- no `--` anywhere (reserved as the `{user}--{disc}` separator in devserver wildcard hosts)
-
-Additional username guards:
-
-- `RESERVED_USERNAMES` blocks anything that could collide with a top-level path under `gw.{domain}/` (ex `gw.chan.app`). Sorted alphabetically (test-pinned); checked with `binary_search`.
-- `rustrict` filter blocks profanity / leet-speak heuristically. False positives surface as 400; users can unblock specific handles via the `RUSTRICT_ALLOWLIST` env var (comma-separated, case-insensitive).
-
-A rename kills the caller's live tunnels (`kill_owner_tunnels`) before profile persists the new handle: identity matches controller rows to the current username (`t.user == user.username`) and the tenant host label embeds it (`{owner}--{disc}.`), so registrations under the old name would fail the owner check and mint origins that no longer resolve to the caller.
-
-Username changes preflight the edit limit and known name collisions before cutting tunnels. Profile still enforces both atomically when updating; a concurrent rename can race this preflight, so the authority cut remains before persistence.
+Usernames are shared validators in `gateway_common::validators`: lowercase alphanumerics and single hyphens, with `--` forbidden because it is the `{owner}--{disc}` separator in tenant host labels. A reserved list blocks anything that could collide with a top-level path under `gw.{domain}/`, and a profanity filter blocks the rest heuristically, with an operator allowlist for false positives. Renames are capped for life so the public namespace (`/s/{username}`, the host labels) does not churn, and a rename kills the caller's live tunnels before profile persists the new handle, because registrations under the old name would fail the owner check and mint origins that no longer resolve to the caller.
 
 ### Session contract
 
-- Cookie name `__Host-id_session` (`id_session_insecure_dev` when `COOKIE_SECURE=false`: browsers reject `__Host-` names without Secure). **Host-only on `gw.{domain}` (ex `gw.chan.app`).** No `Domain` attribute.
-- `HttpOnly`, `SameSite=Lax`, 30-day inactivity expiry.
-- `Secure` follows the `COOKIE_SECURE` env var.
-- devserver-proxy does **not** read this cookie. Cross-service auth uses a short-lived Ed25519 entry credential, not cookie sharing.
-- Authenticated sessions are indexed only after `cycle_id`; every public authentication checks the store id, user and authentication time against that index and flushes a mismatch. The index's secret `store_id` is database-only and never appears in serialization, debug output, or tracing.
-- `/internal/v1/sessions/whoami` accepts the raw cookie only over the internal bearer surface and treats every invalid/pre-auth/pre-index/blocked/deleted case as the same 401.
-
-### Session id rotates on login
-
-`session.cycle_id()` runs immediately before storing `user_id` on a successful OAuth callback. Prevents an attacker-planted session cookie from being carried into the authenticated state.
+The cookie is `__Host-id_session` (`id_session_insecure_dev` when `COOKIE_SECURE=false`, because browsers reject `__Host-` names without `Secure`), host-only on `gw.{domain}` with no `Domain` attribute, `HttpOnly`, `SameSite=Lax`, with an inactivity expiry. devserver-proxy never reads it; cross-service authority is the entry credential. The session id rotates at the privilege boundary, immediately before `user_id` is stored, which closes session fixation. Authenticated sessions are indexed only after that rotation, and every authenticated request checks the store id, user and authentication time against the index and flushes a mismatch; the index's store id is database-only and never serialized or logged. Logout always flushes, even when index resolution fails.
 
 ### Constant-time everywhere
 
-- OAuth `state` compared with `subtle::ConstantTimeEq`.
-- Internal validate bearer compared the same way.
-- PAT validate compares hashes (the upstream lookup is a parameterised SQL query, not a string compare).
+OAuth state, every internal bearer and every PAT digest comparison use a timing-safe comparison. Wrong-scope and unknown bearers share one failure shape.
 
-### Devserver-gate mint, not session sharing
+### Entry credential mint, not session sharing
 
-Identity alone holds `DEVSERVER_ENTRY_SIGNING_KEY`; proxy nodes receive only the matching `DEVSERVER_ENTRY_VERIFYING_KEYS` public-key ring. Identity signs a 30-second, single-use entry credential after verifying the controller's admission lease and profile authorization. The browser submits it only in the body of `POST /_chan/entry`. The proxy consumes its `jti` and replaces it with an opaque, proxy-local session cookie capped at one hour.
+identity alone holds `DEVSERVER_ENTRY_SIGNING_KEY`; proxy nodes receive only the verifying ring. The credential is signed after the profile authorization and the controller lease check, lives seconds, succeeds once, and is accepted only in the body of `POST /_chan/entry`. The proxy replaces it with its own opaque, proxy-local session.
 
-### Identity bearer scopes are disjoint
+### Disjoint internal bearers
 
-The bearer devserver-proxy presents on `/internal/v1/tokens/validate` is `IDENTITY_INTERNAL_TOKEN`; the account session lookup presents `IDENTITY_SESSION_INTERNAL_TOKEN`; operators present `IDENTITY_ADMIN_TOKEN`; and the account composite caller presents `IDENTITY_ACCOUNT_ADMIN_TOKEN`. Validation is required. Each narrow token is optional and an empty value disables that scope with a not-found posture when no operator credential also authorizes the route. Every configured value must be pairwise distinct or identity refuses startup. Wrong-scope and unknown bearers share the same authorization failure shape.
+The proxy's validate bearer, the account caller's session-lookup bearer, the operator bearer and the account-composite bearer are four variables. Validation is required; each narrow bearer is optional and an empty value disables its scope. Every configured value must be pairwise distinct or identity refuses to start, so a leaked service-scope token never grants the operator tree.
 
-### PAT validate runs its own throttle
+### Public origins are explicit configuration
 
-Mirror of devserver-proxy's `ThrottlingValidator`. It also meters the Hello-name announcement, which devserver-proxy does not, so a fresh fingerprint's first announcement can be refused here. Throttled requests return 401, identical on the wire to an unknown token, so the throttle is not observable from the outside. The devserver-proxy throttle catches the typical case; this one catches a leaked internal bearer being used to brute-force PATs directly.
-
-### Public origins are explicit config
-
-The public origins are explicit deployment configuration, each required and validated as a canonical origin at startup: `BASE_URL` (identity's own origin, also the OAuth-callback base), `DEVSERVER_PROXY_ORIGIN` (the proxy namespace apex advertised by discovery, e.g. `https://proxy.chan.app`), and `DEVSERVER_TUNNEL_ORIGIN` (tunnel ingress). identity never derives a tenant host from the apex alone: entry origins are built from the controller-reported node base after checking it sits exactly one DNS label below the `DEVSERVER_PROXY_ORIGIN` host with matching scheme and effective port. The entry credential's `aud` is the exact inbound authority: if identity and the proxies disagreed on the namespace, the handoff would fail closed.
-
-The origin strings stay coupled to DNS, the per-node wildcard TLS certificates, and the controller's node base template, so they are deploy-time config, not runtime knobs.
+`BASE_URL`, `DEVSERVER_PROXY_ORIGIN` and `DEVSERVER_TUNNEL_ORIGIN` are each required and validated as canonical origins at startup; nothing is derived from a base domain. identity never builds a tenant host from the apex alone: entry origins come from the controller-reported node base, checked against the apex. The credential's audience is the exact inbound authority, so if identity and the proxies disagreed on the namespace the handoff would fail closed. The origins are coupled to DNS, the per-node wildcard certificates and the controller's node base template, so they are deploy-time configuration, not runtime knobs.
 
 ## Invariants
 
-- A signed-in session always carries `user_id: Uuid` under `KEY_USER` and an `authenticated_at` matching its indexed store id.
-- `pending_oauth` is removed on the first read in the callback. A cold-reloaded callback (missing pending) returns 400, not a fresh flow.
-- Blocked accounts cannot start a session: the login flow writes `login_denied` and returns 403.
-- Accounts whose `oauth_login` flag resolves to false cannot start a session either: the login flow writes `login_denied` and 303s to `/?denied=oauth_login` so the SPA can explain why.
-- PATs hash to `SHA-256(token)`; plaintext is never persisted.
-- Session id rotates on every successful sign-in.
-- `authenticated_at` and the final rotated store id are committed to `identity_session_index` before callback success.
-- Devserver PAT mint and validation both require readable enabled fleet/user policy; required-mode absence fails closed.
-- The `gw.{domain}` session cookie has no `Domain` attribute; it never spans subdomains.
-- Identity SPA HTML carries application-layer CSP and XFO; production nginx supplies `nosniff` and `strict-origin-when-cross-origin`; embedded asset responses are unchanged.
+- A signed-in session always carries a user id and an authentication time matching its indexed store id, and the session id rotates on every successful sign-in.
+- The OAuth stash is consumed on first read; a reloaded callback is refused.
+- Blocked accounts and accounts without `oauth_login` cannot start a session; both write `login_denied`.
+- PATs are stored as digests only; plaintext leaves identity once.
+- PAT mint and validation both require readable, enabled fleet and user policy; required-mode absence fails closed.
+- The session cookie has no `Domain` attribute and never spans subdomains.
+- Every entry credential states its client, its exact audience and its devserver.
 - Bearer comparisons run at constant time.
 
 ## Error model
 
-`identity::Error`:
-
-| Variant              | HTTP | Notes                                       |
-|----------------------|------|---------------------------------------------|
-| Unauthorized         | 401  | session missing or invalid                  |
-| Forbidden            | 403  | account blocked                             |
-| BadRequest           | 400  | input or OAuth-flow failure                 |
-| NotFound             | 404  | unknown provider, missing user / token      |
-| DesktopEntryNotFound | 404  | desktop entry only: reason body (see above) |
-| DevserverAccessDisabled | 403 | body `devserver_access_disabled`          |
-| AdminDevserverAccessDisabled | 409 | same body, admin policy path         |
-| Gone                 | 410  | consumed / expired desktop redemption code  |
-| Conflict             | 409  | username taken, rename cap reached          |
-| Upstream             | 502  | profile / devserver-control unhappy         |
-| Unavailable          | 503  | dependency temporarily unavailable          |
-| Anyhow               | 500  | startup or unexpected                       |
-| Reqwest              | 502  | network failure to a sibling service        |
-| Database             | 500  | sqlx failure                                |
-
-`From<gateway_common::profile_client::ProfileError>` and `From<gateway_common::devserver_control_client::DevserverControlError>` plug sibling-service errors into the local enum so request handlers can `?` straight through.
+`identity::Error` is a `thiserror` enum mapped to precise HTTP statuses with short public messages; detail goes to the log. Sibling-service client errors (`ProfileError`, `DevserverControlError`) convert into it so handlers can `?` straight through. The desktop entry's not-found carries a reason body; the share landings' not-found is uniform.
 
 ## What is not wired
 
-- WebAuthn / passkeys
-- Magic-link sign-in
-- Device flow (RFC 8628) for browserless clients: chan-desktop's `/desktop/authorize` flow still rides the user's browser
-- Transparent browser-only renewal for share-link sessions; chan-desktop refreshes its opaque session proactively from the PAT before expiry
+- WebAuthn or passkeys, and magic-link sign-in.
+- Device flow (RFC 8628) for browserless clients: the desktop still rides the user's browser.
+- Transparent browser-only renewal of share-link sessions; chan-desktop refreshes its opaque session from its PAT before expiry.

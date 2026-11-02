@@ -1,104 +1,76 @@
 # chan-gateway-admin design
 
-## Problem
+`chan-gateway-admin` is the operator CLI for the gateway. Operators need to manage users, tokens, OAuth sessions, tenant sessions, durable access policy, feature flags and live tunnels without direct database access, from a shell, in loops and pipelines and in CI. The CLI composes documented admin HTTP routes and nothing else. Its command surface, configuration and exit codes are in [README.md](README.md).
 
-Operators need to manage users, tokens, OAuth sessions, tenant sessions, durable access policy, and live tunnels without direct database access. The CLI composes with shell loops, jq pipelines, and CI.
+## Where it sits
 
-## Architecture
+One Rust binary that speaks HTTP to profile-service, identity-service and devserver-control. It has no database access and no server of its own. Three clients live inside it, one per destination, each with its own bearer and base URL: `AdminClient` for profile (user resolution and the profile admin tree), `IdentityClient` for identity (OAuth sessions, token mint, the composite policy and access routes) and `WorkspaceClient` for devserver-control (the `/admin/v1/*` tree and the SSE snapshot streams behind the watch commands). The CLI never reuses one service's credential against another destination.
 
-Single Rust binary that talks HTTP to profile-service, identity-service, and devserver-control. No database access; the CLI only consumes documented admin HTTP routes.
-
-The `tokio` runtime is `current_thread` (commands are sequential and short-lived; a multi-threaded runtime is unnecessary overhead). `clap` derives the command tree.
-
-Three HTTP clients live inside the binary:
-
-- `AdminClient`: profile-service (`CHAN_ADMIN_PROFILE_URL`). Resolves `<ident>` and calls the admin tree.
-- `IdentityClient`: identity-service (`CHAN_ADMIN_IDENTITY_URL`). Calls OAuth-session and composite policy/access routes.
-- `WorkspaceClient`: devserver-control (`CHAN_ADMIN_WORKSPACE_URL`). Talks to `/admin/v1/*` and decodes the SSE snapshot streams for `tunnel watch`, `proxy watch`, and `session tenant watch`.
-
-Each client has its own bearer and destination. The CLI sets per-call timeouts (15 seconds on profile and identity calls, 10 or 15 seconds on controller calls), permits 65 seconds for user-deletion quiet-window settlement, and sets no global timeout on watch streams.
+The runtime is single-threaded because commands are sequential and short-lived; `clap` derives the command tree. Per-call timeouts are bounded, user deletion is allowed longer so the quiet-window settlement can complete, and watch streams have no global timeout.
 
 ## Operational contracts
 
 ### Identity resolution
 
-User-facing identifiers resolve by uuid, email substring, or exact username, in that order. Ambiguous and missing matches are distinct operator errors.
-
-Email resolution scans every substring-result page before declaring an exact email absent; matches beyond the first page remain addressable by email.
-
-Profile user pages sort by creation time and immutable user id. Email resolution deduplicates repeated ids across pages, including overlaps caused by concurrent insertion. Offset pagination is not a transaction snapshot; concurrent deletions can still shift later rows.
+A user-facing `<ident>` resolves by uuid, then email, then exact username. Ambiguous and missing matches are distinct operator errors. Email resolution scans every page of the substring result before declaring an exact email absent, deduplicating repeated ids across pages, so a match beyond the first page remains addressable; offset pagination is not a transaction snapshot, so a concurrent deletion can still shift later rows.
 
 ### Composite mutations
 
-`user block` first persists profile block, PAT revocation, audit, and durable subject revocation. It then calls identity's access-revoke composite for OAuth sessions, tenant sessions, and owner tunnels. `user delete`, policy decrease/suspend, and fleet pause also run through identity composites. Durable state remains visible in stdout when a downstream cut is partial, the diagnostic goes to stderr, and the command exits 1. Retrying repeats the required drain.
+`user block` first persists the profile block, PAT revocation, audit and durable subject revocation, then calls identity's access-revoke composite for OAuth sessions, tenant sessions and owner tunnels. `user delete`, a policy decrease or suspend, and fleet pause also run through identity's composites. When a downstream cut is partial, the durable state is still reported on stdout, the diagnostic goes to stderr and the command exits non-zero; retrying repeats the required drain. Policy resume reads the current policy first and refuses to invent a limit when none exists. Fleet pause requires the explicit `--drain` acknowledgement because it always drains.
 
-Policy resume reads the current policy first and refuses 404 instead of inventing a limit. Fleet pause requires the explicit `--drain` acknowledgement and always calls the drain route.
+### Reads
 
-### Session and aggregate reads
-
-OAuth-session reads use identity's bounded inventory. Tenant-session reads and watches use controller snapshots with subject, owner, and proxy filters. Global audit uses profile's filtered pagination. `overview` calls the profile, identity, and controller aggregate endpoints plus fleet status; it never lists rows to count them.
+OAuth-session reads use identity's bounded inventory. Tenant-session reads and watches use controller snapshots with subject, owner and proxy filters. Global audit uses profile's filtered pagination. `overview` calls the profile, identity and controller aggregate endpoints plus fleet status; it never lists rows to count them.
 
 ### Feature flags
 
-Manage feature flags and per-user overrides via profile-service's admin tree. `flag list` and `flag overrides <key>` render a table / `--json`; `flag create` is idempotent (re-issuing for the same key bumps `default_enabled` and description); `flag grant <key> <ident> [--enabled|--disabled]` upserts the per-user override, and `flag revoke` clears it. `<ident>` resolution is the same uuid / email / username pipeline as the user subcommand. Default for `flag grant` is `--enabled`; `--disabled` lets an operator record a deny override against a default-on flag.
+`flag` manages flags and per-user overrides through profile's admin tree. `flag create` is idempotent, re-issuing for the same key updates the default and description; `flag grant` upserts a per-user override, enabled by default, with `--disabled` to record a deny override against a default-on flag; `flag revoke` clears the override so the user resolves the default again.
 
-### Tunnel, proxy, and tenant-session watch
+### Watches
 
-devserver-control's tunnel, proxy, and browser-session watch routes are SSE streams. `watch_loop` consumes `event: snapshot` blocks and re-renders. TTY mode clears the screen between renders (`\x1b[2J\x1b[H`). `--json` emits one prettified JSON document per event.
-
-`tunnel ps` and `proxy ps` read the matching one-shot snapshots (`/admin/v1/tunnels`, `/admin/v1/proxies`). Tunnel rows carry the owning node's `proxy_id` and `proxy_base_url` so an operator can tell which proxy holds a registration; proxy rows carry the node's status, package version, tunnel count, and liveness timestamps.
+The tunnel, proxy and tenant-session watch routes are SSE streams of full snapshots. The watch loop consumes each snapshot event and re-renders; TTY mode clears the screen between renders and `--json` emits one JSON document per event.
 
 ### Output
 
-Default rendering uses `comfy_table` with the `NOTHING` preset (no Unicode lines), targeting 80 columns. Columns are chosen per command (e.g. `USER`, `DEVSERVER`, `PROXY`, `CAP`, `PEER`, `UPTIME`, `CONNECTED` for `tunnel ps`). UUIDs are truncated to 8 chars in table mode.
-
-`--json` emits prettified JSON via `serde_json::to_string_pretty` because operators copy-paste output into tickets; the small overhead is fine for CLI workloads.
+Default rendering is a plain ASCII `comfy_table` sized for an 80-column terminal, with columns chosen per command and UUIDs truncated in table mode. `--json` emits prettified JSON because operators paste output into tickets. stdout carries data and durable partial reports; stderr carries warnings and diagnostics.
 
 ## Key decisions
 
 ### Per-service bearers
 
-The CLI accepts independent `CHAN_ADMIN_PROFILE_TOKEN`, `CHAN_ADMIN_IDENTITY_TOKEN`, and `CHAN_ADMIN_OPERATOR_TOKEN` credentials. `--profile-token`, `--identity-token`, and `--operator-token` are bound to one destination each; `--token` remains only as a compatibility alias for the controller operator token. The CLI never reuses one service's credential against another service.
+`CHAN_ADMIN_PROFILE_TOKEN`, `CHAN_ADMIN_IDENTITY_TOKEN` and `CHAN_ADMIN_OPERATOR_TOKEN` are independent, and `--profile-token`, `--identity-token` and `--operator-token` are each bound to one destination. `--token` remains only as an alias for the controller operator token. A missing or empty bearer for a destination a command touches fails closed before any request leaves the CLI.
 
 ### Exit codes are part of the contract
 
-0 / 1 / 2 / 3 are documented in the README and used by shell wrappers (CI, smoke tests, ops scripts). Adding a new exit code is a public-API change; rotating the existing meanings is not allowed.
+0 success, 1 upstream, network, configuration or partial-drain error, 2 user input error, 3 not found. Shell wrappers rely on these, so adding a code is a public-API change and rotating the existing meanings is not allowed.
 
-### --json everywhere
+### `--json` everywhere
 
-Every read command supports `--json` so the CLI can be piped into jq. Adding a new subcommand without `--json` would be a regression in operability; reviewers should reject such PRs.
+Every command supports `--json` so the CLI can be piped into jq. A new subcommand without `--json` is a regression in operability.
 
 ### No interactive features
 
-No menus, no TUI. All commands are non-interactive except `user delete`, `user change-email`, and `flag delete`, which prompt `[y/N]` (skippable with `--yes`). The CLI is meant to compose with `xargs` and `parallel`.
+No menus and no TUI. Every command is non-interactive except `user delete`, `user change-email` and `flag delete`, which prompt for confirmation and accept `--yes`. The CLI is meant to compose with `xargs` and `parallel`.
 
 ### Minimal local URL encoding
 
-Path segments stay within the username / workspace-slug alphabet (`[a-z0-9-]` plus `_` and `.`, validated upstream), so the CLI ships a tiny inline `urlencoding::encode_path` rather than pulling in a real urlencoding crate. The full RFC 3986 table is overkill for a value that already passed username / workspace-name validation.
+Path segments stay within the alphabet upstream validation already enforces for usernames and ids, so the CLI ships a tiny inline path encoder rather than a URL-encoding dependency.
 
 ## Invariants
 
-- The CLI is read-mostly. State changes go through documented HTTP routes; there are no direct database writes.
-- A block or stricter policy is durable before the CLI reports any live-drain result.
+- The CLI is read-mostly; every state change goes through a documented HTTP route and there are no database writes.
+- A block or a stricter policy is durable before the CLI reports any live-drain result.
 - `user delete` uses identity's convergent composite and never deletes profile state before controller settlement.
-- `tunnel kill` is idempotent: a second kill of the same registration returns 404, which the CLI surfaces as exit 3.
-- Output is deterministic on TTY-vs-`--json` choice. stdout contains data; stderr contains diagnostics.
+- `tunnel kill` is idempotent: a second kill of the same registration is a not-found, reported as exit 3.
+- Output is deterministic for a given TTY-versus-`--json` choice; stdout is data, stderr is diagnostics.
 
 ## Error model
 
-Errors surface as `anyhow::Error` chains; the top-level dispatch calls `eprintln!("error: {e:#}")` and exits with the code from `exit_code_for`. `ClientError` is the typed boundary between HTTP responses and the CLI:
-
-| `ClientError`     | Exit | Notes                                  |
-|-------------------|------|----------------------------------------|
-| `NotFound`        | 3    | upstream returned 404                  |
-| `BadInput(s)`     | 2    | upstream returned 400 (with body)      |
-| `Upstream{...}`   | 1    | any other non-2xx status               |
-
-Network failures (`reqwest::Error`) reach `exit_code_for` as plain `anyhow::Error` instances, which exit 1.
+Errors surface as `anyhow` chains; the top-level dispatch prints the chain to stderr and exits with the code derived from the typed `ClientError` at the HTTP boundary (not found, bad input, or any other upstream status) and 1 for everything else, network failures included.
 
 ## What is not wired
 
-- Shell completion (`clap` has `--generate` for it; not generated yet)
-- A persistent config file for admin defaults
-- Batch operations (`--input batch.jsonl`)
-- Inline editor for `user update --email` (the CLI takes a flag, no `$EDITOR` round trip)
+- Shell completion.
+- A persistent config file for admin defaults.
+- Batch operations from an input file.
+- An editor round trip for `user change-email`.

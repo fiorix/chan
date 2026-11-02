@@ -1,27 +1,28 @@
 # profile-service design
 
-This document owns profile-service's component boundaries, invariants, rationale, and failure behavior. The route and environment-variable catalogs live in [`README.md`](README.md) and are not repeated here.
+profile is the gateway's single authoritative store for who a user is: the canonical user record, linked OAuth identities, devservers and the grants that share them, feature flags, durable per-user and fleet devserver policy, and the authentication audit. It is an internal axum service in front of Postgres, called only by identity-service and the operator CLI. This document covers its boundaries, invariants and rationale; the route and configuration catalogs live in [`README.md`](README.md).
 
-## Problem
+## Why a separate service
 
-Other gateway services need a single, authoritative store for user identity. Two writers must not race when a user signs in for the first time on two providers concurrently; an admin block must revoke every live PAT in one transaction and durably schedule the fleet-wide cut of the user's live tunnels and browser sessions through devserver-control; renames must be capped so the public username namespace (`gw.{domain}/s/{username}`, the `{owner}--{disc}` host labels) doesn't churn.
+Three problems need one owner with one transaction boundary. Two writers must not race when a user signs in for the first time on two providers at once. An admin block must revoke every live PAT and durably schedule the fleet-wide cut of the user's tunnels and browser sessions in the same transaction, so a down control plane delays the cut but never loses it. And renames must be capped so the public username namespace (`gw.{domain}/s/{username}`, the `{owner}--{disc}` host labels) does not churn. Putting the rows behind one service with a small HTTP API gives identity, the CLI and the background workers the same serialization points.
 
-## Architecture
+## Where it sits
 
-Small axum service in front of Postgres. Schema:
+Callers: identity-service over the service bearer for every user, grant, flag and policy question, and the admin CLI over the admin bearer. Callee: devserver-control, through the shared scoped client, for the revocation worker's tunnel kills and session revocations and for the registry sweeper's live-tunnel snapshot. profile holds no sessions (identity owns the only `tower_sessions` table) and renders nothing.
 
-- `users (id, email, display_name, username, username_edits, created_at, updated_at, blocked_at, block_reason, avatar_url)`
-- `identities (id, user_id, provider, provider_subject, email, created_at)` with `UNIQUE (provider, provider_subject)`
-- `api_tokens (id, user_id, label, token_hash, expires_at, created_at, revoked_at, last_used_at, scopes)`
-- `api_token_audit (id, ts, token_id, action, ip, user_agent)`
-- `auth_audit (id, ts, user_id, action, ip, user_agent, note)`
-- `devservers (id, owner_user_id, devserver_id, label, created_at, last_seen_at)` with `UNIQUE (owner_user_id, devserver_id)`. First-class entity for an owner's shareable devserver: lets the dashboard list a devserver that has no grants and no live tunnel yet, and acts as the FK target for grants. `devserver_id` is the lowercase hex SHA-256 of the owner's PAT (produced by identity); `label` mirrors the PAT label. A registry sweeper marks rows from the controller's live-tunnel snapshot once a minute and deletes rows offline longer than `DEVSERVER_RETENTION_MINUTES` (default 15m; 0 disables; values above `sweeper::MAX_RETENTION`, about 6,700 years, fail startup because the delete query could not evaluate them). Rows carrying grants are never swept, and a tick that cannot fetch the snapshot deletes nothing.
-- `devserver_grants (id, owner_user_id, devserver_id, grantee_email, grantee_user_id, created_at, accepted_at)` with `UNIQUE (owner_user_id, devserver_id, lower(grantee_email))` and an FK on `(owner_user_id, devserver_id)` -> `devservers` (cascade delete). A grant is one binary, shell-equivalent authority; there is no role column.
-- `feature_flags (key PK, description, default_enabled, created_at, updated_at)`: registry of named flags.
-- `feature_flag_overrides (flag_key, user_id, enabled, set_at, PRIMARY KEY (flag_key, user_id))`: per-user explicit enable/disable rows. The effective value for `(flag, user)` is the override row when present, else `default_enabled`.
-- `devserver_user_policies (user_id, enabled, max_connected_devservers, updated_at)`: durable, product-agnostic per-user tunnel policy. No row is the compatibility default; identity can require a row at deployment time.
-- `devserver_fleet_policy (singleton, admissions_enabled, updated_at)`: seeded singleton for a persistent fleet pause. Missing or unreadable state is an authorization failure.
-- `identity_session_index (admin_session_id, user_id, store_id, authenticated_at, created_at)`: identity-owned index stored in the shared database. `store_id` is a bearer secret used to resolve OAuth session authentication against this index and to delete the matching tower session; it is never returned.
+## Schema
+
+One Postgres database, migrated only by the dedicated `CHAN_GATEWAY_MIGRATIONS=only` step; the serving mode never touches DDL. The tables, by role:
+
+- `users` and `identities`: the canonical record and its provider identities, unique per `(provider, provider_subject)`. Email and username are unique case-insensitively.
+- `api_tokens` and `api_token_audit`: PATs by digest with their scopes, and the per-token history. identity writes these directly; profile serves the admin views over them.
+- `auth_audit`: login, logout, denial, block and similar events per user.
+- `devservers`: an owner's shareable devserver, keyed by `(owner_user_id, devserver_id)`, where the id is the digest of the owner's PAT. It is the FK target for grants and lets the dashboard list a devserver that has no grant and no live tunnel yet.
+- `devserver_grants`: one binary, whole-devserver grant per `(owner, devserver, grantee email)`, with the grantee user filled in when a matching sign-in is observed. There is no role column.
+- `feature_flags` and `feature_flag_overrides`: named flags with a default and per-user overrides.
+- `devserver_user_policies` and `devserver_fleet_policy`: durable per-user tunnel policy (enabled, connected-devserver limit) and the seeded fleet singleton for a persistent admissions pause.
+- `control_revocation_jobs`: the durable outbox the revocation worker drives.
+- `identity_session_index`: identity's own index of authenticated sessions, stored here because the two services share the database; profile never reads it.
 
 ```mermaid
 erDiagram
@@ -77,6 +78,11 @@ erDiagram
         uuid user_id PK "FK"
         bool enabled
     }
+    DEVSERVER_USER_POLICIES {
+        uuid user_id PK "FK"
+        bool enabled
+        int max_connected_devservers
+    }
     USERS ||--o{ IDENTITIES : "user_id cascade"
     USERS ||--o{ API_TOKENS : "user_id cascade"
     USERS ||--o{ AUTH_AUDIT : "user_id cascade"
@@ -84,144 +90,92 @@ erDiagram
     USERS ||--o{ DEVSERVER_GRANTS : "owner cascade"
     USERS |o--o{ DEVSERVER_GRANTS : "grantee cascade"
     USERS ||--o{ FEATURE_FLAG_OVERRIDES : "user_id cascade"
+    USERS ||--o| DEVSERVER_USER_POLICIES : "user_id"
     API_TOKENS ||--o{ API_TOKEN_AUDIT : "token_id cascade"
     DEVSERVERS ||--o{ DEVSERVER_GRANTS : "owner+devserver_id cascade"
     FEATURE_FLAGS ||--o{ FEATURE_FLAG_OVERRIDES : "flag_key cascade"
 ```
 
-*Gateway Postgres schema: table relationships and key constraints; the bullet list above stays the authoritative column and constraint detail.*
+*The user-centred tables and their cascades; the migrations under `gateway/migrations/` hold the columns and constraints.*
 
-The service never migrates the schema at serve time. `CHAN_GATEWAY_MIGRATIONS=only` applies the sqlx migrations under `gateway/migrations/` and exits (the packaged migrate oneshot and the kube migrate job run this mode with the database-owner credential); `CHAN_GATEWAY_MIGRATIONS=external` serves without touching DDL. An unset or otherwise shaped value fails startup.
+## Routing and authentication
 
-The router splits into three sub-routers:
+Two tiers behind two bearers. The service tier (`/v1/users/*`, `/v1/auth-audit`) admits either `PROFILE_AUTH_TOKEN` or `PROFILE_ADMIN_TOKEN`; the admin tier (`/v1/admin/*`) admits only the admin token. Both checks always run, in constant time, so a wrong token cannot oracle which leg matched. The service tier accepting the admin token is what lets a single-token deployment work without code changes, while deployments that want independent rotation just set different values.
 
-- `/v1/users/*` and `/v1/auth-audit`: gated by `auth` middleware. Either `PROFILE_AUTH_TOKEN` or `PROFILE_ADMIN_TOKEN` admits.
-- `/v1/admin/*`: gated by `admin_auth` middleware. Only `PROFILE_ADMIN_TOKEN` admits.
-- `/healthz`: no auth.
+## Background work
 
-All bearer comparisons run through `subtle::ConstantTimeEq` via the shared `bearer_eq` helper. Both checks always run on the service API so a wrong token cannot oracle which leg matched first.
+Two workers start with the HTTP server and stop with it: the revocation worker and the devserver registry sweeper. `http::app` builds the router alone and starts no background work, so tests compose the router without them.
 
-profile-service requires a `DevserverControlClient` configured with `DEVSERVER_ADMIN_URL` and the profile-scoped `DEVSERVER_PROFILE_ADMIN_TOKEN`. Denial mutations write their primary state, audit record, and a durable revocation-outbox generation in one transaction. The background worker then runs the data-plane cut against devserver-control (`kill_owner_tunnels` plus `revoke_subject_sessions` for a subject or account-delete job, `revoke_sessions_exact` for a single-grant job), confirms a post-commit first cut, waits the full entry-credential quiet window (40 seconds: entry lifetime plus symmetric clock skew), and makes a second cut before settling the job. Each cut retries with backoff for up to five minutes; the second cut's deadline includes the settlement wait before its own retry window. Exhaustion writes one `session_revoke_failed` audit row and drops subject and exact jobs. An exhausted account-delete job remains durable: a new generation resets its phase to `pending_first_cut`, clears the deadline and settlement timestamps, zeroes attempts, and schedules its next claim using the existing retry backoff (capped at 60 seconds). That claim starts a fresh retry window; deletion keeps retrying until both cuts are confirmed. The retained job keeps generic admin unblock refusing the account. The outbox row survives profile restarts. The worker and the devserver registry sweeper start with the service (`http::serve`) and stop with it: once the HTTP server has drained, each finishes the pass it is in and is joined, and one still running after 10 seconds is aborted. Every worker write is one statement or one transaction, so an abort, a crash or a SIGKILL at any point leaves each job as it was claimed or as its last finished step left it; a claim pushes the job's next attempt 15 seconds out, which is how a job claimed by a process that died is claimed again by the next one. `http::app` builds the router alone and starts no background work.
+### Durable revocation
+
+Every denial mutation (block, pending delete, PAT revoke, claimed-grant delete, access revoke) writes its primary state, its audit row and a durable revocation-outbox generation in one transaction, then answers. The worker claims the job and runs the data-plane cut against devserver-control: owner-wide tunnel kills and subject session revocation for a subject or account-delete job, an exact revocation for a single-grant job. It confirms a first post-commit cut, waits the entry-credential quiet window (the credential lifetime plus clock skew, so a credential minted just before the denial cannot create a session after the cut), then requires a second confirmed cut before settling. Each cut retries with backoff to a deadline; exhaustion writes one audit row and drops subject and exact jobs.
+
+An account-delete job is never dropped: an exhausted one is reset and rescheduled, and the user row is deleted only after both cuts are confirmed, at which point the foreign-key cascades remove identities, indexed sessions, tokens and grants. While that job exists, generic unblock refuses the account. Every worker write is one statement or one transaction, so an abort, a crash or a SIGKILL leaves each job as it was claimed or as its last finished step left it, and a claim pushes the job's next attempt out, which is how a job claimed by a process that died is picked up by the next one.
+
+### Registry sweeper
+
+The sweeper marks `devservers` rows from the controller's live-tunnel snapshot once a minute and deletes rows that have been offline longer than the configured retention. Rows carrying grants are never swept, and a tick that cannot fetch the snapshot deletes nothing. identity recreates the row on the next validate a dial or lease refresh drives, so a swept devserver is back as soon as it dials again.
 
 ## Key decisions
 
-### Two-tier auth, single-token-friendly
-
-Routes split into "service" and "admin" tiers, each gated by a distinct env var. The service-tier middleware also accepts the admin token, so a single-token deployment (one secret in vault, both env vars set to it) works without code changes. Deployments that want independent rotation set the env vars to different values; the gate logic does not care.
-
-`bearer_eq` runs both checks unconditionally to avoid leaking which-token-matched timing.
-
 ### Atomic upsert by identity
 
-`POST /v1/users/upsert-by-identity` is one transaction:
-
-1. Look up `(provider, provider_subject)` in `identities`.
-2. If found, update `users.avatar_url` if it changed and return the user with `user_created=false, identity_created=false`.
-3. If not, look up `users` by email (case-insensitive). If found, insert a new `identities` row pointing at the existing user.
-4. If still nothing, insert the user (with placeholder username) and the identity row in the same transaction.
-
-The single transaction is what closes the orphan window when two browser tabs race a first-time login. Concurrent calls can still collide on the unique indexes; the handler retries internally (up to 3 attempts) on `23505` and converges on step 1 or 2.
-
-### Deterministic placeholder usernames
-
-New users get `u<12 hex chars from the row id>` as a placeholder handle. identity-service renames on first sign-in (the SPA prompts for one). The `u`-prefix shape lets future admin queries identify never-renamed accounts trivially. Real users cannot collide because the unique index plus the rename CAS prevent it.
-
-### Rename cap of 4
-
-`update_username` performs the compare-and-swap update and the "rename to current value" no-op case in one statement.
-
-When the CTE returns no rows the handler runs one follow-up SELECT to distinguish "user not found" (404) from "rename cap reached" (409). Collapsing the original two-statement diagnosis into the CTE closes the TOCTOU window where a concurrent rename could change state between the CAS UPDATE and the diagnostic SELECT. The unique index on `lower(username)` still raises `23505` on the rare name collision, which surfaces as 409 with the database's error message.
-
-### Durable devserver policy and access denial
-
-User policy PUT is one lock-coupled upsert: it locks the canonical user row, serializes with block and PAT minting, and inserts or replaces the one policy row. The API accepts limits from 1 through 1,000,000; the controller still applies its lower deployment safety ceiling. The fleet singleton is updated independently and defaults to admissions enabled.
-
-Profile does not perform the product-facing drain inside policy PUT. Identity first persists through these routes, then confirms owner-session revocation and owner-tunnel eviction. A failed drain cannot roll policy back, and an equal stricter retry repeats the drain until the fleet converges.
-
-`POST /v1/admin/users/{id}/access/revoke` locks the user, revokes every live PAT, writes one canonical `access_revoked` row, and reserves a durable subject-revocation generation in the same transaction. Identity adds immediate OAuth-session, tenant-session, and tunnel cuts through its composite admin route; profile's worker confirms the post-commit cuts across the entry-credential quiet window.
-
-### Block and delete use durable revocation
-
-`POST /v1/admin/users/{id}/block`:
-
-1. Set `users.blocked_at` if absent and update `block_reason` in the same transaction as the following steps. While an account-delete job exists, the block keeps the stored `block_reason`; otherwise it stores the supplied admin reason. The supplied admin reason is written to the audit row in either case.
-2. Update `api_tokens` to set `revoked_at = now()` for every live PAT belonging to the user.
-3. Append an `auth_audit` row with action `blocked`.
-4. Reserve a durable subject-revocation generation in the same transaction.
-
-The handler returns 202 as soon as the transaction commits; the background worker performs the fleet cut as described above, so a down devserver-control delays the cut but never rolls back `blocked_at`. The operator CLI follows a block with identity's composite access-revoke route, which synchronously revokes OAuth sessions and tenant sessions and kills owner tunnels; partial confirmation there surfaces as a retryable 502 from the CLI's perspective.
-
-Unblock clears `blocked_at` and `block_reason` only: PATs revoked at block time stay revoked, and the route answers 409 while an account-delete job is pending for the user.
-
-Account deletion uses the dominant `AccountDelete` outbox job. The initial transaction blocks the user and revokes PATs but retains the profile row. On an account that is already blocked it keeps the stored `block_reason`, including null, and the original `blocked_at`; otherwise it stores `account deletion pending`. Only after the quiet-window cuts settle does the worker delete the user and let foreign-key cascades remove identities, indexed OAuth sessions, tokens, and grants.
+`POST /v1/users/upsert-by-identity` is one transaction: find the identity by `(provider, provider_subject)`; else find the user by email and attach a new identity; else create the user and the identity together. The single transaction closes the orphan window when two browser tabs race a first-time login. Concurrent calls can still collide on the unique indexes; the handler retries on a unique violation and converges on an earlier branch. identity calls only this endpoint, and new code that reaches across users and identities should use the same shape rather than a multi-step dance.
 
 ### Email rewrite is admin-only
 
-`PATCH /v1/users/{id}` (the service-tier route) accepts only `display_name` and `avatar_url`. Email is the identity-linking key in `upsert_by_identity` branch (b): a service-bearer holder that could rewrite email could pivot account ownership to any account whose verified OAuth email matched the new value. Email mutation therefore lives behind the admin bearer on `POST /v1/admin/users/{id}/email`, runs in a single transaction with an `auth_audit` row of action `email_changed` (note carries the old + new addresses), and surfaces unique-constraint conflicts as 409.
+The service-tier update accepts only display name and avatar. Email is the identity-linking key in the upsert's second branch: a service-bearer holder that could rewrite an email could pivot account ownership to any account whose verified OAuth email matched. Email mutation therefore lives behind the admin bearer, in one transaction with an audit row that records the old and new addresses.
 
-### Devservers are first-class
+### Deterministic placeholder usernames and a lifetime rename cap
 
-A devserver is a row in `devservers` keyed on `(owner_user_id, devserver_id)`, where `devserver_id` is the lowercase hex SHA-256 of the owner's PAT (ADR-0001: the devserver is the unit of registration, gate, and sharing). identity-service creates the row at PAT-create time (it holds the raw token to compute the id), before either grants land or `chan devserver` registers a live tunnel, so the offline state is always representable; it recreates it on every validate a tunnel's dial or lease refresh drives, so a row the sweeper took while the devserver was offline is back as soon as it dials again. Live tunnels (held in devserver-proxy's in-memory Registry) reference the same `(owner, devserver_id)` pair; the FK from `devserver_grants` -> `devservers` makes devserver deletion atomic (cascading every grant on it).
+A new user gets `u` plus the first twelve hex digits of its row id, so never-renamed accounts are trivially identifiable and cannot collide with real handles. Renames are capped at four for life. The compare-and-swap update and the no-op "rename to the current value" case run in one statement, and a follow-up select distinguishes "user not found" from "cap reached" only when the statement touched no row, which closes the window a concurrent rename could otherwise exploit. identity renames on first sign-in.
 
-`POST /v1/users/{owner}/devservers` is idempotent: 201 on insert, 200 when the id already existed (a blank/absent label on a re-issue leaves the stored label untouched and writes no row, so the once-a-minute ensure behind a live tunnel costs no tuple churn). `POST .../grants` upserts the parent `devservers` row in the same transaction (so a caller that pre-seeds a grant before the devserver registers still produces a valid graph and the FK never fires).
+### Devservers are first-class rows
 
-### Per-devserver sharing grants
+A devserver is a row keyed on `(owner_user_id, devserver_id)`, where the id is the digest of the owner's PAT ([ADR-0001](../../docs/adr/0001-devserver-is-the-sharing-unit.md)). identity creates the row when it mints the PAT, since it holds the raw token to compute the id, so the offline state is always representable before any grant lands or any tunnel registers. Creation is idempotent, and a blank label on a re-issue leaves the stored label untouched and writes no row, so the once-a-minute ensure behind a live tunnel costs no tuple churn. A grant upserts its parent row in the same transaction, so pre-seeding a grant before the devserver registers still produces a valid graph. Token rotation mints a new PAT and therefore a new devserver id, so grants do not survive rotation; that trade-off is settled in the ADR.
 
-A grant gives a collaborator the WHOLE devserver (the whole library), not a single workspace: under ADR-0001 the path `{workspace}` segment is tenant routing only and never gates. A user shares their devserver with another user by email. Grants live in `devserver_grants` keyed on `(owner_user_id, devserver_id, lower(grantee_email))`:
+### Whole-devserver grants, one access question
 
-- The owner pre-seeds grants from the gateway dashboard SPA on `gw.{domain}` *before* (or alongside) running `chan devserver run --tunnel-token <pat>`. The grant row exists independently of any live tunnel.
-- `grantee_user_id` is `NULL` until a sign-in is observed with a verified email matching `grantee_email`. Two resolution paths: (a) at grant-create time, if `users` already has a row for the email; (b) at OAuth-callback time, via `POST /v1/users/{id}/grants/claim` which identity-service calls with the union of the user's verified emails.
-- Re-adding the same email on the same `(owner, devserver)` is idempotent: `INSERT ... ON CONFLICT DO UPDATE` preserves `grantee_user_id` and `accepted_at` via `COALESCE`, so a re-add never re-pends a claimed grant. There are no roles.
+A grant gives a collaborator the whole devserver, never a single workspace; the `{workspace}` path segment is tenant routing only. The owner pre-seeds grants by email from the dashboard, before or alongside running the devserver. The grantee user is filled in either at grant time, when a user with that email already exists, or at the grantee's next OAuth callback, when identity asks profile to claim pending grants for the user's verified emails. Re-adding the same email is idempotent and never re-pends a claimed grant.
 
-Access decisions: identity-service calls `GET /v1/users/{owner}/devservers/{devserver_id}/access?as=<caller_user_id>` before minting a devserver-gate entry JWT, passing the devserver_id of the owner's live registration. The response is `{access: true}` when the caller is the owner or holds a claimed grant for that exact owner and devserver, and 404 otherwise; a devserver id that is not 64 hex characters is a 400. The owner is granted for any well-formed devserver id, with or without a registry row, so an unnamed row may be swept or recreated asynchronously without denying its owner; identity asks about an owner's own access only with a devserver id taken from that owner's live tunnels, so the owner rule opens no path to a devserver that is not live. For any other caller the 404 shape is shared with "unknown devserver": neither the access endpoint nor the share landing page leaks which devservers an owner is sharing. One `devserver_access` call is the single authorization assertion the gate needs.
+`GET .../devservers/{devserver_id}/access?as=<caller>` is the single authorization assertion the gate needs. It answers true for the owner or a claimed grantee and the same not-found for every other case, so neither it nor the share landing leaks which devservers an owner shares. The owner passes for any well-formed devserver id, with or without a registry row, so a swept or not-yet-recreated row never denies its owner; identity only ever asks about an owner's own access with an id taken from that owner's live tunnels, so the owner rule opens no path to a devserver that is not live.
 
-devserver_id normalization: handler lowercases + trims and rejects anything that is not exactly 64 hex chars, the canonical SHA-256(PAT) shape. Email uniqueness is case-insensitive via a functional `lower(grantee_email)` index; display preserves the as-typed casing. Token rotation mints a new PAT and thus a new devserver_id, so existing grants do not survive rotation (re-share required); this is the settled trade-off in ADR-0001.
+Email matching folds both sides with PostgreSQL `lower()`, so a verified address claims a grant made to any case variant of it. Unicode lowering is not injective (the Kelvin sign lowers to `k`), and the gateway accepts that residual rather than fold one side ASCII-only, which would miss genuine non-ASCII case variants. Because `lower()` follows the database's `LC_CTYPE`, the non-ASCII promise holds only on a UTF-8 locale.
 
-Grant claims (`POST /v1/users/{id}/grants/claim`) and the admin email filter match on PostgreSQL `lower()` of both the stored and the supplied emails, so a verified address claims a grant made to any case variant of it, non-ASCII capitals included, and both sides fold by the same rule. Unicode lowering is not injective, so the fold also merges distinct characters: U+212A KELVIN SIGN lowers to ASCII `k`, and a provider-verified `\u{212A}ate@corp.example` claims a pending grant made to `kate@corp.example`. Reaching that needs an identity provider that verifies a mailbox with such a character at the grantee's own domain; the gateway accepts that residual rather than fold one side ASCII-only, which would miss genuine non-ASCII case variants. `lower()` follows the database's `LC_CTYPE`, and a `C` or `POSIX` ctype folds ASCII only, so the non-ASCII promise holds only when the gateway database runs a UTF-8 locale (for example `C.UTF-8`).
+### Durable policy, with the drain owned by identity
 
-Listings: `GET /v1/users/{id}/grants/owned` returns `(owner_user_id, devserver_id, label, grant_count)` for every devserver the user owns (zero-grant rows included); `GET /v1/users/{id}/grants/incoming` returns devservers shared *with* the user (claimed grants only). FK cascades on `users(id)` drop grants when either the owner or the grantee is deleted.
+User policy is one lock-coupled upsert on the canonical user row, so it serializes with block and PAT minting. The fleet singleton always exists after migration, and an unreadable row is an authorization failure, never "enabled". Profile only persists policy; the product-facing drain that follows a stricter policy or a fleet pause is identity's composition, which persists first and then confirms owner-session revocation and tunnel eviction. A failed drain cannot roll policy back, and an equal or stricter retry repeats the drain until the fleet converges.
 
-### Feature flags
+### Block and delete use the outbox
 
-Two-tier table layout (`feature_flags` + `feature_flag_overrides`) behind admin endpoints. Resolution is `COALESCE(override.enabled, flag.default_enabled, false)` so unknown flags are closed by default. identity-service reads the resolved map for a user via `GET /v1/users/{id}/flags` (service tier). Neither seeded flag is enforced inside profile: `oauth_login` gates identity's OAuth callback, and `share_workspaces` is an SPA-only UI toggle shipped in `/api/me`.
+Block sets the block marker and reason, revokes every live PAT, appends the audit row and reserves the revocation generation in one transaction, then answers accepted; the worker performs the fleet cut, so a down devserver-control delays the cut but never rolls back the block. Unblock clears only the marker and reason: tokens revoked at block time stay revoked, and unblock is refused while an account-delete job is pending. Account deletion blocks the user and revokes PATs but retains the row until the worker's quiet-window cuts settle, so FK cascades fire only at that confirmed finalization point.
 
-The seeded flags ship `default_enabled = false`, so a fresh deploy refuses every sign-in at the identity callback until an operator grants `oauth_login` on at least one user. Override-or-default keeps the rollout knob simple: flip the default once the feature is ready for everyone; revoke the per-user override for a deny rule. Audit-style history is the `set_at` column on each override; full audit is deferred.
+### Feature flags resolve closed
+
+A flag resolves to its per-user override when present, else its default, else off, so unknown flags are closed. Neither seeded flag is enforced inside profile: `oauth_login` gates identity's OAuth callback and `share_workspaces` is an SPA-only toggle served through `/api/me`. Both ship default-off, so a fresh deployment refuses every sign-in until an operator grants `oauth_login` to a first user. Override-or-default keeps the rollout knob simple: flip the default once a feature is ready for everyone; revoke an override for a deny rule.
 
 ### All SQL is parameterized
 
-Column lists are constants `format!`'d into queries; user input always rides through `.bind()` at `$N`. Substring search on email in the admin list endpoint uses `position(lower($1) in lower(email)) > 0` with the substring as a bound parameter.
+Column lists are constants formatted into queries; user input always rides through bound parameters, including the substring search on email in the admin list.
 
 ## Invariants
 
-- `users.email` is `NOT NULL`, indexed by `lower(email)`.
-- `identities` has `UNIQUE (provider, provider_subject)`.
-- `users.username_edits` only increases; never reset.
-- `users.blocked_at` is `NULL` or a timestamp; `NULL` means active.
-- `api_token_audit.action` is one of `created`, `created_via_desktop`, `created_via_admin`, `desktop.redeem`, `used`, `revoked` (owner self-revoke), `revoked_via_admin` (operator revoke).
-- Block always: revokes every active PAT, appends one `auth_audit` row, and reserves durable fleet revocation in the same transaction.
-- User-policy writes serialize with PAT mint and block on the canonical user row.
-- The fleet policy singleton always exists after migration; an unreadable row is never interpreted as enabled.
-- Access revoke and pending delete establish durable denial before any live-data-plane acknowledgement.
+- `users.email` is required and unique case-insensitively; `identities` is unique per `(provider, provider_subject)`.
+- `users.username_edits` only increases and is never reset.
+- A null `blocked_at` means active.
+- Block always revokes every active PAT, appends one audit row and reserves durable fleet revocation in the same transaction.
+- Policy writes serialize with PAT mint and block on the canonical user row.
+- The fleet policy singleton always exists after migration; an unreadable row is never read as enabled.
+- Access revoke and pending delete establish durable denial before any data-plane acknowledgement.
+- A grant's `accepted_at` and `grantee_user_id` are null together and flip together at claim time.
 - Bearer comparisons run at constant time.
-- `accepted_at` is `NULL` iff `grantee_user_id` is `NULL`; both flip together at claim time.
 
 ## Error model
 
-`profile::Error`:
-
-| Variant       | HTTP | Notes                              |
-|---------------|------|------------------------------------|
-| Unauthorized  | 401  | bearer missing or wrong            |
-| NotFound      | 404  | user / token id missing            |
-| BadRequest    | 400  | input validation                   |
-| Conflict      | 409  | unique violation, rename cap       |
-| Db (sqlx)     | 500  | logged at error level; 23505 answers 409 `{"error":"conflict"}` |
-| Unavailable   | 503  | fleet policy unreadable            |
-
-Database errors are logged with `tracing::error!(error = ?e, ...)`; clients see a generic `internal error` message.
+`profile::Error` is a `thiserror` enum mapped to precise HTTP statuses with generic public messages; a unique violation surfaces as a conflict and a database failure is logged at error level and answered as an internal error. An unreadable fleet policy is answered as unavailable.
 
 ## What is not wired
 
-- mTLS (auth is Bearer only)
-- Soft deletes (delete cascades via FK)
-- Rate limiting on the service API (mitigated at the network layer; admin tree is bearer-gated by a separate token)
+- mTLS (auth is bearer only).
+- Soft deletes (delete cascades via FK after the quiet window).
+- Rate limiting on the service API (mitigated at the network layer; the admin tree is bearer-gated by a separate token).

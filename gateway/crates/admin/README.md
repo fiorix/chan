@@ -1,10 +1,10 @@
 # chan-gateway-admin
 
-Operator CLI for the chan-gateway suite. Manages users, personal access tokens, OAuth and tenant sessions, durable devserver policy, audit logs, live tunnels, and the connected proxy fleet through the scoped HTTP admin contracts.
+Operator CLI for the chan gateway. Manages users, personal access tokens, OAuth and tenant sessions, durable devserver policy, feature flags, audit logs, live tunnels and the connected proxy fleet through the scoped HTTP admin contracts.
 
 ## Role in the system
 
-Out-of-band admin surface. profile-service owns durable user data and aggregate auth history, identity-service owns OAuth sessions and composite policy/access mutations, and devserver-control owns tenant-session and tunnel authority. The CLI has no database access and never sends one service's bearer to another destination.
+Out-of-band admin surface. profile-service owns durable user data and aggregate auth history, identity-service owns OAuth sessions and the composite policy and access mutations, and devserver-control owns tenant-session and tunnel authority. The CLI has no database access and never sends one service's bearer to another destination. Rationale and contracts are in [`design.md`](design.md).
 
 ## Build
 
@@ -28,16 +28,16 @@ sudo apt install ./chan-gateway-admin_*.deb
 
 ## Env vars
 
-| Name                      | Default                  | Notes              |
-|---------------------------|--------------------------|--------------------|
-| `CHAN_ADMIN_PROFILE_TOKEN` | none                    | profile-service operator bearer |
-| `CHAN_ADMIN_IDENTITY_TOKEN` | none                   | identity-service operator bearer |
-| `CHAN_ADMIN_OPERATOR_TOKEN` | none                   | devserver-control operator bearer |
-| `CHAN_ADMIN_PROFILE_URL`  | `http://127.0.0.1:7001`  | profile-service    |
-| `CHAN_ADMIN_IDENTITY_URL` | `http://127.0.0.1:7000`  | identity-service   |
-| `CHAN_ADMIN_WORKSPACE_URL` | `http://127.0.0.1:7003` | devserver-control  |
+| Name                        | Default                 | Notes                            |
+|-----------------------------|-------------------------|----------------------------------|
+| `CHAN_ADMIN_PROFILE_TOKEN`  | none                    | profile-service admin bearer     |
+| `CHAN_ADMIN_IDENTITY_TOKEN` | none                    | identity-service admin bearer    |
+| `CHAN_ADMIN_OPERATOR_TOKEN` | none                    | devserver-control operator bearer|
+| `CHAN_ADMIN_PROFILE_URL`    | `http://127.0.0.1:7001` | profile-service                  |
+| `CHAN_ADMIN_IDENTITY_URL`   | `http://127.0.0.1:7000` | identity-service                 |
+| `CHAN_ADMIN_WORKSPACE_URL`  | `http://127.0.0.1:7003` | devserver-control                |
 
-Each bearer is scoped to one service. `--token` is retained as a compatibility alias for `--operator-token`; it is not sent to profile or identity. Every command requires the bearer of each service it touches; a missing or empty token fails closed before any request leaves the CLI.
+A packaged deployment points `CHAN_ADMIN_IDENTITY_URL` at identity's internal listener (`7004`), where the admin tree lives. Each bearer is scoped to one service and has a matching `--profile-token`, `--identity-token` or `--operator-token` flag; `--token` is an alias for `--operator-token` only. Every command requires the bearer of each service it touches; a missing or empty token fails closed before any request leaves the CLI.
 
 ## Commands
 
@@ -45,7 +45,7 @@ Each bearer is scoped to one service. `--token` is retained as a compatibility a
 chan-gateway-admin user list   [--blocked|--active] [--email PAT] [--username U] [--limit <n>] [--offset <n>]
 chan-gateway-admin user get    <ident>
 chan-gateway-admin user create --email <e> [--name <n>]
-chan-gateway-admin user update <ident> --name <n>
+chan-gateway-admin user update <ident> [--name <n>]
 chan-gateway-admin user change-email <ident> --email <e> [--yes]
 chan-gateway-admin user rename <ident> <username>
 chan-gateway-admin user delete <ident> [--yes]
@@ -60,7 +60,7 @@ chan-gateway-admin token revoke <token-uuid>
 chan-gateway-admin token audit  <token-uuid> [--limit <n>]
 
 chan-gateway-admin tunnel ps    [--user <username>]
-chan-gateway-admin tunnel kill  <user> <workspace>
+chan-gateway-admin tunnel kill  <user> <devserver-id>
 chan-gateway-admin tunnel watch [--user <username>]
 
 chan-gateway-admin proxy ps
@@ -101,20 +101,20 @@ chan-gateway-admin overview [--since <duration>]
 
 `token create` is the only token command that talks to identity-service (`POST /admin/v1/tokens`); every other token command goes through profile-service. `--scope` defaults to `tunnel`; repeat it for several scopes. The minted secret prints exactly once and is never retrievable again.
 
-`flag create` defaults the flag to OFF when neither `--default-on` nor `--default-off` is given. `tunnel kill` forces one registration offline; the devserver peer is free to reconnect. `overview --since` takes an `s`, `m`, `h`, or `d` duration and defaults to `24h`.
+`flag create` defaults the flag to off when neither `--default-on` nor `--default-off` is given. `tunnel kill` takes the full devserver id and forces one registration offline; the devserver peer is free to reconnect. `overview --since` takes an `s`, `m`, `h` or `d` duration and defaults to `24h`.
 
 `policy suspend` preserves the stored limit. `policy resume` requires an existing policy. `fleet pause` requires `--drain` and always invokes the fleet-wide tenant-session and tunnel cuts.
 
-`--json` is available on every command; the default is a `comfy_table` ASCII table sized for an 80-column terminal. Data and durable partial reports go to stdout. Warnings and errors go to stderr.
+`--json` is available on every command; the default is a plain ASCII table sized for an 80-column terminal. Data and durable partial reports go to stdout. Warnings and errors go to stderr.
 
 ## Exit codes
 
-| Code | Meaning                                              |
-|------|------------------------------------------------------|
-| 0    | success                                              |
-| 1    | upstream / network / config / partial-drain error    |
-| 2    | user input error (bad uuid, missing argument)        |
-| 3    | not found (user / token id absent)                   |
+| Code | Meaning                                           |
+|------|---------------------------------------------------|
+| 0    | success                                           |
+| 1    | upstream / network / config / partial-drain error |
+| 2    | user input error (bad uuid, missing argument)     |
+| 3    | not found (user / token id absent)                |
 
 Shell wrappers can rely on these exact codes.
 

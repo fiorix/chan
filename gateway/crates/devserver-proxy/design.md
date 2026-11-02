@@ -1,195 +1,164 @@
 # devserver-proxy design
 
-## Responsibility
+devserver-proxy is the public data-plane edge for tunneled `chan devserver` instances. It has four jobs: validate a tunnel PAT and obtain an identity-signed admission lease; hold the tunnel handshake until devserver-control admits the exact owner, devserver, registration and proxy tuple; exchange a short-lived identity credential for a revocable, proxy-local browser session; and forward authenticated HTTP and WebSocket traffic to the exact live tunnel with a per-request assertion the devserver verifies on its own.
 
-`devserver-proxy` is the public data-plane edge for tunneled `chan devserver` instances. It has four jobs:
+The service has no database, no SPA, no OAuth credential, no profile policy and no local admin API. identity owns entry decisions, profile owns durable denial and revocation jobs, and devserver-control owns fleet state and command routing. A proxy node is deliberately credential-poor so that a compromised node can be isolated and deprovisioned rather than trusted. How to run it and its configuration live in [README.md](README.md).
 
-1. validate a tunnel PAT and obtain an identity-signed admission lease;
-2. hold the tunnel handshake until `devserver-control` admits the exact immutable owner, devserver, registration, and proxy tuple;
-3. exchange a short-lived identity credential for a revocable, proxy-local browser session; and
-4. forward authenticated HTTP and WebSocket traffic to the exact live tunnel, with a per-request assertion the devserver independently verifies.
+## Where it sits
 
-The service has no database, SPA, OAuth credential, profile policy, or local admin API. Identity owns entry decisions, profile owns durable denial and revocation jobs, and devserver-control owns fleet state and command routing.
+Callers: `chan devserver` clients dialing the tunnel listener, browsers and chan-desktop on the public listener, and devserver-control sending commands down the control session. Callees: identity's internal listener (PAT validation, Hello-name announcement, lease refresh) and devserver-control (one outbound h2c control session). The proxy embeds `chan-tunnel-server` for the tunnel itself and `gateway-common` for the entry credential, the token bucket and the transport checks. It never talks to Postgres or profile.
 
 ## Listeners and routing
 
-One process owns two listeners and one in-memory registry:
+One process owns two listeners and one in-memory registry.
 
-- `BIND_ADDR` is the public HTTP listener. The configured tunnel apex serves `/healthz` and `/readyz`; node wildcard hosts serve authenticated devserver content. `/readyz` is healthy only after the current control session reaches `FleetReady`.
-- `TUNNEL_BIND_ADDR` is raw h2c tunnel ingress for `POST /v1/tunnel`. A TLS edge exposes that path with h2 in production. Cleartext is supported only on loopback or when the deployment explicitly asserts an authenticated, encrypted overlay.
+- `BIND_ADDR` is the public HTTP listener. The tunnel apex host serves health and readiness; the wildcard hosts serve authenticated devserver content. Readiness is true only after the control session has reached `FleetReady`.
+- `TUNNEL_BIND_ADDR` is raw h2c tunnel ingress for `POST /v1/tunnel`. A TLS edge exposes that path with h2 in production. Cleartext is accepted only on loopback or under the explicit protected-overlay assertion.
 
-The wildcard host is `{owner}--{disc}.<node-base>`, where `disc` is the first 12 lowercase hex characters of the devserver id. A bare owner host remains a bounded compatibility path: ordinary requests may resolve one live devserver, but entry exchange is refused unless the route is unambiguous. The full `/{workspace}/...` path is tenant routing owned by chan-server; the proxy never uses the workspace segment as an authorization key.
-
-Public wildcard routing is deliberately small:
-
-- `/_chan/entry` validates method, exact Origin, exact Content-Type, and a form no larger than 8 KiB containing exactly one nonempty `credential` field before consulting the live registry;
-- `/api/devserver/*` is always 404 because that management API is local-only;
-- an extension capability link (`/{tenant}/_chan/extensions/{id}/{64-hex}/...`) is never forwarded, and a signed-in iframe navigation to it is answered with a redirect to a bound path (see [Extension links](#extension-links));
-- an extension bound path (`/{tenant}/_chan/extensions/{id}/{96-hex}/...`) requires a binding whose principal still holds a live session;
-- an ordinary path requires a valid opaque `__Host-devserver_gate` cookie;
-- unauthenticated bare `/` redirects to the identity dashboard; and
-- every other unauthenticated or mismatched request returns the same 404 shape.
-
-The aggregate `/admin/v1/*` tree exists only on devserver-control.
+A single router dispatches on the raw `Host` header, never on the `Host` extractor, which would honour a spoofable forwarded host. The wildcard host is `{owner}--{disc}.<node base>`, where `disc` is a fixed-length prefix of the devserver id. A bare `{owner}` host remains a bounded compatibility path: an ordinary request may resolve one live devserver, but entry exchange is refused unless exactly one candidate exists. The `/{workspace}/...` path is tenant routing owned by chan-server; the proxy never uses the workspace segment as an authorization key.
 
 ```mermaid
 flowchart TD
     R[Request] --> H{configured apex or wildcard?}
     H -->|neither| N[404]
-    H -->|apex| A{health/readiness or tunnel ingress?}
+    H -->|apex| A{"health, readiness or tunnel ingress?"}
     A -->|yes| S[serve listener contract]
     A -->|no| N
     H -->|wildcard| E{/_chan/entry path?}
-    E -->|yes| Q{method, Origin, and Content-Type valid?}
-    Q -->|no| F[404 / 403 / 415 from request shape]
-    Q -->|yes| V{bounded one-field form?}
-    V -->|no| R[400 / 413 from request shape]
-    V -->|yes| L{matching live devserver?}
+    E -->|yes| Q{"method, Origin, Content-Type and bounded one-field form valid?"}
+    Q -->|no| F[refused by request shape alone]
+    Q -->|yes| L{matching live devserver?}
     E -->|no| L
     L -->|no| N
     L -->|yes| M{/api/devserver path?}
     M -->|yes| N
     M -->|no| B{entry exchange?}
-    B -->|yes| X[verify Ed25519 and bindings; consume jti; issue opaque session]
+    B -->|yes| X["verify Ed25519 and bindings; consume jti; issue opaque session"]
     B -->|no| K{extension lane shape?}
     K -->|capability link| G{same-origin iframe navigation with a valid opaque session?}
     G -->|no| N
-    G -->|yes| Y[bind the link to the session's principal; 303 to the bound path]
-    K -->|bound path| Z{binding's principal holds a live session?}
+    G -->|yes| Y["bind the link to the session principal; 303 to the bound path"]
+    K -->|bound path| Z{binding principal holds a live session?}
     Z -->|no| N
-    Z -->|yes| W[authorize operation; sign assertion as that principal; forward to the capability path]
+    Z -->|yes| W["authorize operation; sign assertion as that principal; forward to the capability path"]
     K -->|neither| C{valid opaque session?}
     C -->|no| N
-    C -->|yes| P[authorize operation; sign request assertion; forward full path]
+    C -->|yes| P["authorize operation; sign request assertion; forward full path"]
 ```
 
-The listeners and control supervisor share a 30-second shutdown drain deadline. Tasks still pending at the deadline are aborted so long transfers cannot hold process shutdown indefinitely.
+*The gate order on the public listener: request shape is checked before the registry, the management API is never forwarded, and every unknown, unauthenticated or mismatched case shares one not-found.*
+
+The public wildcard routing is deliberately small. `/_chan/entry` validates method, exact `Origin`, exact `Content-Type` and a bounded form with exactly one `credential` field before consulting the registry. `/api/devserver/*` is always not-found because that management API is local-only. An extension capability link is never forwarded; a bound path forwards only while its principal holds a live session. An ordinary path requires a valid gate cookie. An unauthenticated bare `/` redirects to the identity dashboard, because the proxy renders no UI. Everything else answers the same not-found shape. The aggregate `/admin/v1/*` tree exists only on devserver-control.
 
 ## Tunnel registration and admission
 
-The tunnel listener runs `ThrottlingValidator -> IdentityValidator` before controller admission. Identity validation returns immutable `owner_user_id`, canonical username and devserver id, a short-lived admission lease bound to the proposed registration and proxy, the signed positive `max_connected_devservers`, and the per-tunnel assertion authority. The proxy verifies the admission lease locally under `DEVSERVER_ADMISSION_VERIFYING_KEYS` twice: before it asks devserver-control to admit the registration, and again before it publishes the registration's row. devserver-proxy sends the raw PAT only to identity's validate endpoint; it never sends the PAT to devserver-control or retains it as a proxy-wide credential. See [Devserver publication](../../design.md#devserver-publication) for the contact inventory.
+The tunnel listener runs a throttling validator in front of the identity validator before any controller admission. Identity returns the immutable owner id, the canonical username and devserver id, a short-lived admission lease bound to the proposed registration and this proxy, the signed connected-devserver limit, and the per-tunnel assertion authority. The proxy verifies the lease locally under the admission verifying ring twice: before it asks devserver-control to admit, and again before it publishes the row. It sends the raw PAT only to identity and never retains it as a proxy-wide credential. The contact inventory is in [Devserver publication](../../design.md#devserver-publication).
 
-The listener generates the registration UUID. A lease the proxy cannot verify, or one bound to anything but this registration UUID, this proxy, and the validated owner, username and devserver id, is refused with `control_unavailable` without reaching the controller, which compares the same binding and would otherwise reserve capacity for a tunnel this proxy could never publish. Otherwise the control session sends the lease and exact registration tuple to devserver-control and waits. Only an `Admit` decision permits `HelloAck::Ok` and registry insertion. `AtCapacity` maps to `too_many_workspaces`; warming, stale, or unavailable authority maps to `control_unavailable`. There is no local admission fallback.
+The listener generates the registration id. A lease the proxy cannot verify, or one bound to anything but this registration, this proxy and the validated owner and devserver, is refused without reaching the controller, which would otherwise reserve capacity for a tunnel the proxy could never publish. Otherwise the control session sends the lease and the exact tuple to devserver-control and waits. Only an `Admit` decision permits `HelloAck::Ok` and registry insertion; `AtCapacity` maps to the client's capacity refusal and warming, stale or unavailable authority to its control-unavailable refusal. There is no local admission fallback.
 
-The registry keys live rows by immutable owner plus devserver identity and retains the controller registration UUID. Snapshot and contiguous delta events feed the control session. Controller kills address registration UUIDs, so a predecessor teardown cannot remove its successor.
+The registry keys live rows by owner plus devserver id and retains the registration id. A snapshot plus contiguous deltas feed the control session; controller kills address registration ids, so a predecessor's teardown cannot remove its successor. A registration whose row cannot be published or whose refreshed lease no longer verifies costs that one registration and nothing else: the proxy evicts it, logs why, and keeps the stream up. Ending the control stream would not help, because the registry still holds the tunnel and every reconnect's snapshot would meet the same row until the reconnect grace evicted everything on the node.
 
-A registered tunnel whose row cannot be published costs that registration and nothing else. Its lease can stop verifying after admission (it expired between the driver's expiry timer and a snapshot, or a refresh brought a lease signed outside the ring while no control stream was up to refuse it), and a local tunnel with no lease or expiry at all breaks an invariant controller admission keeps. Ending the control stream would not help: the registry still holds the tunnel, so every reconnect's snapshot meets the same row until the reconnect grace evicts every tunnel on the node. Instead the proxy evicts that one registration (logged with its id and the reason, at error for a missing lease), leaves its row out, and keeps the stream up. The generation stays contiguous: a snapshot is built from the rows it will carry before it is chunked, a `TunnelUp` is skipped before the generation advances, and the connection remembers the registrations it never published so it drops their later `TunnelDown` (every registration is removed exactly once) and any `LeaseRefresh`, both of which the controller would otherwise read as deltas for a row it does not hold.
-
-Admission leases expire unless the client re-presents its PAT over the dedicated refresh stream and identity returns a fresh signed lease. A proxy may forward the lease but cannot renew one from a proxy-held fleet secret. Before forwarding a refreshed lease the control session checks it as the controller will: it must parse, verify under the ring, and be bound to that registration UUID, this proxy, and the owner the registry holds it under. A refresh that fails means that registration's authority can no longer be renewed, so the proxy evicts that one registration, logs it, sends no `LeaseRefresh`, and keeps the stream up. The registration was published, so it is not remembered as unpublished and its eviction's `TunnelDown` goes out as an ordinary delta at the next generation. Username and devserver id are not in the refresh event; the controller compares them with its row and kills the registration if they differ.
+Admission leases expire unless the client re-presents its PAT over a dedicated refresh stream and identity returns a fresh lease. The proxy forwards a refreshed lease after checking it as the controller will; it cannot renew one from any proxy-held secret.
 
 ## Browser entry exchange
 
-Identity performs the binary owner-or-grantee access check and signs a 30-second Ed25519 entry credential. The claims bind:
+identity performs the binary owner-or-grantee access check and signs a short-lived Ed25519 entry credential whose claims bind the purpose and version, the caller and the owner, the client it was minted for (`desktop` or `browser`), the exact devserver id, canonical audience and provisioned proxy id, a random single-use replay id, and the relative clean navigation path.
 
-- purpose `chan.devserver.entry`, protocol version, issuer, and type;
-- immutable caller `sub` and immutable `owner_user_id`;
-- the `client` the credential was minted for (`desktop` from the desktop entry route, `browser` from the share landings);
-- exact devserver id, canonical audience, and provisioned proxy id;
-- a random single-use `jti`;
-- the relative clean navigation path; and
-- exact 30-second lifetime with five seconds of clock skew.
+The browser or the desktop posts one `credential` field to the fixed exchange path. Before reading registry state, the proxy requires the method, exactly one canonical content type, exactly one `Origin` equal to identity's configured public origin, a bounded body and exactly one nonempty field. Those refusals therefore depend only on request shape, never on whether zero, one or several devservers are live, and every entry-specific not-found is the same JSON body regardless of `Accept`. Credentials in query strings are not accepted.
 
-The browser or Desktop posts one URL-encoded `credential` field to the fixed exchange path. Before reading registry state, the proxy requires POST, exactly one canonical content type, exactly one `Origin` equal to identity's configured public origin, a body no larger than 8 KiB, and exactly one nonempty form field named `credential`. The resulting 404, 403, 415, 400, and 413 response tuples therefore depend only on request shape, not whether zero, one, or several devservers are live. Every entry-specific 404 is the same JSON response regardless of `Accept`. The later candidate-count guard still rejects ambiguous bare hosts before signature verification. Credentials in query strings are not accepted.
-
-The proxy verifies the signature under a one-or-two-key rotation ring and checks every binding against the live tunnel and inbound host. A credential with no `client`, which an identity that predates the claim signs, or with a value this build does not recognise, is exchanged like any other and opens a session whose client is `unknown`; the entry version is unchanged, so identity and the proxy may deploy in either order without refusing credentials in flight. It atomically retains the `jti` through `exp + skew`; replay or replay-cache pressure fails closed. Replay state is bounded globally and to 64 unexpired entries per subject. It is process-local, so restart clears it, but the credential's maximum acceptance window remains 40 seconds.
-
-Successful exchange returns 303 to the signed relative path and sets:
-
-- `__Host-devserver_gate=<random 256-bit id>; Path=/; HttpOnly; Secure; SameSite=Lax`
-- `__Host-devserver_csrf=<random 256-bit value>; Path=/; Secure; SameSite=Lax`
-
-Both cookies are host-only. The entry credential never appears in browser history, a redirect, or the clean URL.
+The proxy verifies the signature under a one-or-two-key rotation ring, checks every binding against the live tunnel and the inbound host, and retains the replay id through the credential's acceptance window; a replay, or replay-cache pressure, fails closed. A credential without a recognisable client claim opens a session whose client is `unknown`, so identity and the proxy can deploy in either order without refusing credentials in flight. Success answers a redirect to the signed path and sets two host-only cookies: `__Host-devserver_gate` (HttpOnly, Secure, SameSite=Lax, the opaque session id) and `__Host-devserver_csrf` (Secure, SameSite=Lax, readable by same-origin JS). The credential never appears in browser history, a redirect or the clean URL.
 
 ## Opaque sessions and revocation
 
-The gate cookie is an opaque lookup key, not a self-contained authorization token. A session record contains a separate random `admin_session_id`, the immutable caller, owner, devserver and audience, the client its entry credential was minted for, monotonic and wall-clock creation/expiry, a cancellation token, and the set of active bridge tasks admitted under it.
+The gate cookie is an opaque lookup key, not a self-contained token. A session record holds a separate random admin session id, the immutable caller, owner, devserver and audience, the client its credential was minted for, creation and expiry, a cancellation token and the set of transports admitted under it. The client is an attribute of the session, not of its principal: a user's desktop and browser sessions on one devserver are the same `(subject, owner, devserver, audience)` principal, share its quota and extension bindings, and every revocation that reaches the principal reaches both.
 
-The client is an attribute of the session, not part of its principal. A user's desktop session and browser session on one devserver are the same `(subject, owner, devserver, audience)` principal: they share its session quota and its extension bindings, and every revocation form below that reaches the principal reaches both.
+Bounds are fail-closed: a process-wide active-session cap, a per-subject cap, a per-principal cap, an absolute lifetime that cannot exceed one hour, and a restart that clears every session. The store publishes a redacted snapshot and up/down events to the control supervisor; snapshot chunks and tunnel and session deltas share one connection-local generation, so a gap retracts both authorities and forces a resync. The published view contains only the admin id, subject, owner, devserver id, proxy id, creation and expiry.
 
-Bounds are fail-closed:
+Revocation supports exact `(subject, owner, devserver)`, subject, admin session id, owner and all. The proxy first makes matching records lookup-dead and cancels their tokens, then stops their transports: an HTTP task is aborted at once, a WebSocket bridge is left to send its close frame and is aborted only at a short drain deadline. The proxy acknowledges only after every registered operation guard has dropped, within a bound that stays inside the controller's command timeout. A drain that times out leaves a tombstone, so a retried command cannot observe zero records and falsely confirm. Expiry stops a session's transports the same way. New session issuance is suspended during control-loss cleanup and resumes only after a fresh `FleetReady`.
 
-- `SESSION_MAX_ACTIVE` limits the process, default 10,000;
-- one subject may hold at most 64 sessions;
-- one exact subject/owner/devserver/audience principal may hold at most 16;
-- `SESSION_LIFETIME_SECS` defaults to and cannot exceed one hour; and
-- proxy restart clears every session.
-
-The session store publishes a redacted snapshot and `Up`/`Down` events to the control supervisor. Snapshot chunks and tunnel/session deltas share one connection-local generation, so a gap retracts both authorities and forces a full resync. The public admin view contains only admin id, subject user, owner user, devserver id, proxy id, creation, and expiry.
-
-`RevokeSessions` supports exact `(subject, owner, devserver)`, subject, admin session id, owner, and all forms. The proxy first makes matching records lookup-dead and cancels their tokens, then stops their tasks: an HTTP task, whose body already ends on the cancelled token, is aborted at once, and a WebSocket bridge is left to send its 1008 Close and end itself, and aborted only if it is still running at the drain deadline, 2 seconds after the revocation (the bridge's Close sends are bounded at 1 second, which a compile-time check keeps inside it). The proxy then waits for every registered operation guard to drop before acknowledging, allowing the aborted tasks another 500 ms, so an acknowledgement waits at most 2.5 seconds, half the controller's 5-second command timeout. A drain timeout leaves a tombstone in the store, so a retried command cannot observe zero records and falsely confirm. Expiry stops a session's tasks the same way, with the same drain deadline, and reclaims a tombstone only after its session operations and cancelled extension-binding operations have drained; records still draining are revisited on subsequent expiry passes. New session issuance is suspended during control-loss cleanup and resumes only after a fresh `FleetReady`.
-
-Profile persists revocation work transactionally with each grant delete, block, PAT revoke, or account delete. Its first confirmed fleet cut starts a 40-second quiet window covering entry lifetime and symmetric skew; a later same-generation cut settles the job. The controller reports partial failure while any connected proxy has not confirmed or any disconnected proxy authority marker remains. Absolute one-hour expiry is the final backstop after the bounded retry window is exhausted and audited.
+Profile persists revocation work transactionally with each grant delete, block, PAT revoke or account delete, and its worker makes two confirmed cuts across the entry-credential quiet window. The controller reports partial failure while any connected proxy has not confirmed or any disconnected proxy authority marker remains. The absolute one-hour expiry is the final backstop once the bounded retry window is exhausted and audited.
 
 ## Request authorization
 
-For an ordinary request the proxy resolves the opaque session against the exact live tunnel and canonical audience. Lookup is repeated for every HTTP request and WebSocket upgrade. An expired, cancelled, wrong-host, wrong-owner, or wrong-devserver record returns the indistinguishable 404 path.
+For an ordinary request the proxy resolves the opaque session against the exact live tunnel and the canonical audience, on every HTTP request and every WebSocket upgrade. An expired, cancelled, wrong-host, wrong-owner or wrong-devserver record takes the indistinguishable not-found path. Before transport starts, the request registers an operation guard with the session, and no operation may register after revocation.
 
-Before transport starts, the request registers an operation guard with the session. No operation may register after revocation. Every forwarded request also carries `X-Chan-Gateway-Assertion`, a 60-second HMAC assertion containing only immutable caller, owner, audience, and devserver authority, plus the session's client type. Its key is derived independently from the tunnel PAT by the client and proxy validation path. chan-server verifies it against its configured tunnel origin and owner; missing assertion authority fails closed.
+Every forwarded request carries `X-Chan-Gateway-Assertion`, a short-lived HMAC assertion naming only the immutable caller, owner, audience and devserver, plus the session's client type. Its key is derived independently from the tunnel PAT by the client and by the proxy's validation path, so chan-server can verify it without any shared gateway secret; a missing assertion fails closed there.
 
-This is intentionally not owner-equals-caller authorization. A grantee's `sub` differs from `owner_user_id`, while the exact owner/devserver/audience bindings confine that caller to the one accepted share.
+This is intentionally not owner-equals-caller authorization. A grantee's subject differs from the owner, and the gate never compares the two; that would lock out every accepted grantee. identity already ran `devserver_access` before minting, so a validly signed credential with the right audience and devserver is the authorization assertion, and the audience is what enforces user-to-user isolation.
 
 ## Browser boundaries
 
-All methods except `GET`, `HEAD`, and `OPTIONS` require `X-Chan-CSRF` to match the readable CSRF cookie with a timing-safe comparison. This includes extension methods such as `PROPFIND` and `TRACE`. The header and all inbound cookies are stripped before the tunnel hop.
+All methods except `GET`, `HEAD` and `OPTIONS` require `X-Chan-CSRF` to match the readable CSRF cookie in a timing-safe comparison, extension methods included. The mirror is needed because `SameSite` is site-based and sibling tenant origins under one proxy node are same-site. The header and all inbound cookies are stripped before the tunnel hop.
 
-A cookie-authenticated WebSocket additionally requires exactly one `Origin` equal to the canonical externally visible origin. Missing, multiple, opaque, wrong-scheme, wrong-port, and sibling origins are rejected before a substream opens. The bridge closes on session cancellation, absolute session expiry, or 300 seconds with no frame in either direction. That window starts before the upstream is connected: the 101 is already sent, so a substream open waiting on the tunnel's substream budget, or an upstream handshake the devserver never answers, that outlasts it ends the client socket with a 1011 Close. A setup that fails ends it with a 1011 Close as well, and the reason names the case: `upstream unreachable` when the substream open fails (the tunnel is gone) or the handshake dies in transit, `upstream refused` when the devserver answers the upgrade with anything but a 101, or with an answer the WebSocket handshake rejects (a 101 missing its `Upgrade` or `Connection`, a wrong `Sec-WebSocket-Accept`, a head that does not parse). The three share the code because 1014, the registered bad-gateway close code, is one tungstenite refuses on receipt and reports as a 1002 protocol violation; the reason is what tells them apart. A revocation or an expiry, in setup or once bridged, ends the client socket with a 1008 Close: `session revoked`, or `session expired` when the session's expiry has passed, since the store cancels an expired session's token too and the bridge gives the same reason whichever of the cancellation and its own expiry timer it sees first. The store aborts the bridge task only at the drain deadline above, as the backstop for a bridge that does not finish, and revocation waits for the task to stop before command acknowledgement.
+A cookie-authenticated WebSocket additionally requires exactly one `Origin` equal to the canonical externally visible origin; missing, multiple, opaque, wrong-scheme, wrong-port and sibling origins are rejected before a substream opens. The bridge closes on session cancellation, absolute expiry or a both-directions idle deadline that also bounds the substream open and the upstream handshake. A revoked or expired session ends the client socket with a policy-violation close whose reason names the case; an upstream that cannot be reached or refuses the upgrade ends it with a server-error close whose reason names which.
 
-Every credentialed response receives `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a CSP `frame-ancestors 'none'` directive. The sole framing exception is Chan's capability-scoped `/_chan/extensions/` proxy namespace, which receives `frame-ancestors 'self'` so the owning tenant can host it in an opaque sandboxed iframe; no other tenant content becomes frameable. Upstream cookies with a `Domain` attribute, or names reserved for the gateway session and CSRF cookies, are dropped.
+Every credentialed response receives `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a `frame-ancestors 'none'` policy. The sole framing exception is the extension namespace below, which receives `frame-ancestors 'self'` so the owning tenant can host it in a sandboxed iframe. Upstream cookies with a `Domain` attribute, or names reserved for the gate and CSRF cookies, are dropped; other upstream cookies pass so tenant content can set its own host-only cookies.
 
 ## Extension links
 
-A workspace tenant's extension tab is an iframe with `sandbox="allow-forms allow-scripts"`, so its document has an opaque origin and the requests it makes carry no cookie. chan-server gives each ready extension a 64-hex path capability, and the workspace app points the frame at `/{tenant}/_chan/extensions/{id}/{capability}/...`. The proxy never forwards that capability link, and nobody reaches an extension without signing in. It binds the link to the signed-in user on the frame's navigation instead, which needs nothing from the workspace app, so a devserver serving any version of it works behind this proxy:
+A workspace tenant's extension tab is an iframe with `sandbox="allow-forms allow-scripts"`, so its document has an opaque origin and its requests carry no cookie. chan-server gives each ready extension a path capability, and the workspace app points the frame at `/{tenant}/_chan/extensions/{id}/{capability}/...`. The proxy never forwards that capability link and nobody reaches an extension without signing in. Instead it binds the link to the signed-in user on the frame's navigation, which needs nothing from the workspace app, so a devserver serving any version of it works behind this proxy.
 
-- A `GET` carrying exactly `Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: iframe`, plus a session cookie valid for the host, devserver and owner, mints a binding for that session's principal and is answered 303 to `/{tenant}/_chan/extensions/{id}/{binding}/...`, keeping the rest of the path and the query. The parent page starts that navigation, so the browser attaches the `SameSite=Lax` cookie despite the sandbox. Fetch Metadata cannot be set by page script, so the frame's own fetch, a subresource, a WebSocket, a top-level open, a navigation the sandboxed document starts itself (`cross-site`, and cookieless), a frame on a sibling tenant (`same-site`), and a browser that sends no Fetch Metadata all get the ordinary 404, cookie or not.
-- A binding token is 96 lowercase hex: a 128-bit selector the store looks up, then a 256-bit verifier compared in constant time. It resolves to the principal (subject, owner, devserver, audience), the tenant, the extension id and the devserver capability, and the path's tenant, extension id and host must match. A bound request, HTTP or WebSocket, is forwarded to the devserver's capability path with an assertion naming the principal's real subject. Its client is the client of the session that minted the binding while that client still holds a live session for the principal, and `unknown` otherwise, so a binding another client's session keeps alive never claims a client that is not there. It needs no cookie, CSRF header or WebSocket Origin, none of which the frame can present. A `Location` the devserver answers on its capability path is rewritten back onto the bound path.
-- A binding belongs to its principal rather than to the session that minted it, so an open extension tab survives the user signing in again before the first session's hour ends. It lives only while the principal holds a live session without a gap: when the principal's last session is removed, by expiry or revocation, its bindings go with it, and a lapsed binding does not return with a later session. Every revocation that reaches the principal, an admin-session revocation of any one of its sessions included, deletes its bindings, cancels the transports admitted through them, and waits for those to drain before acknowledging, with the same tombstone-on-timeout rule as sessions. A bound request runs until the principal's latest-expiring live session expires.
-- A request on either shape whose path holds a dot segment, a segment that is exactly `.` or `..`, is answered with the lane's 404 before any session or binding is consulted, and is never forwarded. The check looks for one raw, then percent-decodes the whole path and looks again, until decoding changes nothing, splitting on `/` and `\` each time. It reads at least as much into a path as the devserver does: its extension route percent-decodes the path capture once and hands it to a WHATWG URL parser, which takes `%2e` for a dot and `\` for a separator, so `..%2f`, `.%2E`, `..%5c` and a double-encoded `%252e%252e` are all dot segments there. A path still changing after four decoding rounds is refused too. `...`, `.hidden` and `a..b` are ordinary segments. No browser sends a dot segment, since it resolves them before sending, so this refuses only hand-built requests, and it keeps a bound path inside its extension whatever the devserver does with the path.
-- A principal holds at most 32 bindings; minting another evicts its least recently used one, so reloading frames rotates rather than accumulates. The proxy holds at most four bindings per `SESSION_MAX_ACTIVE` slot, 40,000 by default, and answers 503 when that is full rather than evict another principal's binding.
+```mermaid
+sequenceDiagram
+    participant App as workspace app (parent page)
+    participant Frame as sandboxed iframe
+    participant PX as devserver-proxy
+    participant DS as chan devserver
+    App->>PX: navigate iframe to /{tenant}/_chan/extensions/{id}/{capability}/ (gate cookie attached)
+    Note over PX: Sec-Fetch says same-origin iframe navigation<br/>session valid for host, devserver and owner
+    PX->>PX: mint a binding for the session principal
+    PX-->>Frame: 303 to /{tenant}/_chan/extensions/{id}/{binding}/
+    Frame->>PX: GET or WebSocket on the bound path (no cookie)
+    PX->>PX: resolve binding, principal still holds a live session
+    PX->>DS: forward to the capability path with an assertion naming the real subject
+    DS-->>PX: response (Location rewritten back onto the bound path)
+    PX-->>Frame: response with the extension response policy
+```
+
+*Binding a capability link: the parent page's navigation carries the cookie, the proxy swaps the capability for a principal-bound token, and the cookieless frame uses that token from then on.*
+
+- A `GET` carrying the Fetch Metadata of a same-origin iframe navigation, plus a session cookie valid for the host, devserver and owner, mints a binding for that session's principal and is answered with a redirect to the bound path, keeping the rest of the path and the query. The parent page starts that navigation, so the browser attaches the `SameSite=Lax` cookie despite the sandbox. Page script cannot set Fetch Metadata, so the frame's own fetches, subresources, WebSockets, top-level opens, navigations the sandboxed document starts itself, frames on sibling tenants and browsers that send no Fetch Metadata all get the ordinary not-found, cookie or not.
+- A binding token is a lookup selector plus a verifier compared in constant time. It resolves to the principal, the tenant, the extension id and the devserver capability, and the path's tenant, extension id and host must match. A bound request is forwarded to the capability path with an assertion naming the principal's real subject. It needs no cookie, CSRF header or WebSocket `Origin`, none of which the frame can present.
+- A binding belongs to its principal rather than to the session that minted it, so an open extension tab survives the user signing in again. It lives only while the principal holds a live session without a gap: when the principal's last session is removed, by expiry or revocation, its bindings go with it, and every revocation that reaches the principal deletes its bindings and drains their transports with the same tombstone-on-timeout rule as sessions.
+- A path on either shape that holds a dot segment, raw or percent-encoded through repeated decoding, is answered with the lane's not-found before any session or binding is consulted and is never forwarded. The check reads at least as much into a path as the devserver's own extension route does, so a bound path stays inside its extension whatever the devserver does with it. No browser sends a dot segment, so this refuses only hand-built requests.
+- Bindings are bounded per principal, with least-recently-used eviction so reloading frames rotates rather than accumulates, and bounded per process, answering unavailable rather than evicting another principal's binding.
 
 Every response on either shape carries the extension response policy (`Access-Control-Allow-Origin: null`, no-store, nosniff, no-referrer, no `Set-Cookie`), refusals included, so the frame reads true statuses. Both shapes keep the extension's path depth, so the frame's relative URLs resolve as they would on the capability path, and the trace span redacts either credential segment.
 
 ## Reverse-proxy hygiene
 
-The proxy strips the fixed RFC hop-by-hop set on both legs and every header named by every `Connection` field value. It removes inbound `Host`, `Cookie`, `Authorization`, `X-Chan-CSRF`, and any client-supplied gateway assertion. `X-Forwarded-Host` and `X-Forwarded-Proto` are recomputed from the routed host and configured edge scheme; inbound forwarded host/scheme headers are never routing authority.
+The proxy strips the fixed hop-by-hop set on both legs and every header named by every `Connection` field value. It removes the inbound `Host`, `Cookie`, `Authorization`, `X-Chan-CSRF` and any client-supplied gateway assertion. `X-Forwarded-For` is the socket peer only, `X-Forwarded-Proto` comes from the configured edge scheme and `X-Forwarded-Host` from the host the proxy itself routed on; inbound forwarded headers are never routing authority, because the edge may not scrub them. The upstream is reached over a yamux substream owned by an authenticated tunnel, so there is no SSRF surface: the upstream is never user-supplied.
 
-HTTP request and response bodies default to 100 MiB bounds. The default 60-second request deadline covers headers and streaming response body, and dropping or timing out a response aborts its upstream connection task. Multipart upload and file or archive download routes receive explicit 100 GiB bounds and a 24-hour deadline; the server-side copy route receives the long deadline while retaining the general JSON body bounds. Transfer classification requires the exact method and path, and a download requires exactly one form-decoded truthy `download` field. A non-HEAD response whose declared length exceeds its effective cap is refused with 502 before body forwarding; HEAD has no response body, and unknown-length responses remain bounded while streaming. The full inbound path and query are forwarded unchanged except that the fixed entry exchange is handled locally.
+Request and response bodies and the end-to-end request deadline are bounded by configuration, and a dropped or timed-out response aborts its upstream task. The sanctioned transfer routes (multipart upload, file or archive download, server-side copy) receive explicit long bounds and deadlines so large transfers are not cut by the general policy; classification requires the exact method and path. A response whose declared length exceeds its cap is refused before body forwarding. The full inbound path and query are forwarded unchanged except that the entry exchange is handled locally.
 
-The proxy opens a fresh yamux substream for each HTTP request or WebSocket. WebSockets perform their handshake directly on that substream and share one both-directions idle deadline; traffic in either direction refreshes it.
+The proxy opens a fresh yamux substream for each HTTP request or WebSocket. WebSockets perform their handshake directly on that substream and share one both-directions idle deadline refreshed by traffic in either direction.
 
 ## Control failure semantics
 
-The proxy has one authenticated h2 control session using its provisioned per-proxy credential. It refuses new admissions immediately when that session is unavailable, while existing authority has bounded retention:
+The proxy has one authenticated h2 control session using its provisioned per-proxy credential. It refuses new admissions the moment that session is unavailable, while existing authority has bounded retention: a healthy-session disconnect arms a reconnect grace; a reconnect whose snapshot is accepted but not yet `FleetReady` runs under a distinct, hard convergence deadline; a disconnect in that state cannot extend authority indefinitely. Grace expiry atomically suspends session issuance, evicts every tunnel, cancels every session and waits for admitted bridges to drain. Only `FleetReady` cancels cleanup and resumes admission and session issuance.
 
-- a normal healthy-session disconnect arms a 30-second grace;
-- if a reconnect snapshot is accepted but `FleetReady` has not arrived, a distinct hard 45-second convergence deadline applies;
-- a disconnect in that state cannot reset or extend authority indefinitely;
-- grace expiry atomically suspends session issuance, evicts tunnels, cancels sessions, and waits for admitted bridges to drain; and
-- only `FleetReady` cancels cleanup and resumes admission/session issuance.
-
-The controller retains disconnected `(proxy_id, boot_id)` authority for 60 seconds, longer than every proxy-side retention path. Session revocation therefore cannot report full confirmation during the double-disconnect window where a proxy could still serve old authority.
+The controller retains a disconnected proxy's authority marker for longer than every proxy-side retention path, so session revocation cannot report full confirmation during the window in which a proxy could still be serving old authority.
 
 ## Trust boundary and residuals
 
-A proxy node is credential-poor relative to identity and profile, but it is still a data-plane trust boundary. A fully compromised assigned proxy can capture the PAT of every tunnel currently connected to it and reuse it until identity revokes it or it expires, because the proxy process holds those PATs; see 'Devserver publication' in `gateway/design.md` and `crates/chan-tunnel-server/design.md` for when and how long the proxy holds a PAT. It can also mint per-request assertions for tunnels currently assigned to it. The protocol prevents that node from joining as another provisioned proxy, fabricating an identity-signed admission or entry credential, or turning one node credential into fleet authority. Node isolation, deprovisioning, and PAT rotation remain the incident response for a compromised assigned node; this design is not a trusted execution environment.
+A proxy node is credential-poor relative to identity and profile, but it is still a data-plane trust boundary. A fully compromised assigned proxy can capture the PAT of every tunnel currently connected to it and reuse it until identity revokes it or it expires, because the proxy process holds those PATs at dial, at the Hello-name announcement and at refresh, and inside the h2 connection's header decoder for the life of the connection; `crates/chan-tunnel-server/design.md` has the detail. It can also mint per-request assertions for tunnels currently assigned to it. The protocol prevents that node from joining as another provisioned proxy, fabricating an identity-signed admission or entry credential, or turning one node credential into fleet authority. Node isolation, deprovisioning and PAT rotation remain the incident response; this design is not a trusted execution environment.
 
 An extension bound path carries its binding in the URL, because the opaque-origin frame can present no cookie. A leaked bound path is therefore usable as that user, from any client, until the user holds no live session or a revocation reaches them. The capability link on its own grants nothing.
 
-The replay cache, opaque sessions, extension bindings, registry, and controller fleet view are memory-only by design. Restart fails tunnels and sessions closed. Controller HA, durable fleet state, automatic DNS/certificate provisioning, and proxy-to-proxy traffic are outside this component.
+The replay cache, opaque sessions, extension bindings, registry and controller fleet view are memory-only by design. Restart fails tunnels and sessions closed. Controller HA, durable fleet state, automatic DNS and certificate provisioning, and proxy-to-proxy traffic are outside this component.
 
 ## Invariants
 
 - No tunnel enters the registry before identity validation and synchronous controller admission of its signed immutable tuple.
-- Entry credentials are body-only, single-use, short-lived, and bound to the exact proxy, audience, owner, devserver, caller, and clean path.
-- Entry method, Origin, Content-Type, body-limit, and form-shape failures are answered before registry lookup, and every entry-specific 404 has one shape, so their response tuples reveal no live-devserver state.
+- Entry credentials are body-only, single-use, short-lived and bound to the exact proxy, audience, owner, devserver, caller and clean path.
+- Entry method, Origin, Content-Type, body-limit and form-shape failures are answered before registry lookup, and every entry-specific not-found has one shape, so the responses reveal no live-devserver state.
 - Browser sessions are opaque, bounded, revocable, lookup-checked on every request, and expire absolutely within one hour.
-- Browser-session publication never contains the cookie id, replay id, audience, assertion, peer address, or cancellation internals.
+- Session publication never contains the cookie id, replay id, audience, assertion, peer address or cancellation internals.
 - Revocation acknowledgement means every registered matching transport has stopped; timeouts remain visible to retries.
 - Every tunnel-bound HTTP request and WebSocket carries a fresh per-tunnel gateway assertion; the client cannot supply one.
 - Unsafe browser methods require CSRF and cookie-authenticated WebSockets require exact Origin; the cookieless extension bound path is the one exception, and it requires a live binding instead.
-- No request reaches a tunnel without a signed-in principal, and every assertion names that principal's real subject: an extension capability link is never forwarded, and a bound path forwards only while its principal holds a live session.
+- No request reaches a tunnel without a signed-in principal, and every assertion names that principal's real subject; a capability link is never forwarded, and a bound path forwards only while its principal holds a live session.
 - No extension lane path with a dot segment, raw or percent-encoded, is forwarded or mints a binding.
 - The public wildcard never exposes `/api/devserver/*` or an admin route.
 - Request paths remain segment-preserving; chan-server is the sole workspace tenant router.
-- Control loss cannot retain data-plane authority past its hard deadline, and controller disconnected-authority markers outlive proxy retention.
-
-An HTTP request body that exceeds its route byte cap returns 413 `payload too large`; upstream transport failures retain the 502 response.
+- Control loss cannot retain data-plane authority past its hard deadline, and the controller's disconnected-authority markers outlive proxy retention.
