@@ -25,7 +25,8 @@
 //! host page carries `data-launcher-shown` on its root (`hostCovered`), so
 //! the page's terminal leaves the keyboard with the launcher when the window
 //! comes back from another application; `hostUncovered` clears it before
-//! the hide refocuses the host's own webview.
+//! the hide refocuses the host's own webview, when a host hidden in place
+//! drops its launcher, and after a show that gave the launcher no keyboard.
 //!
 //! A wry webview is not `Send`, so every launcher lives in a main-thread map
 //! and every touch of one runs on the main thread.
@@ -249,6 +250,10 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
     let _ = app.run_on_main_thread(move || {
         if was_visible {
             if let Some(window) = app_for_main.get_webview_window(&host) {
+                // The page stays alive while its window is hidden in place;
+                // left marked, its terminal would skip every resume refocus
+                // after the window is shown again.
+                let _ = window.eval(stage_js("hostUncovered", 0));
                 restore_host(&window);
             }
         }
@@ -441,7 +446,12 @@ async fn show_async(app: &AppHandle, host: &str) -> Result<(), String> {
     eval_host(&host_window, "hostCovered", 0).await;
     let app_for_main = app.clone();
     let host_for_main = host_window.clone();
-    window_ops::on_main(app, move || show_now(&app_for_main, &host_for_main)).await?;
+    let shown = window_ops::on_main(app, move || show_now(&app_for_main, &host_for_main)).await;
+    if !matches!(shown, Ok(true)) {
+        // No launcher took the keyboard, so nothing covers the host.
+        eval_host(&host_window, "hostUncovered", 0).await;
+    }
+    shown?;
     if motion {
         slide_together(app, &host_window, true).await;
         // Make the launcher opaque before restoring the covered host.
@@ -489,9 +499,9 @@ async fn hide_async(app: &AppHandle, host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Show a host's launcher over its content and give it the keyboard. Main
-/// thread.
-fn show_now(app: &AppHandle, host: &WebviewWindow) {
+/// Show a host's launcher over its content and give it the keyboard; `false`
+/// when the host has no launcher to show. Main thread.
+fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
     let label = host.label().to_string();
     let shown = LAUNCHERS.with(|launchers| {
         let Ok(launchers) = launchers.try_borrow() else {
@@ -509,7 +519,7 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) {
         true
     });
     if !shown {
-        return;
+        return false;
     }
     set(&VISIBLE).lock().unwrap().insert(label);
     // Off macOS the launcher carries the only menubar, so the host wears it
@@ -528,6 +538,7 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) {
     }
     #[cfg(target_os = "macos")]
     let _ = app;
+    true
 }
 
 /// Hide a host's launcher and hand the keyboard back to the host's own
@@ -1081,6 +1092,34 @@ mod tests {
         assert!(
             TERMINAL_TAB.contains("document.documentElement.hasAttribute(\"data-launcher-shown\")")
         );
+    }
+
+    #[test]
+    fn every_end_of_a_shown_launcher_uncovers_its_host() {
+        // A host left marked skips its terminal's resume refocus with no
+        // launcher over it, until the next toggle. The marker goes with the
+        // hide, with a launcher dropped while its host is hidden in place,
+        // and with a show that gave the launcher no keyboard.
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let body = |head: &str| {
+            let (_, rest) = SOURCE.split_once(head).expect("the function exists");
+            rest.split_once("\n}\n")
+                .expect("it ends at a column-0 brace")
+                .0
+        };
+        let hide = body("\nasync fn hide_async(");
+        assert!(hide.contains("eval_host(host_window, \"hostUncovered\", 0)"));
+        let close = body("\npub(crate) fn close_for_host<");
+        assert!(close.contains("stage_js(\"hostUncovered\", 0)"));
+        let show = body("\nasync fn show_async(");
+        let covered = show
+            .find("\"hostCovered\"")
+            .expect("the show marks the host");
+        let uncovered = show
+            .find("\"hostUncovered\"")
+            .expect("a show that did not happen unmarks it");
+        assert!(covered < uncovered);
+        assert!(show.contains("if !matches!(shown, Ok(true))"));
     }
 
     #[test]
