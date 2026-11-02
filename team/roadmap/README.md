@@ -30,7 +30,7 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 | [Copy scrollback of a long history blocks the page][ghscroll] | deferred | measure |
 | [a tmux divider between nested splits][tmuxnest] | landed | GA |
 | [Cmd+` does not switch chan windows on macOS][cmdbq] | raised | reading |
-| [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | accepted | build |
+| [the Cachix publication keeps every release's pins and fills the cache][cachixpins] | landed | GA |
 | [hiding the last shown window quits chan][lastwin] | accepted | build |
 | [keys pass under an open confirm][confirmkeys] | accepted | build |
 | [a window loses its drop highlights][dndloss] | raised | reading |
