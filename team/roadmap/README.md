@@ -35,6 +35,9 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 | [keys pass under an open confirm][confirmkeys] | landed | GA |
 | [a window loses its drop highlights][dndloss] | landed | GA |
 | [the editor's URL bubble overlaps its label][urlbubble] | landed | GA |
+| [chan close can answer before the devserver][forgetflake] | landed | GA |
+| [Delete stops working in a ghostty terminal][ghdelete] | landed | GA |
+| [terminal bodies turn see-through][seethru] | raised | reading |
 
 [ghscroll]: v0.121.0/copy-scrollback-of-a-long-ghostty-history-blocks-the-page.md
 [tmuxnest]: v0.121.0/a-tmux-divider-between-nested-splits-cannot-be-resized-from-chan.md
@@ -44,6 +47,9 @@ Opened 2026-11-01 at the v0.120.0 close with three items that version left: the 
 [confirmkeys]: v0.121.0/keys-pass-under-an-open-confirm-so-one-enter-answers-it-and-commits-hybrid-nav.md
 [dndloss]: v0.121.0/a-window-stops-showing-drop-highlights-until-it-is-hidden-and-shown.md
 [urlbubble]: v0.121.0/the-editors-url-bubble-overlaps-its-label-and-outlives-its-tab.md
+[forgetflake]: v0.121.0/chan-close-can-answer-before-the-devserver-records-the-workspace-off.md
+[ghdelete]: v0.121.0/delete-stops-working-in-a-ghostty-terminal-while-typing-still-works.md
+[seethru]: v0.121.0/terminal-bodies-turn-see-through-after-an-app-switch.md
 
 ## Completed
 
