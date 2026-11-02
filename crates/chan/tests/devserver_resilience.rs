@@ -2162,7 +2162,7 @@ async fn workspace_forget_of_an_off_devserver_row_clears_the_overlay_and_restart
     assert!(
         off.iter()
             .any(|row| row["path"] == root.to_string_lossy().as_ref() && row["on"] == false),
-        "{off:?}"
+        "{off:?}\n{close:?}"
     );
     let close_again = sandbox.command().arg("close").arg(&root).output().unwrap();
     assert!(close_again.status.success(), "{close_again:?}");
@@ -2217,6 +2217,48 @@ async fn workspace_forget_of_an_off_devserver_row_clears_the_overlay_and_restart
         String::from_utf8_lossy(&list_after.stdout).contains("no workspaces registered"),
         "{list_after:?}"
     );
+}
+
+/// A close that cannot reach the devserver holding the workspace does not
+/// report it closed: the devserver still serves it and its overlay row stays
+/// on, so the close fails and names the holder. A close that reaches the
+/// devserver then records the off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_that_cannot_reach_the_holding_devserver_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let client = http();
+    let token = devserver_token(&server);
+    let root = std::fs::canonicalize(sandbox.workspace("unreached")).unwrap();
+    let _prefix = mount_workspace(&client, addr, &token, &root).await;
+    let on_row = |rows: &[serde_json::Value], on: bool| {
+        rows.iter()
+            .any(|row| row["path"] == root.to_string_lossy().as_ref() && row["on"] == on)
+    };
+
+    // A runtime directory of its own hides the devserver's control sockets.
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(elsewhere.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let unreached = sandbox
+        .command_in(sandbox.chan_home.path(), elsewhere.path())
+        .arg("close")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&unreached.stderr);
+    assert!(!unreached.status.success(), "{unreached:?}");
+    assert!(
+        stderr.contains(&format!("pid {}", server.pid())),
+        "{unreached:?}"
+    );
+    let rows = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(on_row(&rows, true), "{rows:?}");
+
+    let close = sandbox.command().arg("close").arg(&root).output().unwrap();
+    assert!(close.status.success(), "{close:?}");
+    let rows = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(on_row(&rows, false), "{rows:?}\n{close:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

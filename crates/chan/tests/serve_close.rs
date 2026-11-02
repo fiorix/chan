@@ -471,6 +471,157 @@ fn holder_answering_a_removal_at(
     })
 }
 
+/// How a stand-in holder answers a close.
+enum HolderAnswer {
+    /// Let go of the workspace, then answer that it closed.
+    Closed,
+    /// Answer an error and keep holding the workspace's writer lock.
+    ErrorKeepingTheLock,
+}
+
+/// Stand in for a process that holds `ws`: take its writer lock now, bind a
+/// control socket named for this pid only after `bind_after`, and answer one
+/// request as `answer` says. The thread hands back the request it was sent
+/// (`None` when none arrived in time) and the lock when it kept it, so the
+/// lock stays held until the test drops what it joined.
+fn holder_binding_after(
+    sandbox: &Sandbox,
+    ws: &Path,
+    bind_after: Duration,
+    answer: HolderAnswer,
+) -> std::thread::JoinHandle<(
+    Option<chan_shell::ControlRequest>,
+    Option<chan_workspace::lock::WorkspaceLock>,
+)> {
+    use std::io::Write;
+
+    let lock_dir = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .expect("open the sandbox registry")
+        .workspace_paths_for(ws)
+        .expect("the workspace is registered")
+        .lock;
+    let lock = chan_workspace::lock::WorkspaceLock::acquire(&lock_dir, ws)
+        .expect("hold the workspace's writer lock");
+    let socket = sandbox
+        .sockdir
+        .path()
+        .join(format!("chan-control-{}-holder.sock", std::process::id()));
+    std::thread::spawn(move || {
+        std::thread::sleep(bind_after);
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("bind the holder socket");
+        listener
+            .set_nonblocking(true)
+            .expect("poll the holder socket");
+        let mut accepted = None;
+        poll(EXIT_BUDGET, || {
+            accepted = listener.accept().ok();
+            accepted.is_some()
+        });
+        let Some((mut stream, _)) = accepted else {
+            return (None, Some(lock));
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(EXIT_BUDGET)).unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: chan_shell::ControlRequest = serde_json::from_str(&line).unwrap();
+        let (reply, kept) = match answer {
+            HolderAnswer::Closed => {
+                drop(lock);
+                (
+                    chan_shell::ControlResponse::Ok {
+                        message: "unmounted".into(),
+                    },
+                    None,
+                )
+            }
+            HolderAnswer::ErrorKeepingTheLock => (
+                chan_shell::ControlResponse::Error {
+                    message: "unmounting: the holder failed".into(),
+                },
+                Some(lock),
+            ),
+        };
+        let mut reply = serde_json::to_vec(&reply).unwrap();
+        reply.push(b'\n');
+        stream.write_all(&reply).unwrap();
+        (Some(request), kept)
+    })
+}
+
+/// Register `ws` in the sandbox library.
+fn register(sandbox: &Sandbox, ws: &Path) {
+    let add = sandbox
+        .command()
+        .args(["workspace", "add"])
+        .arg(ws)
+        .output()
+        .expect("run chan workspace add");
+    assert!(add.status.success(), "workspace add failed: {add:?}");
+}
+
+/// A holder whose control socket is not bound yet when the close looks for
+/// it is still asked to close, rather than the workspace read as not served.
+#[test]
+fn close_reaches_a_holder_whose_control_socket_binds_late() {
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    register(&sandbox, &ws);
+    let holder = holder_binding_after(
+        &sandbox,
+        &ws,
+        Duration::from_millis(500),
+        HolderAnswer::Closed,
+    );
+    let out = sandbox.command().arg("close").arg(&ws).output().unwrap();
+    let (request, _) = holder.join().expect("the holder thread");
+    assert!(
+        matches!(
+            &request,
+            Some(chan_shell::ControlRequest::Close { remove: false, .. })
+        ),
+        "the holder was not asked to close: {request:?}\n{out:?}"
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("closed:"),
+        "{out:?}"
+    );
+}
+
+/// A holder that answers a close with an error and keeps the workspace's
+/// writer lock has not closed it: the close fails with the holder's answer.
+#[test]
+fn close_answered_an_error_by_a_holder_that_keeps_the_lock_fails() {
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    register(&sandbox, &ws);
+    let holder = holder_binding_after(
+        &sandbox,
+        &ws,
+        Duration::ZERO,
+        HolderAnswer::ErrorKeepingTheLock,
+    );
+    let out = sandbox.command().arg("close").arg(&ws).output().unwrap();
+    let (request, kept) = holder.join().expect("the holder thread");
+    assert!(
+        matches!(&request, Some(chan_shell::ControlRequest::Close { .. })),
+        "{request:?}"
+    );
+    assert!(kept.is_some(), "the holder let go of the lock");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(stderr.contains("the holder failed"), "{out:?}");
+    assert!(
+        stderr.contains(&format!("pid {}", std::process::id())),
+        "{out:?}"
+    );
+    drop(kept);
+}
+
 /// Register two distinct rows, then point the first row's stored root at
 /// the second workspace's folder without changing either row.
 fn relinked_rows(sandbox: &Sandbox) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
