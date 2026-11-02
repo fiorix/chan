@@ -23,11 +23,11 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.122.0
 
-Opened 2026-11-02 at the v0.121.0 close with the see-through terminal bodies row that version carried ([seethru]), which waits for a reading on macOS.
+Opened 2026-11-02 at the v0.121.0 close with the see-through terminal bodies row that version carried ([seethru]), withdrawn by the owner the same day; it closes to `done/` at this version's GA.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [terminal bodies turn see-through][seethru] | raised | reading |
+| [terminal bodies turn see-through][seethru] | withdrawn | GA |
 
 [seethru]: v0.122.0/terminal-bodies-turn-see-through-after-an-app-switch.md
 
