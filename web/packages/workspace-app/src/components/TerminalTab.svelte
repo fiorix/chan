@@ -199,6 +199,8 @@
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
+  import { installGhosttySelection } from "../terminal/ghosttySelection";
+  import { ghosttyScrollbackText } from "../terminal/ghosttyVt";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
@@ -1343,6 +1345,11 @@
       if (renderer && !installGhosttyOverlayScrollbar(renderer)) {
         console.warn(
           "[chan] ghostty-web scrollbar hooks unavailable; its overlay erases the last columns it covers.",
+        );
+      }
+      if (!installGhosttySelection(ghosttyTerm)) {
+        console.warn(
+          "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history and copies read a cell at a time.",
         );
       }
       ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
@@ -2584,17 +2591,12 @@
 
   /// Scrollback text for the copy actions. The xterm backend serializes
   /// through the SerializeAddon (ANSI styling preserved). The ghostty
-  /// backend has no serialize addon, so walk its WASM buffer and join
-  /// the translated lines -- plain text, styling lost.
+  /// backend has no serialize addon; its core formats the history and the
+  /// rows as plain text in one call (`ghosttyScrollbackText`), styling lost.
   function scrollbackText(): string {
     if (backend === "ghostty") {
-      const buf = (term as GhosttyTerminal | null)?.buffer.active;
-      if (!buf) return "";
-      const lines: string[] = [];
-      for (let y = 0; y < buf.length; y++) {
-        lines.push(buf.getLine(y)?.translateToString(true) ?? "");
-      }
-      return lines.join("\n").trimEnd();
+      const ghosttyTerm = term as GhosttyTerminal | null;
+      return ghosttyTerm ? ghosttyScrollbackText(ghosttyTerm) : "";
     }
     return serialize?.serialize({ scrollback: scrollbackLines }) ?? "";
   }

@@ -63,6 +63,7 @@ export const ABI = {
     BG_COLOR_RGB: 3,
   },
   GhosttyCellWide: { NARROW: 0, WIDE: 1, SPACER_TAIL: 2, SPACER_HEAD: 3 },
+  GhosttyFormatterFormat: { PLAIN: 0 },
 } as const;
 
 /// Struct sizes and field offsets of the pinned build, by upstream C type.
@@ -101,6 +102,13 @@ export const LAYOUT = {
     size: 6,
     fields: { device_type: 0, firmware_version: 2, rom_cartridge: 4 },
   },
+  GhosttyFormatterTerminalOptions: {
+    size: 40,
+    fields: { size: 0, emit: 4, unwrap: 8, trim: 9, extra: 12, selection: 36 },
+  },
+  GhosttyFormatterTerminalExtra: { size: 24, fields: { size: 0, screen: 12 } },
+  GhosttyFormatterScreenExtra: { size: 12, fields: { size: 0 } },
+  GhosttySelection: { size: 32, fields: { size: 0, start: 4, end: 16, rectangle: 28 } },
 } as const;
 
 /// Bit ranges `[lsb, width]` of the packed 64-bit `GhosttyCell`.
@@ -214,6 +222,10 @@ const FUNCTIONS = [
   "ghostty_render_state_row_cells_get",
   "ghostty_key_encoder_new",
   "ghostty_key_encoder_free",
+  "ghostty_formatter_terminal_new",
+  "ghostty_formatter_format_alloc",
+  "ghostty_formatter_free",
+  "ghostty_free",
   "ghostty_key_encoder_setopt",
   "ghostty_key_encoder_encode",
   "ghostty_key_event_new",
@@ -740,6 +752,99 @@ export class VtTerminal {
   // Scrollback and grid lookups
   // ------------------------------------------------------------------
 
+  /// The text of the active screen in one core call, rows on separate
+  /// lines: on the primary screen its history and then its rows, on the
+  /// alternate screen its rows alone. It is the text the rows show: a blank
+  /// cell is a space, a wide character appears once, a cluster whole; each
+  /// row's trailing spaces and the trailing blank rows go (other whitespace
+  /// a program printed stays), and a soft wrap stays a line break. A
+  /// row-by-row read of the history costs a few wasm calls a cell; this is
+  /// one formatter call for all of it. The text is built in the instance's
+  /// memory, which keeps its high-water mark, so a long history's first copy
+  /// grows the terminal's memory by about the text's size. With `range`, only
+  /// those rows and columns; a range past the last row stops there. `null`
+  /// when the core cannot format it.
+  plainText(range?: TextRange): string | null {
+    const fn = this.wasm.fn;
+    const O = LAYOUT.GhosttyFormatterTerminalOptions;
+    const E = LAYOUT.GhosttyFormatterTerminalExtra;
+    const X = LAYOUT.GhosttyFormatterScreenExtra;
+    const s = this.scratch;
+    let opts = 0;
+    let selection = 0;
+    let formatter = 0;
+    try {
+      if (range) {
+        const last = this.getScrollbackLength() + this._rows - 1;
+        if (Math.min(range.startRow, range.endRow) > last) return "";
+        selection = this.selection(range, last);
+        if (!selection) return null;
+      }
+      opts = this.wasm.alloc(O.size);
+      // Zeroed: no extra state is emitted, and a null selection formats the
+      // whole screen.
+      this.wasm.bytes().fill(0, opts, opts + O.size);
+      const view = this.wasm.view();
+      view.setUint32(opts + O.fields.size, O.size, true);
+      view.setInt32(opts + O.fields.emit, ABI.GhosttyFormatterFormat.PLAIN, true);
+      view.setUint8(opts + O.fields.unwrap, 0);
+      view.setUint8(opts + O.fields.trim, 1);
+      view.setUint32(opts + O.fields.extra + E.fields.size, E.size, true);
+      view.setUint32(opts + O.fields.extra + E.fields.screen + X.fields.size, X.size, true);
+      view.setUint32(opts + O.fields.selection, selection, true);
+      formatter = this.wasm.newHandle(
+        (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.handle, opts),
+        "formatter",
+      );
+      const result = fn.ghostty_formatter_format_alloc(formatter, 0, s + SCRATCH.slot, s + SCRATCH.slot2);
+      if (result !== ABI.GhosttyResult.SUCCESS) return null;
+      const ptr = this.wasm.view().getUint32(s + SCRATCH.slot, true);
+      const len = this.wasm.view().getUint32(s + SCRATCH.slot2, true);
+      // Empty output is a success with no buffer.
+      if (!ptr) return "";
+      try {
+        return new TextDecoder().decode(this.wasm.bytes().subarray(ptr, ptr + len));
+      } finally {
+        fn.ghostty_free(0, ptr, len);
+      }
+    } catch {
+      return null;
+    } finally {
+      if (formatter) fn.ghostty_formatter_free(formatter);
+      this.wasm.free(opts, O.size);
+      this.wasm.free(selection, LAYOUT.GhosttySelection.size);
+    }
+  }
+
+  /// A `GhosttySelection` over `range`, its rows clamped to `last`, in a
+  /// block the caller frees; 0 when a corner is outside the screen.
+  private selection(range: TextRange, last: number): number {
+    const S = LAYOUT.GhosttySelection;
+    const R = LAYOUT.GhosttyGridRef;
+    const history = this.getScrollbackLength();
+    const col = (x: number) => Math.max(0, Math.min(x, this._cols - 1));
+    const corner = (x: number, row: number, at: number): boolean => {
+      const y = Math.max(0, Math.min(row, last));
+      const found =
+        y < history
+          ? this.gridRef(ABI.GhosttyPointTag.HISTORY, col(x), y)
+          : this.gridRef(ABI.GhosttyPointTag.ACTIVE, col(x), y - history);
+      if (found) {
+        const from = this.scratch + SCRATCH.gridRef;
+        this.wasm.bytes().copyWithin(at, from, from + R.size);
+      }
+      return found;
+    };
+    const sel = this.wasm.alloc(S.size);
+    this.wasm.bytes().fill(0, sel, sel + S.size);
+    this.wasm.view().setUint32(sel + S.fields.size, S.size, true);
+    if (corner(range.startCol, range.startRow, sel + S.fields.start) && corner(range.endCol, range.endRow, sel + S.fields.end)) {
+      return sel;
+    }
+    this.wasm.free(sel, S.size);
+    return 0;
+  }
+
   getScrollbackLength(): number {
     const ptr = this.scratch + SCRATCH.slot;
     this.wasm.fn.ghostty_terminal_get(this.handle, ABI.GhosttyTerminalData.SCROLLBACK_ROWS, ptr);
@@ -1225,4 +1330,35 @@ export class VtKeyEncoder {
       this.encoder = 0;
     }
   }
+}
+
+/// A span of a terminal's rows and columns between two corners, both
+/// included, either one first. Rows count the history first, 0 its oldest
+/// row, and then the screen's rows, the way ghostty-web's selection numbers
+/// them.
+export type TextRange = { startCol: number; startRow: number; endCol: number; endRow: number };
+
+/// What Copy scrollback reads of a ghostty-web terminal.
+export type ScrollbackSource = {
+  readonly wasmTerm?: unknown;
+  readonly buffer: {
+    readonly active: {
+      readonly length: number;
+      getLine(y: number): { translateToString(trimRight?: boolean): string } | undefined;
+    };
+  };
+};
+
+/// Copy scrollback's text of a ghostty terminal. The binding's terminal
+/// formats its history and rows in one core call (`VtTerminal.plainText`),
+/// where reading them through ghostty-web's buffer costs a few wasm calls a
+/// cell and blocks the page for seconds over a long history. Any other
+/// terminal, or a format that fails, is read row by row through the buffer.
+export function ghosttyScrollbackText(term: ScrollbackSource): string {
+  const text = term.wasmTerm instanceof VtTerminal ? term.wasmTerm.plainText() : null;
+  if (text !== null) return text;
+  const buf = term.buffer.active;
+  const lines: string[] = [];
+  for (let y = 0; y < buf.length; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+  return lines.join("\n").trimEnd();
 }
