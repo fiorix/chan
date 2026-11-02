@@ -17,10 +17,10 @@ The CLI ships as one binary with both SPA bundles (the workspace app and the lau
 1. [principles.md](principles.md) - the load-bearing project invariants.
 2. [writing-rules.md](writing-rules.md) - documentation and comment style.
 3. [patterns.md](patterns.md) - contributor patterns for code changes.
-4. [playbook.md](playbook.md) - cross-phase operational lessons.
+4. [playbook.md](playbook.md) - the operational rules for working alongside other agents, with their reasons.
 5. [skills/](skills/) - executable workflows (test server, release, gate, archive-round) plus vendored general skill profiles.
 
-Subsystem guides: [desktop.md](desktop.md) (chan-desktop), [gateway.md](gateway.md) (the cloud gateway workspace), [orchestration/](orchestration/README.md) (the cs control surface and Team Work). The development process itself (rounds, roles, the roadmap and release trees) is [`../team/README.md`](../team/README.md).
+Subsystem guides: [desktop.md](desktop.md) (chan-desktop), [gateway.md](gateway.md) (the self-hosted gateway workspace), [orchestration/](orchestration/README.md) (the cs control surface and Team Work). The development process itself (rounds, roles, the roadmap and release trees) is [`../team/README.md`](../team/README.md).
 
 ## Layout
 
@@ -35,9 +35,9 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-The Rust toolchain is pinned in `rust-toolchain.toml` (1.95.0). `cargo` auto-installs through rustup on first use, so contributor and CI clippy lint sets stay locked together. Bumping Rust = edit `rust-toolchain.toml` and fix any new clippy findings in the same commit.
+The Rust toolchain is pinned in `rust-toolchain.toml`. `cargo` auto-installs it through rustup on first use, so contributor and CI clippy lint sets stay locked together. To bump Rust, edit `rust-toolchain.toml` and fix any new clippy findings in the same commit.
 
-The pre-push hook (`./scripts/install-hooks` to install) runs `make pre-push`, the shared gate that Linux CI extends with symlinked-temp suites and a Windows-target test check: static shell and workflow lints, the build-matrix and sdme contracts, the browser suite's Node tests, the Nix cargo hash check, formatting, clippy, rustdoc with warnings denied, tests, the no-default-features build, the separate gateway workspace, the web checks, and a release devserver smoke plus the native desktop package. The sdme-contract, browser-suite Node test and gateway steps are the LINUX arm's: the Nix driver calls GNU coreutils, the suite's Node tests use a shell-script npm stand-in and the gateway builds inside an sdme container, so `pre-push` skips them on macOS and Windows (where those targets refuse outright and name `make ci-macos` / `make ci-windows`), which keeps the git hook usable on those hosts instead of guaranteed-red. The authoritative step list and the isolated/own-gate model for multi-agent rounds live in [skills/gate/SKILL.md](skills/gate/SKILL.md).
+The pre-push hook (`./scripts/install-hooks` to install) runs `make pre-push`, the gate CI runs: static lints for the shell scripts and workflows, the build-matrix and Nix hash contracts, formatting, clippy and rustdoc with warnings denied, the tests, the no-default-features build, a Postgres-free build of the gateway workspace, the web checks, a release devserver boot smoke and the native desktop package. Linux CI extends it with symlinked-temp suites and a Windows-target test check; macOS and Windows hosts skip the Linux-only steps so the hook stays usable there. The step list, the per-host differences and the isolated own-gate model for multi-agent rounds are in [skills/gate/SKILL.md](skills/gate/SKILL.md).
 
 ## Documentation
 
