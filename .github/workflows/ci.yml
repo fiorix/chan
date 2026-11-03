@@ -227,13 +227,16 @@ jobs:
       - run: make ci-distro-sources
         working-directory: chan
 
+  # chan-desktop-bin builds chan-desktop again on an Arch Linux Archive
+  # snapshot, packs the release asset from it, and smokes the prebuilt recipe
+  # on the current image; see packaging/distros/arch/build-in-ci.sh.
   aur:
     name: AUR build + smoke (${{ matrix.pkgbase }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pkgbase: [chan, chan-desktop]
+        pkgbase: [chan, chan-desktop, chan-desktop-bin]
     steps:
       - uses: actions/checkout@v6
         with:

@@ -1,15 +1,17 @@
 # chan on Arch Linux (AUR)
 
-Two source-built packages are published to the Arch User Repository:
+Three packages are published to the Arch User Repository:
 
-- [`chan`](https://aur.archlinux.org/packages/chan) installs the standalone CLI and devserver.
-- [`chan-desktop`](https://aur.archlinux.org/packages/chan-desktop) installs the native desktop and provides the same `chan` and `cs` command surface.
+- [`chan`](https://aur.archlinux.org/packages/chan) builds and installs the standalone CLI and devserver.
+- [`chan-desktop`](https://aur.archlinux.org/packages/chan-desktop) builds and installs the native desktop and provides the same `chan` and `cs` command surface.
+- [`chan-desktop-bin`](https://aur.archlinux.org/packages/chan-desktop-bin) installs the same desktop prebuilt, from an asset on the GitHub release, so nothing compiles on the user's machine.
 
-They conflict because `chan-desktop` contains the full CLI in-process. Install one:
+They conflict because each desktop package contains the full CLI in-process. Install one:
 
 ```bash
 paru -S chan
 paru -S chan-desktop
+paru -S chan-desktop-bin
 ```
 
 Without an AUR helper:
@@ -20,14 +22,33 @@ cd chan
 makepkg -si
 ```
 
-The recipes declare x86_64 and aarch64. The x86_64 path gates AUR publication. CI does not validate aarch64: every attempt failed on a CI-environment fault (the Arch Linux ARM download host's TLS certificate, then pacman's Landlock sandbox inside the container), never on a package defect, so aarch64 is neither built nor gated before publish. The aarch64 PKGBUILD still ships in the AUR; aarch64 users build it natively with `makepkg -si`. CachyOS can consume the AUR recipes directly, but inclusion in CachyOS's precompiled package repositories is a separate request to that project.
+The source recipes declare x86_64 and aarch64; `chan-desktop-bin` declares x86_64 only, the one architecture the Arch Linux Archive its asset is built from serves. The x86_64 path gates AUR publication. CI does not validate aarch64: every attempt failed on a CI-environment fault (the Arch Linux ARM download host's TLS certificate, then pacman's Landlock sandbox inside the container), never on a package defect, so aarch64 is neither built nor gated before publish. The aarch64 PKGBUILD still ships in the AUR; aarch64 users build it natively with `makepkg -si`. CachyOS can consume the AUR recipes directly, but inclusion in CachyOS's precompiled package repositories is a separate request to that project.
+
+## chan-desktop-bin
+
+The release asset `chan-desktop-bin-X.Y.Z-N-x86_64.tar.zst` (N is the pkgrel) is the `usr/` tree of a `chan-desktop` package built from the GA tag by the `chan-desktop` recipe itself, so it carries the same `CHAN_PACKAGED=aur` stamp, files, and runtime dependencies; `make build-matrix-check` holds the two `depends` lists equal. The `chan-desktop-bin` recipe copies that tree into place.
+
+The asset is built on an [Arch Linux Archive](https://wiki.archlinux.org/title/Arch_Linux_Archive) snapshot dated six weeks before the tagged commit. A binary linked against older glibc and WebKitGTK keeps running on newer ones, not the reverse, so the snapshot sets the oldest system the package runs on. Six weeks keeps it at or behind derivatives that hold their mirror back: Omarchy's stable channel trails Arch by a month. The gap is measurable: on 2026-11-03 the six-week snapshot (2026/09/22) carried webkit2gtk-4.1 2.52.6 where Arch had 2.54.2. The commit date, not the clock, picks the day, so rebuilding one tag links against the same snapshot. The snapshot's Arch `rust` must still meet the workspace `rust-version`; a toolchain bump that outruns it fails the asset build, not the source packages.
+
+`build-in-ci.sh` with `PKGBASE=chan-desktop-bin` proves both ends in two containers on the same image. The first downgrades it to the snapshot (`ARCH_SNAPSHOT` overrides the date), builds, installs, and smokes `chan-desktop` there, then packs the asset with `desktop-bin-asset.sh`. The second renders `chan-desktop-bin` against that asset and builds, namcaps, installs, and smokes it on the current image. Locally, with Docker:
+
+```bash
+git archive --format=tar.gz --prefix=chan-X.Y.Z/ HEAD > target/aur-ci-source/chan-X.Y.Z.tar.gz
+RELEASE_TAG=vX.Y.Z PKGBASE=chan-desktop-bin AUR_LOCAL_SOURCE=target/aur-ci-source/chan-X.Y.Z.tar.gz \
+    packaging/distros/arch/build-in-ci.sh docker.io/archlinux/archlinux:base-devel
+```
+
+`make aur-check` covers the two source packages only.
+
+The asset name carries the pkgrel, so a published asset is never replaced: a retry of the same version and pkgrel downloads and reuses it, and a repaired recipe is a new pkgrel and a new asset. The binary links WebKitGTK, libsoup, and GTK by API-versioned sonames (`webkit2gtk-4.1`, `libsoup-3.0`, `gtk-3`), which change with a new package name rather than in place; a soname change in any of them would need a release whose snapshot is past it.
 
 ## Maintainer flow
 
 The AUR is a collection of git repositories containing build recipes; it does not build or validate packages. Pushing `PKGBUILD` and `.SRCINFO` publishes immediately. The checked-in files here are versionless templates so the repository cannot strand an old release number.
 
-- `aur/{chan,chan-desktop}/PKGBUILD.in` are the source package templates.
-- `make-aur-package.sh` resolves a GA tag or a local test archive, renders `PKGBUILD`, generates `.SRCINFO`, and validates the metadata. It never pushes.
+- `aur/{chan,chan-desktop}/PKGBUILD.in` are the source package templates, and `aur/chan-desktop-bin/PKGBUILD.in` the prebuilt one.
+- `make-aur-package.sh` resolves a GA tag, a local test archive, or for `chan-desktop-bin` the release asset or a local copy of it, renders `PKGBUILD`, generates `.SRCINFO`, and validates the metadata. It never pushes.
+- `desktop-bin-asset.sh` names the `chan-desktop-bin` asset and packs it from a built `chan-desktop` package.
 - `publish-aur.sh` holds the workflow's dry-run report, AUR push, and RPC index check, shared by every pkgbase.
 - `build-in-container.sh` is the shared clean-Arch build, install and smoke path used by CI and sdme.
 - `build-with-sdme.sh` archives a committed local revision and runs both packages in a disposable sdme container.
@@ -48,7 +69,7 @@ make aur-check SDME='sudo sdme' AUR_ROOTFS=archlinux
 
 The package architecture comes from the host and rootfs; the build never uses QEMU. An aarch64 host runs the same local target against an Arch Linux ARM import under the same name, but CI validates only x86_64.
 
-The automatic path lives in `.github/workflows/publish-downstream.yml`. After a successful GA Release run it builds, installs, and smokes `chan` and `chan-desktop` on clean x86_64 containers, probes the AUR credential, and pushes both AUR repositories after the credential and x86_64 jobs pass. It needs `AUR_SSH_PRIVATE_KEY`, the private key registered with the maintainer's AUR account. Without the secret, validation still runs and publication is skipped; a `publish=false` dispatch on this repository fails instead, because proving the credential is that run's only product.
+The automatic path lives in `.github/workflows/publish-downstream.yml`. After a successful GA Release run it builds, installs, and smokes `chan` and `chan-desktop` on clean x86_64 containers, probes the AUR credential, and pushes both AUR repositories after the credential and x86_64 jobs pass. In a separate chain, `aur-bin-validate` builds the `chan-desktop-bin` asset and recipe as above, or reuses an asset the release already carries, and `aur-bin-publish` uploads the asset to the GitHub release, checks that the release serves the bytes the recipe pins, and only then pushes the recipe. It is the one AUR job with `contents: write`. It needs `AUR_SSH_PRIVATE_KEY`, the private key registered with the maintainer's AUR account. Without the secret, validation still runs and publication is skipped; a `publish=false` dispatch on this repository fails instead, because proving the credential is that run's only product.
 
 Manual dispatch takes the existing GA tag plus:
 
@@ -62,7 +83,7 @@ A prerelease version skips every job in the workflow: the AUR jobs, `copr`, and 
 
 `aur-auth` is the only pre-release proof that the private key in the secret has its public half registered on the AUR account: it runs `ssh -T aur@aur.archlinux.org`, which a registered key answers with a greeting and a refused interactive shell. Without that probe a wrong key surfaces as a failed clone at publication time, after the release is already out.
 
-`aur-validate` is a hard `needs` of `aur-publish`, so anything that fails inside its x86_64 matrix (the `makepkg` build, package-scoped `cargo test`, the namcap error gate, the packaged-update check, the systemd unit check, or the `chan-desktop` desktop-entry and icon checks) blocks the AUR push. The matrix covers both packages, so a `chan-desktop` failure also holds back `chan`. The blast radius stops there: COPR, the PPA, and the GitHub release are separate jobs and a separate workflow, so none of them is affected; the fix is a recipe change plus a `targets=aur` dispatch, with `aur_pkgrel` raised if that version already published.
+`aur-validate` is a hard `needs` of `aur-publish`, so anything that fails inside its x86_64 matrix (the `makepkg` build, package-scoped `cargo test`, the namcap error gate, the packaged-update check, the systemd unit check, or the `chan-desktop` desktop-entry and icon checks) blocks the AUR push. The matrix covers both packages, so a `chan-desktop` failure also holds back `chan`. `chan-desktop-bin` runs in its own chain, so a failure there holds back neither source package, and theirs do not hold it back. The blast radius stops there: COPR, the PPA, and the GitHub release are separate jobs and a separate workflow, so none of them is affected; the fix is a recipe change plus a `targets=aur` dispatch, with `aur_pkgrel` raised if that version already published.
 
 Only `PKGBUILD` and `.SRCINFO` belong in the AUR repositories. The generated source archive and `.pkg.tar.zst` files under `target/aur-*` are local artifacts.
 
@@ -75,4 +96,5 @@ Only `PKGBUILD` and `.SRCINFO` belong in the AUR repositories. The generated sou
 - `namcap` gates the container build: its error class covers a library the binary needs and the recipe does not declare, which would otherwise ship silently to every AUR user. Warnings stay advisory and are printed in full. Adding a waiver is one commented line in `build-in-container.sh`'s `namcap_waivers` array. The array is empty: every finding measured for either package is one of the dependency-declaration warnings below, all advisory.
 - For `chan`, namcap reports `gcc-libs` and `systemd` as possibly unneeded, and `libgcc` as needed and implicitly satisfied. For `chan-desktop` it adds `libayatana-appindicator`, `librsvg`, and `xdg-utils` as possibly unneeded, and `dbus`, `gdk-pixbuf2`, `cairo`, and `glib2` as implicitly satisfied. All of them stay as they are. namcap derives dependencies from linked sonames alone: `systemd` is a runtime dependency for the packaged user unit and `chan devserver start --service=systemd`, `xdg-utils` carries the `chan://` scheme handler, and `libayatana-appindicator` carries the tray, none of which an ELF header shows; `gcc-libs` is the package that provides the `libgcc_s.so.1` the same output says the binary needs (there is no `libgcc` package to declare). The remaining warning on both packages, an unused `ld-linux-x86-64.so.2`, is the dynamic loader itself.
 - `chan-desktop` links to the host WebKitGTK/Mesa stack. This is the correct Arch/CachyOS path and avoids the rolling-distro incompatibility of the Ubuntu-built AppImage.
+- `chan-desktop-bin` runs the `chan-desktop` smoke against the installed package: the binary must carry the AUR-helper refusal hint, and the desktop entry and icons must be in place. It has no build step to stamp, so the rendered-recipe half of that check does not apply.
 - The AUR Ed25519 host key is pinned to the fingerprint published by the AUR. Do not replace it with `ssh-keyscan`.

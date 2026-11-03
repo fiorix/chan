@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Render one AUR package without publishing it.
 #
-# Usage: make-aur-package.sh <chan|chan-desktop> [version] [pkgrel] [outdir]
+# Usage: make-aur-package.sh <chan|chan-desktop|chan-desktop-bin> [version] [pkgrel] [outdir]
 #
 # AUR_LOCAL_SOURCE may name a local chan-<version>.tar.gz. This is the sdme
 # pre-release path; production leaves it unset and resolves the tagged GitHub
 # archive. makepkg is required because this script always emits .SRCINFO.
+#
+# chan-desktop-bin sources the release asset desktop-bin-asset.sh names.
+# AUR_LOCAL_ASSET may name a local copy of it; the recipe still points at the
+# release URL, and the copy is placed beside it, where makepkg uses it instead
+# of downloading. Without it the published asset is hashed.
 
 set -euo pipefail
 
-pkgbase="${1:?usage: make-aur-package.sh <chan|chan-desktop> [version] [pkgrel] [outdir]}"
+pkgbase="${1:?usage: make-aur-package.sh <chan|chan-desktop|chan-desktop-bin> [version] [pkgrel] [outdir]}"
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 version="${2:-}"
@@ -17,8 +22,8 @@ pkgrel="${3:-1}"
 outdir="${4:-$repo/target/aur-out}"
 
 case "$pkgbase" in
-    chan|chan-desktop) ;;
-    *) echo "error: unknown pkgbase '$pkgbase' (expected chan or chan-desktop)" >&2; exit 1 ;;
+    chan|chan-desktop|chan-desktop-bin) ;;
+    *) echo "error: unknown pkgbase '$pkgbase' (expected chan, chan-desktop, or chan-desktop-bin)" >&2; exit 1 ;;
 esac
 
 if [ -z "$version" ]; then
@@ -43,7 +48,20 @@ dest="$outdir/$pkgbase"
 rm -rf "$dest"
 mkdir -p "$dest"
 
-if [ -n "${AUR_LOCAL_SOURCE:-}" ]; then
+if [ "$pkgbase" = chan-desktop-bin ]; then
+    asset="$("$here/desktop-bin-asset.sh" name "$version" "$pkgrel")"
+    source_value="https://github.com/fiorix/chan/releases/download/v$version/$asset"
+    if [ -n "${AUR_LOCAL_ASSET:-}" ]; then
+        [ -f "$AUR_LOCAL_ASSET" ] || {
+            echo "error: AUR_LOCAL_ASSET does not exist: $AUR_LOCAL_ASSET" >&2
+            exit 1
+        }
+        cp "$AUR_LOCAL_ASSET" "$dest/$asset"
+        source_sha="$(sha256sum "$dest/$asset" | awk '{print $1}')"
+    else
+        source_sha="$(curl -fsSL --retry 3 "$source_value" | sha256sum | awk '{print $1}')"
+    fi
+elif [ -n "${AUR_LOCAL_SOURCE:-}" ]; then
     [ -f "$AUR_LOCAL_SOURCE" ] || {
         echo "error: AUR_LOCAL_SOURCE does not exist: $AUR_LOCAL_SOURCE" >&2
         exit 1
@@ -77,6 +95,15 @@ actual_rel="$(awk '/^[[:space:]]+pkgrel = / { print $3; exit }' "$dest/.SRCINFO"
 [ "$actual_base" = "$pkgbase" ] || { echo "error: .SRCINFO pkgbase '$actual_base' != '$pkgbase'" >&2; exit 1; }
 [ "$actual_version" = "$version" ] || { echo "error: .SRCINFO pkgver '$actual_version' != '$version'" >&2; exit 1; }
 [ "$actual_rel" = "$pkgrel" ] || { echo "error: .SRCINFO pkgrel '$actual_rel' != '$pkgrel'" >&2; exit 1; }
+if [ "$pkgbase" = chan-desktop-bin ]; then
+    # The template spells the asset URL with makepkg variables; hold the
+    # expansion to the name the CI wrapper packed and the workflow uploads.
+    actual_source="$(awk '/^[[:space:]]+source = / { print $3; exit }' "$dest/.SRCINFO")"
+    [ "$actual_source" = "$source_value" ] || {
+        echo "error: .SRCINFO source '$actual_source' != '$source_value'" >&2
+        exit 1
+    }
+fi
 
 echo ">> rendered $pkgbase $version-$pkgrel in $dest" >&2
 printf '%s\n' "$dest"

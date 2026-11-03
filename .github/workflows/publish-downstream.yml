@@ -553,9 +553,9 @@ jobs:
 
   # Gated in its own right rather than relying on its dependencies, so the
   # schedule does not depend on how Actions propagates a skip. The steps live
-  # in publish-aur.sh, checked out from the dispatching ref, like the Homebrew
-  # jobs, so a retry of a tag that predates the script still has it; nothing
-  # the AUR serves comes from this checkout.
+  # in publish-aur.sh, shared with aur-bin-publish and checked out from the
+  # dispatching ref, like the Homebrew jobs, so a retry of a tag that predates
+  # the script still has it; nothing the AUR serves comes from this checkout.
   aur-publish:
     if: >-
       ((github.event_name == 'workflow_dispatch' &&
@@ -590,6 +590,169 @@ jobs:
         env:
           CANONICAL: ${{ github.repository == 'fiorix/chan' }}
         run: packaging/distros/arch/publish-aur.sh report /tmp/generated
+
+      - name: Push to the AUR
+        id: aur-push
+        if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: packaging/distros/arch/publish-aur.sh push /tmp/generated
+
+      - name: Verify AUR metadata
+        if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
+        env:
+          PRE_PUSH_VERSION: ${{ steps.aur-push.outputs.pre-push-version }}
+        run: packaging/distros/arch/publish-aur.sh verify
+
+  # chan-desktop-bin installs the chan-desktop build from a release asset, for
+  # Arch systems that should not compile it. Its own chain keeps a failure
+  # here from holding back the source packages. build-in-ci.sh builds the
+  # asset on an Arch Linux Archive snapshot six weeks behind the tag, then
+  # builds and smokes the recipe from it on the current image. An asset this
+  # version and pkgrel already published is reused instead, so a retry never
+  # replaces bytes a pushed recipe pins.
+  aur-bin-validate:
+    if: >-
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'aur') &&
+        !contains(inputs.tag, '-')) ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'v') &&
+        !contains(github.event.workflow_run.head_branch, '-')))
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+      AUR_PKGREL: ${{ github.event_name == 'workflow_dispatch' && inputs.aur_pkgrel || '1' }}
+    outputs:
+      recipe: ${{ steps.recipe.outputs.present }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
+
+      - name: Find the recipe at the tag
+        id: recipe
+        run: |
+          if [ -f packaging/distros/arch/aur/chan-desktop-bin/PKGBUILD.in ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$RELEASE_TAG predates chan-desktop-bin; there is nothing to build or publish."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reuse a published asset
+        if: steps.recipe.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset="$(packaging/distros/arch/desktop-bin-asset.sh name "${RELEASE_TAG#v}" "$AUR_PKGREL")"
+          names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if grep -Fxq "$asset" <<<"$names"; then
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset" --dir target/aur-bin-published
+            echo "AUR_BIN_ASSET=$PWD/target/aur-bin-published/$asset" >> "$GITHUB_ENV"
+            echo "$RELEASE_TAG already carries $asset; the recipe is built from it."
+          else
+            echo "$RELEASE_TAG carries no $asset; the snapshot build makes it."
+          fi
+
+      - name: Build the asset, then build, install, and smoke the recipe
+        if: steps.recipe.outputs.present == 'true'
+        env:
+          PKGBASE: chan-desktop-bin
+        run: packaging/distros/arch/build-in-ci.sh docker.io/archlinux/archlinux:base-devel
+
+      - name: Retain publishable AUR metadata
+        if: steps.recipe.outputs.present == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: aur-metadata-chan-desktop-bin
+          path: |
+            target/aur-ci-out/chan-desktop-bin/PKGBUILD
+            target/aur-ci-out/chan-desktop-bin/.SRCINFO
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Retain the release asset
+        if: steps.recipe.outputs.present == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: aur-bin-asset
+          path: target/aur-ci-out/assets/
+          if-no-files-found: error
+
+  # The asset is uploaded before the recipe that points at it is pushed, and
+  # the bytes the release then serves are held to the recipe's checksum.
+  aur-bin-publish:
+    if: >-
+      ((github.event_name == 'workflow_dispatch' &&
+        (inputs.targets == 'all' || inputs.targets == 'aur') &&
+        !contains(inputs.tag, '-')) ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'v') &&
+        !contains(github.event.workflow_run.head_branch, '-'))) &&
+      needs.aur-bin-validate.outputs.recipe == 'true'
+    needs: [aur-auth, aur-bin-validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+      AUR_PKGREL: ${{ github.event_name == 'workflow_dispatch' && inputs.aur_pkgrel || '1' }}
+      PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+      PUSHABLE: ${{ needs.aur-auth.outputs.credential == 'ok' }}
+      PKGBASE: chan-desktop-bin
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: aur-metadata-chan-desktop-bin
+          path: /tmp/generated
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: aur-bin-asset
+          path: /tmp/asset
+
+      - name: Report the AUR dry run
+        if: env.PUBLISH != 'true' || env.PUSHABLE != 'true'
+        env:
+          CANONICAL: ${{ github.repository == 'fiorix/chan' }}
+        run: packaging/distros/arch/publish-aur.sh report /tmp/generated
+
+      - name: Publish the release asset
+        if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url="$(sed -n 's/^[[:space:]]*source = //p' /tmp/generated/.SRCINFO)"
+          pinned="$(sed -n 's/^[[:space:]]*sha256sums = //p' /tmp/generated/.SRCINFO)"
+          asset="$(basename "$url")"
+          if [ "$url" != "https://github.com/fiorix/chan/releases/download/$RELEASE_TAG/$asset" ]; then
+            echo "::error::the recipe sources $url, not an asset of $RELEASE_TAG"
+            exit 1
+          fi
+          if [ ! -f "/tmp/asset/$asset" ]; then
+            echo "::error::aur-bin-validate retained no $asset"
+            exit 1
+          fi
+          names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if grep -Fxq "$asset" <<<"$names"; then
+            echo "$RELEASE_TAG already carries $asset."
+          else
+            gh release upload "$RELEASE_TAG" "/tmp/asset/$asset" --repo "$GITHUB_REPOSITORY"
+          fi
+          served="$(curl -fsSL --retry 3 "$url" | sha256sum | awk '{print $1}')"
+          if [ "$served" != "$pinned" ]; then
+            echo "::error::$url serves sha256 $served but the recipe pins $pinned"
+            exit 1
+          fi
+          echo "$url serves the sha256 the recipe pins."
 
       - name: Push to the AUR
         id: aur-push

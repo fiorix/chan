@@ -1066,6 +1066,10 @@ AUR_RECIPES = (
     "packaging/distros/arch/aur/chan/PKGBUILD.in",
     "packaging/distros/arch/aur/chan-desktop/PKGBUILD.in",
 )
+# The prebuilt recipe builds nothing, so it is held to the recipe whose
+# package tree it installs instead of to the check() contract.
+AUR_BIN_RECIPE = "packaging/distros/arch/aur/chan-desktop-bin/PKGBUILD.in"
+AUR_BIN_SOURCE = "packaging/distros/arch/aur/chan-desktop/PKGBUILD.in"
 
 # cargo subcommands that resolve and fetch but compile nothing, so the
 # binary the recipe installs cannot come out of them. Every other
@@ -1737,6 +1741,77 @@ def check_node_major_contract() -> None:
             raise ContractError(f"{path}: no nodejs_{major} attribute")
 
 
+def recipe_array(recipe: str, name: str, path: str) -> list[str]:
+    """The words of a recipe's top-level `NAME=(...)` array."""
+    match = re.search(rf"^{name}=\(([^)]*)\)", recipe, re.MULTILINE)
+    if match is None:
+        raise ContractError(f"{path}: no `{name}=(...)` array")
+    return shlex.split(match.group(1), comments=True)
+
+
+def check_aur_bin_contract() -> None:
+    """chan-desktop-bin installs the chan-desktop build and stands in for it.
+
+    The prebuilt package ships the file tree the chan-desktop recipe built,
+    so it needs that recipe's runtime set exactly. namcap reads linked
+    sonames only, so a copy that dropped systemd or xdg-utils would still
+    pass its build. It must also provide and conflict with both packages
+    that own those paths, and declare only the architecture its release
+    asset is built for.
+    """
+    check_aur_bin_recipe(
+        AUR_BIN_RECIPE, read(AUR_BIN_RECIPE), AUR_BIN_SOURCE, read(AUR_BIN_SOURCE)
+    )
+
+
+def check_aur_bin_recipe(path: str, recipe: str, source_path: str, source: str) -> None:
+    """The chan-desktop-bin contract for one prebuilt and one source recipe."""
+    depends = recipe_array(recipe, "depends", path)
+    expected = recipe_array(source, "depends", source_path)
+    missing = sorted(set(expected) - set(depends))
+    extra = sorted(set(depends) - set(expected))
+    if missing or extra:
+        raise ContractError(
+            f"{path}: depends differs from {source_path}: "
+            f"missing {', '.join(missing) or 'none'}, extra {', '.join(extra) or 'none'}"
+        )
+    for name, needles in (
+        ("provides", ("chan=$pkgver", "chan-desktop=$pkgver")),
+        ("conflicts", ("chan", "chan-desktop")),
+    ):
+        words = recipe_array(recipe, name, path)
+        for needle in needles:
+            if needle not in words:
+                raise ContractError(f"{path}: {name} lacks {needle!r}")
+    arch = recipe_array(recipe, "arch", path)
+    if arch != ["x86_64"]:
+        raise ContractError(
+            f"{path}: arch must be ('x86_64'), the one architecture "
+            f"desktop-bin-asset.sh names, got {arch}"
+        )
+
+
+def check_aur_bin_recipe_files(path: str, source_path: str) -> int:
+    """Run the chan-desktop-bin contract alone over PATH and SOURCE_PATH.
+
+    The entry point of scripts/test-check-build-matrix.py, like
+    check_aur_recipe_files.
+    """
+    try:
+        texts = []
+        for name in (path, source_path):
+            try:
+                texts.append(Path(name).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as error:
+                raise ContractError(f"{name}: cannot read: {error}") from error
+        check_aur_bin_recipe(path, texts[0], source_path, texts[1])
+    except ContractError as error:
+        print(f"build-matrix contract: FAIL: {error}", file=sys.stderr)
+        return 1
+    print("build-matrix contract: PASS")
+    return 0
+
+
 def check_aur_recipe_files(paths: list[str]) -> int:
     """Run the AUR check() selection contract alone over PATHS.
 
@@ -1764,6 +1839,8 @@ def check_aur_recipe_files(paths: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if argv[1:2] == ["aur-recipe"]:
         return check_aur_recipe_files(argv[2:])
+    if argv[1:2] == ["aur-bin-recipe"] and len(argv) == 4:
+        return check_aur_bin_recipe_files(argv[2], argv[3])
     # Each contract runs even when an earlier one fails, so one broken
     # contract, or an interpreter too old for the gateway one, does not hide
     # the verdict of the rest.
@@ -1776,6 +1853,7 @@ def main(argv: list[str]) -> int:
         check_docker_contract,
         check_nix_contract,
         check_aur_check_selection_contract,
+        check_aur_bin_contract,
         check_node_major_contract,
     ):
         try:

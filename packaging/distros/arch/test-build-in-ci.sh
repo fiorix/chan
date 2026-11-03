@@ -11,6 +11,7 @@ repo="$work/repo"
 arch="$repo/packaging/distros/arch"
 mkdir -p "$arch" "$work/docker-bin" "$work/builder-bin" "$work/state"
 ln -s "$script_dir/build-in-ci.sh" "$arch/build-in-ci.sh"
+ln -s "$script_dir/desktop-bin-asset.sh" "$arch/desktop-bin-asset.sh"
 
 fail() {
     echo "FAIL $*" >&2
@@ -21,16 +22,36 @@ assert_contains() {
     grep -Fq -- "$1" "$2" || fail "$3: missing $1"
 }
 
+# Each call also lands in docker.<n>.args. A call that asks for the desktop
+# asset packs a stand-in into the /out bind unless STUB_NO_ASSET is set.
 cat > "$work/docker-bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "${STUB_STATE:?}/docker.args"
+n=1
+while [ -e "$STUB_STATE/docker.$n.args" ]; do n=$((n + 1)); done
+printf '%s\n' "$@" > "$STUB_STATE/docker.$n.args"
+out= pack=
+prev=
+for arg in "$@"; do
+    case "$prev:$arg" in
+        -v:*:/out) out="${arg%:/out}" ;;
+        -e:DESKTOP_BIN_ASSET_DIR=/out/assets) pack=1 ;;
+        -e:VERSION=*) version="${arg#VERSION=}" ;;
+        -e:PKGREL=*) pkgrel="${arg#PKGREL=}" ;;
+    esac
+    prev="$arg"
+done
+if [ -n "$pack" ] && [ -z "${STUB_NO_ASSET:-}" ]; then
+    mkdir -p "$out/assets"
+    : > "$out/assets/chan-desktop-bin-$version-$pkgrel-x86_64.tar.zst"
+fi
 STUB
 chmod +x "$work/docker-bin/docker"
 
 run_wrapper() {
     local name="$1"
     shift
-    rm -f "$work/state/docker.args"
+    rm -f "$work/state/docker."*args
     env -u CARGO_BUILD_JOBS -u AUR_CARGO_JOBS \
         RELEASE_TAG=v1.2.3 AUR_PKGREL=4 PKGBASE=chan \
         STUB_STATE="$work/state" PATH="$work/docker-bin:$PATH" \
@@ -75,6 +96,62 @@ for invalid in 0 -2 word ''; do
         "$work/invalid.log" "AUR_CARGO_JOBS=$invalid refusal"
 done
 echo 'ok wrapper default, override, preserved args, and invalid values'
+
+# The snapshot defaults to six weeks before the checked-out commit.
+git -C "$repo" init -q
+GIT_AUTHOR_DATE='2026-11-03T12:00:00Z' GIT_COMMITTER_DATE='2026-11-03T12:00:00Z' \
+    git -C "$repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m t
+bin_asset=chan-desktop-bin-1.2.3-4-x86_64.tar.zst
+
+assert_call() {
+    local name="$1" n="$2"
+    shift 2
+    local needle
+    [ -f "$work/state/docker.$n.args" ] || fail "$name: docker call $n did not run"
+    for needle in "$@"; do
+        grep -Fxq -- "$needle" "$work/state/docker.$n.args" || \
+            fail "$name: docker call $n lacks $needle"
+    done
+}
+
+run_wrapper bin-build PKGBASE=chan-desktop-bin || fail 'chan-desktop-bin wrapper invocation failed'
+assert_call bin-build 1 PKGBASE=chan-desktop ARCH_SNAPSHOT=2026/09/22 \
+    DESKTOP_BIN_ASSET_DIR=/out/assets
+assert_call bin-build 2 PKGBASE=chan-desktop-bin \
+    "AUR_LOCAL_ASSET=/src/target/aur-ci-out/assets/$bin_asset"
+[ ! -e "$work/state/docker.3.args" ] || fail 'bin-build: a third container ran'
+grep -Fq ARCH_SNAPSHOT "$work/state/docker.2.args" && \
+    fail 'bin-build: the chan-desktop-bin container was pinned to the snapshot'
+
+run_wrapper bin-snapshot PKGBASE=chan-desktop-bin ARCH_SNAPSHOT=2026/01/02 || \
+    fail 'ARCH_SNAPSHOT override invocation failed'
+assert_call bin-snapshot 1 ARCH_SNAPSHOT=2026/01/02
+
+rm -f "$repo/target/aur-ci-out/assets/$bin_asset"
+if run_wrapper bin-missing PKGBASE=chan-desktop-bin STUB_NO_ASSET=1; then
+    fail 'a snapshot build that packed no asset was accepted'
+fi
+[ ! -e "$work/state/docker.2.args" ] || fail 'bin-missing: chan-desktop-bin ran without an asset'
+assert_contains "the snapshot build did not pack $bin_asset" "$work/bin-missing.log" 'missing asset refusal'
+
+mkdir -p "$repo/published"
+printf 'published\n' > "$repo/published/$bin_asset"
+run_wrapper bin-reuse PKGBASE=chan-desktop-bin AUR_BIN_ASSET="$repo/published/$bin_asset" || \
+    fail 'published asset invocation failed'
+assert_call bin-reuse 1 PKGBASE=chan-desktop-bin \
+    "AUR_LOCAL_ASSET=/src/target/aur-ci-out/assets/$bin_asset"
+[ ! -e "$work/state/docker.2.args" ] || fail 'bin-reuse: the snapshot build ran for a published asset'
+cmp -s "$repo/published/$bin_asset" "$repo/target/aur-ci-out/assets/$bin_asset" || \
+    fail 'bin-reuse: the published asset was not staged for the container'
+
+printf 'other\n' > "$repo/published/chan-desktop-bin-1.2.3-5-x86_64.tar.zst"
+if run_wrapper bin-wrong PKGBASE=chan-desktop-bin \
+    AUR_BIN_ASSET="$repo/published/chan-desktop-bin-1.2.3-5-x86_64.tar.zst"; then
+    fail 'an asset for another pkgrel was accepted'
+fi
+[ ! -e "$work/state/docker.args" ] || fail 'bin-wrong: a container ran'
+assert_contains "AUR_BIN_ASSET must be $bin_asset" "$work/bin-wrong.log" 'wrong asset refusal'
+echo 'ok chan-desktop-bin snapshot build, override, missing asset, reuse, and wrong asset'
 
 # The root arm needs pacman and writes system configuration. Pin its explicit
 # environment handoff as source text; this does not execute that arm.

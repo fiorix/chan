@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Contract test for AUR package selection and saved-binary ownership.
+"""Contract test for AUR package selection and saved-binary ownership, and
+for the prebuilt chan-desktop-bin recipe's agreement with chan-desktop.
 
 Each case writes a throwaway recipe whose check() holds one shape, most of
 them beside the pinned `cargo test -p <pkgname>` call, and runs it through the
@@ -28,7 +29,21 @@ REAL_RECIPES = (
     "packaging/distros/arch/aur/chan/PKGBUILD.in",
     "packaging/distros/arch/aur/chan-desktop/PKGBUILD.in",
 )
+REAL_BIN_RECIPE = "packaging/distros/arch/aur/chan-desktop-bin/PKGBUILD.in"
 FIXTURE = "PKGBUILD.in"
+BIN_FIXTURE = "bin-PKGBUILD.in"
+# Each prebuilt case is one edit to the real chan-desktop-bin recipe, checked
+# against the real chan-desktop recipe; the refusal must say the text given,
+# or None when the edited recipe must still pass.
+BIN_CASES = (
+    ("the real recipe passes", None, None),
+    ("a dropped runtime dependency", ("    'systemd'\n", ""), "missing systemd"),
+    ("an added runtime dependency", ("    'xdg-utils'\n", "    'xdg-utils'\n    'zlib'\n"), "extra zlib"),
+    ("a reordered dependency list passes", ("    'gcc-libs'\n    'glibc'\n", "    'glibc'\n    'gcc-libs'\n"), None),
+    ("no provides for chan-desktop", (' "chan-desktop=$pkgver")', ")"), "provides lacks 'chan-desktop=$pkgver'"),
+    ("no conflict with chan", ("conflicts=('chan' ", "conflicts=("), "conflicts lacks 'chan'"),
+    ("an architecture with no asset", ("arch=('x86_64')", "arch=('x86_64' 'aarch64')"), "arch must be ('x86_64')"),
+)
 # check() opens on line 3 and its commands follow cd and three exports.
 REPLACED = 8
 BESIDE = 9
@@ -344,13 +359,40 @@ def main() -> int:
             else:
                 failures += 1
                 print(f"not ok - {case.name}: {reason}\n{output.rstrip()}", file=sys.stderr)
+    with tempfile.TemporaryDirectory(prefix="chan-aur-bin-contract.") as scratch:
+        directory = Path(scratch)
+        real = (ROOT / REAL_BIN_RECIPE).read_text(encoding="utf-8")
+        source = str(ROOT / REAL_RECIPES[1])
+        for name, edit, says in BIN_CASES:
+            text = real
+            if edit is not None:
+                assert text.count(edit[0]) == 1, (name, edit[0])
+                text = text.replace(edit[0], edit[1])
+            (directory / BIN_FIXTURE).write_text(text, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(CHECKER), "aur-bin-recipe", BIN_FIXTURE, source],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = result.stdout + result.stderr
+            if says is None:
+                ok = result.returncode == 0 and "build-matrix contract: PASS" in output
+            else:
+                ok = result.returncode == 1 and f"FAIL: {BIN_FIXTURE}: " in output and says in output
+            if ok:
+                print(f"ok - chan-desktop-bin: {name}")
+            else:
+                failures += 1
+                print(f"not ok - chan-desktop-bin: {name}\n{output.rstrip()}", file=sys.stderr)
     status, output = run(ROOT, *REAL_RECIPES)
     if status == 0 and "build-matrix contract: PASS" in output:
         print("ok - the real recipes")
     else:
         failures += 1
         print(f"not ok - the real recipes: status {status}\n{output.rstrip()}", file=sys.stderr)
-    total = len(CASES) + len(ARTIFACT_CASES) + 1
+    total = len(CASES) + len(ARTIFACT_CASES) + len(BIN_CASES) + 1
     if failures:
         print(f"AUR check() contract test: {failures} of {total} cases failed", file=sys.stderr)
         return 1

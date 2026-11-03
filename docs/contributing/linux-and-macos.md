@@ -329,7 +329,7 @@ for p in 7001 7000 7002 7003; do curl -fsS "http://127.0.0.1:$p/healthz"; echo; 
 CI does not run `sdme`. GitHub Actions runs directly on its ubuntu runners with the dependencies installed natively; the `sdme` flow above is the local way to reproduce that environment on your machine.
 
 - `.github/workflows/ci.yml` runs native Linux, macOS, and Windows lanes in parallel. Linux emits an AppImage and boots it as a release devserver; macOS emits and verifies an ad-hoc-signed `.app`; Windows emits an unsigned NSIS installer and boots the desktop binary as a devserver.
-- The same workflow builds the direct-download `.deb` and `.rpm`, both AUR packages in clean Arch containers, the COPR and PPA source packages, the Nix packages, and the chan OCI image.
+- The same workflow builds the direct-download `.deb` and `.rpm`, the three AUR packages in clean Arch containers (`chan-desktop-bin` from a `chan-desktop` build on an Arch Linux Archive snapshot), the COPR and PPA source packages, the Nix packages, and the chan OCI image.
 - `.github/workflows/gateway-ci.yml` runs the gateway gate directly on the runner against a `postgres:16` service container (not `chan-psql`) and separately builds the four gateway OCI images.
 
 Local `sdme` is the fast loop; CI is the canonical lane, and owns x86_64.

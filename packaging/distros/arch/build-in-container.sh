@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Render, build, install, and smoke AUR packages inside a clean Arch-family
 # container. CI and build-with-sdme.sh deliberately share this implementation.
+#
+# ARCH_SNAPSHOT=YYYY/MM/DD pins pacman to that Arch Linux Archive date and
+# downgrades the image to it before anything is built. DESKTOP_BIN_ASSET_DIR
+# makes a smoked chan-desktop build also pack the chan-desktop-bin release
+# asset there. PKGBASE=chan-desktop-bin builds that package from the asset
+# AUR_LOCAL_ASSET names.
 
 set -euo pipefail
 
@@ -12,14 +18,33 @@ PKGBASE="${PKGBASE:-all}"
 HOST_UID="${HOST_UID:-0}"
 HOST_GID="${HOST_GID:-0}"
 AUR_BUILD_TIMEOUT="${AUR_BUILD_TIMEOUT:-}"
+ARCH_SNAPSHOT="${ARCH_SNAPSHOT:-}"
+DESKTOP_BIN_ASSET_DIR="${DESKTOP_BIN_ASSET_DIR:-}"
 
 case "$PKGBASE" in
     all) packages=(chan chan-desktop) ;;
-    chan|chan-desktop) packages=("$PKGBASE") ;;
-    *) echo "error: PKGBASE must be all, chan, or chan-desktop" >&2; exit 1 ;;
+    chan|chan-desktop|chan-desktop-bin) packages=("$PKGBASE") ;;
+    *) echo "error: PKGBASE must be all, chan, chan-desktop, or chan-desktop-bin" >&2; exit 1 ;;
 esac
 
 if [ "$(id -u)" -eq 0 ]; then
+    if [ -n "$ARCH_SNAPSHOT" ]; then
+        [[ "$ARCH_SNAPSHOT" =~ ^[0-9]{4}/[0-9]{2}/[0-9]{2}$ ]] || {
+            echo "error: ARCH_SNAPSHOT must be a YYYY/MM/DD date, got '$ARCH_SNAPSHOT'" >&2
+            exit 1
+        }
+        if pacman -Q archlinuxarm-keyring >/dev/null 2>&1; then
+            echo "error: the Arch Linux Archive serves x86_64 only; ARCH_SNAPSHOT needs an x86_64 Arch image" >&2
+            exit 1
+        fi
+        echo ">> pinning pacman to the Arch Linux Archive snapshot $ARCH_SNAPSHOT" >&2
+        # shellcheck disable=SC2016 # $repo and $arch are pacman's, not the shell's
+        printf 'Server = https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' "$ARCH_SNAPSHOT" \
+            > /etc/pacman.d/mirrorlist
+        # -uu downgrades whatever the image carries past the snapshot, so the
+        # build links against the snapshot's libraries rather than the image's.
+        pacman -Syyuu --noconfirm
+    fi
     echo ">> refreshing the package database and base build tools" >&2
     if pacman -Q archlinuxarm-keyring >/dev/null 2>&1; then
         pacman-key --init
@@ -53,6 +78,7 @@ if [ "$(id -u)" -eq 0 ]; then
     builder_command=(runuser -u builder -- env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND \
         HOME=/home/builder USER=builder LOGNAME=builder SRC="$SRC" OUT="$OUT" \
         VERSION="$VERSION" PKGREL="$PKGREL" PKGBASE="$PKGBASE" \
+        AUR_LOCAL_ASSET="${AUR_LOCAL_ASSET:-}" DESKTOP_BIN_ASSET_DIR="$DESKTOP_BIN_ASSET_DIR" \
         AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" "${cargo_jobs_env[@]}" bash "$0")
     if [ -n "$AUR_BUILD_TIMEOUT" ]; then
         timeout -s TERM -k 30s "${AUR_BUILD_TIMEOUT}s" "${builder_command[@]}" || status=$?
@@ -118,7 +144,7 @@ meminfo_metric() {
 echo ">> AUR validation: version=$VERSION pkgrel=$PKGREL arch=$(uname -m)" >&2
 for pkgbase in "${packages[@]}"; do
     echo ">> building $pkgbase" >&2
-    AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" \
+    AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" AUR_LOCAL_ASSET="${AUR_LOCAL_ASSET:-}" \
         bash "$SRC/packaging/distros/arch/make-aur-package.sh" \
         "$pkgbase" "$VERSION" "$PKGREL" "$OUT"
 
@@ -169,16 +195,19 @@ for pkgbase in "${packages[@]}"; do
     echo ">> smoke: systemd-analyze verify chan-devserver.service" >&2
     sudo systemd-analyze verify /usr/lib/systemd/user/chan-devserver.service
 
-    if [ "$pkgbase" = chan-desktop ]; then
+    if [ "$pkgbase" != chan ]; then
         # The desktop personality routes `chan upgrade` to a running GUI, so a
         # headless container cannot exercise the packaged refusal. Prove the
         # CHAN_PACKAGED=aur stamp reached the build instead, at both ends: the
-        # rendered recipe must export it, and the refusal hint must survive
-        # into the binary. The hint is only reachable through
-        # `option_env!("CHAN_PACKAGED")` being `Some`, so an unstamped release
-        # build drops the literal along with the dead branch. The `chan`
-        # package below covers the executable refusal path.
-        grep -q 'export CHAN_PACKAGED=aur' "$pkgdir/PKGBUILD"
+        # rendered source recipe must export it, and the refusal hint must
+        # survive into the binary, which is the only end chan-desktop-bin has.
+        # The hint is only reachable through `option_env!("CHAN_PACKAGED")`
+        # being `Some`, so an unstamped release build drops the literal along
+        # with the dead branch. The `chan` package below covers the executable
+        # refusal path.
+        if [ "$pkgbase" = chan-desktop ]; then
+            grep -q 'export CHAN_PACKAGED=aur' "$pkgdir/PKGBUILD"
+        fi
         grep -aFq 'your AUR helper (for example, paru -Syu or yay -Syu)' \
             /usr/bin/chan-desktop
         desktop-file-validate /usr/share/applications/chan-desktop.desktop
@@ -191,6 +220,12 @@ for pkgbase in "${packages[@]}"; do
             exit 1
         fi
         grep -q 'AUR helper' "$pkgdir/upgrade.out"
+    fi
+
+    if [ "$pkgbase" = chan-desktop ] && [ -n "$DESKTOP_BIN_ASSET_DIR" ]; then
+        echo ">> packing the chan-desktop-bin asset" >&2
+        bash "$SRC/packaging/distros/arch/desktop-bin-asset.sh" pack \
+            "$pkg" "$VERSION" "$PKGREL" "$DESKTOP_BIN_ASSET_DIR"
     fi
 
     sudo pacman -Rdd --noconfirm "$pkgbase"
