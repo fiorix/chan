@@ -6,7 +6,8 @@
 // hosts settle to, and nothing else asks. A divider drag sends its pane resize
 // and no window size, from the press until the layout tmux answers the release
 // with, and that layout asks nothing back although it moves every pane's host
-// and with them the fold.
+// and with them the fold. Hybrid Nav holds the ask too, since its terminals
+// measure nothing while the draft shows, and the ask follows when it ends.
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -23,7 +24,7 @@ import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/ap
 import { resetLayout, terminalTab } from "./__tests__/tabs";
 import { xterm } from "./__tests__/xterm";
 import { onWatchEvent } from "./state/store.svelte";
-import { layout, splitPane, type LeafNode } from "./state/tabs.svelte";
+import { cancelPaneMode, enterPaneMode, layout, splitPane, type LeafNode } from "./state/tabs.svelte";
 import type { TmuxLayoutNode, TmuxPaneRef, TmuxRequest } from "./state/tmux";
 import { setTmuxLayout, tmuxWindowGrid } from "./state/tmuxWindowSize.svelte";
 
@@ -240,4 +241,15 @@ test("an area change after a drag's request waits for the layout that answers it
     ["pane-0", { request: "resize-pane", pane: "%0", axis: "width", cells: 83 }],
     ["pane-0", { request: "window-size", pane: "%0", cols: 91, rows: 20 }],
   ]);
+});
+
+test("an area change during Hybrid Nav waits for it to end, and asks with the hosts measured then", async () => {
+  enterPaneMode();
+  await settle();
+  await resizedTo(1005, 509, 45, 20);
+  expect(windowSizes()).toEqual([]);
+  cancelPaneMode();
+  await settle();
+  await vi.advanceTimersByTimeAsync(600);
+  expect(windowSizes()).toEqual([["pane-0", { request: "window-size", pane: "%0", cols: 91, rows: 20 }]]);
 });

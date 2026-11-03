@@ -1,8 +1,8 @@
 import { expect, test } from "vitest";
 import { terminalTab } from "../__tests__/tabs";
-import type { Node, SplitNode } from "./tabs.svelte";
+import type { LayoutState, Node, SplitNode } from "./tabs.svelte";
 import type { TmuxLayoutNode } from "./tmux";
-import { tmuxResizeForSplit } from "./tmuxResize";
+import { tmuxPaneModeRequests, tmuxResizeForSplit } from "./tmuxResize";
 
 const leaf = (id: string, session: string, pane: string): Node => ({
   kind: "leaf",
@@ -103,4 +103,36 @@ test("an axis hidden behind same-axis splits on both sides is unreachable by one
     { kind: "column", w: 49, h: 40, children: [row("s4", "s5", 49, 20), row("s6", "s7", 49, 19)] },
   ] };
   expect(tmuxResizeForSplit(root, nodes, tree, 0.6)).toBeNull();
+});
+
+test("a Hybrid Nav commit asks for the divider moves tmux can place, then the splits in the order staged", () => {
+  // The draft as staged: the left pane split down into an empty pane, the
+  // root divider moved, and a split whose new pane is not tmux's yet.
+  const root = split("root", "col", "right", "row", 0.6);
+  const col = split("col", "left", "staged", "column", 0.5);
+  const draft: LayoutState = {
+    rootId: "root",
+    activePaneId: "left",
+    focusColor: "blue",
+    nodes: {
+      root,
+      col,
+      left: leaf("left", "s0", "%0"),
+      staged: { kind: "leaf", id: "staged", tabs: [], activeTabId: null },
+      right: leaf("right", "s1", "%1"),
+    },
+  };
+  const tree: TmuxLayoutNode = { kind: "row", w: 120, h: 40, children: [pane("s0", 60, 40), pane("s1", 59, 40)] };
+  const splits = [
+    { sessionId: "s1", pane: "%1", horizontal: true },
+    { sessionId: "s0", pane: "%0", horizontal: false },
+  ];
+  expect(tmuxPaneModeRequests(draft, { splits, resized: ["root", "gone"] }, tree)).toEqual([
+    { sessionId: "s0", request: { request: "resize-pane", pane: "%0", axis: "width", cells: 71 } },
+    { sessionId: "s1", request: { request: "split", pane: "%1", horizontal: true } },
+    { sessionId: "s0", request: { request: "split", pane: "%0", horizontal: false } },
+  ]);
+  // With no layout from tmux yet there is no border to place; the splits
+  // still go.
+  expect(tmuxPaneModeRequests(draft, { splits, resized: ["root"] }, null).map((call) => call.request.request)).toEqual(["split", "split"]);
 });

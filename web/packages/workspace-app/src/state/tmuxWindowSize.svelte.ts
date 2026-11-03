@@ -11,7 +11,7 @@
 /// other.
 
 import { untrack } from "svelte";
-import { tmuxPaneTabs } from "./tabs.svelte";
+import { paneMode, tmuxPaneTabs } from "./tabs.svelte";
 import type { TmuxLayoutNode } from "./tmux";
 
 export type TerminalGrid = { cols: number; rows: number };
@@ -121,8 +121,11 @@ export function endTmuxDrag(awaitingLayout: boolean): void {
   }, TMUX_DRAG_ANSWER_MS);
 }
 
+/// Whether the window size waits: through a divider drag until its answer,
+/// and while Hybrid Nav is up, since its terminals measure nothing while the
+/// draft shows; they measure again as it ends, and the ask follows.
 export function tmuxWindowSizeHeld(): boolean {
-  return drag !== "none";
+  return drag !== "none" || paneMode.active;
 }
 
 function clearAnswerTimer(): void {

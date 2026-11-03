@@ -15,6 +15,7 @@ import {
 } from "../commands";
 import {
   enterPaneMode,
+  panesHaveSides,
   reopenClosedTab,
   canReopenClosedTab,
 } from "../tabs.svelte";
@@ -161,10 +162,8 @@ registerCommands([
       danger: true,
     },
   }),
-  reuse("app.pane.flip", "Flip pane", "Panes", "any", [
-    "flip",
-    "side",
-    "a",
-    "b",
-  ]),
+  {
+    ...reuse("app.pane.flip", "Flip pane", "Panes", "any", ["flip", "side", "a", "b"]),
+    available: (ctx) => allowedInWindow("app.pane.flip", ctx) && panesHaveSides(),
+  },
 ]);

@@ -11,7 +11,8 @@
 // sides. Cmd+W closes a tab the same way in a control-terminal window, so a
 // live terminal there asks first. While a dialog is open, the keys and host
 // commands meant for it stay with it: none of them enters, commits or drops
-// Hybrid Nav or acts on the layout under the dialog.
+// Hybrid Nav or acts on the layout under the dialog. In a tmux window the
+// draft stages what tmux is asked for on Enter, and its panes have no sides.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -36,17 +37,21 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
   discardWindowSession: vi.fn(async () => {}),
 }));
 
-import { api } from "./api/client";
+import { api, sessionWindowId } from "./api/client";
+import { availableCommands, commandContext } from "./state/commands";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
 import { uiCloseConfirm } from "./state/closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./state/confirm.svelte";
-import { browserSidePanes, discardWindowSession, ui, uiPathPrompt, uiPrompt } from "./state/store.svelte";
+import { browserSidePanes, discardWindowSession, onWatchEvent, ui, uiPathPrompt, uiPrompt } from "./state/store.svelte";
 import {
+  allTerminalTabs,
+  applyTerminalRoster,
   cancelPaneMode,
   clearRecentlyClosedTabsForTest,
   closePane,
   layout,
+  moveActiveTabToSide,
   paneMode,
   paneSideToggleFlash,
   splitPane,
@@ -61,6 +66,8 @@ import { setTmuxLayout } from "./state/tmuxWindowSize.svelte";
 stubAppEnvironment();
 
 const DOC = () => fileTab({ id: "doc", path: "notes/a.md", content: "hello", saved: "hello" });
+const TMUX_TAB = (id: string, session: string, pane: string) =>
+  terminalTab({ id, terminalSessionId: session, tmuxPane: { connection: 1, pane } });
 
 beforeEach(async () => {
   Object.assign(caps, { workspace: true, files: true, drafts: true });
@@ -148,32 +155,6 @@ describe("entering and leaving Hybrid Nav", () => {
 });
 
 describe("arranging the draft", () => {
-  test("a tmux keyboard resize sends its final cell size on Enter and leaves the layout to tmux", async () => {
-    resetLayout([terminalTab({ id: "t0", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } })]);
-    const rightId = splitPane("pane-test", "row")!;
-    leaf(layout, rightId).tabs.push(terminalTab({ id: "t1", terminalSessionId: "s1", tmuxPane: { connection: 1, pane: "%1" } }));
-    leaf(layout, rightId).activeTabId = "t1";
-    layout.activePaneId = "pane-test";
-    setTmuxLayout({ kind: "row", w: 120, h: 40, children: [
-      { kind: "pane", session: "s0", w: 60, h: 40 },
-      { kind: "pane", session: "s1", w: 59, h: 40 },
-    ] });
-    const request = vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
-    await settle();
-    await enterHybridNav();
-    await keys("]");
-    expect(rootSplit(draft()).ratio).toBeCloseTo(0.52);
-    await keys("Enter");
-    expect(request).toHaveBeenCalledWith("s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 62 });
-    expect(request.mock.calls.filter(([, body]) => body.request === "resize-pane")).toHaveLength(1);
-    expect(rootSplit(layout).ratio).toBeCloseTo(0.5);
-    await enterHybridNav();
-    await keys(...Array(30).fill("]"));
-    expect(rootSplit(draft()).ratio).toBe(1);
-    await keys("Enter");
-    expect(request).toHaveBeenCalledWith("s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 119 });
-    expect(rootSplit(layout).ratio).toBeCloseTo(0.5);
-  });
   test.each([
     ["row", "ArrowRight", "ArrowLeft"],
     ["column", "ArrowDown", "ArrowUp"],
@@ -675,5 +656,155 @@ describe("keys under an open dialog", () => {
     expect(document.querySelector('[aria-modal="true"]')).toBeNull();
     expect(paneMode.active).toBe(true);
     expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["file", "terminal"]);
+  });
+});
+
+describe("in a tmux window", () => {
+  /// One pane showing tmux pane %0 on session s0, with tmux's layout for it.
+  async function tmuxWindow() {
+    resetLayout([TMUX_TAB("t0", "s0", "%0")]);
+    setTmuxLayout({ kind: "pane", session: "s0", w: 120, h: 40 });
+    const request = vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
+    await settle();
+    return request;
+  }
+
+  function tmuxLayoutFrame(layout: unknown): void {
+    onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "tmux_layout", layout });
+  }
+
+  /// What the page asked tmux for, less the focus requests it sends as its
+  /// active pane changes.
+  function asked(request: { mock: { calls: unknown[][] } }): unknown[][] {
+    return request.mock.calls.filter(([, body]) => (body as { request: string }).request !== "focus");
+  }
+
+  test("a tmux keyboard resize sends its final cell size on Enter and leaves the layout to tmux", async () => {
+    resetLayout([TMUX_TAB("t0", "s0", "%0")]);
+    const rightId = splitPane("pane-test", "row")!;
+    leaf(layout, rightId).tabs.push(TMUX_TAB("t1", "s1", "%1"));
+    leaf(layout, rightId).activeTabId = "t1";
+    layout.activePaneId = "pane-test";
+    setTmuxLayout({ kind: "row", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 60, h: 40 },
+      { kind: "pane", session: "s1", w: 59, h: 40 },
+    ] });
+    const request = vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
+    await settle();
+    await enterHybridNav();
+    await keys("]");
+    expect(rootSplit(draft()).ratio).toBeCloseTo(0.52);
+    await keys("Enter");
+    expect(request).toHaveBeenCalledWith("s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 62 });
+    expect(request.mock.calls.filter(([, body]) => body.request === "resize-pane")).toHaveLength(1);
+    expect(rootSplit(layout).ratio).toBeCloseTo(0.5);
+    await enterHybridNav();
+    await keys(...Array(30).fill("]"));
+    expect(rootSplit(draft()).ratio).toBe(1);
+    await keys("Enter");
+    expect(request).toHaveBeenCalledWith("s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 119 });
+    expect(rootSplit(layout).ratio).toBeCloseTo(0.5);
+  });
+
+  test("a split stages an empty pane, and Enter asks tmux for it and leaves the layout to tmux", async () => {
+    const request = await tmuxWindow();
+    await enterHybridNav();
+    await keys("/");
+    const staged = draft().activePaneId;
+    expect(rootSplit(draft()).direction).toBe("row");
+    expect(leaf(draft(), staged).tabs).toEqual([]);
+    expect(asked(request)).toEqual([]);
+
+    await keys("Enter");
+
+    expect(asked(request)).toEqual([["s0", { request: "split", pane: "%0", horizontal: true }]]);
+    expect(layout.nodes[layout.rootId]?.kind).toBe("leaf");
+    expect(layout.activePaneId).toBe("pane-test");
+  });
+
+  test("Escape drops a staged split without asking tmux", async () => {
+    const request = await tmuxWindow();
+    await enterHybridNav();
+    await keys("?", "Escape");
+
+    expect(paneMode.active).toBe(false);
+    expect(asked(request)).toEqual([]);
+  });
+
+  test("Enter sends the divider moves first, then the splits in the order staged", async () => {
+    resetLayout([TMUX_TAB("t0", "s0", "%0")]);
+    const right = splitPane("pane-test", "row")!;
+    leaf(layout, right).tabs.push(TMUX_TAB("t1", "s1", "%1"));
+    leaf(layout, right).activeTabId = "t1";
+    layout.activePaneId = "pane-test";
+    setTmuxLayout({ kind: "row", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 60, h: 40 },
+      { kind: "pane", session: "s1", w: 59, h: 40 },
+    ] });
+    const request = vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
+    await settle();
+    await enterHybridNav();
+
+    await keys("?", "ArrowRight", "]", "/", "Enter");
+
+    expect(asked(request)).toEqual([
+      ["s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 62 }],
+      ["s0", { request: "split", pane: "%0", horizontal: false }],
+      ["s1", { request: "split", pane: "%1", horizontal: true }],
+    ]);
+  });
+
+  test("a staged pane takes no split or divider move, and nothing stages a tab, swaps tiles or flips a side", async () => {
+    const request = await tmuxWindow();
+    await enterHybridNav();
+    await keys("/");
+    const staged = draft().activePaneId;
+
+    await keys("?", "]");
+    expect(Object.values(draft().nodes).filter((node) => node.kind === "leaf")).toHaveLength(2);
+    expect(rootSplit(draft()).ratio).toBe(0.5);
+    await keys("t", "Tab");
+    expect(leaf(draft(), staged).tabs).toEqual([]);
+    expect(leaf(draft(), staged).side).toBeUndefined();
+    await keys("ArrowLeft", "d");
+    expect(leaf(draft(), "pane-test").tabs.map((tab) => tab.id)).toEqual(["t0"]);
+    expect(leaf(draft(), "pane-test").side).toBeUndefined();
+
+    await keys("Enter");
+    expect(asked(request)).toEqual([["s0", { request: "split", pane: "%0", horizontal: true }]]);
+  });
+
+  test("tmux's layout and a rename during the transaction apply without making it stale", async () => {
+    const request = await tmuxWindow();
+    await enterHybridNav();
+    await keys("/");
+
+    tmuxLayoutFrame({ kind: "column", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 120, h: 20 },
+      { kind: "pane", session: "s2", w: 120, h: 19 },
+    ] });
+    applyTerminalRoster([{ id: "s0", tab_name: "vim", tab_group: "default", window_id: sessionWindowId(), broadcast: false }]);
+    await settle();
+
+    expect(paneMode.stale).toBe(false);
+    expect(rootSplit(layout).direction).toBe("column");
+    expect(rootSplit(draft()).direction).toBe("row");
+    await keys("Enter");
+    expect(asked(request)).toEqual([["s0", { request: "split", pane: "%0", horizontal: true }]]);
+    expect(rootSplit(layout).direction).toBe("column");
+    expect(allTerminalTabs().find((tab) => tab.id === "t0")?.title).toBe("vim");
+  });
+
+  test("a pane has no sides: the flip chord, the flip command and send-to-side leave it alone", async () => {
+    await tmuxWindow();
+    press({ key: "`", code: "Backquote", ctrlKey: true });
+    hostCommand("app.pane.flip");
+    await settle();
+
+    expect(moveActiveTabToSide("b")).toBe(false);
+    expect(leaf(layout, "pane-test").side).toBeUndefined();
+    expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["t0"]);
+    const offered = availableCommands(commandContext()).map((command) => command.id);
+    for (const id of ["app.pane.flip", "app.tab.sendToA", "app.tab.sendToB"]) expect(offered).not.toContain(id);
   });
 });

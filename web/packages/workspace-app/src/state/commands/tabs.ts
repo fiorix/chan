@@ -1,5 +1,5 @@
 import { registerCommands, type Command } from "../commands";
-import { moveActiveTabToSide, type PaneSide } from "../tabs.svelte";
+import { moveActiveTabToSide, panesHaveSides, type PaneSide } from "../tabs.svelte";
 
 function sendToSideCommand(targetSide: PaneSide): Command {
   const label = targetSide.toUpperCase();
@@ -10,6 +10,7 @@ function sendToSideCommand(targetSide: PaneSide): Command {
     requirement: "any",
     keywords: ["move", "send", "side", label.toLowerCase()],
     available: (ctx) =>
+      panesHaveSides() &&
       ctx.activeTabId !== null &&
       ctx.activeSide !== null &&
       ctx.activeSide !== targetSide,

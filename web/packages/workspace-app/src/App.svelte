@@ -162,7 +162,7 @@
     tmuxWindowGrid,
     tmuxWindowSizeHeld,
   } from "./state/tmuxWindowSize.svelte";
-  import { tmuxResizeForSplit, type TmuxPaneResize } from "./state/tmuxResize";
+  import { tmuxPaneModeRequests, type TmuxCall } from "./state/tmuxResize";
   import { applyEditorTheme, DEFAULT_EDITOR_THEME } from "./state/editorTheme";
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
@@ -640,6 +640,20 @@
       .catch(() => {});
   });
 
+  /// Send tmux requests one at a time, in the order the draft staged them, so
+  /// tmux's new panes land where the draft showed them; the first refusal
+  /// ends the run.
+  async function sendTmuxCalls(calls: TmuxCall[]): Promise<void> {
+    for (const { sessionId, request } of calls) {
+      try {
+        await api.tmuxRequest(sessionId, request);
+      } catch (error) {
+        setTransientStatus(`tmux ${request.request} failed: ${errorText(error)}`);
+        return;
+      }
+    }
+  }
+
   /// Ask the tmux connection this window shows for a new tmux window, which
   /// opens in a chan window of its own. False when this window shows no
   /// tmux pane, and nothing was asked. The request rides the active pane
@@ -971,28 +985,15 @@
           else if (intent.ctx.dir) revealAndSelect(intent.ctx.dir);
         }
         const stagedEditors = paneMode.stagedDraftEditors.slice();
-        const pendingTmuxResizes: TmuxPaneResize[] = [];
-        const tmuxTree = tmuxLayout();
-        if (tmuxTree && paneMode.draft) {
-          for (const node of Object.values(paneMode.draft.nodes)) {
-            if (node.kind !== "split") continue;
-            const live = layout.nodes[node.id];
-            if (live?.kind !== "split" || node.ratio === live.ratio) continue;
-            const resize = tmuxResizeForSplit(node, paneMode.draft.nodes, tmuxTree, node.ratio);
-            if (resize) pendingTmuxResizes.push(resize);
-            // The draft previews the drag; tmux's next layout owns the result.
-            node.ratio = live.ratio;
-          }
-        }
+        // In a tmux window the draft previews what tmux is asked for here;
+        // tmux's next layout shows the result.
+        const tmuxCalls =
+          paneMode.tmux && paneMode.draft ? tmuxPaneModeRequests(paneMode.draft, paneMode.tmux, tmuxLayout()) : [];
         commitPaneMode();
         scheduleSessionSave();
         paneModeHelpVisible = false;
         materializeStagedDraftEditors(stagedEditors);
-        for (const { sessionId, request } of pendingTmuxResizes) {
-          void api.tmuxRequest(sessionId, request).catch((error) =>
-            setTransientStatus(`tmux pane resize failed: ${errorText(error)}`),
-          );
-        }
+        void sendTmuxCalls(tmuxCalls);
         return;
       }
       case "Escape":
@@ -1038,16 +1039,16 @@
         paneModeSwap("right");
         return;
       case "[":
-        paneModeResize("row", false, large, tmuxLayout() !== null);
+        paneModeResize("row", false, large);
         return;
       case "]":
-        paneModeResize("row", true, large, tmuxLayout() !== null);
+        paneModeResize("row", true, large);
         return;
       case "-":
-        paneModeResize("column", false, large, tmuxLayout() !== null);
+        paneModeResize("column", false, large);
         return;
       case "=":
-        paneModeResize("column", true, large, tmuxLayout() !== null);
+        paneModeResize("column", true, large);
         return;
       case "0":
         paneModeEqualize();

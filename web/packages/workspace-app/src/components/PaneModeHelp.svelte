@@ -12,6 +12,7 @@
   // keep the focus / Escape semantics inside App.svelte; this is
   // purely a passive informational panel.
 
+  import { paneMode } from "../state/tabs.svelte";
   import { windowCaps } from "../state/windowCaps";
 
   type Cap = {
@@ -29,8 +30,10 @@
   /// corresponding case in App.svelte's handlePaneModeKey. A row whose
   /// capability this window lacks is not rendered: every cap here is a
   /// clickable button, so an unfiltered row is an action the user can focus,
-  /// hear announced, and press for nothing.
-  type Needs = "files" | "drafts" | "workspace";
+  /// hear announced, and press for nothing. `ownPanes` is a window whose
+  /// panes are chan's: a tmux window's are tmux's, with no tile to swap, tab
+  /// to stage or side to flip.
+  type Needs = "files" | "drafts" | "workspace" | "ownPanes";
   type Row = {
     caps: Cap[];
     action: string;
@@ -71,6 +74,7 @@
             { label: "D", key: "d" },
           ],
           action: "Swap tile with neighbour",
+          needs: "ownPanes",
         },
       ],
     },
@@ -79,6 +83,7 @@
       // Multiple presses stack: three T's queue three terminals on
       // the focused pane. Enter materializes; Esc discards.
       title: "Stage (Enter to commit, Esc to discard)",
+      needs: "ownPanes",
       rows: [
         { caps: [{ label: "t", key: "t" }], action: "Stage Terminal" },
         { caps: [{ label: "f", key: "f" }], action: "Stage File Browser", needs: "files" },
@@ -143,7 +148,7 @@
         { caps: [{ label: "Enter", key: "Enter" }], action: "Commit draft" },
         { caps: [{ label: "Esc", key: "Escape" }], action: "Discard draft" },
         { caps: [{ label: "h", key: "h" }], action: "Toggle this help" },
-        { caps: [{ label: "Tab", key: "Tab" }], action: "Flip side" },
+        { caps: [{ label: "Tab", key: "Tab" }], action: "Flip side", needs: "ownPanes" },
       ],
     },
   ];
@@ -160,6 +165,8 @@
         return windowCaps.drafts;
       case "workspace":
         return windowCaps.workspace;
+      case "ownPanes":
+        return !paneMode.tmux;
     }
   }
 

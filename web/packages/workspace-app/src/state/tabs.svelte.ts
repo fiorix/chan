@@ -1304,6 +1304,18 @@ export interface PaneModeStagedDraftEditor {
   kind: PaneModeDraftEditorKind;
 }
 
+/// What a transaction in a tmux window asks tmux for on Enter. tmux owns that
+/// window's layout, so the draft only previews it: a split adds an empty pane
+/// to the draft, and the commit leaves the live tree to the layout tmux
+/// answers with.
+export interface PaneModeTmux {
+  /// The staged splits in order: the tmux pane each splits, and the session
+  /// of the tab that shows it.
+  splits: { sessionId: string; pane: string; horizontal: boolean }[];
+  /// Draft splits whose divider moved.
+  resized: string[];
+}
+
 export const paneMode = $state<{
   active: boolean;
   draft: LayoutState | null;
@@ -1316,6 +1328,8 @@ export const paneMode = $state<{
   /// Esc (cancel). Each entry pins the target paneId at press time so
   /// later focus changes don't redirect materialization.
   stagedDraftEditors: PaneModeStagedDraftEditor[];
+  /// Set when the mode was entered in a tmux window.
+  tmux: PaneModeTmux | null;
 }>({
   active: false,
   draft: null,
@@ -1324,6 +1338,7 @@ export const paneMode = $state<{
   entryLayout: null,
   pendingRemoteLayout: null,
   stagedDraftEditors: [],
+  tmux: null,
 });
 
 type PaneModeSettledSink = (pendingRemoteLayout: SerNode | null) => void;
@@ -2625,6 +2640,13 @@ export function setTerminalTmuxHostGrid(
 /// The terminal tabs of this window that show tmux panes.
 export function tmuxPaneTabs(): TerminalTab[] {
   return allTerminalTabs().filter((tab) => tab.tmuxPane && tab.terminalSessionId);
+}
+
+/// Whether this window's panes have A and B sides. A tmux window's do not:
+/// each pane shows one tmux pane, and tmux has nothing to put on a second
+/// side.
+export function panesHaveSides(): boolean {
+  return tmuxPaneTabs().length === 0;
 }
 
 /// The terminal tab a tmux request of this window rides: the active tab when
@@ -4713,6 +4735,7 @@ export function enterPaneMode(): void {
   paneMode.entryLayout = serializeLayout({ terminalSessions: true });
   paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
+  paneMode.tmux = tmuxPaneTabs().length > 0 ? { splits: [], resized: [] } : null;
   notifyPaneModeSettled();
 }
 
@@ -4856,26 +4879,36 @@ function carryLiveAuthorityState(next: LayoutState): void {
   }
 }
 
+/// Seal the draft. In a tmux window the live tree stays tmux's: the caller
+/// sends what the draft staged (`paneMode.tmux`, read before this call) and
+/// tmux's next layout shows it, so only the focus moves, to the draft's pane
+/// when tmux still shows it.
 export function commitPaneMode(): void {
   if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
-  // Apply any staged spawn intent into the draft before sealing so the
-  // new tab lands as part of the same transaction. Callers that prime
-  // side effects for a staged spawn (e.g. `revealAndSelect` for a
-  // browser intent) should peek `paneMode.spawnIntent` before calling.
-  if (paneMode.spawnIntent) {
-    const { kind, ctx } = paneMode.spawnIntent;
-    if (kind === "terminal") paneModeOpenTerminal(ctx);
-    else if (kind === "browser") paneModeOpenBrowser(ctx);
-    else if (kind === "graph") paneModeOpenGraph(ctx);
-    else if (kind === "dashboard") paneModeOpenDashboard();
+  if (paneMode.tmux) {
+    if (layout.nodes[paneMode.draft.activePaneId]?.kind === "leaf") {
+      layout.activePaneId = paneMode.draft.activePaneId;
+    }
+  } else {
+    // Apply any staged spawn intent into the draft before sealing so the
+    // new tab lands as part of the same transaction. Callers that prime
+    // side effects for a staged spawn (e.g. `revealAndSelect` for a
+    // browser intent) should peek `paneMode.spawnIntent` before calling.
+    if (paneMode.spawnIntent) {
+      const { kind, ctx } = paneMode.spawnIntent;
+      if (kind === "terminal") paneModeOpenTerminal(ctx);
+      else if (kind === "browser") paneModeOpenBrowser(ctx);
+      else if (kind === "graph") paneModeOpenGraph(ctx);
+      else if (kind === "dashboard") paneModeOpenDashboard();
+    }
+    flushLayoutEdits(paneMode.draft);
+    const next = cloneLayoutState(paneMode.draft);
+    carryLiveAuthorityState(next);
+    layout.rootId = next.rootId;
+    layout.nodes = next.nodes;
+    layout.activePaneId = next.activePaneId;
   }
-  flushLayoutEdits(paneMode.draft);
-  const next = cloneLayoutState(paneMode.draft);
-  carryLiveAuthorityState(next);
   paneModeEntryBuffers.clear();
-  layout.rootId = next.rootId;
-  layout.nodes = next.nodes;
-  layout.activePaneId = next.activePaneId;
   paneMode.active = false;
   paneMode.draft = null;
   paneMode.spawnIntent = null;
@@ -4883,6 +4916,7 @@ export function commitPaneMode(): void {
   paneMode.entryLayout = null;
   paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
+  paneMode.tmux = null;
   notifyPaneModeSettled();
 }
 
@@ -4897,6 +4931,7 @@ export function cancelPaneMode(): void {
   paneMode.entryLayout = null;
   paneMode.pendingRemoteLayout = null;
   paneMode.stagedDraftEditors = [];
+  paneMode.tmux = null;
   notifyPaneModeSettled(pendingRemoteLayout);
 }
 
@@ -4932,7 +4967,7 @@ export function paneModeStageSpawn(
   kind: PaneModeSpawnKind,
   ctx: SpawnContext,
 ): void {
-  if (!paneMode.active || paneMode.stale) return;
+  if (!paneMode.active || paneMode.stale || paneMode.tmux) return;
   paneMode.spawnIntent = { kind, ctx };
 }
 
@@ -4945,6 +4980,13 @@ type Direction = "left" | "right" | "up" | "down";
 
 function draftLayout(): LayoutState | null {
   return paneMode.active && !paneMode.stale ? paneMode.draft : null;
+}
+
+/// The draft for an edit only chan's own panes take: a staged tab or a tile
+/// swap. None in a tmux window, whose panes show tmux's panes alone and are
+/// placed by tmux.
+function ownDraftLayout(): LayoutState | null {
+  return paneMode.tmux ? null : draftLayout();
 }
 
 function parentOf(state: LayoutState, childId: string): SplitNode | null {
@@ -5002,7 +5044,7 @@ export function paneModeMoveFocus(direction: Direction): void {
 }
 
 export function paneModeSwap(direction: Direction): void {
-  const draft = draftLayout();
+  const draft = ownDraftLayout();
   if (!draft) return;
   const nextId = neighbourLeaf(draft, draft.activePaneId, direction);
   if (!nextId) return;
@@ -5013,7 +5055,7 @@ export function paneModeSwap(direction: Direction): void {
 /// `paneModeSwap` reduces to this once the neighbour resolves. Focus
 /// moves to the destination so subsequent swaps chain naturally.
 export function paneModeSwapWith(sourceId: string, targetId: string): void {
-  const draft = draftLayout();
+  const draft = ownDraftLayout();
   if (!draft) return;
   swapPaneContentsIn(draft, sourceId, targetId);
 }
@@ -5079,20 +5121,35 @@ export function paneModeResize(
   axis: SplitNode["direction"],
   positive: boolean,
   amount: number,
-  tmux = false,
 ): void {
   const draft = draftLayout();
   if (!draft) return;
   const split = nearestAncestorSplit(draft, draft.activePaneId, axis);
-  if (!split) return;
+  if (!split || !noteTmuxResize(split)) return;
   const delta = positive ? amount : -amount;
-  split.ratio = Math.max(tmux ? 0 : 0.05, Math.min(tmux ? 1 : 0.95, split.ratio + delta));
+  // tmux holds a pane to its own minimum, and its next layout shows where
+  // the divider landed.
+  const [min, max] = paneMode.tmux ? [0, 1] : [0.05, 0.95];
+  split.ratio = Math.max(min, Math.min(max, split.ratio + delta));
 }
 
 export function paneModeEqualize(): void {
   const draft = draftLayout();
   if (!draft) return;
+  const split = parentOf(draft, draft.activePaneId);
+  if (split && !noteTmuxResize(split)) return;
   equalizePaneIn(draft, draft.activePaneId);
+}
+
+/// Whether the draft may move `split`'s divider, noting the move for a tmux
+/// window's commit. tmux shows only the splits the live tree has, so a split
+/// staged in the same transaction keeps the half tmux gives its new pane.
+function noteTmuxResize(split: SplitNode): boolean {
+  const tmux = paneMode.tmux;
+  if (!tmux) return true;
+  if (layout.nodes[split.id]?.kind !== "split") return false;
+  if (!tmux.resized.includes(split.id)) tmux.resized.push(split.id);
+  return true;
 }
 
 function equalizePaneIn(state: LayoutState, paneId: string): boolean {
@@ -5141,12 +5198,23 @@ function insertSiblingPaneIn(
 /// Hybrid Nav `/` and `?` keybinds. Splits the focused pane in the
 /// draft tree only; Enter seals the split and any tabs spawned during
 /// the mode, Esc rolls everything back. Structural actions are
-/// constrained to right + down.
+/// constrained to right + down. In a tmux window the split is staged for
+/// tmux, so only a pane tmux shows can be split: a pane staged in the same
+/// transaction has no tmux pane yet.
 export function paneModeSplit(direction: "row" | "column"): void {
   const draft = draftLayout();
   if (!draft) return;
   const original = draft.nodes[draft.activePaneId];
   if (!original || original.kind !== "leaf") return;
+  if (paneMode.tmux) {
+    const tab = activeTabInPane(original);
+    if (tab?.kind !== "terminal" || !tab.tmuxPane || !tab.terminalSessionId) return;
+    paneMode.tmux.splits.push({
+      sessionId: tab.terminalSessionId,
+      pane: tab.tmuxPane.pane,
+      horizontal: direction === "row",
+    });
+  }
   const newPane: LeafNode = {
     kind: "leaf",
     id: id("pane"),
@@ -5155,10 +5223,9 @@ export function paneModeSplit(direction: "row" | "column"): void {
   };
   insertSiblingPaneIn(draft, original.id, newPane, direction, "after");
   draft.activePaneId = newPane.id;
-  // Terminal-only windows never have an empty pane: a freshly-split pane gets
-  // its own terminal so the new split is immediately usable.
   // A window with no workspace never sits on an empty pane: there is no
-  // welcome surface to fill it, so a split lands a terminal.
+  // welcome surface to fill it, so a split lands a terminal. In a tmux
+  // window the empty pane stands for the one tmux adds on the commit.
   if (!windowCaps.workspace) paneModeOpenTerminal();
 }
 
@@ -5183,7 +5250,7 @@ export type SpawnContext = {
 /// pane. The session WebSocket opens only when the tab mounts, so an
 /// Esc rollback leaves no backend state behind.
 export function paneModeOpenTerminal(ctx?: SpawnContext): void {
-  const draft = draftLayout();
+  const draft = ownDraftLayout();
   if (!draft) return;
   const p = draft.nodes[draft.activePaneId];
   if (!p || p.kind !== "leaf") return;
@@ -5217,7 +5284,7 @@ export function paneModeOpenTerminal(ctx?: SpawnContext): void {
 /// inspector opens so the auto-selected node lands with its info pane
 /// already visible.
 export function paneModeOpenBrowser(ctx?: SpawnContext): void {
-  const draft = draftLayout();
+  const draft = ownDraftLayout();
   if (!draft) return;
   const p = draft.nodes[draft.activePaneId];
   if (!p || p.kind !== "leaf") return;
@@ -5240,7 +5307,7 @@ export function paneModeOpenBrowser(ctx?: SpawnContext): void {
 /// carries a file or dir, scope the new tab to that node and pre-select
 /// it; GraphPanel pops the inspector on `pendingSelectId`.
 export function paneModeOpenGraph(ctx?: SpawnContext): void {
-  const draft = draftLayout();
+  const draft = ownDraftLayout();
   if (!draft) return;
   const p = draft.nodes[draft.activePaneId];
   if (!p || p.kind !== "leaf") return;
@@ -5274,7 +5341,7 @@ export function paneModeOpenGraph(ctx?: SpawnContext): void {
 }
 
 export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
-  const draft = draftLayout();
+  const draft = ownDraftLayout();
   if (!draft) return;
   const p = draft.nodes[draft.activePaneId];
   if (!p || p.kind !== "leaf") return;
@@ -5411,7 +5478,7 @@ export function openIndexingDashboard(): void {
 /// multiple staged drafts, each targeting the pane focused at press
 /// time.
 export function paneModeStageDraftEditor(kind: PaneModeDraftEditorKind = "draft"): void {
-  if (!paneMode.active || !paneMode.draft || paneMode.stale) return;
+  if (!paneMode.active || !paneMode.draft || paneMode.stale || paneMode.tmux) return;
   const paneId = paneMode.draft.activePaneId;
   const node = leafPaneFrom(paneMode.draft, paneId);
   paneMode.stagedDraftEditors.push({
@@ -5529,6 +5596,7 @@ export function selectTabInPane(paneId: string, tabId: string): void {
 }
 
 export function moveActiveTabToSide(targetSide: PaneSide): boolean {
+  if (!panesHaveSides()) return false;
   const current = activeLayout();
   const p = activePane();
   const sourceSide = paneSide(p);
@@ -5779,6 +5847,7 @@ export function swapPanes(sourcePaneId: string, otherPaneId: string): boolean {
 
 /// Flip the pane between its A and B tab sides.
 export function flipHybrid(paneId: string): void {
+  if (!panesHaveSides()) return;
   const node = activeLayout().nodes[paneId];
   if (!node || node.kind !== "leaf") return;
   const next = oppositePaneSide(paneSide(node));
@@ -7084,8 +7153,12 @@ function markPaneModeStale(): void {
 /// Screen an authoritative remote layout against the fixed entry snapshot.
 /// Once stale, every subsequent snapshot replaces the pending value, including
 /// a snapshot that happens to resemble the original baseline.
+///
+/// A tmux window's transaction never replaces the live tree, so nothing a
+/// remote writes there conflicts with it: tmux's layout, and a peer's copy of
+/// it, apply at once.
 export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
-  if (!paneMode.active) return false;
+  if (!paneMode.active || paneMode.tmux) return false;
   if (paneMode.stale) {
     paneMode.pendingRemoteLayout = clonePaneModeRemoteLayout(incoming);
     return true;
@@ -7100,9 +7173,10 @@ export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
 
 /// Authoritative terminal metadata callers invoke this only after detecting
 /// and applying a settled live-pair change. It never manufactures a pending
-/// session snapshot.
+/// session snapshot. A tmux window's commit keeps the live tabs, and with
+/// them the change.
 export function paneModeMarkStaleForAuthoritativeMetadata(): void {
-  if (!paneMode.active) return;
+  if (!paneMode.active || paneMode.tmux) return;
   markPaneModeStale();
 }
 

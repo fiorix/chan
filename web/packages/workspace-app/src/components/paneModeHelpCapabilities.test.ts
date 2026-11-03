@@ -29,12 +29,14 @@ async function actionsFor(
   kind: string,
   tenantFiles: boolean,
   tenantDrafts = false,
+  tmux = false,
 ): Promise<string[]> {
   vi.resetModules();
   window.history.replaceState({}, "", `/?kind=${kind}&w=w-1`);
   serveMeta("chan-files", tenantFiles);
   serveMeta("chan-drafts", tenantDrafts);
   svelte = await import("svelte");
+  (await import("../state/tabs.svelte")).paneMode.tmux = tmux ? { splits: [], resized: [] } : null;
   const PaneModeHelp = (await import("./PaneModeHelp.svelte")).default;
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -123,6 +125,16 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       el.textContent?.trim(),
     );
     expect(titles).not.toContain("Dock");
+  });
+
+  test("a tmux window lists the splits and resizes, and no tile swap, staged tab or side flip", async () => {
+    const actions = await actionsFor("terminal", true, true, true);
+    for (const action of ["Move focus", "Split right", "Split down", "Move divider left / right", "Commit draft"]) {
+      expect(actions, action).toContain(action);
+    }
+    for (const action of ["Swap tile with neighbour", "Stage Terminal", "Stage File Browser", "Stage New Draft", "Flip side"]) {
+      expect(actions, action).not.toContain(action);
+    }
   });
 
   test("a control terminal is terminals-only too", async () => {

@@ -1,5 +1,15 @@
-import { allPaneTabs, type Node, type SplitNode, type TerminalTab } from "./tabs.svelte";
+import {
+  allPaneTabs,
+  type LayoutState,
+  type Node,
+  type PaneModeTmux,
+  type SplitNode,
+  type TerminalTab,
+} from "./tabs.svelte";
 import type { TmuxLayoutNode, TmuxRequest } from "./tmux";
+
+/// A tmux request and the session it rides.
+export type TmuxCall = { sessionId: string; request: TmuxRequest };
 
 export type TmuxPaneResize = {
   sessionId: string;
@@ -96,4 +106,25 @@ export function tmuxResizeForSplit(
     return null;
   };
   return find(tree);
+}
+
+/// What a Hybrid Nav commit in a tmux window asks tmux for, in order: a pane
+/// resize for each moved divider tmux's last layout can place, then the
+/// staged splits as they were made. The resizes go first because each names
+/// a border of the layout as it stands, which a split moves.
+export function tmuxPaneModeRequests(
+  draft: LayoutState,
+  staged: PaneModeTmux,
+  tree: TmuxLayoutNode | null,
+): TmuxCall[] {
+  const resizes = staged.resized.flatMap((id) => {
+    const split = draft.nodes[id];
+    const resize = tree && split?.kind === "split" ? tmuxResizeForSplit(split, draft.nodes, tree, split.ratio) : null;
+    return resize ? [resize] : [];
+  });
+  const splits = staged.splits.map(({ sessionId, pane, horizontal }) => ({
+    sessionId,
+    request: { request: "split" as const, pane, horizontal },
+  }));
+  return [...resizes, ...splits];
 }

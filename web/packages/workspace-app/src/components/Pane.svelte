@@ -198,9 +198,10 @@
   // A pane showing a tmux pane is tmux's: its one tab is the pane, so the
   // strip with its drag handle is hidden, nothing is dropped into it and
   // nothing is dragged out of it; the window's splits are tmux's layout and
-  // its content stays in the window.
+  // its content stays in the window. So is a pane Hybrid Nav stages in a tmux
+  // window, which stands for the pane tmux adds on the commit.
   const tmuxPaneHere = $derived(
-    everyTab.some((tab) => tab.kind === "terminal" && Boolean(tab.tmuxPane)),
+    paneMode.tmux !== null || everyTab.some((tab) => tab.kind === "terminal" && Boolean(tab.tmuxPane)),
   );
   type PaneFlipAxis = "horizontal" | "vertical";
 
@@ -1786,7 +1787,7 @@
             {#if paneMode.stale && viewLayout.activePaneId === pane.id}
               <div class="pane-mode-stale-warning" role="status">Layout changed. Esc to discard.</div>
             {:else}
-              <div class="pane-mode-title">{active ? tabLabel(active, browserCtxFor(active)) : "Empty pane"}</div>
+              <div class="pane-mode-title">{active ? tabLabel(active, browserCtxFor(active)) : paneMode.tmux ? "New tmux pane" : "Empty pane"}</div>
               <div class="pane-mode-subtitle">
                 {active?.kind === "file"
                   ? active.path
@@ -1800,7 +1801,9 @@
                           ? "dashboard"
                           : active?.kind === "extension"
                             ? `extension: ${active.extensionId}`
-                          : "no active tab"}
+                          : paneMode.tmux
+                            ? "terminal"
+                            : "no active tab"}
               </div>
             {/if}
           </div>
