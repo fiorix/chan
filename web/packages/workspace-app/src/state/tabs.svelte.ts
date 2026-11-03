@@ -5253,8 +5253,8 @@ export type SpawnContext = {
 };
 
 /// Hybrid Nav `t`. Spawn a new terminal tab inside the draft's focused
-/// pane. The session WebSocket opens only when the tab mounts, so an
-/// Esc rollback leaves no backend state behind.
+/// pane. The draft renders, so the staged tab mounts and starts its shell at
+/// once; an Esc rollback kills it (`killStagedTerminalSessions`).
 export function paneModeOpenTerminal(ctx?: SpawnContext): void {
   const draft = ownDraftLayout();
   if (!draft) return;
