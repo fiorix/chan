@@ -1,12 +1,12 @@
 // Hybrid Nav in a tmux window. tmux owns the window's layout, so the
 // transaction stages what tmux will do: a split shows a staged pane and sends
-// tmux the split on Enter, a divider move sends a pane resize, Escape sends
-// nothing, and the layouts tmux sends during the transaction (here from a
-// split and a kill made outside chan) never mark it stale. A window resize
-// during the transaction reaches tmux once it ends. A tmux window has no A/B
-// sides: Hybrid Nav's Tab and the flip command leave the side alone, and the
-// cheatsheet lists neither Tab nor the keys that would stage a local tab or
-// swap tiles.
+// tmux the split on Enter, a divider move by key or mouse drag sends a pane
+// resize on Enter, Escape sends nothing, and the layouts tmux sends during the
+// transaction (here from a split and a kill made outside chan) never mark it
+// stale. A window resize during the transaction reaches tmux once it ends. A
+// tmux window has no A/B sides: Hybrid Nav's Tab and the flip command leave
+// the side alone, and the cheatsheet lists neither Tab nor the keys that would
+// stage a local tab or swap tiles.
 //
 // Skips when tmux is not installed or the launcher bundle is missing.
 
@@ -70,6 +70,23 @@ const pageState = (page) =>
     help: [...document.querySelectorAll(".pane-mode-help [aria-label]")].map((el) => el.getAttribute("aria-label")),
     status: document.querySelector(".status-msg")?.textContent ?? null,
   }));
+
+/// Drag the page's one vertical divider `dx` pixels with the mouse; answers
+/// its value (the left pane's share, in percent) before and after.
+async function dragDivider(page, dx) {
+  const divider = () =>
+    page.evaluate(() => {
+      const el = document.querySelector(".split.row > .divider");
+      const box = el.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2, value: Number(el.getAttribute("aria-valuenow")) };
+    });
+  const from = await divider();
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + dx, from.y, { steps: 5 });
+  await page.mouse.up();
+  return { before: from.value, after: (await divider()).value };
+}
 
 async function dispatchCommand(page, name) {
   await page.evaluate((command) => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: command } })), name);
@@ -186,6 +203,35 @@ export default {
       await poll("tmux widened the left pane", () => {
         const now = tmuxPanes();
         return now.length === 2 && now[0].width > split[0].width + 3 ? now : null;
+      }, 10_000);
+
+      // A mouse drag of the divider is staged the same way: Escape leaves
+      // tmux's panes alone, and Enter sends the resize.
+      step("drag then Escape");
+      await wait(SETTLE_MS);
+      const widths = JSON.stringify(tmuxPanes());
+      await dispatchCommand(page, "app.pane.mode");
+      await page.waitForSelector(".app.pane-mode", { timeout: 10_000 });
+      const preview = await dragDivider(page, -200);
+      check(preview.after < preview.before - 5, `the drag left the draft's divider in place: ${JSON.stringify(preview)}`);
+      await wait(SETTLE_MS);
+      check(JSON.stringify(tmuxPanes()) === widths, `the drag reached tmux before Enter: ${widths} became ${JSON.stringify(tmuxPanes())}`);
+      await page.keyboard.press("Escape");
+      await wait(SETTLE_MS);
+      state = await pageState(page);
+      check(!state.paneMode && JSON.stringify(tmuxPanes()) === widths, `after Escape: tmux ${widths} became ${JSON.stringify(tmuxPanes())}, page ${JSON.stringify(state)}`);
+
+      step("drag then Enter");
+      await dispatchCommand(page, "app.pane.mode");
+      await page.waitForSelector(".app.pane-mode", { timeout: 10_000 });
+      await dragDivider(page, -200);
+      await wait(SETTLE_MS);
+      check(JSON.stringify(tmuxPanes()) === widths, `the drag reached tmux before Enter: ${widths} became ${JSON.stringify(tmuxPanes())}`);
+      await page.keyboard.press("Enter");
+      const dragged = JSON.parse(widths);
+      await poll("tmux narrowed the left pane", () => {
+        const now = tmuxPanes();
+        return now.length === 2 && now[0].width < dragged[0].width - 5 ? now : null;
       }, 10_000);
 
       // No sides: Tab, the cheatsheet and the flip command.

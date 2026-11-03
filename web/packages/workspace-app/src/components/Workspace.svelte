@@ -14,7 +14,14 @@
   // cross-axis space.
 
   import { api } from "../api/client";
-  import { activeLayout, type LeafNode, type SplitNode } from "../state/tabs.svelte";
+  import {
+    activeLayout,
+    noteTmuxResize,
+    paneMode,
+    paneModeMayResize,
+    type LeafNode,
+    type SplitNode,
+  } from "../state/tabs.svelte";
   import { tmuxResizeForSplit } from "../state/tmuxResize";
   import { endTmuxDrag, startTmuxDrag, tmuxLayout } from "../state/tmuxWindowSize.svelte";
   import {
@@ -33,6 +40,11 @@
   function startResize(e: MouseEvent, split: SplitNode): void {
     const tmuxTree = tmuxLayout();
     if (tmuxTree && !tmuxResizeForSplit(split, viewLayout.nodes, tmuxTree, split.ratio)) return;
+    // Hybrid Nav in a tmux window stages the move like a keyboard one, under
+    // the same rule: Enter sends it with the rest of the transaction, and the
+    // window size waits for the whole mode.
+    if (!paneModeMayResize(split)) return;
+    const staged = paneMode.tmux !== null;
     e.preventDefault();
     const splitEl = (e.currentTarget as HTMLElement).parentElement;
     if (!splitEl) return;
@@ -44,7 +56,7 @@
     const startRatio = split.ratio;
     // tmux lays its panes out inside the window size this page asks for, so
     // the ask waits from here until tmux has answered the drag's resize.
-    if (tmuxTree) startTmuxDrag();
+    if (tmuxTree && !staged) startTmuxDrag();
 
     const onMove = (ev: MouseEvent) => {
       const coord = isRow ? ev.clientX : ev.clientY;
@@ -64,6 +76,10 @@
       // child elements with their own cursor styles).
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
+      if (staged) {
+        if (split.ratio !== startRatio && !noteTmuxResize(split)) split.ratio = startRatio;
+        return;
+      }
       if (tmuxTree) {
         const resize =
           split.ratio === startRatio

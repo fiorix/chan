@@ -5141,14 +5141,19 @@ export function paneModeEqualize(): void {
   equalizePaneIn(draft, draft.activePaneId);
 }
 
+/// Whether the draft may move `split`'s divider. tmux shows only the splits
+/// the live tree has, so in a tmux window a split staged in the same
+/// transaction keeps the half tmux gives its new pane.
+export function paneModeMayResize(split: SplitNode): boolean {
+  return !paneMode.tmux || layout.nodes[split.id]?.kind === "split";
+}
+
 /// Whether the draft may move `split`'s divider, noting the move for a tmux
-/// window's commit. tmux shows only the splits the live tree has, so a split
-/// staged in the same transaction keeps the half tmux gives its new pane.
-function noteTmuxResize(split: SplitNode): boolean {
+/// window's commit.
+export function noteTmuxResize(split: SplitNode): boolean {
+  if (!paneModeMayResize(split)) return false;
   const tmux = paneMode.tmux;
-  if (!tmux) return true;
-  if (layout.nodes[split.id]?.kind !== "split") return false;
-  if (!tmux.resized.includes(split.id)) tmux.resized.push(split.id);
+  if (tmux && !tmux.resized.includes(split.id)) tmux.resized.push(split.id);
   return true;
 }
 

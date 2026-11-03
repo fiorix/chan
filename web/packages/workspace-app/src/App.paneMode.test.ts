@@ -12,7 +12,8 @@
 // live terminal there asks first. While a dialog is open, the keys and host
 // commands meant for it stay with it: none of them enters, commits or drops
 // Hybrid Nav or acts on the layout under the dialog. In a tmux window the
-// draft stages what tmux is asked for on Enter, and its panes have no sides.
+// draft stages what tmux is asked for on Enter, a divider drag's resize
+// included, and its panes have no sides.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -61,7 +62,7 @@ import {
   type Tab,
 } from "./state/tabs.svelte";
 import { closeTeamDialog, teamDialogState } from "./state/teamDialog.svelte";
-import { setTmuxLayout } from "./state/tmuxWindowSize.svelte";
+import { setTmuxLayout, tmuxWindowSizeHeld } from "./state/tmuxWindowSize.svelte";
 
 stubAppEnvironment();
 
@@ -126,6 +127,18 @@ function rootSplit(state: LayoutState): Split {
 
 function kinds(tabs: Tab[]): string[] {
   return tabs.map((tab) => tab.kind);
+}
+
+/// Drag the layout's only divider from the middle of its 1000 px split to `x`.
+/// Answers whether the divider took the press.
+async function dragDivider(x: number): Promise<boolean> {
+  const divider = document.querySelector<HTMLElement>(".split > .divider")!;
+  vi.spyOn(divider.parentElement!, "getBoundingClientRect").mockReturnValue({ width: 1000, height: 600 } as DOMRect);
+  const taken = !divider.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 500 }));
+  window.dispatchEvent(new MouseEvent("mousemove", { clientX: x }));
+  window.dispatchEvent(new MouseEvent("mouseup"));
+  await settle();
+  return taken;
 }
 
 describe("entering and leaving Hybrid Nav", () => {
@@ -202,6 +215,19 @@ describe("arranging the draft", () => {
     await keys("0");
     expect(rootSplit(draft()).ratio).toBe(0.5);
     expect(rootSplit(layout).ratio).toBe(0.5);
+  });
+
+  test("a divider drag moves the draft's divider, a staged split's too, and Enter keeps it", async () => {
+    resetLayout([DOC()]);
+    await settle();
+    await enterHybridNav();
+    await keys("/");
+
+    expect(await dragDivider(700)).toBe(true);
+    expect(rootSplit(draft()).ratio).toBeCloseTo(0.7);
+    await keys("Enter");
+
+    expect(rootSplit(layout).ratio).toBeCloseTo(0.7);
   });
 
   test("Tab flips the focused pane's side in the draft and stays in Hybrid Nav", async () => {
@@ -669,6 +695,25 @@ describe("in a tmux window", () => {
     return request;
   }
 
+  /// Two panes side by side showing tmux panes %0 and %1, with tmux's layout
+  /// for them.
+  async function tmuxPair() {
+    resetLayout([TMUX_TAB("t0", "s0", "%0")]);
+    const right = splitPane("pane-test", "row")!;
+    leaf(layout, right).tabs.push(TMUX_TAB("t1", "s1", "%1"));
+    leaf(layout, right).activeTabId = "t1";
+    layout.activePaneId = "pane-test";
+    setTmuxLayout({ kind: "row", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 60, h: 40 },
+      { kind: "pane", session: "s1", w: 59, h: 40 },
+    ] });
+    const request = vi.spyOn(api, "tmuxRequest").mockResolvedValue(undefined);
+    await settle();
+    return request;
+  }
+
+  const WIDEN_LEFT = ["s0", { request: "resize-pane", pane: "%0", axis: "width", cells: 83 }];
+
   function tmuxLayoutFrame(layout: unknown): void {
     onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "tmux_layout", layout });
   }
@@ -752,6 +797,68 @@ describe("in a tmux window", () => {
       ["s0", { request: "split", pane: "%0", horizontal: false }],
       ["s1", { request: "split", pane: "%1", horizontal: true }],
     ]);
+  });
+
+  test("a divider drag stages its pane resize for Enter, and the window size waits no longer than the mode", async () => {
+    const request = await tmuxPair();
+    await enterHybridNav();
+
+    await dragDivider(700);
+    expect(rootSplit(draft()).ratio).toBeCloseTo(0.7);
+    expect(asked(request)).toEqual([]);
+    await keys("Enter");
+
+    expect(asked(request)).toEqual([WIDEN_LEFT]);
+    expect(rootSplit(layout).ratio).toBe(0.5);
+    expect(tmuxWindowSizeHeld()).toBe(false);
+  });
+
+  test("Escape drops a divider drag without asking tmux, and a drag after the mode asks at once", async () => {
+    const request = await tmuxPair();
+    await enterHybridNav();
+    await dragDivider(700);
+
+    await keys("Escape");
+    expect(asked(request)).toEqual([]);
+    expect(rootSplit(layout).ratio).toBe(0.5);
+    expect(tmuxWindowSizeHeld()).toBe(false);
+
+    await dragDivider(700);
+    expect(asked(request)).toEqual([WIDEN_LEFT]);
+  });
+
+  test("a staged split's divider refuses a drag", async () => {
+    const request = await tmuxWindow();
+    await enterHybridNav();
+    await keys("/");
+
+    expect(await dragDivider(700)).toBe(false);
+    expect(rootSplit(draft()).ratio).toBe(0.5);
+    await keys("Enter");
+
+    expect(asked(request)).toEqual([["s0", { request: "split", pane: "%0", horizontal: true }]]);
+  });
+
+  test("a divider whose split the live tree lost refuses a drag, as it refuses the keys", async () => {
+    const request = await tmuxPair();
+    await enterHybridNav();
+    // Another client lays the panes out in a column and back: the live tree
+    // rebuilds its root split, and tmux's row places the draft's again.
+    tmuxLayoutFrame({ kind: "column", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 120, h: 20 },
+      { kind: "pane", session: "s1", w: 120, h: 19 },
+    ] });
+    tmuxLayoutFrame({ kind: "row", w: 120, h: 40, children: [
+      { kind: "pane", session: "s0", w: 60, h: 40 },
+      { kind: "pane", session: "s1", w: 59, h: 40 },
+    ] });
+    await settle();
+    expect(layout.nodes[rootSplit(draft()).id]).toBeUndefined();
+
+    expect(await dragDivider(700)).toBe(false);
+    await keys("]", "Enter");
+
+    expect(asked(request)).toEqual([]);
   });
 
   test("a staged pane takes no split or divider move, and nothing stages a tab, swaps tiles or flips a side", async () => {
