@@ -89,7 +89,7 @@ The site runs the launcher SPA frontend-only, with no backend, so the homepage a
 
 ## Manual
 
-`src/manual-pages.json` defines the manual's section order, titles, descriptions and route slugs. The overview is `src/pages/manual.html`; each section's HTML lives under `src/pages/manual/`. The generator wraps each page with shared section navigation, an active-page marker, an index of its linked headings, and previous and next links. Keep section headings as self-links so the page index and shareable anchors agree. All guide content and navigation work without JavaScript. The manual covers terminal commands, editor screenshots and walkthroughs, workspace indexing and search, collaboration and client sessions, and extensions; the overview links to these chapters.
+`src/manual-pages.json` defines the manual's section order, titles, descriptions and route slugs. The overview is `src/pages/manual.html`; each section's HTML lives under `src/pages/manual/`. The generator wraps each page with shared section navigation, an active-page marker, an index of its linked headings, and previous and next links. Keep section headings as self-links so the page index and shareable anchors agree. All guide content and navigation work without JavaScript. The manual covers the Linux default terminal, terminal commands, editor screenshots and walkthroughs, workspace indexing and search, collaboration and client sessions, and extensions; the overview links to these chapters.
 
 The product videos sit beside their manual topics: terminal commands, terminal write and scrollback, and the clipboard in Terminal; Hybrid Nav in Navigation; opening the editor in Editor; graph navigation in Graph; and the empty-workspace animation in Screensavers. Videos use native controls, `preload="none"` and still-frame JPEG posters under `assets/manual/video-posters/`, and play only when requested. The three `assets/home/team-*.png` screenshots form an expandable team example. No page links `home-hero.png`, `team-work-fleet.png` or `team-work-spawn.png` under `assets/`.
 
@@ -128,7 +128,7 @@ A manual Pages deploy (`gh workflow run pages.yml`) ships marketing-only updates
 
 `/install/` separates two installation paths:
 
-- Desktop: Homebrew or the DMG on macOS, the Windows installer, then the Linux AppImage and the managed `chan-desktop` packages.
+- Desktop: Homebrew or the DMG on macOS, the Windows installer, then the Linux AppImage and the managed `chan-desktop` packages (on Arch, also the prebuilt `chan-desktop-bin`). `/manual/install/#default-terminal` explains how a Linux package becomes the default terminal through xdg-terminal-exec.
 - Server: the Unix and Windows installers first, the managed `chan` packages second, then Docker and the optional self-hosted gateway.
 
 The standalone installers support the active CLI release targets: Linux x86_64 and aarch64, macOS aarch64, FreeBSD x86_64 and aarch64, and Windows x86_64. Desktop packages are downloaded directly as release artifacts and are not installed by `install.sh`. Raw CLI archives remain in the release metadata and on GitHub Releases but are not presented as primary install-page choices.

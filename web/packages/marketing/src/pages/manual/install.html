@@ -21,6 +21,40 @@
   <p>Run <code>target/release/chan-desktop</code> from an X11 or Wayland session. A source build does not update itself: pull and build again to upgrade.</p>
 </section>
 
+<section class="manual-block" id="default-terminal">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#default-terminal">Default terminal on Linux</a></h2>
+  </div>
+  <p>Linux desktops that open terminals through <a href="https://github.com/Vladimir-csp/xdg-terminal-exec">xdg-terminal-exec</a>, such as Omarchy, can open them in Chan Desktop: the terminal key binding, TUIs, and installer scripts alike. The Arch, Ubuntu, Fedora, and Nix packages install the desktop entry this needs, <code>chan-desktop.desktop</code>. The AppImage's entry lacks its terminal keys, so the AppImage cannot be chosen.</p>
+  <p>xdg-terminal-exec runs the first valid entry in <code>~/.config/xdg-terminals.list</code>. Make Chan Desktop that entry:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>echo chan-desktop.desktop &gt; ~/.config/xdg-terminals.list</b></code>
+    {{copyButton}}
+  </div>
+  <p class="minor">This replaces the list, as Omarchy's terminal picker does; list other terminals on the lines below it to keep a fallback. A list named for your desktop, such as <code>~/.config/hyprland-xdg-terminals.list</code>, takes precedence when it exists.</p>
+  <p>Check the choice. This prints <code>chan-desktop.desktop</code>:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>xdg-terminal-exec --print-id</b></code>
+    {{copyButton}}
+  </div>
+  <p>Then open a shell in your home directory, and a program in a window of its own:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>xdg-terminal-exec --dir="$HOME"</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>xdg-terminal-exec --app-id=TUI.float -e top</b></code>
+    {{copyButton}}
+  </div>
+  <p>How Chan Desktop takes each launch:</p>
+  <ul>
+    <li>A launch with no command, like Omarchy's Super+Return, opens your shell in the directory <code>--dir</code> names, or in the current one. When Chan Desktop is running, the shell opens in a new terminal window of the running app, one that is not restored at its next launch. Otherwise a launch with <code>--dir</code> opens a window of its own, and a launch with no options at all starts Chan Desktop.</li>
+    <li>A launch with a command runs it in a window and process of its own, apart from a running Chan Desktop, and exits with the command's exit code when it ends. <code>--hold</code> keeps the window open after the command exits, until you close it. A command that is not on your <code>PATH</code> exits with status 127 and opens no window.</li>
+    <li><code>--app-id</code> sets the window's Wayland app id, or its X11 class, so compositor window rules can match it: Omarchy floats <code>TUI.float</code>. <code>--title</code> sets the window title. Either one also gives the launch a process of its own.</li>
+  </ul>
+  <p class="minor">xdg-terminal-exec maps its options onto Chan Desktop's own flags, which also work directly: <code>chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] [-e CMD ARGS... | -- CMD ARGS...]</code>.</p>
+</section>
+
 <section class="manual-block" id="first-run">
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#first-run">First run: a terminal and the Computers screen</a></h2>
