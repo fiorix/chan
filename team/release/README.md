@@ -150,7 +150,7 @@ New agents should also read [`.agents/playbook.md`](../../.agents/playbook.md), 
 - [release-v0.120.1](release-v0.120.1.md) - a patch over v0.120.0: the Computers card scrolls with the mouse and shows its last workspace whole; a tmux pane drag no longer fights tmux's re-layout.
 - [release-v0.121.0](release-v0.121.0.md) - the last shown window kept while terminals would die with it, keys held under an open dialog, drag highlights kept on macOS after the launcher was shown, ghostty copies and Select all in one core call, Delete sent in a ghostty terminal when WebKit takes it as text input, the editor's URL bubble and popovers closed with their tab, `chan close` refusing to report a held workspace closed, and Cachix pins kept to the last 10 releases; Cmd+` closed as working; see-through terminal bodies carried to v0.122.0.
 - [release-v0.122.0](release-v0.122.0.md) - the Computers launcher keeping the keyboard after an app switch on macOS, and chan described as a supercharged terminal emulator across the package descriptions, help, design documents, guides, manual and site; see-through terminal bodies withdrawn.
-- [release-v0.123.0](release-v0.123.0.md) - Hybrid Nav staging what tmux will be asked for in a tmux window, a terminal staged in Hybrid Nav named by the server, and one Hybrid Nav divider step.
+- [release-v0.123.0](release-v0.123.0.md) - Hybrid Nav staging what tmux will be asked for in a tmux window, a terminal staged in Hybrid Nav named by the server, one Hybrid Nav divider step, and chan-desktop-bin, a prebuilt chan-desktop on the AUR.
 
 ## Conventions
 

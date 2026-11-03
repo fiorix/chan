@@ -11,17 +11,17 @@ Hybrid Nav treated a `tmux -CC` window as a chan layout and fought tmux:
 - A split (`/`, `?`) staged a local shell. Its first session frame renamed the staged terminal and marked the transaction stale ("Layout changed. Esc to discard.").
 - Every `tmux_layout` went through the peer-conflict screen, where tmux's tabs (no name, no active marker) never match the entry layout, so any layout tmux sent read as a conflict.
 - A browser resize during the mode asked tmux for the old grid, since terminals measure nothing while the draft shows, and nothing asked again afterwards.
-- A divider drag sent its `resize-pane` on release even while Hybrid Nav was up, so it reached tmux before Enter, Escape could not undo it, and it started a drag hold on the window size beside the mode's own.
+- A divider drag sent its `resize-pane` on release even while Hybrid Nav was up, so it reached tmux before Enter, Escape could not undo it, and it started a drag hold on the window size.
 - The A/B flip, send-to-side and Hybrid Nav's `Tab` acted on panes that are tmux's panes, which have no sides.
 
 ## Desired contract
 
-1. In a tmux window, Hybrid Nav stages what tmux will be asked for. A split adds an empty "New tmux pane" to the draft and starts no local shell; a staged pane takes no further split or divider move. A divider move, by key or by a drag, previews in the draft and sends nothing.
+1. In a tmux window, Hybrid Nav stages what tmux will be asked for. A split adds an empty "New tmux pane" to the draft and starts no local shell; a staged pane takes no further split, and a staged split's divider does not move. A divider move, by key or by a drag, previews in the draft and sends nothing.
 2. Enter sends the `resize-pane` requests, then the splits in the order staged, one at a time; the live tree stays tmux's and its next layout shows the result. Escape sends nothing.
 3. tmux layouts, peer session blobs and terminal renames apply to the live tree at once and never mark the transaction stale.
 4. The tmux window-size ask is held while Hybrid Nav is up and follows when it ends.
 5. A tmux window's panes have no A/B sides: the flip, send-to-side, tile swaps and tab staging are refused there, and the launcher and the cheatsheet do not offer them.
-6. Outside Hybrid Nav, and in windows that show no tmux pane, nothing changes.
+6. Outside Hybrid Nav a divider drag in a tmux window is unchanged, and windows that show no tmux pane do not change; the side refusals of contract 5 hold in and out of the mode.
 
 ## Closing
 

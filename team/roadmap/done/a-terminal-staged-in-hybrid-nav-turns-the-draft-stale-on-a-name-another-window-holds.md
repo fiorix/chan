@@ -10,7 +10,7 @@ A terminal staged in Hybrid Nav (`t`, or a split in a window without a workspace
 
 ## Desired contract
 
-1. A staged terminal asks for the server's next name as any new terminal does.
+1. A staged terminal takes the name the server proposes, as any new terminal does.
 2. A settled name for a tab that only the draft holds does not stale the transaction; the commit adopts the tab with its name. This covers the server settling another name when two spawns race for one proposal.
 3. A live terminal renamed during the mode still stales it, through the roster, the rename ack or its session frame.
 

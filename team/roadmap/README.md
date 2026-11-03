@@ -33,9 +33,10 @@ Opened 2026-11-03 at the v0.123.0 close with no rows.
 
 ### v0.123.0
 
-Shipped 2026-11-03; see [release-v0.123.0](../release/release-v0.123.0.md). A no-rc release by the owner's word: the five Hybrid Nav commits from the owner's local branch, rebased onto `main`, under three rows, all shipped; those rows are in [`done/`](done/).
+Shipped 2026-11-03; see [release-v0.123.0](../release/release-v0.123.0.md). A no-rc release by the owner's word: the five Hybrid Nav commits from the owner's local branch, rebased onto `main`, under three rows, all shipped; those rows are in [`done/`](done/). `chan-desktop-bin`, from another of the owner's sessions, was folded in during the cut by the owner's word and shipped with no row before the GA; its item is in [`done/`](done/) too.
 
 - [a-terminal-staged-in-hybrid-nav-turns-the-draft-stale-on-a-name-another-window-holds](done/a-terminal-staged-in-hybrid-nav-turns-the-draft-stale-on-a-name-another-window-holds.md) - A terminal staged in Hybrid Nav turns the draft stale on a name another window holds.
+- [chan-desktop-on-the-aur-builds-from-source](done/chan-desktop-on-the-aur-builds-from-source.md) - chan-desktop on the AUR builds from source.
 - [hybrid-nav-fights-tmux-in-a-tmux-window](done/hybrid-nav-fights-tmux-in-a-tmux-window.md) - Hybrid Nav fights tmux in a tmux window.
 - [hybrid-navs-shift-resize-step-does-not-fire-on-a-us-layout](done/hybrid-navs-shift-resize-step-does-not-fire-on-a-us-layout.md) - Hybrid Nav's Shift resize step does not fire on a US layout.
 

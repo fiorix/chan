@@ -6,7 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [v0.123.0] - 2026-11-03
 
-v0.123.0 makes Hybrid Nav stage what tmux will be asked for in a tmux window, names a terminal staged in Hybrid Nav from the server, and gives Hybrid Nav one divider step.
+v0.123.0 makes Hybrid Nav stage what tmux will be asked for in a tmux window, names a terminal staged in Hybrid Nav from the server, gives Hybrid Nav one divider step, and publishes `chan-desktop-bin`, a prebuilt chan-desktop for the AUR.
+
+### Added
+
+- **chan-desktop-bin on the AUR.** Arch, CachyOS and Omarchy users can install chan-desktop without compiling it: `chan-desktop-bin` installs the desktop from a GitHub release asset built from the tag on an Arch Linux Archive snapshot six weeks before it, so it also runs on systems that hold their mirrors behind current Arch. It provides and conflicts with `chan` and `chan-desktop`, and is x86_64 only.
 
 ### Changed
 
@@ -15,7 +19,7 @@ v0.123.0 makes Hybrid Nav stage what tmux will be asked for in a tmux window, na
 ### Fixed
 
 - **Hybrid Nav works with tmux in a tmux window.** In a window that shows a `tmux -CC` window, Hybrid Nav previews what tmux will be asked for: a split shows a staged New tmux pane and starts no local shell, and a divider move, by key or by dragging the divider, shows the new size. Enter asks tmux for them one at a time and the panes arrive as tmux lays them out; Escape asks nothing. tmux's own layouts no longer read as "Layout changed", a window resize during the mode reaches tmux when it ends, and the A/B flip, send-to-side and Hybrid Nav's Tab, which a tmux pane has no use for, are not offered there.
-- **A terminal staged in Hybrid Nav no longer turns the draft stale.** A staged terminal took a placeholder name counted from its own window; when another window held that name, the server settled another one and the draft read "Layout changed. Esc to discard." as soon as the terminal connected. A staged terminal now asks the server for its name as any new terminal does.
+- **A terminal staged in Hybrid Nav no longer turns the draft stale.** A staged terminal took a placeholder name counted from its own window; when another window held that name, the server settled another one and the draft read "Layout changed. Esc to discard." as soon as the terminal connected. A staged terminal now takes the name the server proposes, as any new terminal does.
 
 ## [v0.122.0] - 2026-11-02
 
