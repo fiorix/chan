@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   applyTerminalRoster,
+  applyTerminalSessionMetadata,
   cancelPaneMode,
   enterPaneMode,
   flipHybrid,
@@ -638,6 +639,10 @@ function resetLiveTerminal(): void {
   layout.focusColor = "blue";
 }
 
+function liveTerminal(): TerminalTab {
+  return (layout.nodes["pane-1"] as LeafNode).tabs[0] as TerminalTab;
+}
+
 function resetLiveSplit(): {
   split: SplitNode;
   left: LeafNode;
@@ -813,7 +818,7 @@ describe("Pane Mode remote-layout deferral", () => {
     resetLiveTerminal();
     enterPaneMode();
 
-    paneModeMarkStaleForAuthoritativeMetadata();
+    paneModeMarkStaleForAuthoritativeMetadata(liveTerminal());
 
     expect(paneMode.stale).toBe(true);
     expect(paneMode.pendingRemoteLayout).toBeNull();
@@ -840,6 +845,29 @@ describe("Pane Mode remote-layout deferral", () => {
     expect(paneMode.stale).toBe(true);
     expect(paneMode.pendingRemoteLayout).toBeNull();
     applyTerminalRoster([]);
+  });
+
+  test("session metadata stales for a live terminal, not a staged one", () => {
+    resetLiveTerminal();
+    enterPaneMode();
+    paneModeOpenTerminal();
+    // The draft's copies, which the mounted terminals hold during the mode.
+    const draftPane = paneMode.draft!.nodes["pane-1"] as LeafNode;
+    const [live, staged] = draftPane.tabs as TerminalTab[];
+    const settle = (tab: TerminalTab, name: string) =>
+      applyTerminalSessionMetadata(tab, {
+        name,
+        group: "default",
+        spawnName: name,
+        spawnGroup: null,
+      });
+
+    settle(staged!, "Terminal-1-2");
+    expect(staged!.title).toBe("Terminal-1-2");
+    expect(paneMode.stale).toBe(false);
+
+    settle(live!, "renamed");
+    expect(paneMode.stale).toBe(true);
   });
 });
 
@@ -871,7 +899,7 @@ describe("Pane Mode staged editor intent state", () => {
     enterPaneMode();
     paneModeStageDraftEditor();
     const intent = paneMode.stagedDraftEditors[0]!;
-    paneModeMarkStaleForAuthoritativeMetadata();
+    paneModeMarkStaleForAuthoritativeMetadata(liveTerminal());
 
     paneModeRemoveStagedDraftEditor(intent.id);
 

@@ -1103,14 +1103,16 @@ export async function applyGlobalTerminalName(tab: TerminalTab): Promise<void> {
   try {
     const name = (await api.terminalNextName()).trim();
     if (!name) return;
-    // Mutate the LIVE tab from the layout, NOT the passed reference. A tab
-    // object pushed into `$state` is only reactive through its Svelte proxy;
-    // writing `tab.title` on the original (pre-push) object updates the data
-    // but never re-renders the name. Re-find the proxy by id (this also
-    // covers the tab being closed / moved out mid-fetch -> not found -> skip).
-    const live = allTerminalTabs().find((t) => t.id === tab.id);
-    if (!live) return;
-    live.title = name;
+    // Mutate the tab from the layout on screen, NOT the passed reference. A
+    // tab object pushed into `$state` is only reactive through its Svelte
+    // proxy; writing `tab.title` on the original (pre-push) object updates
+    // the data but never re-renders the name. Re-find the proxy by id (this
+    // also covers the tab being closed / moved out mid-fetch -> not found ->
+    // skip). While Hybrid Nav is up the screen shows its draft, the only tree
+    // that holds a staged terminal.
+    const shown = terminalTabsIn(activeLayout()).find((t) => t.id === tab.id);
+    if (!shown) return;
+    shown.title = name;
   } catch {
     // Keep the local placeholder name; the global counter is a nicety, not a
     // correctness requirement.
@@ -2280,7 +2282,7 @@ function applyTerminalLiveMetadata(
   if (changed) {
     tab.terminalEnvNamePromptDismissed = false;
     tab.terminalEnvPromptDismissedFor = undefined;
-    paneModeMarkStaleForAuthoritativeMetadata();
+    paneModeMarkStaleForAuthoritativeMetadata(tab);
   }
   return settled;
 }
@@ -7177,11 +7179,14 @@ export function paneModeDeferRemoteLayout(incoming: SerNode | null): boolean {
 }
 
 /// Authoritative terminal metadata callers invoke this only after detecting
-/// and applying a settled live-pair change. It never manufactures a pending
-/// session snapshot. A tmux window's commit keeps the live tabs, and with
-/// them the change.
-export function paneModeMarkStaleForAuthoritativeMetadata(): void {
+/// and applying a settled live-pair change to `tab`. It never manufactures a
+/// pending session snapshot. A tmux window's commit keeps the live tabs, and
+/// with them the change. A tab the live tree does not hold, such as a staged
+/// terminal settling its name, is the draft's alone, and the commit adopts
+/// it with the change.
+export function paneModeMarkStaleForAuthoritativeMetadata(tab: TerminalTab): void {
   if (!paneMode.active || paneMode.tmux) return;
+  if (!allTerminalTabs().some((live) => live.id === tab.id)) return;
   markPaneModeStale();
 }
 

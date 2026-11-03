@@ -5,14 +5,15 @@
 // Arrows move focus and WASD swaps tiles; brackets, minus and equals resize,
 // zero evens a split out, and Tab flips the focused pane's side. Letters stage
 // tabs into the draft, each only where its surface exists, and h shows the
-// help. The dock toggles commit first. A draft gone stale answers only Escape
-// and h. Outside it, the spawn commands and the new-terminal chord open at the
-// focused tab's folder, and the pane commands close tabs, panes and empty
-// sides. Cmd+W closes a tab the same way in a control-terminal window, so a
-// live terminal there asks first. While a dialog is open, the keys and host
-// commands meant for it stay with it: none of them enters, commits or drops
-// Hybrid Nav or acts on the layout under the dialog. In a tmux window the
-// draft stages what tmux is asked for on Enter, a divider drag's resize
+// help. A staged terminal takes the server's name, and settling it leaves the
+// draft fresh. The dock toggles commit first. A draft gone stale answers only
+// Escape and h. Outside it, the spawn commands and the new-terminal chord open
+// at the focused tab's folder, and the pane commands close tabs, panes and
+// empty sides. Cmd+W closes a tab the same way in a control-terminal window,
+// so a live terminal there asks first. While a dialog is open, the keys and
+// host commands meant for it stay with it: none of them enters, commits or
+// drops Hybrid Nav or acts on the layout under the dialog. In a tmux window
+// the draft stages what tmux is asked for on Enter, a divider drag's resize
 // included, and its panes have no sides.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -39,6 +40,8 @@ vi.mock("./state/store.svelte", async (importOriginal) => ({
 }));
 
 import { api, sessionWindowId } from "./api/client";
+import { setSocketFactory } from "./api/transport";
+import { demoSocketFactory } from "./demo/socket";
 import { availableCommands, commandContext } from "./state/commands";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { fileTab, resetLayout, terminalTab } from "./__tests__/tabs";
@@ -60,6 +63,7 @@ import {
   type LeafNode,
   type Split,
   type Tab,
+  type TerminalTab,
 } from "./state/tabs.svelte";
 import { closeTeamDialog, teamDialogState } from "./state/teamDialog.svelte";
 import { setTmuxLayout, tmuxWindowSizeHeld } from "./state/tmuxWindowSize.svelte";
@@ -314,6 +318,82 @@ describe("staging tabs", () => {
     expect(JSON.stringify(draft())).toBe(before);
     expect(paneMode.stagedDraftEditors).toEqual([]);
     expect(paneMode.active).toBe(true);
+  });
+});
+
+/// The terminal registry's naming over the demo transport's PTY stand-in: a
+/// new session takes the name it asks for unless a session of the tenant holds
+/// it, and then that name with the first free `-N` suffix, which its session
+/// frame carries. `held` lists the names taken, other windows' among them.
+function namingSockets(held: string[]): (url: string) => WebSocket {
+  return (url) => {
+    type Handler = ((event: { data: unknown }) => void) | null;
+    const socket = demoSocketFactory(url) as unknown as { onmessage: Handler };
+    const query = new URL(url).searchParams;
+    const asked = query.get("tab_name");
+    if (!asked || query.has("session")) return socket as unknown as WebSocket;
+    let name = asked;
+    for (let n = 2; held.includes(name); n++) name = `${asked}-${n}`;
+    held.push(name);
+    let handler: Handler = null;
+    Object.defineProperty(socket, "onmessage", {
+      configurable: true,
+      get: () => handler,
+      set: (next: Handler) => {
+        handler =
+          next &&
+          ((event) => {
+            const frame = typeof event.data === "string" ? (JSON.parse(event.data) as { type?: string }) : null;
+            next(frame?.type === "session" ? { data: JSON.stringify({ ...frame, name }) } : event);
+          });
+      },
+    });
+    return socket as unknown as WebSocket;
+  };
+}
+
+describe("a staged terminal's name", () => {
+  /// The terminal beside the doc.
+  function terminalIn(state: LayoutState): TerminalTab | undefined {
+    return leaf(state, "pane-test").tabs.find((tab): tab is TerminalTab => tab.kind === "terminal");
+  }
+
+  /// Stage a terminal beside the doc and answer it once its session frame
+  /// has landed.
+  async function stageTerminal(): Promise<TerminalTab> {
+    await twoPanes();
+    await enterHybridNav();
+    await keys("t");
+    let staged: TerminalTab | undefined;
+    await vi.waitFor(() => {
+      staged = terminalIn(draft());
+      expect(staged?.terminalSessionId).toBeTruthy();
+    });
+    return staged!;
+  }
+
+  test("is the server's next name, even where this window's own count would clash", async () => {
+    // Another window of the workspace holds Terminal-1.
+    setSocketFactory(namingSockets(["Terminal-1"]));
+    vi.spyOn(api, "terminalNextName").mockResolvedValue("Terminal-2");
+
+    expect((await stageTerminal()).title).toBe("Terminal-2");
+    expect(paneMode.stale).toBe(false);
+
+    await keys("Enter");
+    expect(terminalIn(layout)?.title).toBe("Terminal-2");
+  });
+
+  test("is the name the server settles, without making the draft stale, when another window took the proposal first", async () => {
+    setSocketFactory(namingSockets(["Terminal-1", "Terminal-2"]));
+    vi.spyOn(api, "terminalNextName").mockResolvedValue("Terminal-2");
+
+    expect((await stageTerminal()).title).toBe("Terminal-2-2");
+    expect(paneMode.stale).toBe(false);
+
+    await keys("Enter");
+    expect(paneMode.active).toBe(false);
+    expect(terminalIn(layout)?.title).toBe("Terminal-2-2");
   });
 });
 
