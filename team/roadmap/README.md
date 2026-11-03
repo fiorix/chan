@@ -21,22 +21,23 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.123.0
+### v0.124.0
 
-Opened 2026-11-02 at the v0.122.0 close with no rows.
+Opened 2026-11-03 at the v0.123.0 close with no rows.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Hybrid Nav fights tmux in a tmux window][hntmux] | landed | GA |
-| [a staged terminal goes stale on a taken name][hnstagedname] | landed | GA |
-| [Hybrid Nav's Shift resize step does not fire][hnshift] | landed | GA |
-
-[hntmux]: v0.123.0/hybrid-nav-fights-tmux-in-a-tmux-window.md
-[hnstagedname]: v0.123.0/a-terminal-staged-in-hybrid-nav-turns-the-draft-stale-on-a-name-another-window-holds.md
-[hnshift]: v0.123.0/hybrid-navs-shift-resize-step-does-not-fire-on-a-us-layout.md
 
 
 ## Completed
+
+### v0.123.0
+
+Shipped 2026-11-03; see [release-v0.123.0](../release/release-v0.123.0.md). A no-rc release by the owner's word: the five Hybrid Nav commits from the owner's local branch, rebased onto `main`, under three rows, all shipped; those rows are in [`done/`](done/).
+
+- [a-terminal-staged-in-hybrid-nav-turns-the-draft-stale-on-a-name-another-window-holds](done/a-terminal-staged-in-hybrid-nav-turns-the-draft-stale-on-a-name-another-window-holds.md) - A terminal staged in Hybrid Nav turns the draft stale on a name another window holds.
+- [hybrid-nav-fights-tmux-in-a-tmux-window](done/hybrid-nav-fights-tmux-in-a-tmux-window.md) - Hybrid Nav fights tmux in a tmux window.
+- [hybrid-navs-shift-resize-step-does-not-fire-on-a-us-layout](done/hybrid-navs-shift-resize-step-does-not-fire-on-a-us-layout.md) - Hybrid Nav's Shift resize step does not fire on a US layout.
 
 ### v0.122.0
 

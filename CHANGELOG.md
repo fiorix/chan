@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.123.0] - 2026-11-03
+
+v0.123.0 makes Hybrid Nav stage what tmux will be asked for in a tmux window, names a terminal staged in Hybrid Nav from the server, and gives Hybrid Nav one divider step.
+
+### Changed
+
+- **Hybrid Nav has one divider step.** Shift no longer scales the `[` `]` `-` `=` step. On a US layout Shift turns those keys into others Hybrid Nav does not bind, so the larger step never fired there, and on a layout that types one of them with Shift that key always took it. The cheatsheet's Larger nudge row is gone.
+
+### Fixed
+
+- **Hybrid Nav works with tmux in a tmux window.** In a window that shows a `tmux -CC` window, Hybrid Nav previews what tmux will be asked for: a split shows a staged New tmux pane and starts no local shell, and a divider move, by key or by dragging the divider, shows the new size. Enter asks tmux for them one at a time and the panes arrive as tmux lays them out; Escape asks nothing. tmux's own layouts no longer read as "Layout changed", a window resize during the mode reaches tmux when it ends, and the A/B flip, send-to-side and Hybrid Nav's Tab, which a tmux pane has no use for, are not offered there.
+- **A terminal staged in Hybrid Nav no longer turns the draft stale.** A staged terminal took a placeholder name counted from its own window; when another window held that name, the server settled another one and the draft read "Layout changed. Esc to discard." as soon as the terminal connected. A staged terminal now asks the server for its name as any new terminal does.
+
 ## [v0.122.0] - 2026-11-02
 
 v0.122.0 keeps the keyboard with the Computers launcher on macOS after a switch to another application and back, and describes chan as a supercharged terminal emulator across its package descriptions, help, documentation and site.

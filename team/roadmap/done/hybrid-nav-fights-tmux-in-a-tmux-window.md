@@ -1,6 +1,8 @@
 # Hybrid Nav fights tmux in a tmux window
 
-Status: found and built on 2026-11-03 on the owner's local branch `hybrid-nav-tmux` (base `762f95240`), rebased onto `main` for v0.123.0 by the owner's release order of the same day; landed, closes at the GA.
+Status: shipped in [v0.123.0](../../release/release-v0.123.0.md).
+
+Record before the release: found and built on 2026-11-03 on the owner's local branch `hybrid-nav-tmux` (base `762f95240`), rebased onto `main` for v0.123.0 by the owner's release order of the same day; landed, closes at the GA.
 
 ## What was there
 

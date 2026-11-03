@@ -1,6 +1,8 @@
 # A terminal staged in Hybrid Nav turns the draft stale on a name another window holds
 
-Status: found on 2026-11-03 as a known gap of the tmux staging work on the owner's local branch `hybrid-nav-tmux` and built there, rebased onto `main` for v0.123.0 by the owner's release order of the same day; landed, closes at the GA.
+Status: shipped in [v0.123.0](../../release/release-v0.123.0.md).
+
+Record before the release: found on 2026-11-03 as a known gap of the tmux staging work on the owner's local branch `hybrid-nav-tmux` and built there, rebased onto `main` for v0.123.0 by the owner's release order of the same day; landed, closes at the GA.
 
 ## What was there
 
