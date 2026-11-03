@@ -18,11 +18,8 @@
   type Cap = {
     /// Visible label on the kbd-shaped button (e.g. "↑", "W", "Tab").
     label: string;
-    /// Dispatch key - matches `KeyboardEvent.key`. `undefined` means
-    /// the cap is descriptive only (no action; renders as inert kbd).
-    /// Used for compound descriptors like "Shift + [ ] - =" that
-    /// can't be fired by a single click.
-    key?: string;
+    /// Dispatch key - matches `KeyboardEvent.key`.
+    key: string;
     /// Optional aria-label override; defaults to "`label`: `action`".
     aria?: string;
   };
@@ -131,14 +128,6 @@
           ],
           action: "Move divider up / down",
         },
-        {
-          // Shift modifier can't be expressed as a single key click;
-          // leave this row descriptive-only so the user still sees
-          // the "larger nudge" affordance documented but can't
-          // mis-fire it from the mouse.
-          caps: [{ label: "Shift + [ ] - =" }],
-          action: "Larger nudge",
-        },
         { caps: [{ label: "0", key: "0" }], action: "Equalize siblings" },
       ],
     },
@@ -198,16 +187,12 @@
           {#each g.rows as row (rowKey(row))}
             <dt>
               {#each row.caps as cap (cap.label)}
-                {#if cap.key !== undefined}
-                  <button
-                    type="button"
-                    class="kbd kbd-button"
-                    aria-label={capAria(cap, row.action)}
-                    onclick={() => dispatchKey(cap.key!)}
-                  >{cap.label}</button>
-                {:else}
-                  <kbd>{cap.label}</kbd>
-                {/if}
+                <button
+                  type="button"
+                  class="kbd kbd-button"
+                  aria-label={capAria(cap, row.action)}
+                  onclick={() => dispatchKey(cap.key)}
+                >{cap.label}</button>
               {/each}
             </dt>
             <dd>{row.action}</dd>

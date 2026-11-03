@@ -972,7 +972,6 @@
       }
       return;
     }
-    const large = e.shiftKey ? 0.1 : 0.02;
     switch (e.key) {
       case "Enter": {
         // Prime browserSelection before commit when a browser spawn is staged
@@ -1039,16 +1038,16 @@
         paneModeSwap("right");
         return;
       case "[":
-        paneModeResize("row", false, large);
+        paneModeResize("row", false);
         return;
       case "]":
-        paneModeResize("row", true, large);
+        paneModeResize("row", true);
         return;
       case "-":
-        paneModeResize("column", false, large);
+        paneModeResize("column", false);
         return;
       case "=":
-        paneModeResize("column", true, large);
+        paneModeResize("column", true);
         return;
       case "0":
         paneModeEqualize();

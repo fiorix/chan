@@ -5113,22 +5113,21 @@ function nearestAncestorSplit(
   return null;
 }
 
+/// The share of a split one Hybrid Nav resize key moves its divider by.
+const PANE_MODE_RESIZE_STEP = 0.02;
+
 /// Hybrid Nav resize. `positive=true` shifts the divider toward the
 /// right (row axis) or the bottom (column axis); `positive=false`
 /// shifts it toward the left / top. Bracket-direction equals
 /// divider-direction, independent of which side of the split the
 /// active pane sits on. `ratio` is A's share of the split (A is the
 /// left / top child), so `positive` maps directly to the delta sign.
-export function paneModeResize(
-  axis: SplitNode["direction"],
-  positive: boolean,
-  amount: number,
-): void {
+export function paneModeResize(axis: SplitNode["direction"], positive: boolean): void {
   const draft = draftLayout();
   if (!draft) return;
   const split = nearestAncestorSplit(draft, draft.activePaneId, axis);
   if (!split || !noteTmuxResize(split)) return;
-  const delta = positive ? amount : -amount;
+  const delta = positive ? PANE_MODE_RESIZE_STEP : -PANE_MODE_RESIZE_STEP;
   // tmux holds a pane to its own minimum, and its next layout shows where
   // the divider landed.
   const [min, max] = paneMode.tmux ? [0, 1] : [0.05, 0.95];

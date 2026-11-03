@@ -3,8 +3,7 @@
 // The Hybrid Nav help lists every binding by group, under the title "Hybrid
 // Nav (Cmd+.)". Each key-cap is a button that presses its key on the
 // document, where App's Hybrid Nav handler takes it, so a click and a
-// keystroke run the same switch. The one cap that stands for a modifier
-// ("Shift + [ ] - =") is a plain label: a single click cannot hold Shift.
+// keystroke run the same switch.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -60,7 +59,7 @@ describe("the Hybrid Nav help", () => {
       },
       {
         title: "Resize",
-        rows: ["Move divider left / right", "Move divider up / down", "Larger nudge", "Equalize siblings"],
+        rows: ["Move divider left / right", "Move divider up / down", "Equalize siblings"],
       },
       { title: "Commit", rows: ["Commit draft", "Discard draft", "Toggle this help", "Flip side"] },
     ]);
@@ -97,11 +96,5 @@ describe("the Hybrid Nav help", () => {
       const cap = caps.find((button) => button.textContent === key);
       expect(cap?.getAttribute("aria-label")).toBe(`${key}: ${action}`);
     }
-  });
-
-  test("shows the Shift nudge as a label, not a button", () => {
-    const shift = [...help.querySelectorAll("dt kbd")].map((kbd) => kbd.textContent);
-
-    expect(shift).toEqual(["Shift + [ ] - ="]);
   });
 });

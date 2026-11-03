@@ -206,7 +206,7 @@ describe("arranging the draft", () => {
   test.each([
     ["row", "]", "["],
     ["column", "=", "-"],
-  ] as const)("in a %s split, %s grows and %s shrinks the focused side, Shift in larger steps, and 0 evens it", async (direction, grow, shrink) => {
+  ] as const)("in a %s split, %s grows and %s shrinks the focused side one step, Shift or not, and 0 evens it", async (direction, grow, shrink) => {
     await twoPanes(direction);
     await enterHybridNav();
 
@@ -214,8 +214,9 @@ describe("arranging the draft", () => {
     expect(rootSplit(draft()).ratio).toBeCloseTo(0.52);
     await keys(shrink, shrink);
     expect(rootSplit(draft()).ratio).toBeCloseTo(0.48);
-    await keys({ key: grow, shiftKey: true });
-    expect(rootSplit(draft()).ratio).toBeCloseTo(0.58);
+    // Some layouts type the key with Shift: `=` is Shift+0 on a German one.
+    await keys({ key: grow, shiftKey: true }, { key: grow, shiftKey: true });
+    expect(rootSplit(draft()).ratio).toBeCloseTo(0.52);
     await keys("0");
     expect(rootSplit(draft()).ratio).toBe(0.5);
     expect(rootSplit(layout).ratio).toBe(0.5);

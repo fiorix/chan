@@ -2246,7 +2246,7 @@ describe("pane state", () => {
 
     enterPaneMode();
     paneModeMoveFocus("right");
-    paneModeResize("row", true, 0.1);
+    paneModeResize("row", true);
     expect(paneMode.draft?.activePaneId).toBe(rightPane.id);
     expect(root.ratio).toBe(0.5);
 
@@ -2915,7 +2915,7 @@ describe("pane state", () => {
     layout.activePaneId = leftPane.id;
 
     enterPaneMode();
-    paneModeResize("row", true, 0.1);
+    paneModeResize("row", true);
     paneModeMoveFocus("right");
     paneModeSwap("left");
     paneModeEqualize();
