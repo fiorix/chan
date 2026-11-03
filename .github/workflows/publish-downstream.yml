@@ -552,7 +552,10 @@ jobs:
           if-no-files-found: error
 
   # Gated in its own right rather than relying on its dependencies, so the
-  # schedule does not depend on how Actions propagates a skip.
+  # schedule does not depend on how Actions propagates a skip. The steps live
+  # in publish-aur.sh, checked out from the dispatching ref, like the Homebrew
+  # jobs, so a retry of a tag that predates the script still has it; nothing
+  # the AUR serves comes from this checkout.
   aur-publish:
     if: >-
       ((github.event_name == 'workflow_dispatch' &&
@@ -573,136 +576,33 @@ jobs:
       AUR_PKGREL: ${{ github.event_name == 'workflow_dispatch' && inputs.aur_pkgrel || '1' }}
       PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
       PUSHABLE: ${{ needs.aur-auth.outputs.credential == 'ok' }}
+      PKGBASE: ${{ matrix.pkgbase }}
     steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/download-artifact@v8
         with:
           name: aur-metadata-${{ matrix.pkgbase }}
           path: /tmp/generated
 
-      # aur-auth fails the whole AUR chain on a rejected key, so an unusable
-      # credential here means the secret is absent. That is the fork contract,
-      # but on the canonical repository a publish=false dispatch exists to
-      # prove the credential before the tag, and one that proves nothing must
-      # not end green. A publish=true run keeps the documented no-op: it is
-      # reporting an outcome, not standing in for the proof.
       - name: Report the AUR dry run
         if: env.PUBLISH != 'true' || env.PUSHABLE != 'true'
         env:
-          PKGBASE: ${{ matrix.pkgbase }}
           CANONICAL: ${{ github.repository == 'fiorix/chan' }}
-        run: |
-          echo "Validated $PKGBASE metadata for ${RELEASE_TAG}-${AUR_PKGREL} and pushed nothing."
-          echo "publish=$PUBLISH credential-usable=$PUSHABLE"
-          cat /tmp/generated/.SRCINFO
-          if [ "$PUBLISH" != "true" ] && [ "$PUSHABLE" != "true" ] && [ "$CANONICAL" = "true" ]; then
-            echo "::error::AUR_SSH_PRIVATE_KEY is absent on the canonical repository; the metadata validated but the AUR credential is unproven."
-            exit 1
-          fi
+        run: packaging/distros/arch/publish-aur.sh report /tmp/generated
 
       - name: Push to the AUR
         id: aur-push
         if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          PKGBASE: ${{ matrix.pkgbase }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$AUR_SSH_KEY" > /tmp/aur-key
-          chmod 600 /tmp/aur-key
-          cat > /tmp/aur-known-hosts <<'EOF'
-          aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
-          EOF
-          export GIT_SSH_COMMAND="ssh -i /tmp/aur-key -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/aur-known-hosts -o StrictHostKeyChecking=yes"
-          version=${RELEASE_TAG#v}
-          git config --global user.name "Alexandre Fiori"
-          git config --global user.email "fiorix@gmail.com"
-          git clone "ssh://aur@aur.archlinux.org/$PKGBASE.git" /tmp/aur
-          # The clone is the pre-push ground truth: the version the AUR had
-          # on master before this run touched it, or nothing for a pkgbase
-          # that has never been pushed. The verify step tolerates the RPC
-          # index reporting a version at or below it (a not-yet-caught-up
-          # index) and reds on anything else.
-          pre_push=""
-          if [ -f /tmp/aur/.SRCINFO ]; then
-            pkgver="$(sed -n 's/^[[:space:]]*pkgver = //p' /tmp/aur/.SRCINFO | head -n1)"
-            pkgrel="$(sed -n 's/^[[:space:]]*pkgrel = //p' /tmp/aur/.SRCINFO | head -n1)"
-            epoch="$(sed -n 's/^[[:space:]]*epoch = //p' /tmp/aur/.SRCINFO | head -n1)"
-            if [ -n "$pkgver" ] && [ -n "$pkgrel" ]; then
-              pre_push="${epoch:+$epoch:}$pkgver-$pkgrel"
-            fi
-          fi
-          echo "pre-push-version=$pre_push" >> "$GITHUB_OUTPUT"
-          cp /tmp/generated/{PKGBUILD,.SRCINFO} /tmp/aur/
-          cd /tmp/aur
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "$PKGBASE is already at $version-$AUR_PKGREL; nothing to push."
-            exit 0
-          fi
-          git commit -m "upgpkg: $PKGBASE $version-$AUR_PKGREL"
-          git push origin HEAD:master
+        run: packaging/distros/arch/publish-aur.sh push /tmp/generated
 
       - name: Verify AUR metadata
         if: env.PUBLISH == 'true' && env.PUSHABLE == 'true'
         env:
-          PKGBASE: ${{ matrix.pkgbase }}
           PRE_PUSH_VERSION: ${{ steps.aur-push.outputs.pre-push-version }}
-        run: |
-          set -euo pipefail
-          expected="${RELEASE_TAG#v}-$AUR_PKGREL"
-          rpc_url="https://aur.archlinux.org/rpc/v5/info/$PKGBASE"
-          # The push step is the publication: a zero exit from `git push`
-          # means the AUR accepted the ref, and the AUR's own hooks reject
-          # a malformed .SRCINFO at push time. The RPC index is a separate,
-          # asynchronously populated projection with no freshness
-          # guarantee, so this poll is advisory: an index that never
-          # catches up inside the budget ends in a warning, not a red. The
-          # one red left is the index affirmatively reporting a version
-          # that is neither the pushed one nor at or below the pre-push
-          # master state, which means the recipe the AUR serves does not
-          # correspond to this release.
-          budget="${AUR_VERIFY_BUDGET:-600}"
-          delay=10
-          reported=""
-          while :; do
-            payload="$(curl -fsSL --retry 3 "$rpc_url" || true)"
-            count="$(jq -r '.resultcount // empty' <<<"$payload" 2>/dev/null || true)"
-            if [ "$count" = "1" ]; then
-              reported="$(jq -r '.results[0].Version // empty' <<<"$payload")"
-              if [ "$reported" = "$expected" ]; then
-                echo "$PKGBASE $expected is visible in the AUR after ${SECONDS}s."
-                exit 0
-              fi
-              if [ -n "$reported" ]; then
-                stale=false
-                if [ -n "$PRE_PUSH_VERSION" ]; then
-                  newest="$(printf '%s\n%s\n' "$reported" "$PRE_PUSH_VERSION" | sort -V | tail -n1)"
-                  if [ "$newest" = "$PRE_PUSH_VERSION" ]; then
-                    stale=true
-                  fi
-                fi
-                if [ "$stale" != "true" ]; then
-                  echo "::error::the AUR reports $PKGBASE $reported, which is neither the pushed $expected nor at or below the pre-push ${PRE_PUSH_VERSION:-state of a new pkgbase}; the recipe the AUR serves does not match this release"
-                  exit 1
-                fi
-                echo "the AUR still reports $PKGBASE $reported (pre-push state); waiting for $expected"
-              fi
-            fi
-            if [ "$SECONDS" -ge "$budget" ]; then
-              break
-            fi
-            sleep "$delay"
-            delay=$((delay * 2))
-            if [ "$delay" -gt 60 ]; then
-              delay=60
-            fi
-          done
-          echo "::warning::$PKGBASE $expected was pushed but the AUR RPC index reports ${reported:-no result} after ${SECONDS}s; the push is authoritative and the index advisory, check $rpc_url by hand"
-          {
-            echo "### AUR $PKGBASE: pushed, index confirmation timed out"
-            echo
-            echo "The recipe was pushed. The RPC index did not report $expected within ${SECONDS}s (last seen: ${reported:-no result}). Manual check: $rpc_url"
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: packaging/distros/arch/publish-aur.sh verify
 
   # ---- Nix binary cache (Cachix) -------------------------------------------
   # The flake's default output is chan-desktop. Build both Nix packages natively

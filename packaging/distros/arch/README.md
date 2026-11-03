@@ -28,6 +28,7 @@ The AUR is a collection of git repositories containing build recipes; it does no
 
 - `aur/{chan,chan-desktop}/PKGBUILD.in` are the source package templates.
 - `make-aur-package.sh` resolves a GA tag or a local test archive, renders `PKGBUILD`, generates `.SRCINFO`, and validates the metadata. It never pushes.
+- `publish-aur.sh` holds the workflow's dry-run report, AUR push, and RPC index check, shared by every pkgbase.
 - `build-in-container.sh` is the shared clean-Arch build, install and smoke path used by CI and sdme.
 - `build-with-sdme.sh` archives a committed local revision and runs both packages in a disposable sdme container.
 - `build-in-ci.sh` is the workflow's entry point: it validates the tag and `pkgrel`, then runs the same container build against the image the job provides, so the x86_64 and aarch64 jobs cannot drift apart.
