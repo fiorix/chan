@@ -734,6 +734,17 @@ jobs:
             system: aarch64-linux
     runs-on: ${{ matrix.os }}
     steps:
+      # The two release builds (chan, then chan-desktop) run in the Nix sandbox
+      # on the root filesystem, and some runner images leave it too small for
+      # them. Drop the preinstalled toolchains this job never uses first; the
+      # two df lines show the room before and after.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell /usr/share/swift
+          df -h /
+
       - uses: actions/checkout@v6
         with:
           # Publishing pins the released commit/tag. A dry run may validate
