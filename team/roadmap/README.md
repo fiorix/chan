@@ -27,6 +27,13 @@ Opened 2026-11-02 at the v0.122.0 close with no rows.
 
 | Item | State | Next |
 | --- | --- | --- |
+| [Hybrid Nav fights tmux in a tmux window][hntmux] | landed | GA |
+| [a staged terminal goes stale on a taken name][hnstagedname] | landed | GA |
+| [Hybrid Nav's Shift resize step does not fire][hnshift] | landed | GA |
+
+[hntmux]: v0.123.0/hybrid-nav-fights-tmux-in-a-tmux-window.md
+[hnstagedname]: v0.123.0/a-terminal-staged-in-hybrid-nav-turns-the-draft-stale-on-a-name-another-window-holds.md
+[hnshift]: v0.123.0/hybrid-navs-shift-resize-step-does-not-fire-on-a-us-layout.md
 
 
 ## Completed
