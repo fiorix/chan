@@ -52,12 +52,23 @@ struct Cli {
     #[arg(long, global = true, env = "CHAN_ADMIN_IDENTITY_URL")]
     identity_url: Option<String>,
 
+    // The three token arguments' environment values are credentials.
     /// Bearer matching profile-service's PROFILE_ADMIN_TOKEN.
-    #[arg(long, global = true, env = "CHAN_ADMIN_PROFILE_TOKEN")]
+    #[arg(
+        long,
+        global = true,
+        env = "CHAN_ADMIN_PROFILE_TOKEN",
+        hide_env_values = true
+    )]
     profile_token: Option<String>,
 
     /// Bearer matching identity-service's IDENTITY_ADMIN_TOKEN.
-    #[arg(long, global = true, env = "CHAN_ADMIN_IDENTITY_TOKEN")]
+    #[arg(
+        long,
+        global = true,
+        env = "CHAN_ADMIN_IDENTITY_TOKEN",
+        hide_env_values = true
+    )]
     identity_token: Option<String>,
 
     /// Operator bearer for devserver-control. `--token` remains as a
@@ -66,7 +77,8 @@ struct Cli {
         long,
         visible_alias = "token",
         global = true,
-        env = "CHAN_ADMIN_OPERATOR_TOKEN"
+        env = "CHAN_ADMIN_OPERATOR_TOKEN",
+        hide_env_values = true
     )]
     operator_token: Option<String>,
 
