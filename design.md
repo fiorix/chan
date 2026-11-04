@@ -43,6 +43,7 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 | `chan-tmux` | The tmux control-mode protocol: framing, notifications, commands and layouts, with no I/O. |
 | `chan-systemd` | The systemd boundary: readiness and watchdog notifications, the fd store, unit rendering. |
 | `chan-tunnel-proto`, `chan-tunnel-client`, `chan-tunnel-server` | The gateway tunnel: the wire contract, the dial side the devserver embeds, and the terminating side the gateway embeds. |
+| `chan-wireguard` | The in-process WireGuard peer and TCP/IP stack the devserver's tunnel dial runs through when a wg-quick file is given, with no interface or privilege on the host. |
 | `chan-revtunnel` | Reverse port forwarding from a devserver to the connected desktop (`cs tunnel`). |
 | `chan` | The CLI binary: argument parsing, `chan serve`, the devserver verbs, workspace management, self-upgrade. |
 | `desktop` | chan-desktop, the Tauri shell: native windows, the launcher, devserver and gateway connections. The same binary is the CLI when invoked as `chan` or `cs`. |
@@ -70,6 +71,7 @@ flowchart LR
     Dev["chan devserver"]
     Agent["agent CLI in a terminal"]
     TunC["chan-tunnel-client"]
+    Wg["chan-wireguard"]
   end
 
   subgraph Gw["a gateway you run"]
@@ -91,6 +93,8 @@ flowchart LR
   Agent -->|"in-process MCP socket"| Dev
   Dev -->|"hands its router to"| TunC
   TunC ==>|"outbound tunnel"| Proxy
+  TunC -.->|"optional: the dial runs inside"| Wg
+  Wg -.->|"UDP to the proxy node's kernel WireGuard"| Proxy
   Proxy -->|"substream per request"| Dev
 
   Browser -->|"{owner}--{disc}.{proxy}.proxy.{domain}"| Proxy

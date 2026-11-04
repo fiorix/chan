@@ -156,6 +156,8 @@ function seed(): Seed {
         pending_signin: false,
         devserver_count: 1,
         last_error: null,
+        wireguard: null,
+        wireguard_restart_required: false,
       },
     ],
     devserverWorkspaces: [
@@ -548,16 +550,20 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
         pending_signin: false,
         devserver_count: 0,
         last_error: null,
+        wireguard: (input.wireguard ?? "").trim() || null,
+        wireguard_restart_required: false,
       };
       gateways.push(gw);
       notify();
       return tick({ ...gw });
     },
-    // Rename only, like the mock: the URL is identity and never changes.
+    // Label and WireGuard file only, like the mock: the URL is identity and
+    // never changes. The demo has no desktop to restart, so the flag stays off.
     updateGateway: (id, input) => {
       const gw = gateways.find((g) => g.id === id);
       if (!gw) throw new Error(`unknown gateway ${id}`);
       gw.label = (input.label ?? "").trim();
+      gw.wireguard = (input.wireguard ?? "").trim() || null;
       notify();
       return tick({ ...gw });
     },

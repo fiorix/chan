@@ -1,11 +1,15 @@
 <script lang="ts">
-  // The gateway form: add a gateway, or rename one when `editing` is set. Add
-  // just adds (no probe -- the first Connect discovers and signs in). Rename
-  // changes the label only: the URL is the gateway's identity, so its field
-  // renders disabled (remove + re-add changes the origin). The New/Edit dialog
-  // renders it for a rename and for the command deck's Add gateway, and the
-  // Gateways deck's Add gateway card renders it on the card's back face. Each
-  // host mounts the form fresh, so its fields seed from the edit target.
+  // The gateway form: add a gateway, or edit one when `editing` is set. Add
+  // just adds (no probe -- the first Connect discovers and signs in). Edit
+  // changes the label and the WireGuard file only: the URL is the gateway's
+  // identity, so its field renders disabled (remove + re-add changes the
+  // origin). The WireGuard file is a path the registry reads at save time, so
+  // a bad file comes back as the server's 400 sentence and renders here
+  // verbatim: it is written for the user and names the path, the line and the
+  // key, never a value. The New/Edit dialog renders the form for an edit and
+  // for the command deck's Add gateway, and the Gateways deck's Add gateway
+  // card renders it on the card's back face. Each host mounts the form fresh,
+  // so its fields seed from the edit target.
   import { addGateway, updateGateway } from "../state/library.svelte";
   import type { GatewayEntry } from "../api/library";
 
@@ -27,6 +31,7 @@
 
   let url = $state(target?.url ?? "");
   let name = $state(target?.label ?? "");
+  let wireguard = $state(target?.wireguard ?? "");
   let error = $state<string | null>(null);
   let submitting = $state(false);
 
@@ -42,11 +47,16 @@
   }
 
   async function submit(): Promise<void> {
+    // Both optional fields are full-replace on the wire: a blank one rides as
+    // absent, which the registry reads as "clear".
+    const label = name.trim() || undefined;
+    const file = wireguard.trim() || undefined;
     let save: () => Promise<string>;
     if (target) {
-      // Rename: the URL field is disabled, so the stored origin rides back
-      // unchanged (the registry re-checks it) and only the label moves.
-      save = () => updateGateway(target.id, { url: target.url, label: name.trim() || undefined });
+      // Edit: the URL field is disabled, so the stored origin rides back
+      // unchanged (the registry re-checks it) and only the label and the
+      // WireGuard file move.
+      save = () => updateGateway(target.id, { url: target.url, label, wireguard: file });
     } else {
       const raw = url.trim();
       let parsed: URL | null = null;
@@ -59,7 +69,7 @@
         error = "Enter the gateway URL, like https://gateway.example.com";
         return;
       }
-      save = () => addGateway({ url: raw, label: name.trim() || undefined });
+      save = () => addGateway({ url: raw, label, wireguard: file });
     }
     submitting = true;
     try {
@@ -77,7 +87,8 @@
 <div class="gateway-form">
   {#if target}
     <p class="intro">
-      Rename this gateway. The URL is its identity; remove and re-add the gateway to change it.
+      Rename this gateway or set its WireGuard file. The URL is its identity; remove and re-add
+      the gateway to change it.
     </p>
   {:else}
     <p class="intro">
@@ -105,6 +116,22 @@
       placeholder="Defaults to the URL host"
       autocomplete="off"
       onkeydown={onFieldKey} />
+  </label>
+  <label class="field">
+    WireGuard file <span class="muted">(optional)</span>
+    <input
+      type="text"
+      class="mono"
+      bind:value={wireguard}
+      placeholder="~/.config/chan/gateway.conf"
+      autocomplete="off"
+      spellcheck="false"
+      onkeydown={onFieldKey} />
+    <span class="field-hint">
+      A wg-quick peer file, readable only by you (<code>chmod 600</code>). The gateway is then
+      reached through an in-process WireGuard tunnel; a change takes effect when chan-desktop
+      restarts.
+    </span>
   </label>
 
   {#if error}
@@ -164,6 +191,19 @@
     color: var(--text-secondary);
     font-weight: 400;
     opacity: 0.8;
+  }
+
+  /* The one-line rule under a field that the placeholder alone cannot carry. */
+  .field-hint {
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    opacity: 0.85;
+  }
+
+  .field-hint code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent);
   }
 
   .error {

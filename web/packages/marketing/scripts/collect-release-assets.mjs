@@ -120,6 +120,12 @@ list, and an explicit --tag must be GA and the newest retained release: the
 script refuses to publish a prerelease or a stale tag to /dl. With
 --release-json, the fixture may hold one release object or an array standing
 in for the releases list.
+
+Each manifest also carries minimum_system_version, keyed by updater target
+(darwin), when the tag's desktop/src-tauri/tauri.conf.json sets
+bundle.macOS.minimumSystemVersion; it is read through the GitHub contents API
+at the tag, or offline from <asset-dir>/tauri.conf.json when that file
+exists. The desktop refuses an update whose floor the running macOS is below.
 `);
 }
 
@@ -340,13 +346,58 @@ async function collectManifest(release, options) {
     });
   }
 
+  const minimumSystemVersion = await collectMinimumSystemVersion(tag, options);
   return {
     version,
     tag,
     published_at: publishedAt,
     notes: String(release.body ?? ""),
     assets,
+    ...(minimumSystemVersion ? { minimum_system_version: minimumSystemVersion } : {}),
   };
+}
+
+const TAURI_CONF_PATH = "desktop/src-tauri/tauri.conf.json";
+
+// The macOS floor the desktop at `tag` was bundled with, keyed by the
+// updater's target name: bundle.macOS.minimumSystemVersion in the tag's
+// tauri.conf.json, read through the contents API so the history walk stamps
+// each release with its own floor and never the checkout's. The desktop
+// refuses an update whose floor the running macOS is below, which is the
+// only thing standing between a Mac on an older macOS and an installed app
+// LaunchServices will not open, so a tag that has the file but an unreadable
+// setting, or an API answer other than found or absent, fails collection
+// rather than publish a manifest with the floor quietly missing. A tag
+// without the file or the setting gets no entry. Offline (--release-json),
+// the floor is <asset-dir>/tauri.conf.json when that file exists.
+async function collectMinimumSystemVersion(tag, options) {
+  let conf;
+  if (options.assetDir) {
+    try {
+      conf = JSON.parse(await fs.readFile(path.join(options.assetDir, "tauri.conf.json"), "utf8"));
+    } catch (err) {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    }
+  } else {
+    const url = `https://api.github.com/repos/${options.repo}/contents/${TAURI_CONF_PATH}?ref=${encodeURIComponent(tag)}`;
+    const response = await request(url);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
+    const body = await response.json();
+    if (body.encoding !== "base64" || typeof body.content !== "string") {
+      throw new Error(`${url} did not answer with base64 file content`);
+    }
+    conf = JSON.parse(Buffer.from(body.content, "base64").toString("utf8"));
+  }
+  const darwin = conf?.bundle?.macOS?.minimumSystemVersion;
+  if (darwin === undefined) return null;
+  if (typeof darwin !== "string" || !/^\d+(\.\d+){0,2}$/.test(darwin)) {
+    throw new Error(
+      `${tag}: ${TAURI_CONF_PATH} minimumSystemVersion must be N[.N[.N]], got ${JSON.stringify(darwin)}`,
+    );
+  }
+  return { darwin };
 }
 
 async function collectAsset(name, releaseAssets, options) {

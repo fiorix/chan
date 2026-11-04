@@ -3,11 +3,16 @@
   // the ArrowRightLeft glyph, the label over the URL, the status dot, the
   // rename pencil, and the connect/disconnect control with a spinning cancel
   // while connecting, sign-in narration while a browser sign-in is pending,
-  // and a red lost dot + disconnect-to-recover while unreachable. Select mode
-  // reveals per-badge checkboxes feeding the same global bulk bar as the
-  // Computers screen; the screen is reachable only on the desktop surface (the
-  // TopBar toggle gates on the bridge), and the controls carry the same bridge
-  // gate.
+  // and a red lost dot + disconnect-to-recover while unreachable. A badge
+  // reached through WireGuard shows its file under the URL and, while the
+  // desktop's fabric predates the setting, a restart notice: the desktop
+  // decides its WireGuard set once per process and refuses to connect such a
+  // row until it restarts (the refusal itself reaches the notice ring like any
+  // other). A file that failed at start arrives as the row's `last_error`,
+  // which the status line already narrates. Select mode reveals per-badge
+  // checkboxes feeding the same global bulk bar as the Computers screen; the
+  // screen is reachable only on the desktop surface (the TopBar toggle gates
+  // on the bridge), and the controls carry the same bridge gate.
   //
   // On the desktop the badges are a carousel deck like the Computers screen's
   // (Carousel): the gateways sorted by name, then the Add gateway card, which
@@ -124,6 +129,13 @@
           <span class="gw-glyph"></span>
           <span class="gw-url" title={gw.url}>{gw.url}</span>
         </span>
+        {#if gw.wireguard}
+          <span class="gw-addr-row gw-wireguard">
+            <span class="gw-glyph"></span>
+            <span class="chip">WireGuard</span>
+            <span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span>
+          </span>
+        {/if}
       </div>
       <div class="card-actions gateway-actions">
         {#if !readOnly}
@@ -180,6 +192,13 @@
         {/if}
       </div>
     </div>
+    {#if gw.wireguard_restart_required}
+      <!-- The WireGuard set is decided at the desktop's start, so a changed
+           file waits for a restart; say so where the change was made. -->
+      <p class="card-prompt gateway-prompt restart" role="status">
+        Restart chan-desktop to apply the WireGuard change.
+      </p>
+    {/if}
     {#if gw.pending_signin}
       <!-- The connect handed off to a browser sign-in: narrate the wait. The
            desktop clears the state on the deep-link callback, its timeout,
@@ -290,6 +309,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* The file is a path the user typed, so it reads as literal text. */
+  .gw-wg-file {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* The restart notice is a pending action, not a failure: amber, not red. */
+  .gateway-prompt.restart {
+    color: var(--warn);
   }
 
   .status-dot {

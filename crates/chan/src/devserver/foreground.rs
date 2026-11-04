@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -50,13 +51,20 @@ pub(super) fn warn_non_loopback_bind(addr: SocketAddr) {
 /// systemd/launchd refusal lives at the call site. These backends persist no
 /// unit to reuse an endpoint from, so a token with no `--tunnel-url` /
 /// `CHAN_TUNNEL_URL` is an error here -- the same refusal the supervised path
-/// only reaches once the installed unit has come up empty too.
+/// only reaches once the installed unit has come up empty too. A WireGuard
+/// file is read and parsed here, so a bad one is refused before anything
+/// starts, and refused without a token, since the tunnel it describes
+/// carries nothing but the gateway dial.
 pub(super) fn build_devserver_tunnel(
     tunnel_token: Option<String>,
     tunnel_url: Option<String>,
     tunnel_devserver_name: Option<&str>,
+    tunnel_wireguard: Option<&Path>,
 ) -> Result<Option<chan_server::DevserverTunnel>> {
     let Some(token) = tunnel_token else {
+        if tunnel_wireguard.is_some() {
+            anyhow::bail!(WIREGUARD_NEEDS_TOKEN);
+        }
         return Ok(None);
     };
     // clap does not expose the arg source, so compare to the env directly.
@@ -67,10 +75,12 @@ pub(super) fn build_devserver_tunnel(
         );
     }
     let tunnel_url = tunnel_url.context(MISSING_TUNNEL_URL)?;
+    let wireguard = tunnel_wireguard.map(read_wireguard_config).transpose()?;
     Ok(Some(chan_server::DevserverTunnel {
         tunnel_url,
         token,
         name: resolve_tunnel_devserver_name(tunnel_devserver_name),
+        wireguard,
     }))
 }
 
@@ -80,12 +90,32 @@ pub(super) fn build_devserver_tunnel(
 pub(super) const MISSING_TUNNEL_URL: &str =
     "chan devserver: tunnel mode requires --tunnel-url or CHAN_TUNNEL_URL";
 
+/// The refusal when a WireGuard file is given with no token to dial with.
+pub(super) const WIREGUARD_NEEDS_TOKEN: &str = "chan devserver: --tunnel-wireguard carries the \
+    gateway dial and needs a tunnel token (--tunnel-token or CHAN_TUNNEL_TOKEN)";
+
+/// Read the wg-quick file behind `--tunnel-wireguard` through the crate's
+/// reader, which refuses a file the group or others can read before reading
+/// it and names the path, the line and the key in a refusal, never a value.
+/// The flag is named here so the refusal reads as the command's.
+pub(crate) fn read_wireguard_config(path: &Path) -> Result<chan_server::DevserverWireguard> {
+    let config = chan_wireguard::config::read_file(path)
+        .map_err(|e| anyhow::anyhow!("chan devserver: --tunnel-wireguard {e}"))?;
+    Ok(chan_server::DevserverWireguard {
+        path: path.to_path_buf(),
+        config,
+    })
+}
+
 /// Hidden daemon child tunnel config. The token is never accepted as an argv
 /// field here; the parent passes it through CHAN_TUNNEL_TOKEN only. The name
-/// is not a secret and rides argv (`--tunnel-devserver-name`).
+/// and the WireGuard file's path are not secrets and ride argv
+/// (`--tunnel-devserver-name`, `--tunnel-wireguard`); the file is read here,
+/// as the parent read it before spawning.
 pub(crate) fn build_devserver_tunnel_from_env(
     tunnel_url: Option<String>,
     tunnel_devserver_name: Option<String>,
+    tunnel_wireguard: Option<&Path>,
 ) -> Result<Option<chan_server::DevserverTunnel>> {
     let Some(token) = std::env::var("CHAN_TUNNEL_TOKEN")
         .ok()
@@ -96,10 +126,12 @@ pub(crate) fn build_devserver_tunnel_from_env(
     let tunnel_url = tunnel_url
         .filter(|url| !url.trim().is_empty())
         .context("CHAN_TUNNEL_URL or --tunnel-url is required with CHAN_TUNNEL_TOKEN")?;
+    let wireguard = tunnel_wireguard.map(read_wireguard_config).transpose()?;
     Ok(Some(chan_server::DevserverTunnel {
         tunnel_url,
         token,
         name: resolve_tunnel_devserver_name(tunnel_devserver_name.as_deref()),
+        wireguard,
     }))
 }
 
@@ -355,14 +387,16 @@ mod tests {
         // Making the endpoint requirement lazy must not make it optional. The
         // foreground and `chan` backends persist no unit to recover one from,
         // so for them the refusal fires exactly where it always did.
-        let Err(error) = build_devserver_tunnel(Some("chan_pat_a".into()), None, None) else {
+        let Err(error) = build_devserver_tunnel(Some("chan_pat_a".into()), None, None, None) else {
             panic!("a token with no endpoint must fail on the unsupervised path");
         };
         assert_eq!(error.to_string(), MISSING_TUNNEL_URL);
         // No token is not tunnel mode, endpoint or not.
-        assert!(build_devserver_tunnel(None, None, None).unwrap().is_none());
+        assert!(build_devserver_tunnel(None, None, None, None)
+            .unwrap()
+            .is_none());
         assert!(
-            build_devserver_tunnel(None, Some("https://cli.test".into()), None)
+            build_devserver_tunnel(None, Some("https://cli.test".into()), None, None)
                 .unwrap()
                 .is_none()
         );
@@ -371,12 +405,114 @@ mod tests {
             Some("chan_pat_a".into()),
             Some("https://cli.test".into()),
             Some("office box"),
+            None,
         )
         .unwrap()
         .unwrap();
         assert_eq!(tunnel.tunnel_url, "https://cli.test");
         assert_eq!(tunnel.token, "chan_pat_a");
         assert_eq!(tunnel.name, "office box");
+        assert!(tunnel.wireguard.is_none());
+    }
+
+    /// A 32-byte key as `wg genkey` prints one; the text stands in for a
+    /// real private key in every refusal below, which must not echo it.
+    const PRIVATE_KEY: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+    const PEER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+
+    fn wireguard_text() -> String {
+        format!(
+            "[Interface]\nPrivateKey = {PRIVATE_KEY}\nAddress = 10.7.0.2/32\n\
+             [Peer]\nPublicKey = {PEER_KEY}\nEndpoint = 192.0.2.1:51820\n\
+             AllowedIPs = 10.7.0.1/32\n"
+        )
+    }
+
+    /// Write `text` as an owner-only file, the shape `read_wireguard_config`
+    /// accepts, in a directory of its own.
+    fn wireguard_file(text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chan.conf");
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn wireguard_file_is_read_with_a_token_and_an_endpoint() {
+        let (_dir, path) = wireguard_file(&wireguard_text());
+        let tunnel = build_devserver_tunnel(
+            Some("chan_pat_a".into()),
+            Some("http://10.7.0.1:4443/v1/tunnel".into()),
+            None,
+            Some(&path),
+        )
+        .unwrap()
+        .unwrap();
+        let wireguard = tunnel.wireguard.expect("the file was read");
+        assert_eq!(wireguard.path, path);
+        assert_eq!(
+            wireguard.config.peer.endpoint.to_string(),
+            "192.0.2.1:51820"
+        );
+        // The daemon child reads the same file from the path the parent
+        // handed it. The guard serializes the CHAN_* writes with the other
+        // tests that read them and clears the token on drop.
+        let _env = crate::test_env::ChanTestEnv::new();
+        std::env::set_var("CHAN_TUNNEL_TOKEN", "chan_pat_a");
+        let child = build_devserver_tunnel_from_env(
+            Some("http://10.7.0.1:4443/v1/tunnel".into()),
+            None,
+            Some(&path),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(child.wireguard.is_some());
+    }
+
+    #[test]
+    fn wireguard_file_without_a_token_is_refused() {
+        let (_dir, path) = wireguard_file(&wireguard_text());
+        let Err(error) = build_devserver_tunnel(None, None, None, Some(&path)) else {
+            panic!("a WireGuard file with no token must be refused");
+        };
+        assert_eq!(error.to_string(), WIREGUARD_NEEDS_TOKEN);
+        // The same with an endpoint alone, which selects nothing by itself.
+        let Err(error) = build_devserver_tunnel(
+            None,
+            Some("http://10.7.0.1:4443/v1/tunnel".into()),
+            None,
+            Some(&path),
+        ) else {
+            panic!("an endpoint is not a token");
+        };
+        assert_eq!(error.to_string(), WIREGUARD_NEEDS_TOKEN);
+    }
+
+    #[test]
+    fn wireguard_file_refusal_names_the_flag_and_the_readers_message() {
+        // The reader's own messages are pinned in chan-wireguard; here the
+        // command's wrapping names the flag in front of them.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.conf");
+        let error = read_wireguard_config(&path).unwrap_err().to_string();
+        assert!(
+            error.starts_with(&format!(
+                "chan devserver: --tunnel-wireguard {}: ",
+                path.display()
+            )),
+            "{error}"
+        );
+        let (_dir, path) = wireguard_file(&wireguard_text().replace("10.7.0.2/32", "nowhere"));
+        let error = read_wireguard_config(&path).unwrap_err().to_string();
+        assert!(error.contains("--tunnel-wireguard"), "{error}");
+        assert!(error.contains("line 3"), "{error}");
+        assert!(error.contains("Address"), "{error}");
+        assert!(!error.contains(PRIVATE_KEY), "{error}");
     }
 
     #[test]

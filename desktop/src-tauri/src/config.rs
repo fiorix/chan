@@ -143,6 +143,13 @@ pub struct Gateway {
     /// removing the gateway removes the records with it.
     #[serde(default)]
     pub native_trust: Vec<NativeDevserverTrust>,
+    /// The wg-quick file this gateway is reached through, when it sits
+    /// behind WireGuard: at start the desktop runs a tunnel from it and
+    /// every leg to the gateway goes through that tunnel. Absent for a
+    /// gateway reached directly, and left off the file then, so a config
+    /// from before the field reads and writes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<PathBuf>,
 }
 
 impl Gateway {
@@ -1000,8 +1007,10 @@ impl GatewayConfigRegistry {
 fn entry_from_gateway(
     g: &Gateway,
     view: Option<crate::gateway::GatewayRuntimeView>,
+    wireguard: &crate::wireguard::WireguardStartup,
 ) -> GatewayEntry {
     let view = view.unwrap_or_default();
+    let file = g.wireguard.as_deref();
     GatewayEntry {
         id: g.id.clone(),
         url: g.url.clone(),
@@ -1010,8 +1019,36 @@ fn entry_from_gateway(
         status: view.status,
         pending_signin: view.pending_signin,
         devserver_count: view.devserver_count,
-        last_error: view.last_error,
+        // A row whose file was refused at start has no runtime to carry the
+        // reason, so the projection carries it until a connect sets its own.
+        last_error: view
+            .last_error
+            .or_else(|| wireguard.failure(&g.id, file).map(str::to_string)),
+        wireguard: file.map(|path| path.display().to_string()),
+        wireguard_restart_required: wireguard.restart_required(&g.id, file, g.enabled),
     }
+}
+
+/// The WireGuard file of an add or update payload: absent or blank is none;
+/// otherwise an absolute path, or one under `~/` as a form is typed, that
+/// the shared reader accepts now. Reading it here refuses a bad file where
+/// the launcher can show the reader's message, rather than at the next
+/// start; the message names the path, the line and the key, never a value.
+pub(crate) fn validate_wireguard_file(raw: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()
+            .ok_or_else(|| "WireGuard: no home directory to resolve ~ against".to_string())?
+            .join(rest),
+        None => PathBuf::from(raw),
+    };
+    if !path.is_absolute() {
+        return Err(format!("WireGuard: the file path must be absolute: {raw}"));
+    }
+    chan_wireguard::config::read_file(&path).map_err(|e| format!("WireGuard: {e}"))?;
+    Ok(Some(path))
 }
 
 impl GatewayRegistry for GatewayConfigRegistry {
@@ -1024,7 +1061,13 @@ impl GatewayRegistry for GatewayConfigRegistry {
             .map(|cfg| {
                 cfg.gateways
                     .iter()
-                    .map(|g| entry_from_gateway(g, self.manager.view(&g.id)))
+                    .map(|g| {
+                        entry_from_gateway(
+                            g,
+                            self.manager.view(&g.id),
+                            self.manager.wireguard_startup(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1032,6 +1075,7 @@ impl GatewayRegistry for GatewayConfigRegistry {
 
     fn add(&self, input: GatewayInput) -> Result<GatewayEntry, String> {
         let url = normalize_gateway_url(&input.url)?;
+        let wireguard = validate_wireguard_file(input.wireguard.as_deref())?;
         let mut store = self.store.lock().unwrap();
         let mut cfg = store.get().map_err(|e| e.to_string())?;
         if cfg.gateways.iter().any(|g| g.url == url) {
@@ -1044,13 +1088,19 @@ impl GatewayRegistry for GatewayConfigRegistry {
             enabled: true,
             added_at: now_millis(),
             native_trust: Vec::new(),
+            wireguard,
         };
         cfg.gateways.push(gw.clone());
         store.save(&cfg).map_err(|e| e.to_string())?;
-        Ok(entry_from_gateway(&gw, None))
+        Ok(entry_from_gateway(
+            &gw,
+            None,
+            self.manager.wireguard_startup(),
+        ))
     }
 
     fn update(&self, id: &str, input: GatewayInput) -> Result<Option<GatewayEntry>, String> {
+        let wireguard = validate_wireguard_file(input.wireguard.as_deref())?;
         let mut store = self.store.lock().unwrap();
         let mut cfg = store.get().map_err(|e| e.to_string())?;
         let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
@@ -1066,7 +1116,10 @@ impl GatewayRegistry for GatewayConfigRegistry {
         // Label is full-replace: empty clears, and the badge derives from
         // the URL host again.
         gw.label = input.label.unwrap_or_default().trim().to_string();
-        let entry = entry_from_gateway(gw, self.manager.view(id));
+        // The file is full-replace like the label; the tunnel it names
+        // starts at the next start, which the projection says.
+        gw.wireguard = wireguard;
+        let entry = entry_from_gateway(gw, self.manager.view(id), self.manager.wireguard_startup());
         store.save(&cfg).map_err(|e| e.to_string())?;
         Ok(Some(entry))
     }
@@ -1162,6 +1215,7 @@ fn split_legacy_gateway_rows(cfg: &mut Config) -> GatewayMigration {
             enabled: true,
             added_at: row.added_at,
             native_trust: Vec::new(),
+            wireguard: None,
         };
         cfg.gateways.push(gw.clone());
         outcome.created.push(gw);
@@ -1200,6 +1254,7 @@ pub fn convert_devserver_row_to_gateway(
             enabled: true,
             added_at: row.added_at,
             native_trust: Vec::new(),
+            wireguard: None,
         };
         cfg.gateways.push(gw.clone());
         gw
@@ -2406,6 +2461,7 @@ mod tests {
                 enabled: true,
                 added_at: 1,
                 native_trust: Vec::new(),
+                wireguard: None,
             }],
             ..Default::default()
         };
@@ -2546,6 +2602,7 @@ mod tests {
                     enabled: true,
                     added_at: 1,
                     native_trust: Vec::new(),
+                    wireguard: None,
                 }],
                 ..Default::default()
             };
@@ -2662,6 +2719,7 @@ mod tests {
                     enabled: true,
                     added_at: 1,
                     native_trust: Vec::new(),
+                    wireguard: None,
                 }],
                 ..Default::default()
             };
@@ -2761,6 +2819,7 @@ mod tests {
                     enabled: true,
                     added_at: 1,
                     native_trust: Vec::new(),
+                    wireguard: None,
                 }],
                 ..Default::default()
             };
@@ -2805,6 +2864,7 @@ mod tests {
             .add(GatewayInput {
                 url: "https://GW.chan.app/consent?pick=1".to_string(),
                 label: Some("  work  ".to_string()),
+                wireguard: None,
             })
             .expect("add");
         assert_eq!(added.url, "https://gw.chan.app");
@@ -2823,6 +2883,7 @@ mod tests {
             .add(GatewayInput {
                 url: "https://gw.chan.app/other".to_string(),
                 label: None,
+                wireguard: None,
             })
             .expect_err("dup origin");
         assert!(err.contains("already configured"), "{err}");
@@ -2831,6 +2892,7 @@ mod tests {
             .add(GatewayInput {
                 url: "ftp://gw.chan.app".to_string(),
                 label: None,
+                wireguard: None,
             })
             .is_err());
         assert_eq!(reg.list().len(), 1);
@@ -2851,6 +2913,7 @@ mod tests {
             .add(GatewayInput {
                 url: "https://gw.chan.app".to_string(),
                 label: Some("work".to_string()),
+                wireguard: None,
             })
             .expect("add");
         // Rename: label is full-replace (trimmed), echoing the stored URL back
@@ -2861,6 +2924,7 @@ mod tests {
                 GatewayInput {
                     url: "https://gw.chan.app".to_string(),
                     label: Some("  prod  ".to_string()),
+                    wireguard: None,
                 },
             )
             .expect("update")
@@ -2878,6 +2942,7 @@ mod tests {
                 GatewayInput {
                     url: String::new(),
                     label: None,
+                    wireguard: None,
                 },
             )
             .expect("update")
@@ -2892,6 +2957,7 @@ mod tests {
                 GatewayInput {
                     url: "https://other.example".to_string(),
                     label: Some("x".to_string()),
+                    wireguard: None,
                 },
             )
             .expect_err("url change refused");
@@ -2906,6 +2972,7 @@ mod tests {
                 GatewayInput {
                     url: "https://GW.chan.app/consent?pick=1".to_string(),
                     label: Some("noisy".to_string()),
+                    wireguard: None,
                 },
             )
             .expect("update")
@@ -2917,6 +2984,7 @@ mod tests {
                 GatewayInput {
                     url: String::new(),
                     label: None,
+                    wireguard: None,
                 },
             ),
             Ok(None)
@@ -2949,10 +3017,256 @@ mod tests {
             .add(GatewayInput {
                 url: "https://gw.chan.app".to_string(),
                 label: None,
+                wireguard: None,
             })
             .expect("add");
         assert_eq!(reg.remove(&added.id), Ok(true));
         assert_eq!(*removed_ids.lock().unwrap(), vec![added.id]);
         assert!(reg.list().is_empty());
+    }
+
+    #[test]
+    fn gateway_wireguard_path_round_trips_and_an_old_row_reads() {
+        // A row written before the field reads with none, and writes none
+        // back, so a downgrade reads the same file.
+        let old: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "gw-1a2b3c4d",
+            "url": "https://gw.chan.app"
+        }))
+        .unwrap();
+        assert_eq!(old.wireguard, None);
+        let text = serde_json::to_string(&old).unwrap();
+        assert!(!text.contains("wireguard"), "{text}");
+        let with: Gateway = serde_json::from_value(serde_json::json!({
+            "id": "gw-1a2b3c4d",
+            "url": "https://gw.chan.app",
+            "wireguard": "/home/u/wg/chan.conf"
+        }))
+        .unwrap();
+        assert_eq!(
+            with.wireguard.as_deref(),
+            Some(std::path::Path::new("/home/u/wg/chan.conf"))
+        );
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(
+            text.contains("\"wireguard\":\"/home/u/wg/chan.conf\""),
+            "{text}"
+        );
+        let back: Gateway = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, with);
+    }
+
+    /// A 32-byte key as `wg genkey` prints one; it stands in for the
+    /// private key every refusal below must not echo.
+    const WG_PRIVATE_KEY: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+    const WG_PEER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+
+    fn wg_text() -> String {
+        format!(
+            "[Interface]\nPrivateKey = {WG_PRIVATE_KEY}\nAddress = 10.7.0.2/32\n\
+             [Peer]\nPublicKey = {WG_PEER_KEY}\nEndpoint = 192.0.2.1:51820\n\
+             AllowedIPs = 10.7.0.1/32\n"
+        )
+    }
+
+    /// An owner-only wg-quick file named `name` under `dir`.
+    fn wg_file(dir: &std::path::Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    fn gateway_registry_over(
+        dir: &std::path::Path,
+    ) -> (
+        Arc<Mutex<ConfigStore>>,
+        Arc<crate::gateway::GatewayManager>,
+        GatewayConfigRegistry,
+    ) {
+        let store = Arc::new(Mutex::new(ConfigStore {
+            path: dir.join("config.json"),
+        }));
+        let manager = Arc::new(crate::gateway::GatewayManager::default());
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::clone(&manager),
+        );
+        (store, manager, reg)
+    }
+
+    fn wg_input(url: &str, wireguard: Option<&str>) -> GatewayInput {
+        GatewayInput {
+            url: url.to_string(),
+            label: None,
+            wireguard: wireguard.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn gateway_registry_add_and_update_read_the_wireguard_file_and_refuse_a_bad_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _manager, reg) = gateway_registry_over(dir.path());
+        let good = wg_file(dir.path(), "good.conf", &wg_text());
+        let bad_line = wg_file(
+            dir.path(),
+            "bad.conf",
+            &wg_text().replace("10.7.0.2/32", "nowhere"),
+        );
+        let url = "https://gw.chan.app";
+
+        // A bad file is refused with the reader's message, the path, the
+        // line and the key and never the private key, and nothing is stored.
+        let err = reg
+            .add(wg_input(url, Some(bad_line.to_str().unwrap())))
+            .expect_err("a bad line is refused");
+        assert!(err.contains(&bad_line.display().to_string()), "{err}");
+        assert!(err.contains("line 3"), "{err}");
+        assert!(err.contains("Address"), "{err}");
+        assert!(!err.contains(WG_PRIVATE_KEY), "{err}");
+        assert!(reg.list().is_empty());
+        // So are a relative path and a missing file.
+        let err = reg
+            .add(wg_input(url, Some("wg/chan.conf")))
+            .expect_err("a relative path is refused");
+        assert!(err.contains("absolute"), "{err}");
+        let missing = dir.path().join("absent.conf");
+        let err = reg
+            .add(wg_input(url, Some(missing.to_str().unwrap())))
+            .expect_err("a missing file is refused");
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+        assert!(reg.list().is_empty());
+
+        // A good file is stored as given, trimmed. No tunnel started in
+        // this process, so the row waits for a restart.
+        let added = reg
+            .add(wg_input(url, Some(&format!("  {}  ", good.display()))))
+            .expect("add");
+        assert_eq!(added.wireguard.as_deref(), good.to_str());
+        assert!(added.wireguard_restart_required);
+        assert_eq!(added.last_error, None);
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].wireguard.as_deref(), Some(good.as_path()));
+
+        // Update refuses a bad file and keeps the stored one.
+        let err = reg
+            .update(&added.id, wg_input(url, Some(bad_line.to_str().unwrap())))
+            .expect_err("a bad line is refused on update");
+        assert!(err.contains("line 3"), "{err}");
+        assert!(!err.contains(WG_PRIVATE_KEY), "{err}");
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].wireguard.as_deref(), Some(good.as_path()));
+        // A blank, like an absent one, clears it, and the file loses the key.
+        let cleared = reg
+            .update(&added.id, wg_input("", Some("  ")))
+            .expect("update")
+            .expect("row exists");
+        assert_eq!(cleared.wireguard, None);
+        assert!(!cleared.wireguard_restart_required);
+        let cfg = store.lock().unwrap().get().unwrap();
+        assert_eq!(cfg.gateways[0].wireguard, None);
+        let text = fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(!text.contains("wireguard"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_registry_refuses_a_shared_wireguard_file_naming_the_fix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _manager, reg) = gateway_registry_over(dir.path());
+        let shared = wg_file(dir.path(), "shared.conf", &wg_text());
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o644)).unwrap();
+        let err = reg
+            .add(wg_input(
+                "https://gw.chan.app",
+                Some(shared.to_str().unwrap()),
+            ))
+            .expect_err("a shared file is refused");
+        assert!(err.contains("mode 644"), "{err}");
+        assert!(
+            err.contains(&format!("chmod 600 {}", shared.display())),
+            "{err}"
+        );
+        assert!(!err.contains(WG_PRIVATE_KEY), "{err}");
+        assert!(reg.list().is_empty());
+    }
+
+    #[test]
+    fn gateway_list_projects_the_wireguard_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, manager, reg) = gateway_registry_over(dir.path());
+        let a_file = wg_file(dir.path(), "a.conf", &wg_text());
+        let b_file = wg_file(dir.path(), "b.conf", &wg_text());
+        let other = wg_file(dir.path(), "other.conf", &wg_text());
+        let row = |id: &str, url: &str, wireguard: Option<&PathBuf>| Gateway {
+            id: id.to_string(),
+            url: url.to_string(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+            wireguard: wireguard.cloned(),
+        };
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways = vec![
+                row("gw-aaaaaaaa", "https://a.example", Some(&a_file)),
+                row("gw-bbbbbbbb", "https://b.example", Some(&b_file)),
+                row("gw-cccccccc", "https://c.example", None),
+            ];
+            guard.save(&cfg).unwrap();
+        }
+        // The start ran A's tunnel and refused B's file; it is recorded
+        // before anything projects the rows, as `main` records it before
+        // the embedded server serves the launcher.
+        let reason = format!(
+            "WireGuard: {}: line 3: Address: not an IP address",
+            b_file.display()
+        );
+        manager
+            .set_wireguard_startup(crate::wireguard::WireguardStartup::for_test(
+                &[("gw-aaaaaaaa", a_file.to_str().unwrap())],
+                &[("gw-bbbbbbbb", b_file.to_str().unwrap(), &reason)],
+            ))
+            .unwrap();
+        let by_id = |id: &str| reg.list().into_iter().find(|e| e.id == id).unwrap();
+        let a_row = by_id("gw-aaaaaaaa");
+        assert_eq!(a_row.wireguard.as_deref(), a_file.to_str());
+        assert!(!a_row.wireguard_restart_required);
+        assert_eq!(a_row.last_error, None);
+        let b_row = by_id("gw-bbbbbbbb");
+        assert!(b_row.wireguard_restart_required);
+        assert_eq!(b_row.last_error.as_deref(), Some(reason.as_str()));
+        let plain_row = by_id("gw-cccccccc");
+        assert!(!plain_row.wireguard_restart_required);
+        assert_eq!(plain_row.wireguard, None);
+        // A changes its file: the next start applies it.
+        let changed = reg
+            .update("gw-aaaaaaaa", wg_input("", Some(other.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert!(changed.wireguard_restart_required);
+        // B drops its file: the refusal no longer applies, and a row that
+        // asks for no tunnel waits for nothing.
+        let dropped = reg
+            .update("gw-bbbbbbbb", wg_input("", None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(dropped.last_error, None);
+        assert!(!dropped.wireguard_restart_required);
+        // A plain row that gains a file waits for a restart.
+        let gained = reg
+            .update("gw-cccccccc", wg_input("", Some(other.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert!(gained.wireguard_restart_required);
     }
 }

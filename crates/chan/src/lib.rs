@@ -312,9 +312,14 @@ where
             port,
             tunnel_url,
             tunnel_devserver_name,
+            tunnel_wireguard,
         } => {
             let addr = SocketAddr::new(bind, port);
-            let tunnel = build_devserver_tunnel_from_env(tunnel_url, tunnel_devserver_name)?;
+            let tunnel = build_devserver_tunnel_from_env(
+                tunnel_url,
+                tunnel_devserver_name,
+                tunnel_wireguard.as_deref(),
+            )?;
             devserver_daemon::run_devserver_daemon_child(addr, tunnel).await
         }
         Command::Config { action } => cmd_config(action),

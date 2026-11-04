@@ -1,0 +1,53 @@
+[package]
+name = "chan-wireguard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The crate is Apache-2.0 like the workspace; the `noise` module and the
+# clock are derived from Cloudflare's boringtun under BSD-3-Clause, whose
+# notice is the LICENSE file beside this manifest.
+license = "Apache-2.0 AND BSD-3-Clause"
+repository.workspace = true
+description = "The WireGuard protocol core and an in-process tunnel for chan."
+
+[dependencies]
+base64 = { workspace = true }
+blake2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hmac = { workspace = true }
+# The proxy's response body type: nothing, or the destination's body.
+http-body-util = { workspace = true }
+# The loopback proxy serves each client connection with hyper's HTTP/1
+# server and opens its destination connections with hyper's HTTP/1 client;
+# the workspace row enables http2, client and server, and the proxy
+# speaks HTTP/1 only.
+hyper = { workspace = true, features = ["http1"] }
+# TokioIo bridges tokio streams to hyper's IO traits and TokioTimer drives
+# hyper's header read timeout.
+hyper-util = { workspace = true, features = ["tokio"] }
+parking_lot = { workspace = true }
+rand_core = { workspace = true }
+ring = { workspace = true }
+# TCP over the tunnel without an OS interface: an IP-medium device fed by
+# the protocol core, IPv4 and IPv6, TCP sockets with CUBIC (the congestion
+# control every host OS defaults to; without one a socket bursts its whole
+# window) and the task wakers the streams block on. No Ethernet, DHCP, DNS,
+# UDP or ICMP: the tunnel carries only the connections chan opens through it.
+smoltcp = { workspace = true }
+# SO_RCVBUF and SO_SNDBUF on the tunnel socket, which tokio does not expose.
+socket2 = { workspace = true }
+subtle = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+x25519-dalek = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# CLOCK_BOOTTIME for the protocol timers: std's Instant stops while the
+# machine sleeps, and a session has to be seen as expired after a laptop
+# wakes.
+rustix = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# The reader tests write owner-only wg-quick files in a directory of their
+# own.
+tempfile = { workspace = true }

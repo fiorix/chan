@@ -21,11 +21,13 @@ mod runtime_capability;
 mod serve;
 mod terminal_mode;
 mod terminal_opacity;
+mod update_floor;
 mod upload;
 mod watcher;
 mod window_ops;
 mod window_watcher;
 mod window_watcher_wiring;
+mod wireguard;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -277,6 +279,10 @@ pub struct AppState {
     /// the command that wrote it) sends nothing again. `None` until the first
     /// announcement; a window reads its first value through the command.
     pub terminal_background_opacity: Mutex<Option<u32>>,
+    /// The WireGuard tunnels and the proxy over them, when an enabled
+    /// gateway carried a wg-quick file at start. Held here for the process:
+    /// dropping it ends the proxy and every connection through it.
+    pub wireguard: Option<wireguard::WireguardFabric>,
 }
 
 impl AppState {
@@ -325,7 +331,22 @@ impl AppState {
             update_gate: tokio::sync::Mutex::new(()),
             update_installed_version: Mutex::new(None),
             terminal_background_opacity: Mutex::new(None),
+            wireguard: None,
         }
+    }
+
+    /// Hand the state the WireGuard fabric the start decided and what it
+    /// decided per gateway, which the Gateways projection and connect read.
+    pub(crate) fn with_wireguard(
+        mut self,
+        fabric: Option<wireguard::WireguardFabric>,
+        startup: wireguard::WireguardStartup,
+    ) -> Self {
+        self.wireguard = fabric;
+        if self.gateway_manager.set_wireguard_startup(startup).is_err() {
+            tracing::warn!("the WireGuard start outcome was recorded twice");
+        }
+        self
     }
 
     fn native_policy_lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -3388,6 +3409,9 @@ async fn desktop_handle_upgrade(
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
+            if let Some(message) = update_floor::refusal(&update) {
+                return Response::Error { message };
+            }
             if check_only {
                 return Response::UpgradeChecked {
                     desktop_version: CHAN_VERSION.into(),
@@ -3486,6 +3510,9 @@ async fn desktop_handle_upgrade(
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
+            if let Some(message) = update_floor::refusal(&update) {
+                return Response::Error { message };
+            }
             if check_only {
                 return Response::UpgradeChecked {
                     desktop_version: CHAN_VERSION.into(),
@@ -3590,6 +3617,10 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
+                if let Some(reason) = update_floor::refusal(&update) {
+                    tracing::warn!(%version, %reason, "on-launch update skipped");
+                    return;
+                }
                 tracing::info!(%version, "on-launch update available; downloading");
                 let state = Arc::clone(&app.state::<Arc<AppState>>());
                 // Serialize with a handoff `chan upgrade` (see
@@ -3655,6 +3686,10 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
+                if let Some(reason) = update_floor::refusal(&update) {
+                    tracing::warn!(%version, %reason, "on-launch update skipped");
+                    return;
+                }
                 tracing::info!(%version, "on-launch update available; downloading");
                 let state = Arc::clone(&app.state::<Arc<AppState>>());
                 // Serialize with a handoff `chan upgrade` (see
@@ -3886,7 +3921,7 @@ pub(crate) fn clear_gateway_404_counts_for_window(
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     let state = window.state::<Arc<AppState>>();
     let label = window.label();
-    let client = match reqwest::Client::builder()
+    let client = match crate::wireguard::client_builder()
         .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
     {
@@ -5432,7 +5467,23 @@ fn main() {
             None
         }
     };
-    let state = Arc::new(AppState::with_store(store));
+    // The WireGuard fabric: a tunnel per enabled gateway with a wg-quick
+    // file and one loopback proxy over them, decided here, before any
+    // webview or HTTP client exists. The webview proxy is process-wide on
+    // Windows and the HTTP clients pin the proxy at their first build, so
+    // the decision cannot move later; nothing starts when no gateway
+    // carries a file.
+    let gateways = match store.lock().unwrap().get() {
+        Ok(cfg) => cfg.gateways,
+        Err(e) => {
+            tracing::warn!(error = %e, "reading the gateways for WireGuard failed; no tunnel starts");
+            Vec::new()
+        }
+    };
+    let (fabric, wireguard_startup) = tauri::async_runtime::block_on(wireguard::start(&gateways));
+    wireguard::install_proxy(fabric.as_ref().map(|f| f.proxy_url().clone()))
+        .expect("the WireGuard proxy is decided before any HTTP client is built");
+    let state = Arc::new(AppState::with_store(store).with_wireguard(fabric, wireguard_startup));
     *state.gateway_migration.lock().unwrap() = migration_outcome;
     let state_for_exit = Arc::clone(&state);
     let state_for_setup = Arc::clone(&state);
@@ -6658,11 +6709,13 @@ fn open_about_window(app: &tauri::AppHandle) -> Result<(), String> {
         "window.__CHAN_THEME__ = {};",
         serde_json::to_string(&theme).unwrap_or_else(|_| "null".to_string())
     );
-    let win = WebviewWindowBuilder::new(
+    // A local page, but on Windows the first webview's proxy is the
+    // process's, so this window carries the WireGuard proxy like the rest.
+    let win = wireguard::with_webview_proxy(WebviewWindowBuilder::new(
         app,
         "about",
         WebviewUrl::App(format!("about.html?v={version}&b={build}").into()),
-    )
+    ))
     .title("About Chan Desktop")
     // Tall enough that the content never has to scroll; about.css centers
     // it, so any slack is split evenly above and below rather than piling
@@ -10084,6 +10137,7 @@ mod tests {
                 enabled: true,
                 added_at: 0,
                 native_trust: Vec::new(),
+                wireguard: None,
             });
             store.save(&cfg).unwrap();
         }
@@ -10177,6 +10231,7 @@ mod tests {
                 enabled: true,
                 added_at: 0,
                 native_trust: Vec::new(),
+                wireguard: None,
             });
             store.save(&cfg).unwrap();
         }
@@ -10320,6 +10375,7 @@ mod tests {
                 enabled: true,
                 added_at: 0,
                 native_trust: Vec::new(),
+                wireguard: None,
             });
             store.save(&cfg).unwrap();
         }

@@ -1,6 +1,7 @@
 //! TLS + h2 dial path for the chan-tunnel client.
 //!
-//! Resolves the tunnel URL, opens a TCP connection, runs rustls
+//! Resolves the tunnel URL, opens a TCP connection (or asks the
+//! embedder's `Connector` for a stream), runs rustls
 //! through it (ALPN: h2), runs `h2::client` on top, posts the
 //! handshake request, wraps `(SendStream, RecvStream)` in an
 //! `H2Duplex`, and finally runs the chan-tunnel handshake.
@@ -41,7 +42,7 @@ use tokio_util::compat::Compat;
 use url::Url;
 use yamux::Connection as YamuxConnection;
 
-use crate::{handshake, ClientConfig, ClientError, Registration};
+use crate::{handshake, ClientConfig, ClientError, DialStream, Registration};
 
 /// Open one tunnel against the configured URL: TLS + h2 + tunnel
 /// handshake. Returns the registration the server assigned plus
@@ -91,21 +92,38 @@ pub async fn dial_with_tls(
     // typo like `/v2/tunnel` still surfaces as a 404 they can see.
     let tunnel_url = normalize_tunnel_url(&cfg.tunnel_url);
 
-    let tcp = open_tcp(&host, port, cfg.proxy.as_ref()).await?;
-    if scheme == "http"
-        && !tcp
-            .peer_addr()
-            .map(|peer| peer.ip().is_loopback())
-            .unwrap_or(false)
-    {
+    // Cleartext h2 is allowed only where the bytes cannot be read on the
+    // way: to a peer on this machine, or inside a transport that
+    // authenticates and encrypts. For a connector that is known before
+    // any bytes move, so an unprotected one never even connects.
+    let (stream, cleartext_peer_ok): (Box<dyn DialStream>, bool) = match cfg.connector.as_deref() {
+        Some(transport) => {
+            if scheme == "http" && !transport.is_protected() {
+                return Err(ClientError::InvalidUrl(
+                    "cleartext tunnel connection refused over an unprotected connector".into(),
+                ));
+            }
+            let stream = transport.connect(&host, port).await?;
+            (stream, transport.is_protected())
+        }
+        None => {
+            let tcp = open_tcp(&host, port, cfg.proxy.as_ref()).await?;
+            let loopback = tcp
+                .peer_addr()
+                .map(|peer| peer.ip().is_loopback())
+                .unwrap_or(false);
+            tcp.set_nodelay(true).ok();
+            (Box::new(tcp), loopback)
+        }
+    };
+    if scheme == "http" && !cleartext_peer_ok {
         return Err(ClientError::InvalidUrl(
             "cleartext tunnel connection did not terminate on a loopback peer".into(),
         ));
     }
-    tcp.set_nodelay(true).ok();
 
     // Drive h2 frames in the background; the connection future has
-    // a different type per branch (rustls TlsStream vs raw TcpStream),
+    // a different type per branch (rustls TlsStream vs the raw stream),
     // so each arm spawns its own driver and returns only the SendRequest.
     let mut send_req = if scheme == "https" {
         let tls_config = tls
@@ -115,7 +133,7 @@ pub async fn dial_with_tls(
         let server_name = ServerName::try_from(host.clone())
             .map_err(|e| ClientError::Tls(format!("invalid SNI {host:?}: {e}")))?;
         let tls = connector
-            .connect(server_name, tcp)
+            .connect(server_name, stream)
             .await
             .map_err(|e| ClientError::Tls(format!("rustls handshake: {e}")))?;
         let (s, conn) = tunnel_h2_client_builder()
@@ -126,7 +144,7 @@ pub async fn dial_with_tls(
         s
     } else {
         let (s, conn) = tunnel_h2_client_builder()
-            .handshake(tcp)
+            .handshake(stream)
             .await
             .map_err(|e| ClientError::Handshake(format!("h2c handshake: {e}")))?;
         spawn_h2_driver(conn);
@@ -227,11 +245,21 @@ pub(crate) fn validate_tunnel_url(cfg: &ClientConfig) -> Result<(), ClientError>
         .tunnel_url
         .host_str()
         .ok_or_else(|| ClientError::InvalidUrl("missing host".into()))?;
+    if cfg.connector.is_some() && cfg.proxy.is_some() {
+        return Err(ClientError::InvalidUrl(
+            "a connector and an HTTP proxy cannot both carry the tunnel".into(),
+        ));
+    }
+    let protected_connector = cfg
+        .connector
+        .as_ref()
+        .is_some_and(|connector| connector.is_protected());
     match cfg.tunnel_url.scheme() {
         "https" => Ok(()),
-        "http" if is_loopback_host(host) => Ok(()),
+        "http" if is_loopback_host(host) || protected_connector => Ok(()),
         "http" => Err(ClientError::InvalidUrl(
-            "non-loopback tunnel URLs must use https://".into(),
+            "non-loopback tunnel URLs must use https:// unless a protected connector carries them"
+                .into(),
         )),
         _ => Err(ClientError::InvalidUrl(
             "tunnel URL scheme must be https:// or http://".into(),
@@ -677,6 +705,113 @@ mod tests {
                 Err(ClientError::InvalidUrl(message)) if message.contains("userinfo")
             ));
         }
+    }
+
+    /// A connector that ignores the host it is asked for and opens TCP
+    /// to a fixed address, recording what the dial asked of it.
+    struct Redirect {
+        to: std::net::SocketAddr,
+        protected: bool,
+        asked: Arc<std::sync::Mutex<Vec<(String, u16)>>>,
+    }
+
+    impl crate::Connector for Redirect {
+        fn connect<'a>(&'a self, host: &'a str, port: u16) -> crate::ConnectFuture<'a> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push((host.to_string(), port));
+                let tcp = TcpStream::connect(self.to).await?;
+                Ok(Box::new(tcp) as Box<dyn DialStream>)
+            })
+        }
+
+        fn is_protected(&self) -> bool {
+            self.protected
+        }
+    }
+
+    /// A protected connector lifts the loopback rule: the dial is asked
+    /// for the URL's own host and port, and the h2 preface goes down the
+    /// stream the connector returned.
+    #[tokio::test]
+    async fn a_protected_connector_carries_a_cleartext_dial_to_any_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cfg = ClientConfig {
+            tunnel_url: Url::parse("http://tunnel.invalid:7443/v1/tunnel").unwrap(),
+            token: "chan_pat_x".into(),
+            connector: Some(Arc::new(Redirect {
+                to: addr,
+                protected: true,
+                asked: asked.clone(),
+            })),
+            ..ClientConfig::default()
+        };
+        validate_tunnel_url(&cfg).expect("a protected connector lifts the loopback rule");
+        let dialing = tokio::spawn(async move { dial_with_tls(&cfg, None).await.map(|_| ()) });
+        let (mut server, _) = listener.accept().await.unwrap();
+        let mut preface = [0u8; 24];
+        server.read_exact(&mut preface).await.unwrap();
+        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            [("tunnel.invalid".to_string(), 7443)]
+        );
+        drop(server);
+        assert!(dialing.await.unwrap().is_err());
+    }
+
+    /// An unprotected connector is held to https: a cleartext dial is
+    /// refused before the connector is asked for anything, even to a
+    /// loopback host, and a non-loopback host fails validation.
+    #[tokio::test]
+    async fn an_unprotected_connector_never_sees_a_cleartext_dial() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cfg = ClientConfig {
+            tunnel_url: Url::parse("http://127.0.0.1:7443/v1/tunnel").unwrap(),
+            token: "chan_pat_x".into(),
+            connector: Some(Arc::new(Redirect {
+                to: "127.0.0.1:1".parse().unwrap(),
+                protected: false,
+                asked: asked.clone(),
+            })),
+            ..ClientConfig::default()
+        };
+        let err = dial_with_tls(&cfg, None).await.err().expect("refused");
+        assert!(
+            matches!(err, ClientError::InvalidUrl(ref m) if m.contains("unprotected connector")),
+            "{err}"
+        );
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "no connect may happen before the refusal"
+        );
+        let cfg = ClientConfig {
+            tunnel_url: Url::parse("http://tunnel.invalid:7443/v1/tunnel").unwrap(),
+            ..cfg
+        };
+        assert!(matches!(
+            validate_tunnel_url(&cfg),
+            Err(ClientError::InvalidUrl(m)) if m.contains("https://")
+        ));
+    }
+
+    #[test]
+    fn a_connector_and_a_proxy_are_refused_together() {
+        let cfg = ClientConfig {
+            tunnel_url: Url::parse("https://workspace.chan.app/v1/tunnel").unwrap(),
+            proxy: Some(Url::parse("http://127.0.0.1:3128").unwrap()),
+            connector: Some(Arc::new(Redirect {
+                to: "127.0.0.1:1".parse().unwrap(),
+                protected: true,
+                asked: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })),
+            ..ClientConfig::default()
+        };
+        assert!(matches!(
+            validate_tunnel_url(&cfg),
+            Err(ClientError::InvalidUrl(m)) if m.contains("cannot both")
+        ));
     }
 
     async fn run_proxy(listener: TcpListener, response: &'static [u8]) -> Vec<u8> {

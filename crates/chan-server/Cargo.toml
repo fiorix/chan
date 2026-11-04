@@ -52,6 +52,10 @@ chan-revtunnel = { workspace = true }
 chan-systemd = { workspace = true }
 chan-tunnel-client = { workspace = true }
 chan-tunnel-proto = { workspace = true }
+# The in-process WireGuard tunnel `chan devserver run --tunnel-wireguard` dials
+# the gateway through; the connector over it lives here, not in
+# chan-tunnel-client, which the gateway workspace builds without it.
+chan-wireguard = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

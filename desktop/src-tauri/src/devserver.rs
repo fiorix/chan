@@ -528,11 +528,17 @@ pub struct DevserverWorkspaceRow {
 }
 
 /// Reuse one process-wide HTTP client so devserver polls and requests share keep-alive connection pools. Cloning the client shares its pool rather than opening an independent one. Memoize the build result, including TLS initialization failures, so every caller sees the same initialization outcome without repeated build attempts.
+///
+/// The first call pins the process's WireGuard proxy into the client, so it
+/// runs after the start decided the proxy (`main` records it before the
+/// Tauri app is built, and the first devserver request comes later); the
+/// decision refuses to be made after a client was built, so a wrong order
+/// fails loudly rather than leaving a client on the wrong path.
 fn http_client() -> Result<reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            crate::wireguard::client_builder()
                 .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
                 .build()
                 .map_err(|e| format!("building devserver http client: {e}"))
@@ -540,11 +546,12 @@ fn http_client() -> Result<reqwest::Client, String> {
         .clone()
 }
 
+/// The no-redirect twin of [`http_client`], under the same proxy order.
 fn http_client_no_redirect() -> Result<reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            crate::wireguard::client_builder()
                 .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()

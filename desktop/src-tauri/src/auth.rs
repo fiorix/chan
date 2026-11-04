@@ -1048,7 +1048,7 @@ async fn redeem_inner(
         identity_origin.trim_end_matches('/')
     );
     let body = serde_json::json!({ "code": code, "code_verifier": code_verifier });
-    let client = reqwest::Client::builder()
+    let client = crate::wireguard::client_builder()
         .timeout(Duration::from_secs(REDEEM_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("building redeem http client: {e}"))?;

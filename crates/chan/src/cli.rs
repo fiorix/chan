@@ -180,6 +180,15 @@ pub(super) enum Command {
         /// resolved value (explicit flag or hostname) through argv.
         #[arg(long, verbatim_doc_comment)]
         tunnel_devserver_name: Option<String>,
+        /// wg-quick file of the WireGuard tunnel the dial runs through.
+        /// The parent passes its path; the file is read here.
+        #[arg(
+            long,
+            env = "CHAN_TUNNEL_WIREGUARD",
+            value_name = "FILE",
+            verbatim_doc_comment
+        )]
+        tunnel_wireguard: Option<PathBuf>,
     },
     /// Internal: run the chan-llm MCP server on stdio against a
     /// workspace. Spawned by MCP clients so file edits route through
@@ -423,14 +432,31 @@ pub(super) struct DevserverServeArgs {
     /// holds the name, the gateway suffixes `-2`, `-3`, ...
     #[arg(long, env = "CHAN_TUNNEL_DEVSERVER_NAME", verbatim_doc_comment)]
     pub(super) tunnel_devserver_name: Option<String>,
+    /// Dial the tunnel URL through an in-process WireGuard tunnel read
+    /// from FILE, a wg-quick style configuration: [Interface] with
+    /// PrivateKey and Address, one [Peer] with PublicKey, Endpoint and
+    /// AllowedIPs. The server side is an ordinary WireGuard peer (the
+    /// kernel's `wg`), and the tunnel URL may then be an http:// address
+    /// inside the tunnel, since the peer is pinned by its key and every
+    /// byte is encrypted. Needs a tunnel token. The file holds the
+    /// tunnel's private key, so it must be readable by its owner only;
+    /// a systemd unit and the --service=chan daemon record its path,
+    /// never its contents.
+    #[arg(
+        long,
+        env = "CHAN_TUNNEL_WIREGUARD",
+        value_name = "FILE",
+        verbatim_doc_comment
+    )]
+    pub(super) tunnel_wireguard: Option<PathBuf>,
     /// Run WITHOUT tunnel mode, ignoring any token in scope: the
     /// --tunnel-token flag, CHAN_TUNNEL_TOKEN in the environment, and
     /// (under --service=systemd) the PAT persisted in the installed
-    /// unit. This is how a supervised tunnel devserver is converted
-    /// back to a purely local one, and how a shell that inherited a
-    /// token still starts a local devserver. Omit it and a supervised
-    /// start / restart / join keeps the tunnel registration the unit
-    /// already carries.
+    /// unit, along with any --tunnel-wireguard file. This is how a
+    /// supervised tunnel devserver is converted back to a purely local
+    /// one, and how a shell that inherited a token still starts a local
+    /// devserver. Omit it and a supervised start / restart / join keeps
+    /// the tunnel registration the unit already carries.
     #[arg(long, verbatim_doc_comment)]
     pub(super) no_tunnel: bool,
 }
@@ -1567,9 +1593,68 @@ mod tests {
         match cli.command {
             Command::Devserver {
                 action: DevserverAction::Run { args },
-            } => assert_tunnel_defaults_off(&args.tunnel_url, &args.tunnel_token),
+            } => assert_tunnel_defaults_off(
+                &args.tunnel_url,
+                &args.tunnel_token,
+                &args.tunnel_wireguard,
+            ),
             other => panic!("expected Command::Devserver, got {other:?}"),
         }
+    }
+
+    fn devserver_run_args(args: &[&str]) -> DevserverServeArgs {
+        let argv = ["chan", "devserver", "run"]
+            .into_iter()
+            .chain(args.iter().copied());
+        match Cli::parse_from(argv).command {
+            Command::Devserver {
+                action: DevserverAction::Run { args },
+            } => args,
+            other => panic!("expected Command::Devserver, got {other:?}"),
+        }
+    }
+
+    /// The WireGuard file is a path flag with an environment spelling, on
+    /// the run verb and on the hidden daemon child the parent re-execs.
+    #[test]
+    fn devserver_tunnel_wireguard_parses_from_the_flag_and_its_env() {
+        let _env = test_env::ChanTestEnv::new();
+        let args = devserver_run_args(&["--tunnel-wireguard", "/etc/wireguard/chan.conf"]);
+        assert_eq!(
+            args.tunnel_wireguard.as_deref(),
+            Some(std::path::Path::new("/etc/wireguard/chan.conf"))
+        );
+        std::env::set_var("CHAN_TUNNEL_WIREGUARD", "/home/dev/wg.conf");
+        let args = devserver_run_args(&[]);
+        assert_eq!(
+            args.tunnel_wireguard.as_deref(),
+            Some(std::path::Path::new("/home/dev/wg.conf"))
+        );
+        let cli = Cli::parse_from([
+            "chan",
+            "__devserver-daemon",
+            "--bind=127.0.0.1",
+            "--port=0",
+            "--tunnel-wireguard=/etc/wireguard/chan.conf",
+        ]);
+        match cli.command {
+            Command::DevserverDaemon {
+                tunnel_wireguard, ..
+            } => assert_eq!(
+                tunnel_wireguard.as_deref(),
+                Some(std::path::Path::new("/etc/wireguard/chan.conf"))
+            ),
+            other => panic!("expected Command::DevserverDaemon, got {other:?}"),
+        }
+        let text = Cli::command()
+            .find_subcommand_mut("devserver")
+            .unwrap()
+            .find_subcommand_mut("run")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(text.contains("[env: CHAN_TUNNEL_WIREGUARD"), "{text}");
+        assert!(text.contains("--tunnel-wireguard <FILE>"), "{text}");
     }
 
     #[test]
@@ -1599,7 +1684,11 @@ mod tests {
     /// Asserts the devserver tunnel defaults without rendering any received
     /// value: `tunnel_token` can carry a live `chan_pat_` credential, so a
     /// failure names the field and stays redacted.
-    fn assert_tunnel_defaults_off(tunnel_url: &Option<String>, tunnel_token: &Option<String>) {
+    fn assert_tunnel_defaults_off(
+        tunnel_url: &Option<String>,
+        tunnel_token: &Option<String>,
+        tunnel_wireguard: &Option<PathBuf>,
+    ) {
         assert!(
             tunnel_url.is_none(),
             "tunnel URL must default to unset (value redacted)"
@@ -1609,6 +1698,10 @@ mod tests {
             tunnel_token.is_none(),
             "tunnel token must default to unset (value redacted)"
         );
+        assert!(
+            tunnel_wireguard.is_none(),
+            "WireGuard file must default to unset (value redacted)"
+        );
     }
 
     /// Negative coverage for the redaction contract: a failing default-check
@@ -1617,7 +1710,7 @@ mod tests {
     fn tunnel_default_failure_never_renders_the_value() {
         const SENTINEL: &str = "chan_pat_test_sentinel_value";
         let panicked = std::panic::catch_unwind(|| {
-            assert_tunnel_defaults_off(&None, &Some(SENTINEL.to_string()));
+            assert_tunnel_defaults_off(&None, &Some(SENTINEL.to_string()), &None);
         });
         let payload = panicked.expect_err("the check must fail on a set token");
         let message = payload

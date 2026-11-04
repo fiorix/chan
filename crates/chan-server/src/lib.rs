@@ -76,6 +76,7 @@ mod terminal_blob;
 mod tunnel_guard;
 mod util;
 mod window_bus;
+mod wireguard_connector;
 
 pub use config::ServerConfig;
 /// The bounds of `terminal.background_opacity`, for an embedder that writes
@@ -117,7 +118,7 @@ pub use chan_library::{
 };
 pub use devserver::{
     persisted_devserver_port, persisted_devserver_token, rotate_persisted_devserver_token,
-    run_devserver, spawn_root_health_probe, DevserverConfig, DevserverTunnel,
+    run_devserver, spawn_root_health_probe, DevserverConfig, DevserverTunnel, DevserverWireguard,
     DEVSERVER_TOKEN_MARKER, DEVSERVER_TOKEN_MAX_AGE_SECS, ROOT_HEALTH_PROBE_INTERVAL,
     WORKSPACE_MOUNT_TIMEOUT,
 };

@@ -43,6 +43,8 @@ function gateway(over: Partial<GatewayEntry> = {}): GatewayEntry {
     pending_signin: false,
     devserver_count: 0,
     last_error: null,
+    wireguard: null,
+    wireguard_restart_required: false,
     ...over,
   };
 }
