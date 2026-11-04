@@ -579,7 +579,7 @@ impl Tunn {
 mod tests {
     use super::*;
     use crate::clock;
-    use crate::noise::timers::{REKEY_AFTER_TIME, REKEY_TIMEOUT};
+    use crate::noise::timers::{KEEPALIVE_TIMEOUT, REKEY_AFTER_TIME, REKEY_TIMEOUT};
     use rand_core::{OsRng, RngCore};
 
     fn create_two_tuns() -> (Tunn, Tunn) {
@@ -763,6 +763,88 @@ mod tests {
         clock::advance(REKEY_AFTER_TIME);
         assert!(matches!(their_tun.update_timers(&mut []), TunnResult::Done));
         update_timer_results_in_handshake(&mut my_tun);
+    }
+
+    /// A data packet and the one the peer answers it with inside a single
+    /// timer tick, so every stamp the exchange leaves is the same.
+    fn exchange_within_one_tick(my_tun: &mut Tunn, their_tun: &mut Tunn) {
+        let mut my_dst = [0u8; 1024];
+        let mut their_dst = [0u8; 1024];
+        let packet = create_ipv4_udp_packet();
+        let TunnResult::WriteToNetwork(sent) = my_tun.encapsulate(&packet, &mut my_dst) else {
+            panic!("a session is up")
+        };
+        assert!(matches!(
+            their_tun.decapsulate(None, sent, &mut their_dst),
+            TunnResult::WriteToTunnelV4(..)
+        ));
+        let TunnResult::WriteToNetwork(reply) = their_tun.encapsulate(&packet, &mut their_dst)
+        else {
+            panic!("a session is up")
+        };
+        assert!(matches!(
+            my_tun.decapsulate(None, reply, &mut my_dst),
+            TunnResult::WriteToTunnelV4(..)
+        ));
+    }
+
+    /// The side that received the last data packet owes a keepalive ten
+    /// seconds later even when its own send and the answer share a stamp;
+    /// a kernel peer that never gets it re-handshakes five seconds after.
+    #[test]
+    fn passive_keepalive_after_an_answer_within_the_same_tick() {
+        let _guard = clock::test_offset_guard();
+        let (mut my_tun, mut their_tun) = create_two_tuns_and_handshake();
+        let mut my_dst = [0u8; 1024];
+        let mut their_dst = [0u8; 1024];
+        clock::advance(Duration::from_secs(1));
+        assert!(matches!(
+            my_tun.update_timers(&mut my_dst),
+            TunnResult::Done
+        ));
+        assert!(matches!(
+            their_tun.update_timers(&mut their_dst),
+            TunnResult::Done
+        ));
+        exchange_within_one_tick(&mut my_tun, &mut their_tun);
+
+        clock::advance(KEEPALIVE_TIMEOUT);
+        let TunnResult::WriteToNetwork(keepalive) = my_tun.update_timers(&mut my_dst) else {
+            panic!("the receiver of the last data packet owes a keepalive")
+        };
+        assert!(matches!(
+            Tunn::parse_incoming_packet(keepalive).unwrap(),
+            Packet::PacketData(_)
+        ));
+        assert_eq!(keepalive.len(), 32, "a keepalive carries no payload");
+        // The side that sent last owes nothing yet.
+        assert!(matches!(
+            their_tun.update_timers(&mut their_dst),
+            TunnResult::Done
+        ));
+    }
+
+    /// The side that sent the last data packet and heard nothing back for
+    /// fifteen seconds starts a new handshake, with the same shared stamp.
+    #[test]
+    fn new_handshake_after_an_unanswered_send_within_the_same_tick() {
+        let _guard = clock::test_offset_guard();
+        let (mut my_tun, mut their_tun) = create_two_tuns_and_handshake();
+        let mut my_dst = [0u8; 1024];
+        let mut their_dst = [0u8; 1024];
+        clock::advance(Duration::from_secs(1));
+        assert!(matches!(
+            my_tun.update_timers(&mut my_dst),
+            TunnResult::Done
+        ));
+        assert!(matches!(
+            their_tun.update_timers(&mut their_dst),
+            TunnResult::Done
+        ));
+        exchange_within_one_tick(&mut my_tun, &mut their_tun);
+
+        clock::advance(KEEPALIVE_TIMEOUT + REKEY_TIMEOUT);
+        update_timer_results_in_handshake(&mut their_tun);
     }
 
     #[test]

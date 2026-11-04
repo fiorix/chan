@@ -15,7 +15,7 @@ pub(crate) const REKEY_AFTER_TIME: Duration = Duration::from_secs(120);
 const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
 const REKEY_ATTEMPT_TIME: Duration = Duration::from_secs(90);
 pub(crate) const REKEY_TIMEOUT: Duration = Duration::from_secs(5);
-const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 const COOKIE_EXPIRATION_TIME: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
@@ -105,15 +105,15 @@ impl IndexMut<TimerName> for Timers {
 
 impl Tunn {
     pub(super) fn timer_tick(&mut self, timer_name: TimerName) {
+        // Only a data packet starts either count, as in the kernel: a
+        // received keepalive is not answered with one, and a sent keepalive
+        // does not start the fifteen seconds that end in a new handshake.
+        // Any authenticated packet, either way, ends the count.
         match timer_name {
-            TimeLastPacketReceived => {
-                self.timers.want_keepalive = true;
-                self.timers.want_handshake = false;
-            }
-            TimeLastPacketSent => {
-                self.timers.want_handshake = true;
-                self.timers.want_keepalive = false;
-            }
+            TimeLastPacketReceived => self.timers.want_handshake = false,
+            TimeLastDataPacketReceived => self.timers.want_keepalive = true,
+            TimeLastPacketSent => self.timers.want_keepalive = false,
+            TimeLastDataPacketSent => self.timers.want_handshake = true,
             _ => {}
         }
 
@@ -265,7 +265,14 @@ impl Tunn {
                 // If we have sent a packet to a given peer but have not received a
                 // packet after from that peer for (KEEPALIVE + REKEY_TIMEOUT) ms,
                 // we initiate a new handshake.
-                if data_packet_sent > aut_packet_received
+                //
+                // The stamps have the tick's resolution, so a data packet and
+                // the answer it drew within one tick share a stamp. The want_
+                // flags record which came last, which is why equal stamps
+                // count here and for the keepalive below; otherwise a kernel
+                // peer that answered last hears no keepalive and re-handshakes
+                // fifteen seconds later.
+                if data_packet_sent >= aut_packet_received
                     && now - aut_packet_received >= KEEPALIVE_TIMEOUT + REKEY_TIMEOUT
                     && mem::take(&mut self.timers.want_handshake)
                 {
@@ -276,7 +283,7 @@ impl Tunn {
                 if !handshake_initiation_required {
                     // If a packet has been received from a given peer, but we have not sent one back
                     // to the given peer in KEEPALIVE ms, we send an empty packet.
-                    if data_packet_received > aut_packet_sent
+                    if data_packet_received >= aut_packet_sent
                         && now - aut_packet_sent >= KEEPALIVE_TIMEOUT
                         && mem::take(&mut self.timers.want_keepalive)
                     {
