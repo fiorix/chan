@@ -10,6 +10,12 @@
 //! rather than tracked as a dependency: the protocol has no versioning to
 //! follow.
 //!
+//! [`Tunnel`] is the tunnel as a process uses it: it owns the UDP socket,
+//! drives one `Tunn` and runs a TCP/IP stack over it, so a caller opens
+//! TCP connections to the peer's addresses with [`Tunnel::connect`] and
+//! gets a tokio [`Stream`], with no interface, route or privilege on the
+//! host. [`config::Config`] is read from the wg-quick file format.
+//!
 //! The `noise` module and the clock derive from Cloudflare's boringtun
 //! under BSD-3-Clause; the notice is the LICENSE file beside the crate's
 //! manifest.
@@ -19,6 +25,12 @@
 pub(crate) mod clock;
 pub mod config;
 pub mod noise;
+mod stack;
+mod stream;
+mod tunnel;
+
+pub use stream::{Listener, Stream};
+pub use tunnel::{Status, Tunnel};
 
 /// The Curve25519 key types a tunnel is built from.
 pub mod x25519 {

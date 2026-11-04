@@ -18,7 +18,16 @@ hmac = { workspace = true }
 parking_lot = { workspace = true }
 rand_core = { workspace = true }
 ring = { workspace = true }
+# TCP over the tunnel without an OS interface: an IP-medium device fed by
+# the protocol core, IPv4 and IPv6, TCP sockets with CUBIC (the congestion
+# control every host OS defaults to; without one a socket bursts its whole
+# window) and the task wakers the streams block on. No Ethernet, DHCP, DNS,
+# UDP or ICMP: the tunnel carries only the connections chan opens through it.
+smoltcp = { workspace = true }
+# SO_RCVBUF and SO_SNDBUF on the tunnel socket, which tokio does not expose.
+socket2 = { workspace = true }
 subtle = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 x25519-dalek = { workspace = true }
 
