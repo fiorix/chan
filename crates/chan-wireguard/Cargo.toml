@@ -1,0 +1,28 @@
+[package]
+name = "chan-wireguard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The crate is Apache-2.0 like the workspace; the `noise` module and the
+# clock are derived from Cloudflare's boringtun under BSD-3-Clause, whose
+# notice is the LICENSE file beside this manifest.
+license = "Apache-2.0 AND BSD-3-Clause"
+repository.workspace = true
+description = "The WireGuard protocol core and an in-process tunnel for chan."
+
+[dependencies]
+blake2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hmac = { workspace = true }
+parking_lot = { workspace = true }
+rand_core = { workspace = true }
+ring = { workspace = true }
+subtle = { workspace = true }
+tracing = { workspace = true }
+x25519-dalek = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# CLOCK_BOOTTIME for the protocol timers: std's Instant stops while the
+# machine sleeps, and a session has to be seen as expired after a laptop
+# wakes.
+rustix = { workspace = true, features = ["time"] }
