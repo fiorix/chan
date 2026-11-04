@@ -1127,7 +1127,10 @@ mod tests {
     #[test]
     fn the_covered_marker_is_the_one_the_terminal_reads() {
         // The host page's terminal skips its resume refocus on this root
-        // attribute; both sides spell it from the script's one constant.
+        // attribute, read through the page's focus guard; both sides spell
+        // it from the script's one constant.
+        const FOCUS_GUARD: &str =
+            include_str!("../../../web/packages/workspace-app/src/state/focusGuard.ts");
         const TERMINAL_TAB: &str =
             include_str!("../../../web/packages/workspace-app/src/components/TerminalTab.svelte");
         assert!(TRANSITION_JS.contains("const COVERED = 'data-launcher-shown';"));
@@ -1136,8 +1139,10 @@ mod tests {
         assert!(TRANSITION_JS
             .contains("hostUncovered() { document.documentElement.removeAttribute(COVERED); }"));
         assert!(
-            TERMINAL_TAB.contains("document.documentElement.hasAttribute(\"data-launcher-shown\")")
+            FOCUS_GUARD.contains("document.documentElement.hasAttribute(\"data-launcher-shown\")")
         );
+        assert!(TERMINAL_TAB.contains("from \"../state/focusGuard\";"));
+        assert!(TERMINAL_TAB.contains("if (launcherShownOverWindow()) return;"));
     }
 
     #[test]
