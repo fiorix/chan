@@ -94,45 +94,17 @@ pub(super) const MISSING_TUNNEL_URL: &str =
 pub(super) const WIREGUARD_NEEDS_TOKEN: &str = "chan devserver: --tunnel-wireguard carries the \
     gateway dial and needs a tunnel token (--tunnel-token or CHAN_TUNNEL_TOKEN)";
 
-/// Read and parse the wg-quick file behind `--tunnel-wireguard`. The file
-/// holds the tunnel's private key, so on Unix one the group or others can
-/// read is refused the way ssh refuses a shared private key, before its
-/// contents are read. Messages name the path and the parser's line and key,
-/// never a value: a value may be the key.
+/// Read the wg-quick file behind `--tunnel-wireguard` through the crate's
+/// reader, which refuses a file the group or others can read before reading
+/// it and names the path, the line and the key in a refusal, never a value.
+/// The flag is named here so the refusal reads as the command's.
 pub(crate) fn read_wireguard_config(path: &Path) -> Result<chan_server::DevserverWireguard> {
-    let shown = path.display();
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| anyhow::anyhow!("chan devserver: reading --tunnel-wireguard {shown}: {e}"))?;
-    refuse_shared_wireguard_file(path, &metadata)?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("chan devserver: reading --tunnel-wireguard {shown}: {e}"))?;
-    let config = chan_wireguard::config::Config::parse(&text)
-        .map_err(|e| anyhow::anyhow!("chan devserver: --tunnel-wireguard {shown}: {e}"))?;
+    let config = chan_wireguard::config::read_file(path)
+        .map_err(|e| anyhow::anyhow!("chan devserver: --tunnel-wireguard {e}"))?;
     Ok(chan_server::DevserverWireguard {
         path: path.to_path_buf(),
         config,
     })
-}
-
-#[cfg(unix)]
-fn refuse_shared_wireguard_file(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        anyhow::bail!(
-            "chan devserver: --tunnel-wireguard {path} is readable by the group or others \
-             (mode {mode:03o}); it holds the tunnel's private key, so narrow it first: \
-             chmod 600 {path}",
-            path = path.display()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn refuse_shared_wireguard_file(_path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
-    Ok(())
 }
 
 /// Hidden daemon child tunnel config. The token is never accepted as an argv
@@ -522,51 +494,25 @@ mod tests {
     }
 
     #[test]
-    fn wireguard_file_that_is_missing_is_refused_naming_the_path() {
+    fn wireguard_file_refusal_names_the_flag_and_the_readers_message() {
+        // The reader's own messages are pinned in chan-wireguard; here the
+        // command's wrapping names the flag in front of them.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("absent.conf");
         let error = read_wireguard_config(&path).unwrap_err().to_string();
-        assert!(error.contains("--tunnel-wireguard"), "{error}");
-        assert!(error.contains(&path.display().to_string()), "{error}");
-    }
-
-    #[test]
-    fn wireguard_file_with_a_bad_line_is_refused_naming_the_line_not_the_key() {
+        assert!(
+            error.starts_with(&format!(
+                "chan devserver: --tunnel-wireguard {}: ",
+                path.display()
+            )),
+            "{error}"
+        );
         let (_dir, path) = wireguard_file(&wireguard_text().replace("10.7.0.2/32", "nowhere"));
         let error = read_wireguard_config(&path).unwrap_err().to_string();
-        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("--tunnel-wireguard"), "{error}");
         assert!(error.contains("line 3"), "{error}");
         assert!(error.contains("Address"), "{error}");
         assert!(!error.contains(PRIVATE_KEY), "{error}");
-        // A malformed key is named by its key, never by its value.
-        let bad_key = wireguard_text().replace(PRIVATE_KEY, &"A".repeat(44));
-        let (_dir, path) = wireguard_file(&bad_key);
-        let error = read_wireguard_config(&path).unwrap_err().to_string();
-        assert!(error.contains("line 2"), "{error}");
-        assert!(error.contains("PrivateKey"), "{error}");
-        assert!(!error.contains("AAAA"), "{error}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn wireguard_file_readable_by_others_is_refused_naming_the_mode_fix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let (_dir, path) = wireguard_file(&wireguard_text());
-        for mode in [0o640, 0o604, 0o644, 0o660] {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            let error = read_wireguard_config(&path).unwrap_err().to_string();
-            assert!(error.contains(&path.display().to_string()), "{error}");
-            assert!(error.contains(&format!("mode {mode:03o}")), "{error}");
-            assert!(
-                error.contains(&format!("chmod 600 {}", path.display())),
-                "{error}"
-            );
-            assert!(!error.contains(PRIVATE_KEY), "{error}");
-        }
-        // Owner-only, read-only included, is accepted.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
-        assert!(read_wireguard_config(&path).is_ok());
     }
 
     #[test]

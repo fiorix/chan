@@ -12,12 +12,18 @@
 //! by name rather than ignored: this stack owns no interface, no routes
 //! and no resolver, and a file that asks for them is a file written for a
 //! different client.
+//!
+//! [`read_file`] is how a consumer gets from a path to a [`Config`]: it
+//! refuses a file other users can read before reading it, and its errors
+//! name the path, the line and the key, never a value.
 
 use crate::x25519::{PublicKey, StaticSecret};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use std::fmt;
+use std::io;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 /// A parsed configuration. `Debug` never prints key material.
 pub struct Config {
@@ -147,6 +153,96 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+/// Why a file was refused by [`read_file`]. Every message names the path;
+/// a parse refusal adds the line and the key, and nothing ever carries a
+/// value, since a value may be a key.
+#[derive(Debug)]
+pub enum ReadError {
+    /// The file could not be read: absent, unreadable, not UTF-8.
+    Io { path: PathBuf, source: io::Error },
+    /// The file is readable by the group or others. It holds the tunnel's
+    /// private key, so it is refused before its contents are read, as ssh
+    /// refuses a shared private key.
+    Shared { path: PathBuf, mode: u32 },
+    /// The contents are not a configuration this stack honours.
+    Parse { path: PathBuf, source: ConfigError },
+}
+
+impl fmt::Display for ReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReadError::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            ReadError::Shared { path, mode } => write!(
+                f,
+                "{path} is readable by the group or others (mode {mode:03o}); it holds the \
+                 tunnel's private key, so narrow it first: chmod 600 {path}",
+                path = path.display()
+            ),
+            ReadError::Parse { path, source } => write!(f, "{}: {source}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReadError::Io { source, .. } => Some(source),
+            ReadError::Shared { .. } => None,
+            ReadError::Parse { source, .. } => Some(source),
+        }
+    }
+}
+
+impl ReadError {
+    /// The refused file.
+    pub fn path(&self) -> &Path {
+        match self {
+            ReadError::Io { path, .. }
+            | ReadError::Shared { path, .. }
+            | ReadError::Parse { path, .. } => path,
+        }
+    }
+}
+
+/// Read and parse the wg-quick file at `path`. The file's metadata is read
+/// first and on Unix a file the group or others can read is refused before
+/// its contents are; only then is the text read and handed to
+/// [`Config::parse`]. Nothing from the file is logged or carried in an
+/// error.
+pub fn read_file(path: &Path) -> Result<Config, ReadError> {
+    let io_error = |source| ReadError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let metadata = std::fs::metadata(path).map_err(io_error)?;
+    refuse_shared(path, &metadata)?;
+    let text = std::fs::read_to_string(path).map_err(io_error)?;
+    Config::parse(&text).map_err(|source| ReadError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(unix)]
+fn refuse_shared(path: &Path, metadata: &std::fs::Metadata) -> Result<(), ReadError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(ReadError::Shared {
+            path: path.to_path_buf(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+/// Windows has no mode bits to read; the file's ACL is the user's to set.
+#[cfg(not(unix))]
+fn refuse_shared(_path: &Path, _metadata: &std::fs::Metadata) -> Result<(), ReadError> {
+    Ok(())
+}
 
 fn err(line: usize, message: impl Into<String>) -> ConfigError {
     ConfigError {
@@ -627,5 +723,80 @@ mod tests {
         let with_psk = format!("{}PresharedKey = {KEY_A}\n", sample());
         let cfg = Config::parse(&with_psk).unwrap();
         assert!(!format!("{cfg:?}").contains(KEY_A));
+    }
+
+    /// Write `text` as an owner-only file, the shape `read_file` accepts,
+    /// in a directory of its own.
+    fn owner_only_file(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chan.conf");
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn read_file_parses_an_owner_only_file() {
+        let (_dir, path) = owner_only_file(&sample());
+        let cfg = read_file(&path).unwrap();
+        assert_eq!(cfg.peer.endpoint.to_string(), "vpn.example.org:51820");
+        assert_eq!(cfg.addresses.len(), 2);
+    }
+
+    #[test]
+    fn read_file_that_is_missing_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.conf");
+        let error = read_file(&path).unwrap_err();
+        assert!(matches!(error, ReadError::Io { .. }), "{error:?}");
+        assert_eq!(error.path(), path);
+        let text = error.to_string();
+        assert!(text.starts_with(&path.display().to_string()), "{text}");
+    }
+
+    #[test]
+    fn read_file_with_a_bad_line_names_the_line_and_the_key_not_the_value() {
+        let (_dir, path) = owner_only_file(&sample().replace("10.7.0.2/32", "nowhere"));
+        let error = read_file(&path).unwrap_err();
+        assert!(matches!(error, ReadError::Parse { .. }), "{error:?}");
+        let text = error.to_string();
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("line 3"), "{text}");
+        assert!(text.contains("Address"), "{text}");
+        assert!(!text.contains(KEY_A), "{text}");
+        // A malformed key is named by its key, never by its value.
+        let (_dir, path) = owner_only_file(&sample().replace(KEY_A, &"A".repeat(44)));
+        let text = read_file(&path).unwrap_err().to_string();
+        assert!(text.contains("line 2"), "{text}");
+        assert!(text.contains("PrivateKey"), "{text}");
+        assert!(!text.contains("AAAA"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_readable_by_others_is_refused_naming_the_mode_fix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = owner_only_file(&sample());
+        for mode in [0o640, 0o604, 0o644, 0o660] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = read_file(&path).unwrap_err();
+            assert!(matches!(error, ReadError::Shared { .. }), "{error:?}");
+            let text = error.to_string();
+            assert!(text.contains(&path.display().to_string()), "{text}");
+            assert!(text.contains(&format!("mode {mode:03o}")), "{text}");
+            assert!(
+                text.contains(&format!("chmod 600 {}", path.display())),
+                "{text}"
+            );
+            assert!(!text.contains(KEY_A), "{text}");
+        }
+        // Owner-only, read-only included, is accepted.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(read_file(&path).is_ok());
     }
 }
