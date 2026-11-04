@@ -31,9 +31,13 @@ const ghostty = vi.hoisted(() => {
     // every text the component pasted through ghostty-web.
     bracketedPaste: false,
     pastes: [] as string[],
+    // The forceAll flag of every render pass asked of the renderer.
+    renders: [] as boolean[],
   };
   /// ghostty-web's own render, as the painter finds it on the renderer.
-  function fakeRender() {}
+  function fakeRender(_buffer: unknown, forceAll?: boolean) {
+    record.renders.push(forceAll === true);
+  }
   class FakeGhosttyTerminal {
     cols = 80;
     rows = 24;
@@ -49,6 +53,12 @@ const ghostty = vi.hoisted(() => {
       ? { getMetrics: () => ({ width: 8, height: 16 }) }
       : { getMetrics: () => ({ width: 8, height: 16 }), ctx: {}, render: fakeRender };
     buffer = { active: { type: "normal", length: 24, getLine: () => undefined }, alternate: {} };
+    // The wasm core the renderer draws from, as far as a render pass reads it.
+    wasmTerm = {
+      getDimensions: () => ({ cols: this.cols, rows: this.rows }),
+      isRowDirty: () => false,
+      needsFullRedraw: () => false,
+    };
     applicationCursorKeys = false;
     constructor(options: Record<string, unknown>) {
       this.options = options;
@@ -97,7 +107,6 @@ const ghostty = vi.hoisted(() => {
       this.rows = rows;
       for (const handler of this.resizeHandlers) handler({ cols, rows });
     }
-    refresh() {}
     focus() {
       record.events.push("focus");
     }
@@ -582,6 +591,23 @@ describe("focus recovery after a host resume", () => {
     await tick();
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
+
+  // ghostty-web has no refresh() and its frame loop repaints dirty rows
+  // only, so pixels the host dropped while the window sat off-screen come
+  // back only through a forced full pass of its renderer; the resume must
+  // ask for one even though the grid is unchanged and the fit is a no-op.
+  test("the resume forces a full render pass of the ghostty renderer", async () => {
+    const { term } = await mountGhostty();
+    // The mount fits and paints; the resume is judged from a settled terminal.
+    await vi.waitFor(() => expect(ghostty.record.renders).not.toEqual([]));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    ghostty.record.renders.splice(0);
+    term.resized.splice(0);
+
+    await resume();
+    await vi.waitFor(() => expect(ghostty.record.renders, "a forced pass").toContain(true));
+    expect(term.resized, "the repaint is not a resize").toEqual([]);
+  });
 
   test("with the host active, the resume blurs it and then focuses the terminal", async () => {
     const { target } = await mountGhostty();

@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+  type RefreshableTerminal,
   refreshTerminalRows,
   shouldUseWebglRenderer,
   webglRendererOverride,
@@ -16,6 +17,30 @@ describe("terminal renderer helpers", () => {
 
   test("does not require refresh support", () => {
     expect(() => refreshTerminalRows({ rows: 1 })).not.toThrow();
+  });
+
+  // ghostty-web has no refresh(); its renderer repaints dirty rows only, so
+  // the repaint is a forced full pass with the terminal as the scrollback
+  // provider and the overlay scrollbar left to the frame loop.
+  test("forces a full ghostty render pass from the viewport offset", () => {
+    const calls: unknown[][] = [];
+    const wasmTerm = { core: true } as unknown as RefreshableTerminal["wasmTerm"];
+    const term = {
+      rows: 24,
+      renderer: { render: (...args: unknown[]) => void calls.push(args) },
+      wasmTerm,
+      getViewportY: () => 7,
+    };
+    refreshTerminalRows(term);
+    expect(calls).toEqual([[wasmTerm, true, 7, term, 0]]);
+  });
+
+  test("a ghostty terminal that has not opened has nothing to repaint", () => {
+    const calls: unknown[][] = [];
+    expect(() =>
+      refreshTerminalRows({ rows: 24, renderer: { render: (...args: unknown[]) => void calls.push(args) } }),
+    ).not.toThrow();
+    expect(calls).toEqual([]);
   });
 
   test("uses each desktop renderer signal and keeps browsers on WebGL", () => {

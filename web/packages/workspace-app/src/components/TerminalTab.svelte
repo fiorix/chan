@@ -893,7 +893,10 @@
   // 0.19 renderer rebuilds the atlas itself for color / DPR / font /
   // options changes, so the focus / blur / active-flip / wake
   // recovery only needs a row repaint: term.refresh() redraws from
-  // the existing good atlas with no cross-pane fallout.
+  // the existing good atlas with no cross-pane fallout. On ghostty the
+  // same call forces a full pass of its canvas renderer, since its
+  // frame loop repaints dirty rows only and the fit below is a no-op
+  // while the grid is unchanged (refreshTerminalRows in renderer.ts).
   function refreshTerminalRenderer(): void {
     if (!term) return;
     requestAnimationFrame(() => {
