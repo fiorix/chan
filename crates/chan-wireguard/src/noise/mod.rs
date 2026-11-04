@@ -765,6 +765,45 @@ mod tests {
         update_timer_results_in_handshake(&mut my_tun);
     }
 
+    /// The initiator whose first exchange happened in the tick that
+    /// established the session still rekeys at REKEY_AFTER_TIME. chan's
+    /// connect queues the SYN before the handshake and sends it the moment
+    /// the session is up, and the peer answers within the same tick, so
+    /// the establishment stamp and the data stamps are all equal; equal
+    /// stamps count. Before the rekey the passive keepalive is owed and
+    /// sent at ten seconds, as in a real idle hold.
+    #[test]
+    fn rekey_after_two_mins_when_the_first_exchange_shares_the_establishment_stamp() {
+        let _guard = clock::test_offset_guard();
+        let (mut my_tun, mut their_tun) = create_two_tuns_and_handshake();
+        let mut my_dst = [0u8; 1024];
+        let mut their_dst = [0u8; 1024];
+        // No tick between the handshake and the first exchange.
+        exchange_within_one_tick(&mut my_tun, &mut their_tun);
+
+        clock::advance(KEEPALIVE_TIMEOUT);
+        let TunnResult::WriteToNetwork(keepalive) = my_tun.update_timers(&mut my_dst) else {
+            panic!("the receiver of the last data packet owes a keepalive")
+        };
+        assert_eq!(keepalive.len(), 32, "a keepalive carries no payload");
+        // The peer hears it, so it has no unanswered send to re-handshake for.
+        assert!(matches!(
+            their_tun.decapsulate(None, keepalive, &mut their_dst),
+            TunnResult::Done
+        ));
+        assert!(matches!(
+            their_tun.update_timers(&mut their_dst),
+            TunnResult::Done
+        ));
+
+        clock::advance(REKEY_AFTER_TIME - KEEPALIVE_TIMEOUT);
+        assert!(matches!(
+            their_tun.update_timers(&mut their_dst),
+            TunnResult::Done
+        ));
+        update_timer_results_in_handshake(&mut my_tun);
+    }
+
     /// A data packet and the one the peer answers it with inside a single
     /// timer tick, so every stamp the exchange leaves is the same.
     fn exchange_within_one_tick(my_tun: &mut Tunn, their_tun: &mut Tunn) {

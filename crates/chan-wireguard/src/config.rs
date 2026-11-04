@@ -298,8 +298,12 @@ enum Section {
 impl Config {
     /// Parse a wg-quick style text. Section and key names are matched
     /// without regard to case, as wg-quick matches them; `#` starts a
-    /// comment; values may be quoted the way `wg` writes them.
+    /// comment; values may be quoted the way `wg` writes them. Lines may
+    /// end in CRLF, and a leading UTF-8 byte order mark is skipped: it is
+    /// an encoding mark, not a setting, and Windows editors and
+    /// PowerShell's `Out-File -Encoding utf8` write one.
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut interface: Option<InterfaceDraft> = None;
         let mut peers: Vec<PeerDraft> = Vec::new();
         let mut section = Section::None;
@@ -618,6 +622,19 @@ mod tests {
         assert_eq!(cfg.peer.endpoint.to_string(), "[2001:db8::1]:51820");
         assert_eq!(cfg.peer.persistent_keepalive, None);
         assert_eq!(cfg.peer.allowed_ips[0].prefix, 0);
+    }
+
+    /// A file written on Windows: CRLF line endings and the byte order
+    /// mark PowerShell 5.1's `Out-File -Encoding utf8` puts first.
+    #[test]
+    fn accepts_crlf_and_a_byte_order_mark() {
+        let text = format!("\u{feff}{}", sample().replace('\n', "\r\n"));
+        let cfg = Config::parse(&text).unwrap();
+        assert_eq!(cfg.addresses[0].to_string(), "10.7.0.2/32");
+        assert_eq!(cfg.peer.endpoint.to_string(), "vpn.example.org:51820");
+        assert_eq!(cfg.peer.persistent_keepalive, Some(25));
+        // A line still ends without a stray carriage return in its value.
+        assert_eq!(cfg.mtu, Some(1380));
     }
 
     #[test]

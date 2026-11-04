@@ -238,7 +238,14 @@ impl Tunn {
                     // ms old, we initiate a new handshake. If the sender was the original
                     // responder of the handshake, it does not re-initiate a new handshake
                     // after REKEY_AFTER_TIME ms like the original initiator does.
-                    if session_established < data_packet_sent
+                    //
+                    // The stamps have the tick's resolution, and a session's first
+                    // data packet goes out the moment the handshake completes, so it
+                    // shares the establishment stamp; equal counts as sent on the
+                    // session, or a tunnel whose traffic fit in that tick would never
+                    // rekey, and one whose first exchange a tick happened to split
+                    // would, which read as a client that rekeyed on some runs only.
+                    if session_established <= data_packet_sent
                         && now - session_established >= REKEY_AFTER_TIME
                     {
                         tracing::debug!("HANDSHAKE(REKEY_AFTER_TIME (on send))");
@@ -249,7 +256,7 @@ impl Tunn {
                     // of the handshake and if the current session key is REJECT_AFTER_TIME
                     // - KEEPALIVE_TIMEOUT - REKEY_TIMEOUT ms old, we initiate a new
                     // handshake.
-                    if session_established < data_packet_received
+                    if session_established <= data_packet_received
                         && now - session_established
                             >= REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT - REKEY_TIMEOUT
                     {
