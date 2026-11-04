@@ -162,6 +162,7 @@ fn cfg(port: u16, token: &str, workspace: &str) -> ClientConfig {
         dial_timeout: Duration::from_secs(5),
         events: None,
         proxy: None,
+        connector: None,
         max_concurrent_substreams: chan_tunnel_client::DEFAULT_MAX_CONCURRENT_SUBSTREAMS,
     }
 }
