@@ -21,9 +21,11 @@ tauri-build = { workspace = true, features = [] }
 
 [dependencies]
 # `macos-proxy`: the per-webview proxy (`WebviewWindowBuilder::proxy_url`)
-# that puts a gateway window inside the WireGuard fabric (src/wireguard.rs);
-# on macOS wry sets it on the webview's data store, which exists from
-# macOS 14, so the desktop sets it only there at run time.
+# that puts a gateway window inside the WireGuard fabric (src/wireguard.rs).
+# On macOS wry sets it on the webview's data store and links Network.framework
+# symbols that exist from macOS 14, which is why the bundle's
+# minimumSystemVersion (tauri.conf.json) is 14.0: below it dyld refuses the
+# binary before main.
 tauri = { workspace = true, features = ["devtools", "macos-proxy"] }
 # The in-window launcher (src/launcher_panel.rs): a second webview
 # chan-desktop places inside each window itself, outside Tauri's webview

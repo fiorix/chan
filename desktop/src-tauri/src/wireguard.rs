@@ -411,30 +411,27 @@ fn connect_status(head: &[u8]) -> Option<u16> {
 }
 
 /// The proxy URL for a window's webview builder: the process's proxy when
-/// there is one and this platform's webview can take it. On macOS the
-/// proxy is set on the webview's data store, which exists from macOS 14;
-/// below it the windows reach gateways directly, and the first window says
-/// so once. On Linux it also carries the local windows, through the proxy's
-/// plain HTTP forwarding.
+/// there is one. WebView2 takes it as a browser argument, WebKitGTK sets it
+/// on the shared web context, and WKWebView sets it on the webview's data
+/// store, whose Network.framework symbols exist from macOS 14, the bundle's
+/// minimum system version. On Linux it also carries the local windows,
+/// through the proxy's plain HTTP forwarding.
 pub fn webview_proxy_url() -> Option<Url> {
-    let decision = decision()?;
-    platform_takes_webview_proxy().then(|| decision.url.clone())
+    decision().map(|d| d.url.clone())
 }
 
 /// The same proxy for the launcher's wry builder, which takes it as a
 /// host and port rather than a URL.
 pub fn launcher_proxy_config() -> Option<wry::ProxyConfig> {
-    let decision = decision()?;
-    platform_takes_webview_proxy().then(|| {
+    decision().map(|d| {
         wry::ProxyConfig::Http(wry::ProxyEndpoint {
-            host: decision.addr.ip().to_string(),
-            port: decision.addr.port().to_string(),
+            host: d.addr.ip().to_string(),
+            port: d.addr.port().to_string(),
         })
     })
 }
 
-/// Put the process's proxy on a window's webview builder, when there is
-/// one this platform's webview takes.
+/// Put the process's proxy on a window's webview builder, when there is one.
 pub fn with_webview_proxy<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
     builder: tauri::WebviewWindowBuilder<'a, R, M>,
 ) -> tauri::WebviewWindowBuilder<'a, R, M> {
@@ -450,28 +447,6 @@ pub fn with_launcher_proxy(builder: wry::WebViewBuilder<'_>) -> wry::WebViewBuil
         Some(config) => builder.with_proxy_config(config),
         None => builder,
     }
-}
-
-#[cfg(target_os = "macos")]
-fn platform_takes_webview_proxy() -> bool {
-    static TAKES: OnceLock<bool> = OnceLock::new();
-    *TAKES.get_or_init(|| {
-        let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
-        let takes = version.majorVersion >= 14;
-        if !takes {
-            tracing::warn!(
-                major = version.majorVersion,
-                minor = version.minorVersion,
-                "gateway WireGuard needs macOS 14 for the windows; on this macOS the pages reach the gateways directly"
-            );
-        }
-        takes
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn platform_takes_webview_proxy() -> bool {
-    true
 }
 
 #[cfg(test)]

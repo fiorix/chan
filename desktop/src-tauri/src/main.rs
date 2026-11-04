@@ -21,6 +21,7 @@ mod runtime_capability;
 mod serve;
 mod terminal_mode;
 mod terminal_opacity;
+mod update_floor;
 mod upload;
 mod watcher;
 mod window_ops;
@@ -3408,6 +3409,9 @@ async fn desktop_handle_upgrade(
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
+            if let Some(message) = update_floor::refusal(&update) {
+                return Response::Error { message };
+            }
             if check_only {
                 return Response::UpgradeChecked {
                     desktop_version: CHAN_VERSION.into(),
@@ -3506,6 +3510,9 @@ async fn desktop_handle_upgrade(
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
+            if let Some(message) = update_floor::refusal(&update) {
+                return Response::Error { message };
+            }
             if check_only {
                 return Response::UpgradeChecked {
                     desktop_version: CHAN_VERSION.into(),
@@ -3610,6 +3617,10 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
+                if let Some(reason) = update_floor::refusal(&update) {
+                    tracing::warn!(%version, %reason, "on-launch update skipped");
+                    return;
+                }
                 tracing::info!(%version, "on-launch update available; downloading");
                 let state = Arc::clone(&app.state::<Arc<AppState>>());
                 // Serialize with a handoff `chan upgrade` (see
@@ -3675,6 +3686,10 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
         match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
+                if let Some(reason) = update_floor::refusal(&update) {
+                    tracing::warn!(%version, %reason, "on-launch update skipped");
+                    return;
+                }
                 tracing::info!(%version, "on-launch update available; downloading");
                 let state = Arc::clone(&app.state::<Arc<AppState>>());
                 // Serialize with a handoff `chan upgrade` (see

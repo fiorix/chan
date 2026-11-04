@@ -40,7 +40,7 @@
     "shortDescription": "Supercharged terminal emulator",
     "longDescription": "Chan Desktop is a supercharged terminal emulator: scriptable, multiplexed, the same locally and on remote machines, with workspaces for any directory.",
     "macOS": {
-      "minimumSystemVersion": "11.0",
+      "minimumSystemVersion": "14.0",
       "signingIdentity": "Developer ID Application: Alexandre Fiori (W73XV5CK3N)"
     },
     "linux": {

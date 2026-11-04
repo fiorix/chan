@@ -191,7 +191,7 @@ try {
   // and must not leak them into the collected manifest.
   const droppedDesktopNames = [`Chan_${version}_amd64.deb`, `Chan-${version}-1.x86_64.rpm`];
   // No Windows assets: the optional Windows entries are skipped, not an error.
-  const base = runCollect("base", version, droppedDesktopNames);
+  const base = runCollect("base", version, droppedDesktopNames, new Set(), { macosFloor: "14.0" });
   assertEqual(base.version, version, "version");
   assertEqual(base.tag, tag, "tag");
   assertEqual(base.assets.length, baseAssetCount, "asset count excludes detached sig");
@@ -221,6 +221,24 @@ try {
   const updater = base.assets.find((asset) => asset.updater_platform === "darwin-aarch64");
   assert(updater, "missing updater asset");
   assertEqual(updater.signature, "fixture-updater-signature", "updater signature");
+  assertEqual(
+    base.minimum_system_version?.darwin,
+    "14.0",
+    "the macOS floor from the tag's tauri.conf.json, by updater target",
+  );
+
+  // A setting the bundle could not have been built with is a manifest the
+  // desktop would misread; the collector refuses to write it.
+  {
+    const stderr = runCollect("bad-floor", version, [], new Set(), {
+      macosFloor: "fourteen",
+      expectFailure: true,
+    });
+    assert(
+      stderr.includes("minimumSystemVersion") && stderr.includes("fourteen"),
+      `the refusal must name the setting and the value it read, got: ${stderr}`,
+    );
+  }
 
   // The AppImages are the Linux updater payloads: each public download record
   // is decorated with its platform key and signature, not duplicated.
@@ -246,6 +264,7 @@ try {
   // installer is decorated in place as the Windows updater payload.
   const windowsNames = optionalNames(version);
   const win = runCollect("windows", version, windowsNames);
+  assert(!("minimum_system_version" in win), "no floor is recorded without the tag's tauri.conf.json");
   assertEqual(win.assets.length, windowsAssetCount, "windows assets collected when present");
   assert(
     win.assets.some((asset) => asset.name === windowsNames[0]),
@@ -559,11 +578,26 @@ function optionalNames(releaseVersion) {
   return windowsAssets(releaseVersion);
 }
 
-function runCollect(label, releaseVersion, extraNames, digestNames = new Set()) {
+// With expectFailure the collector must exit non-zero, and its stderr is
+// returned instead of a manifest.
+function runCollect(
+  label,
+  releaseVersion,
+  extraNames,
+  digestNames = new Set(),
+  { macosFloor = "", expectFailure = false } = {},
+) {
   const releaseTag = `v${releaseVersion}`;
   const runRoot = path.join(root, label);
   const assetDir = path.join(runRoot, "assets");
   mkdirSync(assetDir, { recursive: true });
+  // The tag's tauri.conf.json, as the collector reads it offline.
+  if (macosFloor) {
+    writeFileSync(
+      path.join(assetDir, "tauri.conf.json"),
+      `${JSON.stringify({ bundle: { macOS: { minimumSystemVersion: macosFloor } } })}\n`,
+    );
+  }
   const release = {
     tag_name: releaseTag,
     published_at: "2026-05-27T00:00:00Z",
@@ -587,7 +621,7 @@ function runCollect(label, releaseVersion, extraNames, digestNames = new Set()) 
   const releaseJson = path.join(runRoot, "release.json");
   const out = path.join(runRoot, "manifest.json");
   writeFileSync(releaseJson, `${JSON.stringify(release, null, 2)}\n`);
-  execFileSync("node", [
+  const args = [
     "scripts/collect-release-assets.mjs",
     "--release-json",
     releaseJson,
@@ -595,7 +629,17 @@ function runCollect(label, releaseVersion, extraNames, digestNames = new Set()) 
     assetDir,
     "--out",
     out,
-  ], { cwd: siteRoot });
+  ];
+  if (expectFailure) {
+    try {
+      execFileSync("node", args, { cwd: siteRoot, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      assert(!existsSync(out), `${label}: no manifest may be written when collection fails`);
+      return String(err.stderr ?? "");
+    }
+    throw new Error(`${label}: the collector should have failed`);
+  }
+  execFileSync("node", args, { cwd: siteRoot });
 
   return JSON.parse(readFileSync(out, "utf8"));
 }

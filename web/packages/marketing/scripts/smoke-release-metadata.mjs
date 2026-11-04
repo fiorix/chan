@@ -88,6 +88,56 @@ async function main() {
     console.log("smoked the generator's target-to-asset bindings");
   }
 
+  // The collector's macOS floor rides into the desktop manifest under the key
+  // the desktop reads it back by, and a floor the bundle setting could not
+  // have written is refused rather than published: the desktop would misread
+  // it and install an app LaunchServices will not open.
+  {
+    const raw = JSON.parse(await fs.readFile(fixture, "utf8"));
+    const floorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "chan-release-metadata-floor-"));
+    try {
+      const withFloor = path.join(floorRoot, "with-floor.json");
+      await fs.writeFile(
+        withFloor,
+        JSON.stringify({ ...raw, minimum_system_version: { darwin: "14.0" } }),
+      );
+      const floorOut = path.join(floorRoot, "out");
+      await runNode(path.join(scriptsRoot, "generate-release-metadata.mjs"), [
+        "--manifest",
+        withFloor,
+        "--out",
+        floorOut,
+      ]);
+      const latest = await readJson(path.join(floorOut, "desktop", "latest.json"));
+      assert(
+        latest.minimum_system_version?.darwin === "14.0",
+        "desktop latest.json carries the darwin floor",
+      );
+      const byVersion = await readJson(path.join(floorOut, "desktop", `v${fixtureVersion}.json`));
+      assert(
+        JSON.stringify(latest) === JSON.stringify(byVersion),
+        "the per-version desktop manifest carries the same floor",
+      );
+
+      const badFloor = path.join(floorRoot, "bad-floor.json");
+      await fs.writeFile(
+        badFloor,
+        JSON.stringify({ ...raw, minimum_system_version: { darwin: "fourteen" } }),
+      );
+      const stderr = await runNodeExpectFail(
+        path.join(scriptsRoot, "generate-release-metadata.mjs"),
+        ["--manifest", badFloor, "--out", path.join(floorRoot, "bad-out")],
+      );
+      assert(
+        stderr.includes("minimum_system_version.darwin"),
+        `the refusal must name the floor key, got: ${stderr}`,
+      );
+      console.log("smoked the desktop manifest's macOS floor");
+    } finally {
+      await fs.rm(floorRoot, { recursive: true, force: true });
+    }
+  }
+
   const out = await fs.mkdtemp(path.join(os.tmpdir(), "chan-release-metadata-"));
   try {
     await runNode(path.join(scriptsRoot, "generate-release-metadata.mjs"), [
@@ -102,6 +152,10 @@ async function main() {
     const cliVersion = await readJson(path.join(out, "cli", "v0.15.4.json"));
     const desktopLatest = await readJson(path.join(out, "desktop", "latest.json"));
     const desktopVersion = await readJson(path.join(out, "desktop", "v0.15.4.json"));
+    assert(
+      !("minimum_system_version" in desktopLatest),
+      "no floor is written without one in the manifest",
+    );
 
     assert(releases.latest === "0.15.4", "releases.json latest version");
     assert(releases.latest_tag === "v0.15.4", "releases.json latest tag");

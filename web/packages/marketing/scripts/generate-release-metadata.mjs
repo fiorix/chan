@@ -227,6 +227,10 @@ per-version cli/vX.Y.Z.json + desktop/vX.Y.Z.json files plus a releases.json
 entry, so /dl keeps the latest release and up to --latest-count-1 previous GA
 releases (default 4) available for explicit-version upgrades.
 
+A manifest's minimum_system_version (the macOS floor by updater target, as
+collect-release-assets.mjs records it) is copied into its desktop manifest;
+the desktop refuses an update whose floor the running macOS is below.
+
 This script only writes static metadata files; it does not create releases,
 upload assets, or publish Pages.
 `);
@@ -294,6 +298,7 @@ function normalizeManifest(raw, source) {
     throw new Error(`${source}: published_at must be an ISO timestamp`);
   }
   const notes = String(raw.notes ?? "");
+  const minimumSystemVersion = normalizeMinimumSystemVersion(raw.minimum_system_version, source);
   if (!Array.isArray(raw.assets) || raw.assets.length === 0) {
     throw new Error(`${source}: assets must be a non-empty array`);
   }
@@ -307,7 +312,32 @@ function normalizeManifest(raw, source) {
     assets.set(asset.name, asset);
   }
 
-  return { assets, notes, publishedAt, tag, version };
+  return { assets, minimumSystemVersion, notes, publishedAt, tag, version };
+}
+
+// The optional floor the collector read from the tag's tauri.conf.json, keyed
+// by the updater's target name (`darwin`) with the dotted number the bundle
+// setting spells. The desktop reads it back by that key and refuses an update
+// whose floor the running macOS is below, so a shape the desktop would
+// misread fails generation instead of being published.
+function normalizeMinimumSystemVersion(raw, source) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${source}: minimum_system_version must be an object keyed by updater target`);
+  }
+  const floors = {};
+  for (const [target, floor] of Object.entries(raw)) {
+    if (!/^[a-z]+$/.test(target)) {
+      throw new Error(
+        `${source}: minimum_system_version key ${JSON.stringify(target)} is not an updater target name`,
+      );
+    }
+    if (typeof floor !== "string" || !/^\d+(\.\d+){0,2}$/.test(floor)) {
+      throw new Error(`${source}: minimum_system_version.${target} must be N[.N[.N]]`);
+    }
+    floors[target] = floor;
+  }
+  return Object.keys(floors).length > 0 ? floors : null;
 }
 
 function normalizeAsset(raw, source) {
@@ -497,6 +527,9 @@ function buildRelease(manifest) {
     notes: manifest.notes,
     pub_date: manifest.publishedAt,
     platforms: desktopPlatforms(manifest),
+    ...(manifest.minimumSystemVersion
+      ? { minimum_system_version: manifest.minimumSystemVersion }
+      : {}),
   };
 
   const release = {
