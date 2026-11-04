@@ -68,7 +68,7 @@ The library lists clients, and a window has a participant roster with a leader a
 
 ## Windows, panes, sides and tabs
 
-A window is a tree of splits and panes (`state/tabs.svelte.ts`). A split has a direction and a ratio that gives its first child its share of the length; a pane is a leaf. Every pane has two tab sides, A and B, each with its own tab strip and active tab, and shows one side at a time; flipping the pane turns it over to the other. A tab is a file editor, a terminal, a graph, a file browser, a dashboard or an extension; search and settings are overlays over the window rather than tabs. The active pane carries the window's focus colour, a per-window preset or the library's own colour, and every drag highlight reads the same variable.
+A window is a tree of splits and panes (`state/tabs.svelte.ts`). A split has a direction and a ratio that gives its first child its share of the length; a pane is a leaf. Every pane has two tab sides, A and B, each with its own tab strip and active tab, and shows one side at a time; flipping the pane turns it over to the other. With the `pane_strip_auto_hide` preference on, a side's strip is drawn only while that side holds two or more tabs, so a lone tab fills its pane and an empty pane shows its welcome alone; a tmux pane and the control terminal have no strip either way. A tab is a file editor, a terminal, a graph, a file browser, a dashboard or an extension; search and settings are overlays over the window rather than tabs. The active pane carries the window's focus colour, a per-window preset or the library's own colour, and every drag highlight reads the same variable.
 
 ```mermaid
 flowchart TB

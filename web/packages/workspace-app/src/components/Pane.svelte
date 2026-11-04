@@ -100,6 +100,7 @@
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import {
     chooseWindowFocusColor,
+    currentPreferences,
     modalDialogOpen,
     ui,
     workspaceDisplayName,
@@ -347,6 +348,26 @@
   const paneModeStagedSet = $derived(paneModeStagedTabIds());
   const paneModeStagedEditors = $derived(
     paneModeStagedDraftEditorsFor(pane.id, visibleSide),
+  );
+  // Hybrid Nav stages its rows in the strip: the ghost tab an app-spawn chord
+  // adds and the New draft / New diagram rows. They are the only view of what
+  // Enter will commit, so a side holding one keeps its strip while the mode
+  // is active, whatever the tab count.
+  const stripHoldsStagedRow = $derived(
+    paneMode.active &&
+      (paneModeStagedEditors.length > 0 || visibleTabs.some((tab) => paneModeStagedSet.has(tab.id))),
+  );
+  // With the auto-hide preference on, a side holding one tab or none draws
+  // no strip: the lone tab is the whole pane, as in a plain terminal, and an
+  // empty pane keeps its welcome. The strip returns with the second tab,
+  // when there is something to switch between. Judged per visible side, so
+  // flipping to a side with two tabs shows it and flipping back to a lone
+  // tab hides it again. The preference is read through `currentPreferences`
+  // so a standalone terminal window, which has no workspace, follows it too.
+  const stripAutoHidden = $derived(
+    (currentPreferences()?.pane_strip_auto_hide ?? false) &&
+      visibleTabs.length < 2 &&
+      !stripHoldsStagedRow,
   );
 
   /// Subscribe to the structural-wobble bus. Each splitPane /
@@ -1350,6 +1371,7 @@
     class="tabs"
     class:drop-active={dropActive}
     class:control-hidden={ui.terminalControl || tmuxPaneHere}
+    class:auto-hidden={stripAutoHidden}
     role="tablist"
     ondragover={onDragOver}
     ondragleave={onDragLeave}
@@ -2208,6 +2230,12 @@
      window like a plain terminal. Closing is the native red dot; there is no
      in-page tab or split affordance. */
   .tabs.control-hidden {
+    display: none;
+  }
+  /* The auto-hide preference: a side with fewer than two tabs draws no
+     strip, so its hamburger, side toggle and drop target go with it; the
+     keyboard and the command launcher still reach every command. */
+  .tabs.auto-hidden {
     display: none;
   }
   .tab[draggable="true"] { -webkit-user-drag: element; }

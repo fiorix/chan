@@ -68,3 +68,15 @@
       commit((p) => ({ ...p, empty_pane_carousel_cycling: on }))}
   />
 </SettingField>
+
+<SettingField
+  label="Pane strip"
+  pref="pane_strip_auto_hide"
+  hint="Hide a pane's tab strip until the side it shows holds two or more tabs. New tabs still come from the shortcuts and the command launcher."
+>
+  <PillToggle
+    label="Auto-hide"
+    checked={prefs.pane_strip_auto_hide ?? false}
+    ontoggle={(on) => commit((p) => ({ ...p, pane_strip_auto_hide: on }))}
+  />
+</SettingField>

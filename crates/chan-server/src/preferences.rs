@@ -21,6 +21,8 @@
 //!   - bubble_overlay_mode (stack / tray for watcher notifications)
 //!   - empty_pane_carousel_cycling (auto-rotate the empty-pane
 //!     carousel; per-user toggle, default true)
+//!   - pane_strip_auto_hide (hide a pane's tab strip while the side it
+//!     shows holds fewer than two tabs; default off)
 //!   - page_width_ratio (editor page-width cap as a ratio of the
 //!     window width, (0, 1]; migrated from the SPA
 //!     `chan.pageWidth.ratio` localStorage so it lives in the library)
@@ -85,6 +87,13 @@ pub struct EditorPrefs {
     /// of this flag.
     #[serde(default = "default_empty_pane_carousel_cycling")]
     pub empty_pane_carousel_cycling: bool,
+    /// Hide a pane's tab strip while the side it shows holds fewer than
+    /// two tabs. Off by default so every window keeps the strip's chrome
+    /// (hamburger, side toggle, drop target) unless the user asks for the
+    /// bare look. A tmux pane and the control terminal hide their strips
+    /// on their own and ignore this.
+    #[serde(default)]
+    pub pane_strip_auto_hide: bool,
     /// Editor page-width cap as a ratio of the window width, in (0, 1]
     /// (1.0 = no cap). Migrated from the SPA `chan.pageWidth.ratio`
     /// localStorage so the setting lives in the library and travels with
@@ -161,6 +170,7 @@ impl Default for EditorPrefs {
             bubble_overlay_mode: BubbleOverlayMode::default(),
             hybrid_surface_themes: HybridSurfaceThemes::default(),
             empty_pane_carousel_cycling: default_empty_pane_carousel_cycling(),
+            pane_strip_auto_hide: false,
             page_width_ratio: default_page_width_ratio(),
             overlay_maximized: false,
             shortcuts: BTreeMap::new(),
@@ -655,6 +665,34 @@ mod tests {
         );
         let reloaded = EditorPrefs::load_from(&p).unwrap();
         assert!(!reloaded.empty_pane_carousel_cycling);
+    }
+
+    #[test]
+    fn pane_strip_auto_hide_defaults_off_and_round_trips() {
+        // Off keeps today's strip in every window; a preferences file
+        // from before the field loads as off, and an explicit true
+        // survives a save and reload.
+        let prefs = EditorPrefs::default();
+        assert!(!prefs.pane_strip_auto_hide);
+
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("preferences.toml");
+        std::fs::write(&p, "theme = \"dark\"\n").unwrap();
+        let loaded = EditorPrefs::load_from(&p).unwrap();
+        assert!(!loaded.pane_strip_auto_hide);
+
+        let hidden = EditorPrefs {
+            pane_strip_auto_hide: true,
+            ..Default::default()
+        };
+        hidden.save_to(&p).unwrap();
+        let saved = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            saved.contains("pane_strip_auto_hide = true"),
+            "got: {saved}"
+        );
+        let reloaded = EditorPrefs::load_from(&p).unwrap();
+        assert!(reloaded.pane_strip_auto_hide);
     }
 
     #[test]
