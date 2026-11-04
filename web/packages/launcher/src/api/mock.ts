@@ -146,6 +146,23 @@ export function resetMockGateways(): void {
   gateways.length = 0;
 }
 
+/** The registry's path grammar for a gateway's WireGuard file: blank clears,
+ * and anything else must be absolute or under `~/`. The mock has no file to
+ * read, so this is the one refusal it can share with the real registry, with
+ * the same 400 sentence, which is what keeps the form's error path honest
+ * against it. */
+function mockWireguardFile(raw: string | undefined): string | null {
+  const path = (raw ?? "").trim();
+  if (!path) return null;
+  if (!path.startsWith("/") && !path.startsWith("~/")) {
+    throw new ApiError(
+      400,
+      JSON.stringify({ error: `WireGuard: the file path must be absolute: ${path}` }),
+    );
+  }
+  return path;
+}
+
 /** Re-seed the remote-workspace state the confirm-and-retry flow mutates (the
  * `ds-1:w/api` row turns off on a forced retry and drops its live-terminal
  * flag). Test-only, so a suite that exercises the flow stays order-independent;
@@ -584,6 +601,7 @@ export const mockApi: LibraryApi = {
   listGateways: () => tick(gateways.map((g) => ({ ...g }))),
 
   addGateway: (input) => {
+    const wireguard = mockWireguardFile(input.wireguard);
     const gw: GatewayEntry = {
       id: `gw-mock${nextGw++}`,
       url: input.url,
@@ -593,18 +611,25 @@ export const mockApi: LibraryApi = {
       pending_signin: false,
       devserver_count: 0,
       last_error: null,
+      wireguard,
+      // The desktop decides its WireGuard fabric once per process, so a file
+      // on a new row waits for a restart like a changed one does.
+      wireguard_restart_required: wireguard !== null,
     };
     gateways.push(gw);
     notify();
     return tick({ ...gw });
   },
 
-  // Rename only: the URL is the gateway's identity, so update never touches it
-  // (the real registry refuses a different origin).
+  // Label and WireGuard file only: the URL is the gateway's identity, so
+  // update never touches it (the real registry refuses a different origin).
   updateGateway: (id, input) => {
     const gw = gateways.find((g) => g.id === id);
     if (!gw) throw new Error(`unknown gateway ${id}`);
+    const wireguard = mockWireguardFile(input.wireguard);
     gw.label = (input.label ?? "").trim();
+    if (wireguard !== gw.wireguard) gw.wireguard_restart_required = true;
+    gw.wireguard = wireguard;
     notify();
     return tick({ ...gw });
   },

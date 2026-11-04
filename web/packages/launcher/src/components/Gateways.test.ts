@@ -51,6 +51,8 @@ function gw(over: Partial<GatewayEntry> = {}): GatewayEntry {
     pending_signin: false,
     devserver_count: 0,
     last_error: null,
+    wireguard: null,
+    wireguard_restart_required: false,
     ...over,
   };
 }
@@ -607,6 +609,59 @@ describe("Gateways screen", () => {
     check.click();
     flushSync();
     expect(isSelected("gateway", "gw-test0001")).toBe(true);
+  });
+
+  it("a badge reached through WireGuard shows its file under the URL", () => {
+    library.gateways = [gw({ label: "prod", wireguard: "/home/u/wg/chan.conf" })];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    const file = card.querySelector(".gw-wg-file");
+    expect(file).not.toBeNull();
+    expect(file!.textContent).toBe("/home/u/wg/chan.conf");
+    expect(file!.getAttribute("title")).toBe("/home/u/wg/chan.conf");
+    expect(card.querySelector(".gw-wireguard .chip")!.textContent).toBe("WireGuard");
+  });
+
+  it("a badge reached directly has no WireGuard line", () => {
+    library.gateways = [gw({ label: "prod" })];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    expect(card.querySelector(".gw-wg-file")).toBeNull();
+    expect(card.textContent).not.toContain("WireGuard");
+  });
+
+  it.each([false, true])("the restart notice shows exactly when wireguard_restart_required=%s", (required) => {
+    library.gateways = [
+      gw({ label: "prod", wireguard: "/home/u/wg/chan.conf", wireguard_restart_required: required }),
+    ];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    const notice = card.querySelector(".gateway-prompt.restart");
+    if (required) {
+      expect(notice, "a changed WireGuard set must announce the restart").not.toBeNull();
+      expect(notice!.textContent!.trim()).toBe("Restart chan-desktop to apply the WireGuard change.");
+      expect(notice!.getAttribute("role")).toBe("status");
+    } else {
+      expect(notice, "an applied setting must not nag").toBeNull();
+      expect(card.textContent).not.toContain("Restart chan-desktop");
+    }
+  });
+
+  it("a WireGuard failure at start narrates once as the row's last_error", () => {
+    const reason = "WireGuard: /home/u/wg/chan.conf: line 3: Address: not an IP address";
+    library.gateways = [gw({ label: "prod", wireguard: "/home/u/wg/chan.conf", last_error: reason })];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    expect(card.textContent).toContain(`Not connected (${reason})`);
+    expect(card.textContent!.split(reason).length - 1, "the status line alone carries the reason").toBe(1);
+  });
+
+  it("a gateway added with a WireGuard file deals a badge with the file and the restart notice", async () => {
+    await addGateway({ url: "https://wg-gw.example", label: "wg", wireguard: "~/.config/chan/gateway.conf" });
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    expect(card.querySelector(".gw-wg-file")!.textContent).toBe("~/.config/chan/gateway.conf");
+    expect(card.querySelector(".gateway-prompt.restart")).not.toBeNull();
   });
 
   it("the plug drives the connect action and the badge flips live", async () => {

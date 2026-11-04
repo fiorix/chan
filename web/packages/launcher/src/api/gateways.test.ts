@@ -4,7 +4,7 @@
 // sample gateway for its populated variant.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { liveApi, type GatewayEntry } from "./library";
+import { ApiError, liveApi, type GatewayEntry } from "./library";
 import { mockApi, resetMockGateways } from "./mock";
 import { createLauncherDemoApi } from "./demo";
 
@@ -29,7 +29,11 @@ describe("liveApi gateway routes (frozen wire)", () => {
     const { calls } = stubFetch();
     await liveApi.listGateways();
     const { calls: post } = stubFetch(200, {});
-    await liveApi.addGateway({ url: "https://gw.chan.app", label: "" });
+    await liveApi.addGateway({
+      url: "https://gw.chan.app",
+      label: "",
+      wireguard: "~/.config/chan/gateway.conf",
+    });
     const { calls: putCalls } = stubFetch(200, {});
     await liveApi.updateGateway("gw-1a2b3c4d", { url: "https://gw.chan.app", label: "prod" });
     const { calls: rest } = stubFetch(204);
@@ -41,7 +45,13 @@ describe("liveApi gateway routes (frozen wire)", () => {
     expect(calls[0][1].method).toBe("GET");
     expect(post[0][0]).toBe("/api/library/gateways");
     expect(post[0][1].method).toBe("POST");
-    expect(post[0][1].body).toBe(JSON.stringify({ url: "https://gw.chan.app", label: "" }));
+    expect(post[0][1].body).toBe(
+      JSON.stringify({
+        url: "https://gw.chan.app",
+        label: "",
+        wireguard: "~/.config/chan/gateway.conf",
+      }),
+    );
     expect(putCalls[0][0]).toBe("/api/library/gateways/gw-1a2b3c4d");
     expect(putCalls[0][1].method).toBe("PUT");
     expect(putCalls[0][1].body).toBe(
@@ -55,7 +65,10 @@ describe("liveApi gateway routes (frozen wire)", () => {
   });
 
   it("parses the pinned GatewayEntry wire shape", async () => {
-    // The Contract C sample: every key present, no extras consumed.
+    // The server's byte-pinned sample: every key present, no extras consumed.
+    // `satisfies` makes svelte-check the gate on the mirror: a key the Rust
+    // struct gained and this type lacks, or the reverse, fails there, where
+    // vitest alone would pass with the types stripped.
     const wire = {
       id: "gw-1a2b3c4d",
       url: "https://gw.chan.app",
@@ -65,11 +78,35 @@ describe("liveApi gateway routes (frozen wire)", () => {
       pending_signin: false,
       devserver_count: 3,
       last_error: null,
-    };
+      wireguard: null,
+      wireguard_restart_required: false,
+    } satisfies GatewayEntry;
     stubFetch(200, [wire]);
     const list = await liveApi.listGateways();
     const entry: GatewayEntry = list[0];
     expect(entry).toEqual(wire);
+    expect(entry.wireguard).toBeNull();
+    expect(entry.wireguard_restart_required).toBe(false);
+  });
+
+  it("parses a WireGuard gateway row: the stored path, the restart flag, a startup reason", async () => {
+    const wire = {
+      id: "gw-1a2b3c4d",
+      url: "https://gw.chan.app",
+      label: "prod",
+      enabled: true,
+      status: "disconnected",
+      pending_signin: false,
+      devserver_count: 0,
+      last_error: "WireGuard: /home/u/wg/chan.conf: line 3: Address: not an IP address",
+      wireguard: "/home/u/wg/chan.conf",
+      wireguard_restart_required: true,
+    } satisfies GatewayEntry;
+    stubFetch(200, [wire]);
+    const [entry] = await liveApi.listGateways();
+    expect(entry.wireguard).toBe("/home/u/wg/chan.conf");
+    expect(entry.wireguard_restart_required).toBe(true);
+    expect(entry.last_error).toMatch(/^WireGuard: /);
   });
 
   it("uses guarded PUT and DELETE routes for exact synthesized-row trust", async () => {
@@ -123,6 +160,30 @@ describe("mock gateway registry", () => {
     expect(() => mockApi.updateGateway("gw-ghost", { url: "https://gw.example" })).toThrow(
       /unknown gateway/,
     );
+  });
+
+  it("stores the WireGuard file, marks the restart, and clears on a blank update", async () => {
+    const gw = await mockApi.addGateway({ url: "https://gw.example", wireguard: " ~/.config/chan/gateway.conf " });
+    expect(gw.wireguard).toBe("~/.config/chan/gateway.conf");
+    expect(gw.wireguard_restart_required, "a file on a new row waits for the desktop's restart").toBe(true);
+    const direct = await mockApi.addGateway({ url: "https://direct.example", wireguard: "" });
+    expect(direct.wireguard).toBeNull();
+    expect(direct.wireguard_restart_required).toBe(false);
+    const cleared = await mockApi.updateGateway(gw.id, { url: gw.url });
+    expect(cleared.wireguard).toBeNull();
+    expect((await mockApi.listGateways()).find((g) => g.id === gw.id)!.wireguard).toBeNull();
+  });
+
+  it("refuses a relative WireGuard path with the registry's 400 sentence", () => {
+    let caught: unknown = null;
+    try {
+      mockApi.addGateway({ url: "https://gw.example", wireguard: "wg/chan.conf" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(400);
+    expect((caught as ApiError).message).toBe("WireGuard: the file path must be absolute: wg/chan.conf");
   });
 
   it("notifies watch subscribers on gateway mutations", async () => {

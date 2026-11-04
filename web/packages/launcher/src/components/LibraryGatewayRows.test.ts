@@ -54,6 +54,8 @@ function hubGateway(): GatewayEntry {
     pending_signin: false,
     devserver_count: 1,
     last_error: null,
+    wireguard: null,
+    wireguard_restart_required: false,
   };
 }
 

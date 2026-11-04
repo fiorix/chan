@@ -439,14 +439,28 @@ export interface GatewayEntry {
   pending_signin: boolean;
   /** How many roster devservers this gateway currently synthesizes. */
   devserver_count: number;
-  /** The last connection/roster error, or null. */
+  /** The last connection/roster error, or null. A `WireGuard: ...` reason
+   * means the file failed at the desktop's start and the row refuses to
+   * connect until the file is fixed and the desktop restarts. */
   last_error: string | null;
+  /** The wg-quick file this gateway is reached through, as stored; null when
+   * the gateway is reached directly. */
+  wireguard: string | null;
+  /** The row's WireGuard setting differs from the one the running desktop
+   * started with (a file added, removed, changed or refused since), so it
+   * takes effect at the next start; the desktop refuses to connect the row
+   * until then. Always false on a headless surface. */
+  wireguard_restart_required: boolean;
 }
 
-/** Write payload for add gateway. Save just adds -- no probe, no sign-in. */
+/** Write payload for add and update gateway. Save just adds -- no probe, no
+ * sign-in. `label` and `wireguard` are full-replace: absent or blank clears. */
 export interface GatewayInput {
   url: string;
   label?: string;
+  /** The path of a wg-quick file, absolute or under `~/`. The registry reads
+   * it at save time and refuses a bad one with the reader's message. */
+  wireguard?: string;
 }
 
 /** Write payload for add/edit devserver. `token` absent on edit leaves it unchanged. */
@@ -546,8 +560,8 @@ export interface LibraryApi {
   /** Register a gateway by URL. Save just adds: no probe, no sign-in; the
    * first Connect discovers + signs in. */
   addGateway(input: GatewayInput): Promise<GatewayEntry>;
-  /** Rename a gateway (label only). The URL is the gateway's identity and
-   * stays fixed: remove + re-add changes the origin. */
+  /** Edit a gateway (label and WireGuard file). The URL is the gateway's
+   * identity and stays fixed: remove + re-add changes the origin. */
   updateGateway(id: string, input: GatewayInput): Promise<GatewayEntry>;
   /** Remove a gateway. The desktop cascades: live roster connections tear
    * down and the synthesized rows leave the feed. */
