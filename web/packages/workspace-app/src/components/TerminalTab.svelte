@@ -238,11 +238,14 @@
     focused: boolean;
   } = $props();
 
-  // A survey is modal over this terminal. Centralizing the guard keeps every
-  // xterm refocus path from stealing keyboard ownership while the card is up;
-  // once the survey clears, the same calls legitimately restore the terminal.
+  // A survey is modal over this terminal, and the Computers launcher shown
+  // over the window holds the keyboard in its own webview: a refocus under
+  // either would take it (launcherShownOverWindow). Centralizing the guard
+  // keeps every refocus path out, the mount and the pane focus included;
+  // once the survey clears or the launcher hides, the same calls
+  // legitimately restore the terminal.
   function focusTerminal(): void {
-    if (surveyFor(tab.id)) return;
+    if (surveyFor(tab.id) || launcherShownOverWindow()) return;
     term?.focus();
   }
 

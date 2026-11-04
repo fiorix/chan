@@ -28,6 +28,13 @@
 //! the hide refocuses the host's own webview, when a host hidden in place
 //! drops its launcher, and after a show that gave the launcher no keyboard.
 //!
+//! A shown launcher owns the window's keyboard, and a focus change in the
+//! host page takes it: a host that reloaded boots without the mark and
+//! focuses its terminal, and a tab opened from `cs` focuses a fresh element.
+//! The desktop therefore hands the keyboard back to a shown launcher when
+//! its window regains focus and when its host page finishes a load, which
+//! also re-marks the host (`reclaim_keyboard`, `host_page_loaded`).
+//!
 //! A wry webview is not `Send`, so every launcher lives in a main-thread map
 //! and every touch of one runs on the main thread.
 
@@ -545,6 +552,12 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
 /// webview. Main thread.
 fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
     set(&VISIBLE).lock().unwrap().remove(host);
+    // hide_async uncovered the host before this; a host page load that
+    // finished in between re-marked it (host_page_loaded), so uncover again
+    // now that the launcher no longer reads as shown.
+    if let Some(host_window) = host_window {
+        let _ = host_window.eval(stage_js("hostUncovered", 0));
+    }
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
             if let Some(webview) = launchers.get(host) {
@@ -680,6 +693,37 @@ fn sync_for_host(host: &WebviewWindow) {
     });
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let _ = host;
+}
+
+/// Give a host's shown launcher the keyboard again. A focus change in the
+/// host page makes the host's own webview the window's first responder and
+/// leaves the launcher deaf until the next toggle; the window regaining
+/// focus and a host page load are the moments to take it back. Main thread.
+fn reclaim_keyboard(host: &str) {
+    if !panel_is_visible(host) {
+        return;
+    }
+    LAUNCHERS.with(|launchers| {
+        if let Ok(launchers) = launchers.try_borrow() {
+            if let Some(webview) = launchers.get(host) {
+                let _ = webview.focus();
+            }
+        }
+    });
+}
+
+/// A host page finished loading under a shown launcher: a reload, or the
+/// connecting page reaching its live page. The new document carries no mark
+/// and its terminal focuses itself on load, so re-mark it and take the
+/// keyboard back. Any thread.
+pub(crate) fn host_page_loaded(webview: &tauri::Webview) {
+    let host = webview.label().to_string();
+    if !can_host_panel(&host) || !panel_is_visible(&host) {
+        return;
+    }
+    let _ = webview.eval(stage_js("hostCovered", 0));
+    let app = webview.app_handle().clone();
+    let _ = app.run_on_main_thread(move || reclaim_keyboard(&host));
 }
 
 /// The loopback launcher URL and the origin its pages may come from.
@@ -863,14 +907,16 @@ fn build_panel(
         launchers.borrow_mut().insert(label.clone(), webview);
     });
     if set(&SYNC_HOOKED).lock().unwrap().insert(label) {
-        let host_for_sync = host.clone();
-        host.on_window_event(move |event| {
-            if matches!(
-                event,
-                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
-            ) {
-                sync_for_host(&host_for_sync);
+        let host_for_events = host.clone();
+        host.on_window_event(move |event| match event {
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                sync_for_host(&host_for_events)
             }
+            // The window came back from another application or desktop:
+            // whatever its page did meanwhile, a shown launcher keeps the
+            // keyboard.
+            WindowEvent::Focused(true) => reclaim_keyboard(host_for_events.label()),
+            _ => {}
         });
     }
     Ok(true)
@@ -1120,6 +1166,48 @@ mod tests {
             .expect("a show that did not happen unmarks it");
         assert!(covered < uncovered);
         assert!(show.contains("if !matches!(shown, Ok(true))"));
+    }
+
+    #[test]
+    fn a_shown_launcher_takes_the_keyboard_back_when_its_window_or_host_page_comes_back() {
+        // A focus change in the host page makes its webview the window's
+        // first responder. The launcher takes the keyboard back when the
+        // window regains focus, and when a host page load finishes, since
+        // the new document boots without the mark: re-marked, then focused.
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        const MAIN: &str = include_str!("main.rs");
+        let body = |head: &str| {
+            let (_, rest) = SOURCE.split_once(head).expect("the function exists");
+            rest.split_once("\n}\n")
+                .expect("it ends at a column-0 brace")
+                .0
+        };
+        let hook = body("\nfn build_panel(");
+        assert!(hook
+            .contains("WindowEvent::Focused(true) => reclaim_keyboard(host_for_events.label())"));
+        let reclaim = body("\nfn reclaim_keyboard(");
+        assert!(reclaim.contains("if !panel_is_visible(host)"));
+        assert!(reclaim.contains("webview.focus()"));
+        let loaded = body("\npub(crate) fn host_page_loaded(");
+        let marked = loaded
+            .find("stage_js(\"hostCovered\", 0)")
+            .expect("the load re-marks the host");
+        let reclaimed = loaded
+            .find("reclaim_keyboard(&host)")
+            .expect("and takes the keyboard back");
+        assert!(marked < reclaimed);
+        // A hide that raced such a load uncovers the host again once the
+        // launcher no longer reads as shown.
+        let hide = body("\nfn hide_now(");
+        let unshown = hide
+            .find("remove(host)")
+            .expect("the hide unlists the launcher");
+        let uncovered = hide
+            .find("stage_js(\"hostUncovered\", 0)")
+            .expect("and uncovers the host after that");
+        assert!(unshown < uncovered);
+        assert!(MAIN.contains("launcher_panel::host_page_loaded(webview)"));
+        assert!(MAIN.contains("PageLoadEvent::Finished"));
     }
 
     #[test]

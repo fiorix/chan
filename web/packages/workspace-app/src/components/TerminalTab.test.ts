@@ -293,6 +293,27 @@ describe("TerminalTab host resume under the launcher", () => {
     await resume();
     expect(focused, "the resume after the launcher hid refocuses").toHaveBeenCalledTimes(1);
   });
+
+  // A terminal that mounts or gains its pane's focus under the launcher (the
+  // host page reloaded and lost its mark, a tab opened from cs) focuses a
+  // fresh element: a real focus change that would make the host webview the
+  // window's first responder. Every refocus waits for the launcher to hide.
+  test("a terminal focused under the launcher takes the keyboard only after it hides", async () => {
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    try {
+      await renderTerminal(terminalTab(), true);
+      bumpTabFocusPulse();
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(xterm.terminals.at(-1)!.focusCount, "no focus while the launcher is shown").toBe(0);
+    } finally {
+      document.documentElement.removeAttribute("data-launcher-shown");
+    }
+    bumpTabFocusPulse();
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(xterm.terminals.at(-1)!.focusCount, "the pane focus after the launcher hid focuses").toBe(1);
+  });
 });
 
 describe("TerminalTab activity frames", () => {

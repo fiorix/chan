@@ -5444,6 +5444,15 @@ fn main() {
     let app = app.plugin(tauri_plugin_updater::Builder::new().build());
     let app = app
         .manage(state)
+        // A host page that loads under its shown launcher (a reload, the
+        // connecting page reaching its live page) boots without the launcher
+        // mark and focuses its terminal: re-mark it and give the launcher
+        // the keyboard back.
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                launcher_panel::host_page_loaded(webview);
+            }
+        })
         .setup(move |app| {
             install_app_menu(app.handle())?;
             // The launcher webviews live outside Tauri; this forwards the

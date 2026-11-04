@@ -186,6 +186,7 @@ vi.mock("../terminal/resize", async (importOriginal) => ({
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
+import { bumpTabFocusPulse } from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
@@ -639,6 +640,27 @@ describe("focus recovery after a host resume", () => {
     await resume();
     expect(blurred, "once the launcher hides, a resume blurs the host").toHaveBeenCalledTimes(1);
     expect(ghostty.record.events, "and focuses the terminal").toContain("focus");
+  });
+
+  // A terminal that mounts or gains its pane's focus under the launcher (the
+  // host page reloaded and lost its mark, a tab opened from cs) focuses a
+  // fresh element: a real focus change that would make the host webview the
+  // window's first responder. Every refocus waits for the launcher to hide.
+  test("a terminal focused under the launcher takes the keyboard only after it hides", async () => {
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    try {
+      await mountGhostty();
+      bumpTabFocusPulse();
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(ghostty.record.events, "the terminal is not focused under the launcher").not.toContain("focus");
+    } finally {
+      document.documentElement.removeAttribute("data-launcher-shown");
+    }
+    bumpTabFocusPulse();
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ghostty.record.events, "the pane focus after the launcher hid focuses the terminal").toContain("focus");
   });
 });
 
