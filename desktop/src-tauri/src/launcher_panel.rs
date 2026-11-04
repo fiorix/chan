@@ -747,7 +747,10 @@ fn build_panel(
     let app_for_new = app.clone();
     let app_for_load = app.clone();
     let host_for_load = label.clone();
-    let builder = wry::WebViewBuilder::new()
+    // The launcher takes the WireGuard proxy every window takes: on Windows
+    // the first webview's proxy is the process's, so every webview must
+    // agree, and on Linux the proxy carries the loopback launcher page too.
+    let builder = crate::wireguard::with_launcher_proxy(wry::WebViewBuilder::new())
         .with_url(url)
         .with_visible(false)
         .with_transparent(true)

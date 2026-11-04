@@ -172,6 +172,10 @@ pub struct FetchEffect {
 #[derive(Default)]
 pub struct GatewayManager {
     state: Mutex<GatewayState>,
+    /// What this process's start decided about each gateway's WireGuard
+    /// file. Set once at start; empty until then and in tests, where no
+    /// row is behind a tunnel.
+    wireguard: std::sync::OnceLock<crate::wireguard::WireguardStartup>,
     #[cfg(test)]
     after_cancel_intent: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -246,6 +250,20 @@ impl GatewayState {
 }
 
 impl GatewayManager {
+    /// Record the start's WireGuard outcome; `Err` hands it back when one
+    /// was recorded already.
+    pub fn set_wireguard_startup(
+        &self,
+        startup: crate::wireguard::WireguardStartup,
+    ) -> Result<(), crate::wireguard::WireguardStartup> {
+        self.wireguard.set(startup)
+    }
+
+    /// The start's WireGuard outcome, empty when none was recorded.
+    pub fn wireguard_startup(&self) -> &crate::wireguard::WireguardStartup {
+        self.wireguard.get_or_init(Default::default)
+    }
+
     /// The volatile GatewayEntry fields for `gateway_id`, or `None` when
     /// the gateway has no runtime (renders as disconnected defaults).
     pub fn view(&self, gateway_id: &str) -> Option<GatewayRuntimeView> {
@@ -563,7 +581,7 @@ async fn apply_roster_policy_diff(state: &Arc<AppState>, gateway_id: &str, diff:
 }
 
 fn roster_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::wireguard::client_builder()
         .timeout(Duration::from_secs(ROSTER_HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("building roster http client: {e}"))
@@ -773,6 +791,32 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
     }))
 }
 
+/// Why `gateway_id` does not connect in this process, if it does not: its
+/// WireGuard file was refused at start, or its WireGuard setting changed
+/// since. The proxy is decided once per process, so a connect that ran
+/// anyway would reach the gateway the wrong way or not at all; the row says
+/// what to fix instead.
+fn wireguard_refusal(
+    state: &AppState,
+    gateway_id: &str,
+) -> Result<Option<(Gateway, String)>, String> {
+    let gateway = state
+        .store
+        .lock()
+        .unwrap()
+        .get()
+        .map_err(|e| e.to_string())?
+        .gateways
+        .into_iter()
+        .find(|g| g.id == gateway_id)
+        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+    let refusal = state
+        .gateway_manager
+        .wireguard_startup()
+        .connect_refusal(&gateway.id, gateway.wireguard.as_deref());
+    Ok(refusal.map(|reason| (gateway, reason)))
+}
+
 /// Connect a configured gateway. Non-interactive startup never opens a browser.
 pub async fn connect_gateway<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -780,6 +824,27 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     gateway_id: String,
     interactive: bool,
 ) -> Result<(), String> {
+    if let Some((gateway, reason)) = wireguard_refusal(&state, &gateway_id)? {
+        {
+            let mut live = state.gateway_manager.state.lock().unwrap();
+            if let Some(rt) = live.runtimes.get_mut(&gateway_id) {
+                rt.status = GatewayStatus::Disconnected;
+                rt.pending_signin = false;
+                rt.last_error = Some(reason.clone());
+            }
+        }
+        emit_notice(
+            &app,
+            "error",
+            "gateway",
+            &gateway_id,
+            &display_label(&gateway),
+            "Gateway WireGuard",
+            &reason,
+        );
+        signal_rows_changed(&app, &state);
+        return Err(reason);
+    }
     let Some(started) = begin_connect(&state, &gateway_id)? else {
         return Ok(());
     };
@@ -2584,6 +2649,7 @@ pub(crate) mod tests {
             enabled: true,
             added_at: 0,
             native_trust,
+            wireguard: None,
         });
         store.lock().unwrap().save(&cfg).unwrap();
         std::mem::forget(dir);
@@ -4867,6 +4933,7 @@ pub(crate) mod tests {
             enabled: true,
             added_at: 0,
             native_trust: Vec::new(),
+            wireguard: None,
         });
         store.lock().unwrap().save(&cfg).unwrap();
         (dir, Arc::new(AppState::with_store(store)))
@@ -4875,6 +4942,86 @@ pub(crate) mod tests {
     /// No gateway listens here: a tick that got past the PAT load would
     /// record a refused connection instead of the load's own error.
     const UNUSED_ROSTER_URL: &str = "http://127.0.0.1:9/desktop/v1/devservers";
+
+    #[tokio::test]
+    async fn connect_refuses_a_row_the_start_has_no_tunnel_for() {
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let file = PathBuf::from("/home/u/wg/gw.conf");
+        let other = PathBuf::from("/home/u/wg/other.conf");
+        let mut cfg = config::Config::default();
+        cfg.gateways.push(Gateway {
+            id: "gw-refused".into(),
+            url: "https://refused.example".into(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+            wireguard: Some(file.clone()),
+        });
+        cfg.gateways.push(Gateway {
+            id: "gw-changed".into(),
+            url: "https://changed.example".into(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+            wireguard: Some(other.clone()),
+        });
+        store.lock().unwrap().save(&cfg).unwrap();
+        // The start refused the first row's file and ran the second row's
+        // tunnel from a file the row no longer names.
+        let reason = "WireGuard: /home/u/wg/gw.conf: line 3: Address: not an IP address";
+        let startup = crate::wireguard::WireguardStartup::for_test(
+            &[("gw-changed", file.to_str().unwrap())],
+            &[("gw-refused", file.to_str().unwrap(), reason)],
+        );
+        let state = Arc::new(AppState::with_store(store).with_wireguard(None, startup));
+        let app = tauri::test::mock_app();
+
+        let err = connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-refused".into(),
+            true,
+        )
+        .await
+        .expect_err("a refused file does not connect");
+        assert_eq!(err, reason);
+        let err = connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-changed".into(),
+            true,
+        )
+        .await
+        .expect_err("a changed file waits for a restart");
+        assert_eq!(err, crate::wireguard::RESTART_REQUIRED);
+        // Neither row registered an attempt: nothing is connecting.
+        assert!(state.gateway_manager.view("gw-refused").is_none());
+        assert!(state.gateway_manager.view("gw-changed").is_none());
+        // A row the start ran as it stands connects past the refusal (and
+        // fails later, at discovery, since nothing listens there).
+        {
+            let mut guard = state.store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways[1].wireguard = Some(file.clone());
+            guard.save(&cfg).unwrap();
+        }
+        let err = connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-changed".into(),
+            true,
+        )
+        .await
+        .expect_err("discovery fails against nothing");
+        assert!(err.contains("discovery"), "{err}");
+    }
 
     /// Install a runtime under `pat_load_test_state`'s gateway id with a
     /// last-known roster, returning the poll token its cascade would cancel.
@@ -5237,6 +5384,7 @@ pub(crate) mod tests {
                 enabled: true,
                 added_at: 0,
                 native_trust: Vec::new(),
+                wireguard: None,
             });
             store.lock().unwrap().save(&cfg).unwrap();
         }
@@ -5312,6 +5460,7 @@ pub(crate) mod tests {
             enabled: true,
             added_at: 0,
             native_trust: Vec::new(),
+            wireguard: None,
         });
         store.lock().unwrap().save(&cfg).unwrap();
         let state = Arc::new(crate::AppState::with_store(store));
@@ -5450,6 +5599,7 @@ pub(crate) mod tests {
                 enabled: true,
                 added_at: 0,
                 native_trust: Vec::new(),
+                wireguard: None,
             });
             store.lock().unwrap().save(&cfg).unwrap();
         }

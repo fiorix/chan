@@ -1113,16 +1113,37 @@ fn ws_auth_shaped(e: &tokio_tungstenite::tungstenite::Error) -> bool {
     )
 }
 
+/// Open a feed's upgrade over the dial the process's WireGuard fabric
+/// decides: a CONNECT through the proxy for a host that is not loopback,
+/// with the TLS and WebSocket handshakes run over the opened stream, and
+/// the direct dial otherwise or when there is no fabric.
+async fn ws_connect(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+) -> Result<GatewayWs, tokio_tungstenite::tungstenite::Error> {
+    match crate::wireguard::ws_route(request.uri()) {
+        None => tokio_tungstenite::connect_async(request)
+            .await
+            .map(|(ws, _)| ws),
+        Some(route) => {
+            let stream = crate::wireguard::connect_through(route.proxy, &route.host, route.port)
+                .await
+                .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+            tokio_tungstenite::client_async_tls_with_config(request, stream, None, None)
+                .await
+                .map(|(ws, _)| ws)
+        }
+    }
+}
+
 async fn connect_gateway_ws(conn: &DevserverConn, path: &str) -> Result<GatewayWs, String> {
     let (request, cookie_header) = gateway_ws_request(conn, path).await?;
-    match tokio_tungstenite::connect_async(request).await {
-        Ok((ws, _)) => Ok(ws),
+    match ws_connect(request).await {
+        Ok(ws) => Ok(ws),
         Err(e) if ws_auth_shaped(&e) => {
             crate::devserver::refresh_gateway_session_if_current(conn, &cookie_header).await?;
             let (request, _) = gateway_ws_request(conn, path).await?;
-            tokio_tungstenite::connect_async(request)
+            ws_connect(request)
                 .await
-                .map(|(ws, _)| ws)
                 .map_err(|e| format!("connect gateway watch after refresh: {e}"))
         }
         Err(e) => Err(format!("connect gateway watch: {e}")),
@@ -1198,13 +1219,10 @@ async fn connect_raw_ws(
     target: &str,
 ) -> Result<GatewayWs, FeedError> {
     let request = raw_ws_request(conn, path, what)?;
-    tokio_tungstenite::connect_async(request)
-        .await
-        .map(|(ws, _)| ws)
-        .map_err(|e| FeedError {
-            declined: ws_declined(&e),
-            message: format!("connect {target}: {e}"),
-        })
+    ws_connect(request).await.map_err(|e| FeedError {
+        declined: ws_declined(&e),
+        message: format!("connect {target}: {e}"),
+    })
 }
 
 /// Keepalive cadence for a devserver feed socket: send a WS Ping after this long

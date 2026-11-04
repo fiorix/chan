@@ -20,7 +20,11 @@ path = "src/main.rs"
 tauri-build = { workspace = true, features = [] }
 
 [dependencies]
-tauri = { workspace = true, features = ["devtools"] }
+# `macos-proxy`: the per-webview proxy (`WebviewWindowBuilder::proxy_url`)
+# that puts a gateway window inside the WireGuard fabric (src/wireguard.rs);
+# on macOS wry sets it on the webview's data store, which exists from
+# macOS 14, so the desktop sets it only there at run time.
+tauri = { workspace = true, features = ["devtools", "macos-proxy"] }
 # The in-window launcher (src/launcher_panel.rs): a second webview
 # chan-desktop places inside each window itself, outside Tauri's webview
 # registry, so the window stays a single-webview Tauri window. The version is
@@ -52,6 +56,11 @@ image = { workspace = true, features = ["png"] }
 chan = { workspace = true }
 chan-workspace = { workspace = true, default-features = false }
 chan-server = { workspace = true, features = ["embeddings"] }
+# The in-process WireGuard tunnels to gateways configured with a wg-quick
+# file and the loopback CONNECT proxy the desktop's legs reach them through
+# (src/wireguard.rs); the same reader the devserver flag uses validates the
+# file at add and update time.
+chan-wireguard = { workspace = true }
 # The `cs` control-socket client, so chan-desktop dispatches `cs` when
 # invoked through a `cs` name (argv[0]) without a `chan` binary on PATH.
 # The workspace dep is `default-features = false` (chan-server pulls it
@@ -127,8 +136,10 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSView"] }
 # `NSString` carries the dialog text and the pasteboard names and types;
 # `NSArray` carries the drag pasteboard's filename property list, and
-# `NSEnumerator` gates the `NSArray::iter` that walks it.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString"] }
+# `NSEnumerator` gates the `NSArray::iter` that walks it. `NSProcessInfo`
+# reads the macOS version that decides whether a webview takes the
+# WireGuard proxy (src/wireguard.rs).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSProcessInfo", "NSString"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

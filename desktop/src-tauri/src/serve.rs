@@ -1096,35 +1096,41 @@ fn build_workspace_window_with_completion(
         // desktop coordinates sidestep the builder's logical-pixel cross-DPI
         // ambiguity. A `Default` plan keeps the visible 1200x800 build below.
         let geometry_plan = resolve_geometry_plan(&app_owned, &label_owned);
-        let builder = WebviewWindowBuilder::new(&app_owned, &label_owned, webview_url)
-            .title(display_title.clone())
-            .inner_size(1200.0, 800.0)
-            .min_inner_size(640.0, 400.0)
-            .resizable(true)
-            .initialization_script(init_script.as_str())
-            // The explicit `zoom_in` / `zoom_out` / `zoom_reset`
-            // IPC commands fired from KEY_BRIDGE_JS
-            // are the primary path; this Tauri-level polyfill stays
-            // on as a mousewheel + pinch fallback (the chord
-            // overlap is harmless because KEY_BRIDGE_JS's capture-
-            // phase listener calls preventDefault before the
-            // polyfill's bubble-phase listener sees the keydown).
-            // Requires `core:webview:allow-set-webview-zoom` on SPA windows per
-            // capabilities/workspace.json.
-            .zoom_hotkeys_enabled(true)
-            // Hand HTML5 drag-and-drop to the page -- this must stay
-            // disabled. With wry's native handler enabled, WebKit
-            // never sees ANY drag on macOS (wry forwards to the OS
-            // default only when the handler returns false, and
-            // tauri-runtime-wry's handler returns true
-            // unconditionally), which kills the editor/file-browser
-            // drop zones AND in-page pane-to-pane tab moves. The
-            // SPA's window-level drop guard owns the no-takeover
-            // guarantee for stray OS file drops, and the terminal
-            // path-print reads the drag pasteboard via
-            // `read_dropped_paths` (dropped_paths.rs) instead of
-            // native drag events.
-            .disable_drag_drop_handler();
+        // The window reaches a gateway through the WireGuard proxy when the
+        // process has one and this platform's webview takes it.
+        let builder = crate::wireguard::with_webview_proxy(WebviewWindowBuilder::new(
+            &app_owned,
+            &label_owned,
+            webview_url,
+        ))
+        .title(display_title.clone())
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(640.0, 400.0)
+        .resizable(true)
+        .initialization_script(init_script.as_str())
+        // The explicit `zoom_in` / `zoom_out` / `zoom_reset`
+        // IPC commands fired from KEY_BRIDGE_JS
+        // are the primary path; this Tauri-level polyfill stays
+        // on as a mousewheel + pinch fallback (the chord
+        // overlap is harmless because KEY_BRIDGE_JS's capture-
+        // phase listener calls preventDefault before the
+        // polyfill's bubble-phase listener sees the keydown).
+        // Requires `core:webview:allow-set-webview-zoom` on SPA windows per
+        // capabilities/workspace.json.
+        .zoom_hotkeys_enabled(true)
+        // Hand HTML5 drag-and-drop to the page -- this must stay
+        // disabled. With wry's native handler enabled, WebKit
+        // never sees ANY drag on macOS (wry forwards to the OS
+        // default only when the handler returns false, and
+        // tauri-runtime-wry's handler returns true
+        // unconditionally), which kills the editor/file-browser
+        // drop zones AND in-page pane-to-pane tab moves. The
+        // SPA's window-level drop guard owns the no-takeover
+        // guarantee for stray OS file drops, and the terminal
+        // path-print reads the drag pasteboard via
+        // `read_dropped_paths` (dropped_paths.rs) instead of
+        // native drag events.
+        .disable_drag_drop_handler();
         // Build hidden when restored geometry will be applied, so the window
         // never flashes at the default size/position before it is repositioned.
         let builder = if geometry_plan.builds_hidden() {

@@ -1037,6 +1037,7 @@ dependencies = [
  "chan-revtunnel",
  "chan-server",
  "chan-shell",
+ "chan-wireguard",
  "chan-workspace",
  "dirs 5.0.1",
  "futures",

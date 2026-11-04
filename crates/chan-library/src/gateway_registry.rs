@@ -83,6 +83,16 @@ pub struct GatewayEntry {
     /// `null` when the gateway is healthy or has never been dialed.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// The wg-quick file this gateway is reached through, as stored; `null`
+    /// when the gateway is reached directly.
+    #[serde(default)]
+    pub wireguard: Option<String>,
+    /// The row's WireGuard setting is not the one the running desktop
+    /// started with (a file added, removed, changed or refused since the
+    /// start), so it takes effect at the next start: the webview proxy is
+    /// decided once per process. Always `false` on a headless surface.
+    #[serde(default)]
+    pub wireguard_restart_required: bool,
 }
 
 /// The add/update payload. `url` is required on add; on update the URL is
@@ -97,6 +107,12 @@ pub struct GatewayInput {
     /// Optional user label; `None`/empty derives from the URL host.
     #[serde(default)]
     pub label: Option<String>,
+    /// Optional path to a wg-quick file; the gateway is then reached through
+    /// an in-process WireGuard tunnel started from it. Full-replace like
+    /// `label`: `None`/empty clears. The registry reads the file on add and
+    /// update and refuses a bad one with the reader's message.
+    #[serde(default)]
+    pub wireguard: Option<String>,
 }
 
 /// The launcher's gateway CRUD, inverted so chan-library (and chan-server's
@@ -144,12 +160,15 @@ mod tests {
             pending_signin: false,
             devserver_count: 3,
             last_error: None,
+            wireguard: None,
+            wireguard_restart_required: false,
         };
         assert_eq!(
             serde_json::to_string(&entry).unwrap(),
             "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
              \"enabled\":true,\"status\":\"disconnected\",\"pending_signin\":false,\
-             \"devserver_count\":3,\"last_error\":null}"
+             \"devserver_count\":3,\"last_error\":null,\"wireguard\":null,\
+             \"wireguard_restart_required\":false}"
         );
         // And the shape round-trips.
         let back: GatewayEntry =
@@ -181,5 +200,26 @@ mod tests {
         let input: GatewayInput =
             serde_json::from_str("{\"url\":\"https://gw.chan.app\",\"label\":\"\"}").unwrap();
         assert_eq!(input.label, Some(String::new()));
+    }
+
+    #[test]
+    fn input_wireguard_is_optional_and_an_old_entry_reads() {
+        // A launcher from before the field posts without it.
+        let input: GatewayInput =
+            serde_json::from_str("{\"url\":\"https://gw.chan.app\"}").unwrap();
+        assert_eq!(input.wireguard, None);
+        let input: GatewayInput = serde_json::from_str(
+            "{\"url\":\"https://gw.chan.app\",\"wireguard\":\"/home/u/wg/chan.conf\"}",
+        )
+        .unwrap();
+        assert_eq!(input.wireguard.as_deref(), Some("/home/u/wg/chan.conf"));
+        // An entry serialized before the fields reads with the defaults.
+        let entry: GatewayEntry = serde_json::from_str(
+            "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
+             \"enabled\":true}",
+        )
+        .unwrap();
+        assert_eq!(entry.wireguard, None);
+        assert!(!entry.wireguard_restart_required);
     }
 }

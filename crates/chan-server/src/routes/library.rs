@@ -6069,6 +6069,8 @@ mod gateway_route_tests {
                     pending_signin: false,
                     devserver_count: 0,
                     last_error: None,
+                    wireguard: None,
+                    wireguard_restart_required: false,
                 }]),
             }
         }
@@ -6091,6 +6093,8 @@ mod gateway_route_tests {
                 pending_signin: false,
                 devserver_count: 0,
                 last_error: None,
+                wireguard: None,
+                wireguard_restart_required: false,
             };
             self.rows.lock().unwrap().push(entry.clone());
             Ok(entry)
