@@ -38,6 +38,7 @@ export function settingsPreferences(): Preferences {
     },
     bubble_overlay_mode: "stack",
     empty_pane_carousel_cycling: true,
+    pane_strip_auto_hide: false,
     page_width_ratio: 0.8,
     overlay_maximized: false,
   };

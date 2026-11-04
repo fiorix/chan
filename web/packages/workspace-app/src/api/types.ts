@@ -430,6 +430,10 @@ export type Preferences = {
   /// older servers that don't ship the field don't trip the type
   /// contract; the UI treats `undefined` as the default-true.
   empty_pane_carousel_cycling?: boolean;
+  /// Hide a pane's tab strip while the side it shows holds fewer than two
+  /// tabs. Optional on the wire so older servers that omit it don't trip
+  /// the contract; the UI treats `undefined` as off.
+  pane_strip_auto_hide?: boolean;
   /// Editor page-width cap as a ratio of the window width, in (0, 1];
   /// 1.0 means no cap. Optional on the wire so older servers that omit
   /// it don't trip the contract; the UI clamps to its slider bounds

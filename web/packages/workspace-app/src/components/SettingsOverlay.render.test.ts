@@ -52,6 +52,7 @@ function basePrefs(): Record<string, unknown> {
     },
     bubble_overlay_mode: "stack",
     empty_pane_carousel_cycling: true,
+    pane_strip_auto_hide: false,
     page_width_ratio: 0.8,
     overlay_maximized: false,
   };
@@ -746,6 +747,27 @@ describe("settings surface render", () => {
         ),
       ),
     ).toEqual(["search_aggression"]);
+  });
+
+  test("the pane strip toggle renders the stored choice and PATCHes it alone", async () => {
+    server.preferences.pane_strip_auto_hide = true;
+    const target = openSurface();
+    await flush();
+    clickTab(target, "Global");
+    await flush();
+    const pill = () =>
+      [...target.querySelectorAll("label.pill")].find(
+        (e) => e.textContent?.trim() === "Auto-hide",
+      ) as HTMLLabelElement | undefined;
+    expect(pill(), "the Global section lists the Auto-hide pill").toBeDefined();
+    expect(pill()!.classList.contains("on"), "the pill shows the stored on").toBe(true);
+
+    const before = patchBodies.length;
+    (pill()!.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    await flush();
+    expect(patchBodies.length).toBe(before + 1);
+    expect(patchBodies[patchBodies.length - 1]).toEqual({ pane_strip_auto_hide: false });
+    expect(pill()!.classList.contains("on"), "the pill follows the write").toBe(false);
   });
 
   test("a stored invalid graph hue is dropped from the PATCH body", async () => {

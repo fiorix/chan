@@ -20,11 +20,13 @@ import { chanMarkdown } from "../editor/markdown/grammar";
 import { dateDecorations } from "../editor/widgets/date";
 import SourceComponent from "../editor/Source.svelte";
 import SettingsOverlay from "../components/SettingsOverlay.svelte";
+import Pane from "../components/Pane.svelte";
 import App from "../App.svelte";
 import { installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers } from "../demo/timers";
 import { preferences } from "../__tests__/standalone";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { installEditorDom, mountWysiwyg, unmountWysiwygs } from "../__tests__/wysiwyg";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/xterm")).xtermModule());
@@ -115,6 +117,16 @@ describe("each reader of a setting", () => {
     mounted.push(mount(SettingsOverlay, { target }));
     flushSync();
     expect(document.documentElement.style.getPropertyValue("--chan-editor-body-size")).toBe("18px");
+  });
+
+  test("the pane strip hides a lone tab under pane_strip_auto_hide", () => {
+    __testSetStandalonePreferences(preferences({ pane_strip_auto_hide: true }));
+    const pane = resetLayout([terminalTab({ id: "lone" })]);
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane } }));
+    flushSync();
+    expect(target.querySelector(".tabs.auto-hidden"), "a lone tab draws no strip").not.toBeNull();
   });
 
   test("the terminal engine command names the configured engine", () => {
