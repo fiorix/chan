@@ -11,7 +11,16 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import Pane from "./Pane.svelte";
 import paneSource from "./Pane.svelte?raw";
-import { cancelPaneMode, flipHybrid, layout, type LeafNode } from "../state/tabs.svelte";
+import {
+  cancelPaneMode,
+  enterPaneMode,
+  flipHybrid,
+  layout,
+  paneMode,
+  paneModeOpenBrowser,
+  paneModeStageDraftEditor,
+  type LeafNode,
+} from "../state/tabs.svelte";
 import { __testSetStandalonePreferences, persistStateToHash } from "../state/store.svelte";
 import { workspace } from "../state/workspace.svelte";
 import { demoWorkspaceInfo } from "../demo/data";
@@ -195,6 +204,50 @@ describe("the pane strip with auto-hide on", () => {
   });
 
   test("the hidden strip is a display rule in the pane's own stylesheet", () => {
-    expect(paneSource).toContain(".tabs.auto-hidden {\n    display: none;\n  }");
+    expect(paneSource).toMatch(/\.tabs\.auto-hidden\s*\{\s*display:\s*none/);
+  });
+});
+
+describe("Hybrid Nav rows keep the strip under auto-hide", () => {
+  test("a staged draft editor row shows the strip beside a lone tab, and leaving the mode hides it", async () => {
+    setWorkspacePreference(true);
+    const target = await renderPane({ kind: "leaf", id: "p-staged-editor", tabs: [terminalTab({ id: "se-1" })], activeTabId: "se-1" });
+    expect(autoHidden(target), "a lone tab draws no strip").toBe(true);
+
+    enterPaneMode();
+    await tick();
+    expect(autoHidden(target), "entering the mode alone stages nothing and changes nothing").toBe(true);
+
+    paneModeStageDraftEditor();
+    await tick();
+    expect(target.querySelector(".tabs .tab.staged-editor"), "the New draft row is in the strip").not.toBeNull();
+    expect(autoHidden(target), "a staged row keeps the strip in view").toBe(false);
+
+    cancelPaneMode();
+    await tick();
+    expect(paneMode.active).toBe(false);
+    expect(autoHidden(target), "back out of the mode the lone tab hides the strip again").toBe(true);
+  });
+
+  test("a ghost tab staged on an empty pane shows the strip", async () => {
+    setWorkspacePreference(true);
+    const pane: LeafNode = { kind: "leaf", id: "p-ghost", tabs: [], activeTabId: null };
+    layout.rootId = pane.id;
+    layout.activePaneId = pane.id;
+    layout.nodes = { [pane.id]: pane };
+    layout.focusColor = "blue";
+    enterPaneMode();
+    paneModeOpenBrowser();
+    // In the mode the window renders the draft layout's pane, which holds
+    // the ghost tab the chord added.
+    const draftPane = paneMode.draft?.nodes[pane.id];
+    if (!draftPane || draftPane.kind !== "leaf") throw new Error("expected a draft leaf");
+    expect(draftPane.tabs, "the chord staged one ghost tab").toHaveLength(1);
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane: draftPane } }) as Record<string, unknown>);
+    await tick();
+    expect(target.querySelector(".tabs .tab.staged"), "the ghost tab is drawn staged").not.toBeNull();
+    expect(autoHidden(target), "a lone ghost tab keeps the strip in view").toBe(false);
   });
 });

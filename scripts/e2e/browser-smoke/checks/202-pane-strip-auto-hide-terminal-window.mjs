@@ -38,14 +38,24 @@ function terminalWindowUrl(origin, row) {
 export default {
   name: "pane-strip-auto-hide-terminal-window",
   async run(ctx) {
-    const chanHome = mkdtempSync(join(tmpdir(), "chan-strip-202-"));
-    execFileSync(ctx.chanBin, ["config", "set", "editor.pane_strip_auto_hide", "true"], {
-      env: { ...process.env, CHAN_HOME: chanHome },
-      stdio: "ignore",
-    });
-    const devserver = spawnDevserver(ctx.chanBin, chanHome);
-    const page = await ctx.browser.newPage();
+    // Everything that needs tearing down is made inside the try, so a throw
+    // from any step leaves no devserver or temp home behind.
+    let chanHome = null;
+    let devserver = null;
+    let page = null;
     try {
+      chanHome = mkdtempSync(join(tmpdir(), "chan-strip-202-"));
+      try {
+        execFileSync(ctx.chanBin, ["config", "set", "editor.pane_strip_auto_hide", "true"], {
+          env: { ...process.env, CHAN_HOME: chanHome },
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+      } catch (error) {
+        const stderr = error?.stderr ? String(error.stderr).trim() : "";
+        throw new Error(`chan config set editor.pane_strip_auto_hide true failed (${error?.status ?? error?.code ?? "?"}): ${stderr || error?.message}`, { cause: error });
+      }
+      devserver = spawnDevserver(ctx.chanBin, chanHome);
+      page = await ctx.browser.newPage();
       const launchUrl = await devserver.url;
       const origin = new URL(launchUrl).origin;
       const token = new URL(launchUrl).searchParams.get("t");
@@ -78,9 +88,9 @@ export default {
       await ctx.shot("202-off-one-terminal", page);
       return { one, two, oneAgain, restored };
     } finally {
-      await page.close().catch(() => {});
-      await killChild(devserver.child);
-      rmSync(chanHome, { recursive: true, force: true });
+      if (page) await page.close().catch(() => {});
+      if (devserver) await killChild(devserver.child);
+      if (chanHome) rmSync(chanHome, { recursive: true, force: true });
     }
   },
 };

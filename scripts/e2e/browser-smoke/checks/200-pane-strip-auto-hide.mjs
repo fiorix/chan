@@ -10,7 +10,6 @@ import {
   closeActiveTerminal,
   closeEveryTerminal,
   dispatchCommand,
-  readPaneStrip,
   readPaneStripPreference,
   stripHidden,
   stripShown,
