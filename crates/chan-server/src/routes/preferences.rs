@@ -58,6 +58,8 @@ pub struct PreferencesView {
     pub hybrid_surface_themes: HybridSurfaceThemes,
     #[serde(default = "default_empty_pane_carousel_cycling")]
     pub empty_pane_carousel_cycling: bool,
+    #[serde(default)]
+    pub pane_strip_auto_hide: bool,
     #[serde(default = "default_page_width_ratio")]
     pub page_width_ratio: f64,
     #[serde(default)]
@@ -107,6 +109,7 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         bubble_overlay_mode: editor.bubble_overlay_mode,
         hybrid_surface_themes: editor.hybrid_surface_themes.clone(),
         empty_pane_carousel_cycling: editor.empty_pane_carousel_cycling,
+        pane_strip_auto_hide: editor.pane_strip_auto_hide,
         page_width_ratio: editor.page_width_ratio,
         overlay_maximized: editor.overlay_maximized,
         shortcuts: editor.shortcuts.clone(),
@@ -155,6 +158,7 @@ struct PreferencesPatch {
     bubble_overlay_mode: Option<BubbleOverlayMode>,
     hybrid_surface_themes: Option<HybridSurfaceThemes>,
     empty_pane_carousel_cycling: Option<bool>,
+    pane_strip_auto_hide: Option<bool>,
     page_width_ratio: Option<f64>,
     overlay_maximized: Option<bool>,
     shortcuts: Option<BTreeMap<String, ShortcutOverride>>,
@@ -239,6 +243,7 @@ impl PreferencesPatch {
             || self.bubble_overlay_mode.is_some()
             || self.hybrid_surface_themes.is_some()
             || self.empty_pane_carousel_cycling.is_some()
+            || self.pane_strip_auto_hide.is_some()
             || self.page_width_ratio.is_some()
             || self.overlay_maximized.is_some()
             || self.shortcuts.is_some()
@@ -293,6 +298,9 @@ impl PreferencesPatch {
         }
         if let Some(value) = self.empty_pane_carousel_cycling {
             editor.empty_pane_carousel_cycling = value;
+        }
+        if let Some(value) = self.pane_strip_auto_hide {
+            editor.pane_strip_auto_hide = value;
         }
         if let Some(value) = self.page_width_ratio {
             editor.page_width_ratio = value;
@@ -1123,6 +1131,60 @@ mod tests {
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn pane_strip_auto_hide_patch_is_editor_owned_and_round_trips() {
+        // The field rides the editor owner: a patch naming it alone saves
+        // the editor prefs once, touches the server config never, and the
+        // view that answers (and every later view) carries the value.
+        let state = make_test_state(false);
+        let view = preferences_view(&state).expect("preferences view");
+        assert!(!view.pane_strip_auto_hide, "default is off");
+        assert_eq!(
+            to_json(&GlobalConfigView {
+                revision: 1,
+                preferences: view,
+                workspaces: Vec::new(),
+            })["preferences"]["pane_strip_auto_hide"],
+            json!(false)
+        );
+
+        let editor_saves = AtomicUsize::new(0);
+        let server_saves = AtomicUsize::new(0);
+        let view = patch_config_with_saves(
+            &state,
+            patch_body(
+                1,
+                PreferencesPatch {
+                    pane_strip_auto_hide: Some(true),
+                    ..Default::default()
+                },
+            ),
+            |_| {
+                editor_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            |_| {
+                server_saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .expect("pane strip patch");
+        assert!(view.preferences.pane_strip_auto_hide);
+        assert_eq!(editor_saves.load(Ordering::Relaxed), 1);
+        assert_eq!(server_saves.load(Ordering::Relaxed), 0);
+        assert!(state.editor_prefs.lock().unwrap().pane_strip_auto_hide);
+        assert!(preferences_view(&state).expect("view").pane_strip_auto_hide);
+
+        let body: PatchConfigBody = serde_json::from_value(json!({
+            "expected_revision": view.revision,
+            "preferences": { "pane_strip_auto_hide": false }
+        }))
+        .expect("the wire names the field");
+        let view = patch_config_with_saves(&state, body, noop_save_editor, noop_save_server)
+            .expect("pane strip patch off");
+        assert!(!view.preferences.pane_strip_auto_hide);
     }
 
     #[test]

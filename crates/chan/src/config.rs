@@ -214,6 +214,10 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         kind: ConfigValueKind::Bool,
     },
     ConfigKeySpec {
+        key: "editor.pane_strip_auto_hide",
+        kind: ConfigValueKind::Bool,
+    },
+    ConfigKeySpec {
         key: "editor.page_width_ratio",
         kind: ConfigValueKind::F64Range(0.25, 1.0),
     },
