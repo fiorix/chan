@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub(crate) mod clock;
+pub mod config;
 pub mod noise;
 
 /// The Curve25519 key types a tunnel is built from.
