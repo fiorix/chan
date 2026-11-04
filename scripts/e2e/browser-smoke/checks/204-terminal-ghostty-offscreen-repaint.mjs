@@ -22,8 +22,8 @@
 
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 
-const TAB = "SmokeOffscreen201";
-const MARK = "OFF201_";
+const TAB = "SmokeOffscreen204";
+const MARK = "OFF204_";
 const LINES = 20;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -118,8 +118,8 @@ export default {
       }
       readings.baseline = baseline;
       await page.evaluate(() => {
-        window.__offscreen201 = [];
-        document.addEventListener("visibilitychange", () => window.__offscreen201.push(document.visibilityState));
+        window.__offscreen204 = [];
+        document.addEventListener("visibilitychange", () => window.__offscreen204.push(document.visibilityState));
       });
 
       // HIDE. Interval polling: a hidden page runs no animation frames.
@@ -149,7 +149,7 @@ export default {
         if (after && after.painted >= floor && after.painted <= ceiling) break;
         if (Date.now() > resumeDeadline) {
           readings.after = after;
-          readings.visibility = await page.evaluate(() => window.__offscreen201);
+          readings.visibility = await page.evaluate(() => window.__offscreen204);
           await ctx.shot("ghostty-offscreen-not-repainted");
           throw new Error(
             `the terminal did not repaint after the visible flip: ` +
@@ -160,7 +160,7 @@ export default {
         await sleep(100);
       }
       readings.after = after;
-      readings.visibility = await page.evaluate(() => window.__offscreen201);
+      readings.visibility = await page.evaluate(() => window.__offscreen204);
       await ctx.shot("ghostty-offscreen-repainted");
       return readings;
     } finally {
