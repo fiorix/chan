@@ -15,6 +15,16 @@ base64 = { workspace = true }
 blake2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 hmac = { workspace = true }
+# The proxy's response body type: nothing, or the destination's body.
+http-body-util = { workspace = true }
+# The loopback proxy serves each client connection with hyper's HTTP/1
+# server and opens its destination connections with hyper's HTTP/1 client;
+# the workspace row enables http2, client and server, and the proxy
+# speaks HTTP/1 only.
+hyper = { workspace = true, features = ["http1"] }
+# TokioIo bridges tokio streams to hyper's IO traits and TokioTimer drives
+# hyper's header read timeout.
+hyper-util = { workspace = true, features = ["tokio"] }
 parking_lot = { workspace = true }
 rand_core = { workspace = true }
 ring = { workspace = true }
@@ -36,3 +46,8 @@ x25519-dalek = { workspace = true }
 # machine sleeps, and a session has to be seen as expired after a laptop
 # wakes.
 rustix = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# The reader tests write owner-only wg-quick files in a directory of their
+# own.
+tempfile = { workspace = true }
