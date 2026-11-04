@@ -9,7 +9,6 @@
 // window controls are desktop-only. Register with registerCommands. See
 // state/commands.ts for the Command shape and helpers.
 
-import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { allowedInWindow, registerCommands, withStatus, workspaceOnly } from "../commands";
 import {
   backslashRefusal,
@@ -89,25 +88,18 @@ async function executeOpen(target: string): Promise<void> {
 
 /// The bare "Open" flow: a PathPromptModal in `open` mode (autocomplete,
 /// no extension append, graph links allowed, "creates and opens"
-/// disclosure). Cancel restores focus to the element captured when the
-/// launcher opened (the launcher itself is long dismissed by now); a
-/// submitted open hands focus to the opened surface instead.
+/// disclosure). A cancel returns focus through the dialog's own opener: from
+/// the launcher, the element the launcher opened from; from an assigned
+/// chord, the control that held focus. A submitted open hands focus to the
+/// opened surface instead.
 async function openPathDialog(): Promise<void> {
-  const returnFocus = deckReturnFocus();
   const target = await uiPathPrompt({
     title: "Open path or chan://graph link",
     kind: "either",
     mode: "open",
     allowAbsolute: true,
   });
-  if (target === null) {
-    // Handing focus back is not navigation: it must not scroll the page. A
-    // dialog opened by a launcher run returns focus to this element by
-    // itself, so from the launcher this is a second focus on the same node;
-    // it stays for a cancel after the launcher was dismissed before the run.
-    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
-    return;
-  }
+  if (target === null) return;
   const trimmed = target.trim();
   if (trimmed !== "") await executeOpen(trimmed);
 }

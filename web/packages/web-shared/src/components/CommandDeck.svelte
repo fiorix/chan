@@ -1,13 +1,5 @@
 <script module lang="ts">
-  let lastReturnFocus: HTMLElement | null = null;
   let pendingReturnFocus: HTMLElement | null = null;
-
-  /// The element that held focus when a command deck last opened. A command
-  /// whose flow outlives the deck, such as a path dialog the user cancels,
-  /// hands focus back here rather than to the deck's long-gone input.
-  export function deckReturnFocus(): HTMLElement | null {
-    return lastReturnFocus;
-  }
 
   /// The element a run in flight will hand focus back to, from the run's
   /// start until the deck's close has rendered, or until the run has settled
@@ -124,7 +116,6 @@
     const isOpen = open;
     if (isOpen && !wasOpen) {
       returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      lastReturnFocus = returnFocus;
       closingRun = null;
       reconcileSelection();
       zone = "input";

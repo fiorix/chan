@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
 import type { DeckConfirm, DeckItem } from "../command-deck/model";
-import { deckPendingReturnFocus, deckReturnFocus } from "./CommandDeck.svelte";
+import { deckPendingReturnFocus } from "./CommandDeck.svelte";
 import CommandDeckHarness from "./CommandDeck.test-harness.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -607,14 +607,6 @@ describe("CommandDeck focus on close", () => {
     escape();
     await flush();
     expect(focus).not.toHaveBeenCalled();
-  });
-
-  it("reports the element it opened from, still after it closes", async () => {
-    await openFromOrigin(run());
-    expect(deckReturnFocus()).toBe(origin);
-    escape();
-    await flush();
-    expect(deckReturnFocus()).toBe(origin);
   });
 
   it("keeps a newer run's claim when an older run settles first", async () => {

@@ -22,6 +22,7 @@ vi.mock("../api/libraryCommand", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
+import PathPromptModal from "./PathPromptModal.svelte";
 import PromptModal from "./PromptModal.svelte";
 import { allCommands, registerCommands } from "../state/commands";
 import "../state/commands/global";
@@ -139,7 +140,7 @@ async function flush(): Promise<void> {
 }
 
 /// Focus a control, then open the launcher from it the way the app does. The
-/// prompt dialog mounts before the launcher, as it does in the app.
+/// prompt dialogs mount before the launcher, as they do in the app.
 async function openFromOrigin(): Promise<HTMLElement> {
   origin = document.createElement("button");
   document.body.append(origin);
@@ -147,6 +148,7 @@ async function openFromOrigin(): Promise<HTMLElement> {
   const dialogs = document.createElement("div");
   document.body.append(dialogs);
   mounted.push(mount(PromptModal, { target: dialogs }) as Record<string, unknown>);
+  mounted.push(mount(PathPromptModal, { target: dialogs }) as Record<string, unknown>);
   const target = document.createElement("div");
   document.body.append(target);
   mounted.push(mount(CommandLauncher, { target }) as Record<string, unknown>);
@@ -169,7 +171,8 @@ function row(target: HTMLElement, title: string): HTMLButtonElement {
   return found;
 }
 
-/// Run Open with no path, which raises its path dialog, and cancel the dialog.
+/// Run Open outside the launcher, as an assigned chord does, which raises
+/// its path dialog, and cancel the dialog.
 async function runOpenAndCancel(): Promise<void> {
   const open = allCommands().find((command) => command.id === "app.open.path");
   expect(open, "the Open command is registered").toBeDefined();
@@ -375,29 +378,35 @@ describe("focus when the launcher closes", () => {
     expect(document.activeElement).toBe(origin);
   });
 
-  test("a cancelled Open hands focus back to the element the launcher opened from", async () => {
-    await openFromOrigin();
-    closeCommandLauncher();
+  test("a cancelled Open from the launcher hands focus back to the element the launcher opened from", async () => {
+    const target = await openFromOrigin();
+    await runFromLauncher(target, "Open");
+    expect(launcherPanel.open).toBe(false);
+    await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]') as HTMLElement | null;
+    expect(dialog, "the path dialog is open").not.toBeNull();
     await flush();
-    // Stands in for the path dialog's field, which holds focus until cancel.
-    const field = document.createElement("input");
-    document.body.append(field);
-    field.focus();
-
-    await runOpenAndCancel();
-    expect(document.activeElement).toBe(origin);
-  });
-
-  test("a cancelled Open hands focus back without scrolling the page", async () => {
-    await openFromOrigin();
-    closeCommandLauncher();
-    await flush();
-    const field = document.createElement("input");
-    document.body.append(field);
-    field.focus();
+    expect(dialog!.contains(document.activeElement), "the restore leaves the dialog its focus").toBe(true);
     const focus = vi.spyOn(origin, "focus");
 
-    await runOpenAndCancel();
+    resolvePathPrompt(null);
+    await flush();
+    await vi.waitFor(() => expect(document.activeElement).toBe(origin));
+    // Handing focus back is not navigation: it must not scroll the page.
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  test("a cancelled Open run by a chord hands focus back to the control that held it", async () => {
+    // The launcher was last opened from `origin` and dismissed; the chord
+    // runs the command with no launcher open and focus on another control.
+    const target = await openFromOrigin();
+    await press(target, "Escape");
+    expect(document.activeElement).toBe(origin);
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.focus();
+
+    await runOpenAndCancel();
+    expect(document.activeElement, "focus returns to the chord's control, not the launcher's last opener").toBe(field);
   });
 });

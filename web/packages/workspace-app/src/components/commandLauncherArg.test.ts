@@ -21,7 +21,6 @@ import {
   launcherPanel,
   openCommandLauncher,
 } from "../state/store.svelte";
-import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { registerCommands } from "../state/commands";
 import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
@@ -139,16 +138,5 @@ describe("launcher argument forwarding", () => {
     await typeQuery(target, "open a  b/c d.md");
     await pressEnter(target);
     expect(runOpen).toHaveBeenCalledExactlyOnceWith("a  b/c d.md");
-  });
-});
-
-describe("deckReturnFocus capture", () => {
-  test("opening the launcher captures the focused element for later restore", async () => {
-    const input = document.createElement("input");
-    document.body.append(input);
-    input.focus();
-    await openLauncher();
-    expect(deckReturnFocus()).toBe(input);
-    input.remove();
   });
 });
