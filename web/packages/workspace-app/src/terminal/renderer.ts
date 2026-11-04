@@ -1,11 +1,40 @@
+import type { GhosttyTerminal } from "ghostty-web";
+
+/// What a repaint of the visible rows needs from either backend. xterm.js
+/// queues the row range through refresh(). ghostty-web has no refresh(): its
+/// canvas renderer repaints only the rows the core marked dirty since the
+/// last frame, so pixels the host dropped (a canvas backing store purged
+/// while the window sat off-screen) stay gone until a full pass is forced
+/// through the renderer itself, as its own resize does.
 export type RefreshableTerminal = {
   rows: number;
   refresh?: (start: number, end: number) => void;
+  renderer?: {
+    render?(
+      buffer: GhosttyTerminal,
+      forceAll?: boolean,
+      viewportY?: number,
+      scrollbackProvider?: unknown,
+      scrollbarOpacity?: number,
+    ): void;
+  };
+  wasmTerm?: GhosttyTerminal;
+  getViewportY?: () => number;
 };
 
 export function refreshTerminalRows(term: RefreshableTerminal | null): void {
   if (!term) return;
-  term.refresh?.(0, Math.max(0, term.rows - 1));
+  if (term.refresh) {
+    term.refresh(0, Math.max(0, term.rows - 1));
+    return;
+  }
+  // The terminal is its own scrollback provider, as in ghostty-web's render
+  // loop. A zero scrollbar opacity leaves the overlay scrollbar to that loop,
+  // which paints it every frame while it is shown.
+  const render = term.renderer?.render;
+  if (typeof render === "function" && term.wasmTerm) {
+    render.call(term.renderer, term.wasmTerm, true, term.getViewportY?.() ?? 0, term, 0);
+  }
 }
 
 /// Escape hatch for the desktop's renderer choice, read from
