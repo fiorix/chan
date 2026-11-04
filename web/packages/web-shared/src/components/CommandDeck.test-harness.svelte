@@ -8,12 +8,14 @@
     onSuccess,
     onError = () => {},
     onFocusLost,
+    mayTakeFocus,
   }: {
     items: DeckItem[];
     onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
     onSuccess?: (item: DeckItem) => void;
     onError?: (item: DeckItem, error: unknown) => void;
     onFocusLost?: () => void;
+    mayTakeFocus?: () => boolean;
   } = $props();
 
   let draft = $state({ ...createDeckDraft(), visible: true });
@@ -54,6 +56,7 @@
   {onChoose}
   {onSuccess}
   {onFocusLost}
+  {mayTakeFocus}
   {...{ onError }}
   onBack={() => {}}
   onScope={() => {}}

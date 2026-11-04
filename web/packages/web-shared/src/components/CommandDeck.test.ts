@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
 import type { DeckConfirm, DeckItem } from "../command-deck/model";
-import { deckReturnFocus } from "./CommandDeck.svelte";
+import { deckPendingReturnFocus, deckReturnFocus } from "./CommandDeck.svelte";
 import CommandDeckHarness from "./CommandDeck.test-harness.svelte";
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -395,6 +395,7 @@ describe("CommandDeck focus on close", () => {
       onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
       onSuccess?: (item: DeckItem) => void;
       onFocusLost?: () => void;
+      mayTakeFocus?: () => boolean;
     } = {},
   ): Promise<void> {
     origin = document.createElement("button");
@@ -538,6 +539,37 @@ describe("CommandDeck focus on close", () => {
     await flush();
     expect(focus).not.toHaveBeenCalled();
     expect(onFocusLost).toHaveBeenCalledOnce();
+  });
+
+  it("hands focus to nothing while the host says the page may not take it", async () => {
+    const onFocusLost = vi.fn();
+    const mayTakeFocus = vi.fn(() => false);
+    await openFromOrigin(run(), { onChoose: close, onFocusLost, mayTakeFocus });
+    const focus = vi.spyOn(origin, "focus");
+    closeResult().click();
+    await flush();
+    expect(mayTakeFocus).toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(onFocusLost).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("publishes the element a run will hand focus to until the close has rendered", async () => {
+    const held = deferred<void>();
+    await openFromOrigin(run(), {
+      onChoose: () => {
+        close();
+        expect(deckPendingReturnFocus(), "for a dialog the command opens as it runs").toBe(origin);
+        return held.promise;
+      },
+    });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(deckPendingReturnFocus(), "a dialog opened later is not the command's").toBeNull();
+    held.resolve();
+    await flush();
+    expect(document.activeElement).toBe(origin);
   });
 
   it("asks nothing of the host while the element it opened from can take focus", async () => {

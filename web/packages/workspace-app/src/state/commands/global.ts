@@ -101,7 +101,10 @@ async function openPathDialog(): Promise<void> {
     allowAbsolute: true,
   });
   if (target === null) {
-    // Handing focus back is not navigation: it must not scroll the page.
+    // Handing focus back is not navigation: it must not scroll the page. A
+    // dialog opened by a launcher run returns focus to this element by
+    // itself, so from the launcher this is a second focus on the same node;
+    // it stays for a cancel after the launcher was dismissed before the run.
     if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     return;
   }

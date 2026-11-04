@@ -97,6 +97,15 @@ async function typeLine(page, line) {
   await page.keyboard.press("Enter");
 }
 
+/// Turn the active terminal's broadcast off when its marker shows.
+async function broadcastOff(page) {
+  if (!(await page.$(BROADCAST_MARKER))) return;
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.broadcastToggle" } })),
+  );
+  await page.waitForSelector(BROADCAST_MARKER, { hidden: true, timeout: 10_000 });
+}
+
 async function tabGone(page, name) {
   await page.waitForFunction(
     (wanted) => ![...document.querySelectorAll(".tab .path")].some((node) => node.textContent?.trim() === wanted),
@@ -172,11 +181,7 @@ export default {
         await waitForScrollback(cs, name, `PROMPT_${engine}_OK`, `${engine}: typed after the prompt closed`);
         await ctx.shot(`203-${engine}-after-prompt`);
 
-        // Broadcast off again before the terminal goes, the state as found.
-        await page.evaluate(() =>
-          window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.broadcastToggle" } })),
-        );
-        await page.waitForSelector(BROADCAST_MARKER, { hidden: true, timeout: 10_000 });
+        await broadcastOff(page);
         details.arms.push(arm);
         console.log(`[smoke]   arm ${JSON.stringify(arm)}`);
         // The tab leaves the page before the engine switches, or the saved
@@ -188,6 +193,9 @@ export default {
       details.engine = await page.browser().version();
       return details;
     } finally {
+      // Broadcast off again before a terminal goes, the state as found; a
+      // closed terminal takes its flag with it either way.
+      await broadcastOff(page).catch(() => {});
       for (const name of opened.reverse()) {
         await cs(["close", "--tab-name", name]).catch(() => {});
       }

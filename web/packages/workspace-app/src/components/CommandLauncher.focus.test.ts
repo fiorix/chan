@@ -61,6 +61,15 @@ const runDrop = vi.fn(() => origin.remove());
 /// A command that asks a question in a prompt dialog, as Set terminal name
 /// does; the dialog outlives the launcher.
 const runPrompt = vi.fn(() => void uiPrompt("Name"));
+/// A command whose run waits on something slow, as a Computers action waiting
+/// for a window page does; the test releases it.
+let held: { promise: Promise<void>; resolve: () => void } | null = null;
+const runHeld = vi.fn(() => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  held = { promise, resolve };
+  return promise;
+});
 registerCommands([
   {
     id: "test.focus.probe",
@@ -109,6 +118,14 @@ registerCommands([
     requirement: "any",
     available: () => true,
     run: runPrompt,
+  },
+  {
+    id: "test.focus.held",
+    title: "Wait on window",
+    category: "Global",
+    requirement: "any",
+    available: () => true,
+    run: runHeld,
   },
 ]);
 
@@ -183,6 +200,8 @@ async function runFromLauncher(target: HTMLElement, title: string): Promise<void
 beforeEach(() => {
   library.snapshot = null;
   probeTarget = null;
+  held = null;
+  document.documentElement.removeAttribute("data-launcher-shown");
   sessionStorage.clear();
   clearLauncherDraft();
   launcherPanel.open = false;
@@ -275,6 +294,43 @@ describe("focus when the launcher closes", () => {
     await flush();
     expect(promptState.open).toBe(false);
     await vi.waitFor(() => expect(document.activeElement).toBe(origin));
+  });
+
+  test("a dialog opened from another control during a long run returns focus to that control", async () => {
+    const target = await openFromOrigin();
+    await runFromLauncher(target, "Wait on window");
+    expect(runHeld).toHaveBeenCalledOnce();
+    expect(launcherPanel.open).toBe(false);
+    // The user clicks into another control while the run waits, and asks
+    // something from there.
+    const control = document.createElement("input");
+    document.body.append(control);
+    control.focus();
+    void uiPrompt("Unrelated");
+    await flush();
+    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]') as HTMLElement | null;
+    expect(dialog, "the prompt is open").not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(dialog!.querySelector("input")));
+    dialog!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+    await vi.waitFor(() => expect(document.activeElement, "the control the dialog came from").toBe(control));
+    held!.resolve();
+    await flush();
+    expect(document.activeElement, "the released run finds focus held and leaves it").toBe(control);
+    control.remove();
+  });
+
+  test("a run that settles under the Computers launcher shown over the window moves no focus", async () => {
+    const target = await openFromOrigin();
+    const pulses = tabFocusPulse.value;
+    const focus = vi.spyOn(origin, "focus");
+    // chan-desktop sets this while its launcher window covers the page.
+    document.documentElement.setAttribute("data-launcher-shown", "");
+    await runFromLauncher(target, "Toggle nothing");
+    expect(launcherPanel.open).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(tabFocusPulse.value).toBe(pulses);
+    expect(document.activeElement).toBe(document.body);
   });
 
   test("a window action that closes the launcher after its success card hands focus back", async () => {

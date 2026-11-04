@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import { createModalFocus } from "./modalFocus";
+import { canTakeFocus, createModalFocus } from "./modalFocus";
 
 let target: HTMLDivElement;
 afterEach(() => target.remove());
@@ -83,4 +83,27 @@ it("wraps forward and backward Tab from outside or the panel and retains an empt
   focus.onKeydown(new KeyboardEvent("keydown", { key: "Tab", cancelable: true }));
   expect(document.activeElement, "empty panel fallback").toBe(panel);
   destroy();
+});
+
+it("answers whether an element can take focus", () => {
+  target = document.createElement("div");
+  target.innerHTML =
+    '<button id="plain">Plain</button>' +
+    '<button id="disabled" disabled>Disabled</button>' +
+    '<div inert><button id="inert">Inert</button></div>' +
+    '<div hidden><button id="hidden">Hidden</button></div>' +
+    '<button id="invisible" style="visibility: hidden">Invisible</button>' +
+    '<div style="display: none"><button id="undisplayed">Undisplayed</button></div>';
+  document.body.append(target);
+  const by = (id: string) => target.querySelector<HTMLElement>(`#${id}`);
+  expect(canTakeFocus(by("plain"))).toBe(true);
+  expect(canTakeFocus(by("disabled")), "a disabled control").toBe(false);
+  expect(canTakeFocus(by("inert")), "inside an inert subtree").toBe(false);
+  expect(canTakeFocus(by("hidden")), "inside a hidden subtree").toBe(false);
+  expect(canTakeFocus(by("invisible")), "visibility hidden").toBe(false);
+  expect(canTakeFocus(by("undisplayed")), "an ancestor with display none").toBe(false);
+  expect(canTakeFocus(null)).toBe(false);
+  expect(canTakeFocus(document.body), "the page itself").toBe(false);
+  const detached = document.createElement("button");
+  expect(canTakeFocus(detached), "an element off the page").toBe(false);
 });

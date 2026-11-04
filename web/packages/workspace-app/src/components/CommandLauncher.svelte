@@ -48,7 +48,8 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
-  import { bumpTabFocusPulse } from "../state/tabs.svelte";
+  import { activeTerminalTab, bumpTabFocusPulse } from "../state/tabs.svelte";
+  import { refocusRefused } from "../state/focusGuard";
   import { sessionWindowId } from "../api/client";
   import { isTauriDesktop } from "../api/desktop";
   import { ApiError, errorText } from "../api/errors";
@@ -813,4 +814,5 @@
   onClearScope={clearScope}
   onSuccess={succeeded}
   onFocusLost={bumpTabFocusPulse}
+  mayTakeFocus={() => !refocusRefused(activeTerminalTab()?.id ?? null)}
 />

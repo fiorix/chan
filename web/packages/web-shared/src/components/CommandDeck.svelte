@@ -10,10 +10,13 @@
   }
 
   /// The element a run in flight will hand focus back to, from the run's
-  /// start until the deck has settled where focus goes after it. A dialog a
-  /// command opens during its run mounts while the deck's input still holds
-  /// focus, or just after it left, and the deck is gone by the time the
+  /// start until the deck's close has rendered, or until the run has settled
+  /// while the deck stayed open. A dialog a command opens as it runs mounts
+  /// in the flush that unmounts the deck's input, while that input still
+  /// holds focus or just after it left, and the deck is gone by the time the
   /// dialog closes; the dialog takes this as the element to return focus to.
+  /// A dialog opened later, from another control during a long run, is not
+  /// the command's and takes its own opener.
   export function deckPendingReturnFocus(): HTMLElement | null {
     return pendingReturnFocus;
   }
@@ -21,6 +24,7 @@
 
 <script lang="ts">
   import { tick } from "svelte";
+  import { canTakeFocus } from "../modalFocus";
   import type {
     DeckConfirm,
     DeckDraft,
@@ -45,6 +49,7 @@
     onSuccess,
     onError,
     onFocusLost,
+    mayTakeFocus,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -64,6 +69,12 @@
     /// deck opened from can no longer take it. A host that owns an active
     /// surface of its own puts the keyboard there.
     onFocusLost?: () => void;
+    /// Whether the page may move focus at all right now. A host whose
+    /// keyboard is held outside the page, such as a native launcher window
+    /// shown over it, answers false, and the deck then hands focus to
+    /// nothing: a focus change in the page would take the keyboard from
+    /// that surface.
+    mayTakeFocus?: () => boolean;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -124,6 +135,13 @@
       // Preserve the viewport while restoring the caller's focus.
       if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       returnFocus = null;
+      // The pending opener is for a dialog that mounts in the flush that
+      // unmounts this deck's input. Once that close has rendered, a dialog
+      // opened from anywhere else during a long run takes its own opener.
+      const pending = pendingReturnFocus;
+      void tick().then(() => {
+        if (pendingReturnFocus === pending) pendingReturnFocus = null;
+      });
     }
     wasOpen = isOpen;
   });
@@ -247,25 +265,12 @@
   }
 
   /// Whether `element` holds the keyboard: a connected element other than
-  /// the page itself. The deck's own input, once unmounted by a close, is
-  /// still `document.activeElement` in some engines and holds nothing.
+  /// the page itself. The connection check is defensive: an element removed
+  /// from the page, such as this deck's input after a close, has given focus
+  /// up whatever the engine still reports.
   function holdsFocus(element: Element | null): boolean {
     return element instanceof Element && element.isConnected &&
       element !== document.body && element !== document.documentElement;
-  }
-
-  /// Whether `element` can take the keyboard back: the surface it belongs to
-  /// may have been closed by the command, or hidden behind another tab, which
-  /// this app does with `visibility: hidden`. An engine refuses to focus such
-  /// an element and reports nothing, so the check is made here instead.
-  function focusable(element: HTMLElement): boolean {
-    if (!element.isConnected || element === document.body) return false;
-    if (element.matches(":disabled") || element.closest("[inert], [hidden]")) return false;
-    if (getComputedStyle(element).visibility !== "visible") return false;
-    for (let node: HTMLElement | null = element; node; node = node.parentElement) {
-      if (getComputedStyle(node).display === "none") return false;
-    }
-    return true;
   }
 
   /// A run that closes the deck decides where the keyboard goes, so that
@@ -273,14 +278,16 @@
   /// leave it on the body, where the terminal or editor under the deck gets
   /// no keys until it is clicked. Once the run has settled and the close has
   /// rendered, focus still at large goes back to the element the deck opened
-  /// from, when it can take it, and otherwise to the host. A surface the
-  /// command opened keeps the focus it took, and one that takes focus later
-  /// takes it from the restored element as it would from any other.
+  /// from, when it can take it, and otherwise to the host, unless the host
+  /// says the page may not take focus now. A surface the command opened
+  /// keeps the focus it took, and one that takes focus later takes it from
+  /// the restored element as it would from any other.
   async function settleRunFocus(opener: HTMLElement | null): Promise<void> {
     await tick();
     if (pendingReturnFocus === opener) pendingReturnFocus = null;
     if (open || holdsFocus(document.activeElement)) return;
-    if (opener && focusable(opener)) opener.focus({ preventScroll: true });
+    if (mayTakeFocus && !mayTakeFocus()) return;
+    if (canTakeFocus(opener)) opener.focus({ preventScroll: true });
     else onFocusLost?.();
   }
 

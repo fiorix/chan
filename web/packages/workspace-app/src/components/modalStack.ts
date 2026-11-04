@@ -1,3 +1,5 @@
+import { canTakeFocus } from "@chan/web-shared/modal-focus";
+
 type ShellOptions = {
   layer: HTMLElement;
   panel: HTMLElement;
@@ -16,18 +18,8 @@ function top(): Shell | undefined {
   return shells.at(-1);
 }
 
-function usable(element: Element | null): element is HTMLElement {
-  if (!(element instanceof HTMLElement) || !element.isConnected || element === document.body) return false;
-  if (element.matches(":disabled") || element.closest("[inert], [hidden]")) return false;
-  if (getComputedStyle(element).visibility !== "visible") return false;
-  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
-    if (getComputedStyle(node).display === "none") return false;
-  }
-  return true;
-}
-
 function inside(shell: Shell, element: Element | null): element is HTMLElement {
-  return usable(element) && shell.panel.contains(element);
+  return canTakeFocus(element) && shell.panel.contains(element);
 }
 
 function repair(): void {
@@ -121,7 +113,7 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
       const index = shells.indexOf(shell);
       if (index === -1) return;
       const wasTop = top() === shell;
-      const shouldRestore = !usable(document.activeElement) || shell.panel.contains(document.activeElement);
+      const shouldRestore = !canTakeFocus(document.activeElement) || shell.panel.contains(document.activeElement);
       shells.splice(index, 1);
       const version = ++generation;
       setLayers();
@@ -146,8 +138,8 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
           const opener = shell.openers.find((node) => inside(remaining, node));
           if (opener) opener.focus({ preventScroll: true });
           repair();
-        } else if (shouldRestore && !usable(document.activeElement)) {
-          shell.openers.find(usable)?.focus({ preventScroll: true });
+        } else if (shouldRestore && !canTakeFocus(document.activeElement)) {
+          shell.openers.find(canTakeFocus)?.focus({ preventScroll: true });
         }
       });
     },
