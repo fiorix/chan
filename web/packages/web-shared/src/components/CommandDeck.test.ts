@@ -394,6 +394,7 @@ describe("CommandDeck focus on close", () => {
     handlers: {
       onChoose?: (item: DeckItem) => void | DeckConfirm | Promise<void | DeckConfirm>;
       onSuccess?: (item: DeckItem) => void;
+      onFocusLost?: () => void;
     } = {},
   ): Promise<void> {
     origin = document.createElement("button");
@@ -433,15 +434,52 @@ describe("CommandDeck focus on close", () => {
     expect(document.activeElement).toBe(origin);
   });
 
-  it("leaves focus where it is when a chosen item closes the deck", async () => {
+  /// A field a command puts focus on, as a command that opens a surface does.
+  function field(): HTMLInputElement {
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    return input;
+  }
+
+  it("hands focus back when a chosen item closes the deck and takes none", async () => {
     await openFromOrigin(run(), { onChoose: close });
     closeResult().click();
     await flush();
     expect(target.querySelector(".deck-shell")).toBeNull();
-    expect(document.activeElement).not.toBe(origin);
+    expect(document.activeElement).toBe(origin);
   });
 
-  it("leaves focus where it is when an awaited item's success closes the deck", async () => {
+  it("leaves focus where a chosen item put it", async () => {
+    const taken = field();
+    await openFromOrigin(run(), { onChoose: () => { close(); taken.focus(); } });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).toBe(taken);
+    taken.remove();
+  });
+
+  it("leaves focus where a chosen item puts it after it settles", async () => {
+    const taken = field();
+    const settled = deferred<void>();
+    await openFromOrigin(run(), {
+      onChoose: async () => {
+        close();
+        await settled.promise;
+        taken.focus();
+      },
+    });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement, "nothing is restored while the run is in flight").toBe(document.body);
+    settled.resolve();
+    await flush();
+    expect(document.activeElement).toBe(taken);
+    taken.remove();
+  });
+
+  it("hands focus back when an awaited item's success closes the deck and took none", async () => {
     const onChoose = vi.fn(async () => {});
     await openFromOrigin(run({ awaitResult: true, dismissImmediatelyOnSuccess: true }), {
       onChoose,
@@ -451,7 +489,64 @@ describe("CommandDeck focus on close", () => {
     await flush();
     expect(onChoose).toHaveBeenCalledOnce();
     expect(target.querySelector(".deck-shell")).toBeNull();
-    expect(document.activeElement).not.toBe(origin);
+    expect(document.activeElement).toBe(origin);
+  });
+
+  it("leaves focus where an awaited item put it before its success", async () => {
+    const taken = field();
+    await openFromOrigin(run({ awaitResult: true, dismissImmediatelyOnSuccess: true }), {
+      onChoose: async () => { taken.focus(); },
+      onSuccess: close,
+    });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).toBe(taken);
+    taken.remove();
+  });
+
+  it("hands focus back when a chosen item fails after closing the deck", async () => {
+    await openFromOrigin(run(), {
+      onChoose: async () => {
+        close();
+        throw new Error("refused");
+      },
+    });
+    closeResult().click();
+    await flush();
+    expect(target.querySelector(".deck-shell")).toBeNull();
+    expect(document.activeElement).toBe(origin);
+  });
+
+  it("tells the host when the element it opened from left the page", async () => {
+    const onFocusLost = vi.fn();
+    await openFromOrigin(run(), { onChoose: () => { close(); origin.remove(); }, onFocusLost });
+    closeResult().click();
+    await flush();
+    expect(onFocusLost).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("treats an element hidden under another surface as gone", async () => {
+    const onFocusLost = vi.fn();
+    await openFromOrigin(run(), {
+      onChoose: () => { close(); origin.style.visibility = "hidden"; },
+      onFocusLost,
+    });
+    const focus = vi.spyOn(origin, "focus");
+    closeResult().click();
+    await flush();
+    expect(focus).not.toHaveBeenCalled();
+    expect(onFocusLost).toHaveBeenCalledOnce();
+  });
+
+  it("asks nothing of the host while the element it opened from can take focus", async () => {
+    const onFocusLost = vi.fn();
+    await openFromOrigin(run(), { onChoose: close, onFocusLost });
+    closeResult().click();
+    await flush();
+    expect(onFocusLost).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(origin);
   });
 
   it("treats the next close as a dismissal when a chosen item keeps the deck open", async () => {
@@ -507,8 +602,10 @@ describe("CommandDeck focus on close", () => {
     close();
     await flush();
     expect(onChoose).toHaveBeenCalledTimes(2);
-    expect(document.activeElement).not.toBe(origin);
+    expect(document.activeElement, "the newer run still decides").not.toBe(origin);
     newer.resolve();
+    await flush();
+    expect(document.activeElement, "the newer run took no focus").toBe(origin);
   });
 
   it("hands focus back on Escape after the host's success failed", async () => {
@@ -526,7 +623,7 @@ describe("CommandDeck focus on close", () => {
     expect(document.activeElement).toBe(origin);
   });
 
-  it("leaves focus where it is when the success card's timer closes the deck", async () => {
+  it("hands focus back when the success card's timer closes the deck", async () => {
     await openFromOrigin(run({ awaitResult: true }), { onChoose: async () => {}, onSuccess: close });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
@@ -534,13 +631,15 @@ describe("CommandDeck focus on close", () => {
       await flush();
       expect(target.querySelector(".deck-operation")?.textContent, "the success card").toContain("Run");
       expect(target.querySelector(".deck-shell"), "still open on the card").not.toBeNull();
+      expect(document.activeElement, "the card keeps the deck's focus").not.toBe(origin);
       vi.advanceTimersByTime(260);
       await flush();
     } finally {
       vi.useRealTimers();
     }
+    await flush();
     expect(target.querySelector(".deck-shell")).toBeNull();
-    expect(document.activeElement).not.toBe(origin);
+    expect(document.activeElement).toBe(origin);
   });
 });
 

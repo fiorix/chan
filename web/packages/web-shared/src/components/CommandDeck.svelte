@@ -1,11 +1,21 @@
 <script module lang="ts">
   let lastReturnFocus: HTMLElement | null = null;
+  let pendingReturnFocus: HTMLElement | null = null;
 
   /// The element that held focus when a command deck last opened. A command
   /// whose flow outlives the deck, such as a path dialog the user cancels,
   /// hands focus back here rather than to the deck's long-gone input.
   export function deckReturnFocus(): HTMLElement | null {
     return lastReturnFocus;
+  }
+
+  /// The element a run in flight will hand focus back to, from the run's
+  /// start until the deck has settled where focus goes after it. A dialog a
+  /// command opens during its run mounts while the deck's input still holds
+  /// focus, or just after it left, and the deck is gone by the time the
+  /// dialog closes; the dialog takes this as the element to return focus to.
+  export function deckPendingReturnFocus(): HTMLElement | null {
+    return pendingReturnFocus;
   }
 </script>
 
@@ -34,6 +44,7 @@
     onClearScope,
     onSuccess,
     onError,
+    onFocusLost,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -49,6 +60,10 @@
     onClearScope: () => void;
     onSuccess?: (item: DeckItem) => void;
     onError: (item: DeckItem, error: unknown) => void;
+    /// A run closed the deck and left focus nowhere, and the element the
+    /// deck opened from can no longer take it. A host that owns an active
+    /// surface of its own puts the keyboard there.
+    onFocusLost?: () => void;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -66,8 +81,11 @@
   let returnFocus: HTMLElement | null = null;
   // The run in flight: a plain item while the host handles it, an awaited
   // one while the host takes its success. A close while a run is in flight
-  // leaves focus where it is, whatever closed the deck; any other close
-  // (Escape, the backdrop, the host hiding the deck) hands focus back.
+  // leaves focus where it is, whatever closed the deck, since the command may
+  // be putting it on a surface of its own; once the run settles,
+  // settleRunFocus hands back focus the command left nowhere. Any other
+  // close (Escape, the backdrop, the host hiding the deck) hands focus back
+  // at once.
   let closingRun: object | null = null;
   let confirmKeyReleased = true;
   // Tokens bind card writes to the preparation or command currently owning it.
@@ -228,8 +246,62 @@
     }
   }
 
+  /// Whether `element` holds the keyboard: a connected element other than
+  /// the page itself. The deck's own input, once unmounted by a close, is
+  /// still `document.activeElement` in some engines and holds nothing.
+  function holdsFocus(element: Element | null): boolean {
+    return element instanceof Element && element.isConnected &&
+      element !== document.body && element !== document.documentElement;
+  }
+
+  /// Whether `element` can take the keyboard back: the surface it belongs to
+  /// may have been closed by the command, or hidden behind another tab, which
+  /// this app does with `visibility: hidden`. An engine refuses to focus such
+  /// an element and reports nothing, so the check is made here instead.
+  function focusable(element: HTMLElement): boolean {
+    if (!element.isConnected || element === document.body) return false;
+    if (element.matches(":disabled") || element.closest("[inert], [hidden]")) return false;
+    if (getComputedStyle(element).visibility !== "visible") return false;
+    for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+      if (getComputedStyle(node).display === "none") return false;
+    }
+    return true;
+  }
+
+  /// A run that closes the deck decides where the keyboard goes, so that
+  /// close hands focus to nothing. A command that moves focus nowhere would
+  /// leave it on the body, where the terminal or editor under the deck gets
+  /// no keys until it is clicked. Once the run has settled and the close has
+  /// rendered, focus still at large goes back to the element the deck opened
+  /// from, when it can take it, and otherwise to the host. A surface the
+  /// command opened keeps the focus it took, and one that takes focus later
+  /// takes it from the restored element as it would from any other.
+  async function settleRunFocus(opener: HTMLElement | null): Promise<void> {
+    await tick();
+    if (pendingReturnFocus === opener) pendingReturnFocus = null;
+    if (open || holdsFocus(document.activeElement)) return;
+    if (opener && focusable(opener)) opener.focus({ preventScroll: true });
+    else onFocusLost?.();
+  }
+
   async function execute(item: DeckItem): Promise<void> {
     if (item.disabled) return;
+    // Captured before the run: the close effect forgets the opener as the
+    // deck closes, which the run may do at once.
+    const opener = returnFocus;
+    pendingReturnFocus = opener;
+    try {
+      await runItem(item);
+    } finally {
+      if (open) {
+        if (pendingReturnFocus === opener) pendingReturnFocus = null;
+      } else {
+        void settleRunFocus(opener);
+      }
+    }
+  }
+
+  async function runItem(item: DeckItem): Promise<void> {
     const executionDraft = draft;
     const token = {};
     executionToken = token;

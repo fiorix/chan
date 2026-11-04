@@ -48,6 +48,7 @@
     type CommandSurface,
   } from "../state/commands";
   import { chordFor } from "../state/shortcuts";
+  import { bumpTabFocusPulse } from "../state/tabs.svelte";
   import { sessionWindowId } from "../api/client";
   import { isTauriDesktop } from "../api/desktop";
   import { ApiError, errorText } from "../api/errors";
@@ -811,4 +812,5 @@
   {onScope}
   onClearScope={clearScope}
   onSuccess={succeeded}
+  onFocusLost={bumpTabFocusPulse}
 />
