@@ -16,6 +16,8 @@ mod dial;
 
 pub use dial::{build_tls_config, dial, dial_with_tls};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,6 +85,31 @@ impl From<chan_tunnel_proto::IoFrameError> for ClientError {
     }
 }
 
+/// A byte stream the dial can run TLS and h2 over.
+pub trait DialStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> DialStream for T {}
+
+/// What [`Connector::connect`] resolves to: the stream, or the I/O error
+/// the transport met on the way.
+pub type ConnectFuture<'a> =
+    Pin<Box<dyn Future<Output = std::io::Result<Box<dyn DialStream>>> + Send + 'a>>;
+
+/// A transport that replaces the direct TCP connect. The dial asks it for
+/// a byte stream to the tunnel host and port, then runs TLS when the URL
+/// says so and h2 inside it, exactly as it would over TCP. The embedder
+/// supplies one when the gateway is reached through something other than
+/// the machine's own TCP, such as a WireGuard tunnel inside the process.
+pub trait Connector: Send + Sync {
+    /// Open a stream to `host:port`, the tunnel URL's authority.
+    fn connect<'a>(&'a self, host: &'a str, port: u16) -> ConnectFuture<'a>;
+
+    /// Whether the transport authenticates its peer and encrypts what it
+    /// carries. Only a protected transport may carry an `http://` tunnel
+    /// URL as cleartext h2, the allowance a loopback peer has; an
+    /// unprotected one is held to `https://` like plain TCP.
+    fn is_protected(&self) -> bool;
+}
+
 /// Configuration for the dial loop. The token is intentionally a
 /// `String` rather than borrowed: the dial loop may reconnect, and
 /// holding a borrow across reconnects forces the caller into
@@ -128,6 +155,10 @@ pub struct ClientConfig {
     /// honoured automatically: the caller decides whether a proxy is
     /// used, so the client's behavior never depends on its environment.
     pub proxy: Option<Url>,
+    /// Optional transport in place of the direct TCP connect, and of
+    /// `proxy`: the two are refused together, since each is a whole
+    /// transport. See [`Connector`].
+    pub connector: Option<Arc<dyn Connector>>,
     /// Max concurrent inbound yamux substreams served by this
     /// client. Values below 1 are clamped to 1. Default 128.
     pub max_concurrent_substreams: usize,
@@ -147,6 +178,16 @@ impl std::fmt::Debug for ClientConfig {
             .field("dial_timeout", &self.dial_timeout)
             .field("events", &self.events.as_ref().map(|_| "configured"))
             .field("proxy", &self.proxy.as_ref().map(url_without_userinfo))
+            .field(
+                "connector",
+                &self.connector.as_ref().map(|connector| {
+                    if connector.is_protected() {
+                        "protected"
+                    } else {
+                        "unprotected"
+                    }
+                }),
+            )
             .field("max_concurrent_substreams", &self.max_concurrent_substreams)
             .finish()
     }
@@ -173,6 +214,7 @@ impl Default for ClientConfig {
             dial_timeout: Duration::from_secs(30),
             events: None,
             proxy: None,
+            connector: None,
             max_concurrent_substreams: DEFAULT_MAX_CONCURRENT_SUBSTREAMS,
         }
     }

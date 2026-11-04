@@ -12,7 +12,7 @@ chan-server's devserver mode is the one real caller: it builds a `ClientConfig` 
 flowchart TD
     Cfg["ClientConfig + axum::Router"] --> Run["run: validate the config, build the TLS config once"]
     Run --> Dial["one attempt under dial_timeout"]
-    Dial --> Tcp["TCP, optionally through an HTTP CONNECT proxy"]
+    Dial --> Tcp["TCP, through an HTTP CONNECT proxy, or the embedder's connector"]
     Tcp --> Conn["TLS with ALPN h2, or h2c to a loopback peer"]
     Conn --> Post["POST the tunnel path with the bearer"]
     Post --> Status{"200?"}
@@ -38,6 +38,8 @@ The dial is one attempt and the testable unit; `run` adds the retry loop. The TL
 Cleartext h2 is allowed only when the connected TCP peer is a loopback address, which is what a local gateway stack dials. The check is on the peer, not the host name: a private DNS name is not proof of a protected route. Userinfo in the tunnel URL is refused because the token is the credential; accepting both would create an ambiguous credential channel. A URL with no path gets the tunnel path filled in, so a caller can pass a bare base and the wire constant stays single-sourced, while an explicit path is kept verbatim so a typo surfaces as a visible 404 instead of being corrected silently.
 
 An outbound HTTP proxy is optional and explicit: when configured, the client issues an HTTP/1.1 CONNECT to the proxy with Basic credentials from the proxy URL's userinfo, then runs TLS and h2 inside the tunnel. The response headers are read byte by byte up to their terminator so no bytes of the upstream (the TLS ClientHello or the h2 preface) are consumed by a buffered reader. Credentials are only ever sent to a proxy named by a loopback IP literal whose connected peer is loopback, and a failed CONNECT reports its status without echoing the proxy's text, so a hostile proxy cannot reflect credentials into logs. `HTTP_PROXY` and friends are not honoured automatically: the embedder decides, so the client's behaviour never depends on its environment.
+
+An embedder can replace the TCP leg with a `Connector`: the dial asks it for a byte stream to the tunnel URL's host and port and runs TLS and h2 inside it unchanged. A connector declares whether it is protected, meaning it authenticates its peer and encrypts what it carries. Only then may an `http://` tunnel URL run cleartext h2 over it, the allowance a loopback peer has, and the decision is made before any bytes move, so an unprotected connector is never asked to connect for a cleartext dial. A WireGuard tunnel inside the process is the kind of transport that qualifies: its peer is pinned by a static key and every byte is encrypted. A connector and an HTTP proxy are refused together, since each is a whole transport.
 
 The bearer header is marked sensitive, which makes h2 send it as a never-indexed HPACK literal: no decoder on the path may add the token to a compression table, and an intermediary that re-encodes the request must keep that representation.
 

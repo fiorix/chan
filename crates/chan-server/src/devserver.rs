@@ -3721,6 +3721,7 @@ fn spawn_devserver_tunnel(
             max_backoff: Duration::from_secs(30),
             dial_timeout: Duration::from_secs(30),
             proxy: None,
+            connector: None,
             max_concurrent_substreams: chan_tunnel_client::ClientConfig::default()
                 .max_concurrent_substreams,
             events: Some(events_tx),
