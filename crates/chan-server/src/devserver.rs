@@ -94,7 +94,6 @@ pub struct DevserverConfig {
 /// Gateway tunnel registration for a devserver. The devserver identity is
 /// resolved backend-side from the token (PAT SHA-256); the whole library
 /// rides one registration. `name` is display-only metadata for the roster.
-#[derive(Clone)]
 pub struct DevserverTunnel {
     /// Tunnel endpoint URL (`--tunnel-url` / `CHAN_TUNNEL_URL`; required,
     /// no compiled-in default).
@@ -105,6 +104,10 @@ pub struct DevserverTunnel {
     /// roster. The CLI resolves it (`--tunnel-devserver-name`, else the
     /// hostname), trimmed and capped; never empty. Routing-inert.
     pub name: String,
+    /// When set, the dial to `tunnel_url` runs through an in-process
+    /// WireGuard tunnel started from this configuration, and the URL may
+    /// name an `http://` address inside the tunnel.
+    pub wireguard: Option<DevserverWireguard>,
 }
 
 impl std::fmt::Debug for DevserverTunnel {
@@ -114,8 +117,21 @@ impl std::fmt::Debug for DevserverTunnel {
             .field("tunnel_url", &tunnel_url_without_userinfo(&self.tunnel_url))
             .field("token", &"[REDACTED]")
             .field("name", &self.name)
+            .field("wireguard", &self.wireguard)
             .finish()
     }
+}
+
+/// The WireGuard tunnel a devserver dials the gateway through
+/// (`--tunnel-wireguard` / `CHAN_TUNNEL_WIREGUARD`). The CLI reads and
+/// refuses the file before the devserver starts; the path is kept for
+/// messages and for a supervisor's re-exec, and is not a secret. The
+/// configuration's `Debug` never prints key material.
+#[derive(Debug)]
+pub struct DevserverWireguard {
+    /// The wg-quick file the configuration was read from.
+    pub path: PathBuf,
+    pub config: chan_wireguard::config::Config,
 }
 
 fn tunnel_url_without_userinfo(raw: &str) -> String {
@@ -3668,7 +3684,9 @@ const DEVSERVER_TUNNEL_NAME: &str = "devserver";
 /// against the shutdown signal. The devserver is headless, so the lifecycle
 /// drainer only logs connect / disconnect / dial-failure: no QR, no
 /// browser-open, and no SPA prefix swap (each tenant already serves at its own
-/// public slug, so the proxy forwards the public path unchanged).
+/// public slug, so the proxy forwards the public path unchanged). With a
+/// WireGuard configuration the tunnel is started first and the dial loop runs
+/// through it.
 fn spawn_devserver_tunnel(
     tunnel: DevserverTunnel,
     app: Router,
@@ -3678,6 +3696,7 @@ fn spawn_devserver_tunnel(
         tunnel_url,
         token,
         name,
+        wireguard,
     } = tunnel;
     let mut shutdown_rx = signal_tx.subscribe();
     tokio::spawn(async move {
@@ -3687,6 +3706,24 @@ fn spawn_devserver_tunnel(
                 eprintln!("chan devserver: invalid --tunnel-url {tunnel_url:?}: {e}");
                 return;
             }
+        };
+        let connector: Option<Arc<dyn chan_tunnel_client::Connector>> = match wireguard {
+            Some(wireguard) => {
+                let started = tokio::select! {
+                    started = start_wireguard_tunnel(wireguard) => started,
+                    _ = shutdown_rx.changed() => return,
+                };
+                match started {
+                    Ok(tunnel) => Some(Arc::new(
+                        crate::wireguard_connector::WireguardConnector::new(tunnel),
+                    )),
+                    Err(e) => {
+                        eprintln!("chan devserver: WireGuard tunnel did not start: {e}");
+                        return;
+                    }
+                }
+            }
+            None => None,
         };
         let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
         let events_task = tokio::spawn(async move {
@@ -3721,7 +3758,7 @@ fn spawn_devserver_tunnel(
             max_backoff: Duration::from_secs(30),
             dial_timeout: Duration::from_secs(30),
             proxy: None,
-            connector: None,
+            connector,
             max_concurrent_substreams: chan_tunnel_client::ClientConfig::default()
                 .max_concurrent_substreams,
             events: Some(events_tx),
@@ -3739,6 +3776,61 @@ fn spawn_devserver_tunnel(
         events_task.abort();
         let _ = events_task.await;
     })
+}
+
+/// The first backoff between attempts to resolve the WireGuard endpoint's
+/// name, doubled up to [`WIREGUARD_RESOLVE_BACKOFF_MAX`].
+const WIREGUARD_RESOLVE_BACKOFF: Duration = Duration::from_secs(1);
+const WIREGUARD_RESOLVE_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Start the WireGuard tunnel the gateway dial runs through. The endpoint's
+/// name is resolved with retries, since a supervised devserver can come up
+/// before the resolver does; the dial loop above retries its own failures
+/// the same way. Logs the endpoint and the tunnel's public key, which the
+/// operator pastes into the peer's configuration and is not a secret.
+async fn start_wireguard_tunnel(
+    wireguard: DevserverWireguard,
+) -> std::io::Result<chan_wireguard::Tunnel> {
+    use base64::Engine as _;
+
+    let DevserverWireguard { path, config } = wireguard;
+    let public_key =
+        base64::engine::general_purpose::STANDARD.encode(config.public_key().as_bytes());
+    let name = &config.peer.endpoint;
+    let mut backoff = WIREGUARD_RESOLVE_BACKOFF;
+    let endpoint = loop {
+        match tokio::net::lookup_host((name.host.as_str(), name.port)).await {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    break addr;
+                }
+                eprintln!(
+                    "chan devserver: WireGuard endpoint {name} resolved to no address \
+                     (retry in {backoff:?})"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "chan devserver: WireGuard endpoint {name} did not resolve: {e} \
+                     (retry in {backoff:?})"
+                );
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(WIREGUARD_RESOLVE_BACKOFF_MAX);
+    };
+    let bind: SocketAddr = if endpoint.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = tokio::net::UdpSocket::bind(bind).await?;
+    let tunnel = chan_wireguard::Tunnel::start_on(config, socket, endpoint)?;
+    eprintln!(
+        "chan devserver: WireGuard tunnel up from {}: endpoint {endpoint}, public key {public_key}",
+        path.display()
+    );
+    Ok(tunnel)
 }
 
 /// Build the merged router: the unauthenticated info probe, the
@@ -6665,18 +6757,35 @@ mod tests {
     #[test]
     fn devserver_secret_debug_contracts_are_redacted() {
         let sentinel = "devserver-secret-sentinel";
+        // The WireGuard private key is a second secret on the same struct;
+        // the public key beside it is not one and may show.
+        const PRIVATE_KEY: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+        const PEER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+        let wireguard = chan_wireguard::config::Config::parse(&format!(
+            "[Interface]\nPrivateKey = {PRIVATE_KEY}\nAddress = 10.7.0.2/32\n\
+             [Peer]\nPublicKey = {PEER_KEY}\nPresharedKey = {PRIVATE_KEY}\n\
+             Endpoint = wg.example.test:51820\nAllowedIPs = 10.7.0.1/32\n"
+        ))
+        .unwrap();
         let tunnel = DevserverTunnel {
             tunnel_url:
                 "https://tunnel-user-sentinel:tunnel-pass-sentinel@devserver.example.test/v1/tunnel"
                     .into(),
             token: sentinel.into(),
             name: "workstation".into(),
+            wireguard: Some(DevserverWireguard {
+                path: PathBuf::from("/etc/wireguard/chan.conf"),
+                config: wireguard,
+            }),
         };
         let tunnel_debug = format!("{tunnel:?}");
         assert!(tunnel_debug.contains("[REDACTED]"));
         assert!(!tunnel_debug.contains(sentinel));
         assert!(!tunnel_debug.contains("tunnel-user-sentinel"));
         assert!(!tunnel_debug.contains("tunnel-pass-sentinel"));
+        assert!(!tunnel_debug.contains(PRIVATE_KEY), "{tunnel_debug}");
+        assert!(tunnel_debug.contains(PEER_KEY), "{tunnel_debug}");
+        assert!(tunnel_debug.contains("/etc/wireguard/chan.conf"));
 
         let persisted = PersistedConfig {
             devserver_token: sentinel.into(),

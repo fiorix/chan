@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::devserver::foreground::{normalize_tunnel_devserver_name, MISSING_TUNNEL_URL};
+use crate::devserver::foreground::{
+    normalize_tunnel_devserver_name, MISSING_TUNNEL_URL, WIREGUARD_NEEDS_TOKEN,
+};
 use crate::devserver::management::{
     drain_devserver_terminals, emit_devserver_token_marker, DEVSERVER_TOKEN_WAIT,
 };
@@ -41,6 +43,19 @@ pub(super) struct SystemdTunnel {
     /// the tunnel unit. `None` omits the variable, so the service
     /// resolves its hostname default at runtime.
     pinned_name: Option<String>,
+    /// The wg-quick file to pin in the unit's ExecStart
+    /// (`--tunnel-wireguard=`): the explicit flag, else what the persisted
+    /// tunnel unit carries. The path rides the unit, never the file's
+    /// contents; the service reads the file at every start.
+    wireguard: Option<PathBuf>,
+}
+
+impl SystemdTunnel {
+    /// The WireGuard file the unit will record, for the verb to read before
+    /// it installs the unit.
+    pub(super) fn wireguard_file(&self) -> Option<&Path> {
+        self.wireguard.as_deref()
+    }
 }
 
 /// Build the tunnel spec for a systemd unit, resolving every field as "the
@@ -75,6 +90,7 @@ pub(super) fn supervised_tunnel_spec(
     tunnel_token: Option<String>,
     tunnel_url: Option<String>,
     tunnel_devserver_name: Option<&str>,
+    tunnel_wireguard: Option<&Path>,
     force: bool,
     no_tunnel: bool,
     bind: Option<IpAddr>,
@@ -86,8 +102,25 @@ pub(super) fn supervised_tunnel_spec(
     }
     let Some(token) = tunnel_token.or_else(|| persisted_unit.and_then(persisted_tunnel_token))
     else {
+        if tunnel_wireguard.is_some() {
+            anyhow::bail!(WIREGUARD_NEEDS_TOKEN);
+        }
         return Ok(None);
     };
+    let wireguard = tunnel_wireguard
+        .map(Path::to_path_buf)
+        .or_else(|| persisted_unit.and_then(persisted_tunnel_wireguard));
+    if let Some(path) = &wireguard {
+        // ExecStart splits on whitespace, so such a path would reach the
+        // service in pieces and the unit would restart into the same refusal.
+        if path.to_string_lossy().contains(char::is_whitespace) {
+            anyhow::bail!(
+                "chan devserver: --tunnel-wireguard {} contains whitespace, which the \
+                 systemd unit's ExecStart cannot carry; move the file to a path without it",
+                path.display()
+            );
+        }
+    }
     let persisted_url = persisted_unit.and_then(persisted_tunnel_url);
     let url = if force {
         tunnel_url.or(persisted_url)
@@ -106,7 +139,19 @@ pub(super) fn supervised_tunnel_spec(
         pinned_name: tunnel_devserver_name
             .and_then(normalize_tunnel_devserver_name)
             .or_else(|| persisted_unit.and_then(persisted_tunnel_name)),
+        wireguard,
     }))
+}
+
+/// The WireGuard file a persisted TUNNEL unit records in its ExecStart
+/// (`--tunnel-wireguard=`), if any. Same explicitness record as
+/// [`persisted_tunnel_pins`]: the flag is written only when the user chose
+/// the file, and a non-tunnel unit yields nothing.
+fn persisted_tunnel_wireguard(unit: &str) -> Option<PathBuf> {
+    persisted_tunnel_url(unit)?;
+    persisted_flag_value(unit, "--tunnel-wireguard=")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The `--bind`/`--port` pins a persisted TUNNEL unit carries in its
@@ -756,6 +801,11 @@ fn devserver_systemd_unit_spec(
                 exec.push_str(&format!(" --port={port}"));
             }
             exec.push_str(&format!(" --tunnel-url={}", tunnel.url));
+            // The file's path rides the ExecStart like the endpoint; the
+            // service reads the file (and refuses a shared one) at start.
+            if let Some(path) = &tunnel.wireguard {
+                exec.push_str(&format!(" --tunnel-wireguard={}", path.display()));
+            }
             exec
         }
         None => format!(
@@ -1046,6 +1096,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
+            wireguard: None,
         };
         let installed = devserver_systemd_unit_spec(
             Path::new("/usr/local/bin/chan"),
@@ -1061,6 +1112,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: Some(9000),
             pinned_name: None,
+            wireguard: None,
         };
         let desired = devserver_systemd_unit_spec(
             Path::new("/usr/local/bin/chan"),
@@ -1468,6 +1520,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
+            wireguard: None,
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1505,6 +1558,7 @@ mod tests {
             pinned_bind: Some("0.0.0.0".parse().unwrap()),
             pinned_port: Some(9000),
             pinned_name: None,
+            wireguard: None,
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1524,6 +1578,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: Some(9000),
             pinned_name: None,
+            wireguard: None,
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1548,6 +1603,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
+            wireguard: None,
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1576,6 +1632,7 @@ mod tests {
             ServiceKind::Systemd,
             token.map(str::to_owned),
             url.map(str::to_owned),
+            None,
             None,
             force,
             no_tunnel,
@@ -1606,6 +1663,7 @@ mod tests {
             ServiceKind::Launchd,
             Some("chan_pat_a".into()),
             Some("https://cli.test".into()),
+            None,
             None,
             false,
             false,
@@ -1673,6 +1731,7 @@ mod tests {
             ServiceKind::Systemd,
             Some("chan_pat_a".into()),
             Some("https://cli.test".into()),
+            None,
             None,
             false,
             false,
@@ -1777,6 +1836,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: None,
             pinned_name: None,
+            wireguard: None,
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1819,6 +1879,7 @@ mod tests {
             pinned_bind: Some("0.0.0.0".parse().unwrap()),
             pinned_port: Some(9000),
             pinned_name: Some("office box".to_string()),
+            wireguard: Some(PathBuf::from("/etc/wireguard/chan.conf")),
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1839,6 +1900,10 @@ mod tests {
             (Some("0.0.0.0".parse().unwrap()), Some(9000))
         );
         assert_eq!(persisted_tunnel_name(&unit), Some("office box".to_string()));
+        assert_eq!(
+            persisted_tunnel_wireguard(&unit),
+            Some(PathBuf::from("/etc/wireguard/chan.conf"))
+        );
         // Feeding that unit back through the resolver with an empty CLI
         // reproduces the spec it was rendered from -- the restart round trip.
         let spec = tunnel_spec_for(None, None, false, false, Some(&unit))
@@ -1849,6 +1914,7 @@ mod tests {
         assert_eq!(spec.pinned_bind, tunnel.pinned_bind);
         assert_eq!(spec.pinned_port, tunnel.pinned_port);
         assert_eq!(spec.pinned_name, tunnel.pinned_name);
+        assert_eq!(spec.wireguard, tunnel.wireguard);
         // Re-rendering from the recovered spec is byte-identical, so a restart
         // that changes nothing leaves the unit (and its PAT) untouched.
         let rerendered = devserver_systemd_unit(
@@ -1922,6 +1988,7 @@ mod tests {
             pinned_bind: None,
             pinned_port: None,
             pinned_name: Some("office \"box\"\\".to_string()),
+            wireguard: None,
         };
         let unit = devserver_systemd_unit(
             Path::new("/home/dev/.local/bin/chan"),
@@ -1958,6 +2025,124 @@ mod tests {
             Some(&unnamed),
         );
         assert!(!unit.contains("CHAN_TUNNEL_DEVSERVER_NAME"));
+    }
+
+    /// The WireGuard file follows the pin rule: an explicit flag records
+    /// it in the ExecStart after the endpoint, a flagless restart carries
+    /// the recorded one over, `--no-tunnel` drops it, and a non-tunnel
+    /// unit yields none.
+    #[test]
+    fn devserver_systemd_unit_tunnel_pins_the_wireguard_file() {
+        let tunnel = SystemdTunnel {
+            token: "chan_pat_abc123".to_string(),
+            url: "http://10.7.0.1:4443/v1/tunnel".to_string(),
+            pinned_bind: None,
+            pinned_port: None,
+            pinned_name: None,
+            wireguard: Some(PathBuf::from("/etc/wireguard/chan.conf")),
+        };
+        let unit = devserver_systemd_unit(
+            Path::new("/home/dev/.local/bin/chan"),
+            "127.0.0.1:8787".parse().unwrap(),
+            None,
+            Some(&tunnel),
+        );
+        assert!(
+            unit.contains(
+                "ExecStart=/home/dev/.local/bin/chan devserver run \
+                 --tunnel-url=http://10.7.0.1:4443/v1/tunnel \
+                 --tunnel-wireguard=/etc/wireguard/chan.conf\n"
+            ),
+            "{unit}"
+        );
+        // Only the path is recorded: no environment copy, no contents.
+        assert!(!unit.contains("CHAN_TUNNEL_WIREGUARD"), "{unit}");
+        assert_eq!(
+            persisted_tunnel_wireguard(&unit),
+            Some(PathBuf::from("/etc/wireguard/chan.conf"))
+        );
+        // A flagless restart keeps the file; an explicit flag replaces it.
+        let spec = tunnel_spec_for(None, None, false, false, Some(&unit))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.wireguard, tunnel.wireguard);
+        let spec = supervised_tunnel_spec(
+            ServiceKind::Systemd,
+            None,
+            None,
+            None,
+            Some(Path::new("/home/dev/wg.conf")),
+            false,
+            false,
+            None,
+            None,
+            Some(&unit),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(spec.wireguard, Some(PathBuf::from("/home/dev/wg.conf")));
+        // `--no-tunnel` drops the file with the registration.
+        assert!(supervised_tunnel_spec(
+            ServiceKind::Systemd,
+            None,
+            None,
+            None,
+            Some(Path::new("/home/dev/wg.conf")),
+            false,
+            true,
+            None,
+            None,
+            Some(&unit),
+        )
+        .unwrap()
+        .is_none());
+        // A unit without the flag, and a non-tunnel unit, record no file.
+        assert_eq!(persisted_tunnel_wireguard(INSTALLED_TUNNEL_UNIT), None);
+        let local = "ExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port=8787 \
+                     --tunnel-wireguard=/etc/wireguard/chan.conf\n";
+        assert_eq!(persisted_tunnel_wireguard(local), None);
+    }
+
+    /// A WireGuard file with no token from either source is refused, the
+    /// way the unsupervised path refuses it, and a path the ExecStart
+    /// cannot carry whole is refused before the unit is written.
+    #[test]
+    fn supervised_tunnel_spec_refuses_a_wireguard_file_it_cannot_honour() {
+        let Err(error) = supervised_tunnel_spec(
+            ServiceKind::Systemd,
+            None,
+            Some("http://10.7.0.1:4443/v1/tunnel".into()),
+            None,
+            Some(Path::new("/etc/wireguard/chan.conf")),
+            false,
+            false,
+            None,
+            None,
+            None,
+        ) else {
+            panic!("a WireGuard file with no token must be refused");
+        };
+        assert_eq!(error.to_string(), WIREGUARD_NEEDS_TOKEN);
+        let Err(error) = supervised_tunnel_spec(
+            ServiceKind::Systemd,
+            Some("chan_pat_a".into()),
+            Some("http://10.7.0.1:4443/v1/tunnel".into()),
+            None,
+            Some(Path::new("/home/dev/wg files/chan.conf")),
+            false,
+            false,
+            None,
+            None,
+            None,
+        ) else {
+            panic!("a path with whitespace cannot ride the ExecStart");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("/home/dev/wg files/chan.conf"),
+            "{message}"
+        );
+        assert!(message.contains("whitespace"), "{message}");
     }
 
     #[test]
@@ -2000,6 +2185,7 @@ mod tests {
             Some("chan_pat_a".into()),
             Some("https://cli.test".into()),
             Some("  new name  "),
+            None,
             false,
             false,
             None,

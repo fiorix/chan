@@ -387,6 +387,13 @@ fn daemon_command(
             // (no shell in between, so spaces survive). Only the token
             // stays env-only.
             cmd.arg(format!("--tunnel-devserver-name={}", tunnel.name));
+            // The WireGuard file's path is not a secret either, only its
+            // contents are: the daemon reads the file itself.
+            if let Some(wireguard) = &tunnel.wireguard {
+                let mut arg = std::ffi::OsString::from("--tunnel-wireguard=");
+                arg.push(&wireguard.path);
+                cmd.arg(arg);
+            }
             cmd.env("CHAN_TUNNEL_TOKEN", tunnel.token);
         }
         None => {
@@ -833,6 +840,48 @@ mod command_tests {
             handed_chan_home(&command_for(&home)),
             Some(absolute("fallback").as_os_str())
         );
+    }
+
+    /// The daemon child gets the WireGuard file's path on argv, beside the
+    /// endpoint, and never its contents: the token stays the only secret the
+    /// parent hands over, through the environment.
+    #[test]
+    fn the_daemon_is_handed_the_wireguard_path_not_the_file() {
+        const PRIVATE_KEY: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+        let config = chan_wireguard::config::Config::parse(&format!(
+            "[Interface]\nPrivateKey = {PRIVATE_KEY}\nAddress = 10.7.0.2/32\n\
+             [Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
+             Endpoint = 192.0.2.1:51820\nAllowedIPs = 10.7.0.1/32\n"
+        ))
+        .unwrap();
+        let home = DaemonHome::from_parts(&absolute("launch"), &absolute("home"), false, true);
+        let cmd = daemon_command(
+            Path::new("chan"),
+            "127.0.0.1:0".parse().unwrap(),
+            Some(chan_server::DevserverTunnel {
+                tunnel_url: "http://10.7.0.1:4443/v1/tunnel".into(),
+                token: "chan_pat_a".into(),
+                name: "box".into(),
+                wireguard: Some(chan_server::DevserverWireguard {
+                    path: absolute("wg dir").join("chan.conf"),
+                    config,
+                }),
+            }),
+            &home,
+        );
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        let mut expected = std::ffi::OsString::from("--tunnel-wireguard=");
+        expected.push(absolute("wg dir").join("chan.conf"));
+        assert!(args.contains(&expected.as_os_str()), "{args:?}");
+        for arg in &args {
+            assert!(
+                !arg.to_string_lossy().contains(PRIVATE_KEY),
+                "argv carries the key: {args:?}"
+            );
+        }
+        assert!(cmd
+            .get_envs()
+            .any(|(key, value)| key == "CHAN_TUNNEL_TOKEN" && value.is_some()));
     }
 }
 

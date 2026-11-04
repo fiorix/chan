@@ -164,6 +164,8 @@ A devserver listens on loopback behind a persisted bearer token, and the point o
 
 `--tunnel-url` with a personal access token, preferably from the environment so the secret stays out of `ps`, puts the devserver in tunnel mode: it dials the gateway and publishes every mounted workspace behind one registration, named by `--tunnel-devserver-name` or the hostname. In tunnel mode the loopback listener is off by default, since the gateway is the surface, except under systemd notify, where it stays on so a restart can reach the local management API; `CHAN_DEVSERVER_LISTEN` overrides either way.
 
+`--tunnel-wireguard` names a wg-quick file and the dial to the tunnel URL then runs through an in-process WireGuard tunnel (`chan-wireguard`), so the URL may be an `http://` address inside the tunnel and the ingress needs no public name or certificate. The CLI reads the file before anything starts and refuses one it cannot parse, naming the path and the line but never a value, or one the group or others can read, since it holds the tunnel's private key; a daemon child and a systemd unit carry only the path, which is not a secret, and read the file themselves. The flag needs a token and `--no-tunnel` drops it with the rest.
+
 ## Self-upgrade
 
 The upgrade path keeps the running CLI current without a package manager. It has three pieces, all pointed at the maintainer's release metadata in production builds; a compile-time seam exists only for the native Windows installer smoke.

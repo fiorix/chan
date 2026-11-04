@@ -1,13 +1,14 @@
 use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::cli::{DevserverAction, DevserverServeArgs};
 use crate::devserver::foreground::{
-    build_devserver_tunnel, devserver_listen_override, resolve_devserver_listen,
-    resolve_devserver_port, run_devserver_foreground, warn_non_loopback_bind,
+    build_devserver_tunnel, devserver_listen_override, read_wireguard_config,
+    resolve_devserver_listen, resolve_devserver_port, run_devserver_foreground,
+    warn_non_loopback_bind,
 };
 use crate::devserver::launchd::{
     join_devserver_under_launchd, restart_devserver_under_launchd, start_devserver_under_launchd,
@@ -259,13 +260,11 @@ async fn cmd_devserver(
         tunnel_url,
         tunnel_token,
         tunnel_devserver_name,
+        tunnel_wireguard,
         no_tunnel,
     } = args;
-    // `--no-tunnel` drops the token before anything can read it, so a devserver
-    // spawned from a shell that inherited CHAN_TUNNEL_TOKEN stays local when
-    // asked to. The supervised path takes the flag itself as well, to decline
-    // the PAT persisted in the unit (see [`supervised_tunnel_spec`]).
-    let tunnel_token = tunnel_token.filter(|_| !no_tunnel);
+    let (tunnel_token, tunnel_wireguard) =
+        tunnel_inputs_unless_no_tunnel(no_tunnel, tunnel_token, tunnel_wireguard);
     // An endpoint is required with a token, but not necessarily HERE: a
     // supervised verb recovers it from the installed unit, which is the whole
     // point of a flagless `restart`. Resolution stays lazy so that path is
@@ -293,8 +292,12 @@ async fn cmd_devserver(
 
     match plan {
         DevPlan::Foreground(ServiceKind::None) => {
-            let tunnel =
-                build_devserver_tunnel(tunnel_token, tunnel_url, tunnel_devserver_name.as_deref())?;
+            let tunnel = build_devserver_tunnel(
+                tunnel_token,
+                tunnel_url,
+                tunnel_devserver_name.as_deref(),
+                tunnel_wireguard.as_deref(),
+            )?;
             // Tunnel mode defaults to NOT binding the loopback port (the gateway
             // is the surface, and it 404s the management API anyway), but under
             // systemd notify it does bind so `chan devserver restart` fdstore
@@ -332,6 +335,7 @@ async fn cmd_devserver(
                         tunnel_token,
                         tunnel_url,
                         tunnel_devserver_name.as_deref(),
+                        tunnel_wireguard.as_deref(),
                     )?;
                     devserver_daemon::restart_devserver_chan(addr, force, verbose, tunnel).await
                 }
@@ -342,6 +346,7 @@ async fn cmd_devserver(
                         tunnel_token,
                         tunnel_url,
                         tunnel_devserver_name.as_deref(),
+                        tunnel_wireguard.as_deref(),
                     )?;
                     devserver_daemon::run_devserver_as_chan(addr, force, verbose, tunnel).await
                 }
@@ -351,6 +356,7 @@ async fn cmd_devserver(
                         tunnel_token,
                         tunnel_url,
                         tunnel_devserver_name.as_deref(),
+                        tunnel_wireguard.as_deref(),
                     )?;
                     devserver_daemon::join_devserver_chan(addr, force, verbose, tunnel).await
                 }
@@ -358,15 +364,18 @@ async fn cmd_devserver(
         }
         DevPlan::Supervised(kind, action) => {
             // launchd would have to persist a tunnel PAT in the plist (0644) to
-            // re-exec with it, so tunnel mode is refused there. systemd instead
-            // writes the unit 0600 (see write_devserver_unit) and carries the
-            // token via Environment=, so it is supported.
-            if tunnel_token.is_some() && kind == ServiceKind::Launchd {
+            // re-exec with it, so tunnel mode is refused there, a WireGuard
+            // file included since it carries nothing without the token.
+            // systemd instead writes the unit 0600 (see write_devserver_unit)
+            // and carries the token via Environment=, so it is supported.
+            if (tunnel_token.is_some() || tunnel_wireguard.is_some())
+                && kind == ServiceKind::Launchd
+            {
                 anyhow::bail!(
-                    "chan devserver: tunnel mode (--tunnel-token) is not supported under \
-                     --service=launchd; the launch agent would persist the token in the \
-                     plist (0644). Use --service=chan or --service=systemd, or run the \
-                     devserver in the foreground."
+                    "chan devserver: tunnel mode (--tunnel-token, --tunnel-wireguard) is not \
+                     supported under --service=launchd; the launch agent would persist the \
+                     token in the plist (0644). Use --service=chan or --service=systemd, or \
+                     run the devserver in the foreground."
                 );
             }
             // Preserve the running service's bound address when --bind/--port are
@@ -378,14 +387,46 @@ async fn cmd_devserver(
                 tunnel_token,
                 tunnel_url,
                 tunnel_devserver_name.as_deref(),
+                tunnel_wireguard.as_deref(),
                 force,
                 no_tunnel,
                 bind,
                 port,
                 read_systemd_unit().as_deref(),
             )?;
+            // The unit records the WireGuard file's path and the service reads
+            // it at every start; read it here too, so a bad file is refused
+            // by the verb that installs it instead of by a restart loop.
+            if matches!(
+                action,
+                DevAction::Start | DevAction::Restart | DevAction::Join
+            ) {
+                if let Some(path) = tunnel.as_ref().and_then(SystemdTunnel::wireguard_file) {
+                    read_wireguard_config(path)?;
+                }
+            }
             run_supervised_devserver(kind, action, addr, force, verbose, show_url, tunnel).await
         }
+    }
+}
+
+/// The tunnel inputs a verb runs with. `--no-tunnel` drops the token before
+/// anything can read it, so a devserver spawned from a shell that inherited
+/// CHAN_TUNNEL_TOKEN stays local when asked to, and drops the WireGuard file
+/// with it, since the tunnel it describes carries only the gateway dial and
+/// is refused without a token. The supervised path takes the flag itself as
+/// well, to decline the PAT persisted in the unit (see
+/// [`supervised_tunnel_spec`]). The URL needs no dropping: alone, it selects
+/// nothing.
+fn tunnel_inputs_unless_no_tunnel(
+    no_tunnel: bool,
+    tunnel_token: Option<String>,
+    tunnel_wireguard: Option<PathBuf>,
+) -> (Option<String>, Option<PathBuf>) {
+    if no_tunnel {
+        (None, None)
+    } else {
+        (tunnel_token, tunnel_wireguard)
     }
 }
 
@@ -819,11 +860,18 @@ mod tests {
                 "chan_pat_x",
                 "--tunnel-devserver-name",
                 "box",
+                "--tunnel-wireguard",
+                "/etc/wireguard/chan.conf",
                 "--no-tunnel",
             ]);
             let (args, verb) = devserver_verb(action)
                 .unwrap_or_else(|client_side| panic!("{spelling}: got {client_side:?}"));
             assert_eq!(verb, expected, "{spelling}");
+            assert_eq!(
+                args.tunnel_wireguard.as_deref(),
+                Some(Path::new("/etc/wireguard/chan.conf")),
+                "{spelling}"
+            );
             assert_eq!(args.bind, "127.0.0.2".parse().ok(), "{spelling}");
             assert_eq!(args.port, Some(4242), "{spelling}");
             assert_eq!(args.service, ServiceKind::Chan, "{spelling}");
@@ -850,6 +898,48 @@ mod tests {
         assert!(
             matches!(client_side, Err(DevserverAction::Ls { json: true })),
             "{client_side:?}"
+        );
+    }
+
+    /// launchd refuses tunnel mode whole: a WireGuard file with no token
+    /// is turned away there as it is everywhere else, before any plist or
+    /// address is read, instead of silently installing a local agent.
+    #[tokio::test]
+    async fn launchd_refuses_a_wireguard_file_as_tunnel_mode() {
+        let _env = test_env::ChanTestEnv::new();
+        let args = DevserverServeArgs {
+            bind: None,
+            port: None,
+            service: ServiceKind::Launchd,
+            force: false,
+            tunnel_url: None,
+            tunnel_token: None,
+            tunnel_devserver_name: None,
+            tunnel_wireguard: Some(PathBuf::from("/etc/wireguard/chan.conf")),
+            no_tunnel: false,
+        };
+        let error = cmd_devserver(args, DevserverVerb::Manage(DevAction::Start), false, false)
+            .await
+            .expect_err("launchd must refuse a WireGuard file")
+            .to_string();
+        assert!(error.contains("--tunnel-wireguard"), "{error}");
+        assert!(error.contains("--service=launchd"), "{error}");
+    }
+
+    /// `--no-tunnel` drops the token and the WireGuard file together: a
+    /// file left alone would be refused for want of a token, which is not
+    /// what a shell that merely inherited CHAN_TUNNEL_WIREGUARD asked for.
+    #[test]
+    fn no_tunnel_drops_the_token_and_the_wireguard_file() {
+        let token = Some("chan_pat_a".to_string());
+        let file = Some(PathBuf::from("/etc/wireguard/chan.conf"));
+        assert_eq!(
+            tunnel_inputs_unless_no_tunnel(true, token.clone(), file.clone()),
+            (None, None)
+        );
+        assert_eq!(
+            tunnel_inputs_unless_no_tunnel(false, token.clone(), file.clone()),
+            (token, file)
         );
     }
 

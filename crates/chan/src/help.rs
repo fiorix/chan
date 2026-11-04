@@ -422,6 +422,11 @@ CAUTIONS:
   closes, and non-zero when the backing service dies or stops
   answering /api/health.
   --tunnel-token is visible in `ps`; prefer CHAN_TUNNEL_TOKEN.
+  --tunnel-wireguard FILE (CHAN_TUNNEL_WIREGUARD) holds the
+  tunnel's private key: the file must be owner-only, it is read
+  and refused before anything starts, and only its path is
+  recorded in a systemd unit or handed to the --service=chan
+  daemon.
 
 CAVEATS:
   --service=none only runs under `run`; --service=systemd and
@@ -437,6 +442,11 @@ CAVEATS:
   convert the service back to a local devserver. The unit also
   exports CHAN_TUNNEL_URL, so the terminals the devserver spawns
   can run these verbs without naming an endpoint.
+  With --tunnel-wireguard the dial to the tunnel URL runs through
+  an in-process WireGuard tunnel whose peer is an ordinary
+  WireGuard server (kernel `wg`), so the URL may be an http://
+  address inside the tunnel; the tunnel's public key is printed
+  when it starts, for the peer's configuration.
   Omitting --bind/--port on restart/join preserves the running
   service's address instead of reverting to defaults.
   `chan devserver register URL` registers a devserver with

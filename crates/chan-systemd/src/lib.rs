@@ -273,6 +273,7 @@ fn is_chan_devserver_exec(exec_start: &str) -> bool {
         argument.starts_with("--bind=")
             || argument.starts_with("--port=")
             || argument.starts_with("--tunnel-url=")
+            || argument.starts_with("--tunnel-wireguard=")
     })
 }
 
@@ -411,6 +412,34 @@ mod unit_tests {
                 "a unit chan never rendered: {foreign}"
             );
         }
+    }
+
+    /// The tunnel renderer's flags, the WireGuard file included, keep a unit
+    /// chan's own when its dynamic values moved; a flag chan never renders
+    /// makes it foreign.
+    #[test]
+    fn devserver_unit_recognizes_every_flag_the_tunnel_renderer_emits() {
+        let desired = DevserverUnit::new(
+            "/usr/bin/chan devserver run --port=9000 \
+             --tunnel-url=http://10.7.0.1:4443/v1/tunnel \
+             --tunnel-wireguard=/etc/wireguard/chan.conf",
+        );
+        let installed = DevserverUnit::new(
+            "/usr/local/bin/chan devserver run \
+             --tunnel-url=http://10.7.0.1:4443/v1/tunnel \
+             --tunnel-wireguard=/home/dev/wg.conf",
+        )
+        .render()
+        .replace("TimeoutStartSec=10min\n", "");
+        assert_eq!(
+            desired.classify_installed(&installed),
+            DevserverUnitClass::KnownLegacy
+        );
+        let unknown_flag = installed.replace("--tunnel-wireguard=", "--tunnel-socks=");
+        assert_eq!(
+            desired.classify_installed(&unknown_flag),
+            DevserverUnitClass::Foreign
+        );
     }
 
     #[test]
