@@ -30,7 +30,7 @@ use crate::stream::{Connecting, Listener, Stream, BACKLOG};
 const DEFAULT_MTU: u16 = 1420;
 
 /// The timer tick of the protocol core; it expects about this rate.
-const TICK: Duration = Duration::from_millis(250);
+pub(crate) const TICK: Duration = Duration::from_millis(250);
 
 /// The largest UDP payload; a datagram is never longer.
 const MAX_DATAGRAM: usize = 65535;
@@ -226,6 +226,12 @@ impl Tunnel {
             rx_bytes: rx_bytes as u64,
             endpoint: wire.endpoint,
         }
+    }
+
+    /// The peer's AllowedIPs: the destinations `connect` carries. A
+    /// caller holding several tunnels routes by them.
+    pub fn allowed_ips(&self) -> &[Cidr] {
+        &self.inner.allowed_ips
     }
 }
 
@@ -498,73 +504,10 @@ impl Driver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Peer;
+    use crate::testing::*;
     use crate::x25519::{PublicKey, StaticSecret};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::timeout;
-
-    const A_ADDR: &str = "10.7.0.1";
-    const B_ADDR: &str = "10.7.0.2";
-
-    fn cidr(addr: &str) -> Cidr {
-        Cidr {
-            addr: addr.parse().unwrap(),
-            prefix: 32,
-        }
-    }
-
-    fn config(
-        key: StaticSecret,
-        peer: PublicKey,
-        own: &str,
-        other: &str,
-        endpoint: SocketAddr,
-    ) -> Config {
-        Config {
-            private_key: key,
-            addresses: vec![cidr(own)],
-            mtu: None,
-            peer: Peer {
-                public_key: peer,
-                preshared_key: None,
-                endpoint: Endpoint {
-                    host: endpoint.ip().to_string(),
-                    port: endpoint.port(),
-                },
-                allowed_ips: vec![cidr(other)],
-                persistent_keepalive: None,
-            },
-        }
-    }
-
-    struct Pair {
-        a: Tunnel,
-        b: Tunnel,
-        a_at: SocketAddr,
-        b_at: SocketAddr,
-    }
-
-    /// Two tunnels on loopback UDP, each the other's peer, A at 10.7.0.1
-    /// and B at 10.7.0.2.
-    async fn pair() -> Pair {
-        let a_key = StaticSecret::random_from_rng(OsRng);
-        let b_key = StaticSecret::random_from_rng(OsRng);
-        let a_pub = PublicKey::from(&a_key);
-        let b_pub = PublicKey::from(&b_key);
-        let a_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let b_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let a_at = a_udp.local_addr().unwrap();
-        let b_at = b_udp.local_addr().unwrap();
-        let a = Tunnel::start_on(config(a_key, b_pub, A_ADDR, B_ADDR, b_at), a_udp, b_at).unwrap();
-        let b = Tunnel::start_on(config(b_key, a_pub, B_ADDR, A_ADDR, a_at), b_udp, a_at).unwrap();
-        Pair { a, b, a_at, b_at }
-    }
-
-    fn b_port(port: u16) -> SocketAddr {
-        SocketAddr::new(B_ADDR.parse().unwrap(), port)
-    }
-
-    const WAIT: Duration = Duration::from_secs(10);
 
     #[tokio::test]
     async fn echoes_a_mebibyte_each_way() {

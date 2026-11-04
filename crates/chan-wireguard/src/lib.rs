@@ -15,6 +15,10 @@
 //! TCP connections to the peer's addresses with [`Tunnel::connect`] and
 //! gets a tokio [`Stream`], with no interface, route or privilege on the
 //! host. [`config::Config`] is read from the wg-quick file format.
+//! [`ConnectProxy`] is a loopback HTTP CONNECT proxy over a set of
+//! tunnels for the dialers that cannot call `connect` themselves, a
+//! webview among them: a destination inside a tunnel's AllowedIPs goes
+//! through that tunnel and anything else is connected directly.
 //!
 //! The `noise` module and the clock derive from Cloudflare's boringtun
 //! under BSD-3-Clause; the notice is the LICENSE file beside the crate's
@@ -25,10 +29,14 @@
 pub(crate) mod clock;
 pub mod config;
 pub mod noise;
+mod proxy;
 mod stack;
 mod stream;
+#[cfg(test)]
+mod testing;
 mod tunnel;
 
+pub use proxy::ConnectProxy;
 pub use stream::{Listener, Stream};
 pub use tunnel::{Status, Tunnel};
 
