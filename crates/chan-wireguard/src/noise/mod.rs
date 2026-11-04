@@ -170,6 +170,12 @@ impl Tunn {
         self.handshake.is_expired()
     }
 
+    /// Whether a cookie reply from the peer is held for the next retry.
+    #[cfg(test)]
+    pub(crate) fn has_cookie(&self) -> bool {
+        self.handshake.has_cookie()
+    }
+
     pub fn dst_address(packet: &[u8]) -> Option<IpAddr> {
         if packet.is_empty() {
             return None;

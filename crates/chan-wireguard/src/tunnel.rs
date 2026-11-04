@@ -252,8 +252,11 @@ async fn resolve(endpoint: &Endpoint, want_v4: Option<bool>) -> io::Result<Socke
         })
 }
 
-/// A cookie reply is the one message the core answers before it has
-/// authenticated the sender, so it must not move the endpoint.
+/// A cookie reply authenticates nobody in either direction. The one the
+/// core emits answers a handshake message it has not verified yet, and the
+/// one it receives is sealed under a key derived from the peer's public key
+/// with the on-wire mac1 as associated data, which anyone who saw the
+/// initiation can reproduce. Neither moves the endpoint, as in the kernel.
 fn is_cookie_reply(datagram: &[u8]) -> bool {
     datagram.len() == 64 && datagram[..4] == [3, 0, 0, 0]
 }
@@ -388,7 +391,7 @@ impl Driver {
             let mut authenticated = false;
             let mut drain = false;
             match wire.tunn.decapsulate(Some(from.ip()), datagram, work) {
-                TunnResult::Done => authenticated = true,
+                TunnResult::Done => authenticated = !is_cookie_reply(datagram),
                 TunnResult::Err(e) => {
                     tracing::trace!(error = %e, %from, "dropping a datagram");
                 }
@@ -745,6 +748,78 @@ mod tests {
             .unwrap();
         assert_eq!(len, 148, "a handshake initiation");
         assert_eq!(&buf[..4], &[1, 0, 0, 0]);
+        pending.abort();
+    }
+
+    /// A cookie reply is sealed under a key anyone who saw the initiation
+    /// can derive, so one forged from a third address must not move the
+    /// endpoint; the core still takes the cookie, which is the control
+    /// that the forgery was well formed.
+    #[tokio::test]
+    async fn a_forged_cookie_reply_does_not_move_the_endpoint() {
+        use crate::noise::handshake::{b2s_hash, LABEL_COOKIE};
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+
+        let key = StaticSecret::random_from_rng(OsRng);
+        let peer = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let probe_at = probe.local_addr().unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a_at = udp.local_addr().unwrap();
+        let a =
+            Tunnel::start_on(config(key, peer, A_ADDR, B_ADDR, probe_at), udp, probe_at).unwrap();
+
+        // The initiation the probe receives carries the sender index and the
+        // mac1 a forger on the path would see.
+        let pending = tokio::spawn({
+            let a = a.clone();
+            async move { a.connect(b_port(80)).await }
+        });
+        let mut init = [0u8; 256];
+        let (len, _) = timeout(WAIT, probe.recv_from(&mut init))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 148, "a handshake initiation");
+        let sender_idx = &init[4..8];
+        let mac1 = &init[116..132];
+
+        let cookie_key = b2s_hash(LABEL_COOKIE, peer.as_bytes());
+        let mut nonce = [0u8; 24];
+        OsRng.fill_bytes(&mut nonce);
+        let sealed = XChaCha20Poly1305::new_from_slice(&cookie_key)
+            .unwrap()
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &[0x5a; 16],
+                    aad: mac1,
+                },
+            )
+            .unwrap();
+        let mut reply = Vec::with_capacity(64);
+        reply.extend_from_slice(&[3, 0, 0, 0]);
+        reply.extend_from_slice(sender_idx);
+        reply.extend_from_slice(&nonce);
+        reply.extend_from_slice(&sealed);
+        assert_eq!(reply.len(), 64);
+
+        let forger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        forger.send_to(&reply, a_at).await.unwrap();
+
+        timeout(WAIT, async {
+            while !a.inner.wire.lock().tunn.has_cookie() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the core takes a well-formed cookie reply");
+        assert_eq!(
+            a.status().endpoint,
+            probe_at,
+            "a cookie reply authenticates nobody"
+        );
         pending.abort();
     }
 
