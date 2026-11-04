@@ -4,9 +4,12 @@
 //! a peer has gone quiet. `std::time::Instant` stops during suspend on
 //! Linux, so after a laptop wakes a stale session would still look fresh
 //! and the peer would reject its packets until the timers caught up.
-//! Linux reads `CLOCK_BOOTTIME`; macOS and the BSDs have no portable
-//! equivalent through this interface and read the monotonic clock; on
-//! Windows `std::time::Instant` already counts sleep.
+//! Linux reads `CLOCK_BOOTTIME`. FreeBSD reads `CLOCK_MONOTONIC`, which
+//! its `clock_gettime(2)` documents as counting through a suspend and
+//! which its `CLOCK_BOOTTIME` is an alias of (`CLOCK_UPTIME` is the one
+//! that counts only while the machine runs). macOS and the other BSDs
+//! have no equivalent through this interface and read the monotonic
+//! clock; on Windows `std::time::Instant` already counts sleep.
 
 use std::time::Duration;
 

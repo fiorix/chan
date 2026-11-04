@@ -2,7 +2,7 @@
 //! a real peer.
 //!
 //! ```text
-//! wg-connect FILE HOST:PORT [PATH] [--hold SECS] [--timeout SECS]
+//! wg-connect FILE HOST:PORT [PATH] [--hold SECS] [--settle SECS] [--timeout SECS]
 //! ```
 //!
 //! Starts a tunnel from the wg-quick file, opens a TCP connection to
@@ -11,9 +11,12 @@
 //! length and SHA-256, and the tunnel's own status. With `--hold SECS` the
 //! tunnel stays up and idle for that long after the first response and the
 //! GET is repeated, so a peer's `wg show` can be read while the tunnel is
-//! idle and after the rekey the protocol requires two minutes into a
-//! session. `--timeout SECS` bounds each connect (default 30); a connect
-//! that times out exits 2, every other failure exits 1.
+//! idle and across the two minutes after which the protocol rekeys a
+//! session the next time it carries data. `--settle SECS` keeps the tunnel
+//! up for that long after the repeated GET and prints the status once more,
+//! so the handshake that GET set off has completed when the peer's `wg
+//! show` is read. `--timeout SECS` bounds each connect (default 30); a
+//! connect that times out exits 2, every other failure exits 1.
 
 use std::io::Write as _;
 use std::net::SocketAddr;
@@ -25,19 +28,22 @@ use chan_wireguard::config::Config;
 use chan_wireguard::Tunnel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const USAGE: &str = "usage: wg-connect FILE HOST:PORT [PATH] [--hold SECS] [--timeout SECS]";
+const USAGE: &str =
+    "usage: wg-connect FILE HOST:PORT [PATH] [--hold SECS] [--settle SECS] [--timeout SECS]";
 
 struct Args {
     file: String,
     target: SocketAddr,
     path: String,
     hold: Option<Duration>,
+    settle: Option<Duration>,
     timeout: Duration,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut positional = Vec::new();
     let mut hold = None;
+    let mut settle = None;
     let mut timeout = Duration::from_secs(30);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -49,6 +55,14 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--hold is not a number of seconds")?;
                 hold = Some(Duration::from_secs(secs));
+            }
+            "--settle" => {
+                let secs: u64 = args
+                    .next()
+                    .ok_or("--settle needs a number of seconds")?
+                    .parse()
+                    .map_err(|_| "--settle is not a number of seconds")?;
+                settle = Some(Duration::from_secs(secs));
             }
             "--timeout" => {
                 let secs: u64 = args
@@ -76,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
             .cloned()
             .unwrap_or_else(|| "/".to_string()),
         hold,
+        settle,
         timeout,
     })
 }
@@ -137,6 +152,12 @@ async fn run(args: Args) -> Result<(), Failure> {
         tokio::time::sleep(hold).await;
         print_status(&tunnel, "after hold");
         get(&tunnel, &args, 2).await?;
+        if let Some(settle) = args.settle {
+            println!("settle: {}s up after the second GET", settle.as_secs());
+            let _ = std::io::stdout().flush();
+            tokio::time::sleep(settle).await;
+            print_status(&tunnel, "after settle");
+        }
     }
     Ok(())
 }
