@@ -344,6 +344,7 @@ impl Connection {
                     }
                 }
             });
+            tracing::debug!(%peer, %target, route, "proxy upgrade bridged");
             let (mut parts, _) = response.into_parts();
             strip_hop_by_hop(&mut parts.headers, true);
             parts.version = version;
@@ -494,12 +495,14 @@ fn connect_authority(uri: &Uri) -> Option<Authority> {
 }
 
 /// The target of a request to forward: absolute-form with the `http`
-/// scheme, as the authority to open and the origin-form target the
-/// destination is sent. Origin-form, which is a request to this proxy
-/// itself, and any other scheme are refused: `https://` reaches the
-/// proxy as CONNECT, and the rest it does not speak.
+/// scheme, or `ws`, which WebKitGTK writes on a WebSocket upgrade to a
+/// plain origin and which names the same hop, as the authority to open
+/// and the origin-form target the destination is sent. Origin-form,
+/// which is a request to this proxy itself, and any other scheme are
+/// refused: `https://` and `wss://` reach the proxy as CONNECT, and the
+/// rest it does not speak.
 fn forward_target(uri: &Uri) -> Result<(Authority, Uri), StatusCode> {
-    if uri.scheme_str() != Some("http") {
+    if !matches!(uri.scheme_str(), Some("http" | "ws")) {
         return Err(StatusCode::BAD_REQUEST);
     }
     let authority = uri
@@ -1070,14 +1073,16 @@ mod tests {
         assert!(body[..] == expected[..], "the echoed body differs");
     }
 
-    #[tokio::test]
-    async fn an_upgrade_is_bridged_end_to_end() {
+    /// An absolute-form upgrade with `scheme` in the request target, as a
+    /// browser writes one to a proxy, bridged to a server that answers the
+    /// handshake by hand.
+    async fn upgrade_through_proxy(scheme: &str) {
         let listener = TcpListener::bind(loopback()).await.unwrap();
         let server_at = listener.local_addr().unwrap();
         let proxy = ConnectProxy::bind(Vec::new(), loopback()).await.unwrap();
         let mut client = TcpStream::connect(proxy.local_addr()).await.unwrap();
         let request = format!(
-            "GET http://{server_at}/ws HTTP/1.1\r\nHost: {server_at}\r\nConnection: Upgrade\r\n\
+            "GET {scheme}://{server_at}/ws HTTP/1.1\r\nHost: {server_at}\r\nConnection: Upgrade\r\n\
              Upgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
              Sec-WebSocket-Version: 13\r\n\r\n"
         );
@@ -1131,6 +1136,18 @@ mod tests {
             "{headers:?}"
         );
         exchange(client, server).await;
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_is_bridged_end_to_end() {
+        upgrade_through_proxy("http").await;
+    }
+
+    /// WebKitGTK writes a WebSocket upgrade to a plain origin with the `ws`
+    /// scheme in the request target.
+    #[tokio::test]
+    async fn a_ws_scheme_upgrade_is_bridged_end_to_end() {
+        upgrade_through_proxy("ws").await;
     }
 
     #[tokio::test]
@@ -1188,6 +1205,7 @@ mod tests {
             "POST /api HTTP/1.1\r\nHost: 127.0.0.1:1\r\nContent-Length: 0\r\n\r\n",
             "GET https://127.0.0.1:1/ HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n",
             "GET ftp://127.0.0.1:1/ HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n",
+            "GET wss://127.0.0.1:1/ HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n",
             "GET http://127.0.0.1:0/ HTTP/1.1\r\nHost: 127.0.0.1:0\r\n\r\n",
             "GET http://127.0.0.1:http/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
             "GET http://::1:1/ HTTP/1.1\r\nHost: [::1]:1\r\n\r\n",
