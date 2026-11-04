@@ -220,7 +220,7 @@
     toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
-  import { surveyFor } from "../state/survey.svelte";
+  import { launcherShownOverWindow, refocusRefused } from "../state/focusGuard";
   import { terminalRelocations } from "../state/terminalDock.svelte";
   import { filesContext, wirePathFromAbsolute } from "../state/fileContext.svelte";
 
@@ -240,12 +240,12 @@
 
   // A survey is modal over this terminal, and the Computers launcher shown
   // over the window holds the keyboard in its own webview: a refocus under
-  // either would take it (launcherShownOverWindow). Centralizing the guard
-  // keeps every refocus path out, the mount and the pane focus included;
-  // once the survey clears or the launcher hides, the same calls
-  // legitimately restore the terminal.
+  // either would take it (refocusRefused). Centralizing the guard keeps
+  // every refocus path out, the mount and the pane focus included; once the
+  // survey clears or the launcher hides, the same calls legitimately restore
+  // the terminal.
   function focusTerminal(): void {
-    if (surveyFor(tab.id) || launcherShownOverWindow()) return;
+    if (refocusRefused(tab.id)) return;
     term?.focus();
   }
 
@@ -924,14 +924,6 @@
       }, delay);
       hostResumeTimers.push(timer);
     }
-  }
-
-  // chan-desktop marks the page's root while the window's Computers launcher
-  // is shown over it (launcher_transition.js hostCovered). The launcher is a
-  // second webview holding the keyboard; a focus change in this page would
-  // move the window's first responder back here and leave the launcher deaf.
-  function launcherShownOverWindow(): boolean {
-    return document.documentElement.hasAttribute("data-launcher-shown");
   }
 
   // Renderer recovery cannot restore the DOM/native keyboard bridge. A host

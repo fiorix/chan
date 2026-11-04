@@ -1,3 +1,19 @@
+/// Whether `element` can take the keyboard: a connected, enabled element in the
+/// page, outside inert and hidden subtrees, that is rendered. Visibility is
+/// inherited, so the element's own computed value answers for its ancestors;
+/// `display: none` is not, so every ancestor is walked. An engine refuses to
+/// focus an element that fails any of these and reports nothing, so a caller
+/// that would otherwise hand focus to nothing checks here first.
+export function canTakeFocus(element: Element | null): element is HTMLElement {
+  if (!(element instanceof HTMLElement) || !element.isConnected || element === document.body) return false;
+  if (element.matches(":disabled") || element.closest("[inert], [hidden]")) return false;
+  if (getComputedStyle(element).visibility !== "visible") return false;
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    if (getComputedStyle(node).display === "none") return false;
+  }
+  return true;
+}
+
 export function createModalFocus(options: {
   onClose: () => void;
   onKeydown?: (event: KeyboardEvent) => void;

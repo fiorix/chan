@@ -1,16 +1,22 @@
 <script module lang="ts">
-  let lastReturnFocus: HTMLElement | null = null;
+  let pendingReturnFocus: HTMLElement | null = null;
 
-  /// The element that held focus when a command deck last opened. A command
-  /// whose flow outlives the deck, such as a path dialog the user cancels,
-  /// hands focus back here rather than to the deck's long-gone input.
-  export function deckReturnFocus(): HTMLElement | null {
-    return lastReturnFocus;
+  /// The element a run in flight will hand focus back to, from the run's
+  /// start until the deck's close has rendered, or until the run has settled
+  /// while the deck stayed open. A dialog a command opens as it runs mounts
+  /// in the flush that unmounts the deck's input, while that input still
+  /// holds focus or just after it left, and the deck is gone by the time the
+  /// dialog closes; the dialog takes this as the element to return focus to.
+  /// A dialog opened later, from another control during a long run, is not
+  /// the command's and takes its own opener.
+  export function deckPendingReturnFocus(): HTMLElement | null {
+    return pendingReturnFocus;
   }
 </script>
 
 <script lang="ts">
   import { tick } from "svelte";
+  import { canTakeFocus } from "../modalFocus";
   import type {
     DeckConfirm,
     DeckDraft,
@@ -34,6 +40,8 @@
     onClearScope,
     onSuccess,
     onError,
+    onFocusLost,
+    mayTakeFocus,
   }: {
     open: boolean;
     draft: DeckDraft;
@@ -49,6 +57,16 @@
     onClearScope: () => void;
     onSuccess?: (item: DeckItem) => void;
     onError: (item: DeckItem, error: unknown) => void;
+    /// A run closed the deck and left focus nowhere, and the element the
+    /// deck opened from can no longer take it. A host that owns an active
+    /// surface of its own puts the keyboard there.
+    onFocusLost?: () => void;
+    /// Whether the page may move focus at all right now. A host whose
+    /// keyboard is held outside the page, such as a native launcher window
+    /// shown over it, answers false, and the deck then hands focus to
+    /// nothing: a focus change in the page would take the keyboard from
+    /// that surface.
+    mayTakeFocus?: () => boolean;
   } = $props();
 
   const LIST_ID = "chan-command-deck-list";
@@ -66,8 +84,11 @@
   let returnFocus: HTMLElement | null = null;
   // The run in flight: a plain item while the host handles it, an awaited
   // one while the host takes its success. A close while a run is in flight
-  // leaves focus where it is, whatever closed the deck; any other close
-  // (Escape, the backdrop, the host hiding the deck) hands focus back.
+  // leaves focus where it is, whatever closed the deck, since the command may
+  // be putting it on a surface of its own; once the run settles,
+  // settleRunFocus hands back focus the command left nowhere. Any other
+  // close (Escape, the backdrop, the host hiding the deck) hands focus back
+  // at once.
   let closingRun: object | null = null;
   let confirmKeyReleased = true;
   // Tokens bind card writes to the preparation or command currently owning it.
@@ -95,7 +116,6 @@
     const isOpen = open;
     if (isOpen && !wasOpen) {
       returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      lastReturnFocus = returnFocus;
       closingRun = null;
       reconcileSelection();
       zone = "input";
@@ -106,6 +126,13 @@
       // Preserve the viewport while restoring the caller's focus.
       if (!closingRun && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       returnFocus = null;
+      // The pending opener is for a dialog that mounts in the flush that
+      // unmounts this deck's input. Once that close has rendered, a dialog
+      // opened from anywhere else during a long run takes its own opener.
+      const pending = pendingReturnFocus;
+      void tick().then(() => {
+        if (pendingReturnFocus === pending) pendingReturnFocus = null;
+      });
     }
     wasOpen = isOpen;
   });
@@ -228,8 +255,51 @@
     }
   }
 
+  /// Whether `element` holds the keyboard: a connected element other than
+  /// the page itself. The connection check is defensive: an element removed
+  /// from the page, such as this deck's input after a close, has given focus
+  /// up whatever the engine still reports.
+  function holdsFocus(element: Element | null): boolean {
+    return element instanceof Element && element.isConnected &&
+      element !== document.body && element !== document.documentElement;
+  }
+
+  /// A run that closes the deck decides where the keyboard goes, so that
+  /// close hands focus to nothing. A command that moves focus nowhere would
+  /// leave it on the body, where the terminal or editor under the deck gets
+  /// no keys until it is clicked. Once the run has settled and the close has
+  /// rendered, focus still at large goes back to the element the deck opened
+  /// from, when it can take it, and otherwise to the host, unless the host
+  /// says the page may not take focus now. A surface the command opened
+  /// keeps the focus it took, and one that takes focus later takes it from
+  /// the restored element as it would from any other.
+  async function settleRunFocus(opener: HTMLElement | null): Promise<void> {
+    await tick();
+    if (pendingReturnFocus === opener) pendingReturnFocus = null;
+    if (open || holdsFocus(document.activeElement)) return;
+    if (mayTakeFocus && !mayTakeFocus()) return;
+    if (canTakeFocus(opener)) opener.focus({ preventScroll: true });
+    else onFocusLost?.();
+  }
+
   async function execute(item: DeckItem): Promise<void> {
     if (item.disabled) return;
+    // Captured before the run: the close effect forgets the opener as the
+    // deck closes, which the run may do at once.
+    const opener = returnFocus;
+    pendingReturnFocus = opener;
+    try {
+      await runItem(item);
+    } finally {
+      if (open) {
+        if (pendingReturnFocus === opener) pendingReturnFocus = null;
+      } else {
+        void settleRunFocus(opener);
+      }
+    }
+  }
+
+  async function runItem(item: DeckItem): Promise<void> {
     const executionDraft = draft;
     const token = {};
     executionToken = token;

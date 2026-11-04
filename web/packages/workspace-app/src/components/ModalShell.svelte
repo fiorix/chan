@@ -5,6 +5,7 @@
   // caller's; the shell renders only while the caller shows it.
 
   import { onMount, type Snippet } from "svelte";
+  import { deckPendingReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
   import { registerModalShell } from "./modalStack";
 
@@ -34,7 +35,12 @@
   let layer: HTMLElement | undefined = $state();
   let registration: ReturnType<typeof registerModalShell> | undefined;
   const active = document.activeElement;
-  const opener = active instanceof HTMLElement && active !== document.body ? active : null;
+  // A dialog a launcher command opens mounts while the launcher's input
+  // still holds focus, or just after it left; the launcher is gone by the
+  // time the dialog closes, so the dialog returns focus where the launcher
+  // would have, to the element the launcher opened from.
+  const opener = deckPendingReturnFocus() ??
+    (active instanceof HTMLElement && active !== document.body ? active : null);
 
   const focus = createModalFocus({
     restoreFocus: false,
