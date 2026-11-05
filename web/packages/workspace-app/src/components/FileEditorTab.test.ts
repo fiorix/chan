@@ -694,6 +694,70 @@ describe("the body menu", () => {
   });
 });
 
+// The editor keeps focus while its menu is open, so an Escape goes first to
+// CodeMirror, which collapses a selection on it. An open menu takes the key
+// before the editor does.
+describe("Escape over a menu", () => {
+  /// Select "first" and focus the editor, as a user leaves it before a
+  /// right-click.
+  function selectFirst(target: HTMLElement): { view: EditorView; selection: [number, number] } {
+    const view = editorView(target);
+    const at = view.state.doc.toString().indexOf("first");
+    view.dispatch({ selection: { anchor: at, head: at + "first".length } });
+    view.focus();
+    return { view, selection: [at, at + "first".length] };
+  }
+
+  function selection(view: EditorView): [number, number] {
+    return [view.state.selection.main.anchor, view.state.selection.main.head];
+  }
+
+  function pressEscape(): void {
+    (document.activeElement ?? document.body).dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }),
+    );
+  }
+
+  test("with no menu open is the editor's: it collapses the selection", async () => {
+    const tab = seat(fileTab());
+    const { target } = await render(tab);
+    const { view, selection: selected } = selectFirst(target);
+    expect(document.activeElement).toBe(view.contentDOM);
+
+    pressEscape();
+    await settle(2);
+
+    expect(selection(view)).toEqual([selected[1], selected[1]]);
+  });
+
+  test.each(["body menu", "tab menu"] as const)(
+    "closes the %s and leaves the editor its selection and the keyboard",
+    async (menu) => {
+      const tab = seat(fileTab());
+      const { target } = await render(tab);
+      const { view, selection: selected } = selectFirst(target);
+      if (menu === "body menu") await rightClickBody(target);
+      else await openMenu(tab);
+      expect(bubble(), "the menu opened").not.toBeNull();
+      view.focus();
+      expect(document.activeElement, "the editor keeps the keyboard while its menu is open").toBe(view.contentDOM);
+
+      pressEscape();
+      await settle(2);
+
+      expect({ open: bubble() !== null, opened: tabMenu.openForTabId, selection: selection(view) }).toEqual({
+        open: false,
+        opened: null,
+        selection: selected,
+      });
+      expect(document.activeElement).toBe(view.contentDOM);
+      pressEscape();
+      await settle(2);
+      expect(selection(view), "the next Escape is the editor's").toEqual([selected[1], selected[1]]);
+    },
+  );
+});
+
 describe("recovering unsaved work from an earlier page load", () => {
   /// A buffer another page load left behind for the tab's path.
   function strandBuffer(path: string, content: string): void {
