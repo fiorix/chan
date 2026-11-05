@@ -1185,32 +1185,43 @@
     return !!n && n.kind === "leaf";
   }
 
-  function onTabDrop(e: DragEvent, tabIdx: number): void {
-    tabDragInFlight = false;
+  /// Where a drop lands among the visible side's tabs: on the tab at `index`
+  /// (a tab from elsewhere is inserted at `insertAt`, by the pointer's half of
+  /// that tab), or past the strip's last tab.
+  type PaneDropPlace = { at: "tab"; index: number; insertAt: number } | { at: "end" };
+
+  /// The one drop rule of a tab and the strip, for this pane's visible
+  /// side: a tab from this window moves here, a tab from another
+  /// window of this scope is rebuilt here, and a file-tree file opens here.
+  /// Claiming is `preventDefault`, whose "move" effect tells the source to let
+  /// its tab go; returns whether the drop was claimed.
+  function dropIntoPane(e: DragEvent, place: PaneDropPlace): boolean {
     const dt = e.dataTransfer;
-    if (!dt || tmuxPaneHere) return;
-    dropActive = false;
-    dropIndicator = -1;
+    if (!dt) return false;
+    // Tab move takes precedence over file open if both are present.
     const tabRaw = dt.getData(TAB_DRAG_MIME);
     if (tabRaw) {
       try {
         const { fromPaneId, fromSide, tabId, fromWindow } = JSON.parse(tabRaw) as TabDragPayload;
         if (isIntraWindowDrag(fromWindow) && paneInThisWindow(fromPaneId)) {
           e.preventDefault();
-          e.stopPropagation();
           markLocalTabDrop(fromPaneId, tabId, fromSide);
           if (fromPaneId === pane.id && (fromSide ?? visibleSide) === visibleSide) {
-            // Same-pane reorder: drop on tab T means source lands at
-            // position T in the final array. No half-tab logic; drops
-            // on either half of the target produce the same swap.
-            reorderTab(pane.id, tabId, tabIdx, visibleSide);
+            // Dropped on tab T, the source lands at position T in the final
+            // array: no half-tab logic, so either half of the target makes
+            // the same swap. Dropped past the last tab (the strip's
+            // background or actions area), it moves to the end, so dragging
+            // the leftmost tab rightward past the last one does the obvious
+            // thing instead of nothing.
+            const to = place.at === "tab" ? place.index : Math.max(0, visibleTabs.length - 1);
+            reorderTab(pane.id, tabId, to, visibleSide);
           } else {
-            moveTab(fromPaneId, tabId, pane.id, indicatorIndexFor(tabIdx, e), {
+            moveTab(fromPaneId, tabId, pane.id, place.at === "tab" ? place.insertAt : undefined, {
               fromSide,
               toSide: visibleSide,
             });
           }
-          return;
+          return true;
         }
         // Fall through to cross-window path: the drag is from another
         // window (its pane id may coincidentally match a local one).
@@ -1222,82 +1233,46 @@
     if (crossRaw) {
       // Reject a cross-window drop from a different kind/workspace (no
       // preventDefault ⇒ dropEffect "none" ⇒ the source keeps its tab).
-      if (!isTabDragScopeCompatible(e)) return;
+      if (!isTabDragScopeCompatible(e)) return false;
       // Adopt FIRST and only claim the drop if it worked: preventDefault is
       // what makes dropEffect "move", which is what tells the source to close
       // its tab. Accepting before knowing would destroy a tab this window
       // failed to rebuild.
-      if (!acceptCrossWindowTab(crossRaw)) return;
+      if (!acceptCrossWindowTab(crossRaw)) return false;
       e.preventDefault();
-      e.stopPropagation();
-      return;
+      return true;
     }
     const fileRaw = dt.getData(FILE_DRAG_MIME);
     if (fileRaw) {
       e.preventDefault();
-      e.stopPropagation();
       try {
         const { path } = JSON.parse(fileRaw) as { path: string };
         if (path) void openInPane(pane.id, path);
       } catch {
         // ignore
       }
+      return true;
+    }
+    return false;
+  }
+
+  function onTabDrop(e: DragEvent, tabIdx: number): void {
+    tabDragInFlight = false;
+    if (!e.dataTransfer || tmuxPaneHere) return;
+    dropActive = false;
+    dropIndicator = -1;
+    // A claimed drop stops here, so the strip's own handler does not take it
+    // again.
+    if (dropIntoPane(e, { at: "tab", index: tabIdx, insertAt: indicatorIndexFor(tabIdx, e) })) {
+      e.stopPropagation();
     }
   }
 
   function onDrop(e: DragEvent): void {
     dropActive = false;
     dropIndicator = -1;
-    const dt = e.dataTransfer;
-    if (!dt || tmuxPaneHere) return;
-    // Tab move takes precedence over file open if both are present.
-    const tabRaw = dt.getData(TAB_DRAG_MIME);
-    if (tabRaw) {
-      try {
-        const { fromPaneId, fromSide, tabId, fromWindow } = JSON.parse(tabRaw) as TabDragPayload;
-        if (isIntraWindowDrag(fromWindow) && paneInThisWindow(fromPaneId)) {
-          e.preventDefault();
-          markLocalTabDrop(fromPaneId, tabId, fromSide);
-          if (fromPaneId === pane.id && (fromSide ?? visibleSide) === visibleSide) {
-            // Strip-level drop in the same pane (i.e., dropped on the
-            // background or actions area, not directly on a tab). Treat
-            // it as "move source to the end" so dragging a leftmost tab
-            // rightward past the last tab does the obvious thing instead
-            // of silently no-op'ing.
-            reorderTab(pane.id, tabId, Math.max(0, visibleTabs.length - 1), visibleSide);
-          } else {
-            moveTab(fromPaneId, tabId, pane.id, undefined, {
-              fromSide,
-              toSide: visibleSide,
-            });
-          }
-          return;
-        }
-        // Fall through to cross-window path (drag from another window).
-      } catch {
-        // malformed payload; fall through.
-      }
-    }
-    const crossRaw = dt.getData(CROSS_TAB_MIME);
-    if (crossRaw) {
-      // Reject a cross-window drop from a different kind/workspace (no
-      // preventDefault ⇒ dropEffect "none" ⇒ the source keeps its tab).
-      if (!isTabDragScopeCompatible(e)) return;
-      // Adopt before claiming the drop; see the tab-strip handler above.
-      if (!acceptCrossWindowTab(crossRaw)) return;
-      e.preventDefault();
-      return;
-    }
-    const fileRaw = dt.getData(FILE_DRAG_MIME);
-    if (fileRaw) {
-      e.preventDefault();
-      try {
-        const { path } = JSON.parse(fileRaw) as { path: string };
-        if (path) void openInPane(pane.id, path);
-      } catch {
-        // ignore
-      }
-    }
+    if (tmuxPaneHere) return;
+    dropIntoPane(e, { at: "end" });
   }
 </script>
 
