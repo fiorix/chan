@@ -168,43 +168,10 @@ impl Config {
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty());
 
-        let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("GITHUB_CLIENT_ID"),
-            std::env::var("GITHUB_CLIENT_SECRET"),
-        ) {
-            let github = match &oauth_endpoints_base {
-                Some(base) => GitHubProvider::with_endpoints(
-                    id,
-                    secret,
-                    crate::providers::github::GitHubEndpoints {
-                        auth: format!("{base}/login/oauth/authorize"),
-                        token: format!("{base}/login/oauth/access_token"),
-                        user: format!("{base}/user"),
-                        emails: format!("{base}/user/emails"),
-                    },
-                )?,
-                None => GitHubProvider::new(id, secret)?,
-            };
-            providers.push(Arc::new(github));
-        }
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("GOOGLE_CLIENT_ID"),
-            std::env::var("GOOGLE_CLIENT_SECRET"),
-        ) {
-            providers.push(Arc::new(GoogleProvider::new(id, secret)?));
-        }
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("GITLAB_CLIENT_ID"),
-            std::env::var("GITLAB_CLIENT_SECRET"),
-        ) {
-            providers.push(Arc::new(GitLabProvider::new(id, secret)?));
-        }
-        if providers.is_empty() {
-            anyhow::bail!(
-                "no providers configured (set at least one of GITHUB / GOOGLE / GITLAB CLIENT_ID + CLIENT_SECRET)"
-            );
-        }
+        let providers = providers_from_vars(
+            |name| std::env::var(name).ok(),
+            oauth_endpoints_base.as_deref(),
+        )?;
 
         Ok(Self {
             bind_addr,
@@ -372,6 +339,93 @@ impl InvalidNodeBase {
             reason,
         }
     }
+}
+
+/// What one OAuth provider's client id and client secret values amount
+/// to. Not `Debug`: `Complete` holds the client secret.
+enum OAuthClientPair {
+    /// Neither half is set: the provider is off.
+    Absent,
+    /// Both halves are set: the provider registers with them, trimmed.
+    Complete { id: String, secret: String },
+    /// Only the client secret is set.
+    MissingId,
+    /// Only the client id is set.
+    MissingSecret,
+}
+
+impl OAuthClientPair {
+    /// Classify one provider's raw values. A value that is empty or only
+    /// whitespace counts as unset: a deployment that lists every key, as
+    /// an `EnvironmentFile` template or an orchestrator secret does, sets
+    /// the ones it does not use to the empty string.
+    fn from_raw(id: Option<String>, secret: Option<String>) -> Self {
+        let set = |raw: Option<String>| {
+            raw.map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        match (set(id), set(secret)) {
+            (Some(id), Some(secret)) => Self::Complete { id, secret },
+            (None, Some(_)) => Self::MissingId,
+            (Some(_), None) => Self::MissingSecret,
+            (None, None) => Self::Absent,
+        }
+    }
+}
+
+/// Register every OAuth provider whose client pair `var` configures, and
+/// refuse a pair with only one half set. `var` is the environment lookup,
+/// a parameter so the registration rules are testable without touching
+/// the process environment.
+fn providers_from_vars(
+    var: impl Fn(&str) -> Option<String>,
+    oauth_endpoints_base: Option<&str>,
+) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
+    // A half pair is a lost secret or a typo, never a way to turn a
+    // provider off. The refusal names the variables and not the values,
+    // since either half may hold the secret.
+    let pair = |id_var: &str, secret_var: &str| match OAuthClientPair::from_raw(
+        var(id_var),
+        var(secret_var),
+    ) {
+        OAuthClientPair::Absent => Ok(None),
+        OAuthClientPair::Complete { id, secret } => Ok(Some((id, secret))),
+        OAuthClientPair::MissingId => Err(anyhow::anyhow!(
+            "{id_var} is unset or empty but {secret_var} is set; set both or neither"
+        )),
+        OAuthClientPair::MissingSecret => Err(anyhow::anyhow!(
+            "{secret_var} is unset or empty but {id_var} is set; set both or neither"
+        )),
+    };
+    let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+    if let Some((id, secret)) = pair("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")? {
+        let github = match oauth_endpoints_base {
+            Some(base) => GitHubProvider::with_endpoints(
+                id,
+                secret,
+                crate::providers::github::GitHubEndpoints {
+                    auth: format!("{base}/login/oauth/authorize"),
+                    token: format!("{base}/login/oauth/access_token"),
+                    user: format!("{base}/user"),
+                    emails: format!("{base}/user/emails"),
+                },
+            )?,
+            None => GitHubProvider::new(id, secret)?,
+        };
+        providers.push(Arc::new(github));
+    }
+    if let Some((id, secret)) = pair("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")? {
+        providers.push(Arc::new(GoogleProvider::new(id, secret)?));
+    }
+    if let Some((id, secret)) = pair("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET")? {
+        providers.push(Arc::new(GitLabProvider::new(id, secret)?));
+    }
+    if providers.is_empty() {
+        anyhow::bail!(
+            "no providers configured (set at least one of GITHUB / GOOGLE / GITLAB CLIENT_ID + CLIENT_SECRET)"
+        );
+    }
+    Ok(providers)
 }
 
 fn required_origin(name: &str) -> anyhow::Result<Url> {
@@ -590,6 +644,286 @@ mod tests {
             assert!(
                 cfg.tenant_origin_for("alice", id, "p1", bad).is_err(),
                 "{bad} must not mint"
+            );
+        }
+    }
+
+    // Sentinel values a refusal must never print: either half of an OAuth
+    // pair may be a secret.
+    const ID_SENTINEL: &str = "id-sentinel-5d1f";
+    const SECRET_SENTINEL: &str = "secret-sentinel-8a2c";
+    const OTHER_ID_SENTINEL: &str = "other-id-sentinel-3b7e";
+    const OTHER_SECRET_SENTINEL: &str = "other-secret-sentinel-9c4a";
+
+    const OAUTH_VARS: [(&str, &str); 3] = [
+        ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"),
+        ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
+        ("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET"),
+    ];
+
+    fn classify(id: Option<&str>, secret: Option<&str>) -> OAuthClientPair {
+        OAuthClientPair::from_raw(id.map(str::to_owned), secret.map(str::to_owned))
+    }
+
+    /// A variable lookup over fixed assignments where the last one wins,
+    /// as with a later systemd `EnvironmentFile`.
+    fn lookup<K: Into<String>, V: Into<String>>(
+        vars: impl IntoIterator<Item = (K, V)>,
+    ) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        move |name| {
+            vars.iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    /// The packaged `/etc/chan-gateway/identity.env` as systemd loads it:
+    /// each `KEY=VALUE` line, with comments and blank lines skipped.
+    fn packaged_identity_env() -> Vec<(String, String)> {
+        let vars: Vec<(String, String)> = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/packaging/identity.env"
+        ))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with(['#', ';']))
+        .map(|line| {
+            // systemd also unquotes values and joins continuation lines;
+            // refuse a file that needs either rather than misread it.
+            assert!(!line.ends_with('\\'), "continuation line: {line}");
+            let (key, value) = line.split_once('=').expect("KEY=VALUE line");
+            assert!(!value.starts_with(['"', '\'']), "quoted value: {line}");
+            (key.trim().to_owned(), value.trim().to_owned())
+        })
+        .collect();
+        // A parse that found nothing would make every absence check pass.
+        assert!(
+            vars.contains(&("CHAN_GATEWAY_MIGRATIONS".into(), "external".into())),
+            "the packaged identity.env did not parse"
+        );
+        vars
+    }
+
+    fn provider_names(providers: &[Arc<dyn Provider>]) -> Vec<&'static str> {
+        providers.iter().map(|provider| provider.name()).collect()
+    }
+
+    /// The refusal `providers_from_vars` gives, in the `{:?}` form the
+    /// binary logs it with, or a panic naming what it registered instead.
+    fn refusal(result: anyhow::Result<Vec<Arc<dyn Provider>>>) -> String {
+        match result {
+            Ok(providers) => panic!(
+                "expected a startup refusal, registered {:?}",
+                provider_names(&providers)
+            ),
+            Err(error) => format!("{error:?}"),
+        }
+    }
+
+    #[test]
+    fn oauth_pair_with_both_halves_unset_is_absent() {
+        assert!(matches!(classify(None, None), OAuthClientPair::Absent));
+    }
+
+    #[test]
+    fn oauth_pair_with_empty_or_blank_halves_is_absent() {
+        for (id, secret) in [
+            (Some(""), Some("")),
+            (Some("  "), Some("\t\n")),
+            (Some(""), None),
+            (None, Some(" ")),
+        ] {
+            assert!(
+                matches!(classify(id, secret), OAuthClientPair::Absent),
+                "{id:?} / {secret:?} must not configure a provider"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_pair_with_both_halves_set_is_complete() {
+        match classify(Some(ID_SENTINEL), Some(SECRET_SENTINEL)) {
+            OAuthClientPair::Complete { id, secret } => {
+                assert_eq!(id, ID_SENTINEL);
+                assert_eq!(secret, SECRET_SENTINEL);
+            }
+            _ => panic!("a pair with both halves set must be complete"),
+        }
+    }
+
+    #[test]
+    fn oauth_pair_trims_both_halves() {
+        match classify(Some(" id \n"), Some("\tsecret ")) {
+            OAuthClientPair::Complete { id, secret } => {
+                assert_eq!(id, "id");
+                assert_eq!(secret, "secret");
+            }
+            _ => panic!("a padded pair must be complete"),
+        }
+    }
+
+    #[test]
+    fn oauth_pair_with_one_half_set_names_the_missing_half() {
+        for secret in [Some(""), Some(" "), None] {
+            assert!(
+                matches!(
+                    classify(Some(ID_SENTINEL), secret),
+                    OAuthClientPair::MissingSecret
+                ),
+                "id set, secret {secret:?}"
+            );
+        }
+        for id in [Some(""), Some(" "), None] {
+            assert!(
+                matches!(
+                    classify(id, Some(SECRET_SENTINEL)),
+                    OAuthClientPair::MissingId
+                ),
+                "secret set, id {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn half_configured_provider_refuses_naming_the_empty_variable() {
+        // Both names appear in the refusal, so pin which one it calls empty.
+        let assert_refusal = |message: String, empty_var: &str| {
+            let names_empty = format!("{empty_var} is unset or empty");
+            assert!(message.contains(&names_empty), "{message}");
+            for value in [
+                ID_SENTINEL,
+                SECRET_SENTINEL,
+                OTHER_ID_SENTINEL,
+                OTHER_SECRET_SENTINEL,
+            ] {
+                assert!(!message.contains(value), "{message}");
+            }
+        };
+        for (index, &(id_var, secret_var)) in OAUTH_VARS.iter().enumerate() {
+            // Another provider is complete, so the refusal cannot be the
+            // "no providers configured" one.
+            let (other_id_var, other_secret_var) = OAUTH_VARS[(index + 1) % OAUTH_VARS.len()];
+            let other = [
+                (other_id_var, OTHER_ID_SENTINEL),
+                (other_secret_var, OTHER_SECRET_SENTINEL),
+            ];
+            for (half, empty_var) in [
+                ([(id_var, ID_SENTINEL), (secret_var, "")], secret_var),
+                ([(id_var, ID_SENTINEL), (secret_var, " ")], secret_var),
+                ([(id_var, ""), (secret_var, SECRET_SENTINEL)], id_var),
+                ([(id_var, " "), (secret_var, SECRET_SENTINEL)], id_var),
+            ] {
+                let message = refusal(providers_from_vars(
+                    lookup(other.iter().chain(&half).copied()),
+                    None,
+                ));
+                assert_refusal(message, empty_var);
+            }
+            for (half, empty_var) in [
+                ((id_var, ID_SENTINEL), secret_var),
+                ((secret_var, SECRET_SENTINEL), id_var),
+            ] {
+                let message = refusal(providers_from_vars(
+                    lookup(other.iter().copied().chain([half])),
+                    None,
+                ));
+                assert_refusal(message, empty_var);
+            }
+        }
+    }
+
+    #[test]
+    fn only_empty_oauth_pairs_refuse_with_no_providers_configured() {
+        let names = OAUTH_VARS.iter().flat_map(|&(id, secret)| [id, secret]);
+        for value in [None, Some(""), Some(" \t")] {
+            let vars: Vec<(&str, &str)> = match value {
+                None => Vec::new(),
+                Some(value) => names.clone().map(|name| (name, value)).collect(),
+            };
+            let message = refusal(providers_from_vars(lookup(vars), None));
+            assert!(
+                message.contains("no providers configured"),
+                "{value:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn stock_packaged_env_configures_no_provider() {
+        let message = refusal(providers_from_vars(lookup(packaged_identity_env()), None));
+        assert!(message.contains("no providers configured"), "{message}");
+    }
+
+    /// `GET /api/providers` on the public router, built on a closed pool
+    /// so any database access fails instead of connecting.
+    async fn api_providers(providers: Vec<Arc<dyn Provider>>) -> serde_json::Value {
+        use tower::ServiceExt;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let cfg = Config {
+            providers,
+            ..test_config("https://proxy.chan.app")
+        };
+        let (public, _internal) = crate::http::routers(
+            Arc::new(cfg),
+            tower_sessions_sqlx_store::PostgresStore::new(pool.clone()),
+            crate::api_tokens::ApiTokenService::new(pool),
+            crate::token_throttle::TokenThrottle::new(),
+        );
+        let request = axum::http::Request::get("/api/providers")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = public.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn github_only_deployment_lists_only_github() {
+        let github = [
+            ("GITHUB_CLIENT_ID".to_owned(), ID_SENTINEL.to_owned()),
+            (
+                "GITHUB_CLIENT_SECRET".to_owned(),
+                SECRET_SENTINEL.to_owned(),
+            ),
+        ];
+        let others_empty = OAUTH_VARS[1..].iter().flat_map(|&(id, secret)| {
+            [
+                (id.to_owned(), String::new()),
+                (secret.to_owned(), String::new()),
+            ]
+        });
+        for (shape, vars) in [
+            // The packaged file with an operator file setting the GitHub pair.
+            (
+                "stock file plus GitHub",
+                packaged_identity_env()
+                    .into_iter()
+                    .chain(github.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "other pairs empty",
+                others_empty.chain(github.clone()).collect(),
+            ),
+            ("other pairs unset", github.to_vec()),
+        ] {
+            let providers = providers_from_vars(lookup(vars), None).expect(shape);
+            assert_eq!(
+                api_providers(providers).await,
+                serde_json::json!({ "providers": ["github"] }),
+                "{shape}"
             );
         }
     }
