@@ -52,6 +52,7 @@ export default {
       return state;
     }
 
+    let failed = false;
     try {
       await writePaneStripPreference(page, token, true);
       await waitPaneStrip(page, "the empty pane after the preference turned on", stripHidden);
@@ -74,9 +75,20 @@ export default {
         (s) => s.side === "B" && s.tabs.length === 2 && stripShown(s));
       check(bTwoAgain.terminals === 3, `the pane should still mount three terminals; it holds ${JSON.stringify(bTwoAgain)}`);
       return { three, bOne, aTwo, bTwo, aOne, bTwoAgain };
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
-      await closeEveryTerminal(page, "cleanup", token).catch(() => {});
-      await writePaneStripPreference(page, token, original.on);
+      // A terminal or the preference left behind fails the check, unless the
+      // check has already failed; both steps run either way.
+      const errors = [];
+      await closeEveryTerminal(page, "cleanup", token).catch((error) => errors.push(error));
+      await writePaneStripPreference(page, token, original.on).catch((error) => errors.push(error));
+      if (errors.length > 0) {
+        const message = errors.map((error) => error.message).join("; ");
+        if (!failed) throw new Error(`cleanup failed: ${message}`, { cause: errors[0] });
+        console.log(`[smoke]   cleanup failed after the check's failure: ${message}`);
+      }
     }
   },
 };
