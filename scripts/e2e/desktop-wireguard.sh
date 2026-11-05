@@ -41,7 +41,9 @@
 #
 # Needs xvfb-run and curl. Exits 2 when a prerequisite is missing rather
 # than passing. Everything runs under a throwaway CHAN_HOME, HOME,
-# XDG_RUNTIME_DIR and TMPDIR; the work dir is deleted on success and kept
+# XDG_RUNTIME_DIR and TMPDIR, with no Wayland display and GTK held to X11,
+# so the desktop renders on the Xvfb display only and never on the
+# caller's compositor; the work dir is deleted on success and kept
 # on failure. The kept work dir holds the run's client file with a private
 # key that is worthless once the peer process is gone, which the exit path
 # ends, but treat it as a credential until it is deleted.
@@ -101,6 +103,25 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # A test launched from inside a chan terminal must not inherit session
 # state, handoff hints, or credentials.
 for v in $(compgen -v | grep -E '^CHAN_' | grep -vE '^CHAN_(HOME|BIN|DESKTOP_BIN)$'); do unset "$v"; done
+# The caller's Wayland session: WAYLAND_DISPLAY may be an absolute socket
+# path and WAYLAND_SOCKET an inherited descriptor, and either would put the
+# desktop and its webviews on the caller's compositor instead of Xvfb.
+unset WAYLAND_DISPLAY WAYLAND_SOCKET
+export GDK_BACKEND=x11
+# The desktop publishes its handoff socket, and the chan processes here
+# discover devservers, in XDG_RUNTIME_DIR. The caller's own
+# (/run/user/<uid>) holds their live desktop's and devserver's sockets, so
+# refuse to start anything unless it is a private directory.
+private_runtime_dir_reason() {
+    local dir="${XDG_RUNTIME_DIR:-}" actual own
+    [ -n "$dir" ] || { echo "XDG_RUNTIME_DIR is unset"; return; }
+    actual="$(realpath -e -- "$dir" 2>/dev/null)" || { echo "XDG_RUNTIME_DIR=$dir does not exist"; return; }
+    own="/run/user/$(id -u)"
+    own="$(realpath -e -- "$own" 2>/dev/null || echo "$own")"
+    [ "$actual" != "$own" ] || echo "XDG_RUNTIME_DIR=$dir is this user's own runtime directory ($own)"
+}
+reason="$(private_runtime_dir_reason)"
+[ -z "$reason" ] || refuse "$reason"
 export CHAN_UPDATE_CHECK=0
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
