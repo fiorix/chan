@@ -7,6 +7,12 @@
 // preference can store; each arm types a marker before and after and reads
 // the PTY's scrollback for the shell's answer, which is the only proof that
 // keys reach the program.
+//
+// Toggle group broadcast spans the group across every window of the tenant,
+// and the suite's server keeps other checks' terminals, so a toggle in the
+// default group would also reach terminals this check does not own. Each
+// arm's terminal is the only member of a group of its own, read back from the
+// server's roster before the toggle.
 
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
@@ -97,13 +103,46 @@ async function typeLine(page, line) {
   await page.keyboard.press("Enter");
 }
 
+/// The live sessions the server's terminal roster lists in a group.
+async function groupSessions(page, token, group) {
+  return page.evaluate(async (authToken, wanted) => {
+    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
+    const response = await fetch(`${prefix}/api/terminals/roster`, {
+      headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+    });
+    if (!response.ok) throw new Error(`GET /api/terminals/roster -> ${response.status}`);
+    const { sessions = [] } = await response.json();
+    return sessions
+      .filter((session) => session.tab_group === wanted)
+      .map((session) => ({ name: session.tab_name, window: session.window_id, broadcast: session.broadcast }));
+  }, token, group);
+}
+
+/// Wait until the group holds this one session, so a group toggle reaches
+/// nothing but the terminal under test.
+async function waitSoleMember(page, token, group, name, label) {
+  const deadline = Date.now() + 10_000;
+  let members = [];
+  while (Date.now() < deadline) {
+    members = await groupSessions(page, token, group);
+    if (members.length === 1 && members[0].name === name) return;
+    await pause(200);
+  }
+  throw new Error(`${label}: group ${group} should hold only ${name}; the roster lists ${JSON.stringify(members)}`);
+}
+
 /// Turn the active terminal's broadcast off when its marker shows.
-async function broadcastOff(page) {
+async function broadcastOff(page, token, group) {
   if (!(await page.$(BROADCAST_MARKER))) return;
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.broadcastToggle" } })),
   );
-  await page.waitForSelector(BROADCAST_MARKER, { hidden: true, timeout: 10_000 });
+  try {
+    await page.waitForSelector(BROADCAST_MARKER, { hidden: true, timeout: 10_000 });
+  } catch (cause) {
+    const members = await groupSessions(page, token, group).catch((error) => error.message);
+    throw new Error(`the broadcast marker stayed on after Toggle group broadcast; group ${group} lists ${JSON.stringify(members)}`, { cause });
+  }
 }
 
 async function tabGone(page, name) {
@@ -136,10 +175,12 @@ export default {
     const opened = [];
     try {
       for (const engine of ["xterm", "ghostty"]) {
+        // The tab's name doubles as its group's.
         const name = `LauncherFocus203${engine}`;
         await writeTerminalPrefs(page, token, { ghostty: engine === "ghostty" });
-        await openAttachedTerminal(ctx, page, cs, windowId, name, engine);
+        await openAttachedTerminal(ctx, page, cs, windowId, name, engine, ["--tab-group", name]);
         opened.push(name);
+        await waitSoleMember(page, token, name, name, `${engine}: before Toggle group broadcast`);
         // The keyboard starts in the terminal the way a user's does: by a click.
         await page.click(engine === "ghostty"
           ? ".terminal-tab.active .terminal-host canvas"
@@ -181,7 +222,7 @@ export default {
         await waitForScrollback(cs, name, `PROMPT_${engine}_OK`, `${engine}: typed after the prompt closed`);
         await ctx.shot(`203-${engine}-after-prompt`);
 
-        await broadcastOff(page);
+        await broadcastOff(page, token, name);
         details.arms.push(arm);
         console.log(`[smoke]   arm ${JSON.stringify(arm)}`);
         // The tab leaves the page before the engine switches, or the saved
@@ -195,7 +236,7 @@ export default {
     } finally {
       // Broadcast off again before a terminal goes, the state as found; a
       // closed terminal takes its flag with it either way.
-      await broadcastOff(page).catch(() => {});
+      if (opened.length > 0) await broadcastOff(page, token, opened.at(-1)).catch(() => {});
       for (const name of opened.reverse()) {
         await cs(["close", "--tab-name", name]).catch(() => {});
       }
