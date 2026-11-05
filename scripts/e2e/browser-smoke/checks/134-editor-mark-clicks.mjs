@@ -1,5 +1,11 @@
 // Real pointer placement at the visible end of rendered Markdown marks.
 // Each click types a character to pin which side of the hidden tail owns it.
+// A plain press on an external link or autolink edits its target instead
+// (external_links.ts): the caret lands at the end of the URL wherever on the
+// label the press falls. Those rows expect the URL's end, read from the
+// document, and press the last glyph's centre: the handler acts only on a
+// press inside the link's element, and whether a press a pixel inside the
+// glyph's edge stays inside depends on the host's fonts.
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,11 +23,22 @@ const ROWS = [
   { kind: "italic", line: 5, inner: 58, outer: 59, rowEnd: 65, style: "cm-md-italic", contentStart: 52 },
   { kind: "code", line: 6, inner: 73, outer: 74, rowEnd: 74, style: "cm-md-code", contentStart: 67 },
   { kind: "code", line: 7, inner: 82, outer: 83, rowEnd: 89, style: "cm-md-code", contentStart: 76 },
-  { kind: "link", line: 8, inner: 96, outer: 119, rowEnd: 119, style: "cm-md-link", contentStart: 91 },
-  { kind: "link", line: 9, inner: 126, outer: 149, rowEnd: 155, style: "cm-md-link", contentStart: 121 },
-  { kind: "autolink", line: 10, inner: 177, outer: 178, rowEnd: 178, style: "cm-md-link", contentStart: 157 },
+  { kind: "link", line: 8, inner: 96, outer: 119, rowEnd: 119, style: "cm-md-link", contentStart: 91, url: true },
+  { kind: "link", line: 9, inner: 126, outer: 149, rowEnd: 155, style: "cm-md-link", contentStart: 121, url: true },
+  { kind: "autolink", line: 10, inner: 177, outer: 178, rowEnd: 178, style: "cm-md-link", contentStart: 157, url: true },
   { kind: "strike", line: 11, inner: 186, outer: 188, rowEnd: 188, style: "cm-md-strike", contentStart: 181 },
 ];
+
+/// Where the target of the link or autolink on `line` ends: the offset of
+/// its closing `)` or `>`, which is the end of the URL.
+function urlEnd(line) {
+  const lines = DOC.split("\n");
+  const text = lines[line - 1];
+  const target = /\]\([^)]+\)|<[^>]+>/.exec(text ?? "");
+  if (!target) throw new Error(`row ${line} carries no link target: ${text}`);
+  const lineStart = lines.slice(0, line - 1).reduce((offset, previous) => offset + previous.length + 1, 0);
+  return lineStart + target.index + target[0].length - 1;
+}
 
 async function resetAndPoint(page, row, kind) {
   await page.bringToFront();
@@ -55,6 +72,7 @@ async function resetAndPoint(page, row, kind) {
     const y = box.top + box.height / 2;
     const x = kind === "inside" ? box.left + box.width / 4
       : kind === "blank" ? Math.min(box.right + 160, contentBox.right - 250)
+      : row.url ? box.left + box.width / 2
       : box.right - Math.min(1, box.width / 10);
     return { x, y, lineText: line.textContent, hit: view.posAtCoords({ x, y }) };
   }, { row, kind, doc: DOC, selector: EDITOR });
@@ -107,7 +125,7 @@ export default {
         await page.mouse.click(point.x, point.y);
         const atClick = await selection(page);
         const afterType = await typeAtSelection(page);
-        const expected = kind === "glyph" ? row.outer : row.rowEnd;
+        const expected = kind === "blank" ? row.rowEnd : row.url ? urlEnd(row.line) : row.outer;
         const ok = atClick.empty && atClick.head === expected && afterType.doc === insertedAt(expected);
         const reading = { row: row.line, mark: row.kind, kind, point, expected, atClick, afterType: { head: afterType.head, doc: afterType.doc }, ok };
         readings.push(reading);
