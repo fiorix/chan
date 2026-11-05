@@ -173,8 +173,28 @@ JSON
 
 # 3. The desktop, headless.
 xvfb-run -a "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
-PIDS+=("$!")
+XVFB_RUN_PID=$!
+PIDS+=("$XVFB_RUN_PID")
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
+
+# `chan serve` hands a workspace to the desktop only when its own
+# environment names a display, and xvfb-run gives one to the desktop
+# alone; without it serve starts a standalone server that never returns.
+# The CLI calls below take the desktop's display, read from its process.
+desktop_display() {
+    local child bin
+    bin="$(readlink -f "$CHAN_DESKTOP_BIN")"
+    for child in $(pgrep -P "$XVFB_RUN_PID" || true); do
+        [ "$(readlink -f "/proc/$child/exe" 2>/dev/null || true)" = "$bin" ] || continue
+        tr '\0' '\n' < "/proc/$child/environ" | sed -n 's/^DISPLAY=//p'
+        return 0
+    done
+    return 1
+}
+DISPLAY="$(desktop_display)" || fail "no chan-desktop process under xvfb-run (pid $XVFB_RUN_PID)"
+[ -n "$DISPLAY" ] || fail "the desktop's environment names no DISPLAY"
+export DISPLAY
+log "the desktop runs on display $DISPLAY"
 
 if [ "$UNRESOLVED" = 1 ]; then
     arm_rc=0
@@ -234,9 +254,12 @@ verdict probes "$arm_rc" "forward answered $FORWARD, CONNECT answered $CONNECT, 
 # window: a workspace window through the proxied webview. Its page and
 # assets are plain forwards to the embedded origin, and the SPA's socket is
 # an absolute-form upgrade the proxy bridges; the server's 101 on the
-# socket route only happens once the page ran. The desktop opens a window
-# of its own at start, so the count of sockets answered must grow past
-# what was there before the serve.
+# socket route only happens once the page ran. The desktop's own windows
+# open and redial sockets on their own schedule, so a count of sockets
+# proves nothing about this one: the arm needs serve's handoff line, a
+# window the desktop opened after it (its label is `local::` and the
+# window id), and a 101 on the socket that window's page tags with that
+# id (`w=`).
 WS_101='uri=/ws[ ?].*status=101'
 arm_rc=0
 WS="$WORK/ws"
@@ -245,13 +268,25 @@ printf '# note\n' > "$WS/a.md"
 wait_for 30 "chan workspace ls to answer" "$CHAN_BIN" workspace ls >/dev/null || arm_rc=1
 BEFORE_WS="$(count "$WS_101")"
 BEFORE_BRIDGED="$(count 'proxy upgrade bridged')"
-"$CHAN_BIN" serve "$WS" > "$WORK/serve.out" 2>&1 || { arm_rc=1; log "serve: $(cat "$WORK/serve.out")"; }
-ws_grew() { [ "$(count "$WS_101")" -gt "$BEFORE_WS" ]; }
+window_labels() { desktop_log; sed -n 's/.*WINGEO resolve label=\(local::w-[0-9a-f]*\) .*/\1/p' "$CLEAN" | sort -u; }
+window_labels > "$WORK/labels.before"
+set +e
+timeout 60 "$CHAN_BIN" serve "$WS" > "$WORK/serve.out" 2>&1
+serve_rc=$?
+set -e
+[ "$serve_rc" = 0 ] || { arm_rc=1; log "serve rc=$serve_rc (124 is the 60 s bound): $(cat "$WORK/serve.out")"; }
+grep -qE '^chan: opened .*/ws in chan-desktop\.$' "$WORK/serve.out" || arm_rc=1
+SERVED=""
+served_window_opened() { SERVED="$(window_labels | comm -13 "$WORK/labels.before" - | head -1)"; [ -n "$SERVED" ]; }
+served_socket_answered() { [ -n "$SERVED" ] && logged "uri=/ws\\?([^ ]*&)?w=${SERVED#local::}(&| ).*status=101"; }
 bridged_grew() { [ "$(count 'proxy upgrade bridged')" -gt "$BEFORE_BRIDGED" ]; }
+wait_for 60 "the served window" served_window_opened || arm_rc=1
 wait_for 60 "the window's page through the proxy" logged 'forwarding.*target=127\.0\.0\.1:[0-9]+ route="direct"' || arm_rc=1
-wait_for 60 "the served window's socket answered 101" ws_grew || arm_rc=1
+wait_for 60 "the served window's socket answered 101" served_socket_answered || arm_rc=1
 wait_for 10 "the served window's upgrade bridged at the proxy" bridged_grew || arm_rc=1
-verdict window "$arm_rc" "serve: $(tr '\n' ' ' < "$WORK/serve.out" | cut -c1-80); /ws sockets answered 101 $BEFORE_WS -> $(count "$WS_101"), upgrades bridged $BEFORE_BRIDGED -> $(count 'proxy upgrade bridged')"
+SERVED_SOCKET=no
+served_socket_answered && SERVED_SOCKET=yes
+verdict window "$arm_rc" "serve rc=$serve_rc: $(tr '\n' ' ' < "$WORK/serve.out" | cut -c1-80); served window ${SERVED:-none}, its /ws answered 101: $SERVED_SOCKET; /ws 101s $BEFORE_WS -> $(count "$WS_101"), upgrades bridged $BEFORE_BRIDGED -> $(count 'proxy upgrade bridged')"
 
 # launcher: its sockets (`/api/library/local-theme/watch`, one per panel)
 # are served by the launcher router, the embedded server's root fallback
