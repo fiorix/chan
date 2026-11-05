@@ -21,7 +21,7 @@
 #               returns the file.
 #   keepalive   with PersistentKeepalive the peer's receive counter grows
 #               while the tunnel carries no connection.
-#   devserver   `chan devserver run --tunnel-wireguard` logs the tunnel up
+#   devserver   `chan devserver run --tunnel-wireguard` logs the tunnel start
 #               and its h2 dial reaches a raw listener on the peer's tunnel
 #               address with the HTTP/2 connection preface, through the
 #               devserver, the connector, the stack and the kernel. The
@@ -508,7 +508,7 @@ run_devserver() {
     DEVSERVER_PID=$!
     HOST_PIDS+=("$DEVSERVER_PID")
 }
-tunnel_up_logged() { grep -q "^chan devserver: WireGuard tunnel up from $1: endpoint .*, public key $CLIENT_PUB$" "$2"; }
+tunnel_start_logged() { grep -q "^chan devserver: WireGuard tunnel started from $1: endpoint .*, public key $CLIENT_PUB$" "$2"; }
 
 if runs devserver; then
     arm_rc=0
@@ -516,15 +516,15 @@ if runs devserver; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         run_devserver "$WORK/devserver.log" "$WORK/client.conf"
-        wait_for 60 "the tunnel-up line" tunnel_up_logged "$WORK/client.conf" "$WORK/devserver.log" || arm_rc=1
+        wait_for 60 "the tunnel-start line" tunnel_start_logged "$WORK/client.conf" "$WORK/devserver.log" || arm_rc=1
         wait_for 60 "the raw listener to see the dial" peer_has_capture devserver || arm_rc=1
         capture="$(peer_capture devserver)"
         after="$(peer_handshake)"
         kill "$DEVSERVER_PID" 2>/dev/null || true
         case "$capture" in "$H2_PREFACE_HEX"*) ;; *) arm_rc=1 ;; esac
         [ "$after" != "0" ] && [ "$after" != "$before" ] || arm_rc=1
-        verdict devserver "$arm_rc" "tunnel-up logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
+        verdict devserver "$arm_rc" "tunnel start logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver 1 "the raw listener did not start on the peer"
@@ -538,7 +538,7 @@ if runs devserver-wrong-key; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         run_devserver "$WORK/devserver-wrong-key.log" "$WORK/client-wrong-key.conf"
-        wait_for 60 "the tunnel-up line" tunnel_up_logged "$WORK/client-wrong-key.conf" "$WORK/devserver-wrong-key.log" || arm_rc=1
+        wait_for 60 "the tunnel-start line" tunnel_start_logged "$WORK/client-wrong-key.conf" "$WORK/devserver-wrong-key.log" || arm_rc=1
         # The dial has 20 s to reach the listener; with a wrong key it must not.
         sleep 20
         capture="$(peer_capture devserver-wrong-key)"
@@ -547,8 +547,8 @@ if runs devserver-wrong-key; then
         [ "$capture" = absent ] || arm_rc=1
         [ "$before" = "$after" ] || arm_rc=1
         ! grep -q 'tunnel connected' "$WORK/devserver-wrong-key.log" || arm_rc=1
-        verdict devserver-wrong-key "$arm_rc" "tunnel-up logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
+        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver-wrong-key 1 "the raw listener did not start on the peer"

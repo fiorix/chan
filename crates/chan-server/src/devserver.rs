@@ -3793,7 +3793,7 @@ async fn start_wireguard_tunnel(
     let endpoint = config.peer.endpoint.to_string();
     let tunnel = chan_wireguard::Tunnel::start(config)?;
     eprintln!(
-        "chan devserver: WireGuard tunnel up from {}: endpoint {endpoint}, public key {public_key}",
+        "chan devserver: WireGuard tunnel started from {}: endpoint {endpoint}, public key {public_key}",
         path.display()
     );
     Ok(tunnel)

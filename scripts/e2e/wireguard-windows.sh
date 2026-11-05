@@ -720,10 +720,10 @@ Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.err" -ErrorAction SilentlyContinu
 PS
     strip_cr "$WORK/$1.log"
 }
-tunnel_up_logged() {
-    # tunnel_up_logged <name> <client file name>
+tunnel_start_logged() {
+    # tunnel_start_logged <name> <client file name>
     devserver_log "$1"
-    grep -qF "chan devserver: WireGuard tunnel up from $CLIENT_DIR\\$2: endpoint " "$WORK/$1.log" \
+    grep -qF "chan devserver: WireGuard tunnel started from $CLIENT_DIR\\$2: endpoint " "$WORK/$1.log" \
         && grep -qF "public key $CLIENT_PUB" "$WORK/$1.log"
 }
 
@@ -734,7 +734,7 @@ if runs devserver; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         if start_devserver devserver client.conf; then
-            wait_for 60 "the tunnel-up line" tunnel_up_logged devserver client.conf || arm_rc=1
+            wait_for 60 "the tunnel-start line" tunnel_start_logged devserver client.conf || arm_rc=1
             wait_for 60 "the raw listener to see the dial" peer_has_capture devserver || arm_rc=1
         else
             arm_rc=1
@@ -745,8 +745,8 @@ if runs devserver; then
         devserver_log devserver
         case "$capture" in "$H2_PREFACE_HEX"*) ;; *) arm_rc=1 ;; esac
         [ "$after" != "0" ] && [ "$after" != "$before" ] || arm_rc=1
-        verdict devserver "$arm_rc" "tunnel-up logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
+        verdict devserver "$arm_rc" "tunnel start logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver 1 "the raw listener did not start on the peer"
@@ -760,7 +760,7 @@ if runs devserver-wrong-key; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         if start_devserver devserver-wrong-key client-wrong-key.conf; then
-            wait_for 60 "the tunnel-up line" tunnel_up_logged devserver-wrong-key client-wrong-key.conf || arm_rc=1
+            wait_for 60 "the tunnel-start line" tunnel_start_logged devserver-wrong-key client-wrong-key.conf || arm_rc=1
             # The dial has 20 s to reach the listener; with a wrong key it must not.
             sleep 20
         else
@@ -773,8 +773,8 @@ if runs devserver-wrong-key; then
         [ "$capture" = absent ] || arm_rc=1
         [ "$before" = "$after" ] || arm_rc=1
         ! grep -q 'tunnel connected' "$WORK/devserver-wrong-key.log" || arm_rc=1
-        verdict devserver-wrong-key "$arm_rc" "tunnel-up logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
+        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver-wrong-key 1 "the raw listener did not start on the peer"
