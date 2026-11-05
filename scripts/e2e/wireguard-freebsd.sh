@@ -434,10 +434,16 @@ run_hold_arm() {
     # run_hold_arm <name> <client file> <hold secs> <since> [example
     # args...]: the example on the client with an idle hold, sampled on the
     # peer until it ends, the peer's journal captured after. Sets HOLD_RC
-    # and HOLD_AT.
+    # and HOLD_AT, and HOLD_PRIOR: every client file carries the same key,
+    # so until this arm's first handshake the peer still shows the previous
+    # arm's stamp, read here before the launch; samples showing it are not
+    # this arm's.
     local name="$1" file="$2" hold="$3" since="$4" example_pid sampler
     shift 4
     : > "$WORK/$name.samples"; : > "$WORK/$name.hold"
+    # Stamps are whole seconds: one passes first, so this arm's first
+    # handshake cannot carry the prior stamp.
+    HOLD_PRIOR="$(peer_handshake)"; sleep 1
     ssh_to $((hold + 150)) "$CLIENT_SSH" CLIENT_SSH_OPTS \
         "timeout $((hold + 120)) $(quoted "$CLIENT_WG_CONNECT" "$CLIENT_WORK/$file" "$PEER_IP:$HTTP_PORT" /hello.txt --hold "$hold" "$@"); echo rc=\$?" > "$WORK/$name.out" 2>&1 &
     example_pid=$!
@@ -464,14 +470,15 @@ run_hold_arm() {
 # tick's resolution, so that is which side of a tick the first exchange
 # fell on); when it is not, the second GET's data sets the rekey off and
 # the settle gives it time to complete. The arm accepts both. A sample
-# taken before the first handshake reads 0 and is not a stamp.
+# taken before this arm's first handshake reads 0 or the prior arm's stamp
+# and is not this arm's.
 SETTLE=3
 if runs rekey; then
     run_hold_arm rekey client.conf "$HOLD" "$(peer_now)" --settle "$SETTLE"
     rc="$HOLD_RC"
-    first="$(awk '$2 != 0 { print $2; exit }' "$WORK/rekey.samples")"
+    first="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2; exit }' "$WORK/rekey.samples")"
     last="$(awk 'END { print $2 }' "$WORK/rekey.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
     received="$(grep -c 'Receiving handshake initiation' "$WORK/rekey.journal" || true)"
     retries="$(grep -c 'Retrying handshake' "$WORK/rekey.journal" || true)"
     ago="$(sed -n 's/^status after hold: handshake \([0-9.]*\)s ago.*/\1/p' "$WORK/rekey.out")"
@@ -484,7 +491,7 @@ if runs rekey; then
     [ -n "$first" ] && [ -n "$last" ] && [ $((last - first)) -ge 100 ] || arm_rc=1
     [ -n "$fresh" ] && [ "${fresh%.*}" -lt $((HOLD - 100)) ] || arm_rc=1
     [ "$received" -ge 2 ] && [ "$retries" = 0 ] || arm_rc=1
-    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct), handshake ${ago:-?}s old at the second GET and ${fresh:-?}s old at exit, journal: $received initiation(s), $retries retry, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
+    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct after the prior arm's ${HOLD_PRIOR:-none}), handshake ${ago:-?}s old at the second GET and ${fresh:-?}s old at exit, journal: $received initiation(s), $retries retry, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
     { grep -E '^(status|hold|settle|response)' "$WORK/rekey.out"; sed 's/^/    sample /' "$WORK/rekey.samples"; peer_wg_show rekey; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/rekey.out" >&2
 fi
@@ -499,14 +506,14 @@ if runs keepalive; then
     # counted): the growth between them is keepalives alone, 32 bytes each.
     early="$(awk -v t="$((hold_at + 8))" '$1 >= t { print $3; exit }' "$WORK/keepalive.samples")"
     late="$(awk -v t="$((hold_at + KEEPALIVE_HOLD - 5))" '$1 <= t { v = $3 } END { print v }' "$WORK/keepalive.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/keepalive.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2 }' "$WORK/keepalive.samples" | sort -u | wc -l)"
     keepalives="$(grep -c 'Receiving keepalive packet' "$WORK/keepalive.journal" || true)"
     arm_rc=0
     [ "$rc" = 0 ] && [ "$(body_sha "$WORK/keepalive.out" 2)" = "$HELLO_SHA" ] || arm_rc=1
     [ "$hold_at" != 0 ] && [ -n "$early" ] && [ -n "$late" ] && [ "$late" -ge $((early + 32)) ] || arm_rc=1
     [ "$stamps" = 1 ] || arm_rc=1
     [ "$keepalives" -ge 1 ] || arm_rc=1
-    verdict keepalive "$arm_rc" "rc=$rc, peer received $early -> $late bytes across the idle hold (+$((${late:-0} - ${early:-0})), a keepalive is 32), $stamps handshake stamp(s), journal: $keepalives keepalive(s)"
+    verdict keepalive "$arm_rc" "rc=$rc, peer received $early -> $late bytes across the idle hold (+$((${late:-0} - ${early:-0})), a keepalive is 32), $stamps handshake stamp(s) after the prior arm's ${HOLD_PRIOR:-none}, journal: $keepalives keepalive(s)"
     { grep -E '^(status|hold|response)' "$WORK/keepalive.out"; sed 's/^/    sample /' "$WORK/keepalive.samples"; peer_wg_show keepalive; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/keepalive.out" >&2
 fi

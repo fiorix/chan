@@ -432,8 +432,15 @@ hold_started() {
 run_hold_arm() {
     # run_hold_arm <name> <client file> <hold secs>: the example with a hold,
     # sampled on the peer until it ends; the example's rc lands in HOLD_RC.
+    # Every client file carries the same key, so until this arm's first
+    # handshake the peer still shows the previous arm's stamp; it is read
+    # before the launch into HOLD_PRIOR, and samples showing it are not
+    # this arm's.
     local name="$1" file="$2" hold="$3" example_pid sampler rc
     : > "$WORK/$name.samples"; : > "$WORK/$name.hold"
+    # Stamps are whole seconds: one passes first, so this arm's first
+    # handshake cannot carry the prior stamp.
+    HOLD_PRIOR="$(peer_handshake)"; sleep 1
     set +e
     timeout $((hold + 120)) "$WG_CONNECT_BIN" "$file" "$PEER_IP:$HTTP_PORT" /hello.txt --hold "$hold" > "$WORK/$name.out" 2>&1 &
     example_pid=$!
@@ -454,10 +461,11 @@ run_hold_arm() {
 if runs rekey; then
     run_hold_arm rekey "$WORK/client.conf" "$HOLD"
     rc="$HOLD_RC"
-    # A sample taken before the first handshake reads 0 and is not a stamp.
-    first="$(awk '$2 != 0 { print $2; exit }' "$WORK/rekey.samples")"
+    # A sample taken before this arm's first handshake reads 0 or the prior
+    # arm's stamp, and is not this arm's.
+    first="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2; exit }' "$WORK/rekey.samples")"
     last="$(awk 'END { print $2 }' "$WORK/rekey.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
     arm_rc=0
     [ "$rc" = 0 ] || arm_rc=1
     [ "$(body_sha "$WORK/rekey.out" 2)" = "$HELLO_SHA" ] || arm_rc=1
@@ -468,7 +476,7 @@ if runs rekey; then
     [ -n "$first" ] && [ -n "$last" ] && [ $((last - first)) -ge 100 ] || arm_rc=1
     ago="$(sed -n 's/^status after hold: handshake \([0-9.]*\)s ago.*/\1/p' "$WORK/rekey.out")"
     [ -n "$ago" ] && [ "${ago%.*}" -lt $((HOLD - 100)) ] || arm_rc=1
-    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct), client saw the handshake ${ago:-?}s before the second GET, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
+    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct after the prior arm's ${HOLD_PRIOR:-none}), client saw the handshake ${ago:-?}s before the second GET, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
     { grep -E '^(status|hold|response)' "$WORK/rekey.out"; sed 's/^/    sample /' "$WORK/rekey.samples"; peer_wg_show; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/rekey.out" >&2
 fi
@@ -483,12 +491,12 @@ if runs keepalive; then
     # counted): the growth between them is keepalives alone.
     early="$(awk -v t="$((hold_at + 8))" '$1 >= t { print $3; exit }' "$WORK/keepalive.samples")"
     late="$(awk -v t="$((hold_at + KEEPALIVE_HOLD - 5))" '$1 <= t { v = $3 } END { print v }' "$WORK/keepalive.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/keepalive.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2 }' "$WORK/keepalive.samples" | sort -u | wc -l)"
     arm_rc=0
     [ "$rc" = 0 ] && [ "$(body_sha "$WORK/keepalive.out" 2)" = "$HELLO_SHA" ] || arm_rc=1
     [ "$hold_at" != 0 ] && [ -n "$early" ] && [ -n "$late" ] && [ "$late" -ge $((early + 32)) ] || arm_rc=1
     [ "$stamps" = 1 ] || arm_rc=1
-    verdict keepalive "$arm_rc" "rc=$rc, peer received $early -> $late bytes across the idle hold (+$((${late:-0} - ${early:-0})), a keepalive is 32), $stamps handshake stamp(s) seen"
+    verdict keepalive "$arm_rc" "rc=$rc, peer received $early -> $late bytes across the idle hold (+$((${late:-0} - ${early:-0})), a keepalive is 32), $stamps handshake stamp(s) seen after the prior arm's ${HOLD_PRIOR:-none}"
     { grep -E '^(status|hold|response)' "$WORK/keepalive.out"; sed 's/^/    sample /' "$WORK/keepalive.samples"; peer_wg_show; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/keepalive.out" >&2
 fi

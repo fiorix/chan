@@ -539,7 +539,10 @@ fi
 # the session and equal stamps count, so the rekey is on the client's clock
 # every time, not only when a tick split the first exchange. The kernel, the
 # responder, never re-handshakes on its own: its log for the hold holds no
-# retry, and the keepalives it received are counted.
+# retry, and the keepalives it received are counted. The client key is the
+# same in every arm, so until this arm's first handshake the peer still
+# shows the previous arm's stamp: it is read before the launch, and samples
+# still showing it are not this arm's.
 sample_peer_during() {
     # sample_peer_during <pid> <samples file>: until the pid ends.
     local pid="$1" out="$2" sample
@@ -560,6 +563,9 @@ hold_started() {
 if runs rekey; then
     : > "$WORK/rekey.samples"; : > "$WORK/rekey.hold"
     rekey_since=$(( $(date +%s) - 5 ))
+    # Stamps are whole seconds: one passes first, so this arm's first
+    # handshake cannot carry the prior stamp.
+    prior="$(peer_handshake)"; sleep 1
     set +e
     client_ps $((HOLD + 120)) > "$WORK/rekey.out" <<PS &
 & "$CLIENT_DIR\wg-connect.exe" "$CLIENT_DIR\client-keepalive.conf" "$PEER_IP:$HTTP_PORT" /hello.txt --hold $HOLD
@@ -584,10 +590,11 @@ PS
     retries="$(grep -c 'Retrying handshake' "$WORK/rekey.journal" || true)"
     keepalives="$(grep -c 'Receiving keepalive packet' "$WORK/rekey.journal" || true)"
     hold_at="$(cat "$WORK/rekey.hold" 2>/dev/null || echo 0)"
-    # A sample taken before the first handshake reads 0 and is not a stamp.
-    first="$(awk '$2 != 0 { print $2; exit }' "$WORK/rekey.samples")"
+    # A sample taken before this arm's first handshake reads 0 or the prior
+    # stamp, and is not this arm's.
+    first="$(awk -v prior="$prior" '$2 != 0 && $2 != prior { print $2; exit }' "$WORK/rekey.samples")"
     last="$(awk 'END { print $2 }' "$WORK/rekey.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$prior" '$2 != 0 && $2 != prior { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
     # Receive counters at least 8 s into the hold (the first GET's bytes
     # have all landed) and before its last 5 s (the second GET is not yet
     # counted): the growth between them is keepalives and the rekey alone.
@@ -607,7 +614,7 @@ PS
     [ "$hold_at" != 0 ] && [ -n "$early" ] && [ -n "$late" ] && [ "$late" -ge $((early + 96)) ] || arm_rc=1
     # The kernel never retried a handshake, and it saw the keepalives.
     [ "$retries" = 0 ] && [ "$keepalives" -ge 3 ] || arm_rc=1
-    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct), client saw the handshake ${ago:-?}s before the second GET, peer received $early -> $late bytes while idle (+$((${late:-0} - ${early:-0})), a keepalive is 32), kernel log: $retries handshake retries, $keepalives keepalives, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
+    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct after the prior arm's ${prior:-none}), client saw the handshake ${ago:-?}s before the second GET, peer received $early -> $late bytes while idle (+$((${late:-0} - ${early:-0})), a keepalive is 32), kernel log: $retries handshake retries, $keepalives keepalives, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
     { grep -E '^(status|hold|response)' "$WORK/rekey.out"; sed 's/^/    sample /' "$WORK/rekey.samples"; sed 's/^/    kernel /' "$WORK/rekey.journal"; peer_wg_show; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/rekey.out" >&2
 fi
