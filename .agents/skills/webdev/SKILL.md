@@ -143,6 +143,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
   - `graph/workspaceSearchParity.test.ts` reads its JSON fixtures.
   - `state/desktopBridgeLayout.test.ts`: the desktop's injected keyboard scripts follow the same layout contract as the workspace app's `shortcutKey` over the shared layout vectors. It runs the key bridge and the launcher's bridge from `desktop/src-tauri/src/key_bridge.js` and `launcher_bridge.js`, which the desktop includes with `include_str!`, and the connecting page from `desktop/src/connecting.js` and `connecting.html`.
   - `state/keyboardLayout.test.ts`: the key bridge dispatches a letter chord by the layout's letter; it runs `key_bridge.js`.
+  - `state/shortcuts.inspector.test.ts`: the inspector chord a menu shows is the chord the key bridge opens the inspector on; it runs `key_bridge.js`.
   - `state/extensionRelayLayout.test.ts`: the echo extension's keyboard relay forwards exactly the keydowns chan's validation accepts; it runs the script blocks of `crates/chan-server/examples/echo-extension.html`, the page the example serves.
 - No assertion on comment text. A comment is documentation; rewording it to follow the writing rules must never turn the suite red.
 - No absence assertion on an identifier that exists nowhere in the tree: a `not.toMatch` on a name nobody spells passes against an empty file and cannot fail for a real reason. A negative stays only where it guards a shape someone could plausibly re-add and no positive assertion can express it.
