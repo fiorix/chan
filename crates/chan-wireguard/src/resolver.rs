@@ -70,6 +70,11 @@ impl Resolver {
         self.deadline = None;
     }
 
+    /// A lookup started and has not returned yet.
+    pub(crate) fn outstanding(&self) -> bool {
+        self.task.is_some()
+    }
+
     /// A lookup outlived its deadline and still holds the OS call, so no
     /// other lookup can start until it returns.
     pub(crate) fn stalled(&self) -> bool {

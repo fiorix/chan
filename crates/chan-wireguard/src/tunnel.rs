@@ -136,10 +136,10 @@ impl Tunnel {
 
     /// Start the driver over a socket the caller bound, towards an
     /// endpoint the caller resolved. The driver still looks the configured
-    /// name up before initiations: the caller's endpoint stands as the
-    /// previous answer, so it is used while lookups fail and a lookup
-    /// answering it is no change. Must be called within a tokio runtime,
-    /// which the driver task runs on.
+    /// name up on initiations: the caller's endpoint stands as the previous
+    /// answer, so it is used while lookups fail and a lookup answering it
+    /// is no change. Must be called within a tokio runtime, which the
+    /// driver task runs on.
     pub fn start_on(config: Config, socket: UdpSocket, endpoint: SocketAddr) -> io::Result<Tunnel> {
         if socket.local_addr()?.is_ipv4() != endpoint.is_ipv4() {
             return Err(io::Error::new(
@@ -185,6 +185,7 @@ impl Tunnel {
             last_answer: endpoint,
             logged_failure: None,
             pending_initiation: false,
+            initiation_ahead: false,
         };
         let driver = tokio::spawn(driver.run());
         Ok(Tunnel {
@@ -324,6 +325,10 @@ fn is_cookie_reply(datagram: &[u8]) -> bool {
     datagram.len() == 64 && datagram[..4] == [3, 0, 0, 0]
 }
 
+fn is_handshake_initiation(datagram: &[u8]) -> bool {
+    datagram.len() == 148 && datagram[..4] == [1, 0, 0, 0]
+}
+
 /// What a lookup answer did to the endpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Adoption {
@@ -448,9 +453,13 @@ struct Driver {
     last_answer: Option<SocketAddr>,
     /// The failure last logged at warn; a repeat of it logs at debug.
     logged_failure: Option<String>,
-    /// A deferred initiation is generated afresh when the lookup ends, so
-    /// its retry clock starts at transmission, not before the lookup.
+    /// An initiation held for want of an endpoint, generated afresh when
+    /// a lookup gives one, so its retry clock starts at transmission.
     pending_initiation: bool,
+    /// An initiation left for the known endpoint while a lookup was
+    /// outstanding: if that lookup moves the endpoint, the new address
+    /// gets an initiation of its own at once, not at the next retry.
+    initiation_ahead: bool,
 }
 
 impl Driver {
@@ -656,6 +665,7 @@ impl Driver {
         }
         if expired {
             self.pending_initiation = false;
+            self.initiation_ahead = false;
             self.looked_up_at = None;
         } else if self.pending_initiation {
             self.resolver.start();
@@ -689,6 +699,7 @@ impl Driver {
     /// any the answer earns, which so becomes the handshake the core
     /// retries until it is answered.
     async fn resolved(&mut self, result: io::Result<SocketAddr>) {
+        let ahead = std::mem::take(&mut self.initiation_ahead);
         let mut handshake_with = None;
         match result {
             Err(error) => self.failed(self.unresolved(error)),
@@ -704,7 +715,7 @@ impl Driver {
                         tracing::info!(endpoint = %answer, "WireGuard endpoint lookup recovered");
                     }
                     self.resolution_tx.send_replace(Resolution::default());
-                    if adoption == Adoption::Probe {
+                    if adoption == Adoption::Probe || (adoption == Adoption::Moved && ahead) {
                         handshake_with = Some(answer);
                     }
                 }
@@ -751,9 +762,8 @@ impl Driver {
         }
     }
 
-    /// A lookup ended, by an answer, a failure or its deadline. A held
-    /// initiation leaves now when an endpoint is known, so a failing
-    /// resolver never holds back a handshake to the address in use;
+    /// A lookup ended, by an answer, a failure or its deadline. An
+    /// initiation held for want of an endpoint leaves now if there is one;
     /// without one it waits for the next lookup, which the tick starts.
     async fn lookup_ended(&mut self) {
         self.looked_up_at = Some(Instant::now());
@@ -778,31 +788,31 @@ impl Driver {
         self.send_to(&initiation[..len], to).await;
     }
 
-    /// Every initiation asks for a lookup and waits for it to end, unless
-    /// one ended less than `REKEY_TIMEOUT` ago. With an endpoint known it
-    /// also leaves while a timed-out lookup holds the OS call, since no
-    /// other lookup can start until that returns.
-    fn initiation_may_leave(&mut self) -> bool {
-        let known = self.wire.lock().endpoint.is_some();
-        if known
-            && self
-                .looked_up_at
-                .is_some_and(|at| at.elapsed() <= REKEY_TIMEOUT)
-        {
-            return true;
+    /// Every initiation asks for a lookup, unless an endpoint is known and
+    /// one ended no more than `REKEY_TIMEOUT` ago. One to a known endpoint
+    /// does not wait for it; without an endpoint it is held until a lookup
+    /// gives one.
+    fn look_up_on_initiation(&mut self, known: bool) {
+        let fresh = self
+            .looked_up_at
+            .is_some_and(|at| at.elapsed() <= REKEY_TIMEOUT);
+        if !(known && fresh) {
+            self.resolver.start();
         }
-        self.resolver.start();
-        known && self.resolver.stalled()
+        if known {
+            self.initiation_ahead |= self.resolver.outstanding();
+        }
     }
 
     async fn transmit(&mut self, datagram: &[u8]) {
-        if datagram.len() == 148 && datagram[..4] == [1, 0, 0, 0] && !self.initiation_may_leave() {
-            self.pending_initiation = true;
-            return;
-        }
         let endpoint = self.wire.lock().endpoint;
-        let Some(endpoint) = endpoint else { return };
-        self.send_to(datagram, endpoint).await;
+        if is_handshake_initiation(datagram) {
+            self.look_up_on_initiation(endpoint.is_some());
+            self.pending_initiation = endpoint.is_none();
+        }
+        if let Some(endpoint) = endpoint {
+            self.send_to(datagram, endpoint).await;
+        }
     }
 
     async fn send_to(&self, datagram: &[u8], to: SocketAddr) {

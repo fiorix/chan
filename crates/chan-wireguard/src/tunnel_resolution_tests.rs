@@ -362,10 +362,10 @@ async fn live_rekey_and_expiry_follow_the_next_lookup() {
 }
 
 /// The lookup a rekey starts never returns, as a hung `getaddrinfo`. The
-/// session keeps carrying data while the rekey waits, the rekey goes to
-/// the known endpoint at the deadline, the tunnel outlives the first
-/// session's `REJECT_AFTER_TIME`, and the next rekey goes out at once
-/// beside the still-owned lookup instead of starting another.
+/// rekey goes to the known endpoint without waiting for it, the session
+/// keeps carrying data, the timeout lands in the status, the tunnel
+/// outlives the first session's `REJECT_AFTER_TIME`, and the next rekey
+/// goes out beside the still-owned lookup instead of starting another.
 #[tokio::test]
 async fn a_hung_lookup_keeps_a_live_session_past_reject_after_time() {
     let _clock = clock::test_offset_guard();
@@ -518,8 +518,12 @@ async fn start_on_endpoint_stands_as_the_previous_answer() {
     exchange(&mut a, &mut b).await;
 }
 
+/// A peer that never answers: each retry goes to the known endpoint at
+/// once, asks for at most one lookup at a time and none within five
+/// seconds of the last, and an answer naming the endpoint in use sends
+/// nothing more.
 #[tokio::test]
-async fn silent_peer_limits_lookups_and_uses_fresh_answers() {
+async fn silent_peer_limits_lookups_and_retries_at_once() {
     let _clock = clock::test_offset_guard();
     let mut f = Fixture::new().await;
     let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -542,19 +546,19 @@ async fn silent_peer_limits_lookups_and_uses_fresh_answers() {
     }
     clock::advance(Duration::from_secs(3));
     let query = f.query().await;
-    let mut bytes = [0; 256];
-    assert!(
-        silent.try_recv_from(&mut bytes).is_err(),
-        "no initiation using the stale answer"
-    );
+    initiation_within(&silent, REKEY_TIMEOUT / 2).await;
     clock::advance(Duration::from_secs(6));
-    tokio::time::sleep(2 * TICK).await;
+    initiation_within(&silent, REKEY_TIMEOUT / 2).await;
     assert!(
         f.queries.try_recv().is_err(),
         "no overlapping lookup on another retry"
     );
     query.send(Ok(silent.local_addr().unwrap())).unwrap();
-    initiation(&silent).await;
+    tokio::time::sleep(4 * TICK).await;
+    assert!(
+        drain(&silent).is_empty(),
+        "an answer naming the endpoint in use sends nothing"
+    );
     pending.abort();
 }
 
@@ -859,6 +863,11 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
         .send(Ok(silent6.local_addr().unwrap()))
         .unwrap();
     assert!(initiation(&silent6).await.is_ipv6());
+    assert_eq!(
+        drain(&silent4).len(),
+        1,
+        "the retry went to the known endpoint before the answer"
+    );
     clock::advance(Duration::from_secs(6));
     f.query()
         .await
@@ -1117,5 +1126,55 @@ async fn a_changed_answer_moves_the_endpoint_once_the_peer_answers_there() {
     relay.set(VIA_NEW);
     query.send(Ok(relay.new)).unwrap();
     until(|| f.a.status().endpoint == Some(relay.new)).await;
+    exchange(&mut a, &mut b).await;
+}
+
+/// How long the slow resolver below takes: inside `RESOLVE_TIMEOUT`.
+const SLOW_ANSWER: Duration = Duration::from_secs(8);
+
+/// A rekey's lookup that answers after `SLOW_ANSWER`, with the time the
+/// tunnel asked for it; the rekey completes while it is held.
+async fn rekey_beside_a_slow_lookup(f: &mut Fixture) -> (Answer, tokio::time::Instant) {
+    clock::advance(Duration::from_secs(121));
+    let query = f.query().await;
+    let asked = tokio::time::Instant::now();
+    timeout(SLOW_ANSWER - Duration::from_secs(1), async {
+        while !fresh_handshake(&f.a, Duration::from_secs(60)) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the rekey completes before the lookup answers");
+    tokio::time::sleep_until(asked + SLOW_ANSWER).await;
+    (query, asked)
+}
+
+/// With an endpoint known, a rekey goes out at once and does not wait for
+/// the lookup it asks for.
+#[tokio::test]
+async fn a_slow_lookup_does_not_delay_a_rekey_to_the_known_endpoint() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let (mut a, mut b) = f.establish().await;
+    exchange(&mut a, &mut b).await;
+    let (query, _) = rekey_beside_a_slow_lookup(&mut f).await;
+    query.send(Ok(f.b_at)).unwrap();
+    exchange(&mut a, &mut b).await;
+    assert_eq!(f.a.status().endpoint, Some(f.b_at));
+}
+
+/// The slow answer names another address: it still gets an initiation of
+/// its own when it arrives, and the session stays where it is.
+#[tokio::test]
+async fn a_differing_slow_answer_gets_an_initiation_of_its_own() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let (mut a, mut b) = f.establish().await;
+    exchange(&mut a, &mut b).await;
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (query, _) = rekey_beside_a_slow_lookup(&mut f).await;
+    query.send(Ok(other.local_addr().unwrap())).unwrap();
+    initiation_within(&other, REKEY_TIMEOUT / 2).await;
+    assert_eq!(f.a.status().endpoint, Some(f.b_at));
     exchange(&mut a, &mut b).await;
 }
