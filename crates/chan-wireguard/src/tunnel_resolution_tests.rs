@@ -797,6 +797,41 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
     connecting.abort();
 }
 
+/// `Tunnel::start` holds no socket until its first answer binds one of
+/// the answer's family; the fixtures above all bring their own.
+#[tokio::test]
+async fn start_binds_its_socket_from_the_first_answer() {
+    let a_key = StaticSecret::random_from_rng(OsRng);
+    let b_key = StaticSecret::random_from_rng(OsRng);
+    let (a_pub, b_pub) = (PublicKey::from(&a_key), PublicKey::from(&b_key));
+    let b_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b_at = b_udp.local_addr().unwrap();
+    let placeholder = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let placeholder_at = placeholder.local_addr().unwrap();
+    let b = Tunnel::start_on(
+        config(b_key, a_pub, B_ADDR, A_ADDR, placeholder_at),
+        b_udp,
+        placeholder_at,
+    )
+    .unwrap();
+    // An IP literal resolves without a DNS query.
+    let a = Tunnel::start(config(a_key, b_pub, A_ADDR, B_ADDR, b_at)).unwrap();
+    let mut listener = b.listen(0).unwrap();
+    let port = listener.port();
+    let (client, server) = timeout(WAIT, async {
+        tokio::join!(a.connect(b_port(port)), listener.accept())
+    })
+    .await
+    .unwrap();
+    exchange(&mut client.unwrap(), &mut server.unwrap()).await;
+    assert_eq!(a.status().endpoint, Some(b_at));
+    let from = b.status().endpoint.unwrap();
+    assert!(
+        from.is_ipv4() && !from.ip().is_unspecified() && from != placeholder_at,
+        "{from}"
+    );
+}
+
 /// Makes this thread's socket binds fail until dropped.
 struct RefuseBind;
 
