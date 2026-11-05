@@ -914,6 +914,10 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     if let Some(library_id) = control_identity {
         terminal_sessions.install_library_id(library_id);
     }
+    // The roster says whether a page holds each session's window, read from
+    // the presence the `/ws` route registers into, and is pushed again when
+    // a window connects or disconnects.
+    terminal_sessions.install_window_presence(window_presence.clone());
     if matches!(tenant, TenantKind::Terminal { .. }) {
         // A terminal-only tenant is long-lived but has neither the workspace
         // settings route nor its config-change push path. Pull the preference at
@@ -972,7 +976,8 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     // Drain the per-session `cs terminal write` queues (deliver each next
     // poke when its agent goes idle). Sibling of the pruner.
     let terminal_drainer = terminal_sessions.clone().spawn_drainer(shutdown_rx.clone());
-    // Push cross-window roster snapshots onto `/ws` on every change.
+    // Push cross-window roster snapshots onto `/ws` on every session change
+    // and every window presence change.
     let terminal_roster_broadcaster = spawn_roster_broadcaster(
         terminal_sessions.clone(),
         events_tx.clone(),
@@ -3031,6 +3036,109 @@ mod terminal_router_tests {
             dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
             "no cwd means the home directory"
         );
+    }
+
+    /// Read `terminal_roster` frames off `events` until one lists `id` with
+    /// `window_live` equal to `want`, panicking with the last entry for `id`
+    /// when none does within ten seconds.
+    async fn await_roster_liveness(
+        events: &mut tokio::sync::broadcast::Receiver<String>,
+        id: &str,
+        want: bool,
+        label: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut last = None;
+        loop {
+            let frame = match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(error)) => panic!("{label}: the event bus closed: {error}"),
+                Err(_) => panic!(
+                    "{label}: no terminal_roster frame listed {id} with window_live={want} \
+                     within 10s; {}",
+                    match &last {
+                        None => "no roster frame arrived".to_string(),
+                        Some(entry) => format!("the last one listed it as {entry:?}"),
+                    }
+                ),
+            };
+            let Ok(frame) = serde_json::from_str::<serde_json::Value>(&frame) else {
+                continue;
+            };
+            if frame["type"] != "terminal_roster" {
+                continue;
+            }
+            let entry = frame["sessions"]
+                .as_array()
+                .and_then(|sessions| sessions.iter().find(|entry| entry["id"] == id))
+                .cloned();
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry["window_live"] == want)
+            {
+                return;
+            }
+            last = Some(entry);
+        }
+    }
+
+    /// A tenant as the builder makes it pushes the terminal roster when a
+    /// session's window gains its first socket and when it loses its last one,
+    /// with the session's `window_live` following, though no session changed.
+    #[tokio::test]
+    async fn roster_is_pushed_when_a_sessions_window_connects_or_disconnects() {
+        let home = tempfile::tempdir().unwrap();
+        let library = Library::open_at(home.path().join("library.toml")).unwrap();
+        let config = ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            no_token: true,
+            prefix: "/terminal-roster-live".into(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        let mut artifacts = build_tenant_app(
+            TenantBuild {
+                library,
+                tenant: TenantKind::Terminal {
+                    session_dir: None,
+                    drafts_store_root: None,
+                    cwd: Some(home.path().to_path_buf()),
+                },
+                desktop: DesktopBridge::default(),
+                unserve: chan_library::UnserveMode::Unsupported,
+                control_identity: None,
+                bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                client_sessions: chan_library::client_sessions::ClientSessions::new(),
+            },
+            &config,
+        )
+        .await
+        .expect("build terminal app");
+        let mut events = artifacts.state.events_tx.subscribe();
+        let registry = artifacts.terminal_sessions.clone();
+        let mut options = terminal_create_options(Some("sleep 30"));
+        options.window_id = Some("w-roster-live".into());
+        let session = registry
+            .create(options)
+            .expect("create a windowed terminal");
+        let id = session.id().to_owned();
+
+        await_roster_liveness(&mut events, &id, false, "after the create").await;
+        let page = artifacts
+            .state
+            .window_presence
+            .connect("w-roster-live", None);
+        await_roster_liveness(&mut events, &id, true, "after its window connected").await;
+        drop(page);
+        await_roster_liveness(&mut events, &id, false, "after its window disconnected").await;
+
+        drop(session);
+        registry.close(&id, CloseReason::Explicit);
+        artifacts.tasks.shutdown().await;
     }
 
     async fn run_hosted_backend_child() {

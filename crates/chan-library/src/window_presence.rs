@@ -24,16 +24,18 @@
 //! window is on its own page looks for its own tag.
 //!
 //! Semantics note for consumers: "connected" means a live socket
-//! exists SOMEWHERE -- a hidden (buried) chan-desktop window keeps its
-//! webview and therefore its socket, so hidden-vs-visible is not
-//! distinguishable here. The honest vocabulary is connected / saved.
+//! exists SOMEWHERE, which is a page open on the window in some client.
+//! The desktop's Hide destroys a window's webview, so a hidden window
+//! reads not connected while its terminals stay warm; a control terminal
+//! hides in place and keeps its socket. Hidden-vs-visible is therefore not
+//! what this answers. The honest vocabulary is connected / saved.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Notify;
 
 /// The live sockets of one window id.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct WindowSockets {
     /// Sockets that came with no holder tag.
     untagged: usize,
@@ -47,7 +49,7 @@ impl WindowSockets {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct WindowPresence {
     /// window id -> its live sockets. An id is a key only while it has one.
     inner: Mutex<HashMap<String, WindowSockets>>,
@@ -58,6 +60,15 @@ pub struct WindowPresence {
     /// mounts the tenant; absent in unit tests / before install, in which
     /// case presence is silent.
     change_notify: OnceLock<Arc<Notify>>,
+    /// Fired only when a window's first socket connects or its last one
+    /// drops, the transitions that change whether a page holds the window;
+    /// a holder joining or leaving a window that stays connected does not
+    /// fire it. The terminal registry installs its roster signal here (see
+    /// `Registry::install_window_presence`), so the roster is pushed again
+    /// whenever a session's `window_live` can have changed. Fired with
+    /// `notify_one`, which keeps a permit for a transition that lands while
+    /// its one waiter is busy instead of dropping it.
+    window_notify: OnceLock<Arc<Notify>>,
 }
 
 impl WindowPresence {
@@ -72,10 +83,22 @@ impl WindowPresence {
         let _ = self.change_notify.set(notify);
     }
 
-    /// Wake the watch feed if a change signal is installed.
-    fn fire_change(&self) {
+    /// Install the signal fired when a window gains its first socket or loses
+    /// its last one. Set-once: a second install is ignored.
+    pub fn install_window_notify(&self, notify: Arc<Notify>) {
+        let _ = self.window_notify.set(notify);
+    }
+
+    /// Wake the watch feed if a change signal is installed, and the window
+    /// signal too when the set of connected windows changed.
+    fn fire_change(&self, window_changed: bool) {
         if let Some(notify) = self.change_notify.get() {
             notify.notify_waiters();
+        }
+        if window_changed {
+            if let Some(notify) = self.window_notify.get() {
+                notify.notify_one();
+            }
         }
     }
 
@@ -83,11 +106,11 @@ impl WindowPresence {
     /// named one; presence holds until the returned guard drops. The tag is
     /// taken as given: the caller decides what a well-formed one is.
     pub fn connect(self: &Arc<Self>, id: &str, holder: Option<&str>) -> PresenceGuard {
-        let changed = {
+        let (changed, newly_connected) = {
             let mut inner = self.lock();
             let newly_connected = !inner.contains_key(id);
             let sockets = inner.entry(id.to_string()).or_default();
-            match holder {
+            let changed = match holder {
                 Some(tag) => {
                     let count = sockets.tagged.entry(tag.to_string()).or_insert(0);
                     *count += 1;
@@ -97,10 +120,11 @@ impl WindowPresence {
                     sockets.untagged += 1;
                     newly_connected
                 }
-            }
+            };
+            (changed, newly_connected)
         };
         if changed {
-            self.fire_change();
+            self.fire_change(newly_connected);
         }
         PresenceGuard {
             presence: Arc::clone(self),
@@ -133,7 +157,7 @@ impl WindowPresence {
     }
 
     fn disconnect(&self, id: &str, holder: Option<&str>) {
-        let changed = {
+        let (changed, window_left) = {
             let mut inner = self.lock();
             match inner.get_mut(id) {
                 Some(sockets) => {
@@ -157,13 +181,13 @@ impl WindowPresence {
                     if window_left {
                         inner.remove(id);
                     }
-                    holder_left || window_left
+                    (holder_left || window_left, window_left)
                 }
-                None => false,
+                None => (false, false),
             }
         };
         if changed {
-            self.fire_change();
+            self.fire_change(window_left);
         }
     }
 }
