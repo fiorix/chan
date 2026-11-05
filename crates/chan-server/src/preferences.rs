@@ -89,9 +89,10 @@ pub struct EditorPrefs {
     pub empty_pane_carousel_cycling: bool,
     /// Hide a pane's tab strip while the side it shows holds fewer than
     /// two tabs. Off by default so every window keeps the strip's chrome
-    /// (hamburger, side toggle, drop target) unless the user asks for the
-    /// bare look. A tmux pane and the control terminal hide their strips
-    /// on their own and ignore this.
+    /// (hamburger, side toggle) unless the user asks for the bare look; the
+    /// pane's centre takes dropped tabs and files either way. A tmux pane
+    /// and the control terminal hide their strips on their own and ignore
+    /// this.
     #[serde(default)]
     pub pane_strip_auto_hide: bool,
     /// Editor page-width cap as a ratio of the window width, in (0, 1]
