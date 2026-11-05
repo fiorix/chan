@@ -168,43 +168,10 @@ impl Config {
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty());
 
-        let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("GITHUB_CLIENT_ID"),
-            std::env::var("GITHUB_CLIENT_SECRET"),
-        ) {
-            let github = match &oauth_endpoints_base {
-                Some(base) => GitHubProvider::with_endpoints(
-                    id,
-                    secret,
-                    crate::providers::github::GitHubEndpoints {
-                        auth: format!("{base}/login/oauth/authorize"),
-                        token: format!("{base}/login/oauth/access_token"),
-                        user: format!("{base}/user"),
-                        emails: format!("{base}/user/emails"),
-                    },
-                )?,
-                None => GitHubProvider::new(id, secret)?,
-            };
-            providers.push(Arc::new(github));
-        }
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("GOOGLE_CLIENT_ID"),
-            std::env::var("GOOGLE_CLIENT_SECRET"),
-        ) {
-            providers.push(Arc::new(GoogleProvider::new(id, secret)?));
-        }
-        if let (Ok(id), Ok(secret)) = (
-            std::env::var("GITLAB_CLIENT_ID"),
-            std::env::var("GITLAB_CLIENT_SECRET"),
-        ) {
-            providers.push(Arc::new(GitLabProvider::new(id, secret)?));
-        }
-        if providers.is_empty() {
-            anyhow::bail!(
-                "no providers configured (set at least one of GITHUB / GOOGLE / GITLAB CLIENT_ID + CLIENT_SECRET)"
-            );
-        }
+        let providers = providers_from_vars(
+            |name| std::env::var(name).ok(),
+            oauth_endpoints_base.as_deref(),
+        )?;
 
         Ok(Self {
             bind_addr,
@@ -372,6 +339,76 @@ impl InvalidNodeBase {
             reason,
         }
     }
+}
+
+/// What one OAuth provider's client id and client secret values amount
+/// to. Not `Debug`: `Complete` holds the client secret.
+enum OAuthClientPair {
+    /// Neither half is set: the provider is off.
+    Absent,
+    /// Both halves are set: the provider registers with them.
+    Complete { id: String, secret: String },
+    /// Only the client secret is set.
+    MissingId,
+    /// Only the client id is set.
+    MissingSecret,
+}
+
+impl OAuthClientPair {
+    fn from_raw(id: Option<String>, secret: Option<String>) -> Self {
+        match (id, secret) {
+            (Some(id), Some(secret)) => Self::Complete { id, secret },
+            (None, Some(_)) => Self::MissingId,
+            (Some(_), None) => Self::MissingSecret,
+            (None, None) => Self::Absent,
+        }
+    }
+}
+
+/// Register every OAuth provider whose client pair `var` configures.
+/// `var` is the environment lookup, a parameter so the registration
+/// rules are testable without touching the process environment.
+fn providers_from_vars(
+    var: impl Fn(&str) -> Option<String>,
+    oauth_endpoints_base: Option<&str>,
+) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
+    let pair =
+        |id_var: &str, secret_var: &str| OAuthClientPair::from_raw(var(id_var), var(secret_var));
+    let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+    if let OAuthClientPair::Complete { id, secret } =
+        pair("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")
+    {
+        let github = match oauth_endpoints_base {
+            Some(base) => GitHubProvider::with_endpoints(
+                id,
+                secret,
+                crate::providers::github::GitHubEndpoints {
+                    auth: format!("{base}/login/oauth/authorize"),
+                    token: format!("{base}/login/oauth/access_token"),
+                    user: format!("{base}/user"),
+                    emails: format!("{base}/user/emails"),
+                },
+            )?,
+            None => GitHubProvider::new(id, secret)?,
+        };
+        providers.push(Arc::new(github));
+    }
+    if let OAuthClientPair::Complete { id, secret } =
+        pair("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")
+    {
+        providers.push(Arc::new(GoogleProvider::new(id, secret)?));
+    }
+    if let OAuthClientPair::Complete { id, secret } =
+        pair("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET")
+    {
+        providers.push(Arc::new(GitLabProvider::new(id, secret)?));
+    }
+    if providers.is_empty() {
+        anyhow::bail!(
+            "no providers configured (set at least one of GITHUB / GOOGLE / GITLAB CLIENT_ID + CLIENT_SECRET)"
+        );
+    }
+    Ok(providers)
 }
 
 fn required_origin(name: &str) -> anyhow::Result<Url> {
