@@ -21,15 +21,53 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.124.0
+### v0.125.0
 
-Opened 2026-11-03 at the v0.123.0 close with no rows.
+Opened 2026-11-05 at the v0.124.0 close with nine items that version left. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]).
 
 | Item | State | Next |
 | --- | --- | --- |
+| [WireGuard enrollment at gateway sign-in][wgenrol] | accepted | decision |
+| [a wrong peer key reads as a discovery error][wgwrongkey] | raised | build |
+| [a WireGuard expiry logs at ERROR][wgexpiry] | raised | build |
+| [WebView2 shows Edge's 504 on a dead tunnel][wv2504] | raised | decision |
+| [the endpoint rule's probes and rotating names][wgrule] | raised | decision |
+| [the Windows uninstaller leaves chan behind][winuninst] | raised | decision |
+| [two WireGuard e2e suites reach past isolation][wge2e] | raised | build |
+| [a strip right-click leaves focus on body][stripfocus] | raised | reading |
+| [two menus take Escape in the bubble phase][bubbleesc] | raised | build |
 
+[wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
+[wgwrongkey]: v0.125.0/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md
+[wgexpiry]: v0.125.0/a-wireguard-handshake-that-expires-logs-at-error.md
+[wv2504]: v0.125.0/webview2-shows-edges-504-page-after-30-s-on-a-dead-wireguard-tunnel.md
+[wgrule]: v0.125.0/the-wireguard-endpoint-rules-probes-miss-a-late-cutover-and-churn-on-a-rotating-name.md
+[winuninst]: v0.125.0/the-windows-uninstaller-leaves-chans-shims-path-entry-and-state-behind.md
+[wge2e]: v0.125.0/two-wireguard-e2e-suites-reach-past-their-isolation.md
+[stripfocus]: v0.125.0/a-right-click-on-the-pane-strips-empty-stretch-leaves-focus-on-the-body.md
+[bubbleesc]: v0.125.0/the-graph-tab-menu-and-the-inspector-action-pill-take-escape-in-the-bubble-phase.md
 
 ## Completed
+
+### v0.124.0
+
+Shipped 2026-11-05; see [release-v0.124.0](../release/release-v0.124.0.md). A no-rc release by the owner's decision: seventeen `--no-ff` merges of verified tips from fourteen branches (a fifteenth, the pane centre drop, through the menus branch) into the round's integration branch `v0124/int` over `main` at `720b543c0`, under fifteen rows, all shipped; those rows are in [`done/`](done/). None was in the Active table before the GA: the round tracked its work in the lead's notes and in work orders under `dev/`, and each row was written at the cut from them. The WireGuard endpoint resolution, found by reading the WireGuard branch before it shipped, is part of that row rather than one of its own.
+
+- [a-command-launcher-run-that-opens-nothing-leaves-the-terminal-deaf](done/a-command-launcher-run-that-opens-nothing-leaves-the-terminal-deaf.md) - A command launcher run that opens nothing leaves the terminal deaf.
+- [a-ghostty-terminal-comes-back-blank-after-its-window-sits-off-screen](done/a-ghostty-terminal-comes-back-blank-after-its-window-sits-off-screen.md) - A ghostty terminal comes back blank after its window sits off-screen.
+- [a-pane-under-a-hidden-strip-has-nowhere-to-drop-a-tab-or-a-file](done/a-pane-under-a-hidden-strip-has-nowhere-to-drop-a-tab-or-a-file.md) - A pane under a hidden strip has nowhere to drop a tab or a file.
+- [a-panes-tab-strip-shows-over-a-lone-tab-with-nothing-to-switch-to](done/a-panes-tab-strip-shows-over-a-lone-tab-with-nothing-to-switch-to.md) - A pane's tab strip shows over a lone tab with nothing to switch to.
+- [a-shown-computers-launcher-goes-deaf-when-its-host-page-reloads-or-opens-a-terminal](done/a-shown-computers-launcher-goes-deaf-when-its-host-page-reloads-or-opens-a-terminal.md) - A shown Computers launcher goes deaf when its host page reloads or opens a terminal.
+- [browser-checks-60-125-and-134-test-what-the-product-no-longer-does](done/browser-checks-60-125-and-134-test-what-the-product-no-longer-does.md) - Browser checks 60, 125 and 134 test what the product no longer does.
+- [chan-desktop-needs-macos-14-for-its-webview-proxy-and-its-updater-checks-no-floor](done/chan-desktop-needs-macos-14-for-its-webview-proxy-and-its-updater-checks-no-floor.md) - chan-desktop needs macOS 14 for its webview proxy and its updater checks no floor.
+- [chan-reaches-a-gateway-behind-wireguard-only-through-a-vpn-client-on-the-host](done/chan-reaches-a-gateway-behind-wireguard-only-through-a-vpn-client-on-the-host.md) - chan reaches a gateway behind WireGuard only through a VPN client on the host.
+- [escape-does-not-close-a-terminals-right-click-menu](done/escape-does-not-close-a-terminals-right-click-menu.md) - Escape does not close a terminal's right-click menu.
+- [group-broadcast-cannot-be-turned-off-while-a-member-sits-in-a-window-no-page-holds](done/group-broadcast-cannot-be-turned-off-while-a-member-sits-in-a-window-no-page-holds.md) - Group broadcast cannot be turned off while a member sits in a window no page holds.
+- [the-browser-suite-starts-its-devservers-beside-the-users-own](done/the-browser-suite-starts-its-devservers-beside-the-users-own.md) - The browser suite starts its devservers beside the user's own.
+- [the-gateway-admin-help-prints-the-admin-tokens-it-read-from-the-environment](done/the-gateway-admin-help-prints-the-admin-tokens-it-read-from-the-environment.md) - The gateway admin help prints the admin tokens it read from the environment.
+- [the-gateway-identity-counts-an-empty-oauth-pair-as-a-configured-provider](done/the-gateway-identity-counts-an-empty-oauth-pair-as-a-configured-provider.md) - The gateway identity counts an empty OAuth pair as a configured provider.
+- [the-pane-and-terminal-menus-offer-no-way-to-the-command-launcher](done/the-pane-and-terminal-menus-offer-no-way-to-the-command-launcher.md) - The pane and terminal menus offer no way to the command launcher.
+- [the-windows-chan-exe-does-not-start-without-the-visual-c-runtime](done/the-windows-chan-exe-does-not-start-without-the-visual-c-runtime.md) - The Windows chan.exe does not start without the Visual C++ runtime.
 
 ### v0.123.0
 
