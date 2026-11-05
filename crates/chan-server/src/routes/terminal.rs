@@ -1936,10 +1936,10 @@ struct RosterFrame<'a> {
 /// Republish the terminal roster onto the global `/ws` bus whenever it
 /// changes. Awaits the registry's roster-change `Notify` (coalescing bursts
 /// into one push), which a session change fires and, through the window
-/// presence the registry has installed, a window's first socket connecting
-/// or its last one dropping; then sends a `terminal_roster` snapshot to every
-/// connected window. A sibling of the registry's pruner/drainer tasks: own task,
-/// shuts down on the same signal. A send error means no `/ws` client is
+/// presence the registry has installed, a window that holds a session gaining
+/// its first socket or losing its last; then sends a `terminal_roster`
+/// snapshot to every connected window. A sibling of the registry's
+/// pruner/drainer tasks: own task, shuts down on the same signal. A send error means no `/ws` client is
 /// connected; the next connect re-seeds via `GET /api/terminals/roster`.
 pub fn spawn_roster_broadcaster(
     registry: Arc<crate::terminal_sessions::Registry>,

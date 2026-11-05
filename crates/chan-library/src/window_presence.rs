@@ -60,15 +60,32 @@ pub struct WindowPresence {
     /// mounts the tenant; absent in unit tests / before install, in which
     /// case presence is silent.
     change_notify: OnceLock<Arc<Notify>>,
-    /// Fired only when a window's first socket connects or its last one
-    /// drops, the transitions that change whether a page holds the window;
-    /// a holder joining or leaving a window that stays connected does not
-    /// fire it. The terminal registry installs its roster signal here (see
-    /// `Registry::install_window_presence`), so the roster is pushed again
-    /// whenever a session's `window_live` can have changed. Fired with
-    /// `notify_one`, which keeps a permit for a transition that lands while
-    /// its one waiter is busy instead of dropping it.
-    window_notify: OnceLock<Arc<Notify>>,
+    /// Called with the window's id only when a window's first socket
+    /// connects or its last one drops, the transitions that change whether
+    /// a page holds the window; a holder joining or leaving a window that
+    /// stays connected does not call it. The terminal registry installs one
+    /// (see `Registry::install_window_presence`) that pushes the roster again
+    /// when the window holds a session, whose `window_live` just changed.
+    window_hook: OnceLock<WindowHook>,
+}
+
+/// What [`WindowPresence`] calls with a window's id when the window gains its
+/// first socket or loses its last one. Called after the presence lock is
+/// released, on the socket's own task, so it must stay short. A newtype so the
+/// presence keeps deriving `Debug` (a bare `dyn Fn` does not implement it).
+pub struct WindowHook(Box<dyn Fn(&str) + Send + Sync>);
+
+impl WindowHook {
+    /// Wrap a closure taking the window id that connected or disconnected.
+    pub fn new(hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self(Box::new(hook))
+    }
+}
+
+impl std::fmt::Debug for WindowHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WindowHook(..)")
+    }
 }
 
 impl WindowPresence {
@@ -83,22 +100,20 @@ impl WindowPresence {
         let _ = self.change_notify.set(notify);
     }
 
-    /// Install the signal fired when a window gains its first socket or loses
+    /// Install the hook called when a window gains its first socket or loses
     /// its last one. Set-once: a second install is ignored.
-    pub fn install_window_notify(&self, notify: Arc<Notify>) {
-        let _ = self.window_notify.set(notify);
+    pub fn install_window_hook(&self, hook: WindowHook) {
+        let _ = self.window_hook.set(hook);
     }
 
-    /// Wake the watch feed if a change signal is installed, and the window
-    /// signal too when the set of connected windows changed.
-    fn fire_change(&self, window_changed: bool) {
+    /// Wake the watch feed if a change signal is installed, and call the
+    /// window hook with `window` when the window connected or disconnected.
+    fn fire_change(&self, window: Option<&str>) {
         if let Some(notify) = self.change_notify.get() {
             notify.notify_waiters();
         }
-        if window_changed {
-            if let Some(notify) = self.window_notify.get() {
-                notify.notify_one();
-            }
+        if let (Some(id), Some(hook)) = (window, self.window_hook.get()) {
+            (hook.0)(id);
         }
     }
 
@@ -124,7 +139,7 @@ impl WindowPresence {
             (changed, newly_connected)
         };
         if changed {
-            self.fire_change(newly_connected);
+            self.fire_change(newly_connected.then_some(id));
         }
         PresenceGuard {
             presence: Arc::clone(self),
@@ -187,7 +202,7 @@ impl WindowPresence {
             }
         };
         if changed {
-            self.fire_change(window_left);
+            self.fire_change(window_left.then_some(id));
         }
     }
 }

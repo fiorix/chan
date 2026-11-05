@@ -915,8 +915,8 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         terminal_sessions.install_library_id(library_id);
     }
     // The roster says whether a page holds each session's window, read from
-    // the presence the `/ws` route registers into, and is pushed again when
-    // a window connects or disconnects.
+    // the presence the `/ws` route registers into, and is pushed again when a
+    // window that holds a session connects or disconnects.
     terminal_sessions.install_window_presence(window_presence.clone());
     if matches!(tenant, TenantKind::Terminal { .. }) {
         // A terminal-only tenant is long-lived but has neither the workspace
@@ -977,7 +977,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     // poke when its agent goes idle). Sibling of the pruner.
     let terminal_drainer = terminal_sessions.clone().spawn_drainer(shutdown_rx.clone());
     // Push cross-window roster snapshots onto `/ws` on every session change
-    // and every window presence change.
+    // and every presence change of a window that holds a session.
     let terminal_roster_broadcaster = spawn_roster_broadcaster(
         terminal_sessions.clone(),
         events_tx.clone(),

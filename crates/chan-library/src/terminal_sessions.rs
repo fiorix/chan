@@ -33,7 +33,7 @@ use chan_shell::{
 
 use crate::config::{TerminalConfig, TerminalProfile, TerminalTmuxConfig};
 use crate::time::{now_unix_millis, now_unix_secs};
-use crate::window_presence::WindowPresence;
+use crate::window_presence::{WindowHook, WindowPresence};
 
 mod bytes;
 #[cfg(target_os = "linux")]
@@ -538,7 +538,8 @@ pub struct Registry {
     last_exit: Arc<Mutex<Option<TerminalExit>>>,
     /// Fires whenever the live roster changes (create / close / restart /
     /// broadcast-toggle), and, through the installed window presence, when
-    /// a window's first socket connects or its last one drops. The roster
+    /// a window that holds a session gains its first socket or loses its
+    /// last one. The roster
     /// broadcaster task awaits this and republishes a fresh snapshot onto
     /// the `/ws` bus so every window's SPA sees the same cross-window
     /// terminal set. `Notify` coalesces bursts into one wakeup (natural
@@ -1257,7 +1258,8 @@ impl FdStoreRestoreReport {
 /// `tab_group` with a live `cwd`), this carries the `window_id`, whether a
 /// page holds that window, and the per-session `broadcast` toggle, and omits
 /// the (expensive) cwd lookup: the roster is pushed on every session change
-/// and every window presence change, so it stays cheap to build. Serialized
+/// and every presence change of a window that holds a session, so it stays
+/// cheap to build. Serialized
 /// directly into the `/ws` `terminal_roster` frame and the
 /// `GET /api/terminals/roster` seed body.
 #[derive(Debug, Clone, Serialize)]
@@ -1986,14 +1988,38 @@ impl Registry {
     }
 
     /// Read each roster entry's `window_live` from the tenant's window
-    /// presence, and push the roster again whenever a window's first socket
-    /// connects or its last one drops, since that changes `window_live` with
-    /// no session changing. Set-once: the serving layer installs the presence
-    /// it builds beside the registry, and a second install is ignored.
-    pub fn install_window_presence(&self, presence: Arc<WindowPresence>) {
-        if self.window_presence.set(Arc::clone(&presence)).is_ok() {
-            presence.install_window_notify(self.roster_notify.clone());
+    /// presence, and push the roster again whenever a window that holds a
+    /// live session gains its first socket or loses its last one, since that
+    /// changes the session's `window_live` with no session changing. A window
+    /// with no session changes no entry, so it pushes nothing. Set-once: the
+    /// serving layer installs the presence it builds beside the registry, and
+    /// a second install is ignored.
+    pub fn install_window_presence(self: &Arc<Self>, presence: Arc<WindowPresence>) {
+        if self.window_presence.set(Arc::clone(&presence)).is_err() {
+            return;
         }
+        // Weak: the registry holds the presence, so a strong handle here
+        // would keep both alive in a cycle.
+        let registry = Arc::downgrade(self);
+        presence.install_window_hook(WindowHook::new(move |window_id| {
+            if let Some(registry) = registry.upgrade() {
+                if registry.has_live_session_in(window_id) {
+                    registry.notify_roster_change();
+                }
+            }
+        }));
+    }
+
+    /// Whether a live session belongs to `window_id`.
+    fn has_live_session_in(&self, window_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .values()
+            .any(|session| {
+                !session.closed.load(Ordering::Relaxed)
+                    && session.window_id().as_deref() == Some(window_id)
+            })
     }
 
     /// Refresh the backend preference sampled by subsequent PTY spawns.
@@ -13873,7 +13899,7 @@ mod tests {
     /// installed no window is.
     #[test]
     fn roster_says_whether_a_page_holds_each_sessions_window() {
-        let registry = Registry::new(test_config(64, 16, 600));
+        let registry = Arc::new(Registry::new(test_config(64, 16, 600)));
         insert_session(&registry, dummy_session("a", Some("winA"), None, false));
         insert_session(&registry, dummy_session("b", Some("winB"), None, true));
         insert_session(&registry, dummy_session("h", None, None, false));
@@ -13929,13 +13955,15 @@ mod tests {
         notified.poll(&mut context).is_ready()
     }
 
-    /// The roster signal fires when a window's first socket connects and when
-    /// its last one drops, since either changes `window_live` with no session
-    /// changing, and not for a socket that leaves the set of connected windows
-    /// as it was.
+    /// The roster signal fires when a window that holds a session gains its
+    /// first socket and when it loses its last one, since either changes the
+    /// session's `window_live` with no session changing; not for a socket that
+    /// leaves the set of connected windows as it was, and not for a window
+    /// with no session, which changes no entry.
     #[test]
     fn a_window_connecting_or_disconnecting_signals_the_roster() {
-        let registry = Registry::new(test_config(64, 16, 600));
+        let registry = Arc::new(Registry::new(test_config(64, 16, 600)));
+        insert_session(&registry, dummy_session("a", Some("w1"), None, false));
         let presence = Arc::new(WindowPresence::new());
         registry.install_window_presence(Arc::clone(&presence));
         let roster = registry.roster_notify();
@@ -13956,6 +13984,14 @@ mod tests {
         assert!(!take_permit(&roster), "a socket leaving a connected window");
         drop(untagged);
         assert!(take_permit(&roster), "the window's last socket");
+
+        let empty = presence.connect("w-empty", None);
+        assert!(!take_permit(&roster), "a window with no session connecting");
+        drop(empty);
+        assert!(
+            !take_permit(&roster),
+            "a window with no session disconnecting"
+        );
     }
 
     #[cfg(target_os = "linux")]
