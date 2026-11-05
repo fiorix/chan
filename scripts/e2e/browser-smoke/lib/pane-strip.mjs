@@ -5,6 +5,8 @@
 // back from the server; the page learns of it through its own refresh, so a
 // check waits for the painted consequence it expects rather than the write.
 
+import { armFlip, paneFlip } from "./flip.mjs";
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const LAUNCHER_INPUT = '[role="dialog"][aria-label="Command launcher"] input[role="combobox"]';
@@ -150,14 +152,55 @@ export async function closeActiveTerminal(page, label) {
   throw new Error(`${label}: the terminal count stayed at ${last.terminals}; the pane holds ${JSON.stringify(last)}`);
 }
 
+/// The live terminal sessions the server attributes to the page's window, read
+/// from the tenant's terminal roster.
+export async function windowSessions(page, token) {
+  return page.evaluate(async (authToken) => {
+    const windowId = new URL(location.href).searchParams.get("w")?.trim() ||
+      sessionStorage.getItem("chan.session.window")?.trim() || "";
+    if (!windowId) throw new Error("the page has no window id");
+    const prefix = document.querySelector('meta[name="chan-prefix"]')?.getAttribute("content") ?? "";
+    const headers = authToken ? { authorization: `Bearer ${authToken}` } : {};
+    const response = await fetch(`${prefix}/api/terminals/roster`, { headers });
+    if (!response.ok) throw new Error(`GET /api/terminals/roster -> ${response.status}`);
+    const { sessions = [] } = await response.json();
+    return sessions
+      .filter((session) => session.window_id === windowId)
+      .map((session) => ({ id: session.id, name: session.tab_name, group: session.tab_group }));
+  }, token);
+}
+
 /// Close every terminal the pane mounts, on both sides, so the shared server
-/// carries no session of this check into the next one.
-export async function closeEveryTerminal(page, label) {
+/// carries no session of this check into the next one. Closing a side's last
+/// tab leaves that side showing with nothing to close, and a close there turns
+/// the pane over and closes nothing, so the helper turns it over itself, under
+/// the flip observer, before closing on the other side. The server's roster,
+/// not the page, says when the window owns no session: a terminal left behind
+/// stays a member of its group for every later window.
+export async function closeEveryTerminal(page, label, token) {
   let state = await readPaneStrip(page);
   let guard = 0;
   while (state.terminals > 0) {
-    if (++guard > 12) throw new Error(`${label}: still ${state.terminals} terminals after ${guard} closes`);
+    if (++guard > 12) throw new Error(`${label}: still ${state.terminals} terminals after ${guard} steps`);
+    if (state.tabs.length === 0) {
+      const paneId = await page.$eval(".pane", (pane) => pane.getAttribute("data-pane-id"));
+      const flip = await armFlip(page, paneFlip(paneId));
+      await dispatchCommand(page, "app.pane.flip");
+      await flip.settled(`${label} (turn ${guard})`);
+      await flip.assertSettled(`${label} (turn ${guard})`);
+      state = await readPaneStrip(page);
+      continue;
+    }
     state = await closeActiveTerminal(page, `${label} (close ${guard})`);
+  }
+  const deadline = Date.now() + 10_000;
+  let left = await windowSessions(page, token);
+  while (left.length > 0) {
+    if (Date.now() > deadline) {
+      throw new Error(`${label}: the pane mounts no terminal but the server still lists the window's sessions ${JSON.stringify(left)}`);
+    }
+    await sleep(200);
+    left = await windowSessions(page, token);
   }
   return state;
 }
