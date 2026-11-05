@@ -791,6 +791,19 @@ mod tests {
 
     #[test]
     fn half_configured_provider_refuses_naming_the_empty_variable() {
+        // Both names appear in the refusal, so pin which one it calls empty.
+        let assert_refusal = |message: String, empty_var: &str| {
+            let names_empty = format!("{empty_var} is unset or empty");
+            assert!(message.contains(&names_empty), "{message}");
+            for value in [
+                ID_SENTINEL,
+                SECRET_SENTINEL,
+                OTHER_ID_SENTINEL,
+                OTHER_SECRET_SENTINEL,
+            ] {
+                assert!(!message.contains(value), "{message}");
+            }
+        };
         for (index, &(id_var, secret_var)) in OAUTH_VARS.iter().enumerate() {
             // Another provider is complete, so the refusal cannot be the
             // "no providers configured" one.
@@ -809,15 +822,7 @@ mod tests {
                     lookup(other.iter().chain(&half).copied()),
                     None,
                 ));
-                assert!(message.contains(empty_var), "{message}");
-                for value in [
-                    ID_SENTINEL,
-                    SECRET_SENTINEL,
-                    OTHER_ID_SENTINEL,
-                    OTHER_SECRET_SENTINEL,
-                ] {
-                    assert!(!message.contains(value), "{message}");
-                }
+                assert_refusal(message, empty_var);
             }
             for (half, empty_var) in [
                 ((id_var, ID_SENTINEL), secret_var),
@@ -827,8 +832,7 @@ mod tests {
                     lookup(other.iter().copied().chain([half])),
                     None,
                 ));
-                assert!(message.contains(empty_var), "{message}");
-                assert!(!message.contains(half.1), "{message}");
+                assert_refusal(message, empty_var);
             }
         }
     }
