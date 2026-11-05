@@ -54,8 +54,8 @@ Look up the area you changed and run the scenarios listed against it.
 Automated coverage runs from two places. The Rust cases run under the normal test command; the browser cases run through the smoke harness:
 
 ```sh
-SMOKE_ONLY=40,50,55,56,57,58,61,63,97,120 node scripts/e2e/browser-smoke/run.mjs
-SMOKE_ONLY=98 node scripts/e2e/browser-smoke/run.mjs
+XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=40,50,55,56,57,58,61,63,97,120 node scripts/e2e/browser-smoke/run.mjs
+XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=98 node scripts/e2e/browser-smoke/run.mjs
 ```
 
 Check `98` is destructive and must stay in the lexical tail slot, because the workspace is intentionally absent when it returns.

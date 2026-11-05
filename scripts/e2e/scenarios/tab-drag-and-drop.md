@@ -50,7 +50,7 @@ Look up the area you changed and run the scenarios listed against it.
 The automated coverage runs from two places. Component cases run under the normal frontend test command from `web/packages/workspace-app`; the browser case runs through the smoke harness:
 
 ```sh
-SMOKE_ONLY=124 node scripts/e2e/browser-smoke/run.mjs
+XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=124 node scripts/e2e/browser-smoke/run.mjs
 ```
 
 ---

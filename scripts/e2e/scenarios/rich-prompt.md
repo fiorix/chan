@@ -44,7 +44,7 @@ RP-06 and RP-08 state behavior the product does not have yet. The server side of
 The automated coverage that exists today runs from two places. The component cases run under the normal frontend test command from `web/packages/workspace-app`; the browser cases run through the smoke harness:
 
 ```sh
-SMOKE_ONLY=104 node scripts/e2e/browser-smoke/run.mjs
+XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=104 node scripts/e2e/browser-smoke/run.mjs
 ```
 
 ---
