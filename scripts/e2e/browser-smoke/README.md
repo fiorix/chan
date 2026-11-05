@@ -6,7 +6,7 @@ Headless-Chrome smokes that drive a real chan test server end to end: build the 
 
 ```
 make browser-smoke-deps                  # once per container
-node scripts/e2e/browser-smoke/run.mjs
+XDG_RUNTIME_DIR="$(mktemp -d)" node scripts/e2e/browser-smoke/run.mjs
 ```
 
 The runner compares the suite lock's resolved tree with npm's installed-tree record and each direct package's installed version before each run, uses `npm ci --no-audit --no-fund` when they differ or `node_modules` is absent, and logs the installed `puppeteer-core` version in its header. On Linux, `make browser-smoke-lib-test` reaches the same check through `run.mjs --deps-only` and runs the suite's Node tests without starting a server or browser. Chrome is separate: `puppeteer-core` drives a browser, it does not ship one. `make browser-smoke-deps` runs [`provision.sh`](provision.sh), which installs the shared libraries Chrome links against and downloads Chrome into the cache location the runner reads. The project's build containers carry the Rust and Node toolchains and no browser at all, so a container is unrunnable until that target has run in it; the host keeps no toolchain by policy and is not where this suite runs. `provision.sh` is the single list of those dependencies, so an sdme rootfs that prefers them baked in `COPY`s and `RUN`s it rather than restating the set.
@@ -22,6 +22,7 @@ The full run builds `web/` and `cargo build -p chan` first; set `SMOKE_SKIP_BUIL
 - `SMOKE_SKIP_BUILD=1`: skip the web + cargo builds; when the extension check is selected, both `CHAN_BIN` and `CHAN_ECHO_EXTENSION_BIN` must already be current.
 - `SMOKE_ONLY=50,101`: run only the checks whose filenames start with one of the comma-separated prefixes (lexical filename-prefix match).
 - `TMPDIR`: the throwaway workspace is created under the OS tmpdir; a stray `.git` in `/tmp` makes chan's vcs-parent check refuse it, so point `TMPDIR` at a clean directory when that happens.
+- `XDG_RUNTIME_DIR`: required, and never the user's own `/run/user/<uid>`. A check that starts its own `chan devserver run` gives it a throwaway `CHAN_HOME` and `CHAN_NO_DEVSERVER_HANDOFF=1`, and the devserver still binds its discovery endpoint in `$XDG_RUNTIME_DIR/chan-devserver`, or in a per-uid directory under the shared temp dir when the variable is unset. There the user's own `chan serve` (`chan open`) and `chan close` discover it beside the user's own devserver, and while that devserver is down a `chan serve` registers its workspace with the suite's throwaway one. So the runner exits `2` before it installs, builds or starts anything when `XDG_RUNTIME_DIR` is unset, names no directory, or resolves (after `realpath`) to `/run/user/<uid>` for the running uid. Give the run a private 0700 directory, `XDG_RUNTIME_DIR="$(mktemp -d)" node scripts/e2e/browser-smoke/run.mjs`, or run it inside an isolated guest; `--deps-only` starts no chan process and is not refused.
 
 ## Exit status
 
@@ -29,7 +30,7 @@ The full run builds `web/` and `cargo build -p chan` first; set `SMOKE_SKIP_BUIL
 
 `provision.sh` uses the same three codes, and **`make` erases the distinction**: GNU make exits `2` for any recipe failure, so `make browser-smoke-deps` returning 2 means only "it failed": the provisioner's own `1` (it tried and could not) and `2` (this environment is not provisionable) both arrive as make's 2. Run `scripts/e2e/browser-smoke/provision.sh` directly whenever a caller needs to tell those apart; the make target is a convenience, not the interface.
 
-The run exits `2`, before it builds or starts anything, when no Chrome is found, when the Chrome it found will not start (the stock container state: the browser links against `libnss3` and `libasound2` and the rootfs carries neither, so the dynamic linker kills it at exec), when `CHAN_BIN` names no binary, or when `SMOKE_ONLY` selects no check. That last one is the same defect in miniature: a filter matching nothing used to build the tree, run zero checks, and report `ALL GREEN`.
+The run exits `2`, before it builds or starts anything, when `XDG_RUNTIME_DIR` is unset or is the user's own runtime directory (see Environment), when no Chrome is found, when the Chrome it found will not start (the stock container state: the browser links against `libnss3` and `libasound2` and the rootfs carries neither, so the dynamic linker kills it at exec), when `CHAN_BIN` names no binary, or when `SMOKE_ONLY` selects no check. That last one is the same defect in miniature: a filter matching nothing used to build the tree, run zero checks, and report `ALL GREEN`.
 
 A check that calls `ctx.skip` did not run and so cannot have passed, but its precondition is absent rather than broken, so it does not fail the run. It is named on the verdict line and counted in `results.json` as `skipped`, never left to be inferred from the absence of a line.
 

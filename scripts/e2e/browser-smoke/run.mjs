@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -33,6 +34,63 @@ function compareCheckFiles(left, right) {
   if (left === DESTRUCTIVE_TAIL_CHECK) return 1;
   if (right === DESTRUCTIVE_TAIL_CHECK) return -1;
   return left.localeCompare(right);
+}
+
+// Exit 2, distinct from 0 and 1, whenever the environment cannot exercise the
+// suite at all. A caller reading only 0-or-nonzero still sees a failure, and
+// one that tells the two apart learns it has an environment to fix rather than
+// a defect to chase. The absence of a run is never a pass. Every bail runs
+// before the server is launched, so nothing needs tearing down.
+function unrunnable(...lines) {
+  for (const line of lines) console.error(`SKIP: ${line}`);
+  console.error("SKIP: a skipped check is not a pass");
+  process.exit(2);
+}
+
+// The checks that start their own `chan devserver run` give it a throwaway
+// CHAN_HOME and CHAN_NO_DEVSERVER_HANDOFF, and it still binds a discovery
+// endpoint under $XDG_RUNTIME_DIR/chan-devserver, or, with that unset, under
+// a per-uid directory in the shared temp dir. In the user's own runtime
+// directory the endpoint joins the user's own devserver's in what this
+// user's `chan serve` (`chan open`) and `chan close` discover, and while the
+// user's devserver is down the suite's is the sole candidate a `chan serve`
+// registers its workspace with. So a run refuses before it installs, builds
+// or starts anything unless XDG_RUNTIME_DIR names some other directory.
+// `--deps-only` starts no chan process and runs anywhere.
+function sharedRuntimeDirReason() {
+  const dir = process.env.XDG_RUNTIME_DIR;
+  if (!dir) {
+    return "XDG_RUNTIME_DIR is unset, so a devserver a check starts publishes its discovery endpoint in the per-uid directory under the shared temp dir";
+  }
+  const resolved = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  };
+  const actual = resolved(dir);
+  if (!actual || !statSync(actual).isDirectory()) {
+    return `XDG_RUNTIME_DIR=${dir} is not a directory`;
+  }
+  const uid = process.getuid?.();
+  if (uid === undefined) return null;
+  const perUser = `/run/user/${uid}`;
+  if (actual === (resolved(perUser) ?? perUser)) {
+    return `XDG_RUNTIME_DIR=${dir} is this user's own runtime directory (${perUser}), where this user's own devservers publish their discovery endpoints`;
+  }
+  return null;
+}
+
+if (!process.argv.includes("--deps-only")) {
+  const reason = sharedRuntimeDirReason();
+  if (reason) {
+    unrunnable(
+      `refusing to run: ${reason}`,
+      "a devserver a check starts there is discovered by this user's own chan serve and chan close, and takes a chan serve's workspace while the user's own devserver is down",
+      "give the run a private 0700 runtime dir: XDG_RUNTIME_DIR=\"$(mktemp -d)\" node scripts/e2e/browser-smoke/run.mjs, or run it in an isolated guest",
+    );
+  }
 }
 
 // Self-install harness deps so a moved lock cannot keep an older browser driver.
@@ -92,17 +150,6 @@ const outDir =
 mkdirSync(outDir, { recursive: true });
 const downloadDir = join(outDir, "downloads");
 mkdirSync(downloadDir, { recursive: true });
-
-// Exit 2, distinct from 0 and 1, whenever the environment cannot exercise the
-// suite at all. A caller reading only 0-or-nonzero still sees a failure, and
-// one that tells the two apart learns it has an environment to fix rather than
-// a defect to chase. The absence of a run is never a pass. Every bail below
-// runs before the server is launched, so nothing needs tearing down.
-function unrunnable(...lines) {
-  for (const line of lines) console.error(`SKIP: ${line}`);
-  console.error("SKIP: a skipped check is not a pass");
-  process.exit(2);
-}
 
 // SMOKE_ONLY=50,55 runs just the checks whose filenames start with one of the
 // comma-separated prefixes; everything else still runs in order. Prefix
