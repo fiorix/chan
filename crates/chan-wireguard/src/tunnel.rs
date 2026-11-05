@@ -71,6 +71,10 @@ pub struct Status {
     /// its answer, failed; cleared by the next usable answer. While it is
     /// set, initiations still go to `endpoint` when there is one.
     pub resolution_error: Option<String>,
+    /// The latest lookup timed out and still holds the OS call, so no
+    /// other lookup can start until it returns; `resolution_error` names
+    /// the timeout meanwhile.
+    pub resolution_stalled: bool,
 }
 
 /// While the latest handshake is younger than this, a lookup answer never
@@ -285,18 +289,14 @@ impl Tunnel {
     pub fn status(&self) -> Status {
         let wire = self.inner.wire.lock();
         let (last_handshake, tx_bytes, rx_bytes, _, _) = wire.tunn.stats();
+        let resolution = self.inner.resolution.borrow();
         Status {
             last_handshake,
             tx_bytes: tx_bytes as u64,
             rx_bytes: rx_bytes as u64,
             endpoint: wire.endpoint,
-            resolution_error: self
-                .inner
-                .resolution
-                .borrow()
-                .error
-                .as_ref()
-                .map(ToString::to_string),
+            resolution_error: resolution.error.as_ref().map(ToString::to_string),
+            resolution_stalled: resolution.stalled,
         }
     }
 
@@ -550,10 +550,8 @@ impl Driver {
                 Event::Resolved(result) => self.resolved(result).await,
                 Event::ResolveTimeout => {
                     self.resolver.timed_out();
-                    self.failed(self.unresolved(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "lookup timed out; waiting for the system resolver",
-                    )));
+                    let timeout = io::Error::new(io::ErrorKind::TimedOut, "lookup timed out");
+                    self.failed(self.unresolved(timeout));
                     self.lookup_ended().await;
                 }
                 Event::Kick | Event::StackTimer => {}
@@ -680,18 +678,35 @@ impl Driver {
     }
 
     /// Publish a failure. A lookup fails every few seconds while dials
-    /// keep coming, so only a new or changed failure logs at warn.
+    /// keep coming, so only a new or changed failure logs at warn. A
+    /// timed-out lookup is not retried: it says it waits for the system
+    /// resolver instead.
     fn failed(&mut self, error: io::Error) {
         let message = error.to_string();
-        if self.logged_failure.as_deref() == Some(message.as_str()) {
-            tracing::debug!(error = %message, "WireGuard endpoint still failing; retrying");
-        } else {
-            tracing::warn!(error = %message, "WireGuard endpoint failed; retrying");
+        let stalled = self.resolver.stalled();
+        let repeat = self.logged_failure.as_deref() == Some(message.as_str());
+        match (repeat, stalled) {
+            (false, false) => {
+                tracing::warn!(error = %message, "WireGuard endpoint failed; retrying");
+            }
+            (false, true) => tracing::warn!(
+                error = %message,
+                "WireGuard endpoint lookup stalled; waiting for the system resolver"
+            ),
+            (true, false) => {
+                tracing::debug!(error = %message, "WireGuard endpoint still failing; retrying");
+            }
+            (true, true) => tracing::debug!(
+                error = %message,
+                "WireGuard endpoint lookup still stalled; waiting for the system resolver"
+            ),
+        }
+        if !repeat {
             self.logged_failure = Some(message);
         }
         self.resolution_tx.send_replace(Resolution {
             error: Some(Arc::new(error)),
-            stalled: self.resolver.stalled(),
+            stalled,
         });
     }
 
@@ -712,7 +727,7 @@ impl Driver {
                     let adoption = self.adopt(answer);
                     self.last_answer = Some(answer);
                     if self.logged_failure.take().is_some() {
-                        tracing::info!(endpoint = %answer, "WireGuard endpoint lookup recovered");
+                        tracing::warn!(endpoint = %answer, "WireGuard endpoint lookup recovered");
                     }
                     self.resolution_tx.send_replace(Resolution::default());
                     if adoption == Adoption::Probe || (adoption == Adoption::Moved && ahead) {

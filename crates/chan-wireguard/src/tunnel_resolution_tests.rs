@@ -1004,6 +1004,7 @@ impl tracing::Subscriber for Events {
 
 /// A lookup fails every few seconds while demand lasts; the log says so
 /// at warn when a failure starts or changes, and at debug while it repeats.
+/// The recovery logs at warn too, once, so a warn filter sees both ends.
 #[tokio::test]
 async fn lookup_failures_warn_when_they_start_or_change() {
     let events = Events::default();
@@ -1047,7 +1048,7 @@ async fn lookup_failures_warn_when_they_start_or_change() {
             ("WARN", "WireGuard endpoint failed; retrying"),
             ("DEBUG", "WireGuard endpoint still failing; retrying"),
             ("WARN", "WireGuard endpoint failed; retrying"),
-            ("INFO", "WireGuard endpoint lookup recovered"),
+            ("WARN", "WireGuard endpoint lookup recovered"),
             ("WARN", "WireGuard endpoint failed; retrying"),
         ]
     );
@@ -1177,4 +1178,56 @@ async fn a_differing_slow_answer_gets_an_initiation_of_its_own() {
     initiation_within(&other, REKEY_TIMEOUT / 2).await;
     assert_eq!(f.a.status().endpoint, Some(f.b_at));
     exchange(&mut a, &mut b).await;
+}
+
+/// A timed-out lookup holds the OS call and nothing retries until it
+/// returns: the status and the log say it is stalled, not retrying, and
+/// the recovery when the call returns logs at warn.
+#[tokio::test]
+async fn a_stalled_lookup_reads_as_stalled_until_its_call_returns() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // See lookup_failures_warn_when_they_start_or_change.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let stalled = f.query().await;
+    timeout(RESOLVE_TIMEOUT + Duration::from_secs(3), async {
+        while f.a.status().resolution_error.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let status = f.a.status();
+    assert!(status.resolution_stalled, "{status:?}");
+    assert_eq!(
+        status.resolution_error,
+        Some(format!(
+            "endpoint did not resolve: peer.test:{}: lookup timed out",
+            f.b_at.port()
+        ))
+    );
+    stalled.send(Ok(f.b_at)).unwrap();
+    until(|| {
+        let status = f.a.status();
+        !status.resolution_stalled && status.resolution_error.is_none()
+    })
+    .await;
+    let lines = events.endpoint_lines();
+    let lines: Vec<(&str, &str)> = lines
+        .iter()
+        .map(|(level, message)| (level.as_str(), message.as_str()))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            (
+                "WARN",
+                "WireGuard endpoint lookup stalled; waiting for the system resolver"
+            ),
+            ("WARN", "WireGuard endpoint lookup recovered"),
+        ]
+    );
 }

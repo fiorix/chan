@@ -163,12 +163,20 @@ impl WireguardStartup {
 
 /// The launcher's words for a tunnel's state. A tunnel keeps handshaking
 /// with the endpoint it knows while lookups of the name fail, so a live
-/// session reads as up with the failure beside it.
+/// session reads as up with the failure beside it. A failed lookup is
+/// retried; a timed-out one is not until its OS call returns.
 fn describe(status: chan_wireguard::Status) -> String {
-    match (status.last_handshake.is_some(), status.resolution_error) {
+    let failure = status.resolution_error.map(|error| {
+        if status.resolution_stalled {
+            format!("{error}; stalled, waiting for the system resolver")
+        } else {
+            format!("{error}, retrying")
+        }
+    });
+    match (status.last_handshake.is_some(), failure) {
         (true, None) => "up".to_string(),
-        (true, Some(error)) => format!("up; {error}, retrying"),
-        (false, Some(error)) => format!("{error}, retrying"),
+        (true, Some(failure)) => format!("up; {failure}"),
+        (false, Some(failure)) => failure,
         (false, None) => "connecting".to_string(),
     }
 }
@@ -578,26 +586,37 @@ mod tests {
     }
 
     /// A failing lookup no longer takes a live session down, so the state
-    /// reads up while it fails, and the failure alone only without one.
+    /// reads up while it fails, and the failure alone only without one. A
+    /// stalled lookup says so instead of claiming a retry.
     #[test]
     fn describe_reads_a_live_session_as_up_beside_a_failing_lookup() {
-        let status = |handshake: bool, error: Option<&str>| chan_wireguard::Status {
+        let status = |handshake: bool, error: Option<&str>, stalled: bool| chan_wireguard::Status {
             last_handshake: handshake.then_some(Duration::from_secs(3)),
             tx_bytes: 0,
             rx_bytes: 0,
             endpoint: None,
             resolution_error: error.map(str::to_string),
+            resolution_stalled: stalled,
         };
         let failure = "endpoint did not resolve: gw.test:51820: name absent";
-        assert_eq!(describe(status(false, None)), "connecting");
-        assert_eq!(describe(status(true, None)), "up");
+        assert_eq!(describe(status(false, None, false)), "connecting");
+        assert_eq!(describe(status(true, None, false)), "up");
         assert_eq!(
-            describe(status(false, Some(failure))),
+            describe(status(false, Some(failure), false)),
             format!("{failure}, retrying")
         );
         assert_eq!(
-            describe(status(true, Some(failure))),
+            describe(status(true, Some(failure), false)),
             format!("up; {failure}, retrying")
+        );
+        let timeout = "endpoint did not resolve: gw.test:51820: lookup timed out";
+        assert_eq!(
+            describe(status(false, Some(timeout), true)),
+            format!("{timeout}; stalled, waiting for the system resolver")
+        );
+        assert_eq!(
+            describe(status(true, Some(timeout), true)),
+            format!("up; {timeout}; stalled, waiting for the system resolver")
         );
     }
 
