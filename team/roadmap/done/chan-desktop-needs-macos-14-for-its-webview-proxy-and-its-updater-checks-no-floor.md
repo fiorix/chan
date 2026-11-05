@@ -18,7 +18,7 @@ The desktop's WireGuard fabric needs tauri's `macos-proxy` feature, with which w
 
 ## Boundaries
 
-`tauri.conf.json`, `desktop/src-tauri/src/update_floor.rs` and its four call sites in `main.rs`, the run-time gate removed from `wireguard.rs`, the two marketing scripts and their smokes, the cask template's comment, `.agents/desktop.md` (the manifest field), `desktop/design.md`, the comment on `objc2-foundation`'s `NSProcessInfo` feature in `desktop/src-tauri/Cargo.toml`, and the three user documents of contract 5. No change to Linux or Windows updates, the signing path or the manifest's platform map.
+`tauri.conf.json`, `desktop/src-tauri/src/update_floor.rs` and its four call sites in `main.rs`, the run-time gate removed from `wireguard.rs`, the two marketing scripts and their smokes, the cask template's comment, `.agents/desktop.md` (the manifest field), `desktop/design.md`, the comment on tauri's `macos-proxy` feature in `desktop/src-tauri/Cargo.toml` (the `NSProcessInfo` comment there was corrected later by `2d8df9c89`), and the three user documents of contract 5. No change to Linux or Windows updates, the signing path or the manifest's platform map.
 
 ## Acceptance
 
