@@ -73,10 +73,10 @@ pub struct Status {
     pub resolution_error: Option<String>,
 }
 
-/// A lookup answer moves the endpoint while a session lives only when it
-/// differs from the previous answer: the address the peer last
-/// authenticated from wins over a record that has not changed. Past this
-/// age of the latest handshake, three rekey retries have gone unanswered
+/// While the latest handshake is younger than this, a lookup answer never
+/// moves the endpoint: one that differs from the previous answer gets a
+/// handshake initiation, and the endpoint follows only when the peer
+/// answers from there. Past it, three rekey retries have gone unanswered
 /// since `REKEY_AFTER_TIME` (120 s plus three `REKEY_TIMEOUT`s), the path
 /// is presumed dead and any answer is taken. wireguard-tools'
 /// `reresolve-dns.sh` uses the same 135 s for the same decision, and it
@@ -137,9 +137,9 @@ impl Tunnel {
     /// Start the driver over a socket the caller bound, towards an
     /// endpoint the caller resolved. The driver still looks the configured
     /// name up before initiations: the caller's endpoint stands as the
-    /// previous answer, so it is used until a lookup answers a different
-    /// address, and while lookups fail. Must be called within a tokio
-    /// runtime, which the driver task runs on.
+    /// previous answer, so it is used while lookups fail and a lookup
+    /// answering it is no change. Must be called within a tokio runtime,
+    /// which the driver task runs on.
     pub fn start_on(config: Config, socket: UdpSocket, endpoint: SocketAddr) -> io::Result<Tunnel> {
         if socket.local_addr()?.is_ipv4() != endpoint.is_ipv4() {
             return Err(io::Error::new(
@@ -322,6 +322,18 @@ impl std::fmt::Debug for Tunnel {
 /// initiation can reproduce. Neither moves the endpoint, as in the kernel.
 fn is_cookie_reply(datagram: &[u8]) -> bool {
     datagram.len() == 64 && datagram[..4] == [3, 0, 0, 0]
+}
+
+/// What a lookup answer did to the endpoint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    /// The endpoint stands and the answer needs nothing sent.
+    Kept,
+    /// The endpoint moved to the answer.
+    Moved,
+    /// A live session stays where it is; the answer gets an initiation,
+    /// and roaming moves the endpoint if the peer answers from there.
+    Probe,
 }
 
 /// Marks the stack closed when the driver ends for any reason, the
@@ -673,7 +685,11 @@ impl Driver {
         });
     }
 
+    /// A lookup's outcome. An initiation held for it leaves first, then
+    /// any the answer earns, which so becomes the handshake the core
+    /// retries until it is answered.
     async fn resolved(&mut self, result: io::Result<SocketAddr>) {
+        let mut handshake_with = None;
         match result {
             Err(error) => self.failed(self.unresolved(error)),
             Ok(answer) => match self.sockets.ensure(answer) {
@@ -682,34 +698,56 @@ impl Driver {
                     format!("binding a UDP socket for {answer}: {error}"),
                 )),
                 Ok(()) => {
-                    self.adopt(answer);
+                    let adoption = self.adopt(answer);
                     self.last_answer = Some(answer);
                     if self.logged_failure.take().is_some() {
                         tracing::info!(endpoint = %answer, "WireGuard endpoint lookup recovered");
                     }
                     self.resolution_tx.send_replace(Resolution::default());
+                    if adoption == Adoption::Probe {
+                        handshake_with = Some(answer);
+                    }
                 }
             },
         }
         self.lookup_ended().await;
+        if let Some(to) = handshake_with {
+            self.initiate(to).await;
+        }
     }
 
-    /// Move the endpoint to a lookup answer when it says something new: no
-    /// endpoint is known, the answer differs from the previous one, or the
-    /// latest handshake is older than [`STALE_HANDSHAKE`]. Otherwise the
-    /// source the peer last authenticated from stands.
-    fn adopt(&self, answer: SocketAddr) {
+    /// The endpoint rule. With no endpoint known, or the latest handshake
+    /// older than [`STALE_HANDSHAKE`], the answer takes the endpoint. While
+    /// a younger session lives, the endpoint stays on the address the peer
+    /// last authenticated from: an answer that differs from the previous
+    /// one is only handshaken with, and one that does not needs nothing.
+    fn adopt(&self, answer: SocketAddr) -> Adoption {
         let mut wire = self.wire.lock();
+        let Some(current) = wire.endpoint else {
+            tracing::info!(new = %answer, "endpoint resolved");
+            wire.endpoint = Some(answer);
+            return Adoption::Moved;
+        };
+        if current == answer {
+            return Adoption::Kept;
+        }
         let stale = wire
             .tunn
             .time_since_last_handshake()
             .is_none_or(|age| age > STALE_HANDSHAKE);
-        if wire.endpoint.is_some() && self.last_answer == Some(answer) && !stale {
-            return;
-        }
-        if wire.endpoint != Some(answer) {
-            tracing::info!(old = ?wire.endpoint, new = %answer, "endpoint resolved");
+        if stale {
+            tracing::info!(old = %current, new = %answer, "endpoint resolved");
             wire.endpoint = Some(answer);
+            Adoption::Moved
+        } else if self.last_answer == Some(answer) {
+            Adoption::Kept
+        } else {
+            tracing::info!(
+                endpoint = %current,
+                answer = %answer,
+                "endpoint name answered a new address; handshaking with it"
+            );
+            Adoption::Probe
         }
     }
 
@@ -719,9 +757,15 @@ impl Driver {
     /// without one it waits for the next lookup, which the tick starts.
     async fn lookup_ended(&mut self) {
         self.looked_up_at = Some(Instant::now());
-        if !self.pending_initiation || self.wire.lock().endpoint.is_none() {
-            return;
+        let endpoint = self.wire.lock().endpoint;
+        if let (true, Some(endpoint)) = (self.pending_initiation, endpoint) {
+            self.initiate(endpoint).await;
         }
+    }
+
+    /// A fresh initiation straight to `to`, asking for no lookup: the one
+    /// that decided where it goes has just ended.
+    async fn initiate(&mut self, to: SocketAddr) {
         self.pending_initiation = false;
         let mut initiation = [0; 148];
         let len = {
@@ -731,7 +775,7 @@ impl Driver {
                 _ => return,
             }
         };
-        self.transmit(&initiation[..len]).await;
+        self.send_to(&initiation[..len], to).await;
     }
 
     /// Every initiation asks for a lookup and waits for it to end, unless
@@ -758,11 +802,15 @@ impl Driver {
         }
         let endpoint = self.wire.lock().endpoint;
         let Some(endpoint) = endpoint else { return };
-        let Some(socket) = self.sockets.get(endpoint.is_ipv4()) else {
+        self.send_to(datagram, endpoint).await;
+    }
+
+    async fn send_to(&self, datagram: &[u8], to: SocketAddr) {
+        let Some(socket) = self.sockets.get(to.is_ipv4()) else {
             return;
         };
-        if let Err(e) = socket.send_to(datagram, endpoint).await {
-            tracing::debug!(error = %e, %endpoint, "tunnel socket send");
+        if let Err(e) = socket.send_to(datagram, to).await {
+            tracing::debug!(error = %e, endpoint = %to, "tunnel socket send");
         }
     }
 }
