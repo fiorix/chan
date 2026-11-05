@@ -57,7 +57,6 @@
     type PaneSide,
     type FocusColor,
     type LeafNode,
-    type PaneDropEdge,
     type SerTab,
     type Tab,
   } from "../state/tabs.svelte";
@@ -102,6 +101,7 @@
     chooseWindowFocusColor,
     currentPreferences,
     modalDialogOpen,
+    openCommandLauncherFromMenu,
     ui,
     workspaceDisplayName,
     tree,
@@ -121,7 +121,7 @@
     terminalBroadcastReachCount,
   } from "../state/tabs.svelte";
   import type { BrowserLabelCtx } from "../state/tabs.svelte";
-  import { chordFor } from "../state/shortcuts";
+  import { chordFor, webInspectorChordLabel } from "../state/shortcuts";
   import { openTabMenu, tabMenu } from "../state/tabMenu.svelte";
   import {
     defaultShellProfileId,
@@ -142,6 +142,7 @@
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { terminalLayer } from "../state/terminalDock.svelte";
+  import { paneBodyDropZone, type PaneBodyDropZone } from "../state/paneDropZone";
   import { dispatchAllowsCommand } from "../state/commands";
   import { programSummary, programVisual } from "../state/programStatus";
 
@@ -288,9 +289,12 @@
     `Flip to side ${visibleSide === "a" ? "B" : "A"}${flipChord ? ` (${flipChord})` : ""}`,
   );
 
-  /// Empty panes have no right-click context menu. The pane hamburger
-  /// and the command launcher are the discovery surfaces for spawn
-  /// actions; the hamburger also keeps the pane-local chrome controls.
+  /// The pane's right-click menu: Commands, Reload and, on the desktop, Open
+  /// Inspector, each with its chord. It opens over the strip's empty stretch
+  /// and over the body of a side with no tab, where nothing else draws a menu
+  /// and the browser's own would offer Back and Inspect Element instead. The
+  /// pane hamburger and the command launcher stay the discovery surfaces for
+  /// spawn actions; the hamburger also keeps the pane-local chrome controls.
 
   /// Pane chrome menu: the ⋮ in the tab strip that replaces the
   /// per-button split / close controls.
@@ -305,6 +309,10 @@
   });
   let paneContextMenu: HamburgerMenu | undefined = $state();
   let paneContextMenuOpen = $state(false);
+  // What held focus as the right-click menu opened, for its Commands row to
+  // hand back before the launcher opens; see openCommandLauncherFromMenu.
+  let paneContextOpener: HTMLElement | null = null;
+  const inspectorChord = $derived(webInspectorChordLabel());
 
   /// Per-pane page-width cap. The ratio (state/pageWidth) is
   /// global, but the px cap is pane-relative so splitting one
@@ -507,14 +515,19 @@
     await reloadWindow();
   }
 
+  /// Offered on the desktop only: a plain browser opens its own inspector.
   async function doOpenInspector(): Promise<void> {
     closePaneMenus();
     if (await openWebInspector()) return;
-    notify(
-      isTauriDesktop()
-        ? "Inspector unavailable in this build"
-        : "Use the browser's built-in inspector (Right-click → Inspect Element)",
-    );
+    notify("Inspector unavailable in this build");
+  }
+
+  function doOpenCommands(e: MouseEvent): void {
+    const opener = paneContextOpener;
+    closePaneMenus();
+    openCommandLauncherFromMenu(e.currentTarget as Element, () => {
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+    });
   }
 
   function doSetFocusColor(color: FocusColor): void {
@@ -536,8 +549,18 @@
     });
   }
 
+  /// A side with no tab shows a placeholder that draws no menu of its own,
+  /// so its body opens the pane's. Every tab body keeps its own menu, or the
+  /// browser's where it has none, and Hybrid Nav's preview is left alone.
+  function onBodyContextMenu(e: MouseEvent): void {
+    if (active || paneMode.active || e.defaultPrevented) return;
+    openPaneContextAt(e);
+  }
+
   function openPaneContextAt(e: MouseEvent): void {
     e.preventDefault();
+    const held = document.activeElement;
+    paneContextOpener = held instanceof HTMLElement && held !== document.body ? held : null;
     setActivePane(pane.id);
     closePaneHamburgerMenu();
     paneContextMenu?.openAtCursor(e.clientX, e.clientY);
@@ -606,7 +629,9 @@
   // dragged over it. Keyed by pane id so we don't bleed state between
   // panes that share this Svelte 5 component instance.
   let dropActive = $state(false);
-  let bodyDropEdge: PaneDropEdge | null = $state(null);
+  // The body zone the drag over this pane's body would drop into, or null
+  // when the body takes nothing there.
+  let bodyDropZone: PaneBodyDropZone | null = $state(null);
   // Index where a per-tab drop indicator (a thin vertical bar) is
   // currently shown. -1 means no indicator. We render a visual bar
   // before tab[idx]; idx === visibleTabs.length means "after the
@@ -1065,56 +1090,91 @@
     return fromWindow === sessionWindowId();
   }
 
-  function edgeForBodyDrop(e: DragEvent): PaneDropEdge {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const distances: Array<[PaneDropEdge, number]> = [
-      ["left", x],
-      ["right", rect.width - x],
-      ["top", y],
-      ["bottom", rect.height - y],
-    ];
-    distances.sort((a, b) => a[1] - b[1]);
-    return distances[0]![0];
+  /// The body zone a drag over this pane's body drops into, or null for this
+  /// pane's own tab over its own centre, which stays where it is. Only a tab
+  /// from this window splits the pane, so only its drag meets the edge bands:
+  /// a tab from another window is rebuilt as a tab and a file-tree file opens
+  /// as one, and for either the whole body is the centre. So is an empty
+  /// side's body, which a drop fills and never splits.
+  function bodyDropZoneFor(e: DragEvent): PaneBodyDropZone | null {
+    const local = isTabMoveDrag(e) && localTabDrag !== null && paneInThisWindow(localTabDrag.fromPaneId);
+    let zone: PaneBodyDropZone = "centre";
+    if (local && visibleTabs.length > 0) {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      zone = paneBodyDropZone(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+    }
+    return zone === "centre" && local && isSamePaneDrag() ? null : zone;
+  }
+
+  // The body takes the three drags the strip takes, wherever nothing inside
+  // it took the drag first. The zone is judged afresh at every dragover: the
+  // capture listener clears it on the way down, and the bubble listener sets
+  // it on the way up only when no surface inside the body cancelled or
+  // stopped the dragover (the file tree's rows take a move between folders
+  // that way). The drop is then handled on the way down, in the capture
+  // phase, from that zone, so the pane acts on the drops it took at dragover
+  // and no surface under it acts on the same drop. A file-tree drag over an
+  // editor, the Rich Prompt's composer among them, is the editor's: the drag
+  // carries the file's path as text for an editor to type, so the body sets
+  // no zone there and CodeMirror takes the drop as it does anywhere else. A
+  // drag of none of the three, an OS file among them, sets no zone either and
+  // passes through untouched to the terminal or editor that takes it.
+  function onBodyDragOverCapture(): void {
+    bodyDropZone = null;
+  }
+
+  /// Whether `target` is inside a CodeMirror editor: a document's editor or
+  /// the Rich Prompt's composer, the text surfaces a file-tree drag types its
+  /// path into.
+  function inEditor(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".cm-editor") !== null;
   }
 
   function onBodyDragOver(e: DragEvent): void {
-    if (tmuxPaneHere) return;
-    if (
-      !localTabDrag ||
-      !isTabMoveDrag(e) ||
-      !isTabDragScopeCompatible(e) ||
-      !paneInThisWindow(localTabDrag.fromPaneId)
-    ) {
-      bodyDropEdge = null;
-      if (isTabMoveDrag(e)) rejectTabMoveDrag(e);
+    if (tmuxPaneHere || e.defaultPrevented || !isAcceptedDrag(e)) return;
+    if (!isTabMoveDrag(e) && inEditor(e.target)) return;
+    // A tab from another kind of window or another workspace keeps the
+    // no-drop cursor, as on the strip.
+    if (isTabMoveDrag(e) && !isTabDragScopeCompatible(e)) {
+      rejectTabMoveDrag(e);
+      return;
+    }
+    const zone = bodyDropZoneFor(e);
+    if (zone === null) {
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "none";
       return;
     }
     e.preventDefault();
     e.stopPropagation();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    bodyDropEdge = edgeForBodyDrop(e);
+    if (e.dataTransfer) e.dataTransfer.dropEffect = isTabMoveDrag(e) ? "move" : "copy";
+    bodyDropZone = zone;
   }
 
   function onBodyDragLeave(e: DragEvent): void {
     const related = e.relatedTarget as Node | null;
     if (!related || !(e.currentTarget as Node).contains(related)) {
-      bodyDropEdge = null;
+      bodyDropZone = null;
     }
   }
 
-  function onBodyDrop(e: DragEvent): void {
+  function onBodyDropCapture(e: DragEvent): void {
     // A drop ends the drag here, before the source's dragend, which a source
     // pane collapsed by this very drop may not deliver.
     tabDragInFlight = false;
-    if (tmuxPaneHere) return;
+    const zone = bodyDropZone;
+    bodyDropZone = null;
+    if (zone === null || tmuxPaneHere) return;
+    // The centre drops as past the strip's last tab. This pane's own tab
+    // never gets here: the body refused it at dragover, so no drop fires.
+    if (zone === "centre") {
+      if (dropIntoPane(e, { at: "end" })) e.stopPropagation();
+      return;
+    }
+    // Only a tab from this window meets an edge. A cross-window split is not
+    // supported (`acceptCrossWindowTab` adds a tab, not a split), so the
+    // intra-window check both avoids the id-collision false positive and
+    // keeps that boundary.
     const payload = tabDragPayload(e);
-    const edge = bodyDropEdge ?? edgeForBodyDrop(e);
-    bodyDropEdge = null;
-    // Cross-window split-edge drops are not supported (acceptCrossWindowTab
-    // adds a tab to the strip, not a split), so an intra-window check
-    // both avoids the id-collision false-positive and keeps the boundary.
     if (
       !payload ||
       !isIntraWindowDrag(payload.fromWindow) ||
@@ -1124,8 +1184,18 @@
     e.preventDefault();
     e.stopPropagation();
     markLocalTabDrop(payload.fromPaneId, payload.tabId, payload.fromSide);
-    detachTabToPaneEdge(payload.fromPaneId, payload.tabId, pane.id, edge);
+    detachTabToPaneEdge(payload.fromPaneId, payload.tabId, pane.id, zone);
   }
+
+  // A drag cancelled over the body, or ended by a drop elsewhere, leaves no
+  // highlight behind.
+  onMount(() => {
+    const clearBodyDropZone = () => {
+      bodyDropZone = null;
+    };
+    document.addEventListener("dragend", clearBodyDropZone);
+    return () => document.removeEventListener("dragend", clearBodyDropZone);
+  });
 
   /// Compute the insertion index for a drop with cursor position `clientX`
   /// over a tab element. We split the tab in half: drop on the left half
@@ -1185,32 +1255,44 @@
     return !!n && n.kind === "leaf";
   }
 
-  function onTabDrop(e: DragEvent, tabIdx: number): void {
-    tabDragInFlight = false;
+  /// Where a drop lands among the visible side's tabs: on the tab at `index`
+  /// (a tab from elsewhere is inserted at `insertAt`, by the pointer's half of
+  /// that tab), or past the strip's last tab, where the body's centre drops
+  /// too.
+  type PaneDropPlace = { at: "tab"; index: number; insertAt: number } | { at: "end" };
+
+  /// The one drop rule of the strip and the body's centre, for this pane's
+  /// visible side: a tab from this window moves here, a tab from another
+  /// window of this scope is rebuilt here, and a file-tree file opens here.
+  /// Claiming is `preventDefault`, whose "move" effect tells the source to let
+  /// its tab go; returns whether the drop was claimed.
+  function dropIntoPane(e: DragEvent, place: PaneDropPlace): boolean {
     const dt = e.dataTransfer;
-    if (!dt || tmuxPaneHere) return;
-    dropActive = false;
-    dropIndicator = -1;
+    if (!dt) return false;
+    // Tab move takes precedence over file open if both are present.
     const tabRaw = dt.getData(TAB_DRAG_MIME);
     if (tabRaw) {
       try {
         const { fromPaneId, fromSide, tabId, fromWindow } = JSON.parse(tabRaw) as TabDragPayload;
         if (isIntraWindowDrag(fromWindow) && paneInThisWindow(fromPaneId)) {
           e.preventDefault();
-          e.stopPropagation();
           markLocalTabDrop(fromPaneId, tabId, fromSide);
           if (fromPaneId === pane.id && (fromSide ?? visibleSide) === visibleSide) {
-            // Same-pane reorder: drop on tab T means source lands at
-            // position T in the final array. No half-tab logic; drops
-            // on either half of the target produce the same swap.
-            reorderTab(pane.id, tabId, tabIdx, visibleSide);
+            // Dropped on tab T, the source lands at position T in the final
+            // array: no half-tab logic, so either half of the target makes
+            // the same swap. Dropped past the last tab (the strip's
+            // background or actions area), it moves to the end, so dragging
+            // the leftmost tab rightward past the last one does the obvious
+            // thing instead of nothing.
+            const to = place.at === "tab" ? place.index : Math.max(0, visibleTabs.length - 1);
+            reorderTab(pane.id, tabId, to, visibleSide);
           } else {
-            moveTab(fromPaneId, tabId, pane.id, indicatorIndexFor(tabIdx, e), {
+            moveTab(fromPaneId, tabId, pane.id, place.at === "tab" ? place.insertAt : undefined, {
               fromSide,
               toSide: visibleSide,
             });
           }
-          return;
+          return true;
         }
         // Fall through to cross-window path: the drag is from another
         // window (its pane id may coincidentally match a local one).
@@ -1222,82 +1304,46 @@
     if (crossRaw) {
       // Reject a cross-window drop from a different kind/workspace (no
       // preventDefault ⇒ dropEffect "none" ⇒ the source keeps its tab).
-      if (!isTabDragScopeCompatible(e)) return;
+      if (!isTabDragScopeCompatible(e)) return false;
       // Adopt FIRST and only claim the drop if it worked: preventDefault is
       // what makes dropEffect "move", which is what tells the source to close
       // its tab. Accepting before knowing would destroy a tab this window
       // failed to rebuild.
-      if (!acceptCrossWindowTab(crossRaw)) return;
+      if (!acceptCrossWindowTab(crossRaw)) return false;
       e.preventDefault();
-      e.stopPropagation();
-      return;
+      return true;
     }
     const fileRaw = dt.getData(FILE_DRAG_MIME);
     if (fileRaw) {
       e.preventDefault();
-      e.stopPropagation();
       try {
         const { path } = JSON.parse(fileRaw) as { path: string };
         if (path) void openInPane(pane.id, path);
       } catch {
         // ignore
       }
+      return true;
+    }
+    return false;
+  }
+
+  function onTabDrop(e: DragEvent, tabIdx: number): void {
+    tabDragInFlight = false;
+    if (!e.dataTransfer || tmuxPaneHere) return;
+    dropActive = false;
+    dropIndicator = -1;
+    // A claimed drop stops here, so the strip's own handler does not take it
+    // again.
+    if (dropIntoPane(e, { at: "tab", index: tabIdx, insertAt: indicatorIndexFor(tabIdx, e) })) {
+      e.stopPropagation();
     }
   }
 
   function onDrop(e: DragEvent): void {
     dropActive = false;
     dropIndicator = -1;
-    const dt = e.dataTransfer;
-    if (!dt || tmuxPaneHere) return;
-    // Tab move takes precedence over file open if both are present.
-    const tabRaw = dt.getData(TAB_DRAG_MIME);
-    if (tabRaw) {
-      try {
-        const { fromPaneId, fromSide, tabId, fromWindow } = JSON.parse(tabRaw) as TabDragPayload;
-        if (isIntraWindowDrag(fromWindow) && paneInThisWindow(fromPaneId)) {
-          e.preventDefault();
-          markLocalTabDrop(fromPaneId, tabId, fromSide);
-          if (fromPaneId === pane.id && (fromSide ?? visibleSide) === visibleSide) {
-            // Strip-level drop in the same pane (i.e., dropped on the
-            // background or actions area, not directly on a tab). Treat
-            // it as "move source to the end" so dragging a leftmost tab
-            // rightward past the last tab does the obvious thing instead
-            // of silently no-op'ing.
-            reorderTab(pane.id, tabId, Math.max(0, visibleTabs.length - 1), visibleSide);
-          } else {
-            moveTab(fromPaneId, tabId, pane.id, undefined, {
-              fromSide,
-              toSide: visibleSide,
-            });
-          }
-          return;
-        }
-        // Fall through to cross-window path (drag from another window).
-      } catch {
-        // malformed payload; fall through.
-      }
-    }
-    const crossRaw = dt.getData(CROSS_TAB_MIME);
-    if (crossRaw) {
-      // Reject a cross-window drop from a different kind/workspace (no
-      // preventDefault ⇒ dropEffect "none" ⇒ the source keeps its tab).
-      if (!isTabDragScopeCompatible(e)) return;
-      // Adopt before claiming the drop; see the tab-strip handler above.
-      if (!acceptCrossWindowTab(crossRaw)) return;
-      e.preventDefault();
-      return;
-    }
-    const fileRaw = dt.getData(FILE_DRAG_MIME);
-    if (fileRaw) {
-      e.preventDefault();
-      try {
-        const { path } = JSON.parse(fileRaw) as { path: string };
-        if (path) void openInPane(pane.id, path);
-      } catch {
-        // ignore
-      }
-    }
+    if (tmuxPaneHere) return;
+    dropIntoPane(e, { at: "end" });
   }
 </script>
 
@@ -1378,9 +1424,6 @@
     ondrop={onDrop}
     oncontextmenu={(e) => {
       if ((e.target as Element | null)?.closest(".tab, .actions")) return;
-      // Empty panes have no right-click menu; only non-empty panes
-      // get the Reload / Open Inspector context menu.
-      if (visibleTabs.length === 0) return;
       openPaneContextAt(e);
     }}
   >
@@ -1743,9 +1786,17 @@
         bind:open={paneContextMenuOpen}
         showTrigger={false}
         width={220}
-        height={110}
+        height={140}
         onBeforeOpen={closePaneHamburgerMenu}
       >
+        <li>
+          <button role="menuitem" onclick={doOpenCommands}>
+            <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+            <span class="menu-row-label">Commands</span>
+            <span class="menu-row-chord">{chordLabel("app.launcher.toggle")}</span>
+          </button>
+        </li>
+        <li class="sep" role="separator"></li>
         <li>
           <!-- Window-level reload, like a browser Cmd+R. The
                SPA-level chord in App.svelte and this menu entry both
@@ -1759,27 +1810,33 @@
             <span class="menu-row-chord">{chordLabel("app.window.reload")}</span>
           </button>
         </li>
-        <li>
-          <button role="menuitem" onclick={doOpenInspector}>
-            <Bug size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span>Open Inspector</span>
-          </button>
-        </li>
+        {#if isTauriDesktop()}
+          <li>
+            <button role="menuitem" onclick={doOpenInspector}>
+              <Bug size={16} strokeWidth={1.75} aria-hidden="true" />
+              <span class="menu-row-label">Open Inspector</span>
+              <span class="menu-row-chord">{inspectorChord ?? ""}</span>
+            </button>
+          </li>
+        {/if}
       </HamburgerMenu>
     </div>
   </div>
 
   <div
     class="editor-wrap"
-    class:body-drop-left={bodyDropEdge === "left"}
-    class:body-drop-right={bodyDropEdge === "right"}
-    class:body-drop-top={bodyDropEdge === "top"}
-    class:body-drop-bottom={bodyDropEdge === "bottom"}
+    class:body-drop-left={bodyDropZone === "left"}
+    class:body-drop-right={bodyDropZone === "right"}
+    class:body-drop-top={bodyDropZone === "top"}
+    class:body-drop-bottom={bodyDropZone === "bottom"}
+    class:body-drop-centre={bodyDropZone === "centre"}
     class:tab-dragging={tabDragInFlight}
     bind:this={editorWrapEl}
+    ondragovercapture={onBodyDragOverCapture}
     ondragover={onBodyDragOver}
     ondragleave={onBodyDragLeave}
-    ondrop={onBodyDrop}
+    ondropcapture={onBodyDropCapture}
+    oncontextmenu={onBodyContextMenu}
     role="group"
     aria-label="pane content"
   >
@@ -1855,10 +1912,10 @@
                  Indexing graph) lives inside the Dashboard tab.
                  Multi-pane empty panes and panes with tabs on their hidden
                  Hybrid side keep the minimal chrome (just the chan mark).
-                 Empty panes have no right-click menu;
-                 spawn actions live in the pane hamburger's Apps rows
-                 and the command launcher, so right-clicking an empty
-                 pane is a no-op.
+                 Right-clicking here opens the pane's menu (Commands,
+                 Reload, Open Inspector on the desktop) through the body's
+                 handler; spawn actions live in the pane hamburger's Apps
+                 rows and the command launcher.
 
                  Terminal-only windows skip the welcome entirely: they always
                  hold at least one terminal (boot opens one, close-on-last-tab
@@ -2233,8 +2290,9 @@
     display: none;
   }
   /* The auto-hide preference: a side with fewer than two tabs draws no
-     strip, so its hamburger, side toggle and drop target go with it; the
-     keyboard and the command launcher still reach every command. */
+     strip, so its hamburger and side toggle go with it; the keyboard and the
+     command launcher still reach every command, and the body's centre still
+     takes every drop the strip takes. */
   .tabs.auto-hidden {
     display: none;
   }
@@ -2557,8 +2615,15 @@
   .editor-wrap.body-drop-left::after,
   .editor-wrap.body-drop-right::after,
   .editor-wrap.body-drop-top::after,
-  .editor-wrap.body-drop-bottom::after {
+  .editor-wrap.body-drop-bottom::after,
+  .editor-wrap.body-drop-centre::after {
     opacity: 1;
+  }
+  /* A drop in the centre fills the pane, so the whole body wears the ring
+     the strip wears under a dragged tab, where an edge split marks one side. */
+  .editor-wrap.body-drop-centre::after {
+    box-shadow: inset 0 0 0 2px var(--pane-highlight-color, var(--pane-active-focus));
+    background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 8%, transparent);
   }
   .editor-wrap.body-drop-left::after {
     border-left: 4px solid var(--pane-highlight-color, var(--pane-active-focus));

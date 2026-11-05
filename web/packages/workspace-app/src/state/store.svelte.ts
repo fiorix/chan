@@ -4822,6 +4822,21 @@ export function toggleCommandLauncher(): void {
   else openCommandLauncher();
 }
 
+/// Open the command launcher from a context menu's Commands row, through
+/// the window's command bus as its chord does. The launcher hands focus
+/// back, when it closes, to the element that held focus as it opened, and
+/// the row holding focus now goes away with its menu. So `refocus` first
+/// puts focus back on what the menu was opened over, and focus still left
+/// in the menu is let go, so the launcher records that surface, or the page
+/// itself when the surface takes no focus, and never the row.
+export function openCommandLauncherFromMenu(row: Element, refocus?: () => void): void {
+  const menu = row.closest('[role="menu"]') ?? row;
+  refocus?.();
+  const held = document.activeElement;
+  if (held instanceof HTMLElement && menu.contains(held)) held.blur();
+  window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.launcher.toggle" } }));
+}
+
 // ---- settings overlay --------------------------------------------------
 //
 // The configuration surface: a web form over the split-store

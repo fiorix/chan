@@ -33,6 +33,9 @@ const ghostty = vi.hoisted(() => {
     pastes: [] as string[],
     // The forceAll flag of every render pass asked of the renderer.
     renders: [] as boolean[],
+    // When set, focus() does what ghostty-web's does: it focuses the element
+    // the terminal opened in, and again on a zero-delay timer.
+    realFocus: false,
   };
   /// ghostty-web's own render, as the painter finds it on the renderer.
   function fakeRender(_buffer: unknown, forceAll?: boolean) {
@@ -60,12 +63,14 @@ const ghostty = vi.hoisted(() => {
       needsFullRedraw: () => false,
     };
     applicationCursorKeys = false;
+    element: HTMLElement | null = null;
     constructor(options: Record<string, unknown>) {
       this.options = options;
       record.terminals.push(this);
       record.events.push("construct");
     }
-    open() {
+    open(element?: HTMLElement) {
+      this.element = element ?? null;
       record.events.push("open");
     }
     attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean) {
@@ -109,6 +114,10 @@ const ghostty = vi.hoisted(() => {
     }
     focus() {
       record.events.push("focus");
+      const element = this.element;
+      if (!record.realFocus || !element) return;
+      element.focus();
+      setTimeout(() => element.focus(), 0);
     }
     blur() {
       record.events.push("blur");
@@ -243,6 +252,7 @@ beforeEach(() => {
     bareRenderer: false,
     bracketedPaste: false,
     pastes: [],
+    realFocus: false,
   });
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
 });
@@ -703,6 +713,42 @@ test("the VT reads current renderer metrics and sends a resize reply to its own 
 
 // ghostty-web tracks DECSET 1004 and sends no report of its own, so the
 // component reports focus at the element ghostty-web focuses.
+// A launcher opened from the body menu's Commands records what holds the
+// keyboard as it opens and focuses its own input a tick later, as the
+// command deck does. ghostty-web's focus() focuses its element again on a
+// zero-delay timer, after that.
+describe("the body menu's Commands", () => {
+  test("hands the launcher the terminal's host, and leaves the keyboard in the launcher", async () => {
+    ghostty.record.realFocus = true;
+    const { target } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    host.tabIndex = 0;
+    const launcherInput = document.createElement("input");
+    document.body.append(launcherInput);
+    let opener: Element | null = null;
+    const onCommand = (e: Event) => {
+      if ((e as CustomEvent<{ name: string }>).detail.name !== "app.launcher.toggle") return;
+      opener = document.activeElement;
+      void tick().then(() => launcherInput.focus());
+    };
+    window.addEventListener("chan:command", onCommand);
+    try {
+      await openBodyMenu(target);
+      const row = menuRow("Commands");
+      row.focus();
+      row.click();
+      await tick();
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(opener, "the launcher opens from the terminal").toBe(host);
+      expect(document.activeElement, "nothing takes the keyboard back from the launcher").toBe(launcherInput);
+    } finally {
+      window.removeEventListener("chan:command", onCommand);
+      launcherInput.remove();
+    }
+  });
+});
+
 describe("focus reports", () => {
   const reports = (socket: TerminalSocket): unknown[] =>
     sentFrames(socket)

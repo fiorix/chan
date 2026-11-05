@@ -689,6 +689,20 @@ export function chordFor(id: string): string | null {
   return formatChord(chord, os);
 }
 
+/// The desktop's inspector chord: Cmd+Alt+I on macOS, Ctrl+Alt+I on Linux
+/// and Windows. chan-desktop's key bridge (`desktop/src-tauri/src/
+/// key_bridge.js`) opens the inspector on it before the page sees the key,
+/// so it is not in `SHORTCUTS`: the page never dispatches it and a keymap
+/// override could not move it.
+export const WEB_INSPECTOR_CHORD: Chord = "Mod+Alt+I";
+
+/// The inspector chord's label for a menu row, or `null` in a plain browser,
+/// whose own inspector chord is the browser's business.
+export function webInspectorChordLabel(): string | null {
+  if (currentPlatform() !== "native") return null;
+  return formatChord(WEB_INSPECTOR_CHORD, currentOS());
+}
+
 /// Derive the exact chord a raw `KeyboardEvent` spells, with every held
 /// modifier. Shortcut capture stores this form, so an assignment says which
 /// modifiers the user pressed.

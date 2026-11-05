@@ -3,9 +3,9 @@
 // A terminal's two menus. The tab menu (from the tab strip) names and groups
 // the terminal, shows its status and broadcast controls, and ends with Close.
 // The body menu (a right-click in the terminal) shows the live engine and the
-// secret-masking toggle, then Find, Copy, Paste and Copy Scrollback. Command
-// discovery lives in the launcher, not here. A TerminalTab is mounted over
-// the stand-in xterm and socket.
+// secret-masking toggle, then Find, Copy, Paste and Copy Scrollback, and ends
+// with Commands, which opens the command launcher from this terminal as its
+// chord does. A TerminalTab is mounted over the stand-in xterm and socket.
 
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -37,16 +37,21 @@ import {
   terminalTab,
   TERMINAL_PANE,
   TerminalSocket,
+  xterm,
 } from "../__tests__/terminalTab";
 
 installTerminalDom();
 
 const startControl = ui.terminalControl;
 
+const tauri = window as unknown as { __TAURI_INTERNALS__?: { invoke: () => Promise<unknown> } };
+
 afterEach(() => {
   resetTerminals();
   __testSetStandalonePreferences(null);
   ui.terminalControl = startControl;
+  xterm.textareaFocus = false;
+  delete tauri.__TAURI_INTERNALS__;
   vi.restoreAllMocks();
 });
 
@@ -164,6 +169,52 @@ describe("the body menu", () => {
     await openBodyMenu(target);
     expect(maskingLabel()).toBe("Secret masking: off");
     expect(setItem.mock.calls.filter(([key]) => /mask/i.test(String(key)))).toEqual([]);
+  });
+});
+
+describe("the body menu's Commands", () => {
+  const agents = {
+    mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)",
+    linux: "Mozilla/5.0 (X11; Linux x86_64)",
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  } as const;
+  test.each([
+    ["mac", true, "Cmd+K"],
+    ["linux", true, "Ctrl+Alt+K"],
+    ["windows", true, "Ctrl+Alt+K"],
+    ["mac", false, "Ctrl+Alt+K"],
+    ["linux", false, "Ctrl+Alt+K"],
+  ] as const)("on %s, desktop %s, ends the menu after a separator with the launcher's chord %s", async (os, desktop, chord) => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agents[os]);
+    if (desktop) tauri.__TAURI_INTERNALS__ = { invoke: vi.fn(async () => undefined) };
+    const { target } = await attached();
+    await openBodyMenu(target);
+    expect(menuShape().slice(-2)).toEqual(["---", "Commands"]);
+    expect(menuRow("Commands").querySelector(".mbtn-chord")?.textContent?.trim()).toBe(chord);
+  });
+
+  test("opens the launcher from this terminal, which holds focus as it opens, and closes the menu", async () => {
+    xterm.textareaFocus = true;
+    const { target } = await attached();
+    const seen: Array<{ name: string; focus: Element | null }> = [];
+    const listener = (e: Event) =>
+      seen.push({ name: (e as CustomEvent<{ name: string }>).detail.name, focus: document.activeElement });
+    window.addEventListener("chan:command", listener);
+    try {
+      await openBodyMenu(target);
+      // A pointer press on the row moves focus there before its click.
+      const row = menuRow("Commands");
+      row.focus();
+      row.click();
+      await tick();
+    } finally {
+      window.removeEventListener("chan:command", listener);
+    }
+    const screen = target.querySelector(".terminal-tab textarea");
+    expect(screen, "the stand-in terminal opened its textarea").not.toBeNull();
+    expect(seen.map((s) => s.name)).toEqual(["app.launcher.toggle"]);
+    expect(seen[0]!.focus, "the launcher opens with the terminal focused").toBe(screen);
+    expect(document.body.querySelector(".terminal-tab-menu-bubble")).toBeNull();
   });
 });
 
