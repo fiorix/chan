@@ -539,7 +539,10 @@ fi
 # the session and equal stamps count, so the rekey is on the client's clock
 # every time, not only when a tick split the first exchange. The kernel, the
 # responder, never re-handshakes on its own: its log for the hold holds no
-# retry, and the keepalives it received are counted.
+# retry, and the keepalives it received are counted. The client key is the
+# same in every arm, so until this arm's first handshake the peer still
+# shows the previous arm's stamp: it is read before the launch, and samples
+# still showing it are not this arm's.
 sample_peer_during() {
     # sample_peer_during <pid> <samples file>: until the pid ends.
     local pid="$1" out="$2" sample
@@ -560,6 +563,9 @@ hold_started() {
 if runs rekey; then
     : > "$WORK/rekey.samples"; : > "$WORK/rekey.hold"
     rekey_since=$(( $(date +%s) - 5 ))
+    # Stamps are whole seconds: one passes first, so this arm's first
+    # handshake cannot carry the prior stamp.
+    prior="$(peer_handshake)"; sleep 1
     set +e
     client_ps $((HOLD + 120)) > "$WORK/rekey.out" <<PS &
 & "$CLIENT_DIR\wg-connect.exe" "$CLIENT_DIR\client-keepalive.conf" "$PEER_IP:$HTTP_PORT" /hello.txt --hold $HOLD
@@ -584,10 +590,11 @@ PS
     retries="$(grep -c 'Retrying handshake' "$WORK/rekey.journal" || true)"
     keepalives="$(grep -c 'Receiving keepalive packet' "$WORK/rekey.journal" || true)"
     hold_at="$(cat "$WORK/rekey.hold" 2>/dev/null || echo 0)"
-    # A sample taken before the first handshake reads 0 and is not a stamp.
-    first="$(awk '$2 != 0 { print $2; exit }' "$WORK/rekey.samples")"
+    # A sample taken before this arm's first handshake reads 0 or the prior
+    # stamp, and is not this arm's.
+    first="$(awk -v prior="$prior" '$2 != 0 && $2 != prior { print $2; exit }' "$WORK/rekey.samples")"
     last="$(awk 'END { print $2 }' "$WORK/rekey.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$prior" '$2 != 0 && $2 != prior { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
     # Receive counters at least 8 s into the hold (the first GET's bytes
     # have all landed) and before its last 5 s (the second GET is not yet
     # counted): the growth between them is keepalives and the rekey alone.
@@ -607,7 +614,7 @@ PS
     [ "$hold_at" != 0 ] && [ -n "$early" ] && [ -n "$late" ] && [ "$late" -ge $((early + 96)) ] || arm_rc=1
     # The kernel never retried a handshake, and it saw the keepalives.
     [ "$retries" = 0 ] && [ "$keepalives" -ge 3 ] || arm_rc=1
-    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct), client saw the handshake ${ago:-?}s before the second GET, peer received $early -> $late bytes while idle (+$((${late:-0} - ${early:-0})), a keepalive is 32), kernel log: $retries handshake retries, $keepalives keepalives, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
+    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct after the prior arm's ${prior:-none}), client saw the handshake ${ago:-?}s before the second GET, peer received $early -> $late bytes while idle (+$((${late:-0} - ${early:-0})), a keepalive is 32), kernel log: $retries handshake retries, $keepalives keepalives, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
     { grep -E '^(status|hold|response)' "$WORK/rekey.out"; sed 's/^/    sample /' "$WORK/rekey.samples"; sed 's/^/    kernel /' "$WORK/rekey.journal"; peer_wg_show; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/rekey.out" >&2
 fi
@@ -720,10 +727,10 @@ Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.err" -ErrorAction SilentlyContinu
 PS
     strip_cr "$WORK/$1.log"
 }
-tunnel_up_logged() {
-    # tunnel_up_logged <name> <client file name>
+tunnel_start_logged() {
+    # tunnel_start_logged <name> <client file name>
     devserver_log "$1"
-    grep -qF "chan devserver: WireGuard tunnel up from $CLIENT_DIR\\$2: endpoint " "$WORK/$1.log" \
+    grep -qF "chan devserver: WireGuard tunnel started from $CLIENT_DIR\\$2: endpoint " "$WORK/$1.log" \
         && grep -qF "public key $CLIENT_PUB" "$WORK/$1.log"
 }
 
@@ -734,7 +741,7 @@ if runs devserver; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         if start_devserver devserver client.conf; then
-            wait_for 60 "the tunnel-up line" tunnel_up_logged devserver client.conf || arm_rc=1
+            wait_for 60 "the tunnel-start line" tunnel_start_logged devserver client.conf || arm_rc=1
             wait_for 60 "the raw listener to see the dial" peer_has_capture devserver || arm_rc=1
         else
             arm_rc=1
@@ -745,8 +752,8 @@ if runs devserver; then
         devserver_log devserver
         case "$capture" in "$H2_PREFACE_HEX"*) ;; *) arm_rc=1 ;; esac
         [ "$after" != "0" ] && [ "$after" != "$before" ] || arm_rc=1
-        verdict devserver "$arm_rc" "tunnel-up logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
+        verdict devserver "$arm_rc" "tunnel start logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver 1 "the raw listener did not start on the peer"
@@ -760,7 +767,7 @@ if runs devserver-wrong-key; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         if start_devserver devserver-wrong-key client-wrong-key.conf; then
-            wait_for 60 "the tunnel-up line" tunnel_up_logged devserver-wrong-key client-wrong-key.conf || arm_rc=1
+            wait_for 60 "the tunnel-start line" tunnel_start_logged devserver-wrong-key client-wrong-key.conf || arm_rc=1
             # The dial has 20 s to reach the listener; with a wrong key it must not.
             sleep 20
         else
@@ -773,8 +780,8 @@ if runs devserver-wrong-key; then
         [ "$capture" = absent ] || arm_rc=1
         [ "$before" = "$after" ] || arm_rc=1
         ! grep -q 'tunnel connected' "$WORK/devserver-wrong-key.log" || arm_rc=1
-        verdict devserver-wrong-key "$arm_rc" "tunnel-up logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
+        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver-wrong-key 1 "the raw listener did not start on the peer"

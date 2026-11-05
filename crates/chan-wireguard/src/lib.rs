@@ -31,6 +31,7 @@ pub(crate) mod clock;
 pub mod config;
 pub mod noise;
 mod proxy;
+mod resolver;
 mod stack;
 mod stream;
 #[cfg(test)]

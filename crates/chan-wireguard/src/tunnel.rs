@@ -1,7 +1,7 @@
-//! The tunnel: one UDP socket, one protocol peer and one TCP/IP stack,
+//! The tunnel: UDP sockets, one protocol peer and one TCP/IP stack,
 //! driven by one task.
 //!
-//! The driver owns the socket and the network side of the loop: it polls
+//! The driver owns the sockets and the network side of the loop: it polls
 //! the stack, seals every packet the stack emitted and sends it to the
 //! endpoint, and opens every datagram that arrives into the stack. The
 //! streams never see a packet; they share the stack under its lock and
@@ -17,11 +17,15 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use rand_core::{OsRng, RngCore};
 use tokio::net::UdpSocket;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::clock::Instant;
 use crate::config::{Cidr, Config, Endpoint};
 use crate::noise::errors::WireGuardError;
+use crate::noise::REKEY_TIMEOUT;
 use crate::noise::{Tunn, TunnResult};
+use crate::resolver::{self, Resolver};
 use crate::stack::{Shared, Stack};
 use crate::stream::{Connecting, Listener, Stream, BACKLOG};
 
@@ -43,10 +47,6 @@ const SEAL_OVERHEAD: usize = 32;
 /// burst is opened before the stack polls once rather than once each.
 const RECEIVE_BURST: usize = 32;
 
-/// How long a name lookup may take when the endpoint is re-resolved
-/// after the tunnel expired.
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Asked of the kernel for the tunnel socket's buffers: a window of
 /// sealed packets arriving while the driver is busy must fit, and the
 /// OS defaults (64 KiB on Windows, about 200 KiB on Linux) do not hold
@@ -54,7 +54,7 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 const SOCKET_BUFFER_HINT: usize = 4 * 1024 * 1024;
 
 /// A point in time report on the tunnel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     /// Time since the current session's handshake completed; `None`
     /// before the first one.
@@ -65,12 +65,42 @@ pub struct Status {
     pub rx_bytes: u64,
     /// Where datagrams go: the resolved configuration endpoint, or the
     /// source of the peer's latest authenticated datagram.
-    pub endpoint: SocketAddr,
+    /// `None` until an address is resolved or an authenticated peer arrives.
+    pub endpoint: Option<SocketAddr>,
+    /// Why the latest lookup of the endpoint name, or the socket bind for
+    /// its answer, failed; cleared by the next usable answer. While it is
+    /// set, initiations still go to `endpoint` when there is one.
+    pub resolution_error: Option<String>,
+    /// The latest lookup timed out and still holds the OS call, so no
+    /// other lookup can start until it returns; `resolution_error` names
+    /// the timeout meanwhile.
+    pub resolution_stalled: bool,
 }
+
+/// While the latest handshake is younger than this, a lookup answer never
+/// moves the endpoint: one that differs from the previous answer gets a
+/// handshake initiation, and the endpoint follows only when the peer
+/// answers from there. Past it, three rekey retries have gone unanswered
+/// since `REKEY_AFTER_TIME` (120 s plus three `REKEY_TIMEOUT`s), the path
+/// is presumed dead and any answer is taken. wireguard-tools'
+/// `reresolve-dns.sh` uses the same 135 s for the same decision, and it
+/// sits below `REJECT_AFTER_TIME` (180 s), so the switch comes before the
+/// session is rejected.
+const STALE_HANDSHAKE: Duration = Duration::from_secs(135);
 
 struct Wire {
     tunn: Tunn,
-    endpoint: SocketAddr,
+    endpoint: Option<SocketAddr>,
+}
+
+/// What the driver publishes after each lookup outcome, for `connect` and
+/// `status`.
+#[derive(Clone, Default)]
+struct Resolution {
+    error: Option<Arc<io::Error>>,
+    /// A timed-out lookup still holds the OS call, so no other outcome
+    /// can come until it returns.
+    stalled: bool,
 }
 
 struct Inner {
@@ -79,6 +109,7 @@ struct Inner {
     addresses: Vec<IpAddr>,
     allowed_ips: Vec<Cidr>,
     driver: JoinHandle<()>,
+    resolution: watch::Receiver<Resolution>,
 }
 
 impl Drop for Inner {
@@ -98,23 +129,21 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// Resolve the peer's endpoint, bind a UDP socket of its family on an
-    /// ephemeral port and start the driver. No datagram is sent until a
-    /// connection is opened or the keepalive asks for one.
-    pub async fn start(config: Config) -> io::Result<Tunnel> {
-        let endpoint = resolve(&config.peer.endpoint, None).await?;
-        let bind: SocketAddr = if endpoint.is_ipv4() {
-            (Ipv4Addr::UNSPECIFIED, 0).into()
-        } else {
-            (Ipv6Addr::UNSPECIFIED, 0).into()
-        };
-        let socket = UdpSocket::bind(bind).await?;
-        Self::start_on(config, socket, endpoint)
+    /// Start the driver without resolving the endpoint or waiting for a
+    /// handshake. Must run within the tokio runtime that owns the tunnel.
+    /// Resolution and UDP binding run in the background; failures are
+    /// reported by [`Self::status`] and retried on handshake attempts.
+    pub fn start(config: Config) -> io::Result<Tunnel> {
+        let resolver = Resolver::new(config.peer.endpoint.clone());
+        Self::build(config, Sockets::default(), None, resolver)
     }
 
     /// Start the driver over a socket the caller bound, towards an
-    /// endpoint the caller resolved. Must be called within a tokio
-    /// runtime, which the driver task runs on.
+    /// endpoint the caller resolved. The driver still looks the configured
+    /// name up on initiations: the caller's endpoint stands as the previous
+    /// answer, so it is used while lookups fail and a lookup answering it
+    /// is no change. Must be called within a tokio runtime, which the
+    /// driver task runs on.
     pub fn start_on(config: Config, socket: UdpSocket, endpoint: SocketAddr) -> io::Result<Tunnel> {
         if socket.local_addr()?.is_ipv4() != endpoint.is_ipv4() {
             return Err(io::Error::new(
@@ -122,13 +151,18 @@ impl Tunnel {
                 "the socket and the endpoint are of different address families",
             ));
         }
-        let kernel_socket = socket2::SockRef::from(&socket);
-        if let Err(e) = kernel_socket.set_recv_buffer_size(SOCKET_BUFFER_HINT) {
-            tracing::debug!(error = %e, "tunnel socket receive buffer left at the default");
-        }
-        if let Err(e) = kernel_socket.set_send_buffer_size(SOCKET_BUFFER_HINT) {
-            tracing::debug!(error = %e, "tunnel socket send buffer left at the default");
-        }
+        let resolver = Resolver::new(config.peer.endpoint.clone());
+        let mut sockets = Sockets::default();
+        sockets.insert(socket)?;
+        Self::build(config, sockets, Some(endpoint), resolver)
+    }
+
+    fn build(
+        config: Config,
+        sockets: Sockets,
+        endpoint: Option<SocketAddr>,
+        resolver: Resolver,
+    ) -> io::Result<Tunnel> {
         let mtu = usize::from(config.mtu.unwrap_or(DEFAULT_MTU));
         let stack = Stack::new(&config.addresses, mtu)?;
         let shared = Arc::new(Shared::new(stack));
@@ -142,13 +176,20 @@ impl Tunnel {
             None,
         );
         let wire = Arc::new(Mutex::new(Wire { tunn, endpoint }));
+        let (resolution_tx, resolution) = watch::channel(Resolution::default());
         let driver = Driver {
             shared: shared.clone(),
             wire: wire.clone(),
-            socket,
+            sockets,
             endpoint_name: config.peer.endpoint,
             allowed_ips: config.peer.allowed_ips.clone(),
-            expired: false,
+            resolver,
+            resolution_tx,
+            looked_up_at: None,
+            last_answer: endpoint,
+            logged_failure: None,
+            pending_initiation: false,
+            initiation_ahead: false,
         };
         let driver = tokio::spawn(driver.run());
         Ok(Tunnel {
@@ -158,6 +199,7 @@ impl Tunnel {
                 addresses: config.addresses.iter().map(|c| c.addr).collect(),
                 allowed_ips: config.peer.allowed_ips,
                 driver,
+                resolution,
             }),
         })
     }
@@ -165,7 +207,11 @@ impl Tunnel {
     /// Open a TCP connection to `remote` through the tunnel. A destination
     /// outside the peer's allowed IPs is refused as `NetworkUnreachable`
     /// before anything is sent; a reset answers `ConnectionRefused`.
-    /// Dropping the future closes the half-open connection.
+    /// Before any endpoint is known, it waits for a lookup that ends after
+    /// it started and fails with that lookup's reason; when a timed-out
+    /// lookup still holds the OS call, no such outcome can come, and it
+    /// fails at once with the timeout. Other waits are bounded by the
+    /// caller. Dropping the future closes the half-open connection.
     pub async fn connect(&self, remote: SocketAddr) -> io::Result<Stream> {
         let inner = &self.inner;
         if !inner.allowed_ips.iter().any(|c| c.contains(remote.ip())) {
@@ -196,7 +242,30 @@ impl Tunnel {
             stack.connect(remote, local)?
         };
         inner.shared.kick();
-        Connecting::new(Stream::new(inner.shared.clone(), handle, local, remote)).await
+        let connecting = Connecting::new(Stream::new(inner.shared.clone(), handle, local, remote));
+        tokio::pin!(connecting);
+        // An outcome published before this connect answers an earlier
+        // attempt; only a later one, or a stall nothing can end, is ours.
+        let mut resolution = inner.resolution.clone();
+        let mut current = resolution.borrow_and_update().clone();
+        let mut ours = current.stalled;
+        loop {
+            if ours && inner.wire.lock().endpoint.is_none() {
+                if let Some(error) = current.error {
+                    return Err(io::Error::new(error.kind(), error.to_string()));
+                }
+            }
+            tokio::select! {
+                result = &mut connecting => return result,
+                changed = resolution.changed() => {
+                    if changed.is_err() {
+                        return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "the tunnel is closed"));
+                    }
+                    current = resolution.borrow_and_update().clone();
+                    ours = true;
+                }
+            }
+        }
     }
 
     /// Listen for connections the peer opens to `port` at any tunnel
@@ -220,11 +289,14 @@ impl Tunnel {
     pub fn status(&self) -> Status {
         let wire = self.inner.wire.lock();
         let (last_handshake, tx_bytes, rx_bytes, _, _) = wire.tunn.stats();
+        let resolution = self.inner.resolution.borrow();
         Status {
             last_handshake,
             tx_bytes: tx_bytes as u64,
             rx_bytes: rx_bytes as u64,
             endpoint: wire.endpoint,
+            resolution_error: resolution.error.as_ref().map(ToString::to_string),
+            resolution_stalled: resolution.stalled,
         }
     }
 
@@ -244,20 +316,6 @@ impl std::fmt::Debug for Tunnel {
     }
 }
 
-/// The first address the endpoint resolves to, of the wanted family when
-/// one is given.
-async fn resolve(endpoint: &Endpoint, want_v4: Option<bool>) -> io::Result<SocketAddr> {
-    tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
-        .await?
-        .find(|a| want_v4.is_none_or(|v4| a.is_ipv4() == v4))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{endpoint} resolved to no usable address"),
-            )
-        })
-}
-
 /// A cookie reply authenticates nobody in either direction. The one the
 /// core emits answers a handshake message it has not verified yet, and the
 /// one it receives is sealed under a key derived from the peer's public key
@@ -265,6 +323,22 @@ async fn resolve(endpoint: &Endpoint, want_v4: Option<bool>) -> io::Result<Socke
 /// initiation can reproduce. Neither moves the endpoint, as in the kernel.
 fn is_cookie_reply(datagram: &[u8]) -> bool {
     datagram.len() == 64 && datagram[..4] == [3, 0, 0, 0]
+}
+
+fn is_handshake_initiation(datagram: &[u8]) -> bool {
+    datagram.len() == 148 && datagram[..4] == [1, 0, 0, 0]
+}
+
+/// What a lookup answer did to the endpoint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    /// The endpoint stands and the answer needs nothing sent.
+    Kept,
+    /// The endpoint moved to the answer.
+    Moved,
+    /// A live session stays where it is; the answer gets an initiation,
+    /// and roaming moves the endpoint if the peer answers from there.
+    Probe,
 }
 
 /// Marks the stack closed when the driver ends for any reason, the
@@ -283,26 +357,120 @@ enum Event {
     Kick,
     Tick,
     StackTimer,
+    Resolved(io::Result<SocketAddr>),
+    ResolveTimeout,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes `Sockets::ensure` fail on this thread, since no real bind of
+    /// an ephemeral wildcard port fails on demand.
+    static REFUSE_BIND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[derive(Default)]
+struct Sockets {
+    v4: Option<UdpSocket>,
+    v6: Option<UdpSocket>,
+}
+
+impl Sockets {
+    fn get(&self, v4: bool) -> Option<&UdpSocket> {
+        if v4 {
+            self.v4.as_ref()
+        } else {
+            self.v6.as_ref()
+        }
+    }
+
+    fn insert(&mut self, socket: UdpSocket) -> io::Result<()> {
+        let kernel_socket = socket2::SockRef::from(&socket);
+        if let Err(e) = kernel_socket.set_recv_buffer_size(SOCKET_BUFFER_HINT) {
+            tracing::debug!(error = %e, "tunnel socket receive buffer left at the default");
+        }
+        if let Err(e) = kernel_socket.set_send_buffer_size(SOCKET_BUFFER_HINT) {
+            tracing::debug!(error = %e, "tunnel socket send buffer left at the default");
+        }
+        if socket.local_addr()?.is_ipv4() {
+            self.v4 = Some(socket)
+        } else {
+            self.v6 = Some(socket)
+        }
+        Ok(())
+    }
+
+    fn ensure(&mut self, endpoint: SocketAddr) -> io::Result<()> {
+        if self.get(endpoint.is_ipv4()).is_some() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if REFUSE_BIND.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "refused by the test",
+            ));
+        }
+        let bind: SocketAddr = if endpoint.is_ipv4() {
+            (Ipv4Addr::UNSPECIFIED, 0).into()
+        } else {
+            (Ipv6Addr::UNSPECIFIED, 0).into()
+        };
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(bind),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        if bind.is_ipv6() {
+            socket.set_only_v6(true)?;
+        }
+        socket.set_nonblocking(true)?;
+        socket.bind(&bind.into())?;
+        self.insert(UdpSocket::from_std(socket.into())?)
+    }
+
+    async fn receive(
+        socket: &Option<UdpSocket>,
+        buf: &mut [u8],
+    ) -> io::Result<(usize, SocketAddr)> {
+        match socket {
+            Some(socket) => socket.recv_from(buf).await,
+            None => std::future::pending().await,
+        }
+    }
 }
 
 struct Driver {
     shared: Arc<Shared>,
     wire: Arc<Mutex<Wire>>,
-    socket: UdpSocket,
+    sockets: Sockets,
     endpoint_name: Endpoint,
     allowed_ips: Vec<Cidr>,
-    /// Whether the last tick reported the tunnel expired, so the endpoint
-    /// is re-resolved once per expiry rather than every tick.
-    expired: bool,
+    resolver: Resolver,
+    resolution_tx: watch::Sender<Resolution>,
+    /// When the latest lookup ended: an answer, a failure or its deadline.
+    looked_up_at: Option<Instant>,
+    /// The latest usable answer, or the endpoint `start_on` was given.
+    last_answer: Option<SocketAddr>,
+    /// The failure last logged at warn; a repeat of it logs at debug.
+    logged_failure: Option<String>,
+    /// An initiation held for want of an endpoint, generated afresh when
+    /// a lookup gives one, so its retry clock starts at transmission.
+    pending_initiation: bool,
+    /// An initiation left for the known endpoint while a lookup was
+    /// outstanding: if that lookup moves the endpoint, the new address
+    /// gets an initiation of its own at once, not at the next retry.
+    initiation_ahead: bool,
 }
 
 impl Driver {
     async fn run(mut self) {
         let _shut_down = ShutDown(self.shared.clone());
         let mut datagram = vec![0u8; MAX_DATAGRAM];
+        let mut datagram6 = vec![0u8; MAX_DATAGRAM];
         let mut work = vec![0u8; MAX_DATAGRAM + SEAL_OVERHEAD];
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        self.resolver.start();
 
         loop {
             let (outbound, delay, saturated) = {
@@ -327,21 +495,36 @@ impl Driver {
                     None => std::future::pending().await,
                 }
             };
+            let resolve_deadline = self.resolver.deadline();
             let event = tokio::select! {
-                received = self.socket.recv_from(&mut datagram) => match received {
+                received = Sockets::receive(&self.sockets.v4, &mut datagram) => match received {
+                    Ok((len, from)) => Event::Datagram(len, from),
+                    Err(e) => Event::ReceiveFailed(e),
+                },
+                received = Sockets::receive(&self.sockets.v6, &mut datagram6) => match received {
                     Ok((len, from)) => Event::Datagram(len, from),
                     Err(e) => Event::ReceiveFailed(e),
                 },
                 _ = self.shared.kicked() => Event::Kick,
                 _ = tick.tick() => Event::Tick,
                 _ = stack_timer => Event::StackTimer,
+                result = self.resolver.completed() => Event::Resolved(result),
+                _ = resolver::deadline(resolve_deadline) => Event::ResolveTimeout,
             };
             match event {
                 Event::Datagram(len, from) => {
+                    let datagram = if from.is_ipv4() {
+                        &mut datagram
+                    } else {
+                        &mut datagram6
+                    };
                     self.handle_datagram(&datagram[..len], from, &mut work)
                         .await;
                     for _ in 1..RECEIVE_BURST {
-                        match self.socket.try_recv_from(&mut datagram) {
+                        let Some(socket) = self.sockets.get(from.is_ipv4()) else {
+                            break;
+                        };
+                        match socket.try_recv_from(datagram) {
                             Ok((len, from)) => {
                                 self.handle_datagram(&datagram[..len], from, &mut work)
                                     .await;
@@ -364,6 +547,13 @@ impl Driver {
                     return;
                 }
                 Event::Tick => self.tick(&mut work).await,
+                Event::Resolved(result) => self.resolved(result).await,
+                Event::ResolveTimeout => {
+                    self.resolver.timed_out();
+                    let timeout = io::Error::new(io::ErrorKind::TimedOut, "lookup timed out");
+                    self.failed(self.unresolved(timeout));
+                    self.lookup_ended().await;
+                }
                 Event::Kick | Event::StackTimer => {}
             }
         }
@@ -372,11 +562,11 @@ impl Driver {
     /// Seal one IP packet from the stack and send it. Without a session
     /// the core queues the packet and hands back the handshake initiation
     /// instead.
-    async fn send_packet(&self, packet: &[u8], work: &mut [u8]) {
-        let (len, endpoint) = {
+    async fn send_packet(&mut self, packet: &[u8], work: &mut [u8]) {
+        let len = {
             let mut wire = self.wire.lock();
             match wire.tunn.encapsulate(packet, work) {
-                TunnResult::WriteToNetwork(sealed) => (sealed.len(), wire.endpoint),
+                TunnResult::WriteToNetwork(sealed) => sealed.len(),
                 TunnResult::Err(e) => {
                     tracing::debug!(error = %e, "dropping an outgoing packet");
                     return;
@@ -386,13 +576,13 @@ impl Driver {
                 | TunnResult::WriteToTunnelV6(..) => return,
             }
         };
-        self.send(&work[..len], endpoint).await;
+        self.transmit(&work[..len]).await;
     }
 
     async fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr, work: &mut [u8]) {
         let mut to_network: Vec<Vec<u8>> = Vec::new();
         let mut to_stack: Vec<Vec<u8>> = Vec::new();
-        let endpoint = {
+        {
             let mut wire = self.wire.lock();
             let mut authenticated = false;
             let mut drain = false;
@@ -423,14 +613,15 @@ impl Driver {
                 }
             }
             if authenticated {
-                self.expired = false;
-                if wire.endpoint != from {
-                    tracing::info!(old = %wire.endpoint, new = %from, "peer endpoint moved");
-                    wire.endpoint = from;
+                if wire.endpoint != Some(from) {
+                    tracing::info!(old = ?wire.endpoint, new = %from, "peer endpoint moved");
+                    wire.endpoint = Some(from);
+                }
+                if datagram.len() == 92 && datagram[..4] == [2, 0, 0, 0] {
+                    self.pending_initiation = false;
                 }
             }
-            wire.endpoint
-        };
+        }
         if !to_stack.is_empty() {
             let mut stack = self.shared.stack.lock();
             for packet in to_stack {
@@ -438,7 +629,7 @@ impl Driver {
             }
         }
         for sealed in &to_network {
-            self.send(sealed, endpoint).await;
+            self.transmit(sealed).await;
         }
     }
 
@@ -453,53 +644,205 @@ impl Driver {
     }
 
     async fn tick(&mut self, work: &mut [u8]) {
-        let (len, endpoint, expired) = {
+        let (len, expired) = {
             let mut wire = self.wire.lock();
             match wire.tunn.update_timers(work) {
-                TunnResult::WriteToNetwork(sealed) => (sealed.len(), wire.endpoint, false),
-                TunnResult::Err(WireGuardError::ConnectionExpired) => (0, wire.endpoint, true),
+                TunnResult::WriteToNetwork(sealed) => (sealed.len(), false),
+                TunnResult::Err(WireGuardError::ConnectionExpired) => (0, true),
                 TunnResult::Err(e) => {
                     tracing::debug!(error = %e, "timer tick");
-                    (0, wire.endpoint, false)
+                    (0, false)
                 }
                 TunnResult::Done
                 | TunnResult::WriteToTunnelV4(..)
-                | TunnResult::WriteToTunnelV6(..) => (0, wire.endpoint, false),
+                | TunnResult::WriteToTunnelV6(..) => (0, false),
             }
         };
         if len > 0 {
-            self.send(&work[..len], endpoint).await;
+            self.transmit(&work[..len]).await;
         }
-        if expired && !self.expired {
-            // The peer stopped answering for the whole retry window. The
-            // next packet starts a fresh handshake on its own; the name is
-            // read again first so a moved peer is found.
-            self.expired = true;
-            tracing::warn!(endpoint = %self.endpoint_name, "tunnel expired; re-resolving the endpoint");
-            let want_v4 = self.socket.local_addr().map(|a| a.is_ipv4()).ok();
-            match tokio::time::timeout(RESOLVE_TIMEOUT, resolve(&self.endpoint_name, want_v4)).await
-            {
-                Ok(Ok(addr)) => {
-                    let mut wire = self.wire.lock();
-                    if wire.endpoint != addr {
-                        tracing::info!(old = %wire.endpoint, new = %addr, "endpoint re-resolved");
-                        wire.endpoint = addr;
-                    }
-                }
-                Ok(Err(e)) => tracing::warn!(error = %e, "endpoint lookup failed"),
-                Err(_) => tracing::warn!("endpoint lookup timed out"),
-            }
-        } else if !expired {
-            self.expired = false;
+        if expired {
+            self.pending_initiation = false;
+            self.initiation_ahead = false;
+            self.looked_up_at = None;
+        } else if self.pending_initiation {
+            self.resolver.start();
         }
     }
 
-    async fn send(&self, datagram: &[u8], endpoint: SocketAddr) {
-        if let Err(e) = self.socket.send_to(datagram, endpoint).await {
-            tracing::debug!(error = %e, %endpoint, "tunnel socket send");
+    fn unresolved(&self, error: io::Error) -> io::Error {
+        io::Error::new(
+            error.kind(),
+            format!("endpoint did not resolve: {}: {error}", self.endpoint_name),
+        )
+    }
+
+    /// Publish a failure. A lookup fails every few seconds while dials
+    /// keep coming, so only a new or changed failure logs at warn. A
+    /// timed-out lookup is not retried: it says it waits for the system
+    /// resolver instead.
+    fn failed(&mut self, error: io::Error) {
+        let message = error.to_string();
+        let stalled = self.resolver.stalled();
+        let repeat = self.logged_failure.as_deref() == Some(message.as_str());
+        match (repeat, stalled) {
+            (false, false) => {
+                tracing::warn!(error = %message, "WireGuard endpoint failed; retrying");
+            }
+            (false, true) => tracing::warn!(
+                error = %message,
+                "WireGuard endpoint lookup stalled; waiting for the system resolver"
+            ),
+            (true, false) => {
+                tracing::debug!(error = %message, "WireGuard endpoint still failing; retrying");
+            }
+            (true, true) => tracing::debug!(
+                error = %message,
+                "WireGuard endpoint lookup still stalled; waiting for the system resolver"
+            ),
+        }
+        if !repeat {
+            self.logged_failure = Some(message);
+        }
+        self.resolution_tx.send_replace(Resolution {
+            error: Some(Arc::new(error)),
+            stalled,
+        });
+    }
+
+    /// A lookup's outcome. An initiation held for it leaves first, then
+    /// any the answer earns, which so becomes the handshake the core
+    /// retries until it is answered.
+    async fn resolved(&mut self, result: io::Result<SocketAddr>) {
+        let ahead = std::mem::take(&mut self.initiation_ahead);
+        let mut handshake_with = None;
+        match result {
+            Err(error) => self.failed(self.unresolved(error)),
+            Ok(answer) => match self.sockets.ensure(answer) {
+                Err(error) => self.failed(io::Error::new(
+                    error.kind(),
+                    format!("binding a UDP socket for {answer}: {error}"),
+                )),
+                Ok(()) => {
+                    let adoption = self.adopt(answer);
+                    self.last_answer = Some(answer);
+                    if self.logged_failure.take().is_some() {
+                        tracing::warn!(endpoint = %answer, "WireGuard endpoint lookup recovered");
+                    }
+                    self.resolution_tx.send_replace(Resolution::default());
+                    if adoption == Adoption::Probe || (adoption == Adoption::Moved && ahead) {
+                        handshake_with = Some(answer);
+                    }
+                }
+            },
+        }
+        self.lookup_ended().await;
+        if let Some(to) = handshake_with {
+            self.initiate(to).await;
+        }
+    }
+
+    /// The endpoint rule. With no endpoint known, or the latest handshake
+    /// older than [`STALE_HANDSHAKE`], the answer takes the endpoint. While
+    /// a younger session lives, the endpoint stays on the address the peer
+    /// last authenticated from: an answer that differs from the previous
+    /// one is only handshaken with, and one that does not needs nothing.
+    fn adopt(&self, answer: SocketAddr) -> Adoption {
+        let mut wire = self.wire.lock();
+        let Some(current) = wire.endpoint else {
+            tracing::info!(new = %answer, "endpoint resolved");
+            wire.endpoint = Some(answer);
+            return Adoption::Moved;
+        };
+        if current == answer {
+            return Adoption::Kept;
+        }
+        let stale = wire
+            .tunn
+            .time_since_last_handshake()
+            .is_none_or(|age| age > STALE_HANDSHAKE);
+        if stale {
+            tracing::info!(old = %current, new = %answer, "endpoint resolved");
+            wire.endpoint = Some(answer);
+            Adoption::Moved
+        } else if self.last_answer == Some(answer) {
+            Adoption::Kept
+        } else {
+            tracing::info!(
+                endpoint = %current,
+                answer = %answer,
+                "endpoint name answered a new address; handshaking with it"
+            );
+            Adoption::Probe
+        }
+    }
+
+    /// A lookup ended, by an answer, a failure or its deadline. An
+    /// initiation held for want of an endpoint leaves now if there is one;
+    /// without one it waits for the next lookup, which the tick starts.
+    async fn lookup_ended(&mut self) {
+        self.looked_up_at = Some(Instant::now());
+        let endpoint = self.wire.lock().endpoint;
+        if let (true, Some(endpoint)) = (self.pending_initiation, endpoint) {
+            self.initiate(endpoint).await;
+        }
+    }
+
+    /// A fresh initiation straight to `to`, asking for no lookup: the one
+    /// that decided where it goes has just ended.
+    async fn initiate(&mut self, to: SocketAddr) {
+        self.pending_initiation = false;
+        let mut initiation = [0; 148];
+        let len = {
+            let mut wire = self.wire.lock();
+            match wire.tunn.format_handshake_initiation(&mut initiation, true) {
+                TunnResult::WriteToNetwork(packet) => packet.len(),
+                _ => return,
+            }
+        };
+        self.send_to(&initiation[..len], to).await;
+    }
+
+    /// Every initiation asks for a lookup, unless an endpoint is known and
+    /// one ended no more than `REKEY_TIMEOUT` ago. One to a known endpoint
+    /// does not wait for it; without an endpoint it is held until a lookup
+    /// gives one.
+    fn look_up_on_initiation(&mut self, known: bool) {
+        let fresh = self
+            .looked_up_at
+            .is_some_and(|at| at.elapsed() <= REKEY_TIMEOUT);
+        if !(known && fresh) {
+            self.resolver.start();
+        }
+        if known {
+            self.initiation_ahead |= self.resolver.outstanding();
+        }
+    }
+
+    async fn transmit(&mut self, datagram: &[u8]) {
+        let endpoint = self.wire.lock().endpoint;
+        if is_handshake_initiation(datagram) {
+            self.look_up_on_initiation(endpoint.is_some());
+            self.pending_initiation = endpoint.is_none();
+        }
+        if let Some(endpoint) = endpoint {
+            self.send_to(datagram, endpoint).await;
+        }
+    }
+
+    async fn send_to(&self, datagram: &[u8], to: SocketAddr) {
+        let Some(socket) = self.sockets.get(to.is_ipv4()) else {
+            return;
+        };
+        if let Err(e) = socket.send_to(datagram, to).await {
+            tracing::debug!(error = %e, endpoint = %to, "tunnel socket send");
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tunnel_resolution_tests.rs"]
+mod resolution_tests;
 
 #[cfg(test)]
 mod tests {
@@ -760,7 +1103,7 @@ mod tests {
         .expect("the core takes a well-formed cookie reply");
         assert_eq!(
             a.status().endpoint,
-            probe_at,
+            Some(probe_at),
             "a cookie reply authenticates nobody"
         );
         pending.abort();
@@ -772,7 +1115,7 @@ mod tests {
         let before = a.status();
         assert_eq!(before.last_handshake, None);
         assert_eq!((before.tx_bytes, before.rx_bytes), (0, 0));
-        assert_eq!(before.endpoint, b_at);
+        assert_eq!(before.endpoint, Some(b_at));
 
         let mut listener = b.listen(0).unwrap();
         let port = listener.port();
@@ -798,10 +1141,10 @@ mod tests {
         assert!(after.last_handshake.is_some(), "{after:?}");
         assert!(after.last_handshake.unwrap() < WAIT);
         assert!(after.tx_bytes > 0 && after.rx_bytes > 0, "{after:?}");
-        assert_eq!(after.endpoint, b_at);
+        assert_eq!(after.endpoint, Some(b_at));
         let b_status = b.status();
         assert!(b_status.last_handshake.is_some(), "{b_status:?}");
-        assert_eq!(b_status.endpoint, a_at);
+        assert_eq!(b_status.endpoint, Some(a_at));
     }
 
     #[tokio::test]

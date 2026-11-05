@@ -29,7 +29,9 @@
 # (the peer answers 404 to everything), the macOS and Windows webviews, and
 # a peer behind NAT or at a changing address.
 #
-# Usage: desktop-wireguard.sh
+# Usage: desktop-wireguard.sh [--unresolved-endpoint]
+#   --unresolved-endpoint proves startup and the proxy with a missing name;
+#                         it runs instead of the connected-peer arms.
 #   CHAN_DESKTOP_BIN  a built debug chan-desktop (default
 #                     target/debug/chan-desktop). It is not built here: it
 #                     needs the web bundles, `make web` then
@@ -39,7 +41,9 @@
 #
 # Needs xvfb-run and curl. Exits 2 when a prerequisite is missing rather
 # than passing. Everything runs under a throwaway CHAN_HOME, HOME,
-# XDG_RUNTIME_DIR and TMPDIR; the work dir is deleted on success and kept
+# XDG_RUNTIME_DIR and TMPDIR, with no Wayland display and GTK held to X11,
+# so the desktop renders on the Xvfb display only and never on the
+# caller's compositor; the work dir is deleted on success and kept
 # on failure. The kept work dir holds the run's client file with a private
 # key that is worthless once the peer process is gone, which the exit path
 # ends, but treat it as a credential until it is deleted.
@@ -49,6 +53,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 CHAN_DESKTOP_BIN="${CHAN_DESKTOP_BIN:-$REPO/target/debug/chan-desktop}"
 GATEWAY_ID="gw-e2e00001"
+UNRESOLVED=0
+if [ "${1:-}" = --unresolved-endpoint ]; then UNRESOLVED=1; shift; fi
+[ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
 
 log() { printf 'desktop-wireguard: %s\n' "$*" >&2; }
 refuse() { log "cannot run: $*"; exit 2; }
@@ -96,6 +103,25 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # A test launched from inside a chan terminal must not inherit session
 # state, handoff hints, or credentials.
 for v in $(compgen -v | grep -E '^CHAN_' | grep -vE '^CHAN_(HOME|BIN|DESKTOP_BIN)$'); do unset "$v"; done
+# The caller's Wayland session: WAYLAND_DISPLAY may be an absolute socket
+# path and WAYLAND_SOCKET an inherited descriptor, and either would put the
+# desktop and its webviews on the caller's compositor instead of Xvfb.
+unset WAYLAND_DISPLAY WAYLAND_SOCKET
+export GDK_BACKEND=x11
+# The desktop publishes its handoff socket, and the chan processes here
+# discover devservers, in XDG_RUNTIME_DIR. The caller's own
+# (/run/user/<uid>) holds their live desktop's and devserver's sockets, so
+# refuse to start anything unless it is a private directory.
+private_runtime_dir_reason() {
+    local dir="${XDG_RUNTIME_DIR:-}" actual own
+    [ -n "$dir" ] || { echo "XDG_RUNTIME_DIR is unset"; return; }
+    actual="$(realpath -e -- "$dir" 2>/dev/null)" || { echo "XDG_RUNTIME_DIR=$dir does not exist"; return; }
+    own="/run/user/$(id -u)"
+    own="$(realpath -e -- "$own" 2>/dev/null || echo "$own")"
+    [ "$actual" != "$own" ] || echo "XDG_RUNTIME_DIR=$dir is this user's own runtime directory ($own)"
+}
+reason="$(private_runtime_dir_reason)"
+[ -z "$reason" ] || refuse "$reason"
 export CHAN_UPDATE_CHECK=0
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
@@ -157,6 +183,9 @@ wait_for 20 "the peer" peer_logged '^peer: ready' || fail "the peer did not star
 PEER_URL="$(sed -n 's/^peer: ready url=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
 [ -n "$PEER_URL" ] || fail "the peer printed no URL: $(cat "$WORK/peer.log")"
 log "peer at $PEER_URL, client file $WORK/client.conf (mode $(stat -c %a "$WORK/client.conf"))"
+if [ "$UNRESOLVED" = 1 ]; then
+    sed -i 's/^Endpoint = .*/Endpoint = chan-endpoint-missing.invalid:51820/' "$WORK/client.conf"
+fi
 
 # 2. The desktop's config: one enabled gateway behind the file.
 cat > "$CHAN_HOME/desktop/config.json" <<JSON
@@ -165,8 +194,60 @@ JSON
 
 # 3. The desktop, headless.
 xvfb-run -a "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
-PIDS+=("$!")
+XVFB_RUN_PID=$!
+PIDS+=("$XVFB_RUN_PID")
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
+
+# `chan serve` hands a workspace to the desktop only when its own
+# environment names a display, and xvfb-run gives one to the desktop
+# alone; without it serve starts a standalone server that never returns.
+# The CLI calls below take the desktop's display, read from its process.
+desktop_display() {
+    local child bin
+    bin="$(readlink -f "$CHAN_DESKTOP_BIN")"
+    for child in $(pgrep -P "$XVFB_RUN_PID" || true); do
+        [ "$(readlink -f "/proc/$child/exe" 2>/dev/null || true)" = "$bin" ] || continue
+        tr '\0' '\n' < "/proc/$child/environ" | sed -n 's/^DISPLAY=//p'
+        return 0
+    done
+    return 1
+}
+DISPLAY="$(desktop_display)" || fail "no chan-desktop process under xvfb-run (pid $XVFB_RUN_PID)"
+[ -n "$DISPLAY" ] || fail "the desktop's environment names no DISPLAY"
+export DISPLAY
+log "the desktop runs on display $DISPLAY"
+
+if [ "$UNRESOLVED" = 1 ]; then
+    arm_rc=0
+    proxy_logged=no
+    lookup_logged=no
+    wait_for 15 "the proxy before resolution" logged 'gateway WireGuard proxy listening' && proxy_logged=yes || arm_rc=1
+    wait_for 20 "the resolver failure" logged 'endpoint did not resolve' && lookup_logged=yes || arm_rc=1
+    # `chan devserver ls` is answered by the desktop's control socket, so
+    # it shows the desktop itself serving requests while its gateway's
+    # name does not resolve.
+    set +e
+    timeout 20 "$CHAN_BIN" devserver ls > "$WORK/startup.out" 2>&1
+    control_rc=$?
+    set -e
+    [ "$control_rc" = 0 ] || arm_rc=1
+    desktop_log
+    proxy="$(sed -n 's/.*gateway WireGuard proxy listening.*proxy=\(127\.0\.0\.1:[0-9]*\).*/\1/p' "$CLEAN" | head -1)"
+    [ -n "$proxy" ] || arm_rc=1
+    response=none
+    if [ -n "$proxy" ]; then
+        # A malformed request is answered by the bound proxy without any
+        # destination lookup or handshake.
+        response="$(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "http://$proxy/" || true)"
+        [ "$response" = 400 ] || arm_rc=1
+    fi
+    verdict unresolved-startup "$arm_rc" "proxy line $proxy_logged (${proxy:-no address}), origin-form request answered ${response:-nothing} (want 400), lookup error logged $lookup_logged, desktop control rc=$control_rc: $(head -1 "$WORK/startup.out" | cut -c1-80)"
+    [ "$arm_rc" = 0 ] || fail "unresolved endpoint startup"
+    cleanup
+    trap - EXIT
+    rm -rf "${WORK:?}"
+    exit 0
+fi
 
 # tunnel: the start line in the desktop and the handshake at the peer.
 arm_rc=0
@@ -204,9 +285,12 @@ verdict probes "$arm_rc" "forward answered $FORWARD, CONNECT answered $CONNECT, 
 # window: a workspace window through the proxied webview. Its page and
 # assets are plain forwards to the embedded origin, and the SPA's socket is
 # an absolute-form upgrade the proxy bridges; the server's 101 on the
-# socket route only happens once the page ran. The desktop opens a window
-# of its own at start, so the count of sockets answered must grow past
-# what was there before the serve.
+# socket route only happens once the page ran. The desktop's own windows
+# open and redial sockets on their own schedule, so a count of sockets
+# proves nothing about this one: the arm needs serve's handoff line, a
+# window the desktop opened after it (its label is `local::` and the
+# window id), and a 101 on the socket that window's page tags with that
+# id (`w=`).
 WS_101='uri=/ws[ ?].*status=101'
 arm_rc=0
 WS="$WORK/ws"
@@ -215,13 +299,25 @@ printf '# note\n' > "$WS/a.md"
 wait_for 30 "chan workspace ls to answer" "$CHAN_BIN" workspace ls >/dev/null || arm_rc=1
 BEFORE_WS="$(count "$WS_101")"
 BEFORE_BRIDGED="$(count 'proxy upgrade bridged')"
-"$CHAN_BIN" serve "$WS" > "$WORK/serve.out" 2>&1 || { arm_rc=1; log "serve: $(cat "$WORK/serve.out")"; }
-ws_grew() { [ "$(count "$WS_101")" -gt "$BEFORE_WS" ]; }
+window_labels() { desktop_log; sed -n 's/.*WINGEO resolve label=\(local::w-[0-9a-f]*\) .*/\1/p' "$CLEAN" | sort -u; }
+window_labels > "$WORK/labels.before"
+set +e
+timeout 60 "$CHAN_BIN" serve "$WS" > "$WORK/serve.out" 2>&1
+serve_rc=$?
+set -e
+[ "$serve_rc" = 0 ] || { arm_rc=1; log "serve rc=$serve_rc (124 is the 60 s bound): $(cat "$WORK/serve.out")"; }
+grep -qE '^chan: opened .*/ws in chan-desktop\.$' "$WORK/serve.out" || arm_rc=1
+SERVED=""
+served_window_opened() { SERVED="$(window_labels | comm -13 "$WORK/labels.before" - | head -1)"; [ -n "$SERVED" ]; }
+served_socket_answered() { [ -n "$SERVED" ] && logged "uri=/ws\\?([^ ]*&)?w=${SERVED#local::}(&| ).*status=101"; }
 bridged_grew() { [ "$(count 'proxy upgrade bridged')" -gt "$BEFORE_BRIDGED" ]; }
+wait_for 60 "the served window" served_window_opened || arm_rc=1
 wait_for 60 "the window's page through the proxy" logged 'forwarding.*target=127\.0\.0\.1:[0-9]+ route="direct"' || arm_rc=1
-wait_for 60 "the served window's socket answered 101" ws_grew || arm_rc=1
+wait_for 60 "the served window's socket answered 101" served_socket_answered || arm_rc=1
 wait_for 10 "the served window's upgrade bridged at the proxy" bridged_grew || arm_rc=1
-verdict window "$arm_rc" "serve: $(tr '\n' ' ' < "$WORK/serve.out" | cut -c1-80); /ws sockets answered 101 $BEFORE_WS -> $(count "$WS_101"), upgrades bridged $BEFORE_BRIDGED -> $(count 'proxy upgrade bridged')"
+SERVED_SOCKET=no
+served_socket_answered && SERVED_SOCKET=yes
+verdict window "$arm_rc" "serve rc=$serve_rc: $(tr '\n' ' ' < "$WORK/serve.out" | cut -c1-80); served window ${SERVED:-none}, its /ws answered 101: $SERVED_SOCKET; /ws 101s $BEFORE_WS -> $(count "$WS_101"), upgrades bridged $BEFORE_BRIDGED -> $(count 'proxy upgrade bridged')"
 
 # launcher: its sockets (`/api/library/local-theme/watch`, one per panel)
 # are served by the launcher router, the embedded server's root fallback

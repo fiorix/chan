@@ -21,13 +21,15 @@
 #               returns the file.
 #   keepalive   with PersistentKeepalive the peer's receive counter grows
 #               while the tunnel carries no connection.
-#   devserver   `chan devserver run --tunnel-wireguard` logs the tunnel up
+#   devserver   `chan devserver run --tunnel-wireguard` logs the tunnel start
 #               and its h2 dial reaches a raw listener on the peer's tunnel
 #               address with the HTTP/2 connection preface, through the
 #               devserver, the connector, the stack and the kernel. The
 #               dial then fails at the HTTP level, which is expected.
 #   devserver-wrong-key
 #               the same dial with the wrong peer key reaches nothing.
+#   dns         an initially absent endpoint recovers and follows a hosts
+#               file change to a second UDP forwarding path (opt-in).
 #
 # What it cannot prove: a peer behind a real NAT or a changing address, a
 # tunnel URL by name, and anything the gateway answers past the preface.
@@ -44,6 +46,23 @@
 #                        refused when it already exists)
 #   --hold SECS          the rekey arm's idle hold (default 130, past the 120 s rekey)
 #   --arms LIST          comma separated arms to run (default: all, in the order above)
+#   --dns-second-endpoint HOST:PORT  second forward to the same peer, for --arms dns
+#   --dns-second-peer-port PORT      the peer port that second forward reaches,
+#                        when it is not the listen port: the run redirects it
+#                        to the listen port with nft and removes the rule at
+#                        exit (refused when its table already exists)
+#
+# The dns arm needs two UDP paths from this host to the peer's WireGuard
+# port, and checks first that each path answers from its own address. QEMU
+# user networking (slirp) cannot give two forwards to one guest port: it
+# sends every reply for a guest port out of the newest forward to it, so
+# the first path is answered from the second's port. Forward the second
+# path to a guest port of its own and let the run redirect that port, for
+# the kernel peer VM on 51820:
+#   (qemu) hostfwd_add udp:127.0.0.1:51821-:51822
+#   wireguard-kernel.sh --arms dns --dns-second-endpoint 127.0.0.1:51821 \
+#       --dns-second-peer-port 51822 SSH_TARGET 127.0.0.1:51820 PEER_ADDRESS
+# The redirect needs nft on the peer.
 #
 # Prerequisites. On the peer: Linux with the wireguard module, wireguard-tools
 # (`wg`), iproute2, python3 (serves the files and the raw listener), sha256sum,
@@ -71,6 +90,9 @@ ARMS="wrong-key,get,rekey,keepalive,devserver,devserver-wrong-key"
 HTTP_PORT=8080
 RAW_PORT=4443
 POSITIONAL=()
+DNS_SECOND_ENDPOINT=""
+DNS_SECOND_PEER_PORT=""
+NFT_TABLE=chanwg_dns
 
 log() { printf 'wireguard-kernel: %s\n' "$*" >&2; }
 refuse() { log "cannot run: $*"; exit 2; }
@@ -83,6 +105,8 @@ while [ $# -gt 0 ]; do
         --interface) IFACE="$2"; shift 2 ;;
         --hold) HOLD="$2"; shift 2 ;;
         --arms) ARMS="$2"; shift 2 ;;
+        --dns-second-endpoint) DNS_SECOND_ENDPOINT="$2"; shift 2 ;;
+        --dns-second-peer-port) DNS_SECOND_PEER_PORT="$2"; shift 2 ;;
         -h | --help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | cut -c3-; exit 0 ;;
         -*) refuse "unknown option $1" ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -94,6 +118,13 @@ ENDPOINT="${POSITIONAL[1]}"
 PEER_CIDR="${POSITIONAL[2]}"
 case "$HOLD" in '' | *[!0-9]*) refuse "--hold takes a number of seconds" ;; esac
 [ "$HOLD" -gt 120 ] || refuse "--hold must exceed the protocol's 120 s rekey time"
+case ",$ARMS," in
+    *,dns,*)
+        [ -n "$DNS_SECOND_ENDPOINT" ] || refuse "--arms dns requires --dns-second-endpoint"
+        command -v unshare >/dev/null 2>&1 || refuse "unshare is not installed"
+        unshare --user --map-root-user --mount true || refuse "unprivileged mount namespaces unavailable"
+        ;;
+esac
 
 for tool in ssh python3 sha256sum xxd timeout; do
     command -v "$tool" >/dev/null 2>&1 || refuse "$tool is not installed"
@@ -107,6 +138,13 @@ PEER_NET="$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.a
 [ -n "$CLIENT_IP" ] || CLIENT_IP="$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).ip + 1)' "$PEER_CIDR")"
 [ -n "$LISTEN_PORT" ] || LISTEN_PORT="${ENDPOINT##*:}"
 case "$LISTEN_PORT" in '' | *[!0-9]*) refuse "no port in ENDPOINT $ENDPOINT" ;; esac
+NFT_PLANNED=""
+if [ -n "$DNS_SECOND_PEER_PORT" ]; then
+    case ",$ARMS," in *,dns,*) ;; *) refuse "--dns-second-peer-port is for --arms dns" ;; esac
+    case "$DNS_SECOND_PEER_PORT" in '' | *[!0-9]*) refuse "--dns-second-peer-port takes a port number" ;; esac
+    [ "$DNS_SECOND_PEER_PORT" != "$LISTEN_PORT" ] || refuse "--dns-second-peer-port is the listen port; leave it out"
+    NFT_PLANNED="$NFT_TABLE"
+fi
 
 if [ -z "${CHAN_BIN:-}" ]; then
     log "building chan at $SHA"
@@ -137,13 +175,16 @@ peer_script() {
 }
 
 # Every prerequisite on the peer is probed before anything is created there.
-if ! PROBE="$(peer 'sudo -n wg --version >/dev/null 2>&1 || echo no-wg; sudo -n ip -V >/dev/null 2>&1 || echo no-ip; command -v python3 >/dev/null 2>&1 || echo no-python3; command -v sha256sum >/dev/null 2>&1 || echo no-sha256sum; sudo -n true 2>/dev/null || echo no-sudo; ip link show '"$IFACE"' >/dev/null 2>&1 && echo iface-exists; uname -sr' 2>&1)"; then
+NFT_PROBE=":"
+[ -z "$NFT_PLANNED" ] || NFT_PROBE="sudo -n nft list tables >/dev/null 2>&1 || echo no-nft; sudo -n nft list table ip $NFT_PLANNED >/dev/null 2>&1 && echo nft-table-exists"
+if ! PROBE="$(peer 'sudo -n wg --version >/dev/null 2>&1 || echo no-wg; sudo -n ip -V >/dev/null 2>&1 || echo no-ip; command -v python3 >/dev/null 2>&1 || echo no-python3; command -v sha256sum >/dev/null 2>&1 || echo no-sha256sum; sudo -n true 2>/dev/null || echo no-sudo; ip link show '"$IFACE"' >/dev/null 2>&1 && echo iface-exists; '"$NFT_PROBE"'; uname -sr' 2>&1)"; then
     refuse "ssh to $SSH_TARGET failed: $PROBE"
 fi
-for missing in no-wg no-ip no-python3 no-sha256sum no-sudo; do
+for missing in no-wg no-ip no-python3 no-sha256sum no-sudo no-nft; do
     case "$PROBE" in *"$missing"*) refuse "the peer lacks ${missing#no-} (or sudo -n for it): $PROBE" ;; esac
 done
 case "$PROBE" in *iface-exists*) refuse "interface $IFACE already exists on the peer; this run creates and deletes its own" ;; esac
+case "$PROBE" in *nft-table-exists*) refuse "nft table ip $NFT_PLANNED already exists on the peer; this run creates and deletes its own" ;; esac
 PEER_KERNEL="$(printf '%s\n' "$PROBE" | tail -1)"
 
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/chan-wireguard-kernel.XXXXXX")"
@@ -159,6 +200,7 @@ HOST_PIDS=()
 PEER_WORK=""
 PEER_PIDS=""
 IFACE_CREATED=""
+NFT_CREATED=""
 cleanup() {
     local pid
     for pid in "${HOST_PIDS[@]:-}"; do
@@ -171,9 +213,10 @@ cleanup() {
     # Only what the run made on the peer: its processes by recorded pid,
     # the interface it created, and its work dir, identified by the marker
     # the run wrote into it.
-    if [ -n "$PEER_WORK" ] || [ -n "$IFACE_CREATED" ]; then
-        peer_script "$PEER_WORK" "$PEER_PIDS" "$IFACE_CREATED" <<'PEER' >/dev/null 2>&1 || log "peer cleanup did not finish; check $SSH_TARGET for $IFACE and $PEER_WORK"
-work="$1"; pids="$2"; iface="$3"
+    if [ -n "$PEER_WORK" ] || [ -n "$IFACE_CREATED" ] || [ -n "$NFT_CREATED" ]; then
+        peer_script "$PEER_WORK" "$PEER_PIDS" "$IFACE_CREATED" "$NFT_CREATED" <<'PEER' >/dev/null 2>&1 || log "peer cleanup did not finish; check $SSH_TARGET for $IFACE, nft table $NFT_TABLE and $PEER_WORK"
+work="$1"; pids="$2"; iface="$3"; table="$4"
+[ -n "$table" ] && sudo -n nft delete table ip "$table" 2>/dev/null || true
 for pid in $pids; do kill "$pid" 2>/dev/null || true; done
 [ -n "$iface" ] && sudo -n ip link del "$iface" 2>/dev/null || true
 if [ -n "$work" ] && [ -f "$work/.chan-wireguard-kernel" ]; then rm -rf -- "${work:?}"; fi
@@ -276,6 +319,21 @@ BIG_SHA="$(setup_field big_sha)"
 [ -n "$PEER_WORK" ] && [ -n "$SERVER_PUB" ] && [ -n "$CLIENT_KEY" ] && [ -n "$HELLO_SHA" ] || { log "peer setup returned an incomplete record"; exit 1; }
 log "peer interface $IFACE up at $PEER_CIDR, serving $PEER_IP:$HTTP_PORT; client public key $CLIENT_PUB"
 
+# The dns arm's second path, when it reaches its own peer port: redirected
+# to the listen port, so replies leave through that path's own forward.
+# Recorded before the call, so the exit path removes a half-made table.
+if [ -n "$NFT_PLANNED" ]; then
+    NFT_CREATED="$NFT_PLANNED"
+    peer_script "$NFT_PLANNED" "$DNS_SECOND_PEER_PORT" "$LISTEN_PORT" <<'PEER' || { log "the peer redirect for the dns arm failed"; exit 1; }
+set -euo pipefail
+table="$1"; from="$2"; to="$3"
+sudo -n nft add table ip "$table"
+sudo -n nft add chain ip "$table" prerouting '{ type nat hook prerouting priority -100; }'
+sudo -n nft add rule ip "$table" prerouting udp dport "$from" redirect to :"$to"
+PEER
+    log "peer redirects UDP $DNS_SECOND_PEER_PORT to $LISTEN_PORT for the dns arm (nft table ip $NFT_PLANNED)"
+fi
+
 # 2. The client files, owner-only as the devserver demands.
 write_client_file() {
     # write_client_file <path> <peer public key> [extra peer lines...]
@@ -292,6 +350,12 @@ write_client_file "$WORK/client-wrong-key.conf" "$WRONG_PUB"
 
 runs() { case ",$ARMS," in *",$1,"*) return 0 ;; esac; return 1; }
 body_sha() { sed -n "s/^body $2: [0-9]* bytes, sha256 \([0-9a-f]*\)$/\1/p" "$1"; }
+hello_body() {
+    # hello_body <sha>: how a GET body compares with hello.txt.
+    if [ -z "$1" ]; then echo "absent"
+    elif [ "$1" = "$HELLO_SHA" ]; then echo "sha ${1:0:12}, hello.txt"
+    else echo "sha ${1:0:12}, not hello.txt"; fi
+}
 run_example() {
     # run_example <log> <file> <args...>: the example, its rc recorded in the log.
     local out="$1" file="$2"; shift 2
@@ -301,6 +365,30 @@ run_example() {
     set -e
     sed -n 's/^rc=//p' "$out"
 }
+
+if runs dns; then
+    arm_rc=0
+    parent_mount_namespace="$(readlink /proc/self/ns/mnt)"
+    unshare --user --map-root-user --mount --fork \
+        python3 "$REPO/scripts/e2e/wireguard-dns.py" \
+        "$WG_CONNECT_BIN" "$WORK/client.conf" "$PEER_IP:$HTTP_PORT" \
+        "$ENDPOINT" "$DNS_SECOND_ENDPOINT" "$WORK/dns" "$HOLD" "$parent_mount_namespace" \
+        > "$WORK/dns.log" 2>&1 || arm_rc=$?
+    helper_rc="$arm_rc"
+    sha1=""; sha2=""
+    if [ -f "$WORK/dns/client.log" ]; then
+        sha1="$(body_sha "$WORK/dns/client.log" 1)"; sha2="$(body_sha "$WORK/dns/client.log" 2)"
+    fi
+    if [ "$arm_rc" = 0 ] && { [ "$sha1" != "$HELLO_SHA" ] || [ "$sha2" != "$HELLO_SHA" ]; }; then
+        arm_rc=1
+    fi
+    # The helper's own account, one line per stage it reached and its PASS
+    # or FAIL line (first line only: the client log a FAIL carries is
+    # printed below).
+    stages="$(sed -n 's/^dns: //p' "$WORK/dns.log" | paste -sd '|' - | sed 's/|/; /g')"
+    verdict dns "$arm_rc" "helper rc=$helper_rc (${stages:-no stage reached}); GET 1 $(hello_body "$sha1"), GET 2 $(hello_body "$sha2")"
+    cat "$WORK/dns.log" >&2
+fi
 
 # wrong-key: the control. The peer's handshake stamp must not move, the
 # connect must time out, and the peer must have taken UDP datagrams from
@@ -358,8 +446,15 @@ hold_started() {
 run_hold_arm() {
     # run_hold_arm <name> <client file> <hold secs>: the example with a hold,
     # sampled on the peer until it ends; the example's rc lands in HOLD_RC.
+    # Every client file carries the same key, so until this arm's first
+    # handshake the peer still shows the previous arm's stamp; it is read
+    # before the launch into HOLD_PRIOR, and samples showing it are not
+    # this arm's.
     local name="$1" file="$2" hold="$3" example_pid sampler rc
     : > "$WORK/$name.samples"; : > "$WORK/$name.hold"
+    # Stamps are whole seconds: one passes first, so this arm's first
+    # handshake cannot carry the prior stamp.
+    HOLD_PRIOR="$(peer_handshake)"; sleep 1
     set +e
     timeout $((hold + 120)) "$WG_CONNECT_BIN" "$file" "$PEER_IP:$HTTP_PORT" /hello.txt --hold "$hold" > "$WORK/$name.out" 2>&1 &
     example_pid=$!
@@ -380,10 +475,11 @@ run_hold_arm() {
 if runs rekey; then
     run_hold_arm rekey "$WORK/client.conf" "$HOLD"
     rc="$HOLD_RC"
-    # A sample taken before the first handshake reads 0 and is not a stamp.
-    first="$(awk '$2 != 0 { print $2; exit }' "$WORK/rekey.samples")"
+    # A sample taken before this arm's first handshake reads 0 or the prior
+    # arm's stamp, and is not this arm's.
+    first="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2; exit }' "$WORK/rekey.samples")"
     last="$(awk 'END { print $2 }' "$WORK/rekey.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2 }' "$WORK/rekey.samples" | sort -u | wc -l)"
     arm_rc=0
     [ "$rc" = 0 ] || arm_rc=1
     [ "$(body_sha "$WORK/rekey.out" 2)" = "$HELLO_SHA" ] || arm_rc=1
@@ -394,7 +490,7 @@ if runs rekey; then
     [ -n "$first" ] && [ -n "$last" ] && [ $((last - first)) -ge 100 ] || arm_rc=1
     ago="$(sed -n 's/^status after hold: handshake \([0-9.]*\)s ago.*/\1/p' "$WORK/rekey.out")"
     [ -n "$ago" ] && [ "${ago%.*}" -lt $((HOLD - 100)) ] || arm_rc=1
-    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct), client saw the handshake ${ago:-?}s before the second GET, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
+    verdict rekey "$arm_rc" "rc=$rc, peer handshake stamp $first -> $last (+$((${last:-0} - ${first:-0}))s, $stamps distinct after the prior arm's ${HOLD_PRIOR:-none}), client saw the handshake ${ago:-?}s before the second GET, second GET sha $(body_sha "$WORK/rekey.out" 2 | cut -c1-12)"
     { grep -E '^(status|hold|response)' "$WORK/rekey.out"; sed 's/^/    sample /' "$WORK/rekey.samples"; peer_wg_show; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/rekey.out" >&2
 fi
@@ -409,12 +505,12 @@ if runs keepalive; then
     # counted): the growth between them is keepalives alone.
     early="$(awk -v t="$((hold_at + 8))" '$1 >= t { print $3; exit }' "$WORK/keepalive.samples")"
     late="$(awk -v t="$((hold_at + KEEPALIVE_HOLD - 5))" '$1 <= t { v = $3 } END { print v }' "$WORK/keepalive.samples")"
-    stamps="$(awk '$2 != 0 { print $2 }' "$WORK/keepalive.samples" | sort -u | wc -l)"
+    stamps="$(awk -v prior="$HOLD_PRIOR" '$2 != 0 && $2 != prior { print $2 }' "$WORK/keepalive.samples" | sort -u | wc -l)"
     arm_rc=0
     [ "$rc" = 0 ] && [ "$(body_sha "$WORK/keepalive.out" 2)" = "$HELLO_SHA" ] || arm_rc=1
     [ "$hold_at" != 0 ] && [ -n "$early" ] && [ -n "$late" ] && [ "$late" -ge $((early + 32)) ] || arm_rc=1
     [ "$stamps" = 1 ] || arm_rc=1
-    verdict keepalive "$arm_rc" "rc=$rc, peer received $early -> $late bytes across the idle hold (+$((${late:-0} - ${early:-0})), a keepalive is 32), $stamps handshake stamp(s) seen"
+    verdict keepalive "$arm_rc" "rc=$rc, peer received $early -> $late bytes across the idle hold (+$((${late:-0} - ${early:-0})), a keepalive is 32), $stamps handshake stamp(s) seen after the prior arm's ${HOLD_PRIOR:-none}"
     { grep -E '^(status|hold|response)' "$WORK/keepalive.out"; sed 's/^/    sample /' "$WORK/keepalive.samples"; peer_wg_show; } >&2
     [ "$arm_rc" = 0 ] || cat "$WORK/keepalive.out" >&2
 fi
@@ -480,7 +576,7 @@ run_devserver() {
     DEVSERVER_PID=$!
     HOST_PIDS+=("$DEVSERVER_PID")
 }
-tunnel_up_logged() { grep -q "^chan devserver: WireGuard tunnel up from $1: endpoint .*, public key $CLIENT_PUB$" "$2"; }
+tunnel_start_logged() { grep -q "^chan devserver: WireGuard tunnel started from $1: endpoint .*, public key $CLIENT_PUB$" "$2"; }
 
 if runs devserver; then
     arm_rc=0
@@ -488,15 +584,15 @@ if runs devserver; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         run_devserver "$WORK/devserver.log" "$WORK/client.conf"
-        wait_for 60 "the tunnel-up line" tunnel_up_logged "$WORK/client.conf" "$WORK/devserver.log" || arm_rc=1
+        wait_for 60 "the tunnel-start line" tunnel_start_logged "$WORK/client.conf" "$WORK/devserver.log" || arm_rc=1
         wait_for 60 "the raw listener to see the dial" peer_has_capture devserver || arm_rc=1
         capture="$(peer_capture devserver)"
         after="$(peer_handshake)"
         kill "$DEVSERVER_PID" 2>/dev/null || true
         case "$capture" in "$H2_PREFACE_HEX"*) ;; *) arm_rc=1 ;; esac
         [ "$after" != "0" ] && [ "$after" != "$before" ] || arm_rc=1
-        verdict devserver "$arm_rc" "tunnel-up logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
+        verdict devserver "$arm_rc" "tunnel start logged, listener on $PEER_IP:$RAW_PORT got $(( ${#capture} / 2 )) bytes starting $(printf '%s' "$capture" | cut -c1-48 | xxd -r -p | tr '\r\n' '..'), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver.log"; echo "    capture: $capture"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver 1 "the raw listener did not start on the peer"
@@ -510,7 +606,7 @@ if runs devserver-wrong-key; then
         PEER_PIDS="$PEER_PIDS $listener_pid"
         before="$(peer_handshake)"
         run_devserver "$WORK/devserver-wrong-key.log" "$WORK/client-wrong-key.conf"
-        wait_for 60 "the tunnel-up line" tunnel_up_logged "$WORK/client-wrong-key.conf" "$WORK/devserver-wrong-key.log" || arm_rc=1
+        wait_for 60 "the tunnel-start line" tunnel_start_logged "$WORK/client-wrong-key.conf" "$WORK/devserver-wrong-key.log" || arm_rc=1
         # The dial has 20 s to reach the listener; with a wrong key it must not.
         sleep 20
         capture="$(peer_capture devserver-wrong-key)"
@@ -519,8 +615,8 @@ if runs devserver-wrong-key; then
         [ "$capture" = absent ] || arm_rc=1
         [ "$before" = "$after" ] || arm_rc=1
         ! grep -q 'tunnel connected' "$WORK/devserver-wrong-key.log" || arm_rc=1
-        verdict devserver-wrong-key "$arm_rc" "tunnel-up logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
-        { grep 'WireGuard tunnel up' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
+        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
+        { grep 'WireGuard tunnel started' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
     else
         arm_rc=1
         verdict devserver-wrong-key 1 "the raw listener did not start on the peer"

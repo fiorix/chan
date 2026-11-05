@@ -95,9 +95,19 @@ pub struct WireguardStartup {
     started: HashMap<String, PathBuf>,
     /// Gateways whose file was refused, with the file and the reason.
     failed: HashMap<String, (PathBuf, String)>,
+    tunnels: HashMap<String, Tunnel>,
 }
 
 impl WireguardStartup {
+    /// Live tunnel state for the file this process started from. A changed
+    /// path has no live state until the desktop restarts.
+    pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        if self.started.get(gateway_id).map(PathBuf::as_path) != configured {
+            return None;
+        }
+        Some(describe(self.tunnels.get(gateway_id)?.status()))
+    }
+
     /// Whether an enabled row's WireGuard setting differs from what the
     /// process runs: a file added, changed, removed or refused since the
     /// start. A disabled row asks nothing of the process.
@@ -136,6 +146,7 @@ impl WireguardStartup {
         failed: &[(&str, &str, &str)],
     ) -> WireguardStartup {
         WireguardStartup {
+            tunnels: HashMap::new(),
             started: started
                 .iter()
                 .map(|(id, path)| (id.to_string(), PathBuf::from(path)))
@@ -147,6 +158,26 @@ impl WireguardStartup {
                 })
                 .collect(),
         }
+    }
+}
+
+/// The launcher's words for a tunnel's state. A tunnel keeps handshaking
+/// with the endpoint it knows while lookups of the name fail, so a live
+/// session reads as up with the failure beside it. A failed lookup is
+/// retried; a timed-out one is not until its OS call returns.
+fn describe(status: chan_wireguard::Status) -> String {
+    let failure = status.resolution_error.map(|error| {
+        if status.resolution_stalled {
+            format!("{error}; stalled, waiting for the system resolver")
+        } else {
+            format!("{error}, retrying")
+        }
+    });
+    match (status.last_handshake.is_some(), failure) {
+        (true, None) => "up".to_string(),
+        (true, Some(failure)) => format!("up; {failure}"),
+        (false, Some(failure)) => failure,
+        (false, None) => "connecting".to_string(),
     }
 }
 
@@ -175,7 +206,7 @@ pub async fn start(gateways: &[Gateway]) -> (Option<WireguardFabric>, WireguardS
             }
         };
         let endpoint = config.peer.endpoint.to_string();
-        match Tunnel::start(config).await {
+        match Tunnel::start(config) {
             Ok(tunnel) => {
                 tracing::info!(
                     gateway = %gateway.id,
@@ -184,6 +215,7 @@ pub async fn start(gateways: &[Gateway]) -> (Option<WireguardFabric>, WireguardS
                     "gateway WireGuard tunnel started"
                 );
                 startup.started.insert(gateway.id.clone(), path.clone());
+                startup.tunnels.insert(gateway.id.clone(), tunnel.clone());
                 tunnels.push(tunnel);
             }
             Err(e) => {
@@ -219,6 +251,7 @@ pub async fn start(gateways: &[Gateway]) -> (Option<WireguardFabric>, WireguardS
         Err(e) => {
             tracing::error!(error = %e, "gateway WireGuard proxy failed to bind; the tunnels are dropped");
             let reason = format!("WireGuard: starting the proxy: {e}");
+            startup.tunnels.clear();
             for (id, path) in std::mem::take(&mut startup.started) {
                 startup.failed.insert(id, (path, reason.clone()));
             }
@@ -456,6 +489,136 @@ mod tests {
     use tokio::net::TcpListener;
 
     const WAIT: Duration = Duration::from_secs(10);
+
+    fn tunnel_config(
+        private: &str,
+        endpoint: SocketAddr,
+        address: &str,
+    ) -> chan_wireguard::config::Config {
+        chan_wireguard::config::Config::parse(&format!(
+            "[Interface]\nPrivateKey = {private}\nAddress = {address}/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = {endpoint}\nAllowedIPs = 10.7.0.0/24\n"
+        )).unwrap()
+    }
+
+    #[tokio::test]
+    async fn startup_binds_proxy_without_polling_endpoint_resolution() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.conf");
+        std::fs::write(&path, "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.7.0.1/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = pending.test:51820\nAllowedIPs = 10.7.0.0/24\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let gateways = [Gateway {
+            id: "pending".into(),
+            url: "https://gateway.test".into(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: vec![],
+            wireguard: Some(path.clone()),
+        }];
+        let starting = start(&gateways);
+        tokio::pin!(starting);
+        let (fabric, startup) = std::future::poll_fn(|cx| match starting.as_mut().poll(cx) {
+            Poll::Ready(value) => Poll::Ready(value),
+            Poll::Pending => panic!("startup waited before binding the proxy"),
+        })
+        .await;
+        let fabric = fabric.expect("a parsed configuration installs the proxy");
+        assert_eq!(
+            startup.status("pending", Some(&path)).as_deref(),
+            Some("connecting")
+        );
+        assert_eq!(startup.connect_refusal("pending", Some(&path)), None);
+        assert!(!startup.restart_required("pending", Some(&path), true));
+        // This current-thread runtime has not yielded to a driver task. No
+        // lookup can complete, but the listener already accepts connections.
+        let connection = std::net::TcpStream::connect(fabric.proxy.local_addr()).unwrap();
+        drop(connection);
+        drop(startup);
+        drop(fabric);
+    }
+
+    #[tokio::test]
+    async fn gateway_state_reads_the_live_tunnel() {
+        let a_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a_at = a_udp.local_addr().unwrap();
+        let b_at = b_udp.local_addr().unwrap();
+        let mut a_config = tunnel_config(
+            "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
+            b_at,
+            "10.7.0.1",
+        );
+        let mut b_config = tunnel_config(
+            "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
+            a_at,
+            "10.7.0.2",
+        );
+        a_config.peer.public_key = b_config.public_key();
+        b_config.peer.public_key = a_config.public_key();
+        let a = Tunnel::start_on(a_config, a_udp, b_at).unwrap();
+        let b = Tunnel::start_on(b_config, b_udp, a_at).unwrap();
+        let mut startup = WireguardStartup::for_test(&[("gateway", "/gateway.conf")], &[]);
+        startup.tunnels.insert("gateway".into(), a.clone());
+        let path = Some(Path::new("/gateway.conf"));
+        assert_eq!(
+            startup.status("gateway", path).as_deref(),
+            Some("connecting")
+        );
+        let mut listener = b.listen(80).unwrap();
+        let (client, server) = tokio::time::timeout(WAIT, async {
+            tokio::join!(a.connect("10.7.0.2:80".parse().unwrap()), listener.accept())
+        })
+        .await
+        .unwrap();
+        let (_client, _server) = (client.unwrap(), server.unwrap());
+        assert_eq!(startup.status("gateway", path).as_deref(), Some("up"));
+        assert_eq!(
+            startup.status("gateway", Some(Path::new("/changed.conf"))),
+            None
+        );
+    }
+
+    /// A failing lookup no longer takes a live session down, so the state
+    /// reads up while it fails, and the failure alone only without one. A
+    /// stalled lookup says so instead of claiming a retry.
+    #[test]
+    fn describe_reads_a_live_session_as_up_beside_a_failing_lookup() {
+        let status = |handshake: bool, error: Option<&str>, stalled: bool| chan_wireguard::Status {
+            last_handshake: handshake.then_some(Duration::from_secs(3)),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            endpoint: None,
+            resolution_error: error.map(str::to_string),
+            resolution_stalled: stalled,
+        };
+        let failure = "endpoint did not resolve: gw.test:51820: name absent";
+        assert_eq!(describe(status(false, None, false)), "connecting");
+        assert_eq!(describe(status(true, None, false)), "up");
+        assert_eq!(
+            describe(status(false, Some(failure), false)),
+            format!("{failure}, retrying")
+        );
+        assert_eq!(
+            describe(status(true, Some(failure), false)),
+            format!("up; {failure}, retrying")
+        );
+        let timeout = "endpoint did not resolve: gw.test:51820: lookup timed out";
+        assert_eq!(
+            describe(status(false, Some(timeout), true)),
+            format!("{timeout}; stalled, waiting for the system resolver")
+        );
+        assert_eq!(
+            describe(status(true, Some(timeout), true)),
+            format!("up; {timeout}; stalled, waiting for the system resolver")
+        );
+    }
 
     /// A stand-in HTTP peer on loopback: it records the request line of
     /// every connection and answers each with `response`, then, when

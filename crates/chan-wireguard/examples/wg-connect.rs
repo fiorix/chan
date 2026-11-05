@@ -16,7 +16,9 @@
 //! up for that long after the repeated GET and prints the status once more,
 //! so the handshake that GET set off has completed when the peer's `wg
 //! show` is read. `--timeout SECS` bounds each connect (default 30); a
-//! connect that times out exits 2, every other failure exits 1.
+//! connect that times out exits 2, every other failure exits 1. With
+//! `--retry-for SECS`, initial lookup failures are retried on the same
+//! tunnel until the bound, for endpoint recovery proofs.
 
 use std::io::Write as _;
 use std::net::SocketAddr;
@@ -29,7 +31,7 @@ use chan_wireguard::Tunnel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const USAGE: &str =
-    "usage: wg-connect FILE HOST:PORT [PATH] [--hold SECS] [--settle SECS] [--timeout SECS]";
+    "usage: wg-connect FILE HOST:PORT [PATH] [--hold SECS] [--settle SECS] [--timeout SECS] [--retry-for SECS]";
 
 struct Args {
     file: String,
@@ -38,6 +40,7 @@ struct Args {
     hold: Option<Duration>,
     settle: Option<Duration>,
     timeout: Duration,
+    retry_for: Duration,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -45,9 +48,18 @@ fn parse_args() -> Result<Args, String> {
     let mut hold = None;
     let mut settle = None;
     let mut timeout = Duration::from_secs(30);
+    let mut retry_for = Duration::ZERO;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--retry-for" => {
+                let secs = args
+                    .next()
+                    .ok_or("--retry-for needs seconds")?
+                    .parse()
+                    .map_err(|_| "--retry-for is not seconds")?;
+                retry_for = Duration::from_secs(secs);
+            }
             "--hold" => {
                 let secs: u64 = args
                     .next()
@@ -92,6 +104,7 @@ fn parse_args() -> Result<Args, String> {
         hold,
         settle,
         timeout,
+        retry_for,
     })
 }
 
@@ -141,11 +154,23 @@ async fn run(args: Args) -> Result<(), Failure> {
             None => "off".to_string(),
         }
     );
-    let tunnel = Tunnel::start(config)
-        .await
-        .map_err(|e| format!("starting the tunnel: {e}"))?;
+    let tunnel = Tunnel::start(config).map_err(|e| format!("starting the tunnel: {e}"))?;
 
-    get(&tunnel, &args, 1).await?;
+    let retry_until = tokio::time::Instant::now() + args.retry_for;
+    loop {
+        match get(&tunnel, &args, 1).await {
+            Ok(()) => break,
+            Err(Failure::Other(message))
+                if message.contains("endpoint did not resolve")
+                    && tokio::time::Instant::now() < retry_until =>
+            {
+                println!("retry: {message}");
+                let _ = std::io::stdout().flush();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     if let Some(hold) = args.hold {
         println!("hold: {}s idle", hold.as_secs());
         let _ = std::io::stdout().flush();
@@ -231,7 +256,9 @@ fn print_status(tunnel: &Tunnel, when: &str) {
         },
         status.tx_bytes,
         status.rx_bytes,
-        status.endpoint
+        status
+            .endpoint
+            .map_or_else(|| "unresolved".to_string(), |addr| addr.to_string())
     );
     let _ = std::io::stdout().flush();
 }

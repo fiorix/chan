@@ -630,6 +630,21 @@ describe("Gateways screen", () => {
     expect(card.textContent).not.toContain("WireGuard");
   });
 
+  it("the WireGuard state follows connecting, errors and recovery on the same card", () => {
+    library.gateways = [gw({ wireguard: "/gateway.conf", wireguard_status: "connecting" })];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    expect(card.querySelector(".gw-wg-status")!.textContent).toBe("connecting");
+    const error = "endpoint did not resolve: peer.test: name absent, retrying";
+    for (const status of [error, "up"]) {
+      library.gateways = [gw({ wireguard: "/gateway.conf", wireguard_status: status })];
+      flushSync();
+      expect(el.querySelector("section.gateway-card")).toBe(card);
+      expect(card.querySelector(".gw-wg-status")!.textContent).toBe(status);
+      expect(card.querySelector(".gw-wg-status")!.getAttribute("title")).toBe(status);
+    }
+  });
+
   it.each([false, true])("the restart notice shows exactly when wireguard_restart_required=%s", (required) => {
     library.gateways = [
       gw({ label: "prod", wireguard: "/home/u/wg/chan.conf", wireguard_restart_required: required }),

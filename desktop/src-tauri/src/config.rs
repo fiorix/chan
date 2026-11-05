@@ -1026,6 +1026,7 @@ fn entry_from_gateway(
             .or_else(|| wireguard.failure(&g.id, file).map(str::to_string)),
         wireguard: file.map(|path| path.display().to_string()),
         wireguard_restart_required: wireguard.restart_required(&g.id, file, g.enabled),
+        wireguard_status: wireguard.status(&g.id, file),
     }
 }
 
