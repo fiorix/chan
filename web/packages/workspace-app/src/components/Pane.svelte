@@ -1089,17 +1089,27 @@
   // it on the way up only when no surface inside the body cancelled or
   // stopped the dragover (the file tree's rows take a move between folders
   // that way). The drop is then handled on the way down, in the capture
-  // phase, from that zone, so a surface that never claimed the dragover does
-  // not act on the drop under it: CodeMirror would type a file-tree drag's
-  // path into the document. A drag of none of the three, an OS file among
-  // them, sets no zone and passes through untouched to the terminal or editor
-  // that takes it.
+  // phase, from that zone, so the pane acts on the drops it took at dragover
+  // and no surface under it acts on the same drop. A file-tree drag over an
+  // editor, the Rich Prompt's composer among them, is the editor's: the drag
+  // carries the file's path as text for an editor to type, so the body sets
+  // no zone there and CodeMirror takes the drop as it does anywhere else. A
+  // drag of none of the three, an OS file among them, sets no zone either and
+  // passes through untouched to the terminal or editor that takes it.
   function onBodyDragOverCapture(): void {
     bodyDropZone = null;
   }
 
+  /// Whether `target` is inside a CodeMirror editor: a document's editor or
+  /// the Rich Prompt's composer, the text surfaces a file-tree drag types its
+  /// path into.
+  function inEditor(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".cm-editor") !== null;
+  }
+
   function onBodyDragOver(e: DragEvent): void {
     if (tmuxPaneHere || e.defaultPrevented || !isAcceptedDrag(e)) return;
+    if (!isTabMoveDrag(e) && inEditor(e.target)) return;
     // A tab from another kind of window or another workspace keeps the
     // no-drop cursor, as on the strip.
     if (isTabMoveDrag(e) && !isTabDragScopeCompatible(e)) {

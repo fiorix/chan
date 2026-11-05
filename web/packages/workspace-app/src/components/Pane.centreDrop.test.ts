@@ -3,11 +3,12 @@
 // A pane body's centre takes the drops the tab strip takes, with the strip
 // drawn or auto-hidden: a tab from another pane of this window moves in, a
 // tab from another window of this scope is rebuilt there, and a file dragged
-// from the file tree opens there. Only a tab from this window meets the edge
-// bands, where it splits the pane; an empty pane's whole body is the centre.
-// This pane's own tab dropped back on its own centre stays where it is. A
-// drag the pane does not take, an OS file among them, passes through to the
-// terminal or editor under it.
+// from the file tree opens there, except over an editor or a terminal's Rich
+// Prompt, which types the path the drag carries. Only a tab from this window
+// meets the edge bands, where it splits the pane; an empty pane's whole body
+// is the centre. This pane's own tab dropped back on its own centre stays
+// where it is. A drag the pane does not take, an OS file among them, passes
+// through to the terminal or editor under it.
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -20,6 +21,8 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm"
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { fileTab, readTab, resetLayout, terminalTab } from "../__tests__/tabs";
 import { clearRecentlyClosedTabsForTest, layout, type LeafNode, type Tab } from "../state/tabs.svelte";
+import { showRichPromptForTab } from "../state/richPrompt.svelte";
+import { EditorView } from "@codemirror/view";
 
 stubAppEnvironment();
 
@@ -142,6 +145,23 @@ function stripHidden(id: string): boolean {
   return paneEl(id).querySelector(".tabs")!.classList.contains("auto-hidden");
 }
 
+/// A file dragged from the file tree, as FileTree's dragstart writes it: the
+/// tree's own move type, the pane's open-in-pane type, and the path as plain
+/// text for an editor to type.
+function treeDrag(path: string): DragData {
+  return new DragData({
+    [TREE_MOVE_MIME]: JSON.stringify({ path, isDir: false, paths: [path] }),
+    [FILE_MIME]: JSON.stringify({ path }),
+    "text/plain": path,
+  });
+}
+
+/// The right pane's tabs, files by path and the rest by id.
+function rightPaths(): string[] {
+  const right = layout.nodes["pane-right"] as LeafNode;
+  return right.tabs.map((t) => (t.kind === "file" ? t.path : t.id));
+}
+
 describe.each([false, true])("with pane_strip_auto_hide %s, the centre of a pane's body", (autoHide) => {
   test("takes a tab from another pane of this window and appends it to the visible side", async () => {
     await mount(autoHide, [terminalTab({ id: "r1", title: "Right" })]);
@@ -195,26 +215,88 @@ describe.each([false, true])("with pane_strip_auto_hide %s, the centre of a pane
     expect(leafCount()).toBe(2);
   });
 
-  test("opens a file dragged from the file tree, over an editor, without typing its path", async () => {
+  test("leaves a file dragged from the file tree to an editor, which types its path", async () => {
     await mount(autoHide, [fileTab({ id: "right", path: "right.md" })]);
     const target = body("pane-right");
     const content = target.querySelector(".cm-content");
     expect(content, "the right pane shows an editor").not.toBeNull();
-    const data = new DragData({
-      [TREE_MOVE_MIME]: JSON.stringify({ path: "README.md", isDir: false, paths: ["README.md"] }),
-      [FILE_MIME]: JSON.stringify({ path: "README.md" }),
-      "text/plain": "README.md",
-    });
-    expect(fire(content!, "dragover", data, 799, 300).defaultPrevented).toBe(true);
+    const data = treeDrag("README.md");
+    expect(fire(content!, "dragover", data, 400, 300).defaultPrevented, "the pane leaves the dragover to the editor").toBe(false);
+    await settle();
+    expect(zones(target), "no centre over an editor").toEqual([]);
+    fire(content!, "drop", data, 400, 300);
+    await settle();
+    expect(rightPaths()).toEqual(["right.md"]);
+    expect(readTab("right")?.content, "the editor typed the dragged path").toContain("README.md");
+  });
+
+  test("still takes a tab dragged over an editor in its centre", async () => {
+    await mount(autoHide, [fileTab({ id: "right", path: "right.md" })]);
+    const target = body("pane-right");
+    const content = target.querySelector(".cm-content")!;
+    const tab = stripTab("pane-left", 1);
+    const data = new DragData();
+    fire(tab, "dragstart", data);
+    try {
+      expect(fire(content, "dragover", data, 400, 300).defaultPrevented).toBe(true);
+      await settle();
+      expect(zones(target)).toEqual(["body-drop-centre"]);
+      expect(fire(content, "drop", data, 400, 300).defaultPrevented).toBe(true);
+    } finally {
+      fire(tab, "dragend", data);
+    }
+    await settle();
+    expect(rightPaths()).toEqual(["right.md", "l2"]);
+    expect(readTab("right")?.content, "a tab drag types nothing").toBe("saved");
+  });
+
+  test("leaves a file dragged to a terminal's Rich Prompt, which types its path", async () => {
+    await mount(autoHide, [terminalTab({ id: "r1", title: "Right", terminalSessionId: "sess-r1" })]);
+    showRichPromptForTab("r1");
+    const target = body("pane-right");
+    const composer = await vi.waitFor(() => {
+      const editor = target.querySelector<HTMLElement>(".terminal-composer .cm-editor");
+      if (!editor) throw new Error(`the terminal shows no Rich Prompt editor: ${target.querySelector(".terminal-composer")?.outerHTML.slice(0, 300) ?? "no composer"}`);
+      return editor;
+    }, { timeout: 5_000 });
+    const content = composer.querySelector(".cm-content")!;
+    const data = treeDrag("README.md");
+    expect(fire(content, "dragover", data, 400, 300).defaultPrevented, "the pane leaves the dragover to the composer").toBe(false);
+    await settle();
+    expect(zones(target), "no centre over the composer").toEqual([]);
+    fire(content, "drop", data, 400, 300);
+    await settle();
+    expect(rightPaths()).toEqual(["r1"]);
+    expect(EditorView.findFromDOM(composer)?.state.doc.toString(), "the composer typed the dragged path").toContain("README.md");
+  });
+
+  test("opens a file dragged from the file tree over a terminal's screen", async () => {
+    await mount(autoHide, [terminalTab({ id: "r1", title: "Right", terminalSessionId: "sess-r1" })]);
+    const target = body("pane-right");
+    const screen = target.querySelector<HTMLElement>(".terminal-host");
+    expect(screen, "the right pane docks its terminal").not.toBeNull();
+    const data = treeDrag("README.md");
+    expect(fire(screen!, "dragover", data, 799, 300).defaultPrevented).toBe(true);
     expect(data.dropEffect).toBe("copy");
     await settle();
     expect(zones(target)).toEqual(["body-drop-centre"]);
-    expect(fire(content!, "drop", data, 799, 300).defaultPrevented).toBe(true);
+    expect(fire(screen!, "drop", data, 799, 300).defaultPrevented).toBe(true);
     await settle();
-    const right = layout.nodes["pane-right"] as LeafNode;
-    expect(right.tabs.map((t) => (t.kind === "file" ? t.path : t.id))).toEqual(["right.md", "README.md"]);
-    expect(readTab("right")?.content, "the editor under the drop typed nothing").toBe("saved");
+    expect(rightPaths()).toEqual(["r1", "README.md"]);
     expect(zones(target)).toEqual([]);
+  });
+
+  test("opens a file dragged from the file tree over an empty pane", async () => {
+    await mount(autoHide, []);
+    const target = body("pane-right");
+    const data = treeDrag("README.md");
+    expect(fire(target, "dragover", data, 20, 300).defaultPrevented).toBe(true);
+    await settle();
+    expect(zones(target)).toEqual(["body-drop-centre"]);
+    expect(fire(target, "drop", data, 20, 300).defaultPrevented).toBe(true);
+    await settle();
+    expect(rightPaths()).toEqual(["README.md"]);
+    expect(leafCount()).toBe(2);
   });
 
   test("of an empty pane is its whole body: a tab dropped at its edge fills it and splits nothing", async () => {
