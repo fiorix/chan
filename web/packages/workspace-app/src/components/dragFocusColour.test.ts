@@ -59,6 +59,7 @@ const PANE_RULES: Array<[string, string[]]> = [
   [".editor-wrap.body-drop-right::after", ["border-right", "background"]],
   [".editor-wrap.body-drop-top::after", ["border-top", "background"]],
   [".editor-wrap.body-drop-bottom::after", ["border-bottom", "background"]],
+  [".editor-wrap.body-drop-centre::after", ["box-shadow", "background"]],
 ];
 
 describe("the pane's drag and drop highlights", () => {

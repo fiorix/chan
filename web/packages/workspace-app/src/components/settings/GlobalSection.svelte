@@ -72,7 +72,7 @@
 <SettingField
   label="Pane strip"
   pref="pane_strip_auto_hide"
-  hint="Hide a pane's tab strip until the side it shows holds two or more tabs. New tabs still come from the shortcuts and the command launcher."
+  hint="Hide a pane's tab strip until the side it shows holds two or more tabs. New tabs still come from the shortcuts and the command launcher, and a tab or file dropped in the pane's centre lands there."
 >
   <PillToggle
     label="Auto-hide"

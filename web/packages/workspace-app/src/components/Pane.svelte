@@ -57,7 +57,6 @@
     type PaneSide,
     type FocusColor,
     type LeafNode,
-    type PaneDropEdge,
     type SerTab,
     type Tab,
   } from "../state/tabs.svelte";
@@ -142,6 +141,7 @@
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { terminalLayer } from "../state/terminalDock.svelte";
+  import { paneBodyDropZone, type PaneBodyDropZone } from "../state/paneDropZone";
   import { dispatchAllowsCommand } from "../state/commands";
   import { programSummary, programVisual } from "../state/programStatus";
 
@@ -606,7 +606,9 @@
   // dragged over it. Keyed by pane id so we don't bleed state between
   // panes that share this Svelte 5 component instance.
   let dropActive = $state(false);
-  let bodyDropEdge: PaneDropEdge | null = $state(null);
+  // The body zone the drag over this pane's body would drop into, or null
+  // when the body takes nothing there.
+  let bodyDropZone: PaneBodyDropZone | null = $state(null);
   // Index where a per-tab drop indicator (a thin vertical bar) is
   // currently shown. -1 means no indicator. We render a visual bar
   // before tab[idx]; idx === visibleTabs.length means "after the
@@ -1065,56 +1067,81 @@
     return fromWindow === sessionWindowId();
   }
 
-  function edgeForBodyDrop(e: DragEvent): PaneDropEdge {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const distances: Array<[PaneDropEdge, number]> = [
-      ["left", x],
-      ["right", rect.width - x],
-      ["top", y],
-      ["bottom", rect.height - y],
-    ];
-    distances.sort((a, b) => a[1] - b[1]);
-    return distances[0]![0];
+  /// The body zone a drag over this pane's body drops into, or null for this
+  /// pane's own tab over its own centre, which stays where it is. Only a tab
+  /// from this window splits the pane, so only its drag meets the edge bands:
+  /// a tab from another window is rebuilt as a tab and a file-tree file opens
+  /// as one, and for either the whole body is the centre. So is an empty
+  /// side's body, which a drop fills and never splits.
+  function bodyDropZoneFor(e: DragEvent): PaneBodyDropZone | null {
+    const local = isTabMoveDrag(e) && localTabDrag !== null && paneInThisWindow(localTabDrag.fromPaneId);
+    let zone: PaneBodyDropZone = "centre";
+    if (local && visibleTabs.length > 0) {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      zone = paneBodyDropZone(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
+    }
+    return zone === "centre" && local && isSamePaneDrag() ? null : zone;
+  }
+
+  // The body takes the three drags the strip takes, wherever nothing inside
+  // it took the drag first. The zone is judged afresh at every dragover: the
+  // capture listener clears it on the way down, and the bubble listener sets
+  // it on the way up only when no surface inside the body cancelled or
+  // stopped the dragover (the file tree's rows take a move between folders
+  // that way). The drop is then handled on the way down, in the capture
+  // phase, from that zone, so a surface that never claimed the dragover does
+  // not act on the drop under it: CodeMirror would type a file-tree drag's
+  // path into the document. A drag of none of the three, an OS file among
+  // them, sets no zone and passes through untouched to the terminal or editor
+  // that takes it.
+  function onBodyDragOverCapture(): void {
+    bodyDropZone = null;
   }
 
   function onBodyDragOver(e: DragEvent): void {
-    if (tmuxPaneHere) return;
-    if (
-      !localTabDrag ||
-      !isTabMoveDrag(e) ||
-      !isTabDragScopeCompatible(e) ||
-      !paneInThisWindow(localTabDrag.fromPaneId)
-    ) {
-      bodyDropEdge = null;
-      if (isTabMoveDrag(e)) rejectTabMoveDrag(e);
+    if (tmuxPaneHere || e.defaultPrevented || !isAcceptedDrag(e)) return;
+    // A tab from another kind of window or another workspace keeps the
+    // no-drop cursor, as on the strip.
+    if (isTabMoveDrag(e) && !isTabDragScopeCompatible(e)) {
+      rejectTabMoveDrag(e);
+      return;
+    }
+    const zone = bodyDropZoneFor(e);
+    if (zone === null) {
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "none";
       return;
     }
     e.preventDefault();
     e.stopPropagation();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    bodyDropEdge = edgeForBodyDrop(e);
+    if (e.dataTransfer) e.dataTransfer.dropEffect = isTabMoveDrag(e) ? "move" : "copy";
+    bodyDropZone = zone;
   }
 
   function onBodyDragLeave(e: DragEvent): void {
     const related = e.relatedTarget as Node | null;
     if (!related || !(e.currentTarget as Node).contains(related)) {
-      bodyDropEdge = null;
+      bodyDropZone = null;
     }
   }
 
-  function onBodyDrop(e: DragEvent): void {
+  function onBodyDropCapture(e: DragEvent): void {
     // A drop ends the drag here, before the source's dragend, which a source
     // pane collapsed by this very drop may not deliver.
     tabDragInFlight = false;
-    if (tmuxPaneHere) return;
+    const zone = bodyDropZone;
+    bodyDropZone = null;
+    if (zone === null || tmuxPaneHere) return;
+    // The centre drops as past the strip's last tab. This pane's own tab
+    // never gets here: the body refused it at dragover, so no drop fires.
+    if (zone === "centre") {
+      if (dropIntoPane(e, { at: "end" })) e.stopPropagation();
+      return;
+    }
+    // Only a tab from this window meets an edge. A cross-window split is not
+    // supported (`acceptCrossWindowTab` adds a tab, not a split), so the
+    // intra-window check both avoids the id-collision false positive and
+    // keeps that boundary.
     const payload = tabDragPayload(e);
-    const edge = bodyDropEdge ?? edgeForBodyDrop(e);
-    bodyDropEdge = null;
-    // Cross-window split-edge drops are not supported (acceptCrossWindowTab
-    // adds a tab to the strip, not a split), so an intra-window check
-    // both avoids the id-collision false-positive and keeps the boundary.
     if (
       !payload ||
       !isIntraWindowDrag(payload.fromWindow) ||
@@ -1124,8 +1151,18 @@
     e.preventDefault();
     e.stopPropagation();
     markLocalTabDrop(payload.fromPaneId, payload.tabId, payload.fromSide);
-    detachTabToPaneEdge(payload.fromPaneId, payload.tabId, pane.id, edge);
+    detachTabToPaneEdge(payload.fromPaneId, payload.tabId, pane.id, zone);
   }
+
+  // A drag cancelled over the body, or ended by a drop elsewhere, leaves no
+  // highlight behind.
+  onMount(() => {
+    const clearBodyDropZone = () => {
+      bodyDropZone = null;
+    };
+    document.addEventListener("dragend", clearBodyDropZone);
+    return () => document.removeEventListener("dragend", clearBodyDropZone);
+  });
 
   /// Compute the insertion index for a drop with cursor position `clientX`
   /// over a tab element. We split the tab in half: drop on the left half
@@ -1187,11 +1224,12 @@
 
   /// Where a drop lands among the visible side's tabs: on the tab at `index`
   /// (a tab from elsewhere is inserted at `insertAt`, by the pointer's half of
-  /// that tab), or past the strip's last tab.
+  /// that tab), or past the strip's last tab, where the body's centre drops
+  /// too.
   type PaneDropPlace = { at: "tab"; index: number; insertAt: number } | { at: "end" };
 
-  /// The one drop rule of a tab and the strip, for this pane's visible
-  /// side: a tab from this window moves here, a tab from another
+  /// The one drop rule of the strip and the body's centre, for this pane's
+  /// visible side: a tab from this window moves here, a tab from another
   /// window of this scope is rebuilt here, and a file-tree file opens here.
   /// Claiming is `preventDefault`, whose "move" effect tells the source to let
   /// its tab go; returns whether the drop was claimed.
@@ -1746,15 +1784,17 @@
 
   <div
     class="editor-wrap"
-    class:body-drop-left={bodyDropEdge === "left"}
-    class:body-drop-right={bodyDropEdge === "right"}
-    class:body-drop-top={bodyDropEdge === "top"}
-    class:body-drop-bottom={bodyDropEdge === "bottom"}
+    class:body-drop-left={bodyDropZone === "left"}
+    class:body-drop-right={bodyDropZone === "right"}
+    class:body-drop-top={bodyDropZone === "top"}
+    class:body-drop-bottom={bodyDropZone === "bottom"}
+    class:body-drop-centre={bodyDropZone === "centre"}
     class:tab-dragging={tabDragInFlight}
     bind:this={editorWrapEl}
+    ondragovercapture={onBodyDragOverCapture}
     ondragover={onBodyDragOver}
     ondragleave={onBodyDragLeave}
-    ondrop={onBodyDrop}
+    ondropcapture={onBodyDropCapture}
     role="group"
     aria-label="pane content"
   >
@@ -2208,8 +2248,9 @@
     display: none;
   }
   /* The auto-hide preference: a side with fewer than two tabs draws no
-     strip, so its hamburger, side toggle and drop target go with it; the
-     keyboard and the command launcher still reach every command. */
+     strip, so its hamburger and side toggle go with it; the keyboard and the
+     command launcher still reach every command, and the body's centre still
+     takes every drop the strip takes. */
   .tabs.auto-hidden {
     display: none;
   }
@@ -2532,8 +2573,15 @@
   .editor-wrap.body-drop-left::after,
   .editor-wrap.body-drop-right::after,
   .editor-wrap.body-drop-top::after,
-  .editor-wrap.body-drop-bottom::after {
+  .editor-wrap.body-drop-bottom::after,
+  .editor-wrap.body-drop-centre::after {
     opacity: 1;
+  }
+  /* A drop in the centre fills the pane, so the whole body wears the ring
+     the strip wears under a dragged tab, where an edge split marks one side. */
+  .editor-wrap.body-drop-centre::after {
+    box-shadow: inset 0 0 0 2px var(--pane-highlight-color, var(--pane-active-focus));
+    background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 8%, transparent);
   }
   .editor-wrap.body-drop-left::after {
     border-left: 4px solid var(--pane-highlight-color, var(--pane-active-focus));

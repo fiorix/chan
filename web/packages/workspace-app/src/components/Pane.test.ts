@@ -1140,8 +1140,14 @@ describe("Pane tab drag and drop between windows", () => {
     const tab = source.querySelector('.tab[draggable="true"]')!;
     const body = target.querySelector<HTMLElement>(".editor-wrap")!;
     body.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    // A drag of this scope's tab with no tab drag of this window in flight is
+    // another window's tab: the body takes it in its centre, wherever it
+    // lands, and only a tab of this window meets the split edges.
     const foreign = new DragData({ [TAB_MIME]: "{}", [OURS]: "1" });
-    expect(fire(body, "dragover", foreign, 799, 300).defaultPrevented).toBe(false);
+    expect(fire(body, "dragover", foreign, 799, 300).defaultPrevented).toBe(true);
+    await tick();
+    expect(body.classList.contains("body-drop-centre")).toBe(true);
+    expect(body.classList.contains("body-drop-right")).toBe(false);
 
     const data = new DragData();
     fire(tab, "dragstart", data);
@@ -1156,9 +1162,12 @@ describe("Pane tab drag and drop between windows", () => {
       await tick();
       expect(body.classList.contains("body-drop-right")).toBe(false);
 
+      // Once the drag ends, its data no longer reaches an edge.
       data.dropEffect = "none";
       fire(tab, "dragend", data);
-      expect(fire(body, "dragover", data, 799, 300).defaultPrevented).toBe(false);
+      fire(body, "dragover", data, 799, 300);
+      await tick();
+      expect(body.classList.contains("body-drop-right")).toBe(false);
       fire(tab, "dragstart", data);
       expect(fire(body, "dragover", data, 799, 300).defaultPrevented).toBe(true);
       expect(fire(body, "drop", data, 799, 300).defaultPrevented).toBe(true);
