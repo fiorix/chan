@@ -18,12 +18,12 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { TerminalPreferences } from "../api/types";
+import type { TerminalPreferences, TerminalRosterEntry } from "../api/types";
 import { terminalPreferences } from "../__tests__/standalone";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { layout, type LeafNode } from "../state/tabs.svelte";
+import { applyTerminalRoster, layout, type LeafNode } from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
@@ -112,6 +112,48 @@ describe("the tab menu", () => {
     await vi.waitFor(() => expect(confirmState.open).toBe(true));
     resolveConfirm(true);
     await vi.waitFor(() => expect((layout.nodes[TERMINAL_PANE] as LeafNode).tabs).toEqual([]));
+  });
+});
+
+// Select All describes the group across windows. A member whose window no
+// page holds cannot act on a toggle routed to it, so the label leaves it out.
+describe("the tab menu's Select All", () => {
+  afterEach(() => applyTerminalRoster([]));
+
+  function member(name: string, live: boolean, broadcast: boolean): TerminalRosterEntry {
+    return { id: `sess-${name}`, tab_name: name, tab_group: "default", window_id: `${name}-win`, window_live: live, broadcast };
+  }
+
+  /// This window's one terminal with broadcast on, the roster's members of
+  /// its group in other windows, and what its tab menu then shows: the
+  /// Select All row's label and the members it lists under other windows.
+  async function selectAll(members: TerminalRosterEntry[]): Promise<{ label: string; others: string[] }> {
+    const [tab] = seatTerminals([terminalTab({ broadcastEnabled: true })]);
+    await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    applyTerminalRoster(members);
+    await openTerminalMenu(tab!);
+    const label = menuShape().find((row) => row === "Select All" || row === "Deselect All") ?? "";
+    const others = [
+      ...document.body.querySelectorAll(".terminal-tab-menu-bubble .broadcast-other-windows-label ~ .target-row .target-name"),
+    ].map((el) => el.textContent?.trim() ?? "");
+    return { label, others };
+  }
+
+  test("reads Deselect All once every member in a window a page holds is on", async () => {
+    expect(await selectAll([member("Live", true, true), member("Hidden", false, false)])).toEqual({
+      label: "Deselect All",
+      others: ["Live"],
+    });
+  });
+
+  test("reads Select All while a member in a window a page holds is off", async () => {
+    expect(await selectAll([member("Live", true, false), member("Hidden", false, true)])).toEqual({
+      label: "Select All",
+      others: ["Live"],
+    });
   });
 });
 

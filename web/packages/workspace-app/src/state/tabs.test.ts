@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
+import type { TerminalRosterEntry } from "../api/types";
 import * as notifications from "./notify.svelte";
 import { confirmState, resolveConfirm } from "./confirm.svelte";
 import { pathPromptState, resolvePathPrompt, tree } from "./store.svelte";
@@ -31,6 +32,7 @@ import {
   closeTabsInPane,
   conflictDialog,
   consumeLastMovedOutSession,
+  crossWindowBroadcastMembers,
   isTerminalMoving,
   markTerminalMovingOut,
   cancelPaneMode,
@@ -4908,6 +4910,60 @@ describe("terminal broadcast groups", () => {
     expect(spy).toHaveBeenCalledWith("sess-x", false);
 
     spy.mockRestore();
+    applyTerminalRoster([]);
+  });
+
+  // A member in another window whose flag never flips: its window has no page
+  // to act on the toggle the server routes there. Two toggles of the group.
+  function toggleTwiceOverStuckMember(member: Partial<TerminalRosterEntry>) {
+    resetLayout([terminalTab({ id: "term-a", title: "A", terminalSessionId: "sess-a" })]);
+    applyTerminalRoster([
+      { id: "sess-x", tab_name: "X", tab_group: "default", window_id: "other-win", broadcast: false, ...member },
+    ]);
+    const spy = vi.spyOn(api, "setTerminalSessionBroadcast").mockResolvedValue(undefined);
+    const self = () => (activePane().tabs[0] as TerminalTab).broadcastEnabled;
+    toggleActiveTerminalBroadcastSelectAll();
+    const afterFirst = self();
+    toggleActiveTerminalBroadcastSelectAll();
+    const result = { afterFirst, afterSecond: self(), sent: spy.mock.calls.map(([id, on]) => [id, on]) };
+    spy.mockRestore();
+    applyTerminalRoster([]);
+    return result;
+  }
+
+  test("a member whose window no page holds is left out, so the second toggle clears the group", () => {
+    expect(toggleTwiceOverStuckMember({ window_live: false })).toEqual({
+      afterFirst: true,
+      afterSecond: false,
+      sent: [],
+    });
+  });
+
+  test.each([
+    ["marked live", { window_live: true }],
+    ["from a server that does not say", {}],
+  ])("a member %s still counts, so a toggle keeps asking it to join", (_label, member) => {
+    expect(toggleTwiceOverStuckMember(member)).toEqual({
+      afterFirst: true,
+      afterSecond: true,
+      sent: [
+        ["sess-x", true],
+        ["sess-x", true],
+      ],
+    });
+  });
+
+  test("a member whose window comes back live rejoins with its own flag", () => {
+    resetLayout([terminalTab({ id: "term-a", title: "A", terminalSessionId: "sess-a" })]);
+    const member = { id: "sess-x", tab_name: "X", tab_group: "default", window_id: "other-win" };
+    const tab = () => activePane().tabs[0] as TerminalTab;
+    applyTerminalRoster([{ ...member, window_live: false, broadcast: true }]);
+    expect(crossWindowBroadcastMembers(tab())).toEqual([]);
+    expect(terminalBroadcastReachCount(tab())).toBe(0);
+
+    applyTerminalRoster([{ ...member, window_live: true, broadcast: true }]);
+    expect(crossWindowBroadcastMembers(tab()).map((m) => [m.id, m.broadcast])).toEqual([["sess-x", true]]);
+    expect(terminalBroadcastReachCount(tab())).toBe(1);
     applyTerminalRoster([]);
   });
 
