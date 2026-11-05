@@ -350,6 +350,12 @@ write_client_file "$WORK/client-wrong-key.conf" "$WRONG_PUB"
 
 runs() { case ",$ARMS," in *",$1,"*) return 0 ;; esac; return 1; }
 body_sha() { sed -n "s/^body $2: [0-9]* bytes, sha256 \([0-9a-f]*\)$/\1/p" "$1"; }
+hello_body() {
+    # hello_body <sha>: how a GET body compares with hello.txt.
+    if [ -z "$1" ]; then echo "absent"
+    elif [ "$1" = "$HELLO_SHA" ]; then echo "sha ${1:0:12}, hello.txt"
+    else echo "sha ${1:0:12}, not hello.txt"; fi
+}
 run_example() {
     # run_example <log> <file> <args...>: the example, its rc recorded in the log.
     local out="$1" file="$2"; shift 2
@@ -368,11 +374,19 @@ if runs dns; then
         "$WG_CONNECT_BIN" "$WORK/client.conf" "$PEER_IP:$HTTP_PORT" \
         "$ENDPOINT" "$DNS_SECOND_ENDPOINT" "$WORK/dns" "$HOLD" "$parent_mount_namespace" \
         > "$WORK/dns.log" 2>&1 || arm_rc=$?
-    if [ "$arm_rc" = 0 ]; then
-        [ "$(body_sha "$WORK/dns/client.log" 1)" = "$HELLO_SHA" ] || arm_rc=1
-        [ "$(body_sha "$WORK/dns/client.log" 2)" = "$HELLO_SHA" ] || arm_rc=1
+    helper_rc="$arm_rc"
+    sha1=""; sha2=""
+    if [ -f "$WORK/dns/client.log" ]; then
+        sha1="$(body_sha "$WORK/dns/client.log" 1)"; sha2="$(body_sha "$WORK/dns/client.log" 2)"
     fi
-    verdict dns "$arm_rc" "private hosts: absent, first forward, second forward; both GET bodies verified"
+    if [ "$arm_rc" = 0 ] && { [ "$sha1" != "$HELLO_SHA" ] || [ "$sha2" != "$HELLO_SHA" ]; }; then
+        arm_rc=1
+    fi
+    # The helper's own account, one line per stage it reached and its PASS
+    # or FAIL line (first line only: the client log a FAIL carries is
+    # printed below).
+    stages="$(sed -n 's/^dns: //p' "$WORK/dns.log" | paste -sd '|' - | sed 's/|/; /g')"
+    verdict dns "$arm_rc" "helper rc=$helper_rc (${stages:-no stage reached}); GET 1 $(hello_body "$sha1"), GET 2 $(hello_body "$sha2")"
     cat "$WORK/dns.log" >&2
 fi
 
