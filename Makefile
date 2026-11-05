@@ -265,6 +265,7 @@ windows-chan-installer: ## Build the Windows NSIS desktop installer.
 .PHONY: shell-check
 shell-check: ## Run shellcheck over the tracked shell scripts.
 	scripts/lint-static.sh shell
+	bash scripts/test-windows-crt.sh
 
 .PHONY: workflow-check
 workflow-check: ## Run actionlint (and shellcheck on run: blocks) over the workflows.
