@@ -77,6 +77,25 @@
     <li>Click the gateway card's on/off connection control, or select its header and press <code>o</code>, then sign in in your browser. One sign-in covers the whole account.</li>
     <li>Flip back to Computers with <code>g</code>: the gateway's devservers are listed there, each marked "via" the gateway.</li>
   </ol>
+  <h3 id="wireguard"><a class="heading-anchor" href="#wireguard">Reach a gateway through WireGuard</a></h3>
+  <p>Chan can run a userspace WireGuard peer inside the devserver or desktop process to reach a gateway behind a WireGuard peer. It creates no OS network interface or host routes and needs no root privileges or separate VPN client.</p>
+  <p>On the devserver, supply the gateway PAT through <code>CHAN_TUNNEL_TOKEN</code> and point <code>--tunnel-wireguard</code> (or <code>CHAN_TUNNEL_WIREGUARD</code>) at the local wg-quick file:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>chan devserver run \
+  --tunnel-url https://p1.proxy.example.com/v1/tunnel \
+  --tunnel-wireguard /absolute/path/to/devserver.conf</b></code>
+    {{copyButton}}
+  </div>
+  <p>The tunnel URL's destination must be inside the peer's <code>AllowedIPs</code>. An <code>http://</code> ingress inside WireGuard is also accepted: WireGuard pins the peer's key and encrypts the connection. The gateway token is still required.</p>
+  <p>On the desktop, add or edit a gateway in the launcher and set <strong>WireGuard file</strong> to its local wg-quick file. Use an absolute path or one starting with <code>~/</code>. The file is validated when you save; adding, changing or clearing it takes effect after restarting Chan Desktop.</p>
+  <p>Both clients read the same wg-quick subset:</p>
+  <ul>
+    <li>One <code>[Interface]</code>: required <code>PrivateKey</code> and <code>Address</code>, optional <code>MTU</code>.</li>
+    <li>Exactly one <code>[Peer]</code>: required <code>PublicKey</code>, <code>Endpoint</code> (host or IP address with a port), and <code>AllowedIPs</code>; optional <code>PresharedKey</code> and <code>PersistentKeepalive</code>.</li>
+    <li><code>DNS</code>, <code>Table</code>, <code>FwMark</code>, <code>ListenPort</code>, <code>PreUp</code>, <code>PostUp</code>, <code>PreDown</code>, <code>PostDown</code>, <code>SaveConfig</code>, unknown keys, and additional peers are refused.</li>
+  </ul>
+  <p>On Unix, the file must have no group or other permission bits; use <code>chmod 600 /absolute/path/to/devserver.conf</code>. Windows ACLs are not checked by this reader; restrict access to the file yourself because it contains the private key.</p>
+  <p class="minor">See the <a href="/gateway/#wireguard">gateway guide</a> for the desktop connection and the <a href="https://github.com/fiorix/chan/blob/main/crates/chan-wireguard/design.md">chan-wireguard design</a> for the implementation.</p>
   <h3 id="remote-workspaces"><a class="heading-anchor" href="#remote-workspaces">Open remote terminals and workspaces</a></h3>
   <p>A connected devserver's card offers <strong>New terminal</strong> (<code>t</code>). Its registered workspaces appear on the card; open a workspace window from its row with <strong>New window</strong> (<code>w</code>). The command launcher's Computers scope does the same from any window on that devserver.</p>
   <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan open {path}</code> in a devserver terminal to create a workspace on that machine, or <code>chan workspace serve {path} --on NAME</code> from a terminal on your desktop. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>

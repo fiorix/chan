@@ -10,6 +10,8 @@ The workspace UI is the same Svelte app shipped in the standalone `chan` binary.
 
 Notarized macOS builds, signed Windows installers, and Linux builds (`.AppImage`, `.deb`, `.rpm`) are published on https://chan.app. End users should grab the build from there rather than building from source.
 
+chan-desktop requires macOS 14 (Sonoma) or later. Its self-updater refuses an update whose published macOS minimum exceeds the running version and keeps the installed app. See [Self-update](design.md#self-update) for the update metadata and checks.
+
 ## Build and run
 
 Requirements: stable Rust (pinned in `rust-toolchain.toml`) and npm for the embedded web build. The Makefile builds the embedded web bundle (`web/dist`) and installs `tauri-cli` v2 under the repository's `.build-tools/tauri-cli` if `cargo-tauri` is not already on `$PATH`.
