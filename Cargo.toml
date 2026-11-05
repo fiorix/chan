@@ -165,6 +165,14 @@ strip = "symbols"
 opt-level = "s"
 strip = true
 
+# Proc macros and build scripts run only on the build machine, so leave them
+# unstripped. Xcode 27.1's strip writes proc-macro libraries that dyld then
+# refuses to load ("mis-aligned LINKEDIT string pool"), which stopped a
+# release build on macOS 27 at zeroize_derive. Shipped binaries keep the
+# strip settings above.
+[profile.release.build-override]
+strip = false
+
 # gemm's fp16 kernels reach the `fmla v0.8h, ...` instructions through `#[inline]`
 # helpers called from `#[target_feature(enable = "fp16")]` code. At opt-level 0
 # those helpers are emitted as standalone functions that do not carry the
