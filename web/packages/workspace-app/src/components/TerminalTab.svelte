@@ -5,6 +5,7 @@
     Check,
     Clipboard,
     ClipboardPaste,
+    Command as CommandIcon,
     EyeOff,
     MessageSquare,
     Pencil,
@@ -103,6 +104,7 @@
     fileOps,
     dismissCliReloadNotice,
     scheduleSessionSave,
+    openCommandLauncherFromMenu,
     setTransientStatus,
     surfaceThemeOverride,
     ui,
@@ -2191,6 +2193,27 @@
     toggleRichPromptToolbar(tab.id);
   }
 
+  // The launcher opens from this terminal, as its chord does from a focused
+  // terminal, so it hands the keyboard back here when it closes.
+  function openCommandsFromMenu(e: MouseEvent): void {
+    const row = e.currentTarget as Element;
+    closeTabMenu();
+    openCommandLauncherFromMenu(row, focusTerminalBeforeLauncher);
+  }
+
+  // ghostty-web's focus() focuses its element and then again on a zero-delay
+  // timer, which would take the keyboard back from the launcher's input once
+  // the launcher has it. On ghostty the host it opened in, the element it
+  // reads keys from, is focused once instead; xterm.js focuses at once.
+  function focusTerminalBeforeLauncher(): void {
+    if (backend !== "ghostty") {
+      focusTerminal();
+      return;
+    }
+    if (surveyFor(tab.id) || launcherShownOverWindow()) return;
+    host?.focus({ preventScroll: true });
+  }
+
   function attachPtyWriteOrigin(): PtyWriteOrigin {
     return attachReplayActive && suppressAttachReplayGeneratedReplies ? "replay" : "live";
   }
@@ -2989,8 +3012,9 @@
       {#if tabMenu.source === "body"}
         <!-- Body-context terminal menu (right-click in the terminal
              body): Find + Copy (selection or scrollback) + Paste + Copy
-             Scrollback. Name / Group / broadcast / MCP / spawn config
-             lives on the tab-name menu. -->
+             Scrollback, the Rich Prompt rows, then the window's Commands.
+             Name / Group / broadcast / MCP / spawn config lives on the
+             tab-name menu. -->
         <div class="action-list">
           <div class="terminal-backend-label" data-terminal-backend={backend}>
             <span>Terminal engine</span>
@@ -3062,6 +3086,16 @@
               </button>
             {/if}
           {/if}
+          <!-- The window's commands, after this terminal's own, as the
+               browser puts its page-wide rows last. -->
+          <div class="msep" role="separator"></div>
+          <button class="mbtn" role="menuitem" onclick={openCommandsFromMenu}>
+            <span class="mbtn-icon">
+              <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">Commands</span>
+            <span class="mbtn-chord">{chordLabel("app.launcher.toggle")}</span>
+          </button>
         </div>
       {:else}
       <label class="rename-row">

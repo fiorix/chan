@@ -101,6 +101,7 @@
     chooseWindowFocusColor,
     currentPreferences,
     modalDialogOpen,
+    openCommandLauncherFromMenu,
     ui,
     workspaceDisplayName,
     tree,
@@ -120,7 +121,7 @@
     terminalBroadcastReachCount,
   } from "../state/tabs.svelte";
   import type { BrowserLabelCtx } from "../state/tabs.svelte";
-  import { chordFor } from "../state/shortcuts";
+  import { chordFor, webInspectorChordLabel } from "../state/shortcuts";
   import { openTabMenu, tabMenu } from "../state/tabMenu.svelte";
   import {
     defaultShellProfileId,
@@ -288,9 +289,12 @@
     `Flip to side ${visibleSide === "a" ? "B" : "A"}${flipChord ? ` (${flipChord})` : ""}`,
   );
 
-  /// Empty panes have no right-click context menu. The pane hamburger
-  /// and the command launcher are the discovery surfaces for spawn
-  /// actions; the hamburger also keeps the pane-local chrome controls.
+  /// The pane's right-click menu: Commands, Reload and, on the desktop, Open
+  /// Inspector, each with its chord. It opens over the strip's empty stretch
+  /// and over the body of a side with no tab, where nothing else draws a menu
+  /// and the browser's own would offer Back and Inspect Element instead. The
+  /// pane hamburger and the command launcher stay the discovery surfaces for
+  /// spawn actions; the hamburger also keeps the pane-local chrome controls.
 
   /// Pane chrome menu: the ⋮ in the tab strip that replaces the
   /// per-button split / close controls.
@@ -305,6 +309,10 @@
   });
   let paneContextMenu: HamburgerMenu | undefined = $state();
   let paneContextMenuOpen = $state(false);
+  // What held focus as the right-click menu opened, for its Commands row to
+  // hand back before the launcher opens; see openCommandLauncherFromMenu.
+  let paneContextOpener: HTMLElement | null = null;
+  const inspectorChord = $derived(webInspectorChordLabel());
 
   /// Per-pane page-width cap. The ratio (state/pageWidth) is
   /// global, but the px cap is pane-relative so splitting one
@@ -507,14 +515,19 @@
     await reloadWindow();
   }
 
+  /// Offered on the desktop only: a plain browser opens its own inspector.
   async function doOpenInspector(): Promise<void> {
     closePaneMenus();
     if (await openWebInspector()) return;
-    notify(
-      isTauriDesktop()
-        ? "Inspector unavailable in this build"
-        : "Use the browser's built-in inspector (Right-click → Inspect Element)",
-    );
+    notify("Inspector unavailable in this build");
+  }
+
+  function doOpenCommands(e: MouseEvent): void {
+    const opener = paneContextOpener;
+    closePaneMenus();
+    openCommandLauncherFromMenu(e.currentTarget as Element, () => {
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+    });
   }
 
   function doSetFocusColor(color: FocusColor): void {
@@ -536,8 +549,18 @@
     });
   }
 
+  /// A side with no tab shows a placeholder that draws no menu of its own,
+  /// so its body opens the pane's. Every tab body keeps its own menu, or the
+  /// browser's where it has none, and Hybrid Nav's preview is left alone.
+  function onBodyContextMenu(e: MouseEvent): void {
+    if (active || paneMode.active || e.defaultPrevented) return;
+    openPaneContextAt(e);
+  }
+
   function openPaneContextAt(e: MouseEvent): void {
     e.preventDefault();
+    const held = document.activeElement;
+    paneContextOpener = held instanceof HTMLElement && held !== document.body ? held : null;
     setActivePane(pane.id);
     closePaneHamburgerMenu();
     paneContextMenu?.openAtCursor(e.clientX, e.clientY);
@@ -1401,9 +1424,6 @@
     ondrop={onDrop}
     oncontextmenu={(e) => {
       if ((e.target as Element | null)?.closest(".tab, .actions")) return;
-      // Empty panes have no right-click menu; only non-empty panes
-      // get the Reload / Open Inspector context menu.
-      if (visibleTabs.length === 0) return;
       openPaneContextAt(e);
     }}
   >
@@ -1766,9 +1786,17 @@
         bind:open={paneContextMenuOpen}
         showTrigger={false}
         width={220}
-        height={110}
+        height={140}
         onBeforeOpen={closePaneHamburgerMenu}
       >
+        <li>
+          <button role="menuitem" onclick={doOpenCommands}>
+            <CommandIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+            <span class="menu-row-label">Commands</span>
+            <span class="menu-row-chord">{chordLabel("app.launcher.toggle")}</span>
+          </button>
+        </li>
+        <li class="sep" role="separator"></li>
         <li>
           <!-- Window-level reload, like a browser Cmd+R. The
                SPA-level chord in App.svelte and this menu entry both
@@ -1782,12 +1810,15 @@
             <span class="menu-row-chord">{chordLabel("app.window.reload")}</span>
           </button>
         </li>
-        <li>
-          <button role="menuitem" onclick={doOpenInspector}>
-            <Bug size={16} strokeWidth={1.75} aria-hidden="true" />
-            <span>Open Inspector</span>
-          </button>
-        </li>
+        {#if isTauriDesktop()}
+          <li>
+            <button role="menuitem" onclick={doOpenInspector}>
+              <Bug size={16} strokeWidth={1.75} aria-hidden="true" />
+              <span class="menu-row-label">Open Inspector</span>
+              <span class="menu-row-chord">{inspectorChord ?? ""}</span>
+            </button>
+          </li>
+        {/if}
       </HamburgerMenu>
     </div>
   </div>
@@ -1805,6 +1836,7 @@
     ondragover={onBodyDragOver}
     ondragleave={onBodyDragLeave}
     ondropcapture={onBodyDropCapture}
+    oncontextmenu={onBodyContextMenu}
     role="group"
     aria-label="pane content"
   >
@@ -1880,10 +1912,10 @@
                  Indexing graph) lives inside the Dashboard tab.
                  Multi-pane empty panes and panes with tabs on their hidden
                  Hybrid side keep the minimal chrome (just the chan mark).
-                 Empty panes have no right-click menu;
-                 spawn actions live in the pane hamburger's Apps rows
-                 and the command launcher, so right-clicking an empty
-                 pane is a no-op.
+                 Right-clicking here opens the pane's menu (Commands,
+                 Reload, Open Inspector on the desktop) through the body's
+                 handler; spawn actions live in the pane hamburger's Apps
+                 rows and the command launcher.
 
                  Terminal-only windows skip the welcome entirely: they always
                  hold at least one terminal (boot opens one, close-on-last-tab

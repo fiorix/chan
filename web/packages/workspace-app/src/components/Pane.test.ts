@@ -492,9 +492,9 @@ describe("Pane right-click menus", () => {
     }
   });
 
-  test("empty pane right-click opens NO menu (empty-pane-menu)", async () => {
-    // The command launcher carries spawn actions; right-clicking an
-    // empty pane is a no-op.
+  test("empty pane right-click opens the pane menu in place of the browser's", async () => {
+    // Spawn actions stay in the hamburger and the launcher; the right-click
+    // menu offers Commands and Reload (Open Inspector on the desktop).
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-empty",
@@ -504,19 +504,17 @@ describe("Pane right-click menus", () => {
     const target = await renderPane(pane, { paneMode: false });
     expect(target.querySelector(".welcome")).not.toBeNull();
 
-    target.querySelector(".placeholder")?.dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        clientX: 20,
-        clientY: 20,
-      }),
-    );
+    const event = new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    target.querySelector(".placeholder")?.dispatchEvent(event);
     await tick();
 
-    // Right-clicking an empty pane is a no-op; no popover opens.
-    // The hamburger trigger button is present but its menu stays closed.
-    expect(document.body.querySelector(".hamburger-menu")).toBeNull();
+    expect(event.defaultPrevented).toBe(true);
+    expect(menuLabels()).toEqual(["Commands", "Reload"]);
   });
 
   test("empty pane left-click leaves the welcome menu closed", async () => {
@@ -547,7 +545,7 @@ describe("Pane right-click menus", () => {
     expect(document.body.querySelector(".hamburger-menu")).toBeNull();
   });
 
-  test("loaded pane right-click keeps reload and inspector menu", async () => {
+  test("loaded pane right-click on the strip lists Commands and Reload", async () => {
     const pane: LeafNode = {
       kind: "leaf",
       id: "pane-loaded",
@@ -566,7 +564,9 @@ describe("Pane right-click menus", () => {
     );
     await tick();
 
-    expect(menuLabels()).toEqual(["Reload", "Open Inspector"]);
+    // A plain browser opens its own inspector, so Open Inspector is the
+    // desktop's row only.
+    expect(menuLabels()).toEqual(["Commands", "Reload"]);
   });
 
   // Side B is a normal tab side, so activity belongs to its own tab strip.
