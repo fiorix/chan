@@ -75,7 +75,7 @@ export default {
       check(bTwoAgain.terminals === 3, `the pane should still mount three terminals; it holds ${JSON.stringify(bTwoAgain)}`);
       return { three, bOne, aTwo, bTwo, aOne, bTwoAgain };
     } finally {
-      await closeEveryTerminal(page, "cleanup").catch(() => {});
+      await closeEveryTerminal(page, "cleanup", token).catch(() => {});
       await writePaneStripPreference(page, token, original.on);
     }
   },

@@ -60,12 +60,12 @@ export default {
       const restored = await waitPaneStrip(page, "the lone terminal after the preference turned off", (s) => s.tabs.length === 1 && stripShown(s));
       await ctx.shot("200-off-one-terminal");
 
-      await closeEveryTerminal(page, "cleanup");
+      await closeEveryTerminal(page, "cleanup", token);
       const emptyAgain = await waitPaneStrip(page, "the emptied pane", (s) => s.terminals === 0 && stripShown(s) && s.welcome);
       return { before, hiddenEmpty, one, two, back, oneAgain, restored, emptyAgain };
     } finally {
       await writePaneStripPreference(page, token, original.on);
-      await closeEveryTerminal(page, "final cleanup").catch(() => {});
+      await closeEveryTerminal(page, "final cleanup", token).catch(() => {});
     }
   },
 };
