@@ -272,6 +272,12 @@ Source: `crates/chan-workspace/src/teams.rs`; validation in `crates/chan-server/
 
 ## chan devserver
 
+### Gateway tunnel options
+
+The gateway tunnel is configured through CLI flags or environment variables, separately from the persisted files below. `--tunnel-url` (`CHAN_TUNNEL_URL`) names the ingress, `--tunnel-token` (`CHAN_TUNNEL_TOKEN`) enables the tunnel, and `--tunnel-devserver-name` (`CHAN_TUNNEL_DEVSERVER_NAME`) sets the roster label.
+
+`--tunnel-wireguard FILE` (`CHAN_TUNNEL_WIREGUARD`) optionally supplies a wg-quick file for the in-process WireGuard peer that carries the gateway dial. It defaults to unset and requires a tunnel token and URL. On Unix the file must have no group or other permission bits (`chmod 600 FILE`). See the [devserver manual](https://chan.app/manual/devserver/#wireguard) for usage and the accepted keys. Source: `crates/chan/src/cli.rs` and `crates/chan-wireguard/src/config.rs`.
+
 ### `~/.chan/devserver/config.json`: `PersistedConfig`
 
 Source: `crates/chan-server/src/devserver.rs`. Written atomically at mode 0600 because it holds the bearer token. The devserver writes every field; nothing here is meant for hand editing.
@@ -332,6 +338,9 @@ A `gateways[]` entry is the account-level connection; the account token lives in
 | `enabled` | `bool` | `true` | connect intent: an enabled gateway auto-connects at startup; connect and disconnect persist it |
 | `added_at` | `u64` | now on add | wall-clock millis the row was added or converted |
 | `native_trust[]` | `Vec<NativeDevserverTrust>` | empty | shared devservers allowed to receive native IPC: `owner_user_id` (UUID), `owner` and `devserver_id`; removing the gateway removes them |
+| `wireguard` | `Option<PathBuf>` | unset | wg-quick file path; see below |
+
+The launcher's Gateway form sets or clears `wireguard` through its optional **WireGuard file** field. It accepts an absolute path or a path starting with `~/`, expands `~/` to the user's home, and validates the file when saving. An unset field is omitted from JSON. The desktop reads the file at startup for an enabled gateway; adding, changing or removing the setting takes effect after restarting chan-desktop. The file uses the same parser and Unix permissions rule as `--tunnel-wireguard` above. Source: `desktop/src-tauri/src/config.rs` and `desktop/src-tauri/src/wireguard.rs`.
 
 A `window_geometry[]` record holds `window_label`, `saved_at` and a `geometries[]` list, newest first, of `{monitor_sig, x, y, w, h, saved_at}`: one logical position and size per monitor signature, so a machine that docks and undocks restores each layout's own geometry.
 
