@@ -346,7 +346,7 @@ impl InvalidNodeBase {
 enum OAuthClientPair {
     /// Neither half is set: the provider is off.
     Absent,
-    /// Both halves are set: the provider registers with them.
+    /// Both halves are set: the provider registers with them, trimmed.
     Complete { id: String, secret: String },
     /// Only the client secret is set.
     MissingId,
@@ -355,8 +355,16 @@ enum OAuthClientPair {
 }
 
 impl OAuthClientPair {
+    /// Classify one provider's raw values. A value that is empty or only
+    /// whitespace counts as unset: a deployment that lists every key, as
+    /// an `EnvironmentFile` template or an orchestrator secret does, sets
+    /// the ones it does not use to the empty string.
     fn from_raw(id: Option<String>, secret: Option<String>) -> Self {
-        match (id, secret) {
+        let set = |raw: Option<String>| {
+            raw.map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        match (set(id), set(secret)) {
             (Some(id), Some(secret)) => Self::Complete { id, secret },
             (None, Some(_)) => Self::MissingId,
             (Some(_), None) => Self::MissingSecret,
@@ -365,19 +373,32 @@ impl OAuthClientPair {
     }
 }
 
-/// Register every OAuth provider whose client pair `var` configures.
-/// `var` is the environment lookup, a parameter so the registration
-/// rules are testable without touching the process environment.
+/// Register every OAuth provider whose client pair `var` configures, and
+/// refuse a pair with only one half set. `var` is the environment lookup,
+/// a parameter so the registration rules are testable without touching
+/// the process environment.
 fn providers_from_vars(
     var: impl Fn(&str) -> Option<String>,
     oauth_endpoints_base: Option<&str>,
 ) -> anyhow::Result<Vec<Arc<dyn Provider>>> {
-    let pair =
-        |id_var: &str, secret_var: &str| OAuthClientPair::from_raw(var(id_var), var(secret_var));
+    // A half pair is a lost secret or a typo, never a way to turn a
+    // provider off. The refusal names the variables and not the values,
+    // since either half may hold the secret.
+    let pair = |id_var: &str, secret_var: &str| match OAuthClientPair::from_raw(
+        var(id_var),
+        var(secret_var),
+    ) {
+        OAuthClientPair::Absent => Ok(None),
+        OAuthClientPair::Complete { id, secret } => Ok(Some((id, secret))),
+        OAuthClientPair::MissingId => Err(anyhow::anyhow!(
+            "{id_var} is unset or empty but {secret_var} is set; set both or neither"
+        )),
+        OAuthClientPair::MissingSecret => Err(anyhow::anyhow!(
+            "{secret_var} is unset or empty but {id_var} is set; set both or neither"
+        )),
+    };
     let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
-    if let OAuthClientPair::Complete { id, secret } =
-        pair("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")
-    {
+    if let Some((id, secret)) = pair("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")? {
         let github = match oauth_endpoints_base {
             Some(base) => GitHubProvider::with_endpoints(
                 id,
@@ -393,14 +414,10 @@ fn providers_from_vars(
         };
         providers.push(Arc::new(github));
     }
-    if let OAuthClientPair::Complete { id, secret } =
-        pair("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")
-    {
+    if let Some((id, secret)) = pair("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET")? {
         providers.push(Arc::new(GoogleProvider::new(id, secret)?));
     }
-    if let OAuthClientPair::Complete { id, secret } =
-        pair("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET")
-    {
+    if let Some((id, secret)) = pair("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET")? {
         providers.push(Arc::new(GitLabProvider::new(id, secret)?));
     }
     if providers.is_empty() {
