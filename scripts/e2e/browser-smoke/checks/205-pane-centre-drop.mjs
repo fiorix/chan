@@ -19,6 +19,12 @@
 //     splits nothing, since an empty pane's whole body is the centre.
 //   - on: the same drop on a right pane holding a tab splits it, and the tab
 //     becomes the new pane between the two.
+//   - a file dragged from a Files tab in the left pane onto the right pane's
+//     editor is the editor's: no zone is painted, the editor types the path
+//     the drag carries, and no tab opens.
+//   - the same drag onto an empty right pane paints the centre and opens the
+//     file there, so the editor arm's absent zone is the rule, not a drag the
+//     body never saw.
 //
 // Each arm opens its own window from a layout in the address, so no arm
 // inherits another's layout. The preference is restored to what the check
@@ -28,6 +34,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readPaneStripPreference, writePaneStripPreference } from "../lib/pane-strip.mjs";
+import { waitFileRow } from "../lib/files.mjs";
 
 const FILES = ["centre-drop-a.md", "centre-drop-b.md", "centre-drop-c.md"];
 const RUN = Date.now().toString(36);
@@ -41,6 +48,16 @@ function layoutHash(rightHoldsATab) {
   }));
 }
 
+/// The left pane holds a Files tab at the workspace root; the right pane an
+/// editor or nothing.
+function treeLayoutHash(rightHoldsATab) {
+  return "s=" + encodeURIComponent(JSON.stringify({
+    k: "s", d: "r",
+    a: { k: "l", f: 1, t: [{ k: "b", a: 1 }] },
+    b: { k: "l", t: rightHoldsATab ? [{ p: FILES[2], m: "wysiwyg", a: 1 }] : [] },
+  }));
+}
+
 /// Installed before the page's scripts: every drag event's type, whether the
 /// browser made it, and the pane and part of the pane it reached first.
 function installDragRecord() {
@@ -49,13 +66,20 @@ function installDragRecord() {
     window.addEventListener(type, (event) => {
       const target = event.target instanceof Element ? event.target : null;
       const pane = target?.closest(".pane") ?? null;
-      window.__dragRecord.push({
+      const entry = {
         type,
         trusted: event.isTrusted,
         pane: pane ? [...document.querySelectorAll(".pane")].indexOf(pane) : -1,
         body: Boolean(target?.closest(".editor-wrap")),
         strip: Boolean(target?.closest(".tabs")),
-      });
+        editor: Boolean(target?.closest(".cm-editor")),
+        effect: event.dataTransfer?.dropEffect ?? null,
+        allowed: event.dataTransfer?.effectAllowed ?? null,
+      };
+      window.__dragRecord.push(entry);
+      // Whether anything on the way took the event, read once it has
+      // finished its trip.
+      setTimeout(() => { entry.prevented = event.defaultPrevented; }, 0);
     }, true);
   }
 }
@@ -152,17 +176,64 @@ async function arm(ctx, page, token, { name, autoHide, rightHoldsATab, at, zone 
   return { name, autoHide, at, body, before, hovering, painted, types };
 }
 
+/// Drag the first file's row from the left pane's Files tab onto the right
+/// pane: the middle of its editor's text when it holds one, else the middle of
+/// its empty body.
+async function treeArm(ctx, page, { name, rightHoldsATab }) {
+  const url = new URL(ctx.serverUrl);
+  url.searchParams.set("w", `centre-drop-205-${name}-${RUN}`);
+  url.hash = treeLayoutHash(rightHoldsATab);
+  await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await waitPanes(page, `${name}: the two panes`, (p) => p.length === 2 && p[1].tabs.length === (rightHoldsATab ? 1 : 0));
+  const leftId = await page.evaluate(() => document.querySelectorAll(".pane")[0].dataset.paneId);
+  const row = await waitFileRow(page, FILES[0], true, { scope: `[role="region"][data-pane-id=${JSON.stringify(leftId)}]` });
+  const box = await row.boundingBox();
+  await row.dispose();
+  if (rightHoldsATab) {
+    await page.waitForFunction(() => document.querySelectorAll(".pane")[1].querySelector(".cm-content"), { timeout: 15_000 });
+  }
+  const target = await page.evaluate(() => {
+    const right = document.querySelectorAll(".pane")[1];
+    const el = right.querySelector(".cm-content") ?? right.querySelector(".editor-wrap");
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + Math.min(r.height / 2, 60) };
+  });
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const data = await withTimeout(page.mouse.drag(start, target), 15_000, `${name}: the native drag from the Files row`);
+  const types = (data.items ?? []).map((item) => item.mimeType);
+  assert.ok(types.includes("application/x-md-file") && types.includes("text/plain"),
+    `${name}: the drag carries the open-in-pane type and the path as text: ${JSON.stringify(types)}`);
+  await page.mouse.dragEnter(target, data);
+  await page.mouse.dragOver(target, data);
+  let hovering;
+  if (rightHoldsATab) {
+    // A second dragover a beat later reads the settled answer: the pane
+    // never paints a zone over an editor, so there is nothing to wait for.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await page.mouse.dragOver(target, data);
+    hovering = await readPanes(page);
+    assert.deepEqual(hovering[1].zones, [], `${name}: the editor's body paints no zone: ${JSON.stringify(hovering)}`);
+  } else {
+    hovering = await waitPanes(page, `${name}: the empty body paints the centre`, (p) =>
+      p[1].zones.length === 1 && p[1].zones[0] === "body-drop-centre");
+  }
+  await ctx.shot(`205-${name}-hover`, page);
+  await page.mouse.drop(target, data);
+  await page.mouse.up();
+  return { name, before: null, hovering, painted: null, types, body: { width: 0, height: 0 } };
+}
+
 /// Read once the drop's layout has settled, so a dragend has had its turn.
 async function settled(page, result, after) {
   const record = await page.evaluate(() => window.__dragRecord);
   return { ...result, after, record };
 }
 
-function assertTrusted(result) {
+function assertTrusted(result, from = "strip") {
   const { name, record } = result;
   const first = (type) => record.find((r) => r.type === type);
-  assert.ok(first("dragstart")?.trusted && first("dragstart").pane === 0 && first("dragstart").strip,
-    `${name}: the browser started the drag on the left strip: ${JSON.stringify(record)}`);
+  assert.ok(first("dragstart")?.trusted && first("dragstart").pane === 0 && first("dragstart")[from],
+    `${name}: the browser started the drag on the left ${from}: ${JSON.stringify(record)}`);
   assert.ok(record.some((r) => r.type === "dragover" && r.trusted && r.pane === 1 && r.body),
     `${name}: a trusted dragover reached the right body: ${JSON.stringify(record)}`);
   assert.ok(record.some((r) => r.type === "drop" && r.trusted && r.pane === 1 && r.body),
@@ -230,6 +301,30 @@ export default {
           `edge: the dragged tab is the new pane before the right one: ${JSON.stringify(after)}`);
         assert.equal(result.painted.borderLeftWidth, "4px", `edge: the left edge overlay is painted: ${JSON.stringify(result.painted)}`);
         assertTrusted(done);
+      }
+
+      // A file from the Files tab over the right pane's editor is the
+      // editor's, which types its path; over an empty pane the centre opens
+      // it.
+      {
+        const result = await treeArm(ctx, page, { name: "tree-editor", rightHoldsATab: true });
+        const typed = await page.waitForFunction((stem) =>
+          document.querySelectorAll(".pane")[1].querySelector(".cm-content")?.textContent?.includes(stem),
+        { timeout: 15_000 }, FILES[0]).then(() => true, () => false);
+        const after = await readPanes(page);
+        const done = await settled(page, result, after);
+        details.arms.push(done);
+        assert.ok(typed, `tree-editor: the editor typed the dragged path: ${JSON.stringify(after)} ${JSON.stringify(done.record)}`);
+        assert.equal(after[1].tabs.length, 1, `tree-editor: no tab opened over the editor: ${JSON.stringify(after)}`);
+        assertTrusted(done, "body");
+      }
+      {
+        const result = await treeArm(ctx, page, { name: "tree-empty", rightHoldsATab: false });
+        const after = await waitPanes(page, "tree-empty: the file opened in the empty pane", (p) =>
+          p.length === 2 && p[1].tabs.length === 1 && named(p[1].tabs, FILES[0]));
+        const done = await settled(page, result, after);
+        details.arms.push(done);
+        assertTrusted(done, "body");
       }
 
       for (const a of details.arms) {
