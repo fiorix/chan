@@ -9,71 +9,85 @@
 // `<CHAN_HOME>/devserver/Drafts`). Against a binary without the drafts
 // surface the meta assertion fails first, so the check can go red.
 
-import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fetchWindows, goto, killChild, poll, spawnDevserver } from "../lib/launcher-devserver.mjs";
 
-const PORT = 39147;
+const TERMINAL_MENU = '.terminal-tab-menu-bubble[role="menu"]';
+// Puppeteer's names for the modifier labels formatChord renders.
+const MODIFIER_KEYS = { Ctrl: "Control", Alt: "Alt", Shift: "Shift", Cmd: "Meta" };
 
-function pollUntil(fn, timeoutMs, label) {
-  const t0 = Date.now();
-  return new Promise((resolve, reject) => {
-    const tick = () => {
-      let value;
-      try {
-        value = fn();
-      } catch {
-        value = null;
-      }
-      if (value) return resolve(value);
-      if (Date.now() - t0 > timeoutMs) {
-        return reject(new Error(`timed out waiting for ${label}`));
-      }
-      setTimeout(tick, 300);
-    };
-    tick();
-  });
+function terminalWindowUrl(origin, row) {
+  const prefix = `/${row.prefix.replace(/^\/+|\/+$/g, "")}`;
+  const url = new URL(`${prefix}/`, origin);
+  url.searchParams.set("kind", "terminal");
+  url.searchParams.set("w", row.window_id);
+  url.searchParams.set("t", row.token);
+  return url.toString();
 }
 
-async function fetchJson(url, token) {
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`${url} answered ${res.status}`);
-  return res.json();
+/// The Rich Prompt chord as this page labels it. The terminal menu's row
+/// renders chordFor("terminal.richPrompt"), the shortcut registry's chord
+/// for this OS and surface, while App.svelte's keymap matches the keys on
+/// its own; pressing the label holds the two to each other instead of to a
+/// copy of either.
+async function richPromptChord(page) {
+  const terminal = await page.$eval(".pane .terminal-tab.active", (el) => {
+    const r = el.getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  });
+  // The menu opens at the press and extends right and down from it.
+  await page.mouse.click(terminal.left + terminal.width / 2, terminal.top + terminal.height / 2, { button: "right" });
+  await page.waitForSelector(TERMINAL_MENU, { visible: true, timeout: 10_000 });
+  const rows = await page.$$eval(`${TERMINAL_MENU} button.mbtn`, (buttons) =>
+    buttons.map((b) => [
+      b.querySelector(".mbtn-label")?.textContent?.trim() ?? "",
+      b.querySelector(".mbtn-chord")?.textContent?.trim() ?? "",
+    ]));
+  // Close it with a press on the terminal outside it. Escape would reach the
+  // focused terminal, which takes the key before the menu's window listener.
+  await page.mouse.click(terminal.left + 24, terminal.top + 24);
+  await page.waitForSelector(TERMINAL_MENU, { hidden: true, timeout: 10_000 });
+  const row = rows.find(([label]) => label === "Show Rich Prompt");
+  if (!row) throw new Error(`the terminal menu has no Show Rich Prompt row: ${JSON.stringify(rows)}`);
+  const parts = row[1].split("+");
+  const letter = parts.pop();
+  const modifiers = parts.map((part) => MODIFIER_KEYS[part]);
+  if (!/^[A-Z]$/.test(letter ?? "") || modifiers.length === 0 || modifiers.some((key) => !key)) {
+    throw new Error(`the Rich Prompt row's chord label is not a modified letter: ${JSON.stringify(row[1])}`);
+  }
+  return { label: row[1], modifiers, key: `Key${letter}` };
+}
+
+async function pressChord(page, { modifiers, key }) {
+  for (const modifier of modifiers) await page.keyboard.down(modifier);
+  await page.keyboard.press(key);
+  for (const modifier of [...modifiers].reverse()) await page.keyboard.up(modifier);
 }
 
 export default {
   name: "mini-window-drafts",
   async run(ctx) {
-    const chanHome = mkdtempSync(join(tmpdir(), "chan-mini-drafts-"));
-    const devserver = spawn(ctx.chanBin, ["devserver", "run", "--bind", "127.0.0.1", "--port", String(PORT)], {
-      env: { ...process.env, CHAN_HOME: chanHome },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let log = "";
-    devserver.stdout.on("data", (chunk) => (log += chunk));
-    devserver.stderr.on("data", (chunk) => (log += chunk));
-    const page = await ctx.page.browser().newPage();
+    // Everything that needs tearing down is made inside the try, so a throw
+    // from any step leaves no devserver or temp home behind.
+    let chanHome = null;
+    let devserver = null;
+    let page = null;
     try {
-      await pollUntil(() => log.includes("CHAN_DEVSERVER_TOKEN="), 30_000, "devserver token");
-      const mgmtToken = log.match(/CHAN_DEVSERVER_TOKEN=([A-Za-z0-9_-]+)/)[1];
-      const base = `http://127.0.0.1:${PORT}`;
+      chanHome = mkdtempSync(join(tmpdir(), "chan-mini-drafts-"));
+      devserver = spawnDevserver(ctx.chanBin, chanHome, ["--bind", "127.0.0.1"]);
+      page = await ctx.browser.newPage();
+      const launchUrl = await devserver.url;
+      const origin = new URL(launchUrl).origin;
+      const token = new URL(launchUrl).searchParams.get("t");
+      if (!token) throw new Error("launcher URL has no management token");
 
       // The devserver mints one terminal window on first boot; its row
       // carries the shared terminal tenant's prefix and bearer.
-      let row;
-      const t0 = Date.now();
-      while (!row && Date.now() - t0 < 30_000) {
-        const rows = await fetchJson(`${base}/api/library/windows`, mgmtToken).catch(() => []);
-        row = rows.find?.((r) => r.kind === "terminal" && r.token);
-        if (!row) await new Promise((r) => setTimeout(r, 500));
-      }
-      if (!row) throw new Error("no terminal window row appeared on the devserver");
-
-      await page.goto(
-        `${base}${row.prefix}/?kind=terminal&w=${encodeURIComponent(row.window_id)}&t=${row.token}`,
-        { waitUntil: "domcontentloaded" },
-      );
+      const row = await poll("the minted terminal window", async () =>
+        (await fetchWindows(origin, token)).find((r) => r.kind === "terminal" && r.token) ?? null);
+      await goto(page, terminalWindowUrl(origin, row));
 
       // The serving tenant's capability advertisement, readable before
       // first render: both metas, injected server-side into the shell.
@@ -85,30 +99,27 @@ export default {
       if (!metas.drafts) throw new Error("shell carries no chan-drafts meta");
 
       // A fresh standalone window boots on one terminal.
-      await page.waitForSelector(".terminal-tab", { timeout: 30_000 });
+      await page.waitForSelector(".pane .terminal-tab.active", { timeout: 30_000 });
       await new Promise((r) => setTimeout(r, 2000));
       await ctx.shot("mini-window-booted", page);
 
       // Rich Prompt via its real chord. The composer opening at all
       // proves the drafts gate: the chord handler returns early in a
       // window without the capability.
-      await page.keyboard.down("Control");
-      await page.keyboard.down("Shift");
-      await page.keyboard.press("KeyP");
-      await page.keyboard.up("Shift");
-      await page.keyboard.up("Control");
+      const chord = await richPromptChord(page);
+      await pressChord(page, chord);
       await page.waitForSelector(".rich-prompt .cm-content", { timeout: 15_000 });
       await page.type(".rich-prompt .cm-content", "mini window rich prompt body");
       // The composer autosaves (debounced) into the per-library store.
       const draftsDir = join(chanHome, "devserver", "Drafts");
-      const richDraft = await pollUntil(() => {
+      const richDraft = await poll("the rich-prompt draft autosave in the store", () => {
         if (!existsSync(draftsDir)) return null;
         for (const name of readdirSync(draftsDir)) {
           const p = join(draftsDir, name, "draft.md");
           if (existsSync(p) && readFileSync(p, "utf8").includes("rich prompt body")) return p;
         }
         return null;
-      }, 15_000, "the rich-prompt draft autosave in the store");
+      }, 15_000);
       await ctx.shot("mini-rich-prompt", page);
 
       // New draft through the command bridge: the dispatch gate consults
@@ -134,13 +145,11 @@ export default {
       }
       await ctx.shot("mini-new-draft", page);
 
-      return { store: draftsDir, drafts: draftDirs, richDraft };
+      return { chord: chord.label, store: draftsDir, drafts: draftDirs, richDraft };
     } finally {
-      await page.close().catch(() => {});
-      devserver.kill("SIGTERM");
-      await new Promise((r) => setTimeout(r, 500));
-      devserver.kill("SIGKILL");
-      rmSync(chanHome, { recursive: true, force: true });
+      if (page) await page.close().catch(() => {});
+      if (devserver) await killChild(devserver.child);
+      if (chanHome) rmSync(chanHome, { recursive: true, force: true });
     }
   },
 };
