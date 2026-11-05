@@ -155,7 +155,7 @@ Every authenticated OAuth session also has a public admin session id mapped to i
 
 ### Pluggable providers, two deliberately absent
 
-A small `Provider` trait (authorize URL, code exchange, user info) backs each provider; adding one is a new file under `providers/` plus wiring in `Config::from_env`. Microsoft is not wired because tenant admins can mint accounts whose verified email is unverifiable from the outside, and email-based linking would let those accounts attach to existing users. Apple is not wired because its setup friction (signing key, team id, key id, JWT rotation) outweighs the projected share.
+A small `Provider` trait (authorize URL, code exchange, user info) backs each provider; adding one is a new file under `providers/` plus wiring in `providers_from_vars`, which `Config::from_env` calls. Microsoft is not wired because tenant admins can mint accounts whose verified email is unverifiable from the outside, and email-based linking would let those accounts attach to existing users. Apple is not wired because its setup friction (signing key, team id, key id, JWT rotation) outweighs the projected share.
 
 ### Email-based identity linking lives in profile
 

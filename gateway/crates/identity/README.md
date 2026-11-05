@@ -95,7 +95,7 @@ Required:
 | `DEVSERVER_ADMISSION_VERIFYING_KEYS` | admission public-key ring              |
 | `DEVSERVER_ENTRY_SIGNING_KEY`        | Ed25519 entry-credential signing key   |
 
-At least one provider's `*_CLIENT_ID` and `*_CLIENT_SECRET` pair is required; each pair is optional and leaving both unset disables that provider: `GITHUB_*`, `GOOGLE_*`, `GITLAB_*`.
+At least one provider's `*_CLIENT_ID` and `*_CLIENT_SECRET` pair is required: `GITHUB_*`, `GOOGLE_*`, `GITLAB_*`. A pair counts only when both values are non-empty after trimming; leaving both unset or empty disables that provider, and setting only one of the two refuses to start with a message that names the empty variable and prints neither value.
 
 Optional:
 
