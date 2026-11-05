@@ -1,0 +1,106 @@
+// cdp.mjs: a dependency-free CDP driver for WebView2's remote debugging
+// port (Node 22 or later, for the global WebSocket and fetch).
+//   node cdp.mjs page PORT
+//     prints the id of the first window's page target and, after a space,
+//     its URL without the query (which carries the window's token); exits 1
+//     when there is none. The launcher, served at the root, is not a window.
+//   node cdp.mjs nav PORT TARGET_ID URL OUT_PREFIX [WAIT_MS]
+//     navigates the target, waits WAIT_MS (default 8000) for the page's own
+//     fetch and WebSocket, then writes OUT_PREFIX.json (the main document's
+//     response, the navigation's errorText, the WebSocket handshakes and the
+//     page's text) and OUT_PREFIX.png (Page.captureScreenshot).
+import { writeFileSync } from 'node:fs';
+
+const [mode, port, ...rest] = process.argv.slice(2);
+const base = `http://127.0.0.1:${port}`;
+const targets = async () => (await fetch(`${base}/json/list`)).json();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+if (mode === 'page') {
+  const parse = (u) => {
+    try {
+      return new URL(u);
+    } catch {
+      return null;
+    }
+  };
+  const page = (await targets())
+    .map((t) => ({ t, u: parse(t.url) }))
+    .find(({ t, u }) => t.type === 'page' && u && u.protocol === 'http:' && u.pathname !== '/');
+  if (!page) process.exit(1);
+  console.log(`${page.t.id} ${page.u.origin}${page.u.pathname}`);
+  process.exit(0);
+}
+if (mode !== 'nav') {
+  console.error(`unknown mode ${mode}`);
+  process.exit(2);
+}
+
+const [targetId, url, outPrefix, waitArg] = rest;
+const target = (await targets()).find((t) => t.id === targetId);
+if (!target) {
+  console.error(`no target ${targetId}`);
+  process.exit(2);
+}
+const ws = new WebSocket(target.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const record = { url, documents: [], failures: [], wsHandshakes: [] };
+ws.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data);
+  if (msg.id && pending.has(msg.id)) {
+    const { resolve, reject } = pending.get(msg.id);
+    pending.delete(msg.id);
+    msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+    return;
+  }
+  const p = msg.params;
+  if (msg.method === 'Network.responseReceived' && p.type === 'Document') {
+    record.documents.push({ url: p.response.url, status: p.response.status, remote: `${p.response.remoteIPAddress}:${p.response.remotePort}` });
+  } else if (msg.method === 'Network.loadingFailed') {
+    record.failures.push({ type: p.type, errorText: p.errorText });
+  } else if (msg.method === 'Network.webSocketHandshakeResponseReceived') {
+    record.wsHandshakes.push(p.response.status);
+  }
+};
+await new Promise((res, rej) => {
+  ws.onopen = res;
+  ws.onerror = () => rej(new Error('CDP websocket error'));
+});
+const send = (method, params = {}, timeoutMs = 90000) => {
+  const id = ++nextId;
+  ws.send(JSON.stringify({ id, method, params }));
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    setTimeout(() => {
+      if (pending.delete(id)) reject(new Error(`${method} timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+  });
+};
+await send('Page.enable');
+await send('Network.enable');
+await send('Network.setCacheDisabled', { cacheDisabled: true });
+const t0 = Date.now();
+try {
+  const nav = await send('Page.navigate', { url });
+  record.errorText = nav.errorText || null;
+} catch (e) {
+  record.navigateError = String(e);
+}
+record.navigateMs = Date.now() - t0;
+await sleep(Number(waitArg || 8000));
+try {
+  const ev = await send('Runtime.evaluate', { expression: 'JSON.stringify({href: location.href, title: document.title, text: document.body ? document.body.innerText : ""})', returnByValue: true }, 15000);
+  record.page = JSON.parse(ev.result.value);
+} catch (e) {
+  record.evaluateError = String(e);
+}
+try {
+  const shot = await send('Page.captureScreenshot', { format: 'png' }, 30000);
+  writeFileSync(`${outPrefix}.png`, Buffer.from(shot.data, 'base64'));
+} catch (e) {
+  record.screenshotError = String(e);
+}
+writeFileSync(`${outPrefix}.json`, JSON.stringify(record, null, 2));
+ws.close();
+process.exit(0);
