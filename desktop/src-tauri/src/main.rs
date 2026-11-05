@@ -21,6 +21,9 @@ mod runtime_capability;
 mod serve;
 mod terminal_mode;
 mod terminal_opacity;
+// Reads the updater plugin's offered update, and FreeBSD builds without
+// the plugin (see Cargo.toml), so the module goes with it.
+#[cfg(not(target_os = "freebsd"))]
 mod update_floor;
 mod upload;
 mod watcher;
