@@ -90,9 +90,9 @@ pub struct EditorPrefs {
     /// Hide a pane's tab strip while the side it shows holds fewer than
     /// two tabs. Off by default so every window keeps the strip's chrome
     /// (hamburger, side toggle) unless the user asks for the bare look; the
-    /// pane's centre takes dropped tabs and files either way. A tmux pane
-    /// and the control terminal hide their strips on their own and ignore
-    /// this.
+    /// pane's centre takes dropped tabs, and files outside an editor, either
+    /// way. A tmux pane and the control terminal hide their strips on their
+    /// own and ignore this.
     #[serde(default)]
     pub pane_strip_auto_hide: bool,
     /// Editor page-width cap as a ratio of the window width, in (0, 1]

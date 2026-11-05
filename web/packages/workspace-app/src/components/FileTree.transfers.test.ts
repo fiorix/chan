@@ -93,7 +93,9 @@ describe("dragging a tree row", () => {
 
     expect(drag("a.md")).toEqual({
       types: ["application/x-chan-tree-move", "application/x-md-file", "text/plain"],
-      effectAllowed: "move",
+      // Moved onto a folder, copied when a pane opens it or an editor types
+      // its path: a browser refuses a drop effect the source does not allow.
+      effectAllowed: "copyMove",
     });
   });
 
