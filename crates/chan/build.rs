@@ -20,6 +20,11 @@
 include!("src/build_id.rs");
 
 fn main() {
+    // Match tauri-build: static VC runtime, in-box dynamic UCRT. The helper
+    // checks CARGO_CFG_TARGET_ENV, so non-MSVC targets emit no linker args.
+    // rustc-link-arg applies here, not to dependents such as chan-desktop.
+    static_vcruntime::metabuild();
+
     // The included rules are part of this script's behaviour, and the
     // rerun-if-* lines below opt out of Cargo's default whole-package scan.
     println!("cargo:rerun-if-changed=src/build_id.rs");

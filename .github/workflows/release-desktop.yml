@@ -324,8 +324,11 @@ jobs:
           # `chan devserver run` then BLOCKS and takes Ctrl-C, unlike the
           # GUI-subsystem chan-desktop.exe, which detaches when launched from
           # PowerShell). The shims (cs_install.rs) re-point at it when present.
+          rustup component add llvm-tools
           cargo build --release -p chan
           powershell -NoProfile -ExecutionPolicy Bypass -File desktop/src-tauri/scripts/windows/sign.ps1 target/release/chan.exe
+          LLVM_OBJDUMP="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-objdump.exe" \
+            bash scripts/check-windows-crt.sh target/release/chan.exe
           cargo build --release -p chan-desktop
           powershell -NoProfile -ExecutionPolicy Bypass -File desktop/src-tauri/scripts/windows/sign.ps1 target/release/chan-desktop.exe
           # NSIS only: the cross-platform `bundle.targets: "all"` would also try

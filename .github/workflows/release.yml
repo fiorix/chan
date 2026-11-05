@@ -1129,8 +1129,11 @@ jobs:
           test -f web/dist/index.html
           # Console-subsystem chan.exe CLI (a real terminal program): shipped standalone
           # as the Windows CLI zip AND embedded into the NSIS installer as a resource.
+          rustup component add llvm-tools
           cargo build --release -p chan
           powershell -NoProfile -ExecutionPolicy Bypass -File desktop/src-tauri/scripts/windows/sign.ps1 target/release/chan.exe
+          LLVM_OBJDUMP="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-objdump.exe" \
+            bash scripts/check-windows-crt.sh target/release/chan.exe
           mkdir -p release-artifacts staging
           cp target/release/chan.exe staging/
           cp LICENSE README.md staging/
