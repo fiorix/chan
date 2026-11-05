@@ -200,7 +200,7 @@ export default {
       return details;
     } finally {
       try {
-        if (terminalOpened) await closeEveryTerminal(page, "cleanup");
+        if (terminalOpened) await closeEveryTerminal(page, "cleanup", token);
       } finally {
         try {
           if (original) await writePaneStripPreference(page, token, original.on);
