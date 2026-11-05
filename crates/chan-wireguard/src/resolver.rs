@@ -18,12 +18,11 @@ use crate::noise::REKEY_TIMEOUT;
 pub(crate) const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 type LookupFuture = Pin<Box<dyn Future<Output = io::Result<SocketAddr>> + Send>>;
 pub(crate) type Lookup = Arc<dyn Fn(Endpoint) -> LookupFuture + Send + Sync>;
-type Answer = (io::Result<SocketAddr>, Instant);
 
 pub(crate) struct Resolver {
     name: Endpoint,
     lookup: Lookup,
-    task: Option<JoinHandle<Answer>>,
+    task: Option<JoinHandle<io::Result<SocketAddr>>>,
     last_attempt: Option<Instant>,
     pub(crate) deadline: Option<tokio::time::Instant>,
 }
@@ -43,6 +42,8 @@ impl Resolver {
         }
     }
 
+    /// Start a lookup, unless one is outstanding or the last one started
+    /// less than `REKEY_TIMEOUT` ago.
     pub(crate) fn start(&mut self) {
         if self.task.is_some()
             || self
@@ -55,20 +56,17 @@ impl Resolver {
         self.deadline = Some(tokio::time::Instant::now() + RESOLVE_TIMEOUT);
         let lookup = self.lookup.clone();
         let name = self.name.clone();
-        self.task = Some(tokio::spawn(async move {
-            let result = lookup(name).await;
-            (result, Instant::now())
-        }));
+        self.task = Some(tokio::spawn(lookup(name)));
     }
 
-    pub(crate) async fn completed(&mut self) -> Answer {
+    pub(crate) async fn completed(&mut self) -> io::Result<SocketAddr> {
         let Some(task) = &mut self.task else {
             return pending().await;
         };
         let result = task.await;
         self.task = None;
         self.deadline = None;
-        result.unwrap_or_else(|e| (Err(io::Error::other(e)), Instant::now()))
+        result.unwrap_or_else(|e| Err(io::Error::other(e)))
     }
 }
 

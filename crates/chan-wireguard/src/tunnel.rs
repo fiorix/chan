@@ -71,10 +71,20 @@ pub struct Status {
     pub resolution_error: Option<String>,
 }
 
+/// A lookup answer moves the endpoint while a session lives only when it
+/// differs from the previous answer: the address the peer last
+/// authenticated from wins over a record that has not changed. Past this
+/// age of the latest handshake, three rekey retries have gone unanswered
+/// since `REKEY_AFTER_TIME` (120 s plus three `REKEY_TIMEOUT`s), the path
+/// is presumed dead and any answer is taken. wireguard-tools'
+/// `reresolve-dns.sh` uses the same 135 s for the same decision, and it
+/// sits below `REJECT_AFTER_TIME` (180 s), so the switch comes before the
+/// session is rejected.
+const STALE_HANDSHAKE: Duration = Duration::from_secs(135);
+
 struct Wire {
     tunn: Tunn,
     endpoint: Option<SocketAddr>,
-    endpoint_updated: Option<Instant>,
 }
 
 struct Inner {
@@ -113,8 +123,11 @@ impl Tunnel {
     }
 
     /// Start the driver over a socket the caller bound, towards an
-    /// endpoint the caller resolved. Must be called within a tokio
-    /// runtime, which the driver task runs on.
+    /// endpoint the caller resolved. The driver still looks the configured
+    /// name up before initiations: the caller's endpoint stands as the
+    /// previous answer, so it is used until a lookup answers a different
+    /// address. Must be called within a tokio runtime, which the driver
+    /// task runs on.
     pub fn start_on(config: Config, socket: UdpSocket, endpoint: SocketAddr) -> io::Result<Tunnel> {
         if socket.local_addr()?.is_ipv4() != endpoint.is_ipv4() {
             return Err(io::Error::new(
@@ -146,11 +159,7 @@ impl Tunnel {
             index,
             None,
         );
-        let wire = Arc::new(Mutex::new(Wire {
-            tunn,
-            endpoint,
-            endpoint_updated: None,
-        }));
+        let wire = Arc::new(Mutex::new(Wire { tunn, endpoint }));
         let (resolution_tx, resolution) = watch::channel(None);
         let driver = Driver {
             shared: shared.clone(),
@@ -161,6 +170,7 @@ impl Tunnel {
             resolver,
             resolution_tx,
             resolved_at: None,
+            last_answer: endpoint,
             pending_initiation: false,
         };
         let driver = tokio::spawn(driver.run());
@@ -308,7 +318,7 @@ enum Event {
     Kick,
     Tick,
     StackTimer,
-    Resolved(io::Result<SocketAddr>, Instant),
+    Resolved(io::Result<SocketAddr>),
     ResolveTimeout,
 }
 
@@ -385,6 +395,8 @@ struct Driver {
     resolver: Resolver,
     resolution_tx: watch::Sender<Option<Arc<io::Error>>>,
     resolved_at: Option<Instant>,
+    /// The latest usable answer, or the endpoint `start_on` was given.
+    last_answer: Option<SocketAddr>,
     /// A deferred initiation is generated afresh when resolution completes,
     /// so its retry clock starts at transmission, not before the lookup.
     pending_initiation: bool,
@@ -436,7 +448,7 @@ impl Driver {
                 _ = self.shared.kicked() => Event::Kick,
                 _ = tick.tick() => Event::Tick,
                 _ = stack_timer => Event::StackTimer,
-                (result, at) = self.resolver.completed() => Event::Resolved(result, at),
+                result = self.resolver.completed() => Event::Resolved(result),
                 _ = resolver::deadline(resolve_deadline) => Event::ResolveTimeout,
             };
             match event {
@@ -475,7 +487,7 @@ impl Driver {
                     return;
                 }
                 Event::Tick => self.tick(&mut work).await,
-                Event::Resolved(result, at) => self.resolved(result, at).await,
+                Event::Resolved(result) => self.resolved(result).await,
                 Event::ResolveTimeout => {
                     self.resolver.deadline = None;
                     self.resolution_failed(io::Error::new(
@@ -546,7 +558,6 @@ impl Driver {
                     tracing::info!(old = ?wire.endpoint, new = %from, "peer endpoint moved");
                     wire.endpoint = Some(from);
                 }
-                wire.endpoint_updated = Some(Instant::now());
                 if datagram.len() == 92 && datagram[..4] == [2, 0, 0, 0] {
                     self.pending_initiation = false;
                 }
@@ -608,7 +619,7 @@ impl Driver {
         self.resolution_tx.send_replace(Some(Arc::new(error)));
     }
 
-    async fn resolved(&mut self, result: io::Result<SocketAddr>, at: Instant) {
+    async fn resolved(&mut self, result: io::Result<SocketAddr>) {
         let endpoint =
             match result.and_then(|endpoint| self.sockets.ensure(endpoint).map(|()| endpoint)) {
                 Ok(endpoint) => endpoint,
@@ -617,18 +628,10 @@ impl Driver {
                     return;
                 }
             };
-        self.resolved_at = Some(at);
+        self.resolved_at = Some(Instant::now());
         self.resolution_tx.send_replace(None);
-        {
-            let mut wire = self.wire.lock();
-            if wire.endpoint_updated.is_none_or(|updated| at > updated) {
-                if wire.endpoint != Some(endpoint) {
-                    tracing::info!(old = ?wire.endpoint, new = %endpoint, "endpoint resolved");
-                }
-                wire.endpoint = Some(endpoint);
-                wire.endpoint_updated = Some(at);
-            }
-        }
+        self.adopt(endpoint);
+        self.last_answer = Some(endpoint);
         if std::mem::take(&mut self.pending_initiation) {
             let mut initiation = [0; 148];
             let len = {
@@ -639,6 +642,25 @@ impl Driver {
                 }
             };
             self.transmit(&initiation[..len]).await;
+        }
+    }
+
+    /// Move the endpoint to a lookup answer when it says something new: no
+    /// endpoint is known, the answer differs from the previous one, or the
+    /// latest handshake is older than [`STALE_HANDSHAKE`]. Otherwise the
+    /// source the peer last authenticated from stands.
+    fn adopt(&self, answer: SocketAddr) {
+        let mut wire = self.wire.lock();
+        let stale = wire
+            .tunn
+            .time_since_last_handshake()
+            .is_none_or(|age| age > STALE_HANDSHAKE);
+        if wire.endpoint.is_some() && self.last_answer == Some(answer) && !stale {
+            return;
+        }
+        if wire.endpoint != Some(answer) {
+            tracing::info!(old = ?wire.endpoint, new = %answer, "endpoint resolved");
+            wire.endpoint = Some(answer);
         }
     }
 

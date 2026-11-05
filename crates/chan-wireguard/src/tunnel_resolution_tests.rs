@@ -3,6 +3,7 @@ use crate::clock;
 use crate::resolver::{Lookup, RESOLVE_TIMEOUT};
 use crate::testing::*;
 use crate::x25519::{PublicKey, StaticSecret};
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -104,15 +105,135 @@ async fn exchange(a: &mut Stream, b: &mut Stream) {
     .unwrap();
 }
 
+fn is_initiation(datagram: &[u8]) -> bool {
+    datagram.len() == 148 && datagram[..4] == [1, 0, 0, 0]
+}
+
 async fn initiation(socket: &UdpSocket) -> SocketAddr {
     let mut bytes = [0; 256];
     let (len, from) = timeout(WAIT, socket.recv_from(&mut bytes))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(len, 148);
-    assert_eq!(&bytes[..4], &[1, 0, 0, 0]);
+    assert!(is_initiation(&bytes[..len]));
     from
+}
+
+const VIA_OLD: u8 = 0;
+const VIA_NEW: u8 = 1;
+const MUTE: u8 = 2;
+
+/// A UDP relay in front of the peer at `to`. The client reaches it at
+/// `old` or `new`, and the peer sees every datagram come from `back`.
+/// `VIA_OLD` answers the client through `old`; `VIA_NEW` drops what
+/// arrives at `old` and answers through `new`, as when the peer moved;
+/// `MUTE` forwards nothing either way. Every datagram the peer sends is
+/// also copied to `from_peer`.
+struct Relay {
+    old: SocketAddr,
+    new: SocketAddr,
+    back: SocketAddr,
+    mode: Arc<AtomicU8>,
+    from_peer: mpsc::UnboundedReceiver<Vec<u8>>,
+    task: JoinHandle<()>,
+}
+
+impl Relay {
+    async fn new(to: SocketAddr) -> Self {
+        let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let new = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (old_at, new_at) = (old.local_addr().unwrap(), new.local_addr().unwrap());
+        let back_at = back.local_addr().unwrap();
+        let mode = Arc::new(AtomicU8::new(VIA_OLD));
+        let (copy, from_peer) = mpsc::unbounded_channel();
+        let task = tokio::spawn({
+            let mode = mode.clone();
+            async move {
+                let mut client = None;
+                let mut at_old = [0u8; 2048];
+                let mut at_new = [0u8; 2048];
+                let mut at_back = [0u8; 2048];
+                loop {
+                    tokio::select! {
+                        received = old.recv_from(&mut at_old) => {
+                            let Ok((len, from)) = received else { continue };
+                            if mode.load(Ordering::SeqCst) == VIA_OLD {
+                                client = Some(from);
+                                let _ = back.send_to(&at_old[..len], to).await;
+                            }
+                        }
+                        received = new.recv_from(&mut at_new) => {
+                            let Ok((len, from)) = received else { continue };
+                            if mode.load(Ordering::SeqCst) != MUTE {
+                                client = Some(from);
+                                let _ = back.send_to(&at_new[..len], to).await;
+                            }
+                        }
+                        received = back.recv_from(&mut at_back) => {
+                            let Ok((len, _)) = received else { continue };
+                            let _ = copy.send(at_back[..len].to_vec());
+                            let front = match mode.load(Ordering::SeqCst) {
+                                VIA_OLD => &old,
+                                VIA_NEW => &new,
+                                _ => continue,
+                            };
+                            if let Some(client) = client {
+                                let _ = front.send_to(&at_back[..len], client).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            old: old_at,
+            new: new_at,
+            back: back_at,
+            mode,
+            from_peer,
+            task,
+        }
+    }
+
+    fn set(&self, mode: u8) {
+        self.mode.store(mode, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A session between the fixture's tunnels through the relay's old front.
+async fn session_through(relay: &Relay, f: &mut Fixture) -> (Stream, Stream) {
+    f.query().await.send(Ok(relay.old)).unwrap();
+    let (mut a, mut b) = f.connect().await;
+    exchange(&mut a, &mut b).await;
+    assert_eq!(f.a.status().endpoint, Some(relay.old));
+    (a, b)
+}
+
+/// The peer moves: the old front goes dark and the peer, speaking first,
+/// is heard from the new one, which the client's endpoint follows.
+async fn roam(relay: &Relay, f: &Fixture, a: &mut Stream, b: &mut Stream) {
+    relay.set(VIA_NEW);
+    b.write_all(b"hi").await.unwrap();
+    let mut two = [0; 2];
+    timeout(WAIT, a.read_exact(&mut two))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.a.status().endpoint, Some(relay.new));
+}
+
+fn fresh_handshake(tunnel: &Tunnel, within: Duration) -> bool {
+    tunnel
+        .status()
+        .last_handshake
+        .is_some_and(|age| age < within)
 }
 
 #[tokio::test]
@@ -328,6 +449,138 @@ async fn authenticated_roaming_and_a_later_lookup_both_move_the_endpoint() {
     assert_eq!(f.a.status().endpoint, Some(moved.local_addr().unwrap()));
 }
 
+/// The peer roams while its DNS record still names the address it left.
+/// The rekey's lookup answers that unchanged address; the endpoint stays
+/// where the peer authenticated from and the rekey reaches it there.
+#[tokio::test]
+async fn an_unchanged_answer_does_not_undo_a_live_roam() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    roam(&relay, &f, &mut a, &mut b).await;
+    exchange(&mut a, &mut b).await;
+    clock::advance(Duration::from_secs(121));
+    let query = f.query().await;
+    // Let both sides' post-jump timers (keepalives) flush before the answer.
+    tokio::time::sleep(8 * TICK).await;
+    query.send(Ok(relay.old)).unwrap();
+    until(|| fresh_handshake(&f.a, Duration::from_secs(60))).await;
+    assert_eq!(f.a.status().endpoint, Some(relay.new));
+    exchange(&mut a, &mut b).await;
+}
+
+/// The control for the case above: the record moved with the peer.
+#[tokio::test]
+async fn a_rekey_lookup_answering_the_roamed_address_keeps_the_session() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    roam(&relay, &f, &mut a, &mut b).await;
+    exchange(&mut a, &mut b).await;
+    clock::advance(Duration::from_secs(121));
+    let query = f.query().await;
+    tokio::time::sleep(8 * TICK).await;
+    query.send(Ok(relay.new)).unwrap();
+    until(|| fresh_handshake(&f.a, Duration::from_secs(60))).await;
+    assert_eq!(f.a.status().endpoint, Some(relay.new));
+    exchange(&mut a, &mut b).await;
+}
+
+/// The rekey's lookup starts before the peer roams and ends after it,
+/// still naming the old address: completing later does not let it win.
+#[tokio::test]
+async fn a_lookup_started_before_a_roam_does_not_undo_it() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    clock::advance(Duration::from_secs(121));
+    let query = f.query().await;
+    roam(&relay, &f, &mut a, &mut b).await;
+    query.send(Ok(relay.old)).unwrap();
+    until(|| fresh_handshake(&f.a, Duration::from_secs(60))).await;
+    assert_eq!(f.a.status().endpoint, Some(relay.new));
+    exchange(&mut a, &mut b).await;
+}
+
+/// Past `STALE_HANDSHAKE` the roamed path is presumed dead, and even an
+/// unchanged answer moves the endpoint back to the name's address.
+#[tokio::test]
+async fn after_a_stale_handshake_an_unchanged_answer_moves_the_endpoint() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    roam(&relay, &f, &mut a, &mut b).await;
+    clock::advance(STALE_HANDSHAKE + Duration::from_secs(5));
+    let query = f.query().await;
+    // The peer's keepalive after the jump still arrives from the new front
+    // and authenticates; let it land first, as it would before a real
+    // handshake went this stale.
+    tokio::time::sleep(8 * TICK).await;
+    assert_eq!(f.a.status().endpoint, Some(relay.new));
+    query.send(Ok(relay.old)).unwrap();
+    until(|| f.a.status().endpoint == Some(relay.old)).await;
+}
+
+/// The far side of the desktop e2e (`wg-peer`) starts with a placeholder
+/// endpoint and learns the client's address from its first handshake.
+/// Its own lookups answer the placeholder; while the handshake is fresh
+/// they must not move the endpoint back to it, or its initiations (here
+/// the one after fifteen unanswered seconds) would go nowhere.
+#[tokio::test]
+async fn the_responders_placeholder_does_not_capture_its_initiations() {
+    let _clock = clock::test_offset_guard();
+    let a_key = StaticSecret::random_from_rng(OsRng);
+    let b_key = StaticSecret::random_from_rng(OsRng);
+    let (a_pub, b_pub) = (PublicKey::from(&a_key), PublicKey::from(&b_key));
+    let a_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut relay = Relay::new(b_udp.local_addr().unwrap()).await;
+    let placeholder = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let placeholder_at = placeholder.local_addr().unwrap();
+    let b = Tunnel::start_on(
+        config(b_key, a_pub, B_ADDR, A_ADDR, placeholder_at),
+        b_udp,
+        placeholder_at,
+    )
+    .unwrap();
+    let a = Tunnel::start_on(
+        config(a_key, b_pub, A_ADDR, B_ADDR, relay.old),
+        a_udp,
+        relay.old,
+    )
+    .unwrap();
+    let mut listener = b.listen(0).unwrap();
+    let port = listener.port();
+    let (client, server) = timeout(WAIT, async {
+        tokio::join!(a.connect(b_port(port)), listener.accept())
+    })
+    .await
+    .unwrap();
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    exchange(&mut client, &mut server).await;
+    assert_eq!(b.status().endpoint, Some(relay.back));
+
+    relay.set(MUTE);
+    while relay.from_peer.try_recv().is_ok() {}
+    server.write_all(b"unheard").await.unwrap();
+    clock::advance(Duration::from_secs(16));
+    timeout(WAIT, async {
+        while !is_initiation(&relay.from_peer.recv().await.unwrap()) {}
+    })
+    .await
+    .expect("the responder's initiation goes to the client's address");
+    let mut bytes = [0; 256];
+    assert!(
+        placeholder.try_recv_from(&mut bytes).is_err(),
+        "nothing goes to the placeholder"
+    );
+    assert_eq!(b.status().endpoint, Some(relay.back));
+}
+
 #[tokio::test]
 async fn endpoint_moves_between_ipv4_and_ipv6() {
     let _clock = clock::test_offset_guard();
@@ -360,45 +613,6 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
         "the old family socket is retained"
     );
     connecting.abort();
-}
-
-#[tokio::test]
-async fn delayed_lookup_result_does_not_undo_newer_authenticated_roaming() {
-    let _clock = clock::test_offset_guard();
-    let mut f = Fixture::new().await;
-    let (_a, _b) = f.establish().await;
-    let completed_at = Instant::now();
-    clock::advance(Duration::from_secs(1));
-    let roam = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let mut packet = [0; 256];
-    let sealed = {
-        let mut wire = f.b.inner.wire.lock();
-        let TunnResult::WriteToNetwork(bytes) = wire.tunn.encapsulate(&[], &mut packet) else {
-            panic!("established session")
-        };
-        bytes.to_vec()
-    };
-    roam.send_to(&sealed, f.a_at).await.unwrap();
-    until(|| f.a.status().endpoint == Some(roam.local_addr().unwrap())).await;
-    f.a.inner.driver.abort();
-    let name = Endpoint {
-        host: "peer.test".into(),
-        port: f.b_at.port(),
-    };
-    let mut driver = Driver {
-        shared: f.a.inner.shared.clone(),
-        wire: f.a.inner.wire.clone(),
-        sockets: Sockets::default(),
-        endpoint_name: name.clone(),
-        allowed_ips: vec![],
-        resolver: Resolver::new(name),
-        resolution_tx: watch::channel(None).0,
-        resolved_at: None,
-        pending_initiation: false,
-    };
-    // Deliver an already-completed lookup after the authenticated datagram.
-    driver.resolved(Ok(f.b_at), completed_at).await;
-    assert_eq!(f.a.status().endpoint, Some(roam.local_addr().unwrap()));
 }
 
 #[tokio::test]
