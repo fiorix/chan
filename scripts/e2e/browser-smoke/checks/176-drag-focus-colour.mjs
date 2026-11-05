@@ -4,11 +4,11 @@
 // presets, in the dark and the light scheme, the check drives the app's own
 // handlers and reads the painted colours: a tab dragged from the left pane
 // over the right pane's tab strip (the strip's inset ring and the insertion
-// marker) and over the right pane's body edge (the edge-split overlay); the
-// floating Outline card's resize bar on hover and on keyboard focus; the
-// docked file browser's resize handle on hover and at rest. With no colour
-// chosen each reads the scheme's accent; with a preset chosen, the preset's
-// colour.
+// marker), over the right pane's body edge (the edge-split overlay) and over
+// its centre (the centre-drop overlay); the floating Outline card's resize
+// bar on hover and on keyboard focus; the docked file browser's resize handle
+// on hover and at rest. With no colour chosen each reads the scheme's accent;
+// with a preset chosen, the preset's colour.
 // After a reload with orange chosen, the panes and the docked handle read
 // orange from the window's restored preset.
 //
@@ -141,6 +141,19 @@ async function tabDragReadings(page) {
     const wrap = document.querySelectorAll(".pane")[1].querySelector(".editor-wrap");
     return getComputedStyle(wrap, "::after").borderLeftColor;
   });
+  await page.evaluate(() => {
+    const wrap = document.querySelectorAll(".pane")[1].querySelector(".editor-wrap");
+    const r = wrap.getBoundingClientRect();
+    wrap.dispatchEvent(new DragEvent("dragover", {
+      bubbles: true, cancelable: true, dataTransfer: window.__focusColourDrag,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+    }));
+  });
+  await page.waitForFunction(() => document.querySelectorAll(".pane")[1].querySelector(".editor-wrap.body-drop-centre"), { timeout: 10_000 });
+  const centre = await page.evaluate(() => {
+    const wrap = document.querySelectorAll(".pane")[1].querySelector(".editor-wrap");
+    return getComputedStyle(wrap, "::after").boxShadow;
+  });
   // End the drag where it started, with no drop effect, so the source keeps
   // its tab.
   await page.evaluate(() => {
@@ -154,7 +167,7 @@ async function tabDragReadings(page) {
   await page.waitForFunction(() => !document.querySelector(".tabs.drop-active, .drop-bar, .editor-wrap[class*=body-drop-]"), { timeout: 10_000 });
   assert.equal(await page.evaluate(() => document.querySelectorAll(".pane")[0].querySelectorAll(".tabs .tab").length), 2,
     "the drag left the source's tabs in place");
-  return { ...strip, edge };
+  return { ...strip, edge, centre };
 }
 
 async function resizeBarReadings(page) {
@@ -189,6 +202,7 @@ async function arm(page, label, expected) {
   assert.ok(drag.stripShadow.includes(expected), fail("the tab strip under a dragged tab", drag.stripShadow));
   assert.equal(drag.marker, expected, fail("the insertion marker", drag.marker));
   assert.equal(drag.edge, expected, fail("the edge-split overlay", drag.edge));
+  assert.ok(drag.centre.includes(expected), fail("the centre-drop overlay", drag.centre));
   assert.equal(bars.hover, expected, fail("the Outline card's resize bar on hover", bars.hover));
   assert.equal(bars.focus, expected, fail("the Outline card's resize bar on keyboard focus", bars.focus));
   assert.equal(bars.rest, TRANSPARENT, fail("the Outline card's resize bar at rest", bars.rest));
