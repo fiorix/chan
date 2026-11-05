@@ -556,13 +556,14 @@
       }),
   );
   const selectedBroadcastTargets = $derived(new Set(terminalBroadcastMemberIds(tab)));
-  // Same-group terminals in OTHER windows of this tenant. Listed below the
-  // local rows under an "other windows" label; toggling one routes through
-  // the server to its owning window (group-wide selection spans windows).
+  // Same-group terminals in OTHER windows of this tenant that a page holds.
+  // Listed below the local rows under an "other windows" label; toggling one
+  // routes through the server to its owning window (group-wide selection
+  // spans windows).
   const crossWindowMembers = $derived(crossWindowBroadcastMembers(tab));
   // "Select All" / "Deselect All" reflects the WHOLE group across windows:
   // every local row (self via broadcastEnabled, others via selection) AND
-  // every cross-window member's own broadcast toggle.
+  // the own broadcast toggle of every cross-window member a page holds.
   const allBroadcastTargetsSelected = $derived(
     broadcastTargets.length + crossWindowMembers.length > 0 &&
       broadcastTargets.every((target) =>
