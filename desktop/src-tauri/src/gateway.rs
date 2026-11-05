@@ -255,8 +255,8 @@ impl GatewayManager {
     pub fn set_wireguard_startup(
         &self,
         startup: crate::wireguard::WireguardStartup,
-    ) -> Result<(), crate::wireguard::WireguardStartup> {
-        self.wireguard.set(startup)
+    ) -> Result<(), Box<crate::wireguard::WireguardStartup>> {
+        self.wireguard.set(startup).map_err(Box::new)
     }
 
     /// The start's WireGuard outcome, empty when none was recorded.

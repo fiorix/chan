@@ -11,6 +11,7 @@ pub mod rate_limiter;
 
 mod session;
 mod timers;
+pub(crate) use timers::REKEY_TIMEOUT;
 
 use crate::noise::errors::WireGuardError;
 use crate::noise::handshake::Handshake;

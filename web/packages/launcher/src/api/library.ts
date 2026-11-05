@@ -451,6 +451,8 @@ export interface GatewayEntry {
    * takes effect at the next start; the desktop refuses to connect the row
    * until then. Always false on a headless surface. */
   wireguard_restart_required: boolean;
+  /** Live tunnel state; absent on an older desktop, null without a tunnel. */
+  wireguard_status?: string | null;
 }
 
 /** Write payload for add and update gateway. Save just adds -- no probe, no

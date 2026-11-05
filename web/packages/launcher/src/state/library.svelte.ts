@@ -189,7 +189,12 @@ function installVisibilityResync(): void {
 function startWorkspacePolling(): void {
   if (demoState.enabled || workspacePoll !== null || typeof document === "undefined") return;
   workspacePoll = setInterval(() => {
-    if (document.visibilityState === "visible") void refreshWorkspacesLive();
+    if (document.visibilityState !== "visible") return;
+    void refreshWorkspacesLive();
+    // Tunnel state changes without a registry mutation or window-feed push.
+    if (library.gateways.some((gateway) => gateway.wireguard && !gateway.wireguard_restart_required)) {
+      void refreshGatewaysLive();
+    }
   }, WORKSPACE_POLL_MS);
   (workspacePoll as { unref?: () => void }).unref?.();
 }

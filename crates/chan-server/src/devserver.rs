@@ -3778,15 +3778,9 @@ fn spawn_devserver_tunnel(
     })
 }
 
-/// The first backoff between attempts to resolve the WireGuard endpoint's
-/// name, doubled up to [`WIREGUARD_RESOLVE_BACKOFF_MAX`].
-const WIREGUARD_RESOLVE_BACKOFF: Duration = Duration::from_secs(1);
-const WIREGUARD_RESOLVE_BACKOFF_MAX: Duration = Duration::from_secs(30);
-
-/// Start the WireGuard tunnel the gateway dial runs through. The endpoint's
-/// name is resolved with retries, since a supervised devserver can come up
-/// before the resolver does; the dial loop above retries its own failures
-/// the same way. Logs the endpoint and the tunnel's public key, which the
+/// Start the WireGuard tunnel the gateway dial runs through. The tunnel
+/// resolves its endpoint in the background and retries failed lookups.
+/// Logs the endpoint and the tunnel's public key, which the
 /// operator pastes into the peer's configuration and is not a secret.
 async fn start_wireguard_tunnel(
     wireguard: DevserverWireguard,
@@ -3796,36 +3790,8 @@ async fn start_wireguard_tunnel(
     let DevserverWireguard { path, config } = wireguard;
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(config.public_key().as_bytes());
-    let name = &config.peer.endpoint;
-    let mut backoff = WIREGUARD_RESOLVE_BACKOFF;
-    let endpoint = loop {
-        match tokio::net::lookup_host((name.host.as_str(), name.port)).await {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    break addr;
-                }
-                eprintln!(
-                    "chan devserver: WireGuard endpoint {name} resolved to no address \
-                     (retry in {backoff:?})"
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "chan devserver: WireGuard endpoint {name} did not resolve: {e} \
-                     (retry in {backoff:?})"
-                );
-            }
-        }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(WIREGUARD_RESOLVE_BACKOFF_MAX);
-    };
-    let bind: SocketAddr = if endpoint.is_ipv4() {
-        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-    } else {
-        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
-    };
-    let socket = tokio::net::UdpSocket::bind(bind).await?;
-    let tunnel = chan_wireguard::Tunnel::start_on(config, socket, endpoint)?;
+    let endpoint = config.peer.endpoint.to_string();
+    let tunnel = chan_wireguard::Tunnel::start(config)?;
     eprintln!(
         "chan devserver: WireGuard tunnel up from {}: endpoint {endpoint}, public key {public_key}",
         path.display()
@@ -4909,6 +4875,26 @@ pub(crate) mod hung_root_support {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn wireguard_start_does_not_wait_for_the_resolver() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let config = chan_wireguard::config::Config::parse("[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.7.0.1/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = pending.test:51820\nAllowedIPs = 10.7.0.0/24\n").unwrap();
+        let starting = super::start_wireguard_tunnel(super::DevserverWireguard {
+            path: "gateway.conf".into(),
+            config,
+        });
+        tokio::pin!(starting);
+        let tunnel = std::future::poll_fn(|cx| match starting.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result.unwrap()),
+            Poll::Pending => panic!("startup waited for DNS"),
+        })
+        .await;
+        assert_eq!(tunnel.status().endpoint, None);
+        drop(tunnel);
+    }
+
     /// The cadence is a contract, not an implementation detail: the desktop's
     /// embedded host drives the same probe, and callers that reason in terms of
     /// the constant cannot notice it changing. The expected value here is

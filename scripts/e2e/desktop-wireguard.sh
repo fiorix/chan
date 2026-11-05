@@ -29,7 +29,9 @@
 # (the peer answers 404 to everything), the macOS and Windows webviews, and
 # a peer behind NAT or at a changing address.
 #
-# Usage: desktop-wireguard.sh
+# Usage: desktop-wireguard.sh [--unresolved-endpoint]
+#   --unresolved-endpoint proves startup and the proxy with a missing name;
+#                         it runs instead of the connected-peer arms.
 #   CHAN_DESKTOP_BIN  a built debug chan-desktop (default
 #                     target/debug/chan-desktop). It is not built here: it
 #                     needs the web bundles, `make web` then
@@ -49,6 +51,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 CHAN_DESKTOP_BIN="${CHAN_DESKTOP_BIN:-$REPO/target/debug/chan-desktop}"
 GATEWAY_ID="gw-e2e00001"
+UNRESOLVED=0
+if [ "${1:-}" = --unresolved-endpoint ]; then UNRESOLVED=1; shift; fi
+[ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
 
 log() { printf 'desktop-wireguard: %s\n' "$*" >&2; }
 refuse() { log "cannot run: $*"; exit 2; }
@@ -157,6 +162,9 @@ wait_for 20 "the peer" peer_logged '^peer: ready' || fail "the peer did not star
 PEER_URL="$(sed -n 's/^peer: ready url=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
 [ -n "$PEER_URL" ] || fail "the peer printed no URL: $(cat "$WORK/peer.log")"
 log "peer at $PEER_URL, client file $WORK/client.conf (mode $(stat -c %a "$WORK/client.conf"))"
+if [ "$UNRESOLVED" = 1 ]; then
+    sed -i 's/^Endpoint = .*/Endpoint = chan-endpoint-missing.invalid:51820/' "$WORK/client.conf"
+fi
 
 # 2. The desktop's config: one enabled gateway behind the file.
 cat > "$CHAN_HOME/desktop/config.json" <<JSON
@@ -167,6 +175,28 @@ JSON
 xvfb-run -a "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
 PIDS+=("$!")
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
+
+if [ "$UNRESOLVED" = 1 ]; then
+    arm_rc=0
+    wait_for 15 "the proxy before resolution" logged 'gateway WireGuard proxy listening' || arm_rc=1
+    wait_for 20 "the resolver failure" logged 'endpoint did not resolve' || arm_rc=1
+    "$CHAN_BIN" workspace ls > "$WORK/startup.out" 2>&1 || arm_rc=1
+    desktop_log
+    proxy="$(sed -n 's/.*gateway WireGuard proxy listening.*proxy=\(127\.0\.0\.1:[0-9]*\).*/\1/p' "$CLEAN" | head -1)"
+    [ -n "$proxy" ] || arm_rc=1
+    if [ -n "$proxy" ]; then
+        # A malformed request is answered by the bound proxy without any
+        # destination lookup or handshake.
+        response="$(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "http://$proxy/" || true)"
+        [ "$response" = 400 ] || arm_rc=1
+    fi
+    verdict unresolved-startup "$arm_rc" "desktop control responds, proxy ${proxy:-missing} responds, lookup error reported"
+    [ "$arm_rc" = 0 ] || fail "unresolved endpoint startup"
+    cleanup
+    trap - EXIT
+    rm -rf "${WORK:?}"
+    exit 0
+fi
 
 # tunnel: the start line in the desktop and the handshake at the peer.
 arm_rc=0

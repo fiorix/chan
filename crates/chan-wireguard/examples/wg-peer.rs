@@ -186,6 +186,7 @@ async fn run(args: Args) -> Result<(), String> {
                 s.rx_bytes,
                 s.tx_bytes,
                 s.endpoint
+                    .map_or_else(|| "unresolved".to_string(), |addr| addr.to_string())
             );
         }
     });

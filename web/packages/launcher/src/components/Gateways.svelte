@@ -133,6 +133,9 @@
           <span class="gw-addr-row gw-wireguard">
             <span class="gw-glyph"></span>
             <span class="chip">WireGuard</span>
+            {#if gw.wireguard_status}
+              <span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span>
+            {/if}
             <span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span>
           </span>
         {/if}

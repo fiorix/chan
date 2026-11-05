@@ -48,8 +48,8 @@ pub enum GatewayStatus {
 }
 
 /// One configured gateway, as the launcher lists it. Every key is always
-/// present on the wire (`last_error` serializes as `null` when clear), so the
-/// TypeScript mirror never needs optional-key handling.
+/// present on the wire (`last_error` serializes as `null` when clear).
+/// Defaults admit fields absent from the previous release.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayEntry {
     /// Stable registry id (`gw-<8hex>`, desktop-minted) used for row actions
@@ -93,6 +93,10 @@ pub struct GatewayEntry {
     /// decided once per process. Always `false` on a headless surface.
     #[serde(default)]
     pub wireguard_restart_required: bool,
+    /// Live WireGuard state: `connecting`, `up`, or the latest lookup
+    /// error with its retry notice; `null` when no matching tunnel runs.
+    #[serde(default)]
+    pub wireguard_status: Option<String>,
 }
 
 /// The add/update payload. `url` is required on add; on update the URL is
@@ -162,13 +166,14 @@ mod tests {
             last_error: None,
             wireguard: None,
             wireguard_restart_required: false,
+            wireguard_status: None,
         };
         assert_eq!(
             serde_json::to_string(&entry).unwrap(),
             "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
              \"enabled\":true,\"status\":\"disconnected\",\"pending_signin\":false,\
              \"devserver_count\":3,\"last_error\":null,\"wireguard\":null,\
-             \"wireguard_restart_required\":false}"
+             \"wireguard_restart_required\":false,\"wireguard_status\":null}"
         );
         // And the shape round-trips.
         let back: GatewayEntry =
@@ -221,5 +226,6 @@ mod tests {
         .unwrap();
         assert_eq!(entry.wireguard, None);
         assert!(!entry.wireguard_restart_required);
+        assert_eq!(entry.wireguard_status, None);
     }
 }

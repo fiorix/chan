@@ -28,6 +28,8 @@
 #               dial then fails at the HTTP level, which is expected.
 #   devserver-wrong-key
 #               the same dial with the wrong peer key reaches nothing.
+#   dns         an initially absent endpoint recovers and follows a hosts
+#               file change to a second UDP forwarding path (opt-in).
 #
 # What it cannot prove: a peer behind a real NAT or a changing address, a
 # tunnel URL by name, and anything the gateway answers past the preface.
@@ -44,6 +46,7 @@
 #                        refused when it already exists)
 #   --hold SECS          the rekey arm's idle hold (default 130, past the 120 s rekey)
 #   --arms LIST          comma separated arms to run (default: all, in the order above)
+#   --dns-second-endpoint HOST:PORT  second forward to the same peer, for --arms dns
 #
 # Prerequisites. On the peer: Linux with the wireguard module, wireguard-tools
 # (`wg`), iproute2, python3 (serves the files and the raw listener), sha256sum,
@@ -71,6 +74,7 @@ ARMS="wrong-key,get,rekey,keepalive,devserver,devserver-wrong-key"
 HTTP_PORT=8080
 RAW_PORT=4443
 POSITIONAL=()
+DNS_SECOND_ENDPOINT=""
 
 log() { printf 'wireguard-kernel: %s\n' "$*" >&2; }
 refuse() { log "cannot run: $*"; exit 2; }
@@ -83,6 +87,7 @@ while [ $# -gt 0 ]; do
         --interface) IFACE="$2"; shift 2 ;;
         --hold) HOLD="$2"; shift 2 ;;
         --arms) ARMS="$2"; shift 2 ;;
+        --dns-second-endpoint) DNS_SECOND_ENDPOINT="$2"; shift 2 ;;
         -h | --help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | cut -c3-; exit 0 ;;
         -*) refuse "unknown option $1" ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -94,6 +99,13 @@ ENDPOINT="${POSITIONAL[1]}"
 PEER_CIDR="${POSITIONAL[2]}"
 case "$HOLD" in '' | *[!0-9]*) refuse "--hold takes a number of seconds" ;; esac
 [ "$HOLD" -gt 120 ] || refuse "--hold must exceed the protocol's 120 s rekey time"
+case ",$ARMS," in
+    *,dns,*)
+        [ -n "$DNS_SECOND_ENDPOINT" ] || refuse "--arms dns requires --dns-second-endpoint"
+        command -v unshare >/dev/null 2>&1 || refuse "unshare is not installed"
+        unshare --user --map-root-user --mount true || refuse "unprivileged mount namespaces unavailable"
+        ;;
+esac
 
 for tool in ssh python3 sha256sum xxd timeout; do
     command -v "$tool" >/dev/null 2>&1 || refuse "$tool is not installed"
@@ -301,6 +313,22 @@ run_example() {
     set -e
     sed -n 's/^rc=//p' "$out"
 }
+
+if runs dns; then
+    arm_rc=0
+    parent_mount_namespace="$(readlink /proc/self/ns/mnt)"
+    unshare --user --map-root-user --mount --fork \
+        python3 "$REPO/scripts/e2e/wireguard-dns.py" \
+        "$WG_CONNECT_BIN" "$WORK/client.conf" "$PEER_IP:$HTTP_PORT" \
+        "$ENDPOINT" "$DNS_SECOND_ENDPOINT" "$WORK/dns" "$HOLD" "$parent_mount_namespace" \
+        > "$WORK/dns.log" 2>&1 || arm_rc=$?
+    if [ "$arm_rc" = 0 ]; then
+        [ "$(body_sha "$WORK/dns/client.log" 1)" = "$HELLO_SHA" ] || arm_rc=1
+        [ "$(body_sha "$WORK/dns/client.log" 2)" = "$HELLO_SHA" ] || arm_rc=1
+    fi
+    verdict dns "$arm_rc" "private hosts: absent, first forward, second forward; both GET bodies verified"
+    cat "$WORK/dns.log" >&2
+fi
 
 # wrong-key: the control. The peer's handshake stamp must not move, the
 # connect must time out, and the peer must have taken UDP datagrams from

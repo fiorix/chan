@@ -518,6 +518,39 @@ describe("workspace polling", () => {
     vi.restoreAllMocks();
   });
 
+  it("refreshes live WireGuard state while visible without a registry event", async () => {
+    stopWatching();
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const row = {
+      ...library.gateways[0]!,
+      wireguard: "/tmp/gateway.conf",
+      wireguard_restart_required: false,
+      wireguard_status: "connecting",
+    };
+    const list = vi.spyOn(backend, "listGateways").mockResolvedValue([row]);
+    vi.spyOn(backend, "watchWindows").mockReturnValue(() => {});
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    await loadLibrary();
+    list.mockResolvedValue([{ ...row, wireguard_status: "endpoint did not resolve: offline, retrying" }]);
+    list.mockClear();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(library.gateways[0]!.wireguard_status).toContain("endpoint did not resolve");
+    list.mockResolvedValue([{ ...row, wireguard_status: "up" }]);
+    visibility.mockReturnValue("hidden");
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(library.gateways[0]!.wireguard_status).toBe("up");
+
+    stopWatching();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps external lock changes current on a two-second visible cadence", async () => {
     stopWatching();
     vi.useFakeTimers();
