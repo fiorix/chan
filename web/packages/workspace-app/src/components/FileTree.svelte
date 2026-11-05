@@ -195,7 +195,11 @@
   // file-into-editor-pane open. Those never cross the OS boundary.
   function onFileDragStart(e: DragEvent, path: string, isDir: boolean): void {
     if (!e.dataTransfer) return;
-    e.dataTransfer.effectAllowed = "move";
+    // A row moves when it lands on a folder, and is copied when a pane opens
+    // the file or an editor types its path. A browser refuses a drop whose
+    // effect the source does not allow, so a move-only drag would reach
+    // neither the pane nor an editor.
+    e.dataTransfer.effectAllowed = "copyMove";
     // Multi-drag: if the grabbed row is part of the current
     // multi-selection, drag the WHOLE selection; otherwise the drag
     // implicitly selects just this row (desktop behavior - grabbing an
