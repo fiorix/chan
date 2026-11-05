@@ -60,7 +60,9 @@
 #   desktop-wireguard-windows.sh [options] PEER_SSH ENDPOINT PEER_ADDRESS CLIENT_SSH INSTALLER
 #     PEER_SSH      user@host the kernel peer is provisioned through
 #     ENDPOINT      the peer's WireGuard UDP address:port as the CLIENT reaches
-#                   it; an IP literal, since the desktop resolves it at start
+#                   it; an IP literal, so the run does not depend on the
+#                   Windows resolver (a name works since the desktop looks it
+#                   up on each handshake, but this suite has not run one)
 #     PEER_ADDRESS  the peer's tunnel address with its prefix, e.g. 10.7.0.1/24
 #     CLIENT_SSH    user@host of the Windows machine, with a logged-on desktop
 #                   session for that user
@@ -156,7 +158,7 @@ node -e 'process.exit(typeof WebSocket === "function" && typeof fetch === "funct
 [ -f "$HELPERS/peer-http.py" ] && [ -f "$HELPERS/cdp.mjs" ] || refuse "the helpers are missing from $HELPERS"
 case "$CDP_PORT" in '' | *[!0-9]*) refuse "--cdp-port takes a port number" ;; esac
 python3 -I -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1].rsplit(":", 1)[0].strip("[]"))' "$ENDPOINT" 2>/dev/null \
-    || refuse "ENDPOINT $ENDPOINT is not an address:port literal; the desktop resolves a name at start with no timeout"
+    || refuse "ENDPOINT $ENDPOINT is not an address:port literal; this suite runs against a literal only"
 
 # scp spells the port -P where ssh spells it -p; everything else is shared.
 CLIENT_SCP_OPTS=()
