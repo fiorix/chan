@@ -718,11 +718,26 @@
     return { x: Math.round(a.left), y: Math.round(a.bottom + 4) };
   });
 
+  /// An open menu owns Escape: it closes the menu and goes no further. An
+  /// Escape typed in the menu's own fields reaches them first, so the Name
+  /// field puts its draft back, and closes the menu as it bubbles out to the
+  /// window.
   function onMenuKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape" && menuOpen) {
       e.preventDefault();
       closeTabMenu();
     }
+  }
+
+  /// Any other Escape is taken on its way down. The editor keeps focus while
+  /// its menu is open, and CodeMirror would act on the key first: it
+  /// collapses the selection the menu was opened on.
+  function onMenuKeydownCapture(e: KeyboardEvent): void {
+    if (e.key !== "Escape" || !menuOpen) return;
+    if (e.target instanceof Element && e.target.closest(".tab-menu-bubble")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeTabMenu();
   }
 
   /// Dismiss when the click lands outside the bubble AND outside any
@@ -1090,7 +1105,11 @@
   }
 </script>
 
-<svelte:window onkeydown={onMenuKeydown} onpointerdown={onDocPointerDown} />
+<svelte:window
+  onkeydowncapture={onMenuKeydownCapture}
+  onkeydown={onMenuKeydown}
+  onpointerdown={onDocPointerDown}
+/>
 
 <div
   class="editor-tab"
