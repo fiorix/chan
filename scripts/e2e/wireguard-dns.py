@@ -22,6 +22,79 @@ def endpoint(text: str) -> tuple[str, int]:
     return str(address), number
 
 
+def client_file(original: str, path: Path, endpoint_text: str) -> None:
+    """The run's client file with its one Endpoint line replaced, owner-only."""
+    lines = Path(original).read_text().splitlines()
+    if sum(line.startswith("Endpoint = ") for line in lines) != 1:
+        raise ValueError("client file must contain exactly one Endpoint")
+    with path.open("x") as file:
+        path.chmod(0o600)
+        file.write("\n".join(f"Endpoint = {endpoint_text}" if line.startswith("Endpoint = ") else line for line in lines) + "\n")
+
+
+def preflight(binary: str, original: str, target: str, work: Path, destinations: list[tuple[str, int]]) -> None:
+    """Prove each forward answers from its own address before the proof
+    moves between them. QEMU's user network sends every reply for a guest
+    port out of the newest forward to that port, so a second forward to the
+    WireGuard port answers the first path from the second's address, and the
+    proof's connected relay socket drops those replies. One GET per path
+    through an unconnected socket shows where the answers come from."""
+    for index, destination in enumerate(destinations):
+        number = index + 1
+        with contextlib.ExitStack() as stack:
+            selector = stack.enter_context(selectors.DefaultSelector())
+            front = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+            front.bind(("127.0.0.1", 0))
+            front.setblocking(False)
+            back = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+            back.bind(("0.0.0.0", 0))
+            back.setblocking(False)
+            selector.register(front, selectors.EVENT_READ, True)
+            selector.register(back, selectors.EVENT_READ, False)
+            config = work / f"preflight-{number}.conf"
+            client_file(original, config, f"127.0.0.1:{front.getsockname()[1]}")
+            log = work / f"preflight-{number}.log"
+            output = stack.enter_context(log.open("w"))
+            process = subprocess.Popen([binary, str(config), target, "/hello.txt", "--timeout", "15"],
+                                       stdout=output, stderr=subprocess.STDOUT)
+            client = None
+            answered = 0
+            strays: set[tuple[str, int]] = set()
+            deadline = time.monotonic() + 30
+            try:
+                while process.poll() is None:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"forward {number} ({destination[0]}:{destination[1]}): the preflight GET did not finish")
+                    for key, _ in selector.select(0.05):
+                        try:
+                            packet, source = key.fileobj.recvfrom(65535)
+                        except (BlockingIOError, ConnectionRefusedError):
+                            continue
+                        if key.data:
+                            client = source
+                            back.sendto(packet, destination)
+                        elif source != destination:
+                            strays.add(source)
+                        elif client is not None:
+                            answered += 1
+                            front.sendto(packet, client)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+            if strays:
+                seen = ", ".join(f"{host}:{port}" for host, port in sorted(strays))
+                raise RuntimeError(
+                    f"forward {number} ({destination[0]}:{destination[1]}) answered from {seen}: "
+                    "with QEMU user networking, forward the second endpoint to its own guest port "
+                    "and redirect that port to the WireGuard port on the peer (see wireguard-kernel.sh --help)")
+            if process.returncode != 0 or answered == 0:
+                raise RuntimeError(
+                    f"forward {number} ({destination[0]}:{destination[1]}): GET exited {process.returncode} "
+                    f"after {answered} answer(s): {log.read_text()}")
+            print(f"dns: preflight: forward {number} answers from {destination[0]}:{destination[1]}", flush=True)
+
+
 def run(argv: list[str]) -> None:
     binary, original, target, first, second, directory, hold_text, parent_namespace = argv
     destinations = [endpoint(first), endpoint(second)]
@@ -32,6 +105,7 @@ def run(argv: list[str]) -> None:
         raise ValueError("hold must exceed the 120-second rekey interval")
     work = Path(directory)
     work.mkdir(mode=0o700)
+    preflight(binary, original, target, work, destinations)
     hosts = work / "hosts"
     hosts.write_text("127.0.0.1 localhost\n")
     nsswitch = work / "nsswitch.conf"
@@ -65,12 +139,7 @@ def run(argv: list[str]) -> None:
 
         name = "chan-wireguard-endpoint.invalid"
         config = work / "client.conf"
-        lines = Path(original).read_text().splitlines()
-        if sum(line.startswith("Endpoint = ") for line in lines) != 1:
-            raise ValueError("client file must contain exactly one Endpoint")
-        with config.open("x") as file:
-            config.chmod(0o600)
-            file.write("\n".join(f"Endpoint = {name}:{port}" if line.startswith("Endpoint = ") else line for line in lines) + "\n")
+        client_file(original, config, f"{name}:{port}")
         log = work / "client.log"
         output = stack.enter_context(log.open("w"))
         process = subprocess.Popen(

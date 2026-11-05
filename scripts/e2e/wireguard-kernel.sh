@@ -47,6 +47,22 @@
 #   --hold SECS          the rekey arm's idle hold (default 130, past the 120 s rekey)
 #   --arms LIST          comma separated arms to run (default: all, in the order above)
 #   --dns-second-endpoint HOST:PORT  second forward to the same peer, for --arms dns
+#   --dns-second-peer-port PORT      the peer port that second forward reaches,
+#                        when it is not the listen port: the run redirects it
+#                        to the listen port with nft and removes the rule at
+#                        exit (refused when its table already exists)
+#
+# The dns arm needs two UDP paths from this host to the peer's WireGuard
+# port, and checks first that each path answers from its own address. QEMU
+# user networking (slirp) cannot give two forwards to one guest port: it
+# sends every reply for a guest port out of the newest forward to it, so
+# the first path is answered from the second's port. Forward the second
+# path to a guest port of its own and let the run redirect that port, for
+# the kernel peer VM on 51820:
+#   (qemu) hostfwd_add udp:127.0.0.1:51821-:51822
+#   wireguard-kernel.sh --arms dns --dns-second-endpoint 127.0.0.1:51821 \
+#       --dns-second-peer-port 51822 SSH_TARGET 127.0.0.1:51820 PEER_ADDRESS
+# The redirect needs nft on the peer.
 #
 # Prerequisites. On the peer: Linux with the wireguard module, wireguard-tools
 # (`wg`), iproute2, python3 (serves the files and the raw listener), sha256sum,
@@ -75,6 +91,8 @@ HTTP_PORT=8080
 RAW_PORT=4443
 POSITIONAL=()
 DNS_SECOND_ENDPOINT=""
+DNS_SECOND_PEER_PORT=""
+NFT_TABLE=chanwg_dns
 
 log() { printf 'wireguard-kernel: %s\n' "$*" >&2; }
 refuse() { log "cannot run: $*"; exit 2; }
@@ -88,6 +106,7 @@ while [ $# -gt 0 ]; do
         --hold) HOLD="$2"; shift 2 ;;
         --arms) ARMS="$2"; shift 2 ;;
         --dns-second-endpoint) DNS_SECOND_ENDPOINT="$2"; shift 2 ;;
+        --dns-second-peer-port) DNS_SECOND_PEER_PORT="$2"; shift 2 ;;
         -h | --help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | cut -c3-; exit 0 ;;
         -*) refuse "unknown option $1" ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -119,6 +138,13 @@ PEER_NET="$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.a
 [ -n "$CLIENT_IP" ] || CLIENT_IP="$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).ip + 1)' "$PEER_CIDR")"
 [ -n "$LISTEN_PORT" ] || LISTEN_PORT="${ENDPOINT##*:}"
 case "$LISTEN_PORT" in '' | *[!0-9]*) refuse "no port in ENDPOINT $ENDPOINT" ;; esac
+NFT_PLANNED=""
+if [ -n "$DNS_SECOND_PEER_PORT" ]; then
+    case ",$ARMS," in *,dns,*) ;; *) refuse "--dns-second-peer-port is for --arms dns" ;; esac
+    case "$DNS_SECOND_PEER_PORT" in '' | *[!0-9]*) refuse "--dns-second-peer-port takes a port number" ;; esac
+    [ "$DNS_SECOND_PEER_PORT" != "$LISTEN_PORT" ] || refuse "--dns-second-peer-port is the listen port; leave it out"
+    NFT_PLANNED="$NFT_TABLE"
+fi
 
 if [ -z "${CHAN_BIN:-}" ]; then
     log "building chan at $SHA"
@@ -149,13 +175,16 @@ peer_script() {
 }
 
 # Every prerequisite on the peer is probed before anything is created there.
-if ! PROBE="$(peer 'sudo -n wg --version >/dev/null 2>&1 || echo no-wg; sudo -n ip -V >/dev/null 2>&1 || echo no-ip; command -v python3 >/dev/null 2>&1 || echo no-python3; command -v sha256sum >/dev/null 2>&1 || echo no-sha256sum; sudo -n true 2>/dev/null || echo no-sudo; ip link show '"$IFACE"' >/dev/null 2>&1 && echo iface-exists; uname -sr' 2>&1)"; then
+NFT_PROBE=":"
+[ -z "$NFT_PLANNED" ] || NFT_PROBE="sudo -n nft list tables >/dev/null 2>&1 || echo no-nft; sudo -n nft list table ip $NFT_PLANNED >/dev/null 2>&1 && echo nft-table-exists"
+if ! PROBE="$(peer 'sudo -n wg --version >/dev/null 2>&1 || echo no-wg; sudo -n ip -V >/dev/null 2>&1 || echo no-ip; command -v python3 >/dev/null 2>&1 || echo no-python3; command -v sha256sum >/dev/null 2>&1 || echo no-sha256sum; sudo -n true 2>/dev/null || echo no-sudo; ip link show '"$IFACE"' >/dev/null 2>&1 && echo iface-exists; '"$NFT_PROBE"'; uname -sr' 2>&1)"; then
     refuse "ssh to $SSH_TARGET failed: $PROBE"
 fi
-for missing in no-wg no-ip no-python3 no-sha256sum no-sudo; do
+for missing in no-wg no-ip no-python3 no-sha256sum no-sudo no-nft; do
     case "$PROBE" in *"$missing"*) refuse "the peer lacks ${missing#no-} (or sudo -n for it): $PROBE" ;; esac
 done
 case "$PROBE" in *iface-exists*) refuse "interface $IFACE already exists on the peer; this run creates and deletes its own" ;; esac
+case "$PROBE" in *nft-table-exists*) refuse "nft table ip $NFT_PLANNED already exists on the peer; this run creates and deletes its own" ;; esac
 PEER_KERNEL="$(printf '%s\n' "$PROBE" | tail -1)"
 
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/chan-wireguard-kernel.XXXXXX")"
@@ -171,6 +200,7 @@ HOST_PIDS=()
 PEER_WORK=""
 PEER_PIDS=""
 IFACE_CREATED=""
+NFT_CREATED=""
 cleanup() {
     local pid
     for pid in "${HOST_PIDS[@]:-}"; do
@@ -183,9 +213,10 @@ cleanup() {
     # Only what the run made on the peer: its processes by recorded pid,
     # the interface it created, and its work dir, identified by the marker
     # the run wrote into it.
-    if [ -n "$PEER_WORK" ] || [ -n "$IFACE_CREATED" ]; then
-        peer_script "$PEER_WORK" "$PEER_PIDS" "$IFACE_CREATED" <<'PEER' >/dev/null 2>&1 || log "peer cleanup did not finish; check $SSH_TARGET for $IFACE and $PEER_WORK"
-work="$1"; pids="$2"; iface="$3"
+    if [ -n "$PEER_WORK" ] || [ -n "$IFACE_CREATED" ] || [ -n "$NFT_CREATED" ]; then
+        peer_script "$PEER_WORK" "$PEER_PIDS" "$IFACE_CREATED" "$NFT_CREATED" <<'PEER' >/dev/null 2>&1 || log "peer cleanup did not finish; check $SSH_TARGET for $IFACE, nft table $NFT_TABLE and $PEER_WORK"
+work="$1"; pids="$2"; iface="$3"; table="$4"
+[ -n "$table" ] && sudo -n nft delete table ip "$table" 2>/dev/null || true
 for pid in $pids; do kill "$pid" 2>/dev/null || true; done
 [ -n "$iface" ] && sudo -n ip link del "$iface" 2>/dev/null || true
 if [ -n "$work" ] && [ -f "$work/.chan-wireguard-kernel" ]; then rm -rf -- "${work:?}"; fi
@@ -287,6 +318,21 @@ HELLO_SHA="$(setup_field hello_sha)"
 BIG_SHA="$(setup_field big_sha)"
 [ -n "$PEER_WORK" ] && [ -n "$SERVER_PUB" ] && [ -n "$CLIENT_KEY" ] && [ -n "$HELLO_SHA" ] || { log "peer setup returned an incomplete record"; exit 1; }
 log "peer interface $IFACE up at $PEER_CIDR, serving $PEER_IP:$HTTP_PORT; client public key $CLIENT_PUB"
+
+# The dns arm's second path, when it reaches its own peer port: redirected
+# to the listen port, so replies leave through that path's own forward.
+# Recorded before the call, so the exit path removes a half-made table.
+if [ -n "$NFT_PLANNED" ]; then
+    NFT_CREATED="$NFT_PLANNED"
+    peer_script "$NFT_PLANNED" "$DNS_SECOND_PEER_PORT" "$LISTEN_PORT" <<'PEER' || { log "the peer redirect for the dns arm failed"; exit 1; }
+set -euo pipefail
+table="$1"; from="$2"; to="$3"
+sudo -n nft add table ip "$table"
+sudo -n nft add chain ip "$table" prerouting '{ type nat hook prerouting priority -100; }'
+sudo -n nft add rule ip "$table" prerouting udp dport "$from" redirect to :"$to"
+PEER
+    log "peer redirects UDP $DNS_SECOND_PEER_PORT to $LISTEN_PORT for the dns arm (nft table ip $NFT_PLANNED)"
+fi
 
 # 2. The client files, owner-only as the devserver demands.
 write_client_file() {
