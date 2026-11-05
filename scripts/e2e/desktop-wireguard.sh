@@ -198,19 +198,29 @@ log "the desktop runs on display $DISPLAY"
 
 if [ "$UNRESOLVED" = 1 ]; then
     arm_rc=0
-    wait_for 15 "the proxy before resolution" logged 'gateway WireGuard proxy listening' || arm_rc=1
-    wait_for 20 "the resolver failure" logged 'endpoint did not resolve' || arm_rc=1
-    "$CHAN_BIN" workspace ls > "$WORK/startup.out" 2>&1 || arm_rc=1
+    proxy_logged=no
+    lookup_logged=no
+    wait_for 15 "the proxy before resolution" logged 'gateway WireGuard proxy listening' && proxy_logged=yes || arm_rc=1
+    wait_for 20 "the resolver failure" logged 'endpoint did not resolve' && lookup_logged=yes || arm_rc=1
+    # `chan devserver ls` is answered by the desktop's control socket, so
+    # it shows the desktop itself serving requests while its gateway's
+    # name does not resolve.
+    set +e
+    timeout 20 "$CHAN_BIN" devserver ls > "$WORK/startup.out" 2>&1
+    control_rc=$?
+    set -e
+    [ "$control_rc" = 0 ] || arm_rc=1
     desktop_log
     proxy="$(sed -n 's/.*gateway WireGuard proxy listening.*proxy=\(127\.0\.0\.1:[0-9]*\).*/\1/p' "$CLEAN" | head -1)"
     [ -n "$proxy" ] || arm_rc=1
+    response=none
     if [ -n "$proxy" ]; then
         # A malformed request is answered by the bound proxy without any
         # destination lookup or handshake.
         response="$(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "http://$proxy/" || true)"
         [ "$response" = 400 ] || arm_rc=1
     fi
-    verdict unresolved-startup "$arm_rc" "desktop control responds, proxy ${proxy:-missing} responds, lookup error reported"
+    verdict unresolved-startup "$arm_rc" "proxy line $proxy_logged (${proxy:-no address}), origin-form request answered ${response:-nothing} (want 400), lookup error logged $lookup_logged, desktop control rc=$control_rc: $(head -1 "$WORK/startup.out" | cut -c1-80)"
     [ "$arm_rc" = 0 ] || fail "unresolved endpoint startup"
     cleanup
     trap - EXIT
