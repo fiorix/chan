@@ -139,8 +139,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # `NSString` carries the dialog text and the pasteboard names and types;
 # `NSArray` carries the drag pasteboard's filename property list, and
 # `NSEnumerator` gates the `NSArray::iter` that walks it. `NSProcessInfo`
-# reads the macOS version that decides whether a webview takes the
-# WireGuard proxy (src/wireguard.rs).
+# reads the running macOS version so the updater can refuse a build whose
+# minimum system version exceeds it (src/update_floor.rs).
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSProcessInfo", "NSString"] }
 
 [dev-dependencies]
