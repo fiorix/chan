@@ -89,13 +89,23 @@ struct Wire {
     endpoint: Option<SocketAddr>,
 }
 
+/// What the driver publishes after each lookup outcome, for `connect` and
+/// `status`.
+#[derive(Clone, Default)]
+struct Resolution {
+    error: Option<Arc<io::Error>>,
+    /// A timed-out lookup still holds the OS call, so no other outcome
+    /// can come until it returns.
+    stalled: bool,
+}
+
 struct Inner {
     shared: Arc<Shared>,
     wire: Arc<Mutex<Wire>>,
     addresses: Vec<IpAddr>,
     allowed_ips: Vec<Cidr>,
     driver: JoinHandle<()>,
-    resolution: watch::Receiver<Option<Arc<io::Error>>>,
+    resolution: watch::Receiver<Resolution>,
 }
 
 impl Drop for Inner {
@@ -162,7 +172,7 @@ impl Tunnel {
             None,
         );
         let wire = Arc::new(Mutex::new(Wire { tunn, endpoint }));
-        let (resolution_tx, resolution) = watch::channel(None);
+        let (resolution_tx, resolution) = watch::channel(Resolution::default());
         let driver = Driver {
             shared: shared.clone(),
             wire: wire.clone(),
@@ -191,9 +201,11 @@ impl Tunnel {
     /// Open a TCP connection to `remote` through the tunnel. A destination
     /// outside the peer's allowed IPs is refused as `NetworkUnreachable`
     /// before anything is sent; a reset answers `ConnectionRefused`.
-    /// Before any endpoint is known, a failed lookup returns its reason.
-    /// Other waits are bounded by the caller. Dropping the future closes
-    /// the half-open connection.
+    /// Before any endpoint is known, it waits for a lookup that ends after
+    /// it started and fails with that lookup's reason; when a timed-out
+    /// lookup still holds the OS call, no such outcome can come, and it
+    /// fails at once with the timeout. Other waits are bounded by the
+    /// caller. Dropping the future closes the half-open connection.
     pub async fn connect(&self, remote: SocketAddr) -> io::Result<Stream> {
         let inner = &self.inner;
         if !inner.allowed_ips.iter().any(|c| c.contains(remote.ip())) {
@@ -226,10 +238,14 @@ impl Tunnel {
         inner.shared.kick();
         let connecting = Connecting::new(Stream::new(inner.shared.clone(), handle, local, remote));
         tokio::pin!(connecting);
+        // An outcome published before this connect answers an earlier
+        // attempt; only a later one, or a stall nothing can end, is ours.
         let mut resolution = inner.resolution.clone();
+        let mut current = resolution.borrow_and_update().clone();
+        let mut ours = current.stalled;
         loop {
-            if inner.wire.lock().endpoint.is_none() {
-                if let Some(error) = resolution.borrow().as_ref() {
+            if ours && inner.wire.lock().endpoint.is_none() {
+                if let Some(error) = current.error {
                     return Err(io::Error::new(error.kind(), error.to_string()));
                 }
             }
@@ -239,6 +255,8 @@ impl Tunnel {
                     if changed.is_err() {
                         return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "the tunnel is closed"));
                     }
+                    current = resolution.borrow_and_update().clone();
+                    ours = true;
                 }
             }
         }
@@ -274,6 +292,7 @@ impl Tunnel {
                 .inner
                 .resolution
                 .borrow()
+                .error
                 .as_ref()
                 .map(ToString::to_string),
         }
@@ -395,7 +414,7 @@ struct Driver {
     endpoint_name: Endpoint,
     allowed_ips: Vec<Cidr>,
     resolver: Resolver,
-    resolution_tx: watch::Sender<Option<Arc<io::Error>>>,
+    resolution_tx: watch::Sender<Resolution>,
     /// When the latest lookup ended: an answer, a failure or its deadline.
     looked_up_at: Option<Instant>,
     /// The latest usable answer, or the endpoint `start_on` was given.
@@ -620,7 +639,10 @@ impl Driver {
             format!("endpoint did not resolve: {}: {error}", self.endpoint_name),
         );
         tracing::warn!(error = %error, "WireGuard endpoint lookup failed; retrying");
-        self.resolution_tx.send_replace(Some(Arc::new(error)));
+        self.resolution_tx.send_replace(Resolution {
+            error: Some(Arc::new(error)),
+            stalled: self.resolver.stalled(),
+        });
     }
 
     async fn resolved(&mut self, result: io::Result<SocketAddr>) {
@@ -629,7 +651,7 @@ impl Driver {
             Ok(answer) => {
                 self.adopt(answer);
                 self.last_answer = Some(answer);
-                self.resolution_tx.send_replace(None);
+                self.resolution_tx.send_replace(Resolution::default());
             }
         }
         self.lookup_ended().await;

@@ -255,12 +255,15 @@ async fn unresolved_start_returns_and_recovers_without_restart() {
     assert_eq!(f.a.status().endpoint, None);
     let query = f.query().await;
     assert_eq!(f.a.status().last_handshake, None);
-    query
-        .send(Err(io::Error::new(io::ErrorKind::NotFound, "name absent")))
-        .unwrap();
-    until(|| f.a.status().resolution_error.is_some()).await;
-    let error = timeout(WAIT, f.a.connect(b_port(80)))
+    let connecting = tokio::spawn({
+        let a = f.a.clone();
+        async move { a.connect(b_port(80)).await }
+    });
+    tokio::time::sleep(2 * TICK).await;
+    query.send(Err(not_found("name absent"))).unwrap();
+    let error = timeout(WAIT, connecting)
         .await
+        .unwrap()
         .unwrap()
         .unwrap_err();
     assert!(
@@ -272,21 +275,14 @@ async fn unresolved_start_returns_and_recovers_without_restart() {
     assert!(error.to_string().contains("name absent"), "{error}");
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
 
+    // The held initiation retries the lookup on its own; the next answer
+    // brings the tunnel up with no new demand and no restart.
     clock::advance(REKEY_TIMEOUT + TICK);
-    let a = f.a.clone();
-    let mut listener = f.b.listen(0).unwrap();
-    let port = listener.port();
-    // New demand keeps the tunnel retrying even though this attempt still
-    // sees the previous error before the successful lookup arrives.
-    let _ = a.connect(b_port(port)).await;
     f.query().await.send(Ok(f.b_at)).unwrap();
-    until(|| f.a.status().resolution_error.is_none()).await;
-    let (a, b) = timeout(WAIT, async {
-        tokio::join!(a.connect(b_port(port)), listener.accept())
-    })
-    .await
-    .unwrap();
-    exchange(&mut a.unwrap(), &mut b.unwrap()).await;
+    until(|| f.a.status().last_handshake.is_some()).await;
+    assert_eq!(f.a.status().resolution_error, None);
+    let (mut a, mut b) = f.connect().await;
+    exchange(&mut a, &mut b).await;
 }
 
 #[tokio::test]
@@ -558,6 +554,49 @@ async fn failed_lookups_do_not_retry_on_every_tick() {
     );
     clock::advance(REKEY_TIMEOUT + TICK);
     let _retry = f.query().await;
+}
+
+#[tokio::test]
+async fn a_connect_after_a_failed_lookup_waits_for_the_lookup_it_starts() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    f.query().await.send(Err(not_found("name absent"))).unwrap();
+    until(|| f.a.status().resolution_error.is_some()).await;
+    clock::advance(REKEY_TIMEOUT + TICK);
+    let mut listener = f.b.listen(0).unwrap();
+    let port = listener.port();
+    let connecting = tokio::spawn({
+        let a = f.a.clone();
+        async move { a.connect(b_port(port)).await }
+    });
+    // The lookup this connect starts succeeds.
+    f.query().await.send(Ok(f.b_at)).unwrap();
+    let (a, b) = timeout(WAIT, async { tokio::join!(connecting, listener.accept()) })
+        .await
+        .unwrap();
+    let (mut a, mut b) = (a.unwrap().unwrap(), b.unwrap());
+    exchange(&mut a, &mut b).await;
+}
+
+#[tokio::test]
+async fn a_connect_during_a_stalled_lookup_fails_at_once_with_the_timeout() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let _stalled = f.query().await;
+    timeout(RESOLVE_TIMEOUT + Duration::from_secs(3), async {
+        while f.a.status().resolution_error.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // No other lookup can end while the timed-out one holds the OS call.
+    let error = timeout(Duration::from_secs(1), f.a.connect(b_port(80)))
+        .await
+        .expect("a connect has nothing to wait for")
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("lookup timed out"), "{error}");
 }
 
 #[tokio::test]
