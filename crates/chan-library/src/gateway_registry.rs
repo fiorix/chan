@@ -94,7 +94,8 @@ pub struct GatewayEntry {
     #[serde(default)]
     pub wireguard_restart_required: bool,
     /// Live WireGuard state: `connecting`, `up`, or the latest lookup
-    /// error with its retry notice; `null` when no matching tunnel runs.
+    /// error with its retry notice, after `up; ` while a session lives
+    /// anyway; `null` when no matching tunnel runs.
     #[serde(default)]
     pub wireguard_status: Option<String>,
 }

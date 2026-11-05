@@ -105,12 +105,7 @@ impl WireguardStartup {
         if self.started.get(gateway_id).map(PathBuf::as_path) != configured {
             return None;
         }
-        let status = self.tunnels.get(gateway_id)?.status();
-        Some(match status.resolution_error {
-            Some(error) => format!("{error}, retrying"),
-            None if status.last_handshake.is_some() => "up".to_string(),
-            None => "connecting".to_string(),
-        })
+        Some(describe(self.tunnels.get(gateway_id)?.status()))
     }
 
     /// Whether an enabled row's WireGuard setting differs from what the
@@ -163,6 +158,18 @@ impl WireguardStartup {
                 })
                 .collect(),
         }
+    }
+}
+
+/// The launcher's words for a tunnel's state. A tunnel keeps handshaking
+/// with the endpoint it knows while lookups of the name fail, so a live
+/// session reads as up with the failure beside it.
+fn describe(status: chan_wireguard::Status) -> String {
+    match (status.last_handshake.is_some(), status.resolution_error) {
+        (true, None) => "up".to_string(),
+        (true, Some(error)) => format!("up; {error}, retrying"),
+        (false, Some(error)) => format!("{error}, retrying"),
+        (false, None) => "connecting".to_string(),
     }
 }
 
@@ -567,6 +574,30 @@ mod tests {
         assert_eq!(
             startup.status("gateway", Some(Path::new("/changed.conf"))),
             None
+        );
+    }
+
+    /// A failing lookup no longer takes a live session down, so the state
+    /// reads up while it fails, and the failure alone only without one.
+    #[test]
+    fn describe_reads_a_live_session_as_up_beside_a_failing_lookup() {
+        let status = |handshake: bool, error: Option<&str>| chan_wireguard::Status {
+            last_handshake: handshake.then_some(Duration::from_secs(3)),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            endpoint: None,
+            resolution_error: error.map(str::to_string),
+        };
+        let failure = "endpoint did not resolve: gw.test:51820: name absent";
+        assert_eq!(describe(status(false, None)), "connecting");
+        assert_eq!(describe(status(true, None)), "up");
+        assert_eq!(
+            describe(status(false, Some(failure))),
+            format!("{failure}, retrying")
+        );
+        assert_eq!(
+            describe(status(true, Some(failure))),
+            format!("up; {failure}, retrying")
         );
     }
 
