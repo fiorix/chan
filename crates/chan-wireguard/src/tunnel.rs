@@ -67,7 +67,9 @@ pub struct Status {
     /// source of the peer's latest authenticated datagram.
     /// `None` until an address is resolved or an authenticated peer arrives.
     pub endpoint: Option<SocketAddr>,
-    /// The latest endpoint lookup failure; cleared by successful resolution.
+    /// Why the latest lookup of the endpoint name, or the socket bind for
+    /// its answer, failed; cleared by the next usable answer. While it is
+    /// set, initiations still go to `endpoint` when there is one.
     pub resolution_error: Option<String>,
 }
 
@@ -126,8 +128,8 @@ impl Tunnel {
     /// endpoint the caller resolved. The driver still looks the configured
     /// name up before initiations: the caller's endpoint stands as the
     /// previous answer, so it is used until a lookup answers a different
-    /// address. Must be called within a tokio runtime, which the driver
-    /// task runs on.
+    /// address, and while lookups fail. Must be called within a tokio
+    /// runtime, which the driver task runs on.
     pub fn start_on(config: Config, socket: UdpSocket, endpoint: SocketAddr) -> io::Result<Tunnel> {
         if socket.local_addr()?.is_ipv4() != endpoint.is_ipv4() {
             return Err(io::Error::new(
@@ -169,7 +171,7 @@ impl Tunnel {
             allowed_ips: config.peer.allowed_ips.clone(),
             resolver,
             resolution_tx,
-            resolved_at: None,
+            looked_up_at: None,
             last_answer: endpoint,
             pending_initiation: false,
         };
@@ -394,11 +396,12 @@ struct Driver {
     allowed_ips: Vec<Cidr>,
     resolver: Resolver,
     resolution_tx: watch::Sender<Option<Arc<io::Error>>>,
-    resolved_at: Option<Instant>,
+    /// When the latest lookup ended: an answer, a failure or its deadline.
+    looked_up_at: Option<Instant>,
     /// The latest usable answer, or the endpoint `start_on` was given.
     last_answer: Option<SocketAddr>,
-    /// A deferred initiation is generated afresh when resolution completes,
-    /// so its retry clock starts at transmission, not before the lookup.
+    /// A deferred initiation is generated afresh when the lookup ends, so
+    /// its retry clock starts at transmission, not before the lookup.
     pending_initiation: bool,
 }
 
@@ -435,7 +438,7 @@ impl Driver {
                     None => std::future::pending().await,
                 }
             };
-            let resolve_deadline = self.resolver.deadline;
+            let resolve_deadline = self.resolver.deadline();
             let event = tokio::select! {
                 received = Sockets::receive(&self.sockets.v4, &mut datagram) => match received {
                     Ok((len, from)) => Event::Datagram(len, from),
@@ -489,11 +492,12 @@ impl Driver {
                 Event::Tick => self.tick(&mut work).await,
                 Event::Resolved(result) => self.resolved(result).await,
                 Event::ResolveTimeout => {
-                    self.resolver.deadline = None;
+                    self.resolver.timed_out();
                     self.resolution_failed(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "lookup timed out; waiting for the system resolver",
                     ));
+                    self.lookup_ended().await;
                 }
                 Event::Kick | Event::StackTimer => {}
             }
@@ -604,7 +608,7 @@ impl Driver {
         }
         if expired {
             self.pending_initiation = false;
-            self.resolved_at = None;
+            self.looked_up_at = None;
         } else if self.pending_initiation {
             self.resolver.start();
         }
@@ -620,29 +624,15 @@ impl Driver {
     }
 
     async fn resolved(&mut self, result: io::Result<SocketAddr>) {
-        let endpoint =
-            match result.and_then(|endpoint| self.sockets.ensure(endpoint).map(|()| endpoint)) {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    self.resolution_failed(error);
-                    return;
-                }
-            };
-        self.resolved_at = Some(Instant::now());
-        self.resolution_tx.send_replace(None);
-        self.adopt(endpoint);
-        self.last_answer = Some(endpoint);
-        if std::mem::take(&mut self.pending_initiation) {
-            let mut initiation = [0; 148];
-            let len = {
-                let mut wire = self.wire.lock();
-                match wire.tunn.format_handshake_initiation(&mut initiation, true) {
-                    TunnResult::WriteToNetwork(packet) => packet.len(),
-                    _ => return,
-                }
-            };
-            self.transmit(&initiation[..len]).await;
+        match result.and_then(|answer| self.sockets.ensure(answer).map(|()| answer)) {
+            Err(error) => self.resolution_failed(error),
+            Ok(answer) => {
+                self.adopt(answer);
+                self.last_answer = Some(answer);
+                self.resolution_tx.send_replace(None);
+            }
         }
+        self.lookup_ended().await;
     }
 
     /// Move the endpoint to a lookup answer when it says something new: no
@@ -664,15 +654,47 @@ impl Driver {
         }
     }
 
-    async fn transmit(&mut self, datagram: &[u8]) {
-        if datagram.len() == 148
-            && datagram[..4] == [1, 0, 0, 0]
+    /// A lookup ended, by an answer, a failure or its deadline. A held
+    /// initiation leaves now when an endpoint is known, so a failing
+    /// resolver never holds back a handshake to the address in use;
+    /// without one it waits for the next lookup, which the tick starts.
+    async fn lookup_ended(&mut self) {
+        self.looked_up_at = Some(Instant::now());
+        if !self.pending_initiation || self.wire.lock().endpoint.is_none() {
+            return;
+        }
+        self.pending_initiation = false;
+        let mut initiation = [0; 148];
+        let len = {
+            let mut wire = self.wire.lock();
+            match wire.tunn.format_handshake_initiation(&mut initiation, true) {
+                TunnResult::WriteToNetwork(packet) => packet.len(),
+                _ => return,
+            }
+        };
+        self.transmit(&initiation[..len]).await;
+    }
+
+    /// Every initiation asks for a lookup and waits for it to end, unless
+    /// one ended less than `REKEY_TIMEOUT` ago. With an endpoint known it
+    /// also leaves while a timed-out lookup holds the OS call, since no
+    /// other lookup can start until that returns.
+    fn initiation_may_leave(&mut self) -> bool {
+        let known = self.wire.lock().endpoint.is_some();
+        if known
             && self
-                .resolved_at
-                .is_none_or(|at| at.elapsed() > REKEY_TIMEOUT)
+                .looked_up_at
+                .is_some_and(|at| at.elapsed() <= REKEY_TIMEOUT)
         {
+            return true;
+        }
+        self.resolver.start();
+        known && self.resolver.stalled()
+    }
+
+    async fn transmit(&mut self, datagram: &[u8]) {
+        if datagram.len() == 148 && datagram[..4] == [1, 0, 0, 0] && !self.initiation_may_leave() {
             self.pending_initiation = true;
-            self.resolver.start();
             return;
         }
         let endpoint = self.wire.lock().endpoint;

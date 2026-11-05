@@ -24,7 +24,7 @@ pub(crate) struct Resolver {
     lookup: Lookup,
     task: Option<JoinHandle<io::Result<SocketAddr>>>,
     last_attempt: Option<Instant>,
-    pub(crate) deadline: Option<tokio::time::Instant>,
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl Resolver {
@@ -57,6 +57,23 @@ impl Resolver {
         let lookup = self.lookup.clone();
         let name = self.name.clone();
         self.task = Some(tokio::spawn(lookup(name)));
+    }
+
+    /// When the outstanding lookup stops being waited for; `None` without
+    /// one, or once it has timed out.
+    pub(crate) fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
+    }
+
+    /// The deadline passed: stop waiting, keep owning the lookup.
+    pub(crate) fn timed_out(&mut self) {
+        self.deadline = None;
+    }
+
+    /// A lookup outlived its deadline and still holds the OS call, so no
+    /// other lookup can start until it returns.
+    pub(crate) fn stalled(&self) -> bool {
+        self.task.is_some() && self.deadline.is_none()
     }
 
     pub(crate) async fn completed(&mut self) -> io::Result<SocketAddr> {

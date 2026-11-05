@@ -30,6 +30,13 @@ fn controlled_lookup() -> (Lookup, mpsc::UnboundedReceiver<Answer>) {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::build(false).await
+    }
+
+    /// A client whose name `peer.test` resolves only through `queries`,
+    /// and its peer. With `known` the client starts with the peer's
+    /// address, as `start_on` gives it one.
+    async fn build(known: bool) -> Self {
         let a_key = StaticSecret::random_from_rng(OsRng);
         let b_key = StaticSecret::random_from_rng(OsRng);
         let a_pub = PublicKey::from(&a_key);
@@ -44,7 +51,7 @@ impl Fixture {
         let resolver = Resolver::with_lookup(config.peer.endpoint.clone(), lookup);
         let mut sockets = Sockets::default();
         sockets.insert(a_udp).unwrap();
-        let a = Tunnel::build(config, sockets, None, resolver).unwrap();
+        let a = Tunnel::build(config, sockets, known.then_some(b_at), resolver).unwrap();
         let b = Tunnel::start_on(
             crate::testing::config(b_key, a_pub, B_ADDR, A_ADDR, a_at),
             b_udp,
@@ -117,6 +124,10 @@ async fn initiation(socket: &UdpSocket) -> SocketAddr {
         .unwrap();
     assert!(is_initiation(&bytes[..len]));
     from
+}
+
+fn not_found(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, message.to_string())
 }
 
 const VIA_OLD: u8 = 0;
@@ -310,21 +321,153 @@ async fn live_rekey_and_expiry_follow_the_next_lookup() {
     );
 }
 
+/// The lookup a rekey starts never returns, as a hung `getaddrinfo`. The
+/// session keeps carrying data while the rekey waits, the rekey goes to
+/// the known endpoint at the deadline, the tunnel outlives the first
+/// session's `REJECT_AFTER_TIME`, and the next rekey goes out at once
+/// beside the still-owned lookup instead of starting another.
 #[tokio::test]
-async fn hanging_rekey_lookup_keeps_established_streams_moving() {
+async fn a_hung_lookup_keeps_a_live_session_past_reject_after_time() {
     let _clock = clock::test_offset_guard();
     let mut f = Fixture::new().await;
     let (mut a, mut b) = f.establish().await;
     exchange(&mut a, &mut b).await;
     clock::advance(Duration::from_secs(121));
-    let _hanging = f.query().await;
-    for _ in 0..4 {
+    let _hung = f.query().await;
+    let waiting = tokio::time::Instant::now();
+    while waiting.elapsed() < RESOLVE_TIMEOUT + Duration::from_secs(1) {
         exchange(&mut a, &mut b).await;
+        tokio::time::sleep(TICK).await;
     }
+    until(|| fresh_handshake(&f.a, Duration::from_secs(60))).await;
+    let error = f.a.status().resolution_error.unwrap();
+    assert!(error.contains("lookup timed out"), "{error}");
+
+    clock::advance(Duration::from_secs(60));
+    exchange(&mut a, &mut b).await;
+    clock::advance(Duration::from_secs(100));
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
     assert!(
         f.queries.try_recv().is_err(),
-        "only one lookup may be in flight"
+        "one lookup in flight: the hung one"
     );
+    exchange(&mut a, &mut b).await;
+}
+
+/// Walk the clock 190 s in 5 s steps, past `REJECT_AFTER_TIME`, handing
+/// every lookup the tunnel starts to `answer`; returns how many it started.
+async fn walk_past_reject(f: &mut Fixture, mut answer: impl FnMut(Answer)) -> usize {
+    let mut lookups = 0;
+    for _ in 0..38 {
+        clock::advance(Duration::from_secs(5));
+        tokio::time::sleep(2 * TICK).await;
+        while let Ok(query) = f.queries.try_recv() {
+            lookups += 1;
+            answer(query);
+        }
+        tokio::time::sleep(2 * TICK).await;
+    }
+    lookups
+}
+
+#[tokio::test]
+async fn rekeys_past_reject_after_time_with_working_lookups() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let (mut a, mut b) = f.establish().await;
+    exchange(&mut a, &mut b).await;
+    let b_at = f.b_at;
+    walk_past_reject(&mut f, |query| {
+        let _ = query.send(Ok(b_at));
+    })
+    .await;
+    exchange(&mut a, &mut b).await;
+}
+
+#[tokio::test]
+async fn failing_lookups_keep_rekeying_to_the_known_endpoint() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let (mut a, mut b) = f.establish().await;
+    exchange(&mut a, &mut b).await;
+    let lookups = walk_past_reject(&mut f, |query| {
+        let _ = query.send(Err(io::Error::other("resolver down")));
+    })
+    .await;
+    assert!(lookups > 0, "the rekey still asks for a lookup");
+    exchange(&mut a, &mut b).await;
+    let status = f.a.status();
+    assert!(
+        status
+            .last_handshake
+            .is_some_and(|age| age < Duration::from_secs(180)),
+        "{status:?}"
+    );
+    assert!(
+        status
+            .resolution_error
+            .as_deref()
+            .is_some_and(|error| error.contains("resolver down")),
+        "the failure stays in the status: {status:?}"
+    );
+}
+
+#[tokio::test]
+async fn start_on_endpoint_carries_the_handshake_while_the_name_fails() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::build(true).await;
+    f.query()
+        .await
+        .send(Err(not_found("host resolver cannot see it")))
+        .unwrap();
+    let (mut a, mut b) = f.connect().await;
+    exchange(&mut a, &mut b).await;
+    let status = f.a.status();
+    assert_eq!(status.endpoint, Some(f.b_at));
+    assert!(status.resolution_error.is_some(), "{status:?}");
+}
+
+/// No lookup has answered yet when the peer roams, so only the endpoint
+/// `start_on` was given can say the later answer is unchanged.
+#[tokio::test]
+async fn start_on_endpoint_stands_as_the_previous_answer() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::build(true).await;
+    f.query().await.send(Err(not_found("not yet"))).unwrap();
+    let (mut a, mut b) = f.connect().await;
+    exchange(&mut a, &mut b).await;
+    let roam = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut packet = [0; 256];
+    let sealed = {
+        let mut wire = f.b.inner.wire.lock();
+        let TunnResult::WriteToNetwork(bytes) = wire.tunn.encapsulate(&[], &mut packet) else {
+            panic!("established session")
+        };
+        bytes.to_vec()
+    };
+    roam.send_to(&sealed, f.a_at).await.unwrap();
+    until(|| f.a.status().endpoint == Some(roam.local_addr().unwrap())).await;
+    drop(f.b);
+    clock::advance(Duration::from_secs(121));
+    timeout(WAIT, f.queries.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .send(Ok(f.b_at))
+        .unwrap();
+    // The roamed address also hears the client's own traffic.
+    timeout(WAIT, async {
+        let mut bytes = [0; 256];
+        loop {
+            let len = roam.recv(&mut bytes).await.unwrap();
+            if is_initiation(&bytes[..len]) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the rekey goes to the roamed address");
+    assert_eq!(f.a.status().endpoint, Some(roam.local_addr().unwrap()));
 }
 
 #[tokio::test]
