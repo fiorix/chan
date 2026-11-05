@@ -183,6 +183,7 @@ impl Tunnel {
             resolution_tx,
             looked_up_at: None,
             last_answer: endpoint,
+            logged_failure: None,
             pending_initiation: false,
         };
         let driver = tokio::spawn(driver.run());
@@ -343,6 +344,13 @@ enum Event {
     ResolveTimeout,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Makes `Sockets::ensure` fail on this thread, since no real bind of
+    /// an ephemeral wildcard port fails on demand.
+    static REFUSE_BIND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Default)]
 struct Sockets {
     v4: Option<UdpSocket>,
@@ -377,6 +385,13 @@ impl Sockets {
     fn ensure(&mut self, endpoint: SocketAddr) -> io::Result<()> {
         if self.get(endpoint.is_ipv4()).is_some() {
             return Ok(());
+        }
+        #[cfg(test)]
+        if REFUSE_BIND.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "refused by the test",
+            ));
         }
         let bind: SocketAddr = if endpoint.is_ipv4() {
             (Ipv4Addr::UNSPECIFIED, 0).into()
@@ -419,6 +434,8 @@ struct Driver {
     looked_up_at: Option<Instant>,
     /// The latest usable answer, or the endpoint `start_on` was given.
     last_answer: Option<SocketAddr>,
+    /// The failure last logged at warn; a repeat of it logs at debug.
+    logged_failure: Option<String>,
     /// A deferred initiation is generated afresh when the lookup ends, so
     /// its retry clock starts at transmission, not before the lookup.
     pending_initiation: bool,
@@ -512,10 +529,10 @@ impl Driver {
                 Event::Resolved(result) => self.resolved(result).await,
                 Event::ResolveTimeout => {
                     self.resolver.timed_out();
-                    self.resolution_failed(io::Error::new(
+                    self.failed(self.unresolved(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "lookup timed out; waiting for the system resolver",
-                    ));
+                    )));
                     self.lookup_ended().await;
                 }
                 Event::Kick | Event::StackTimer => {}
@@ -633,12 +650,23 @@ impl Driver {
         }
     }
 
-    fn resolution_failed(&self, error: io::Error) {
-        let error = io::Error::new(
+    fn unresolved(&self, error: io::Error) -> io::Error {
+        io::Error::new(
             error.kind(),
             format!("endpoint did not resolve: {}: {error}", self.endpoint_name),
-        );
-        tracing::warn!(error = %error, "WireGuard endpoint lookup failed; retrying");
+        )
+    }
+
+    /// Publish a failure. A lookup fails every few seconds while dials
+    /// keep coming, so only a new or changed failure logs at warn.
+    fn failed(&mut self, error: io::Error) {
+        let message = error.to_string();
+        if self.logged_failure.as_deref() == Some(message.as_str()) {
+            tracing::debug!(error = %message, "WireGuard endpoint still failing; retrying");
+        } else {
+            tracing::warn!(error = %message, "WireGuard endpoint failed; retrying");
+            self.logged_failure = Some(message);
+        }
         self.resolution_tx.send_replace(Resolution {
             error: Some(Arc::new(error)),
             stalled: self.resolver.stalled(),
@@ -646,13 +674,22 @@ impl Driver {
     }
 
     async fn resolved(&mut self, result: io::Result<SocketAddr>) {
-        match result.and_then(|answer| self.sockets.ensure(answer).map(|()| answer)) {
-            Err(error) => self.resolution_failed(error),
-            Ok(answer) => {
-                self.adopt(answer);
-                self.last_answer = Some(answer);
-                self.resolution_tx.send_replace(Resolution::default());
-            }
+        match result {
+            Err(error) => self.failed(self.unresolved(error)),
+            Ok(answer) => match self.sockets.ensure(answer) {
+                Err(error) => self.failed(io::Error::new(
+                    error.kind(),
+                    format!("binding a UDP socket for {answer}: {error}"),
+                )),
+                Ok(()) => {
+                    self.adopt(answer);
+                    self.last_answer = Some(answer);
+                    if self.logged_failure.take().is_some() {
+                        tracing::info!(endpoint = %answer, "WireGuard endpoint lookup recovered");
+                    }
+                    self.resolution_tx.send_replace(Resolution::default());
+                }
+            },
         }
         self.lookup_ended().await;
     }

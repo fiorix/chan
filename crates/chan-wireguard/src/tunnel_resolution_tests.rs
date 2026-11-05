@@ -797,6 +797,143 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
     connecting.abort();
 }
 
+/// Makes this thread's socket binds fail until dropped.
+struct RefuseBind;
+
+impl RefuseBind {
+    fn new() -> Self {
+        REFUSE_BIND.set(true);
+        RefuseBind
+    }
+}
+
+impl Drop for RefuseBind {
+    fn drop(&mut self) {
+        REFUSE_BIND.set(false);
+    }
+}
+
+#[tokio::test]
+async fn a_bind_failure_reads_as_one() {
+    let _clock = clock::test_offset_guard();
+    let _refuse = RefuseBind::new();
+    let mut f = Fixture::new().await;
+    // The fixture holds an IPv4 socket, so an IPv6 answer needs a bind.
+    let answer: SocketAddr = "[::1]:51820".parse().unwrap();
+    f.query().await.send(Ok(answer)).unwrap();
+    until(|| f.a.status().resolution_error.is_some()).await;
+    let error = f.a.status().resolution_error.unwrap();
+    assert!(
+        error.starts_with("binding a UDP socket for [::1]:51820: "),
+        "{error}"
+    );
+    assert_eq!(
+        f.a.status().endpoint,
+        None,
+        "an answer without a socket is not used"
+    );
+}
+
+/// Records the level and message of every event on this thread.
+#[derive(Clone, Default)]
+struct Events(Arc<Mutex<Vec<(String, String)>>>);
+
+impl Events {
+    fn endpoint_lines(&self) -> Vec<(String, String)> {
+        self.0
+            .lock()
+            .iter()
+            .filter(|(_, message)| message.starts_with("WireGuard endpoint"))
+            .cloned()
+            .collect()
+    }
+}
+
+impl tracing::Subscriber for Events {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        self.0
+            .lock()
+            .push((event.metadata().level().to_string(), message.0));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A lookup fails every few seconds while demand lasts; the log says so
+/// at warn when a failure starts or changes, and at debug while it repeats.
+#[tokio::test]
+async fn lookup_failures_warn_when_they_start_or_change() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // With one dispatcher registered, tracing-core computes a callsite's
+    // interest from the default of whichever thread first reaches it, so
+    // a callsite a parallel test reached first stays disabled here too. A
+    // second registered dispatcher makes it ask every registered one.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let _connecting = tokio::spawn({
+        let a = f.a.clone();
+        async move { a.connect(b_port(80)).await }
+    });
+    f.query().await.send(Err(not_found("name absent"))).unwrap();
+    for answer in [not_found("name absent"), not_found("server failure")] {
+        clock::advance(REKEY_TIMEOUT + TICK);
+        f.query().await.send(Err(answer)).unwrap();
+    }
+    clock::advance(REKEY_TIMEOUT + TICK);
+    f.query().await.send(Ok(f.b_at)).unwrap();
+    until(|| f.a.status().last_handshake.is_some()).await;
+    // The rekey's lookup fails as the last one before the recovery did:
+    // a new failure, not a repeat.
+    clock::advance(Duration::from_secs(121));
+    f.query()
+        .await
+        .send(Err(not_found("server failure")))
+        .unwrap();
+    until(|| f.a.status().resolution_error.is_some()).await;
+    let lines = events.endpoint_lines();
+    let lines: Vec<(&str, &str)> = lines
+        .iter()
+        .map(|(level, message)| (level.as_str(), message.as_str()))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("WARN", "WireGuard endpoint failed; retrying"),
+            ("DEBUG", "WireGuard endpoint still failing; retrying"),
+            ("WARN", "WireGuard endpoint failed; retrying"),
+            ("INFO", "WireGuard endpoint lookup recovered"),
+            ("WARN", "WireGuard endpoint failed; retrying"),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn slow_lookup_starts_the_retry_clock_at_transmission() {
     let _clock = clock::test_offset_guard();
