@@ -337,6 +337,11 @@ export type TerminalRosterEntry = {
   tab_name: string | null;
   tab_group: string;
   window_id: string | null;
+  /// Whether a page holds the session's window. False for a window no page
+  /// holds (a desktop window its Hide put away, a saved window nothing has
+  /// opened), whose tab cannot act on a broadcast toggle routed to it.
+  /// Absent from an older server's roster, where every member reads as live.
+  window_live?: boolean;
   broadcast: boolean;
 };
 

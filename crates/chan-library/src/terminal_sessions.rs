@@ -33,6 +33,7 @@ use chan_shell::{
 
 use crate::config::{TerminalConfig, TerminalProfile, TerminalTmuxConfig};
 use crate::time::{now_unix_millis, now_unix_secs};
+use crate::window_presence::{WindowHook, WindowPresence};
 
 mod bytes;
 #[cfg(target_os = "linux")]
@@ -536,12 +537,19 @@ pub struct Registry {
     /// script exit after an attached terminal websocket removes the session.
     last_exit: Arc<Mutex<Option<TerminalExit>>>,
     /// Fires whenever the live roster changes (create / close / restart /
-    /// broadcast-toggle). The roster broadcaster task awaits this and
-    /// republishes a fresh snapshot onto the `/ws` bus so every window's
-    /// SPA sees the same cross-window terminal set. `Notify` coalesces
-    /// bursts into one wakeup (natural debounce) and stores a permit when
-    /// no waiter is parked, so a change is never missed.
+    /// broadcast-toggle), and, through the installed window presence, when
+    /// a window that holds a session gains its first socket or loses its
+    /// last one. The roster
+    /// broadcaster task awaits this and republishes a fresh snapshot onto
+    /// the `/ws` bus so every window's SPA sees the same cross-window
+    /// terminal set. `Notify` coalesces bursts into one wakeup (natural
+    /// debounce) and stores a permit when no waiter is parked, so a change
+    /// is never missed.
     roster_notify: Arc<Notify>,
+    /// The tenant's window presence, which the roster reads for each
+    /// session's `window_live` (see [`Registry::install_window_presence`]).
+    /// Absent, no window reads as live.
+    window_presence: OnceLock<Arc<WindowPresence>>,
     /// What this tenant's terminals run on their PTY when an open request
     /// carries no command of its own: a shell command line through the
     /// login shell, or an argv exec'd directly. `None` keeps the user's
@@ -1247,9 +1255,11 @@ impl FdStoreRestoreReport {
 /// One live terminal session in the cross-window roster the SPA reads to
 /// render broadcast targets + indicators across every window of a tenant.
 /// Unlike [`TerminalSessionSummary`] (the `cs term list` view, grouped by
-/// `tab_group` with a live `cwd`), this carries the `window_id` and the
-/// per-session `broadcast` toggle and omits the (expensive) cwd lookup: the
-/// roster is pushed on every change, so it stays cheap to build. Serialized
+/// `tab_group` with a live `cwd`), this carries the `window_id`, whether a
+/// page holds that window, and the per-session `broadcast` toggle, and omits
+/// the (expensive) cwd lookup: the roster is pushed on every session change
+/// and every presence change of a window that holds a session, so it stays
+/// cheap to build. Serialized
 /// directly into the `/ws` `terminal_roster` frame and the
 /// `GET /api/terminals/roster` seed body.
 #[derive(Debug, Clone, Serialize)]
@@ -1261,6 +1271,14 @@ pub struct RosterEntry {
     /// both sides of the wire.
     pub tab_group: String,
     pub window_id: Option<String>,
+    /// Whether a page holds this session's window: the tenant's window
+    /// presence has a live `/ws` socket for `window_id`. False for a session
+    /// with no window, and for one whose window no page holds, such as a
+    /// desktop window its Hide put away or a saved window nothing has opened.
+    /// Only a page flips a session's `broadcast`, so a `terminal_broadcast`
+    /// command routed to such a window changes nothing, and the SPA leaves
+    /// these members out of a group Select All until their window is live.
+    pub window_live: bool,
     /// The session's own broadcast toggle, synced from the SPA via the
     /// `set-broadcast` WS frame. Cross-window input is only fanned to
     /// members with this on (see [`Registry::broadcast_input_cross_window`]).
@@ -1949,6 +1967,7 @@ impl Registry {
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
+            window_presence: OnceLock::new(),
             default_program: Mutex::new(None),
             persisted_windows: Mutex::new(HashSet::new()),
             moved_out: Mutex::new(HashMap::new()),
@@ -1966,6 +1985,41 @@ impl Registry {
     /// Set the devserver library identity inherited by newly spawned PTYs.
     pub fn install_library_id(&self, library_id: String) {
         let _ = self.library_id.set(library_id);
+    }
+
+    /// Read each roster entry's `window_live` from the tenant's window
+    /// presence, and push the roster again whenever a window that holds a
+    /// live session gains its first socket or loses its last one, since that
+    /// changes the session's `window_live` with no session changing. A window
+    /// with no session changes no entry, so it pushes nothing. Set-once: the
+    /// serving layer installs the presence it builds beside the registry, and
+    /// a second install is ignored.
+    pub fn install_window_presence(self: &Arc<Self>, presence: Arc<WindowPresence>) {
+        if self.window_presence.set(Arc::clone(&presence)).is_err() {
+            return;
+        }
+        // Weak: the registry holds the presence, so a strong handle here
+        // would keep both alive in a cycle.
+        let registry = Arc::downgrade(self);
+        presence.install_window_hook(WindowHook::new(move |window_id| {
+            if let Some(registry) = registry.upgrade() {
+                if registry.has_live_session_in(window_id) {
+                    registry.notify_roster_change();
+                }
+            }
+        }));
+    }
+
+    /// Whether a live session belongs to `window_id`.
+    fn has_live_session_in(&self, window_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .values()
+            .any(|session| {
+                !session.closed.load(Ordering::Relaxed)
+                    && session.window_id().as_deref() == Some(window_id)
+            })
     }
 
     /// Refresh the backend preference sampled by subsequent PTY spawns.
@@ -2688,21 +2742,32 @@ impl Registry {
     }
 
     /// Snapshot of every live session for the cross-window roster. Mirrors
-    /// [`Registry::session_summaries`] but carries `window_id` + the
-    /// `broadcast` toggle and skips the per-session cwd probe (the roster
-    /// is pushed on every change, so it must stay cheap).
+    /// [`Registry::session_summaries`] but carries `window_id`, whether a page
+    /// holds that window, and the `broadcast` toggle, and skips the
+    /// per-session cwd probe (the roster is pushed on every change, so it
+    /// must stay cheap).
     pub fn roster(&self) -> Vec<RosterEntry> {
+        // Presence is read before the session map so the two locks never
+        // nest. A window that connects between the reads fires the roster
+        // signal, so the next push carries it.
+        let live: HashSet<String> = self
+            .window_presence
+            .get()
+            .map(|presence| presence.connected_ids().into_iter().collect())
+            .unwrap_or_default();
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
             .values()
             .filter(|session| !session.closed.load(Ordering::Relaxed))
             .map(|session| {
                 let metadata = session.live_metadata();
+                let window_id = session.window_id();
                 RosterEntry {
                     id: session.id.clone(),
                     tab_name: metadata.name,
                     tab_group: metadata.group,
-                    window_id: session.window_id(),
+                    window_live: window_id.as_ref().is_some_and(|id| live.contains(id)),
+                    window_id,
                     broadcast: session.broadcast.load(Ordering::Relaxed),
                 }
             })
@@ -13815,6 +13880,118 @@ mod tests {
         // No explicit group resolves to the default, matching the SPA.
         assert_eq!(roster[1].tab_group, DEFAULT_TERMINAL_GROUP);
         assert!(!roster[1].broadcast);
+    }
+
+    /// Each session's `(id, window_live)`, sorted by id.
+    fn roster_liveness(registry: &Registry) -> Vec<(String, bool)> {
+        let mut live: Vec<(String, bool)> = registry
+            .roster()
+            .into_iter()
+            .map(|entry| (entry.id, entry.window_live))
+            .collect();
+        live.sort();
+        live
+    }
+
+    /// `window_live` follows the window's presence: false while no socket
+    /// holds the window, true while one does, false again after the last one
+    /// drops; a session with no window is never live, and with no presence
+    /// installed no window is.
+    #[test]
+    fn roster_says_whether_a_page_holds_each_sessions_window() {
+        let registry = Arc::new(Registry::new(test_config(64, 16, 600)));
+        insert_session(&registry, dummy_session("a", Some("winA"), None, false));
+        insert_session(&registry, dummy_session("b", Some("winB"), None, true));
+        insert_session(&registry, dummy_session("h", None, None, false));
+        let owned = |rows: &[(&str, bool)]| -> Vec<(String, bool)> {
+            rows.iter()
+                .map(|(id, live)| (id.to_string(), *live))
+                .collect()
+        };
+        let none_live = owned(&[("a", false), ("b", false), ("h", false)]);
+
+        let presence = Arc::new(WindowPresence::new());
+        let early = presence.connect("winA", None);
+        assert_eq!(
+            roster_liveness(&registry),
+            none_live,
+            "a registry with no presence installed read a window as live"
+        );
+        drop(early);
+
+        registry.install_window_presence(Arc::clone(&presence));
+        assert_eq!(
+            roster_liveness(&registry),
+            none_live,
+            "a window no socket holds read as live"
+        );
+
+        let page = presence.connect("winA", Some("desk-a"));
+        assert_eq!(
+            roster_liveness(&registry),
+            owned(&[("a", true), ("b", false), ("h", false)]),
+            "only the session whose window a socket holds is live"
+        );
+        let reload = presence.connect("winA", None);
+        drop(page);
+        assert_eq!(
+            roster_liveness(&registry),
+            owned(&[("a", true), ("b", false), ("h", false)]),
+            "a window with a socket left stopped reading as live"
+        );
+        drop(reload);
+        assert_eq!(
+            roster_liveness(&registry),
+            none_live,
+            "a window whose last socket dropped still reads as live"
+        );
+    }
+
+    /// Whether `notify` holds a permit, taking it when it does.
+    fn take_permit(notify: &Notify) -> bool {
+        use std::future::Future;
+        let notified = std::pin::pin!(notify.notified());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        notified.poll(&mut context).is_ready()
+    }
+
+    /// The roster signal fires when a window that holds a session gains its
+    /// first socket and when it loses its last one, since either changes the
+    /// session's `window_live` with no session changing; not for a socket that
+    /// leaves the set of connected windows as it was, and not for a window
+    /// with no session, which changes no entry.
+    #[test]
+    fn a_window_connecting_or_disconnecting_signals_the_roster() {
+        let registry = Arc::new(Registry::new(test_config(64, 16, 600)));
+        insert_session(&registry, dummy_session("a", Some("w1"), None, false));
+        let presence = Arc::new(WindowPresence::new());
+        registry.install_window_presence(Arc::clone(&presence));
+        let roster = registry.roster_notify();
+        assert!(!take_permit(&roster), "the signal fired before any change");
+
+        let first = presence.connect("w1", Some("desk-a"));
+        assert!(take_permit(&roster), "the window's first socket");
+        let second = presence.connect("w1", Some("tab-b"));
+        assert!(
+            !take_permit(&roster),
+            "a second holder of a connected window"
+        );
+        let untagged = presence.connect("w1", None);
+        assert!(!take_permit(&roster), "an untagged socket beside others");
+        drop(second);
+        assert!(!take_permit(&roster), "a holder leaving a connected window");
+        drop(first);
+        assert!(!take_permit(&roster), "a socket leaving a connected window");
+        drop(untagged);
+        assert!(take_permit(&roster), "the window's last socket");
+
+        let empty = presence.connect("w-empty", None);
+        assert!(!take_permit(&roster), "a window with no session connecting");
+        drop(empty);
+        assert!(
+            !take_permit(&roster),
+            "a window with no session disconnecting"
+        );
     }
 
     #[cfg(target_os = "linux")]

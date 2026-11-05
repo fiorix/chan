@@ -1923,7 +1923,9 @@ pub async fn api_terminals_roster(State(state): State<Arc<AppState>>) -> Respons
 /// The `terminal_roster` `/ws` envelope: a full roster snapshot the SPA
 /// applies wholesale (idempotent, no delta reconciliation). Same `sessions`
 /// shape as [`RosterResponse`] so one client handler serves both the seed
-/// and the live push.
+/// and the live push. Each entry's `window_live` says whether a page holds
+/// its window; the SPA leaves the members of windows no page holds out of a
+/// group Select All, since only a page can flip their broadcast.
 #[derive(Debug, Serialize)]
 struct RosterFrame<'a> {
     #[serde(rename = "type")]
@@ -1933,9 +1935,11 @@ struct RosterFrame<'a> {
 
 /// Republish the terminal roster onto the global `/ws` bus whenever it
 /// changes. Awaits the registry's roster-change `Notify` (coalescing bursts
-/// into one push) and sends a `terminal_roster` snapshot to every connected
-/// window. A sibling of the registry's pruner/drainer tasks: own task,
-/// shuts down on the same signal. A send error means no `/ws` client is
+/// into one push), which a session change fires and, through the window
+/// presence the registry has installed, a window that holds a session gaining
+/// its first socket or losing its last; then sends a `terminal_roster`
+/// snapshot to every connected window. A sibling of the registry's
+/// pruner/drainer tasks: own task, shuts down on the same signal. A send error means no `/ws` client is
 /// connected; the next connect re-seeds via `GET /api/terminals/roster`.
 pub fn spawn_roster_broadcaster(
     registry: Arc<crate::terminal_sessions::Registry>,

@@ -1745,8 +1745,10 @@ export function toggleActiveTerminalBroadcastSelectAll(): void {
 /// tabs flip directly (self via broadcastEnabled, others via targets);
 /// same-group terminals in OTHER windows flip via the server, which routes a
 /// `terminal_broadcast` command to their owning window. "All on" is computed
-/// across both so one click consistently fills or clears the group. Backs the
-/// menu button and the Cmd+Shift+I chord.
+/// across both so one click consistently fills or clears the group. Members
+/// whose window no page holds are left out (see `crossWindowBroadcastMembers`):
+/// nothing would flip them, so counting them would leave the group impossible
+/// to clear. Backs the menu button and the Cmd+Shift+I chord.
 export function toggleTerminalGroupBroadcast(tab: TerminalTab): void {
   const group = terminalTabGroup(tab);
   const localTargets = allTerminalTabs().filter(
@@ -2535,24 +2537,35 @@ function reconcileLocalMetadataFromRoster(entries: TerminalRosterEntry[]): void 
   }
 }
 
-/// Same-group sessions in OTHER windows of this tenant. The broadcast menu
-/// lists these read-only (cross-window broadcast is group-level by nature -
-/// visible but not individually selectable) and the indicator counts the
-/// ones that have opted in. Sessions with no `window_id` are skipped: they
-/// cannot be attributed to a window, and this window's own sessions are
-/// excluded (already shown as local tabs).
+/// Same-group sessions in OTHER windows of this tenant that a page holds. The
+/// broadcast menu lists these under other windows, the group toggle and its
+/// Select All label count them, and the indicator counts the ones that have
+/// opted in. Sessions with no `window_id` are skipped: they cannot be
+/// attributed to a window, and this window's own sessions are excluded
+/// (already shown as local tabs). So is a session whose window no page holds
+/// (`window_live` false): only its window's page flips its broadcast flag, so
+/// a toggle routed there changes nothing, and a group toggle that waited for
+/// it to join could never clear the group. It rejoins with its own flag once
+/// a page holds its window again. A roster without `window_live` comes from
+/// an older server and reads every member as live.
 export function crossWindowBroadcastMembers(tab: TerminalTab): TerminalRosterEntry[] {
   const group = terminalTabGroup(tab);
   const myWindow = sessionWindowId();
   return terminalRoster.filter(
-    (e) => e.tab_group === group && e.window_id != null && e.window_id !== myWindow,
+    (e) =>
+      e.tab_group === group &&
+      e.window_id != null &&
+      e.window_id !== myWindow &&
+      e.window_live !== false,
   );
 }
 
 /// How many OTHER terminals this terminal's broadcast input reaches: local
 /// same-window targets plus same-group cross-window members that have opted
 /// in (broadcast on). Mirrors the server's cross-window fan gate, which only
-/// delivers to members with their own broadcast toggle on. Drives the
+/// delivers to members with their own broadcast toggle on, over the live
+/// group: a member whose window no page holds is not counted, though the
+/// server still fans input to it while its own toggle is on. Drives the
 /// broadcast indicator's count.
 export function terminalBroadcastReachCount(tab: TerminalTab): number {
   // Input fans out to the source's group only (terminalBroadcastMemberIds),

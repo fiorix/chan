@@ -93,7 +93,7 @@ A socket that names its window registers with window presence, which is how the 
 
 ## Terminals
 
-The terminal registry, PTYs, scrollback rings, write queues and the tmux gate live in chan-library; chan-server is their transport. The routes create, delete, restart and rename sessions, toggle cross-window broadcast, forward tmux requests, list the roster and the selectable shell profiles, and attach a view over `GET /api/terminal/ws`. A session outlives its view, so a window can reload or attach from another machine and the shell keeps running, and several views can be attached at once.
+The terminal registry, PTYs, scrollback rings, write queues and the tmux gate live in chan-library; chan-server is their transport. The routes create, delete, restart and rename sessions, toggle cross-window broadcast, forward tmux requests, list the roster and the selectable shell profiles, and attach a view over `GET /api/terminal/ws`. The roster says whether a page holds each session's window and is pushed over `/ws` on every session change and whenever a window that holds a session gains its first socket or loses its last. A session outlives its view, so a window can reload or attach from another machine and the shell keeps running, and several views can be attached at once.
 
 ```mermaid
 sequenceDiagram
