@@ -81,8 +81,9 @@ fi
 #    is not paid per build. After editing the .sdme template, force a rebuild
 #    with REBUILD_ROOTFS=1 (an existing rootfs is NOT auto-rebuilt on a
 #    template change).
+# Read to EOF to avoid SIGPIPE; a failed listing still takes the fallback path.
 if [ "${REBUILD_ROOTFS:-0}" = "1" ] \
-    || ! $SDME fs ls 2>/dev/null | grep -qE "^${ROOTFS}[[:space:]]"; then
+    || ! $SDME fs ls 2>/dev/null | grep -E "^${ROOTFS}[[:space:]]" >/dev/null; then
     echo "==> building rootfs ${ROOTFS}"
     # A container holding this rootfs blocks the rebuild; drop it first (it is
     # recreated below regardless).

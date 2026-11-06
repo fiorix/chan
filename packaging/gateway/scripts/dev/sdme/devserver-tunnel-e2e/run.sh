@@ -111,7 +111,8 @@ ADMISSION_VERIFYING_KEY="${ADMISSION_KEYS[1]}"
 ENTRY_SIGNING_KEY="${ENTRY_KEYS[0]}"
 ENTRY_VERIFYING_KEY="${ENTRY_KEYS[1]}"
 $SDME ps >/dev/null 2>&1 || die "sudo -n sdme not working"
-if ! $SDME fs ls 2>/dev/null | grep -qE "^${RFS}[[:space:]]"; then
+# Read to EOF to avoid SIGPIPE; a failed listing still takes the fallback path.
+if ! $SDME fs ls 2>/dev/null | grep -E "^${RFS}[[:space:]]" >/dev/null; then
   info "runtime rootfs '$RFS' missing -- building from $RFS_SDME (one-time)"
   ( cd "$HERE" && $SDME fs build -f "$RFS" "$(basename "$RFS_SDME")" ) >/tmp/e2e-rfs.log 2>&1 \
     || { tail -20 /tmp/e2e-rfs.log; die "rootfs build failed"; }

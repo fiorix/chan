@@ -37,11 +37,13 @@ remove_existing_container() {
 mkdir -p "$OUT_DIR" "$SEED"
 
 echo "==> [1/6] ensure ubuntu base rootfs"
-$SDME fs ls 2>/dev/null | grep -qE "^ubuntu[[:space:]]" \
+# Read to EOF to avoid SIGPIPE; a failed listing still takes the fallback path.
+$SDME fs ls 2>/dev/null | grep -E "^ubuntu[[:space:]]" >/dev/null \
   || $SDME fs import docker.io/ubuntu --name ubuntu --install-packages=yes -v
 
 echo "==> [2/6] ensure ${ROOTFS} rootfs (rust+node+cargo-deb)"
-$SDME fs ls 2>/dev/null | grep -qE "^${ROOTFS}[[:space:]]" \
+# Read to EOF to avoid SIGPIPE; a failed listing still takes the fallback path.
+$SDME fs ls 2>/dev/null | grep -E "^${ROOTFS}[[:space:]]" >/dev/null \
   || ( cd "$(dirname "$BUILD_SDME")" && $SDME fs build -f "$ROOTFS" "$(basename "$BUILD_SDME")" )
 
 echo "==> [3/6] ensure build container ${CONTAINER}"
