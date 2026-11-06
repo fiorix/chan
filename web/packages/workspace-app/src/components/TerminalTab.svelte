@@ -206,6 +206,7 @@
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
   import { clampMenu } from "./menuClamp";
+  import { menuEscape } from "./menuEscape";
   import { portal } from "./portal";
   import {
     closeTabMenu,
@@ -2940,29 +2941,11 @@
     }
   }
 
-  /// An open menu owns Escape: it closes the menu and goes no further. An
-  /// Escape typed in the menu's own fields reaches them and closes the menu
-  /// as it bubbles out to the window.
-  function onMenuKeydown(e: KeyboardEvent): void {
-    if (e.key === "Escape" && menuOpen) {
-      e.preventDefault();
-      closeTabMenu();
-    }
-  }
-
-  /// Any other Escape is taken on its way down. The terminal keeps focus
-  /// while its menu is open, and both engines take Escape at the focused
-  /// element: xterm.js on its textarea and chan's ghostty key listener on the
-  /// host each send ESC to the PTY and stop the event, so it never bubbles
-  /// out to the window. Taken here, it reaches neither, and the next key is
-  /// the terminal's.
-  function onMenuKeydownCapture(e: KeyboardEvent): void {
-    if (e.key !== "Escape" || !menuOpen) return;
-    if (e.target instanceof Element && e.target.closest(".terminal-tab-menu-bubble")) return;
-    e.preventDefault();
-    e.stopPropagation();
-    closeTabMenu();
-  }
+  const menuKeys = menuEscape({
+    open: () => menuOpen,
+    inside: (target) => target instanceof Element && !!target.closest(".terminal-tab-menu-bubble"),
+    close: closeTabMenu,
+  });
 
   function onDocPointerDown(e: PointerEvent): void {
     if (!menuOpen) return;
@@ -2995,8 +2978,8 @@
 </script>
 
 <svelte:window
-  onkeydowncapture={onMenuKeydownCapture}
-  onkeydown={onMenuKeydown}
+  onkeydowncapture={menuKeys.capture}
+  onkeydown={menuKeys.bubble}
   onpointerdown={onDocPointerDown}
 />
 

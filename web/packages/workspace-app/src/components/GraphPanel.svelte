@@ -68,6 +68,7 @@
   import { type ScopeOption } from "../state/scope";
   import { basename, parentDir } from "../state/format";
   import { clampMenu } from "./menuClamp";
+  import { menuEscape } from "./menuEscape";
   import { portal } from "./portal";
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
   import {
@@ -867,12 +868,11 @@
     return { x: Math.round(a.left), y: Math.round(a.bottom + 4) };
   });
 
-  function onTabMenuKeydown(e: KeyboardEvent): void {
-    if (e.key === "Escape" && tabMenuOpen) {
-      e.preventDefault();
-      closeTabMenu();
-    }
-  }
+  const tabMenuKeys = menuEscape({
+    open: () => tabMenuOpen,
+    inside: (target) => target instanceof Element && !!target.closest(".tab-menu-bubble"),
+    close: closeTabMenu,
+  });
 
   /// Dismiss when the click lands outside the bubble AND outside
   /// the tab strip (the tab row's own click handler toggles the
@@ -2560,7 +2560,11 @@
   }
 </script>
 
-<svelte:window onkeydown={onTabMenuKeydown} onpointerdown={onTabMenuPointerDown} />
+<svelte:window
+  onkeydowncapture={tabMenuKeys.capture}
+  onkeydown={tabMenuKeys.bubble}
+  onpointerdown={onTabMenuPointerDown}
+/>
 
 <!-- The graph is always a first-class TAB (mounted only by Pane.svelte
      with a `tab`): `graphState` is the tab and `visible` follows the

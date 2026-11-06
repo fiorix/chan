@@ -198,6 +198,8 @@ describe("the actions section", () => {
       "Graph from here",
     ]);
     expect(caret(target)?.getAttribute("aria-expanded")).toBe("true");
+    expect(caret(target)?.getAttribute("aria-haspopup")).toBe("menu");
+    expect(target.querySelector(".action-menu")?.getAttribute("role")).toBe("menu");
   });
 
   test("picking a menu item runs it and closes the menu", async () => {
