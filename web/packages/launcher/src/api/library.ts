@@ -446,7 +446,8 @@ export interface GatewayEntry {
   /** The wg-quick file this gateway is reached through, as stored; null when
    * the gateway is reached directly. */
   wireguard: string | null;
-  /** Live tunnel state; absent on an older desktop, null without a tunnel. */
+  /** Live tunnel state (connecting, up, lost with handshake age, or lookup
+   * failure); absent on an older desktop, null without a tunnel. */
   wireguard_status?: string | null;
 }
 

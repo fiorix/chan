@@ -717,9 +717,30 @@ fn validate_gateway_discovery(
     Ok(d)
 }
 
-pub async fn discover_gateway(url: &str) -> Result<GatewayDiscovery, String> {
+#[derive(Debug)]
+pub enum GatewayDiscoveryError {
+    Transport(String),
+    Other(String),
+}
+
+impl From<String> for GatewayDiscoveryError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl std::fmt::Display for GatewayDiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+pub async fn discover_gateway(url: &str) -> Result<GatewayDiscovery, GatewayDiscoveryError> {
     let normalized = normalize_devserver_url(url)?;
-    let mut u = url::Url::parse(&normalized).map_err(|e| format!("bad gateway URL: {e}"))?;
+    let mut u = url::Url::parse(&normalized)
+        .map_err(|e| GatewayDiscoveryError::Other(format!("bad gateway URL: {e}")))?;
     u.set_path("/.well-known/chan-gateway");
     u.set_query(None);
     u.set_fragment(None);
@@ -727,15 +748,20 @@ pub async fn discover_gateway(url: &str) -> Result<GatewayDiscovery, String> {
         .get(u)
         .send()
         .await
-        .map_err(|e| format!("checking chan-gateway discovery: {e}"))?;
+        .map_err(|e| {
+            GatewayDiscoveryError::Transport(format!("checking chan-gateway discovery: {e}"))
+        })?;
     if !resp.status().is_success() {
-        return Err(format!("gateway discovery returned HTTP {}", resp.status()));
+        return Err(GatewayDiscoveryError::Other(format!(
+            "gateway discovery returned HTTP {}",
+            resp.status()
+        )));
     }
     let d = resp
         .json::<GatewayDiscovery>()
         .await
-        .map_err(|e| format!("decoding gateway discovery: {e}"))?;
-    validate_gateway_discovery(&normalized, d)
+        .map_err(|e| GatewayDiscoveryError::Other(format!("decoding gateway discovery: {e}")))?;
+    validate_gateway_discovery(&normalized, d).map_err(Into::into)
 }
 
 #[derive(Serialize)]
