@@ -815,14 +815,18 @@ if python3 -I "$HERE/wgwrongkey-oracle.py" startup "$WORK/neg.log" "$ENDPOINT" "
 else
     arm_rc=1
 fi
-# The terminal is the only page on some starts. Its key bridge opens the
-# launcher, whose own webview can read the bearer-gated library list.
+# The terminal is the only page on some starts. Send the real chord through
+# CDP Input so its key bridge opens the launcher and its bearer-gated list.
 LAUNCHER_TARGET=""
 if ! launcher_target; then
-    if ! node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$PAGE" \
-        "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'P', code: 'KeyP', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true}))" \
+    node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$PAGE" 'Boolean(window.__TAURI__?.core?.invoke)' \
+        > "$WORK/host-bridge.out" 2>>"$WORK/cdp-eval.err" || true
+    if ! node "$HELPERS/cdp.mjs" launcher-key "$LOCAL_CDP" "$PAGE" \
         > "$WORK/toggle-launcher.out" 2>>"$WORK/cdp-eval.err"; then arm_rc=1; fi
-    wait_for 60 "the launcher target" launcher_target || arm_rc=1
+    if ! wait_for 60 "the launcher target" launcher_target; then
+        node "$HELPERS/cdp.mjs" targets "$LOCAL_CDP" > "$WORK/launcher-targets.json" 2>>"$WORK/cdp-eval.err" || true
+        arm_rc=1
+    fi
 fi
 list_status=unread
 row_error=unread
