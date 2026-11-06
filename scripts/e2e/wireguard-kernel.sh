@@ -32,6 +32,9 @@
 #               start, and logs no ERROR at the production warn filter.
 #   dns         an initially absent endpoint recovers and follows a hosts
 #               file change to a second UDP forwarding path (opt-in).
+#   dns-late    a moved record stays dark for its first probe, then the next
+#               handshake attempt follows it before the session is stale.
+#               Uses --hold 125..140 (default 130), opt-in.
 #
 # What it cannot prove: a peer behind a real NAT or a changing address, a
 # tunnel URL by name, and anything the gateway answers past the preface.
@@ -48,7 +51,7 @@
 #                        refused when it already exists)
 #   --hold SECS          the rekey arm's idle hold (default 130, past the 120 s rekey)
 #   --arms LIST          comma separated arms to run (default: all, in the order above)
-#   --dns-second-endpoint HOST:PORT  second forward to the same peer, for --arms dns
+#   --dns-second-endpoint HOST:PORT  second forward to the same peer, for dns or dns-late
 #   --dns-second-peer-port PORT      the peer port that second forward reaches,
 #                        when it is not the listen port: the run redirects it
 #                        to the listen port with nft and removes the rule at
@@ -121,8 +124,11 @@ PEER_CIDR="${POSITIONAL[2]}"
 case "$HOLD" in '' | *[!0-9]*) refuse "--hold takes a number of seconds" ;; esac
 [ "$HOLD" -gt 120 ] || refuse "--hold must exceed the protocol's 120 s rekey time"
 case ",$ARMS," in
-    *,dns,*)
-        [ -n "$DNS_SECOND_ENDPOINT" ] || refuse "--arms dns requires --dns-second-endpoint"
+    *,dns-late,*) [ "$HOLD" -ge 125 ] && [ "$HOLD" -le 140 ] || refuse "dns-late requires --hold between 125 and 140" ;;
+esac
+case ",$ARMS," in
+    *,dns,*|*,dns-late,*)
+        [ -n "$DNS_SECOND_ENDPOINT" ] || refuse "dns arms require --dns-second-endpoint"
         command -v unshare >/dev/null 2>&1 || refuse "unshare is not installed"
         unshare --user --map-root-user --mount true || refuse "unprivileged mount namespaces unavailable"
         ;;
@@ -142,7 +148,7 @@ PEER_NET="$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.a
 case "$LISTEN_PORT" in '' | *[!0-9]*) refuse "no port in ENDPOINT $ENDPOINT" ;; esac
 NFT_PLANNED=""
 if [ -n "$DNS_SECOND_PEER_PORT" ]; then
-    case ",$ARMS," in *,dns,*) ;; *) refuse "--dns-second-peer-port is for --arms dns" ;; esac
+    case ",$ARMS," in *,dns,*|*,dns-late,*) ;; *) refuse "--dns-second-peer-port is for dns arms" ;; esac
     case "$DNS_SECOND_PEER_PORT" in '' | *[!0-9]*) refuse "--dns-second-peer-port takes a port number" ;; esac
     [ "$DNS_SECOND_PEER_PORT" != "$LISTEN_PORT" ] || refuse "--dns-second-peer-port is the listen port; leave it out"
     NFT_PLANNED="$NFT_TABLE"
@@ -368,18 +374,19 @@ run_example() {
     sed -n 's/^rc=//p' "$out"
 }
 
-if runs dns; then
+for dns_arm in dns dns-late; do
+    runs "$dns_arm" || continue
     arm_rc=0
     parent_mount_namespace="$(readlink /proc/self/ns/mnt)"
-    unshare --user --map-root-user --mount --fork \
+    timeout $((HOLD + 150)) unshare --user --map-root-user --mount --fork \
         python3 "$REPO/scripts/e2e/wireguard-dns.py" \
         "$WG_CONNECT_BIN" "$WORK/client.conf" "$PEER_IP:$HTTP_PORT" \
-        "$ENDPOINT" "$DNS_SECOND_ENDPOINT" "$WORK/dns" "$HOLD" "$parent_mount_namespace" \
-        > "$WORK/dns.log" 2>&1 || arm_rc=$?
+        "$ENDPOINT" "$DNS_SECOND_ENDPOINT" "$WORK/$dns_arm" "$HOLD" "$parent_mount_namespace" "$dns_arm" \
+        > "$WORK/$dns_arm.log" 2>&1 || arm_rc=$?
     helper_rc="$arm_rc"
     sha1=""; sha2=""
-    if [ -f "$WORK/dns/client.log" ]; then
-        sha1="$(body_sha "$WORK/dns/client.log" 1)"; sha2="$(body_sha "$WORK/dns/client.log" 2)"
+    if [ -f "$WORK/$dns_arm/client.log" ]; then
+        sha1="$(body_sha "$WORK/$dns_arm/client.log" 1)"; sha2="$(body_sha "$WORK/$dns_arm/client.log" 2)"
     fi
     if [ "$arm_rc" = 0 ] && { [ "$sha1" != "$HELLO_SHA" ] || [ "$sha2" != "$HELLO_SHA" ]; }; then
         arm_rc=1
@@ -387,10 +394,10 @@ if runs dns; then
     # The helper's own account, one line per stage it reached and its PASS
     # or FAIL line (first line only: the client log a FAIL carries is
     # printed below).
-    stages="$(sed -n 's/^dns: //p' "$WORK/dns.log" | paste -sd '|' - | sed 's/|/; /g')"
-    verdict dns "$arm_rc" "helper rc=$helper_rc (${stages:-no stage reached}); GET 1 $(hello_body "$sha1"), GET 2 $(hello_body "$sha2")"
-    cat "$WORK/dns.log" >&2
-fi
+    stages="$(sed -n -e 's/^dns: //p' -e 's/^dns-late: //p' "$WORK/$dns_arm.log" | paste -sd '|' - | sed 's/|/; /g')"
+    verdict "$dns_arm" "$arm_rc" "helper rc=$helper_rc (${stages:-no stage reached}); GET 1 $(hello_body "$sha1"), GET 2 $(hello_body "$sha2")"
+    cat "$WORK/$dns_arm.log" >&2
+done
 
 # wrong-key: the control. The peer's handshake stamp must not move, the
 # connect must time out, and the peer must have taken UDP datagrams from
