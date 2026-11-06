@@ -3,7 +3,7 @@
 //! for it.
 //!
 //! ```text
-//! wg-peer CLIENT_FILE [--port PORT] [--status SECS]
+//! wg-peer CLIENT_FILE [--port PORT] [--status SECS] [--forward PORT=ADDR]
 //! ```
 //!
 //! Mints a key pair for each side and writes `CLIENT_FILE`, owner-only
@@ -16,7 +16,8 @@
 //! `PORT` (default 8080) inside it and answers every connection as an
 //! HTTP server that prints the request line and answers 404 with no
 //! body, so a gateway discovery reaches a real listener and fails at the
-//! HTTP level, which is the expected outcome. Prints one `peer: ready`
+//! HTTP level, which is the expected outcome. With `--forward`, a second
+//! tunnel listener copies connections to a host TCP address. Prints one `peer: ready`
 //! line with the URL and the UDP address once listening, a `request:`
 //! line per request and a `status:` line every `SECS` (default 2) with
 //! the handshake age, the byte counters and the endpoint; runs until
@@ -38,10 +39,11 @@ use chan_wireguard::config::Config;
 use chan_wireguard::x25519::{PublicKey, StaticSecret};
 use chan_wireguard::{Stream, Tunnel};
 use rand_core::OsRng;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UdpSocket;
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 
-const USAGE: &str = "usage: wg-peer CLIENT_FILE [--port PORT] [--status SECS]";
+const USAGE: &str =
+    "usage: wg-peer CLIENT_FILE [--port PORT] [--status SECS] [--forward PORT=ADDR]";
 const PEER_ADDRESS: &str = "10.7.0.2";
 const CLIENT_ADDRESS: &str = "10.7.0.1";
 const PLACEHOLDER_ENDPOINT: &str = "127.0.0.1:9";
@@ -55,12 +57,14 @@ struct Args {
     file: PathBuf,
     port: u16,
     status: Duration,
+    forward: Option<(u16, SocketAddr)>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut positional = Vec::new();
     let mut port = 8080;
     let mut status = Duration::from_secs(2);
+    let mut forward = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -79,6 +83,16 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "--status is not a number of seconds")?;
                 status = Duration::from_secs(secs);
             }
+            "--forward" => {
+                let value = args.next().ok_or("--forward needs PORT=ADDR")?;
+                let (port, addr) = value.split_once('=').ok_or("--forward needs PORT=ADDR")?;
+                forward = Some((
+                    port.parse()
+                        .map_err(|_| "--forward port is not a port number")?,
+                    addr.parse()
+                        .map_err(|_| "--forward address is not a socket address")?,
+                ));
+            }
             _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
             _ => positional.push(arg),
         }
@@ -90,6 +104,7 @@ fn parse_args() -> Result<Args, String> {
         file: PathBuf::from(&positional[0]),
         port,
         status,
+        forward,
     })
 }
 
@@ -165,11 +180,42 @@ async fn run(args: Args) -> Result<(), String> {
     let mut listener = tunnel
         .listen(args.port)
         .map_err(|e| format!("listening on port {}: {e}", args.port))?;
+    let forward = args
+        .forward
+        .map(|(port, addr)| {
+            tunnel
+                .listen(port)
+                .map(|listener| (listener, addr))
+                .map_err(|e| format!("listening on forward port {port}: {e}"))
+        })
+        .transpose()?;
+    let forward_ready = forward
+        .as_ref()
+        .map_or_else(String::new, |(listener, addr)| {
+            format!(" forward={PEER_ADDRESS}:{}->{addr}", listener.port())
+        });
     println!(
-        "peer: ready url=http://{PEER_ADDRESS}:{} udp={udp_at} file={}",
+        "peer: ready url=http://{PEER_ADDRESS}:{} udp={udp_at} file={}{}",
         listener.port(),
-        args.file.display()
+        args.file.display(),
+        forward_ready
     );
+
+    if let Some((mut listener, addr)) = forward {
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok(stream) => {
+                        tokio::spawn(forward_connection(stream, addr));
+                    }
+                    Err(error) => {
+                        eprintln!("peer: accepting a forwarded connection: {error}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     let status = tunnel.clone();
     let every = args.status;
@@ -200,6 +246,17 @@ async fn run(args: Args) -> Result<(), String> {
             .map_err(|e| format!("accepting a connection: {e}"))?;
         tokio::spawn(answer(stream));
     }
+}
+
+/// Copy a tunnel connection to the host service and close both ends when it ends.
+async fn forward_connection(mut tunnel_stream: Stream, addr: SocketAddr) {
+    let Ok(mut tcp) = TcpStream::connect(addr).await else {
+        return;
+    };
+    let _ = tcp.set_nodelay(true);
+    let _ = copy_bidirectional(&mut tunnel_stream, &mut tcp).await;
+    let _ = tunnel_stream.shutdown().await;
+    let _ = tcp.shutdown().await;
 }
 
 /// Read the request head, print its first line and answer 404.
