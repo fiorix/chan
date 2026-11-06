@@ -47,8 +47,8 @@
 #   refusals      the proxy refused nothing in the positive run, in a log
 #                 that holds its forwards and CONNECTs.
 #   wrong-key     the desktop restarted on a file naming a wrong peer key:
-#                 the start-up log and gateway row name the missing handshake
-#                 and file without key values; the window's peer navigation
+#                 the start-up log names the missing handshake and file
+#                 without key values; the window's peer navigation
 #                 document ends in the proxy's 502 within 8 s, then chan's
 #                 connecting page names the never-handshaken reason; the peer
 #                 logs no request and its handshake stamp does not move, and
@@ -59,7 +59,7 @@
 #
 # What it cannot prove: a real gateway's TLS and identity behind the proxy,
 # the window feed's WebSocket (the stand-in has no roster), the launcher
-# webview (its navigation handler keeps it on its own origin), and a peer
+# panel's child webview (outside this CDP browser process), and a peer
 # behind NAT or at a changing address.
 #
 # Usage:
@@ -685,11 +685,6 @@ navigate() {
 }
 jfield() { python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {}, {"r": r}))' "$@" 2>/dev/null || echo "?"; }
 urlencode() { python3 -I -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
-launcher_target() {
-    LAUNCHER_TARGET="$(node "$HELPERS/cdp.mjs" launcher "$LOCAL_CDP" 2>>"$WORK/cdp-eval.err")" || return 1
-    [ -n "$LAUNCHER_TARGET" ]
-}
-
 # 4. The positive run.
 HS_BEFORE="$(peer_handshake)"
 start_desktop pos client.conf || exit 1
@@ -860,29 +855,6 @@ if python3 -I "$HERE/wgwrongkey-oracle.py" startup "$WORK/neg.log" "$ENDPOINT" "
 else
     arm_rc=1
 fi
-# The terminal is the only page on some starts. Send the real chord through
-# CDP Input so its key bridge opens the launcher and its bearer-gated list.
-LAUNCHER_TARGET=""
-if ! launcher_target; then
-    node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$PAGE" 'Boolean(window.__TAURI__?.core?.invoke)' \
-        > "$WORK/host-bridge.out" 2>>"$WORK/cdp-eval.err" || true
-    if ! node "$HELPERS/cdp.mjs" launcher-key "$LOCAL_CDP" "$PAGE" \
-        > "$WORK/toggle-launcher.out" 2>>"$WORK/cdp-eval.err"; then arm_rc=1; fi
-    if ! wait_for 60 "the launcher target" launcher_target; then
-        node "$HELPERS/cdp.mjs" targets "$LOCAL_CDP" > "$WORK/launcher-targets.json" 2>>"$WORK/cdp-eval.err" || true
-        arm_rc=1
-    fi
-fi
-list_status=unread
-row_error=unread
-if [ -n "$LAUNCHER_TARGET" ]; then
-    if ! node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$LAUNCHER_TARGET" \
-        '(async () => { const token = new URL(location.href).searchParams.get("t"); const response = await fetch("/api/library/gateways", {headers: {Authorization: `Bearer ${token}`}}); return JSON.stringify({http_status: response.status, rows: await response.json()}); })()' \
-        > "$WORK/wrong-key-gateways.json" 2>>"$WORK/cdp-eval.err"; then arm_rc=1; fi
-    list_status="$(jfield "$WORK/wrong-key-gateways.json" 'r["http_status"]')"
-    [ "$list_status" = 200 ] || arm_rc=1
-    row_error="$(python3 -I "$HERE/wgwrongkey-oracle.py" wrong-key "$WORK/wrong-key-gateways.json" "$GATEWAY_ID" "$ENDPOINT" "$expected_file" 2>>"$WORK/oracle.err")" || arm_rc=1
-fi
 navigate "$WORK/wrong-key" "$PEER_ORIGIN/?arm=wrong-key-$NONCE" 5000
 # Navigation spends part of the bound that starts at the tunnel-start line.
 expiry_wait=$((expiry_deadline - SECONDS))
@@ -930,7 +902,7 @@ for forbidden in "$WRONG_PUB" "$SERVER_PUB" 'ERR_HTTP_RESPONSE_CODE_FAILURE'; do
 done
 peer_absent "wrong-key-page-$NONCE" || arm_rc=1
 [ -s "$WORK/wrong-key-page.png" ] || arm_rc=1
-verdict wrong-key "$arm_rc" "startup named=$startup_ok, list HTTP $list_status, row '$(printf '%s' "$row_error" | cut -c1-80)', direct document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms; app document 200: $wrong_page_app, title '$wrong_page_title', error $wrong_page_error, reason '$(printf '%s' "$wrong_page_text" | grep -o 'no WireGuard handshake.*' | head -1 | cut -c1-80)', screenshot $(stat -c %s "$WORK/wrong-key-page.png" 2>/dev/null || echo 0) bytes; peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
+verdict wrong-key "$arm_rc" "startup named=$startup_ok, direct document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms; app document 200: $wrong_page_app, title '$wrong_page_title', error $wrong_page_error, reason '$(printf '%s' "$wrong_page_text" | grep -o 'no WireGuard handshake.*' | head -1 | cut -c1-80)', screenshot $(stat -c %s "$WORK/wrong-key-page.png" 2>/dev/null || echo 0) bytes; peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
 stop_desktop
 
 if [ "$FAILED" != 0 ]; then
