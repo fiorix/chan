@@ -301,6 +301,15 @@ impl GatewayManager {
             })
     }
 
+    /// A saved file change supersedes a discovery failure tied to the old file.
+    pub(crate) fn clear_discovery_error(&self, gateway_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .discovery_errors
+            .remove(gateway_id);
+    }
+
     /// The roster snapshot of a connected gateway (synthesized-row
     /// sources). Empty when the gateway has no runtime.
     pub fn roster(&self, gateway_id: &str) -> Vec<RosterDevserver> {
@@ -5102,7 +5111,12 @@ pub(crate) mod tests {
             .find(|row| row.id == "gw-changed")
             .unwrap();
         assert_eq!(row.last_error.as_deref(), Some(err.as_str()));
-        let notice: serde_json::Value = serde_json::from_str(&notice_rx.recv().unwrap()).unwrap();
+        let notice: serde_json::Value = serde_json::from_str(
+            &notice_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("WireGuard discovery notice"),
+        )
+        .unwrap();
         assert_eq!(notice["title"], "Gateway WireGuard");
         assert_eq!(notice["message"], err);
         assert_eq!(
@@ -5218,6 +5232,34 @@ pub(crate) mod tests {
             fabric.status("gw-changed", Some(&named)).as_deref(),
             Some("connecting")
         );
+        let bad_start = wg_file("bad-start.conf", "224.0.0.1/32");
+        let changed = registry
+            .update(
+                "gw-changed",
+                chan_server::GatewayInput {
+                    url: String::new(),
+                    label: None,
+                    wireguard: Some(bad_start.display().to_string()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let refusal = changed.last_error.expect("the new file's refusal");
+        assert!(refusal.starts_with("WireGuard: "), "{refusal}");
+        assert!(refusal.contains("tunnel address 224.0.0.1/32"), "{refusal}");
+        assert!(!refusal.contains(&named.display().to_string()), "{refusal}");
+        let cleared = registry
+            .update(
+                "gw-changed",
+                chan_server::GatewayInput {
+                    url: String::new(),
+                    label: None,
+                    wireguard: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.last_error, None);
     }
 
     /// Install a runtime under `pat_load_test_state`'s gateway id with a

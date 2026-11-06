@@ -1140,6 +1140,9 @@ impl GatewayRegistry for GatewayConfigRegistry {
         let previous = std::mem::replace(&mut gw.wireguard, wireguard);
         let gw = gw.clone();
         store.save(&cfg).map_err(|e| e.to_string())?;
+        if previous.as_deref() != gw.wireguard.as_deref() {
+            self.manager.clear_discovery_error(id);
+        }
         self.follow_wireguard(&gw, previous.as_deref());
         Ok(Some(entry_from_gateway(
             &gw,

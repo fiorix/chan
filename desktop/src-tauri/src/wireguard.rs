@@ -393,6 +393,9 @@ fn missing_handshake_reason(
 ) -> Option<String> {
     match status.handshake {
         chan_wireguard::HandshakeState::Live(_) => None,
+        chan_wireguard::HandshakeState::Never if status.endpoint.is_none() => {
+            Some(describe(status))
+        }
         _ if status.endpoint.is_none() && status.resolution_error.is_some() => {
             Some(describe(status))
         }
@@ -1168,16 +1171,13 @@ mod tests {
         );
         assert_eq!(
             missing_handshake_reason(
-                status(
-                    chan_wireguard::HandshakeState::Live(Duration::from_secs(3)),
-                    resolved,
-                    None
-                ),
+                status(chan_wireguard::HandshakeState::Never, None, None),
                 endpoint,
                 file,
                 Duration::from_secs(5),
-            ),
-            None
+            )
+            .as_deref(),
+            Some("connecting")
         );
         let failure = "endpoint did not resolve: gw.test:51820, retrying";
         assert_eq!(
@@ -1193,6 +1193,27 @@ mod tests {
             )
             .as_deref(),
             Some(failure)
+        );
+    }
+
+    #[test]
+    fn live_handshake_has_no_missing_reason() {
+        let status = chan_wireguard::Status {
+            handshake: chan_wireguard::HandshakeState::Live(Duration::from_secs(3)),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            endpoint: Some("127.0.0.1:51820".parse().unwrap()),
+            resolution_error: None,
+            resolution_stalled: false,
+        };
+        assert_eq!(
+            missing_handshake_reason(
+                status,
+                "127.0.0.1:51820",
+                Path::new("/tmp/client.conf"),
+                Duration::from_secs(5),
+            ),
+            None
         );
     }
 
@@ -1457,6 +1478,17 @@ mod tests {
         );
         assert_eq!(fabric.failure("gw-a", Some(a)), None);
         assert_eq!(fabric.connect_refusal("gw-a", Some(a)), None);
+        fabric.set_test_status(
+            "gw-a",
+            chan_wireguard::Status {
+                handshake: chan_wireguard::HandshakeState::Never,
+                tx_bytes: 0,
+                rx_bytes: 0,
+                endpoint: Some("127.0.0.1:51820".parse().unwrap()),
+                resolution_error: None,
+                resolution_stalled: false,
+            },
+        );
         let reason = fabric.discovery_failure("gw-a", Some(a)).unwrap();
         assert!(reason.contains("no WireGuard handshake"), "{reason}");
         assert!(reason.contains(&a.display().to_string()), "{reason}");
