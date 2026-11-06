@@ -4,12 +4,6 @@
 //     prints the id of the first window's page target and, after a space,
 //     its URL without the query (which carries the window's token); exits 1
 //     when there is none. The launcher, served at the root, is not a window.
-//   node cdp.mjs launcher PORT
-//     prints the launcher's target id, never its URL or bearer.
-//   node cdp.mjs targets PORT
-//     writes target ids, titles and URL paths with query values redacted.
-//   node cdp.mjs launcher-key PORT TARGET_ID
-//     sends a trusted Ctrl+Shift+P keydown/up to a host webview.
 //   node cdp.mjs eval PORT TARGET_ID EXPRESSION
 //     evaluates in that webview and prints only the returned value.
 //   node cdp.mjs nav PORT TARGET_ID URL OUT_PREFIX [WAIT_MS]
@@ -24,20 +18,6 @@ const base = `http://127.0.0.1:${port}`;
 const targets = async () => (await fetch(`${base}/json/list`)).json();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-if (mode === 'targets') {
-  const listing = (await targets()).map(({ id, type, title, url }) => {
-    let safeUrl;
-    try {
-      const parsed = new URL(url);
-      safeUrl = parsed.origin + parsed.pathname + (parsed.search ? '?[query]' : '');
-    } catch {
-      safeUrl = String(url).split('?')[0];
-    }
-    return { id, type, title, url: safeUrl };
-  });
-  console.log(JSON.stringify(listing, null, 2));
-  process.exit(0);
-}
 if (mode === 'page') {
   const parse = (u) => {
     try {
@@ -53,20 +33,7 @@ if (mode === 'page') {
   console.log(`${page.t.id} ${page.u.origin}${page.u.pathname}`);
   process.exit(0);
 }
-if (mode === 'launcher') {
-  const launcher = (await targets()).find((target) => {
-    try {
-      const url = new URL(target.url);
-      return target.type === 'page' && url.hostname === '127.0.0.1' && url.pathname === '/' && url.searchParams.has('t');
-    } catch {
-      return false;
-    }
-  });
-  if (!launcher) process.exit(1);
-  console.log(launcher.id);
-  process.exit(0);
-}
-if (mode !== 'nav' && mode !== 'eval' && mode !== 'launcher-key') {
+if (mode !== 'nav' && mode !== 'eval') {
   console.error(`unknown mode ${mode}`);
   process.exit(2);
 }
@@ -112,15 +79,6 @@ const send = (method, params = {}, timeoutMs = 90000) => {
     }, timeoutMs);
   });
 };
-if (mode === 'launcher-key') {
-  await send('Page.bringToFront');
-  const key = { modifiers: 10, code: 'KeyP', key: 'P', keyIdentifier: 'U+0050', windowsVirtualKeyCode: 80, nativeVirtualKeyCode: 80 };
-  await send('Input.dispatchKeyEvent', { ...key, type: 'rawKeyDown' });
-  await send('Input.dispatchKeyEvent', { ...key, type: 'keyUp' });
-  console.log('sent');
-  ws.close();
-  process.exit(0);
-}
 if (mode === 'eval') {
   const result = await send('Runtime.evaluate', { expression: url, awaitPromise: true, returnByValue: true }, 30000);
   if (result.exceptionDetails || !Object.hasOwn(result.result, 'value')) throw new Error('webview evaluation failed');
