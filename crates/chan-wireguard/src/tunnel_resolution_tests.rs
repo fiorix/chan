@@ -1098,11 +1098,16 @@ async fn lookup_failures_warn_when_they_start_or_change() {
     clock::advance(REKEY_TIMEOUT + TICK);
     f.query().await.send(Ok(f.b_at)).unwrap();
     until(|| matches!(f.a.status().handshake, HandshakeState::Live(_))).await;
+    // Both peers share the test clock. Stop the peer so its dead-peer
+    // handshake cannot make the client a responder before its rekey.
+    drop(f.b);
     // The rekey's lookup fails as the last one before the recovery did:
     // a new failure, not a repeat.
     clock::advance(Duration::from_secs(121));
-    f.query()
+    timeout(WAIT, f.queries.recv())
         .await
+        .expect("the recovered client's rekey requests a lookup")
+        .expect("the resolver remains alive")
         .send(Err(not_found("server failure")))
         .unwrap();
     until(|| f.a.status().resolution_error.is_some()).await;
