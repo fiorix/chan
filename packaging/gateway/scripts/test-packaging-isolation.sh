@@ -4,7 +4,9 @@
 # refusals.
 #
 # It runs the real package postinst scripts against a scratch root in all 120
-# install orders, drives the database readiness check, the postinst conffile
+# install orders of the five account-plane packages, with the WireGuard
+# agent's package at each of the six positions, drives the database
+# readiness check, the postinst conffile
 # refusals, the admission keypair helper, and every sdme provisioner refusal
 # path against stubbed id/getent. That takes about half a minute, so it is not
 # part of `make pre-push`; the static half, check-packaging-isolation.sh, is.
@@ -25,7 +27,7 @@ die() {
     exit 1
 }
 
-services=(profile identity devserver-control devserver-proxy)
+services=(profile identity devserver-control devserver-proxy wireguard-agent)
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -61,7 +63,7 @@ PATH="$WORK/readiness-bin:$PATH" DATABASE_URL=unused \
 
 mkdir -p "$WORK/postinst" "$WORK/postinst-bin"
 packages=(admin profile identity devserver-control devserver-proxy)
-for package in "${packages[@]}"; do
+for package in "${packages[@]}" wireguard-agent; do
     sed "s|/etc/chan-gateway|$WORK/package-root/etc/chan-gateway|g" \
         "$REPO/gateway/crates/$package/packaging/postinst" \
         > "$WORK/postinst/$package"
@@ -125,8 +127,15 @@ run_package_order() {
     done
 }
 
-# Five nested loops cover all 120 install orders. Distinct package names make
-# an order a permutation; repeated choices are skipped.
+# Five nested loops cover all 120 install orders of the five account-plane
+# packages. Distinct package names make an order a permutation; repeated
+# choices are skipped. The WireGuard agent's package joins each order at a
+# rotating position, first through last, so it runs at each of the six
+# positions in 20 orders: every postinst reapplies the same shared state, so
+# where the agent's runs relative to the others is what an order can change,
+# and all 720 orders of six would take about six times as long.
+orders=0
+declare -A agent_positions=()
 for a in "${packages[@]}"; do
     for b in "${packages[@]}"; do
         [[ "$b" != "$a" ]] || continue
@@ -136,11 +145,20 @@ for a in "${packages[@]}"; do
                 [[ "$d" != "$a" && "$d" != "$b" && "$d" != "$c" ]] || continue
                 for e in "${packages[@]}"; do
                     [[ "$e" != "$a" && "$e" != "$b" && "$e" != "$c" && "$e" != "$d" ]] || continue
-                    run_package_order "$a" "$b" "$c" "$d" "$e"
+                    order=("$a" "$b" "$c" "$d" "$e")
+                    position=$((orders % 6))
+                    run_package_order "${order[@]:0:position}" wireguard-agent "${order[@]:position}"
+                    agent_positions[$position]=$((${agent_positions[$position]:-0} + 1))
+                    orders=$((orders + 1))
                 done
             done
         done
     done
+done
+[[ $orders -eq 120 ]] || die "ran $orders install orders, expected 120"
+for position in 0 1 2 3 4 5; do
+    [[ ${agent_positions[$position]:-0} -eq 20 ]] \
+        || die "the WireGuard agent's postinst ran at position $position in ${agent_positions[$position]:-0} orders, expected 20"
 done
 
 # A retained pre-hardening conffile must fail package configuration instead of

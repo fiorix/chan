@@ -93,7 +93,7 @@ Tests use real Postgres with per-test schema isolation. Identity tests mock the 
 
 ## Releases
 
-The gateway ships on the monorepo's release line: the gateway crates are versioned in lockstep with the root (`chan`), and a `v*` tag triggers the repo-root `.github/workflows/release.yml`, whose `gateway-linux-packages` job builds five .deb packages (`chan-gateway-profile`, `chan-gateway-identity`, `chan-gateway-devserver-control`, `chan-gateway-devserver-proxy`, `chan-gateway-admin`) for amd64 and arm64 and uploads them alongside the rest of the release.
+The gateway ships on the monorepo's release line: the gateway crates are versioned in lockstep with the root (`chan`), and a `v*` tag triggers the repo-root `.github/workflows/release.yml`, whose `gateway-linux-packages` job builds six .deb packages (`chan-gateway-profile`, `chan-gateway-identity`, `chan-gateway-devserver-control`, `chan-gateway-devserver-proxy`, `chan-gateway-admin`, `chan-gateway-wireguard-agent`) for amd64 and arm64 and uploads them alongside the rest of the release.
 
 There is no gateway-local release script: bump `gateway/Cargo.toml` in the same commit as the root `Cargo.toml` version, then cut the release from the monorepo root. The release workflow's `context` job asserts the tag matches the gateway version.
 
@@ -104,7 +104,7 @@ brew install zig
 rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 cargo install cargo-zigbuild cargo-deb
 ../packaging/gateway/scripts/build-debs.sh
-ls dist/                                   # ten .deb files (5 packages x 2 archs)
+ls dist/                                   # twelve .deb files (6 packages x 2 archs)
 ```
 
 ### Install on a Debian/Ubuntu host
@@ -127,7 +127,16 @@ sudo systemctl enable --now chan-gateway-devserver-control
 sudo systemctl enable --now chan-gateway-devserver-proxy
 ```
 
-The binaries listen on loopback by default: identity public `7000`, identity internal `7004`, profile `7001`, control `7003`/`7101`, and proxy `7002`/`7100`. Front only identity `7000` and proxy `7002`/`7100` with TLS. Never publish identity `7004` or either control listener. Kubernetes and sdme deployment is in [`packaging/kube/README.md`](../packaging/kube/README.md).
+The binaries listen on loopback by default: identity public `7000`, identity internal `7004`, profile `7001`, control `7003`/`7101`, and proxy `7002`/`7100`. Front only identity `7000` and proxy `7002`/`7100` with TLS. Never publish identity `7004` or either control listener.
+
+A proxy host that terminates kernel WireGuard for enrolled desktops also runs the WireGuard agent, which listens on nothing. Bring the interface up first ([`crates/wireguard-agent/README.md`](crates/wireguard-agent/README.md) shows how), then install the package, which depends on `wireguard-tools`, set `WIREGUARD_AGENT_TOKEN` in `/etc/chan-gateway/wireguard-agent.env` to identity's value along with the host id and interface name (`configure.sh` does both on a host that runs identity too), and start it:
+
+```sh
+sudo apt install ./chan-gateway-wireguard-agent_*.deb
+sudo systemctl enable --now chan-gateway-wireguard-agent
+```
+
+Kubernetes and sdme deployment is in [`packaging/kube/README.md`](../packaging/kube/README.md).
 
 ## Admin
 

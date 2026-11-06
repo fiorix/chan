@@ -36,7 +36,7 @@ The database needs a UTF-8 locale: profile folds emails with PostgreSQL `lower()
 
 ### Packaging checks
 
-`make gateway-version-pin-check` runs the static packaging contracts (the deb dependency pins and the packaging isolation rules) and is part of `gateway-lint`. `make gateway-packaging-isolation-test` is opt-in: it runs the real postinst scripts in every install order and the sdme provisioner's refusals, about half a minute, so run it when a change touches a package `postinst` or `packaging/*.env`, `configure.sh`, `check-database-ready.sh`, `generate-admission-keypair.py` or `packaging/sdme/chan-devserver-provision.sh`, and before a release that carries such a change. Building and installing the deb packages is in [`gateway/README.md`](../gateway/README.md).
+`make gateway-version-pin-check` runs the static packaging contracts (the deb dependency pins and the packaging isolation rules) and is part of `gateway-lint`. `make gateway-packaging-isolation-test` is opt-in: it runs the six packages' real postinst scripts (every install order of the five account-plane packages, the WireGuard agent's at each position) and the sdme provisioner's refusals, about half a minute, so run it when a change touches a package `postinst` or `packaging/*.env`, `configure.sh`, `check-database-ready.sh`, `generate-admission-keypair.py` or `packaging/sdme/chan-devserver-provision.sh`, and before a release that carries such a change. Building and installing the deb packages is in [`gateway/README.md`](../gateway/README.md).
 
 ## Documents
 

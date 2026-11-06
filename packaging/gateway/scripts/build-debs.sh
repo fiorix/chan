@@ -15,7 +15,7 @@ set -euo pipefail
 
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/gateway"
 
-CRATES=("profile" "identity" "devserver-proxy" "devserver-control" "admin")
+CRATES=("profile" "identity" "devserver-proxy" "devserver-control" "admin" "wireguard-agent")
 TARGETS=("x86_64-unknown-linux-gnu" "aarch64-unknown-linux-gnu")
 
 # Frontend bundle. rust-embed bakes whatever is in
@@ -30,7 +30,8 @@ echo "==> building SPA bundle"
 for target in "${TARGETS[@]}"; do
     echo "==> cargo-zigbuild --release --target $target"
     cargo zigbuild --release --target "$target" \
-        -p profile -p identity -p devserver-proxy -p devserver-control -p admin
+        -p profile -p identity -p devserver-proxy -p devserver-control -p admin \
+        -p wireguard-agent
 done
 
 # Package each crate per target.

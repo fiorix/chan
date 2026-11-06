@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    if ! getent passwd chan-gateway-wireguard-agent >/dev/null; then
+      adduser --system --no-create-home --group chan-gateway-wireguard-agent
+    fi
+    install -d -m 0751 -o root -g root /etc/chan-gateway
+    if [ -f /etc/chan-gateway/domain.env ]; then
+      chown root:root /etc/chan-gateway/domain.env
+      chmod 0644 /etc/chan-gateway/domain.env
+    fi
+    if [ -f /etc/chan-gateway/wireguard-agent.env ]; then
+      chown root:chan-gateway-wireguard-agent /etc/chan-gateway/wireguard-agent.env
+      chmod 0640 /etc/chan-gateway/wireguard-agent.env
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

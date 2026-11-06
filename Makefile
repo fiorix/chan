@@ -105,7 +105,7 @@ REPO_ROOT := $(abspath .)
 # build (gateway-build) and the release.yml deb-packaging matrix, which
 # both read it instead of repeating the names, so a crate rename breaks
 # the local gate rather than only the published release.
-GATEWAY_RELEASE_CRATES := profile identity devserver-proxy devserver-control admin
+GATEWAY_RELEASE_CRATES := profile identity devserver-proxy devserver-control admin wireguard-agent
 
 .PHONY: help
 help: ## Show this help.
@@ -678,7 +678,7 @@ gateway-version-pin-check: ## Check the gateway deb dependency pins and the stat
 	packaging/gateway/scripts/check-packaging-isolation.sh
 
 .PHONY: gateway-packaging-isolation-test
-gateway-packaging-isolation-test: gateway-version-pin-check ## Opt-in, not in pre-push: run the gateway postinsts in all 120 install orders and the sdme provisioner refusals.
+gateway-packaging-isolation-test: gateway-version-pin-check ## Opt-in, not in pre-push: run the gateway postinsts in all 120 orders of the account-plane packages, the WireGuard agent's at every position, and the sdme provisioner refusals.
 	$(LINUX_ONLY)
 	# The behavioural half of the packaging isolation checks. It executes
 	# the real postinst scripts against a scratch root and the provisioner

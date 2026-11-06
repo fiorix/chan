@@ -15,6 +15,10 @@ cargo test -p wireguard-agent
 
 The tests need no privilege, no interface and no identity: the reconciler runs against a stand-in `wg` script and the poll against a wiremock identity.
 
+## Install
+
+The release ships the deb `chan-gateway-wireguard-agent`. It installs `/usr/bin/chan-gateway-wireguard-agent`, the system user and group `chan-gateway-wireguard-agent`, `/etc/chan-gateway/wireguard-agent.env` (mode 0640, root and the agent's group) and the unit `chan-gateway-wireguard-agent.service`, and depends on `wireguard-tools`. The unit keeps the managed set in `/var/lib/chan-gateway/wireguard-agent/` (`StateDirectory=`), holds `CAP_NET_ADMIN` as its one capability, and keeps the rest of the gateway units' sandbox. The install neither enables nor starts it: bring the interface up, fill the env file, then `systemctl enable --now chan-gateway-wireguard-agent`. There is no container image or Kubernetes manifest, since the agent changes the host's own kernel interface.
+
 ## Bring up the interface first
 
 The agent never creates, configures or deletes the interface: it does not set its private key, listen port, fwmark or addresses, and installs no route or firewall rule. The operator brings it up once, for example:

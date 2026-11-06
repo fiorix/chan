@@ -13,7 +13,7 @@ OCI images for chan, the terminal emulator and its headless devserver, and for t
 | `chan-gateway-devserver-control` | 7003, 7101                 |
 | `chan-upload-test`               | (test only)                |
 
-`chan` builds from `chan.Dockerfile`, each gateway service is the same-named `--target` of `gateway.Dockerfile`, and `chan-upload-test` builds from `test/upload/Dockerfile`. The four gateway services share one builder stage in `gateway.Dockerfile` (a single cargo build of all four crates); `--target` selects the runtime.
+`chan` builds from `chan.Dockerfile`, each gateway service is the same-named `--target` of `gateway.Dockerfile`, and `chan-upload-test` builds from `test/upload/Dockerfile`. The four gateway services share one builder stage in `gateway.Dockerfile` (a single cargo build of all four crates); `--target` selects the runtime. The gateway's WireGuard agent has no image: it changes the peers of a kernel WireGuard interface on the host it runs on, so it is installed there from its deb, beside the interface.
 
 ## Build
 
