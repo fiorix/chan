@@ -7,6 +7,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$kind" in
     desktop)
         key=DESKTOP
+        rootfs_names=(chan-desktop-ubuntu)
         default_memory=7G
         default_timeout=3600
         relative=packaging/sdme/build-chan-desktop.sh
@@ -16,6 +17,7 @@ case "$kind" in
         ;;
     gateway)
         key=GATEWAY
+        rootfs_names=(gateway-build)
         default_memory=6G
         default_timeout=1800
         relative=packaging/gateway/scripts/dev/sdme/build-gateway.sh
@@ -25,6 +27,7 @@ case "$kind" in
         ;;
     e2e)
         key=E2E_BINS
+        rootfs_names=(ubuntu gateway-build)
         default_memory=6G
         default_timeout=1800
         relative=packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh
@@ -62,7 +65,23 @@ state="${STUB_STATE:?}"
 case "$SDME_STUB_COMMAND" in
     fs)
         case "${SDME_STUB_PAYLOAD[*]}" in
-            'ls') printf 'ubuntu ready\nchan-desktop-ubuntu ready\ngateway-build ready\n' ;;
+            'ls')
+                listing_number=0
+                [ ! -f "$state/fs-list-count" ] || read -r listing_number <"$state/fs-list-count"
+                listing_number=$((listing_number + 1))
+                printf '%s\n' "$listing_number" >"$state/fs-list-count"
+                listing_status=0
+                if [ "$listing_number" -eq "${STUB_ROOTFS_LIST_AT:-1}" ]; then
+                    if [ -n "${STUB_LONG_ROOTFS_LIST:-}" ]; then
+                        printf '%s ready\n' "$STUB_LONG_ROOTFS_LIST"
+                        # The tail exceeds pipe capacity after an early match.
+                        seq -f 'unused-rootfs-%g ready' 1 100000
+                    fi
+                    listing_status=${STUB_FS_LIST_EXIT:-0}
+                fi
+                printf 'ubuntu ready\nchan-desktop-ubuntu ready\ngateway-build ready\n'
+                exit "$listing_status"
+                ;;
             *) printf 'stub sdme: unsupported fs call\n' >&2; exit 2 ;;
         esac
         ;;
@@ -176,6 +195,27 @@ run_one_limit() {
         SDME="$bin/sdme --config $work/sdme.conf" "SDME_BUILD_${key}_CPUS=1.5" \
         OUT_DIR="$work/one-limit-out" REBUILD_CONTAINER=0 REBUILD_ROOTFS=0 "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
+
+listing_number=0
+for listed_rootfs in "${rootfs_names[@]}"; do
+    listing_number=$((listing_number + 1))
+    run_one_limit "SDME_BUILD_${key}_MEMORY=" "SDME_BUILD_${key}_JOBS=" \
+        "SDME_BUILD_${key}_TIMEOUT=" "STUB_ROOTFS_LIST_AT=$listing_number" STUB_FS_LIST_EXIT=23
+    assert_status 2 "$status" "failed $listed_rootfs listing takes the import or rebuild path"
+    assert_line "$listing_number" "$state/fs-list-count" 'failure follows the selected rootfs listing'
+    assert_line 'stub sdme: unsupported fs call' "$state/driver.log" 'failed listing reaches the rootfs import or build'
+    [ ! -e "$state/build-args" ] || { printf 'not ok - build ran after failed rootfs provisioning\n' >&2; exit 1; }
+
+    run_one_limit "SDME_BUILD_${key}_MEMORY=" "SDME_BUILD_${key}_JOBS=" \
+        "SDME_BUILD_${key}_TIMEOUT=" "STUB_ROOTFS_LIST_AT=$listing_number" "STUB_LONG_ROOTFS_LIST=$listed_rootfs"
+    assert_status 0 "$status" "running guest with one limit and a long $listed_rootfs listing succeeds"
+    [ ! -e "$state/create-args" ] || { printf 'not ok - long rootfs listing recreated a running guest\n' >&2; exit 1; }
+    if [ "$kind" = desktop ]; then
+        assert_exact_set --disk 44G --cpus 1.5
+    else
+        assert_exact_set --cpus 1.5
+    fi
+done
 
 run_driver absent OUT_DIR="$work/out"
 assert_status 0 "$status" 'configured build succeeds'
