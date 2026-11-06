@@ -578,6 +578,11 @@ export interface LibraryApi {
   /** Disconnect a gateway (persists enabled=false; cascades its live rows).
    * A surface with no desktop bridge answers 409. */
   disconnectGateway(id: string): Promise<void>;
+  /** Generate a WireGuard key pair for a gateway, replacing any earlier key:
+   * the desktop keeps the private half and answers the row with the public
+   * half. A gateway whose discovery offers no enrollment answers 400; a
+   * surface with no desktop bridge answers 409. */
+  generateWireguardKey(id: string): Promise<GatewayEntry>;
   /** Open the desktop's native folder picker; resolves to the chosen absolute
    * path, or null if the user cancelled. A pure desktop action (no desktop
    * bridge → 409), offered only where window-ops are available. */
@@ -781,6 +786,8 @@ export const liveApi: LibraryApi = {
   connectGateway: (id) => req("POST", `/api/library/gateways/${encodeURIComponent(id)}/connect`),
   disconnectGateway: (id) =>
     req("POST", `/api/library/gateways/${encodeURIComponent(id)}/disconnect`),
+  generateWireguardKey: (id) =>
+    req("POST", `/api/library/gateways/${encodeURIComponent(id)}/wireguard-key`),
   pickFolder: () => req("POST", "/api/library/fs/pick-folder"),
   listWindows: () => req("GET", "/api/library/windows"),
   watchWindows: (onSet) => {

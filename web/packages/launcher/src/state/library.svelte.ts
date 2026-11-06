@@ -421,6 +421,13 @@ export async function updateGateway(id: string, input: GatewayInput): Promise<st
   return updated.id;
 }
 
+/** A gateway's row as the registry holds it now, re-listed; undefined when
+ * no row has the id. */
+export async function currentGateway(id: string): Promise<GatewayEntry | undefined> {
+  await refreshGateways();
+  return library.gateways.find((gateway) => gateway.id === id);
+}
+
 /** Remove a gateway: the desktop cascades its live connections and its
  * synthesized rows leave the feed. */
 export async function removeGateway(id: string): Promise<void> {
@@ -450,6 +457,14 @@ export async function connectGateway(id: string): Promise<void> {
 export async function disconnectGateway(id: string): Promise<void> {
   await backend.disconnectGateway(id);
   await refreshGateways();
+}
+
+/** Generate a gateway's WireGuard key (desktop action): resolves with the
+ * row, its public key set, after the registry is re-listed. */
+export async function generateWireguardKey(id: string): Promise<GatewayEntry> {
+  const entry = await backend.generateWireguardKey(id);
+  await refreshGateways();
+  return entry;
 }
 
 /** Open a terminal window on a connected devserver. The window feed updates

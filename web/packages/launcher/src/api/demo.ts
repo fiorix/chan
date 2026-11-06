@@ -581,9 +581,21 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       if (gw) {
         gw.status = "connected";
         gw.enabled = true;
+        if (gw.wireguard_public_key) gw.wireguard_enrolled = true;
         notify();
       }
       return tick(undefined);
+    },
+    // A demo key is a fresh 44-character value, enrolled by the next connect.
+    generateWireguardKey: (id) => {
+      const gw = gateways.find((g) => g.id === id);
+      if (!gw) throw new Error(`unknown gateway ${id}`);
+      gw.wireguard_public_key = btoa(
+        String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))),
+      );
+      gw.wireguard_enrolled = false;
+      notify();
+      return tick({ ...gw });
     },
     disconnectGateway: (id) => {
       const gw = gateways.find((g) => g.id === id);

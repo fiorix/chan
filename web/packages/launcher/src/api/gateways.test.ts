@@ -40,6 +40,8 @@ describe("liveApi gateway routes (frozen wire)", () => {
     await liveApi.removeGateway("gw-1a2b3c4d");
     await liveApi.connectGateway("gw-1a2b3c4d");
     await liveApi.disconnectGateway("gw-1a2b3c4d");
+    const { calls: keyCalls } = stubFetch(200, {});
+    await liveApi.generateWireguardKey("gw-1a2b3c4d");
 
     expect(calls[0][0]).toBe("/api/library/gateways");
     expect(calls[0][1].method).toBe("GET");
@@ -61,6 +63,9 @@ describe("liveApi gateway routes (frozen wire)", () => {
       ["/api/library/gateways/gw-1a2b3c4d", "DELETE"],
       ["/api/library/gateways/gw-1a2b3c4d/connect", "POST"],
       ["/api/library/gateways/gw-1a2b3c4d/disconnect", "POST"],
+    ]);
+    expect(keyCalls.map(([url, init]) => [url, init.method, init.body])).toEqual([
+      ["/api/library/gateways/gw-1a2b3c4d/wireguard-key", "POST", undefined],
     ]);
   });
 
@@ -209,6 +214,36 @@ describe("mock gateway registry", () => {
     expect((await mockApi.listGateways()).find((g) => g.id === gw.id)!.wireguard).toBeNull();
   });
 
+  it("generates a key, refuses a gateway that enrolls no peers, and enrolls at connect", async () => {
+    const gw = await mockApi.addGateway({ url: "https://gw.example" });
+    const keyed = await mockApi.generateWireguardKey(gw.id);
+    expect(keyed.wireguard_public_key).toHaveLength(44);
+    expect(keyed.wireguard_enrolled).toBe(false);
+    const again = await mockApi.generateWireguardKey(gw.id);
+    expect(again.wireguard_public_key).not.toBe(keyed.wireguard_public_key);
+    await mockApi.connectGateway(gw.id);
+    let row = (await mockApi.listGateways()).find((g) => g.id === gw.id)!;
+    expect(row.wireguard_enrolled).toBe(true);
+    expect(row.wireguard).toBe(`~/.chan/desktop/wireguard/${gw.id}.conf`);
+    expect(row.wireguard_status).toBe("connecting");
+    // Clearing the file drops the enrollment and keeps the key.
+    const cleared = await mockApi.updateGateway(gw.id, { url: gw.url });
+    expect(cleared.wireguard_enrolled).toBe(false);
+    expect(cleared.wireguard_public_key).toBe(again.wireguard_public_key);
+    row = (await mockApi.listGateways()).find((g) => g.id === gw.id)!;
+    expect(row.wireguard).toBeNull();
+    const direct = await mockApi.addGateway({ url: "https://direct.example" });
+    let caught: unknown = null;
+    try {
+      mockApi.generateWireguardKey(direct.id);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(400);
+    expect((caught as ApiError).message).toBe("this gateway does not enroll WireGuard peers");
+  });
+
   it("serves the WireGuard key fields on an added gateway", async () => {
     const gw = await mockApi.addGateway({ url: "https://gw.example", wireguard: "/w/gw.conf" });
     expect(gw.wireguard_public_key).toBeNull();
@@ -254,6 +289,17 @@ describe("demo gateway registry", () => {
   it("the empty variant seeds none", async () => {
     const demo = createLauncherDemoApi({ variant: "empty" });
     expect(await demo.listGateways()).toEqual([]);
+  });
+
+  it("generates a key that the next connect enrolls", async () => {
+    const demo = createLauncherDemoApi({ variant: "empty" });
+    const gw = await demo.addGateway({ url: "https://gw.example" });
+    const keyed = await demo.generateWireguardKey(gw.id);
+    expect(keyed.wireguard_public_key).toHaveLength(44);
+    expect(keyed.wireguard_enrolled).toBe(false);
+    await demo.connectGateway(gw.id);
+    const [row] = await demo.listGateways();
+    expect(row.wireguard_enrolled).toBe(true);
   });
 
   it("serves the WireGuard key fields on the sample and on an added gateway", async () => {

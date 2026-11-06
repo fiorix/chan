@@ -684,3 +684,82 @@ describe("Gateways screen", () => {
     expect(el.querySelector('[aria-label="Disconnect gateway live"]')).not.toBeNull();
   });
 });
+
+describe("Gateways WireGuard key", () => {
+  const KEY = "VC4iwoJ2wtcsxQssd+OIlaneI45CL0CRy1vZSsryu38=";
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  });
+
+  it("a badge with a key not enrolled shows its first eight characters and asks for a connect", () => {
+    library.gateways = [gw({ label: "prod", wireguard_public_key: KEY, wireguard_enrolled: false })];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    const prefix = card.querySelector(".gw-wg-key-prefix")!;
+    expect(prefix.textContent).toBe(KEY.slice(0, 8));
+    expect(prefix.getAttribute("title")).toBe(KEY);
+    expect(card.querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe(
+      "not enrolled: connect to sign in",
+    );
+    // No file yet, so no file line.
+    expect(card.querySelector(".gw-wg-file")).toBeNull();
+  });
+
+  it("an enrolled key reads enrolled beside the file the sign-in wrote and its live state", () => {
+    const conf = "/home/u/.chan/desktop/wireguard/gw-test0001.conf";
+    library.gateways = [
+      gw({ wireguard_public_key: KEY, wireguard_enrolled: true, wireguard: conf, wireguard_status: "up" }),
+    ];
+    const el = render();
+    const card = el.querySelector("section.gateway-card")!;
+    expect(card.querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe("enrolled");
+    expect(card.querySelector(".gw-wg-file")!.textContent).toBe(conf);
+    expect(card.querySelector(".gw-wg-status")!.textContent).toBe("up");
+  });
+
+  it("the badge's copy action writes the whole public key", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    library.gateways = [gw({ label: "prod", wireguard_public_key: KEY })];
+    const el = render();
+    (el.querySelector('[aria-label="Copy the WireGuard public key of prod"]') as HTMLButtonElement).click();
+    await settle();
+    expect(writeText).toHaveBeenCalledWith(KEY);
+  });
+
+  it("a refused copy is a notice", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: () => Promise.reject(new Error("not allowed")) },
+      configurable: true,
+    });
+    library.gateways = [gw({ label: "prod", wireguard_public_key: KEY })];
+    const el = render();
+    (el.querySelector('[aria-label="Copy the WireGuard public key of prod"]') as HTMLButtonElement).click();
+    await settle();
+    expect(notices.items).toMatchObject([{ kind: "error", message: "not allowed" }]);
+  });
+
+  it("a badge without a key has no key line", () => {
+    library.gateways = [gw({ label: "prod", wireguard: "/home/u/wg/chan.conf" })];
+    const el = render();
+    expect(el.querySelector(".gw-wg-key")).toBeNull();
+  });
+
+  it("a generated key reads not enrolled until the connect's sign-in enrolls it", async () => {
+    const id = await addGateway({ url: "https://wg-enroll.example", label: "enroll" });
+    await libraryActions.generateWireguardKey(id);
+    const el = render();
+    const card = () => el.querySelector("section.gateway-card")!;
+    expect(card().querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe(
+      "not enrolled: connect to sign in",
+    );
+    (el.querySelector('[aria-label="Connect gateway enroll"]') as HTMLButtonElement).click();
+    await settle();
+    flushSync();
+    expect(card().querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe("enrolled");
+    expect(card().querySelector(".gw-wg-file")!.textContent).toBe(
+      `~/.chan/desktop/wireguard/${id}.conf`,
+    );
+  });
+});

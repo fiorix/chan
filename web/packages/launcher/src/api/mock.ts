@@ -163,6 +163,20 @@ function mockWireguardFile(raw: string | undefined): string | null {
   return path;
 }
 
+/** A fresh 44-character WireGuard public key, as `wg` prints one. */
+function mockWireguardKey(): string {
+  return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+}
+
+/** The mock's stand-in for a gateway whose discovery offers no enrollment. */
+function mockOffersEnrollment(url: string): boolean {
+  try {
+    return !new URL(url).host.startsWith("direct.");
+  } catch {
+    return true;
+  }
+}
+
 /** Re-seed the remote-workspace state the confirm-and-retry flow mutates (the
  * `ds-1:w/api` row turns off on a forced retry and drops its live-terminal
  * flag). Test-only, so a suite that exercises the flow stays order-independent;
@@ -631,6 +645,8 @@ export const mockApi: LibraryApi = {
     const wireguard = mockWireguardFile(input.wireguard);
     gw.label = (input.label ?? "").trim();
     if (wireguard !== gw.wireguard) gw.wireguard_status = wireguard === null ? null : "connecting";
+    // Clearing the file drops the enrollment it came from, as the desktop does.
+    if (wireguard === null && gw.wireguard !== null) gw.wireguard_enrolled = false;
     gw.wireguard = wireguard;
     notify();
     return tick({ ...gw });
@@ -647,11 +663,18 @@ export const mockApi: LibraryApi = {
 
   // The mock has no desktop to discover/sign in through, so connect just marks
   // the gateway connected (and disconnect back), mirroring the devserver mock.
+  // A key not enrolled yet is enrolled by it, as the desktop's sign-in does:
+  // the row then names the file the redeem writes, and its tunnel connects.
   connectGateway: (id) => {
     const gw = gateways.find((g) => g.id === id);
     if (gw) {
       gw.status = "connected";
       gw.enabled = true;
+      if (gw.wireguard_public_key && !gw.wireguard_enrolled) {
+        gw.wireguard_enrolled = true;
+        gw.wireguard = `~/.chan/desktop/wireguard/${gw.id}.conf`;
+        gw.wireguard_status = "connecting";
+      }
       notify();
     }
     return tick(undefined);
@@ -665,6 +688,20 @@ export const mockApi: LibraryApi = {
       notify();
     }
     return tick(undefined);
+  },
+
+  // Every gateway but one on a `direct.` host offers enrollment; a new key is
+  // not enrolled until the next connect.
+  generateWireguardKey: (id) => {
+    const gw = gateways.find((g) => g.id === id);
+    if (!gw) throw new Error(`unknown gateway ${id}`);
+    if (!mockOffersEnrollment(gw.url)) {
+      throw new ApiError(400, JSON.stringify({ error: "this gateway does not enroll WireGuard peers" }));
+    }
+    gw.wireguard_public_key = mockWireguardKey();
+    gw.wireguard_enrolled = false;
+    notify();
+    return tick({ ...gw });
   },
 
   // The mock has no native dialog, so it returns a canned path as if the user
