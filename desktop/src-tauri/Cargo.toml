@@ -127,7 +127,9 @@ gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `MainThreadMarker`: the confirm dialog's AppKit calls (src/native_dialog.rs)
-# are main-thread-only and take the marker as proof.
+# are main-thread-only and take the marker as proof. `define_class!` builds
+# the wake observer of src/wake_repaint.rs, a selector target, which needs no
+# block crate.
 objc2 = "0.6"
 # `NSAlert`, `NSApplication` and `NSButton` back the native confirm dialog
 # in src/native_dialog.rs; `NSPasteboard` backs the drag-pasteboard read in
@@ -135,13 +137,20 @@ objc2 = "0.6"
 # superclasses, so `NSControl`, `NSView` and `NSResponder` gate `NSButton`
 # (what `addButtonWithTitle` returns) and `NSResponder` gates
 # `NSApplication`; the dialog's calls on both types sit behind them.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSView"] }
+# `NSWorkspace` carries the workspace notification center and its wake
+# notification names, and `NSWindow` gates `NSApplication::windows` and a
+# window's content view, which the wake repaint walks for its webviews
+# (src/wake_repaint.rs).
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSView", "NSWindow", "NSWorkspace"] }
 # `NSString` carries the dialog text and the pasteboard names and types;
 # `NSArray` carries the drag pasteboard's filename property list, and
 # `NSEnumerator` gates the `NSArray::iter` that walks it. `NSProcessInfo`
 # reads the running macOS version so the updater can refuse a build whose
-# minimum system version exceeds it (src/update_floor.rs).
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSProcessInfo", "NSString"] }
+# minimum system version exceeds it (src/update_floor.rs). `NSNotification`
+# types the wake observer's argument and its center; `NSGeometry` with
+# `objc2-core-foundation` gives the `NSRect` a webview frame is read and set
+# as (src/wake_repaint.rs).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry", "NSNotification", "NSProcessInfo", "NSString", "objc2-core-foundation"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
