@@ -1682,7 +1682,7 @@ mod installer_hook_tests {
             .filter(|name| name.starts_with("NSIS_HOOK_"))
             .collect();
         hooks.sort_unstable();
-        assert_eq!(hooks, ["NSIS_HOOK_POSTUNINSTALL"]);
+        assert_eq!(hooks, ["NSIS_HOOK_POSTUNINSTALL", "NSIS_HOOK_PREUNINSTALL"]);
         for (name, body) in all
             .iter()
             .filter(|(name, _)| name.starts_with("NSIS_HOOK_"))
@@ -1730,6 +1730,20 @@ mod installer_hook_tests {
                 .iter()
                 .any(|c| c == "$DeleteAppDataCheckboxState = 1"),
             "the chan home is removed outside the state choice: {conditions:?}"
+        );
+        // `/PURGE` makes the state choice, and only outside an update.
+        let (_, pre) = macros(&nsh)
+            .into_iter()
+            .find(|(name, _)| name == "NSIS_HOOK_PREUNINSTALL")
+            .expect("the pre-uninstall hook");
+        assert!(
+            statements(&pre).contains(&r#"${GetOptions} $CMDLINE "/PURGE" $R0"#),
+            "{pre:?}"
+        );
+        let conditions = conditions_at(&pre, "StrCpy $DeleteAppDataCheckboxState 1");
+        assert!(
+            conditions.iter().any(|c| c == "$UpdateMode <> 1"),
+            "{conditions:?}"
         );
         // A silent uninstall stays silent and exits 0, and the hooks stay in
         // the current user's hive.

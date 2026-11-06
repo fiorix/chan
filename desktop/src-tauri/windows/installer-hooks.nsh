@@ -148,6 +148,23 @@ Function un.chanPathWithout
   Exch $1
 FunctionEnd
 
+; A scripted uninstall that also removes the user's state: `/PURGE` makes the
+; state choice before the template's steps read it, so the one choice drives
+; the template's removal of the webview data and the post-uninstall hook's
+; removal of the chan home. `/S` alone keeps state. The template tests its
+; passive switch `/P` as a prefix of the command line, so `/PURGE` also makes
+; the uninstall passive: no confirm page, and a running desktop is closed
+; without asking.
+!macro NSIS_HOOK_PREUNINSTALL
+  ${If} $UpdateMode <> 1
+    ${GetOptions} $CMDLINE "/PURGE" $R0
+    ${IfNot} ${Errors}
+      StrCpy $DeleteAppDataCheckboxState 1
+    ${EndIf}
+    ClearErrors
+  ${EndIf}
+!macroend
+
 ; Every uninstall that is not the self-updater's (`/UPDATE`) removes what the
 ; install and the desktop made that points at the install, after the
 ; template's own steps.
