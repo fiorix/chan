@@ -43,9 +43,10 @@
 # missing rather than passing. Everything runs under a throwaway CHAN_HOME,
 # HOME, XDG_RUNTIME_DIR and TMPDIR. The desktop and its webviews use Xvfb
 # and a private session bus, with no caller display or bus inherited. The
-# work dir is deleted on success and kept on failure. The kept work dir
-# holds the run's client file with a private key that is worthless once
-# the peer process is gone, but treat it as a credential until deleted.
+# work dir is deleted on success or refusal and kept on test failure. The
+# kept work dir holds the run's client file with a private key that is
+# worthless once the peer process is gone, but treat it as a credential
+# until deleted.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -57,7 +58,11 @@ if [ "${1:-}" = --unresolved-endpoint ]; then UNRESOLVED=1; shift; fi
 [ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
 
 log() { printf 'desktop-wireguard: %s\n' "$*" >&2; }
-refuse() { log "cannot run: $*"; exit 2; }
+refuse() {
+    log "cannot run: $*"
+    [ -z "${WORK:-}" ] || rm -rf -- "$WORK"
+    exit 2
+}
 fail() {
     log "FAIL: $*"
     log "work dir kept at $WORK"
@@ -92,45 +97,6 @@ if [ -z "${WG_PEER_BIN:-}" ]; then
     WG_PEER_BIN="$REPO/target/debug/examples/wg-peer"
 fi
 [ -x "$WG_PEER_BIN" ] || refuse "no wg-peer binary at $WG_PEER_BIN"
-
-WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/chan-desktop-wireguard.XXXXXX")"
-export CHAN_HOME="$WORK/chan-home"
-export HOME="$WORK/home"
-export XDG_RUNTIME_DIR="$WORK/run"
-export TMPDIR="$WORK/tmp"
-mkdir -p "$CHAN_HOME/desktop" "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
-chmod 700 "$XDG_RUNTIME_DIR"
-# A test launched from inside a chan terminal must not inherit session
-# state, handoff hints, or credentials.
-for v in $(compgen -v | grep -E '^CHAN_' | grep -vE '^CHAN_(HOME|BIN|DESKTOP_BIN)$'); do unset "$v"; done
-# DISPLAY reaches X11 clients outside xvfb-run, while a session bus address
-# reaches GTK and WebKitGTK clients inside it. Wayland names a socket or an
-# inherited descriptor that could put the webviews on the caller's compositor.
-unset DISPLAY DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY WAYLAND_SOCKET
-export GDK_BACKEND=x11
-# The desktop publishes its handoff socket, and the chan processes here
-# discover devservers, in XDG_RUNTIME_DIR. The caller's own
-# (/run/user/<uid>) holds their live desktop's and devserver's sockets, so
-# refuse to start anything unless it is a private directory.
-private_runtime_dir_reason() {
-    local dir="${XDG_RUNTIME_DIR:-}" actual own
-    [ -n "$dir" ] || { echo "XDG_RUNTIME_DIR is unset"; return; }
-    actual="$(realpath -e -- "$dir" 2>/dev/null)" || { echo "XDG_RUNTIME_DIR=$dir does not exist"; return; }
-    own="/run/user/$(id -u)"
-    own="$(realpath -e -- "$own" 2>/dev/null || echo "$own")"
-    [ "$actual" != "$own" ] || echo "XDG_RUNTIME_DIR=$dir is this user's own runtime directory ($own)"
-}
-reason="$(private_runtime_dir_reason)"
-[ -z "$reason" ] || refuse "$reason"
-export CHAN_UPDATE_CHECK=0
-export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
-export LIBGL_ALWAYS_SOFTWARE=1
-# The proxy's forwarding, CONNECT, bridged-upgrade and refusal lines come
-# from chan_wireguard at debug, and the embedded server's request spans and
-# response statuses, which name the socket routes, from chan_server and
-# tower_http at debug.
-export CHAN_LOG="chan_desktop=debug,chan_wireguard=debug,chan_server=debug,tower_http=debug,warn"
 
 PIDS=()
 descendants() {
@@ -177,6 +143,7 @@ cleanup() {
         [ -n "$pid" ] || continue
         kill "$pid" 2>/dev/null || true
     done
+    [ "${#PIDS[@]}" -gt 0 ] || return 0
     sleep 1
     for pid in "${tree[@]}"; do
         kill -9 "$pid" 2>/dev/null || true
@@ -187,6 +154,45 @@ cleanup() {
     done
 }
 trap cleanup EXIT
+
+WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/chan-desktop-wireguard.XXXXXX")"
+export CHAN_HOME="$WORK/chan-home"
+export HOME="$WORK/home"
+export XDG_RUNTIME_DIR="$WORK/run"
+export TMPDIR="$WORK/tmp"
+# A test launched from inside a chan terminal must not inherit session
+# state, handoff hints, or credentials.
+for v in $(compgen -v | grep -E '^CHAN_' | grep -vE '^CHAN_(HOME|BIN|DESKTOP_BIN)$'); do unset "$v"; done
+# DISPLAY reaches X11 clients outside xvfb-run, while a session bus address
+# reaches GTK and WebKitGTK clients inside it. Wayland names a socket or an
+# inherited descriptor that could put the webviews on the caller's compositor.
+unset DISPLAY DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY WAYLAND_SOCKET
+export GDK_BACKEND=x11
+# The desktop and devserver control sockets live in XDG_RUNTIME_DIR. This
+# run derives a private path inside its work dir, but checks its resolved
+# destination before creating or changing it to protect the caller's
+# own (/run/user/<uid>) desktop and devserver sockets.
+private_runtime_dir_reason() {
+    local dir="${XDG_RUNTIME_DIR:-}" actual own
+    [ -n "$dir" ] || { echo "XDG_RUNTIME_DIR is unset"; return; }
+    actual="$(realpath -m -- "$dir")"
+    own="/run/user/$(id -u)"
+    own="$(realpath -e -- "$own" 2>/dev/null || echo "$own")"
+    [ "$actual" != "$own" ] || echo "XDG_RUNTIME_DIR=$dir is this user's own runtime directory ($own)"
+}
+reason="$(private_runtime_dir_reason)"
+[ -z "$reason" ] || refuse "$reason"
+mkdir -p "$CHAN_HOME/desktop" "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export CHAN_UPDATE_CHECK=0
+export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export LIBGL_ALWAYS_SOFTWARE=1
+# The proxy's forwarding, CONNECT, bridged-upgrade and refusal lines come
+# from chan_wireguard at debug, and the embedded server's request spans and
+# response statuses, which name the socket routes, from chan_server and
+# tower_http at debug.
+export CHAN_LOG="chan_desktop=debug,chan_wireguard=debug,chan_server=debug,tower_http=debug,warn"
 
 wait_for() {
     # wait_for <seconds> <description> <command...>: poll until the command
