@@ -39,14 +39,13 @@
 #   CHAN_BIN          a built chan (default: built here with --locked)
 #   WG_PEER_BIN       a built wg-peer example (default: built here)
 #
-# Needs xvfb-run and curl. Exits 2 when a prerequisite is missing rather
-# than passing. Everything runs under a throwaway CHAN_HOME, HOME,
-# XDG_RUNTIME_DIR and TMPDIR, with no Wayland display and GTK held to X11,
-# so the desktop renders on the Xvfb display only and never on the
-# caller's compositor; the work dir is deleted on success and kept
-# on failure. The kept work dir holds the run's client file with a private
-# key that is worthless once the peer process is gone, which the exit path
-# ends, but treat it as a credential until it is deleted.
+# Needs xvfb-run, dbus-run-session and curl. Exits 2 when a prerequisite is
+# missing rather than passing. Everything runs under a throwaway CHAN_HOME,
+# HOME, XDG_RUNTIME_DIR and TMPDIR. The desktop and its webviews use Xvfb
+# and a private session bus, with no caller display or bus inherited. The
+# work dir is deleted on success and kept on failure. The kept work dir
+# holds the run's client file with a private key that is worthless once
+# the peer process is gone, but treat it as a credential until deleted.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -77,6 +76,7 @@ verdict() {
 }
 
 command -v xvfb-run >/dev/null 2>&1 || refuse "xvfb-run is not installed"
+command -v dbus-run-session >/dev/null 2>&1 || refuse "dbus-run-session is not installed"
 command -v curl >/dev/null 2>&1 || refuse "curl is not installed"
 [ -x "$CHAN_DESKTOP_BIN" ] || refuse "no chan-desktop binary at $CHAN_DESKTOP_BIN (set CHAN_DESKTOP_BIN)"
 
@@ -103,10 +103,10 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # A test launched from inside a chan terminal must not inherit session
 # state, handoff hints, or credentials.
 for v in $(compgen -v | grep -E '^CHAN_' | grep -vE '^CHAN_(HOME|BIN|DESKTOP_BIN)$'); do unset "$v"; done
-# The caller's Wayland session: WAYLAND_DISPLAY may be an absolute socket
-# path and WAYLAND_SOCKET an inherited descriptor, and either would put the
-# desktop and its webviews on the caller's compositor instead of Xvfb.
-unset WAYLAND_DISPLAY WAYLAND_SOCKET
+# DISPLAY reaches X11 clients outside xvfb-run, while a session bus address
+# reaches GTK and WebKitGTK clients inside it. Wayland names a socket or an
+# inherited descriptor that could put the webviews on the caller's compositor.
+unset DISPLAY DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY WAYLAND_SOCKET
 export GDK_BACKEND=x11
 # The desktop publishes its handoff socket, and the chan processes here
 # discover devservers, in XDG_RUNTIME_DIR. The caller's own
@@ -133,19 +133,56 @@ export LIBGL_ALWAYS_SOFTWARE=1
 export CHAN_LOG="chan_desktop=debug,chan_wireguard=debug,chan_server=debug,tower_http=debug,warn"
 
 PIDS=()
+descendants() {
+    local parent child
+    local -a pending=("$1")
+    while [ "${#pending[@]}" -gt 0 ]; do
+        parent="${pending[0]}"
+        pending=("${pending[@]:1}")
+        while IFS= read -r child; do
+            [ -n "$child" ] || continue
+            printf '%s\n' "$child"
+            pending+=("$child")
+        done < <(pgrep -P "$parent" || true)
+    done
+}
+desktop_pid() {
+    local child bin
+    bin="$(readlink -f "$CHAN_DESKTOP_BIN")"
+    for child in $(descendants "$XVFB_RUN_PID"); do
+        [ "$(readlink -f "/proc/$child/exe" 2>/dev/null || true)" = "$bin" ] || continue
+        printf '%s\n' "$child"
+        return 0
+    done
+    return 1
+}
 cleanup() {
-    # Each pid is ours (the peer, xvfb-run). xvfb-run leaves Xvfb and the
-    # desktop as its children, so they are ended through it, never by name.
-    local pid
+    # End the desktop first so dbus-run-session can end its daemon, then
+    # end any surviving descendants of this run's xvfb-run process.
+    local pid desktop i
+    local -a tree=()
+    if [ -n "${XVFB_RUN_PID:-}" ]; then
+        mapfile -t tree < <(descendants "$XVFB_RUN_PID")
+        desktop="$(desktop_pid || true)"
+        [ -z "$desktop" ] || kill "$desktop" 2>/dev/null || true
+        for i in {1..10}; do
+            kill -0 "$XVFB_RUN_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+        for ((i=${#tree[@]}-1; i>=0; i--)); do
+            kill "${tree[i]}" 2>/dev/null || true
+        done
+    fi
     for pid in "${PIDS[@]:-}"; do
         [ -n "$pid" ] || continue
-        pkill -TERM -P "$pid" 2>/dev/null || true
         kill "$pid" 2>/dev/null || true
     done
     sleep 1
+    for pid in "${tree[@]}"; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
     for pid in "${PIDS[@]:-}"; do
         [ -n "$pid" ] || continue
-        pkill -KILL -P "$pid" 2>/dev/null || true
         kill -9 "$pid" 2>/dev/null || true
     done
 }
@@ -193,7 +230,7 @@ cat > "$CHAN_HOME/desktop/config.json" <<JSON
 JSON
 
 # 3. The desktop, headless.
-xvfb-run -a "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
+xvfb-run -a dbus-run-session "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
 XVFB_RUN_PID=$!
 PIDS+=("$XVFB_RUN_PID")
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
@@ -203,19 +240,17 @@ wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.
 # alone; without it serve starts a standalone server that never returns.
 # The CLI calls below take the desktop's display, read from its process.
 desktop_display() {
-    local child bin
-    bin="$(readlink -f "$CHAN_DESKTOP_BIN")"
-    for child in $(pgrep -P "$XVFB_RUN_PID" || true); do
-        [ "$(readlink -f "/proc/$child/exe" 2>/dev/null || true)" = "$bin" ] || continue
-        tr '\0' '\n' < "/proc/$child/environ" | sed -n 's/^DISPLAY=//p'
-        return 0
-    done
-    return 1
+    local child
+    child="$(desktop_pid)" || return 1
+    tr '\0' '\n' < "/proc/$child/environ" | sed -n '/^DISPLAY=/p; /^DBUS_SESSION_BUS_ADDRESS=/p'
 }
-DISPLAY="$(desktop_display)" || fail "no chan-desktop process under xvfb-run (pid $XVFB_RUN_PID)"
+desktop_env="$(desktop_display)" || fail "no chan-desktop process under xvfb-run (pid $XVFB_RUN_PID)"
+DISPLAY="$(printf '%s\n' "$desktop_env" | sed -n 's/^DISPLAY=//p')"
+DBUS_SESSION_BUS_ADDRESS="$(printf '%s\n' "$desktop_env" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')"
 [ -n "$DISPLAY" ] || fail "the desktop's environment names no DISPLAY"
+[ -n "$DBUS_SESSION_BUS_ADDRESS" ] || fail "the desktop's environment names no session bus"
 export DISPLAY
-log "the desktop runs on display $DISPLAY"
+log "the desktop runs on display $DISPLAY with bus $DBUS_SESSION_BUS_ADDRESS"
 
 if [ "$UNRESOLVED" = 1 ]; then
     arm_rc=0
