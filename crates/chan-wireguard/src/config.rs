@@ -101,6 +101,14 @@ impl fmt::Display for Cidr {
     }
 }
 
+impl Endpoint {
+    /// `host:port`, with an IPv6 literal in brackets, as a file's
+    /// `Endpoint` reads; the error names no line (0).
+    pub fn parse(value: &str) -> Result<Endpoint, ConfigError> {
+        parse_endpoint(value, 0)
+    }
+}
+
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.host.contains(':') {
@@ -242,6 +250,149 @@ fn refuse_shared(path: &Path, metadata: &std::fs::Metadata) -> Result<(), ReadEr
 #[cfg(not(unix))]
 fn refuse_shared(_path: &Path, _metadata: &std::fs::Metadata) -> Result<(), ReadError> {
     Ok(())
+}
+
+/// Write `config` to `path` as a wg-quick file that [`read_file`] reads
+/// back field for field: `[Interface]` with `PrivateKey`, `Address` (the
+/// addresses comma separated) and `MTU` when set, a blank line, then
+/// `[Peer]` with `PublicKey`, `PresharedKey` when set, `Endpoint`,
+/// `AllowedIPs` and `PersistentKeepalive` when set; keys are base64 as
+/// `wg` prints them.
+///
+/// The file is created owner-only (mode 0600 on Unix; on Windows the
+/// profile's ACL applies, as `read_file` accepts) and replaces any file at
+/// `path` atomically: the text goes to a sibling created exclusively, is
+/// synced, and is renamed over the target, so a reader never sees half a
+/// file. An existing target that is not a regular file is refused with
+/// `InvalidInput`, and on Unix one the group or others can read with
+/// `PermissionDenied`: whoever shared it is not replaced silently. Errors
+/// name the path, never a value.
+pub fn write_file(path: &Path, config: &Config) -> io::Result<()> {
+    if let Ok(existing) = std::fs::symlink_metadata(path) {
+        if !existing.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ));
+        }
+        refuse_replacing_shared(path, &existing)?;
+    }
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} names no file", path.display()),
+        )
+    })?;
+    let mut staged_name = std::ffi::OsString::from(".");
+    staged_name.push(name);
+    staged_name.push(format!(".{}.tmp", std::process::id()));
+    let staged = dir.join(staged_name);
+    let written = write_staged(&staged, render(config).as_bytes())
+        .and_then(|()| std::fs::rename(&staged, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(io::Error::new(
+            e.kind(),
+            format!("writing {}: {e}", path.display()),
+        ));
+    }
+    sync_dir(dir);
+    Ok(())
+}
+
+/// The file text [`write_file`] writes.
+fn render(config: &Config) -> String {
+    let join = |cidrs: &[Cidr]| {
+        cidrs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut text = format!(
+        "[Interface]\nPrivateKey = {}\nAddress = {}\n",
+        BASE64.encode(config.private_key.to_bytes()),
+        join(&config.addresses)
+    );
+    if let Some(mtu) = config.mtu {
+        text.push_str(&format!("MTU = {mtu}\n"));
+    }
+    let peer = &config.peer;
+    text.push_str(&format!(
+        "\n[Peer]\nPublicKey = {}\n",
+        BASE64.encode(peer.public_key.as_bytes())
+    ));
+    if let Some(psk) = peer.preshared_key {
+        text.push_str(&format!("PresharedKey = {}\n", BASE64.encode(psk)));
+    }
+    text.push_str(&format!(
+        "Endpoint = {}\nAllowedIPs = {}\n",
+        peer.endpoint,
+        join(&peer.allowed_ips)
+    ));
+    if let Some(keepalive) = peer.persistent_keepalive {
+        text.push_str(&format!("PersistentKeepalive = {keepalive}\n"));
+    }
+    text
+}
+
+fn write_staged(staged: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(staged)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Make the rename durable; a directory that cannot be opened for it (on
+/// Windows, any) leaves the rename to the filesystem's own ordering.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(dir) = std::fs::File::open(dir) {
+        let _ = dir.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+#[cfg(unix)]
+fn refuse_replacing_shared(path: &Path, metadata: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{path} is readable by the group or others (mode {mode:03o}), so it is not \
+                 replaced; narrow it (chmod 600 {path}) or remove it first",
+                path = path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn refuse_replacing_shared(_path: &Path, _metadata: &std::fs::Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+/// A public key as `wg` prints it (44 characters of base64) or as 64 hex
+/// digits, the form a gateway publishes its interface's key in.
+pub fn parse_public_key(value: &str) -> Result<PublicKey, ConfigError> {
+    parse_key(value, 0, "public key").map(PublicKey::from)
 }
 
 fn err(line: usize, message: impl Into<String>) -> ConfigError {
@@ -505,10 +656,19 @@ fn parse_peer_key(
 /// A 32-byte key as `wg` prints it (base64) or as 64 hex digits.
 fn parse_key(value: &str, line: usize, what: &str) -> Result<[u8; 32], ConfigError> {
     let bytes = match value.len() {
-        64 => (0..32)
-            .map(|i| u8::from_str_radix(&value[i * 2..i * 2 + 2], 16))
-            .collect::<Result<Vec<u8>, _>>()
-            .map_err(|_| err(line, format!("{what} is not valid hex")))?,
+        // Pairs of bytes, not string slices: a key can come from a gateway,
+        // and a multibyte character would not split on a pair boundary.
+        64 => value
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                let digit = |byte: u8| char::from(byte).to_digit(16);
+                match (digit(pair[0]), digit(pair[1])) {
+                    (Some(high), Some(low)) => Ok((high * 16 + low) as u8),
+                    _ => Err(err(line, format!("{what} is not valid hex"))),
+                }
+            })
+            .collect::<Result<Vec<u8>, _>>()?,
         44 => BASE64
             .decode(value)
             .map_err(|_| err(line, format!("{what} is not valid base64")))?,
@@ -744,6 +904,164 @@ mod tests {
 
     /// Write `text` as an owner-only file, the shape `read_file` accepts,
     /// in a directory of its own.
+    /// The section-8 file a gateway's enrollment parameters make.
+    fn enrolled(addresses: &str, keepalive: Option<u16>) -> String {
+        let mut text = format!(
+            "[Interface]\nPrivateKey = {KEY_A}\nAddress = {addresses}\n\n[Peer]\nPublicKey = {KEY_B}\nEndpoint = wg.example.com:51820\nAllowedIPs = 10.7.0.1/32\n"
+        );
+        if let Some(seconds) = keepalive {
+            text.push_str(&format!("PersistentKeepalive = {seconds}\n"));
+        }
+        text
+    }
+
+    #[test]
+    fn write_file_writes_the_wg_quick_text_of_an_enrollment() {
+        let dir = tempfile::tempdir().unwrap();
+        for (addresses, keepalive) in [
+            ("10.7.0.23/32", Some(25)),
+            ("10.7.0.23/32, fd00:7::23/128", Some(25)),
+            ("10.7.0.23/32", None),
+            ("10.7.0.23/32, fd00:7::23/128", None),
+        ] {
+            let text = enrolled(addresses, keepalive);
+            let path = dir.path().join("gw.conf");
+            write_file(&path, &Config::parse(&text).unwrap()).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                text,
+                "{addresses} {keepalive:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_creates_an_owner_only_file_and_replaces_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gw.conf");
+        let config = Config::parse(&enrolled("10.7.0.23/32", Some(25))).unwrap();
+        write_file(&path, &config).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+        // An owner-only file is replaced, and no staged sibling is left.
+        let second = Config::parse(&enrolled("10.7.0.24/32", None)).unwrap();
+        write_file(&path, &second).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            enrolled("10.7.0.24/32", None)
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("gw.conf")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_refuses_to_replace_a_file_other_users_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gw.conf");
+        std::fs::write(&path, "shared\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let config = Config::parse(&enrolled("10.7.0.23/32", Some(25))).unwrap();
+        let err = write_file(&path, &config).expect_err("a shared file is not replaced");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(err.to_string().contains("chmod 600"), "{err}");
+        assert!(!err.to_string().contains(KEY_A), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "shared\n");
+        // Nor is something that is not a regular file.
+        let err = write_file(dir.path(), &config).expect_err("a directory is refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+    }
+
+    #[test]
+    fn write_file_round_trips_through_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.conf");
+        let text = format!(
+            "[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.7.0.2/32, fd00:7::2/128\nMTU = 1380\n[Peer]\nPublicKey = {KEY_B}\nPresharedKey = {KEY_A}\nEndpoint = [2001:db8::1]:51820\nAllowedIPs = 10.7.0.0/24, fd00:7::/64\nPersistentKeepalive = 15\n"
+        );
+        let original = Config::parse(&text).unwrap();
+        write_file(&path, &original).unwrap();
+        let back = read_file(&path).unwrap();
+        assert_eq!(back.private_key.to_bytes(), original.private_key.to_bytes());
+        assert_eq!(back.addresses, original.addresses);
+        assert_eq!(back.mtu, Some(1380));
+        assert_eq!(back.peer.public_key, original.peer.public_key);
+        assert_eq!(back.peer.preshared_key, original.peer.preshared_key);
+        assert_eq!(back.peer.endpoint, original.peer.endpoint);
+        assert_eq!(back.peer.allowed_ips, original.peer.allowed_ips);
+        assert_eq!(back.peer.persistent_keepalive, Some(15));
+    }
+
+    #[test]
+    fn the_public_parsers_take_what_a_file_takes() {
+        assert_eq!(
+            parse_public_key(KEY_B).unwrap().as_bytes()[..],
+            BASE64.decode(KEY_B).unwrap()[..]
+        );
+        for bad in [
+            &KEY_B[..43],
+            "not base64 at all, but forty-four chars long",
+            "",
+        ] {
+            assert!(parse_public_key(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            Endpoint::parse("wg.example.com:51820").unwrap(),
+            Endpoint {
+                host: "wg.example.com".into(),
+                port: 51820
+            }
+        );
+        assert_eq!(Endpoint::parse("[fd00::1]:51820").unwrap().host, "fd00::1");
+        for bad in [
+            "wg.example.com",
+            "wg.example.com:0",
+            ":51820",
+            "[fd00::1:51820",
+        ] {
+            assert!(Endpoint::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_hex_key_is_read_by_byte_pairs_and_refuses_what_is_not_hex() {
+        let hex: String = BASE64
+            .decode(KEY_B)
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect();
+        assert_eq!(
+            parse_public_key(&hex).unwrap().as_bytes()[..],
+            BASE64.decode(KEY_B).unwrap()[..]
+        );
+        // 64 bytes whose last character takes three: a pair boundary falls
+        // inside it. A sign is not a digit either.
+        let multibyte = format!("{}\u{20ac}", "a".repeat(61));
+        assert_eq!(multibyte.len(), 64);
+        let signed = format!("+f{}", &hex[2..]);
+        for bad in [multibyte.as_str(), signed.as_str()] {
+            assert_eq!(
+                parse_public_key(bad).unwrap_err().to_string(),
+                "public key is not valid hex",
+                "{bad:?}"
+            );
+        }
+        let file = format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.7.0.1/32\n\n[Peer]\nPublicKey = {multibyte}\nEndpoint = 127.0.0.1:51820\nAllowedIPs = 10.7.0.2/32\n");
+        assert_eq!(
+            Config::parse(&file).unwrap_err().to_string(),
+            "line 6: PublicKey is not valid hex"
+        );
+    }
+
     fn owner_only_file(text: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chan.conf");
