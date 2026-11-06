@@ -277,6 +277,11 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/test-check-build-matrix.py
 	$(PYTHON) scripts/test-desktop-package-version.py
 
+.PHONY: rust-floor-check
+rust-floor-check: ## Check Linux package dependencies against the PPA builders' Rust.
+	$(PYTHON) scripts/test-check-rust-floor.py
+	$(PYTHON) scripts/check-rust-floor.py
+
 .PHONY: nix-check
 nix-check: ## Evaluate, build, and smoke both Nix packages.
 	$(LINUX_ONLY)
@@ -366,6 +371,7 @@ pre-push: ## Run the local pre-push gate.
 	$(MAKE) shell-check
 	$(MAKE) workflow-check
 	$(MAKE) build-matrix-check
+	$(MAKE) rust-floor-check
 ifeq ($(UNAME_S),Linux)
 	# Linux-only (see LINUX_ONLY), but kept HERE with the other static checks
 	# rather than beside the gateway block below: it is seconds long and needs
