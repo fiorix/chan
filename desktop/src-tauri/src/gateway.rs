@@ -172,10 +172,10 @@ pub struct FetchEffect {
 #[derive(Default)]
 pub struct GatewayManager {
     state: Mutex<GatewayState>,
-    /// What this process's start decided about each gateway's WireGuard
-    /// file. Set once at start; empty until then and in tests, where no
+    /// The process's WireGuard fabric, which adopts and retires each row's
+    /// tunnel. Set once at start; empty in tests that build none, where no
     /// row is behind a tunnel.
-    wireguard: std::sync::OnceLock<crate::wireguard::WireguardStartup>,
+    wireguard: std::sync::OnceLock<Arc<crate::wireguard::WireguardFabric>>,
     #[cfg(test)]
     after_cancel_intent: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -250,18 +250,18 @@ impl GatewayState {
 }
 
 impl GatewayManager {
-    /// Record the start's WireGuard outcome; `Err` hands it back when one
+    /// Record the process's WireGuard fabric; `Err` hands it back when one
     /// was recorded already.
-    pub fn set_wireguard_startup(
+    pub fn set_wireguard(
         &self,
-        startup: crate::wireguard::WireguardStartup,
-    ) -> Result<(), Box<crate::wireguard::WireguardStartup>> {
-        self.wireguard.set(startup).map_err(Box::new)
+        fabric: Arc<crate::wireguard::WireguardFabric>,
+    ) -> Result<(), Arc<crate::wireguard::WireguardFabric>> {
+        self.wireguard.set(fabric)
     }
 
-    /// The start's WireGuard outcome, empty when none was recorded.
-    pub fn wireguard_startup(&self) -> &crate::wireguard::WireguardStartup {
-        self.wireguard.get_or_init(Default::default)
+    /// The process's WireGuard fabric, `None` when none was recorded.
+    pub fn wireguard(&self) -> Option<&Arc<crate::wireguard::WireguardFabric>> {
+        self.wireguard.get()
     }
 
     /// The volatile GatewayEntry fields for `gateway_id`, or `None` when
@@ -791,12 +791,13 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
     }))
 }
 
-/// Why `gateway_id` does not connect in this process, if it does not: its
-/// WireGuard file was refused at start, or its WireGuard setting changed
-/// since. The proxy is decided once per process, so a connect that ran
-/// anyway would reach the gateway the wrong way or not at all; the row says
-/// what to fix instead.
-fn wireguard_refusal(
+/// Adopt `gateway_id`'s WireGuard file before it connects, so a file
+/// refused earlier and fixed in place, or a config edited by hand, comes
+/// up here without a save; a tunnel already running from the file is left
+/// as it is. `Some` with the reason when the file or the fabric cannot
+/// carry the row: a connect that ran anyway would reach the gateway the
+/// wrong way or not at all, so the row says what to fix instead.
+fn adopt_wireguard(
     state: &AppState,
     gateway_id: &str,
 ) -> Result<Option<(Gateway, String)>, String> {
@@ -810,11 +811,16 @@ fn wireguard_refusal(
         .into_iter()
         .find(|g| g.id == gateway_id)
         .ok_or_else(|| format!("no gateway {gateway_id}"))?;
-    let refusal = state
-        .gateway_manager
-        .wireguard_startup()
-        .connect_refusal(&gateway.id, gateway.wireguard.as_deref());
-    Ok(refusal.map(|reason| (gateway, reason)))
+    let (Some(file), Some(fabric)) = (
+        gateway.wireguard.as_deref(),
+        state.gateway_manager.wireguard(),
+    ) else {
+        return Ok(None);
+    };
+    match fabric.adopt(&gateway.id, file, Vec::new()) {
+        Ok(_) => Ok(None),
+        Err(reason) => Ok(Some((gateway, reason))),
+    }
 }
 
 /// Connect a configured gateway. Non-interactive startup never opens a browser.
@@ -824,7 +830,7 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     gateway_id: String,
     interactive: bool,
 ) -> Result<(), String> {
-    if let Some((gateway, reason)) = wireguard_refusal(&state, &gateway_id)? {
+    if let Some((gateway, reason)) = adopt_wireguard(&state, &gateway_id)? {
         {
             let mut live = state.gateway_manager.state.lock().unwrap();
             if let Some(rt) = live.runtimes.get_mut(&gateway_id) {
@@ -1651,6 +1657,11 @@ fn invalidate_gateway(
     let mut live = state.gateway_manager.state.lock().unwrap();
     if reason == CascadeReason::UserDisconnect {
         persist_enabled(&mut store, gateway_id, false);
+        // A disabled row runs no tunnel; its next connect adopts the file
+        // again.
+        if let Some(fabric) = state.gateway_manager.wireguard() {
+            fabric.retire(gateway_id);
+        }
     }
     #[cfg(test)]
     if let Some(after_intent) = state
@@ -4944,45 +4955,66 @@ pub(crate) mod tests {
     const UNUSED_ROSTER_URL: &str = "http://127.0.0.1:9/desktop/v1/devservers";
 
     #[tokio::test]
-    async fn connect_refuses_a_row_the_start_has_no_tunnel_for() {
-        use std::path::PathBuf;
+    async fn connect_adopts_a_row_whose_file_is_not_running_and_refuses_a_bad_file() {
+        use std::path::{Path, PathBuf};
 
         let dir = tempfile::tempdir().unwrap();
+        let wg_file = |name: &str, address: &str| -> PathBuf {
+            let path = dir.path().join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n\
+                     Address = {address}\n[Peer]\n\
+                     PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
+                     Endpoint = 192.0.2.1:51820\nAllowedIPs = 10.7.0.2/32\n"
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            path
+        };
+        let bad = wg_file("bad.conf", "nowhere");
+        let started = wg_file("started.conf", "10.7.0.1/32");
+        let named = wg_file("named.conf", "10.7.0.1/32");
+        let row = |id: &str, url: &str, file: &Path| Gateway {
+            id: id.into(),
+            url: url.into(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+            wireguard: Some(file.to_path_buf()),
+        };
+        // The start refused the first row's file and ran the second row's
+        // tunnel from a file the row no longer names.
+        let fabric = Arc::new(
+            crate::wireguard::start(&[
+                row("gw-refused", "https://refused.example", &bad),
+                row("gw-changed", "https://changed.example", &started),
+            ])
+            .await,
+        );
+        let mut cfg = config::Config::default();
+        cfg.gateways
+            .push(row("gw-refused", "https://refused.example", &bad));
+        cfg.gateways
+            .push(row("gw-changed", "https://changed.example", &named));
         let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
             dir.path().join("config.json"),
         )));
-        let file = PathBuf::from("/home/u/wg/gw.conf");
-        let other = PathBuf::from("/home/u/wg/other.conf");
-        let mut cfg = config::Config::default();
-        cfg.gateways.push(Gateway {
-            id: "gw-refused".into(),
-            url: "https://refused.example".into(),
-            label: String::new(),
-            enabled: true,
-            added_at: 0,
-            native_trust: Vec::new(),
-            wireguard: Some(file.clone()),
-        });
-        cfg.gateways.push(Gateway {
-            id: "gw-changed".into(),
-            url: "https://changed.example".into(),
-            label: String::new(),
-            enabled: true,
-            added_at: 0,
-            native_trust: Vec::new(),
-            wireguard: Some(other.clone()),
-        });
         store.lock().unwrap().save(&cfg).unwrap();
-        // The start refused the first row's file and ran the second row's
-        // tunnel from a file the row no longer names.
-        let reason = "WireGuard: /home/u/wg/gw.conf: line 3: Address: not an IP address";
-        let startup = crate::wireguard::WireguardStartup::for_test(
-            &[("gw-changed", file.to_str().unwrap())],
-            &[("gw-refused", file.to_str().unwrap(), reason)],
-        );
-        let state = Arc::new(AppState::with_store(store).with_wireguard(None, startup));
+        assert!(fabric.failure("gw-refused", Some(&bad)).is_some());
+        assert_eq!(fabric.status("gw-changed", Some(&named)), None);
+        let state = Arc::new(AppState::with_store(store).with_wireguard(Arc::clone(&fabric)));
         let app = tauri::test::mock_app();
 
+        // The refused file is read again at connect and still refused,
+        // with the reader's message, and no attempt is registered.
         let err = connect_gateway(
             app.handle().clone(),
             Arc::clone(&state),
@@ -4991,27 +5023,13 @@ pub(crate) mod tests {
         )
         .await
         .expect_err("a refused file does not connect");
-        assert_eq!(err, reason);
-        let err = connect_gateway(
-            app.handle().clone(),
-            Arc::clone(&state),
-            "gw-changed".into(),
-            true,
-        )
-        .await
-        .expect_err("a changed file waits for a restart");
-        assert_eq!(err, crate::wireguard::RESTART_REQUIRED);
-        // Neither row registered an attempt: nothing is connecting.
+        assert!(err.starts_with("WireGuard: "), "{err}");
+        assert!(err.contains(&bad.display().to_string()), "{err}");
+        assert!(err.contains("line 3"), "{err}");
         assert!(state.gateway_manager.view("gw-refused").is_none());
-        assert!(state.gateway_manager.view("gw-changed").is_none());
-        // A row the start ran as it stands connects past the refusal (and
-        // fails later, at discovery, since nothing listens there).
-        {
-            let mut guard = state.store.lock().unwrap();
-            let mut cfg = guard.get().unwrap();
-            cfg.gateways[1].wireguard = Some(file.clone());
-            guard.save(&cfg).unwrap();
-        }
+
+        // The changed row is adopted from the file it names and connects
+        // past it, failing later, at discovery, since nothing listens there.
         let err = connect_gateway(
             app.handle().clone(),
             Arc::clone(&state),
@@ -5021,6 +5039,35 @@ pub(crate) mod tests {
         .await
         .expect_err("discovery fails against nothing");
         assert!(err.contains("discovery"), "{err}");
+        assert_eq!(
+            fabric.status("gw-changed", Some(&named)).as_deref(),
+            Some("connecting")
+        );
+
+        // A user disconnect retires the tunnel; the next connect adopts it
+        // again.
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-changed",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        assert_eq!(fabric.status("gw-changed", Some(&named)), None);
+        assert_eq!(fabric.tunnels(), 0);
+        let err = connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-changed".into(),
+            true,
+        )
+        .await
+        .expect_err("discovery fails against nothing");
+        assert!(err.contains("discovery"), "{err}");
+        assert_eq!(
+            fabric.status("gw-changed", Some(&named)).as_deref(),
+            Some("connecting")
+        );
     }
 
     /// Install a runtime under `pat_load_test_state`'s gateway id with a

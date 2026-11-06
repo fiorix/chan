@@ -32,7 +32,9 @@
 #               the devserver, the connector, the stack and the kernel. The
 #               dial then fails at the HTTP level, which is expected.
 #   devserver-wrong-key
-#               the same dial with the wrong peer key reaches nothing.
+#               the same dial with the wrong peer key reaches nothing,
+#               logs one session expiry at WARN within 100 s of tunnel
+#               start, and logs no ERROR at the production warn filter.
 #
 # What it cannot prove: a peer behind a real NAT or a changing address, a
 # tunnel URL by name, anything the gateway answers past the preface, the
@@ -693,6 +695,7 @@ start_devserver() {
 \$env:CHAN_HOME = "$CLIENT_DIR\\$name-home"
 New-Item -ItemType Directory -Path \$env:CHAN_HOME -Force | Out-Null
 \$env:CHAN_UPDATE_CHECK = '0'
+\$env:RUST_LOG = 'warn'
 \$p = Start-Process -FilePath "$CLIENT_DIR\chan.exe" -ArgumentList @('devserver', 'run', '--bind', '127.0.0.1', '--port', '$port', '--tunnel-wireguard', "$CLIENT_DIR\\$file", '--tunnel-url', 'http://$PEER_IP:$RAW_PORT/v1/tunnel', '--tunnel-token', 'chan_pat_wireguard_windows_e2e') -RedirectStandardOutput "$CLIENT_DIR\\$name.out" -RedirectStandardError "$CLIENT_DIR\\$name.err" -WindowStyle Hidden -PassThru
 Set-Content -LiteralPath "$CLIENT_DIR\\$name.pid" -Value \$p.Id
 Wait-Process -Id \$p.Id
@@ -722,18 +725,28 @@ PS
 }
 devserver_log() {
     # devserver_log <name>: both of the devserver's streams, fetched into
-    # the work dir.
-    client_ps 60 > "$WORK/$1.log" <<PS || true
-Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.out" -ErrorAction SilentlyContinue
-Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.err" -ErrorAction SilentlyContinue
+    # the work dir. A failed fetch must not stand in for an ERROR-free log.
+    client_ps 60 > "$WORK/$1.raw.log" <<PS || return 1
+\$ErrorActionPreference = 'Stop'
+Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.out"
+Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.err"
 PS
-    strip_cr "$WORK/$1.log"
+    # tracing colours redirected stderr too; the level follows the timestamp.
+    sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$WORK/$1.raw.log" > "$WORK/$1.log"
 }
 tunnel_start_logged() {
     # tunnel_start_logged <name> <client file name>
-    devserver_log "$1"
+    devserver_log "$1" || return 1
     grep -qF "chan devserver: WireGuard tunnel started from $CLIENT_DIR\\$2: endpoint " "$WORK/$1.log" \
         && grep -qF "public key $CLIENT_PUB" "$WORK/$1.log"
+}
+
+session_warnings() {
+    awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
+}
+session_expiry_logged() {
+    devserver_log "$1" || return 1
+    [ "$(session_warnings "$WORK/$1.log")" -ge 1 ]
 }
 
 DEVSERVER_PID=""
@@ -770,19 +783,22 @@ if runs devserver-wrong-key; then
         before="$(peer_handshake)"
         if start_devserver devserver-wrong-key client-wrong-key.conf; then
             wait_for 60 "the tunnel-start line" tunnel_start_logged devserver-wrong-key client-wrong-key.conf || arm_rc=1
-            # The dial has 20 s to reach the listener; with a wrong key it must not.
-            sleep 20
+            # The expiry warning proves the wrong-key attempt ran past 90 s.
+            wait_for 100 "the session-expiry warning" session_expiry_logged devserver-wrong-key || arm_rc=1
         else
             arm_rc=1
         fi
         capture="$(peer_capture devserver-wrong-key)"
         after="$(peer_handshake)"
         stop_devserver
-        devserver_log devserver-wrong-key
+        devserver_log devserver-wrong-key || arm_rc=1
         [ "$capture" = absent ] || arm_rc=1
         [ "$before" = "$after" ] || arm_rc=1
         ! grep -q 'tunnel connected' "$WORK/devserver-wrong-key.log" || arm_rc=1
-        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
+        expiry_warns="$(session_warnings "$WORK/devserver-wrong-key.log")"
+        error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$WORK/devserver-wrong-key.log")"
+        [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0), listener capture $capture (want absent), peer handshake stamp $before -> $after"
         { grep 'WireGuard tunnel started' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
     else
         arm_rc=1

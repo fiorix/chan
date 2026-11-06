@@ -2,34 +2,40 @@
 //! a wg-quick file, and the one loopback CONNECT proxy every outbound leg
 //! reaches those gateways through.
 //!
-//! The fabric is decided once, at start, before any webview exists, and
-//! lives for the process. The three legs to a gateway, the HTTP clients,
-//! the window feed's WebSocket and the webviews, all know how to dial
-//! through an HTTP proxy, so one proxy puts them inside the tunnels with no
-//! interface, route or privilege on the host. It is decided at start
+//! The proxy is bound at start, before any HTTP client or webview exists,
+//! whether or not a gateway carries a file, and lives for the process. The
+//! three legs to a gateway, the HTTP clients, the window feed's WebSocket
+//! and the webviews, all know how to dial through an HTTP proxy, so one
+//! proxy puts them inside the tunnels with no interface, route or privilege
+//! on the host. Its address is the one thing decided once per process,
 //! because the webview proxy is: WebView2 takes it as a browser argument
 //! shared by every webview of the process, so the launcher and every window
-//! must carry the same value and a change needs a restart. A gateway whose
-//! file cannot be read at start is not fatal to the app; the row carries
-//! the reader's message and refuses to connect until the file is fixed and
-//! the desktop restarts. When no gateway carries a file nothing here runs
-//! and every leg dials as it always did.
+//! carry the same value. What the proxy routes is not decided at start: the
+//! tunnels are a live registry behind it, keyed by gateway id. A row's file
+//! is adopted when it is set or changed through the Gateways form, when the
+//! row connects, and at start for every enabled row, so its tunnel starts and
+//! is routed in the running proxy; a cleared file, a removed row and a user
+//! disconnect retire the row's tunnel. A file that cannot be read or a
+//! tunnel that cannot start disables that row alone, with the reader's
+//! message, until its next adopt; a proxy that cannot bind disables every
+//! WireGuard row with that reason, and the app runs without a proxy.
 //!
 //! The proxy routes by destination: an address inside a tunnel's AllowedIPs
 //! goes through that tunnel, anything else is connected directly. The
 //! loopback destinations of the Rust legs (the embedded server, a devserver
 //! on this machine) never enter the proxy at all, so they do not depend on
-//! it being up; the webviews on Linux have no such exception, which is why
-//! the proxy forwards plain HTTP as well as CONNECT.
+//! it being up; the webviews on Linux have no such exception, so there every
+//! local window reaches the embedded server through the proxy's plain HTTP
+//! forwarding, with or without a gateway.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use chan_wireguard::{ConnectProxy, Tunnel};
+use chan_wireguard::{ConnectProxy, HostRoute, ProxyRoute, Tunnel};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::http::Uri;
@@ -50,113 +56,235 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// broken proxy; the bound keeps the byte-wise read from growing forever.
 const MAX_RESPONSE_HEAD: usize = 16 * 1024;
 
-/// The connect refusal for a row whose WireGuard setting is not the one the
-/// process started with.
-pub const RESTART_REQUIRED: &str =
-    "the gateway's WireGuard setting changed; restart chan-desktop to apply it";
-
-/// The tunnels started at this process's start and the proxy over them.
-/// Dropping it ends the proxy and every connection through it, so it lives
-/// in [`AppState`](crate::AppState) for the process.
+/// The process's proxy and the tunnels it routes, one row per gateway that
+/// was adopted. Dropping it ends the proxy and every tunnel and connection
+/// through it, so it lives in [`AppState`](crate::AppState) for the
+/// process.
 pub struct WireguardFabric {
-    tunnels: Vec<Tunnel>,
-    proxy: ConnectProxy,
-    proxy_url: Url,
+    proxy: Proxy,
+    /// The runtime every tunnel's driver runs on, whichever thread adopts.
+    runtime: tokio::runtime::Handle,
+    /// One row per adopted gateway. Adopt and retire hold it from the check
+    /// to the swap, so two adopts of one row never start two tunnels.
+    rows: Mutex<HashMap<String, Row>>,
+}
+
+enum Proxy {
+    Bound {
+        proxy: ConnectProxy,
+        url: Url,
+    },
+    /// The bind failed: no row can be reached, and this is why.
+    Unavailable(String),
+}
+
+/// What the fabric holds for one gateway.
+enum Row {
+    /// The tunnel runs from `path` and its route is in the proxy.
+    Running { path: PathBuf, tunnel: Tunnel },
+    /// The file at `path` was refused, for `reason`; nothing runs.
+    Refused { path: PathBuf, reason: String },
 }
 
 impl WireguardFabric {
-    /// The proxy as the legs name it, `http://127.0.0.1:<port>`.
-    pub fn proxy_url(&self) -> &Url {
-        &self.proxy_url
+    /// The proxy as the legs name it, `http://127.0.0.1:<port>`; `None`
+    /// when it could not bind.
+    pub fn proxy_url(&self) -> Option<&Url> {
+        match &self.proxy {
+            Proxy::Bound { url, .. } => Some(url),
+            Proxy::Unavailable(_) => None,
+        }
     }
 
-    /// How many tunnels the proxy routes over.
+    /// How many tunnels run.
     pub fn tunnels(&self) -> usize {
-        self.tunnels.len()
+        self.rows
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|row| matches!(row, Row::Running { .. }))
+            .count()
+    }
+
+    /// Start `gateway_id`'s tunnel from the wg-quick file at `conf` and
+    /// route it in the running proxy, with `hosts` as the names it carries
+    /// without a lookup on the host (empty to route by AllowedIPs alone).
+    ///
+    /// Synchronous, and callable from any thread: the tunnel's driver is
+    /// spawned on the fabric's runtime. The new route is in the proxy
+    /// before the row's previous tunnel, if any, is dropped, so the next
+    /// connection already goes through the new one while the connections
+    /// the old one carries end with it. Answers the tunnel's status for the
+    /// launcher, `connecting` until a handshake completes.
+    ///
+    /// A row already running from `conf` is left as it is and answers its
+    /// live status, whatever `hosts` says, so a save that leaves the path
+    /// alone never restarts a tunnel; a caller that rewrote the file in
+    /// place, or changed the host map, calls [`retire`](Self::retire)
+    /// first. A file the reader refuses, a tunnel that does not start or a
+    /// host map the proxy refuses answers `Err` with a `WireGuard: ...`
+    /// sentence that names the path, the line and the key and never a
+    /// value; that row's route and any tunnel it ran are dropped and the
+    /// refusal is kept, so [`failure`](Self::failure) reads it while the
+    /// row still names `conf`. With no proxy every adopt answers the bind
+    /// failure and nothing starts.
+    pub fn adopt(
+        &self,
+        gateway_id: &str,
+        conf: &Path,
+        hosts: Vec<HostRoute>,
+    ) -> Result<String, String> {
+        let proxy = match &self.proxy {
+            Proxy::Bound { proxy, .. } => proxy,
+            Proxy::Unavailable(reason) => return Err(reason.clone()),
+        };
+        let mut rows = self.rows.lock().unwrap();
+        if let Some(Row::Running { path, tunnel }) = rows.get(gateway_id) {
+            if path == conf {
+                return Ok(describe(tunnel.status()));
+            }
+        }
+        let started = {
+            let _runtime = self.runtime.enter();
+            start_tunnel(gateway_id, conf)
+        };
+        let routed = started.and_then(|(tunnel, endpoint)| {
+            let route = ProxyRoute {
+                tunnel: tunnel.clone(),
+                hosts,
+            };
+            match proxy.replace_route(gateway_id, route) {
+                Ok(()) => Ok((tunnel, endpoint)),
+                Err(e) => {
+                    tracing::warn!(gateway = %gateway_id, error = %e, "gateway WireGuard host map refused");
+                    Err(format!("WireGuard: {}: {e}", conf.display()))
+                }
+            }
+        });
+        let (row, answer) = match routed {
+            Ok((tunnel, endpoint)) => {
+                tracing::info!(
+                    gateway = %gateway_id,
+                    file = %conf.display(),
+                    %endpoint,
+                    "gateway WireGuard tunnel started"
+                );
+                let status = describe(tunnel.status());
+                let row = Row::Running {
+                    path: conf.to_owned(),
+                    tunnel,
+                };
+                (row, Ok(status))
+            }
+            Err(reason) => {
+                proxy.remove_route(gateway_id);
+                let row = Row::Refused {
+                    path: conf.to_owned(),
+                    reason: reason.clone(),
+                };
+                (row, Err(reason))
+            }
+        };
+        let previous = rows.insert(gateway_id.to_owned(), row);
+        drop(rows);
+        // The previous tunnel's last handle goes here, after the new route
+        // carries the next connections; its driver stops with it.
+        drop(previous);
+        answer
+    }
+
+    /// Drop `gateway_id`'s route and row: its tunnel ends, and so does
+    /// every connection through it. `false` when the fabric held nothing
+    /// for the row.
+    pub fn retire(&self, gateway_id: &str) -> bool {
+        let mut rows = self.rows.lock().unwrap();
+        if let Proxy::Bound { proxy, .. } = &self.proxy {
+            proxy.remove_route(gateway_id);
+        }
+        let row = rows.remove(gateway_id);
+        drop(rows);
+        if let Some(Row::Running { path, .. }) = &row {
+            tracing::info!(gateway = %gateway_id, file = %path.display(), "gateway WireGuard tunnel retired");
+        }
+        row.is_some()
+    }
+
+    /// The launcher's words for the row's live tunnel, while the row still
+    /// names the file it runs from. A row whose stored path is not the
+    /// running one, a config edited by hand while the desktop runs among
+    /// them, reads no status until it is adopted.
+    pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        match self.rows.lock().unwrap().get(gateway_id)? {
+            Row::Running { path, tunnel } if Some(path.as_path()) == configured => {
+                Some(describe(tunnel.status()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Why the row's file was refused at its last adopt, while the row
+    /// still names that file.
+    pub fn failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        match self.rows.lock().unwrap().get(gateway_id)? {
+            Row::Refused { path, reason } if Some(path.as_path()) == configured => {
+                Some(reason.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Why a row naming `configured` cannot be reached: its file's
+    /// refusal, or, for any row with a file, the proxy's bind failure.
+    pub fn connect_refusal(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        if let Some(reason) = self.failure(gateway_id, configured) {
+            return Some(reason);
+        }
+        match &self.proxy {
+            Proxy::Unavailable(reason) if configured.is_some() => Some(reason.clone()),
+            _ => None,
+        }
     }
 }
 
 impl std::fmt::Debug for WireguardFabric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WireguardFabric")
-            .field("tunnels", &self.tunnels.len())
-            .field("proxy", &self.proxy)
+        // Counts and paths only: a row's reason is the reader's sentence,
+        // and nothing here prints what a file holds.
+        let tunnels = self.tunnels();
+        let paths: HashMap<String, String> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, row)| {
+                let (Row::Running { path, .. } | Row::Refused { path, .. }) = row;
+                (id.clone(), path.display().to_string())
+            })
+            .collect();
+        let mut out = f.debug_struct("WireguardFabric");
+        match &self.proxy {
+            Proxy::Bound { proxy, .. } => out.field("proxy", proxy),
+            Proxy::Unavailable(_) => out.field("proxy", &"unavailable"),
+        };
+        out.field("tunnels", &tunnels)
+            .field("rows", &paths)
             .finish()
     }
 }
 
-/// What the start decided for each gateway row: the file its tunnel runs
-/// from, or why its file was refused. The Gateways projection reads it to
-/// say which rows wait for a restart, and connect reads it to refuse a row
-/// the process has no tunnel for.
-#[derive(Debug, Default)]
-pub struct WireguardStartup {
-    /// Gateways with a running tunnel, by the file it was started from.
-    started: HashMap<String, PathBuf>,
-    /// Gateways whose file was refused, with the file and the reason.
-    failed: HashMap<String, (PathBuf, String)>,
-    tunnels: HashMap<String, Tunnel>,
-}
-
-impl WireguardStartup {
-    /// Live tunnel state for the file this process started from. A changed
-    /// path has no live state until the desktop restarts.
-    pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
-        if self.started.get(gateway_id).map(PathBuf::as_path) != configured {
-            return None;
-        }
-        Some(describe(self.tunnels.get(gateway_id)?.status()))
-    }
-
-    /// Whether an enabled row's WireGuard setting differs from what the
-    /// process runs: a file added, changed, removed or refused since the
-    /// start. A disabled row asks nothing of the process.
-    pub fn restart_required(
-        &self,
-        gateway_id: &str,
-        configured: Option<&Path>,
-        enabled: bool,
-    ) -> bool {
-        enabled && self.started.get(gateway_id).map(PathBuf::as_path) != configured
-    }
-
-    /// The reason the row's file was refused at start, while the row still
-    /// names that file.
-    pub fn failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<&str> {
-        self.failed
-            .get(gateway_id)
-            .filter(|(path, _)| Some(path.as_path()) == configured)
-            .map(|(_, reason)| reason.as_str())
-    }
-
-    /// Why a connect of this row is refused, if it is: its file was refused
-    /// at start, or its setting changed since. Connecting is enabling, so
-    /// the row is judged as enabled.
-    pub fn connect_refusal(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
-        if let Some(reason) = self.failure(gateway_id, configured) {
-            return Some(reason.to_string());
-        }
-        self.restart_required(gateway_id, configured, true)
-            .then(|| RESTART_REQUIRED.to_string())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        started: &[(&str, &str)],
-        failed: &[(&str, &str, &str)],
-    ) -> WireguardStartup {
-        WireguardStartup {
-            tunnels: HashMap::new(),
-            started: started
-                .iter()
-                .map(|(id, path)| (id.to_string(), PathBuf::from(path)))
-                .collect(),
-            failed: failed
-                .iter()
-                .map(|(id, path, reason)| {
-                    (id.to_string(), (PathBuf::from(path), reason.to_string()))
-                })
-                .collect(),
+/// Read `conf` and start its tunnel, logging a refusal as it happens. Must
+/// run inside the runtime the tunnel lives on.
+fn start_tunnel(gateway_id: &str, conf: &Path) -> Result<(Tunnel, String), String> {
+    let config = chan_wireguard::config::read_file(conf).map_err(|e| {
+        tracing::warn!(gateway = %gateway_id, error = %e, "gateway WireGuard file refused");
+        format!("WireGuard: {e}")
+    })?;
+    let endpoint = config.peer.endpoint.to_string();
+    match Tunnel::start(config) {
+        Ok(tunnel) => Ok((tunnel, endpoint)),
+        Err(e) => {
+            tracing::warn!(gateway = %gateway_id, %endpoint, error = %e, "gateway WireGuard tunnel failed to start");
+            Err(format!("WireGuard: starting the tunnel to {endpoint}: {e}"))
         }
     }
 }
@@ -184,83 +312,45 @@ fn describe(status: chan_wireguard::Status) -> String {
     }
 }
 
-/// Start a tunnel for every enabled gateway with a WireGuard file and one
-/// proxy over them. A file that cannot be read or a tunnel that cannot
-/// start fails that row alone; a proxy that cannot bind fails every row,
-/// since nothing can reach the tunnels without it. `None` when no tunnel
-/// started. Must run on the tokio runtime the tunnels live on for the
-/// process.
-pub async fn start(gateways: &[Gateway]) -> (Option<WireguardFabric>, WireguardStartup) {
-    let mut startup = WireguardStartup::default();
-    let mut tunnels = Vec::new();
-    for gateway in gateways.iter().filter(|g| g.enabled) {
-        let Some(path) = &gateway.wireguard else {
-            continue;
-        };
-        let config = match chan_wireguard::config::read_file(path) {
-            Ok(config) => config,
-            Err(e) => {
-                tracing::warn!(gateway = %gateway.id, error = %e, "gateway WireGuard file refused");
-                startup.failed.insert(
-                    gateway.id.clone(),
-                    (path.clone(), format!("WireGuard: {e}")),
-                );
-                continue;
-            }
-        };
-        let endpoint = config.peer.endpoint.to_string();
-        match Tunnel::start(config) {
-            Ok(tunnel) => {
-                tracing::info!(
-                    gateway = %gateway.id,
-                    file = %path.display(),
-                    %endpoint,
-                    "gateway WireGuard tunnel started"
-                );
-                startup.started.insert(gateway.id.clone(), path.clone());
-                startup.tunnels.insert(gateway.id.clone(), tunnel.clone());
-                tunnels.push(tunnel);
-            }
-            Err(e) => {
-                tracing::warn!(gateway = %gateway.id, %endpoint, error = %e, "gateway WireGuard tunnel failed to start");
-                startup.failed.insert(
-                    gateway.id.clone(),
-                    (
-                        path.clone(),
-                        format!("WireGuard: starting the tunnel to {endpoint}: {e}"),
-                    ),
-                );
-            }
-        }
-    }
-    if tunnels.is_empty() {
-        return (None, startup);
-    }
-    let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-    match ConnectProxy::bind(tunnels.clone(), bind).await {
+/// Bind the proxy on loopback with no tunnel, then adopt every enabled
+/// gateway with a WireGuard file. Never waits for an endpoint lookup or a
+/// handshake. A file that cannot be read or a tunnel that cannot start
+/// fails that row alone; a proxy that cannot bind fails every row, since
+/// nothing can reach a tunnel without it. Must run on the tokio runtime
+/// the tunnels live on for the process.
+pub async fn start(gateways: &[Gateway]) -> WireguardFabric {
+    start_with_bind(
+        gateways,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+    )
+    .await
+}
+
+async fn start_with_bind(gateways: &[Gateway], bind: SocketAddr) -> WireguardFabric {
+    let proxy = match ConnectProxy::bind_routed(Vec::new(), bind).await {
         Ok(proxy) => {
-            let proxy_url = Url::parse(&format!("http://{}", proxy.local_addr()))
+            let url = Url::parse(&format!("http://{}", proxy.local_addr()))
                 .expect("a loopback socket address is a URL authority");
-            tracing::info!(proxy = %proxy.local_addr(), tunnels = tunnels.len(), "gateway WireGuard proxy listening");
-            (
-                Some(WireguardFabric {
-                    tunnels,
-                    proxy,
-                    proxy_url,
-                }),
-                startup,
-            )
+            tracing::info!(proxy = %proxy.local_addr(), tunnels = 0, "gateway WireGuard proxy listening");
+            Proxy::Bound { proxy, url }
         }
         Err(e) => {
-            tracing::error!(error = %e, "gateway WireGuard proxy failed to bind; the tunnels are dropped");
-            let reason = format!("WireGuard: starting the proxy: {e}");
-            startup.tunnels.clear();
-            for (id, path) in std::mem::take(&mut startup.started) {
-                startup.failed.insert(id, (path, reason.clone()));
-            }
-            (None, startup)
+            tracing::error!(error = %e, "gateway WireGuard proxy failed to bind; WireGuard gateways are disabled");
+            Proxy::Unavailable(format!("WireGuard: starting the proxy: {e}"))
+        }
+    };
+    let fabric = WireguardFabric {
+        proxy,
+        runtime: tokio::runtime::Handle::current(),
+        rows: Mutex::new(HashMap::new()),
+    };
+    for gateway in gateways.iter().filter(|g| g.enabled) {
+        if let Some(path) = &gateway.wireguard {
+            // A refusal is logged and kept on the row by adopt itself.
+            let _ = fabric.adopt(&gateway.id, path, Vec::new());
         }
     }
+    fabric
 }
 
 /// The process's proxy, as the legs consume it.
@@ -488,19 +578,157 @@ pub fn with_launcher_proxy(builder: wry::WebViewBuilder<'_>) -> wry::WebViewBuil
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use chan_wireguard::x25519::{PublicKey, StaticSecret};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
     const WAIT: Duration = Duration::from_secs(10);
 
-    fn tunnel_config(
-        private: &str,
-        endpoint: SocketAddr,
-        address: &str,
-    ) -> chan_wireguard::config::Config {
-        chan_wireguard::config::Config::parse(&format!(
-            "[Interface]\nPrivateKey = {private}\nAddress = {address}/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = {endpoint}\nAllowedIPs = 10.7.0.0/24\n"
-        )).unwrap()
+    fn secret() -> StaticSecret {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes).unwrap();
+        StaticSecret::from(bytes)
+    }
+
+    fn base64_of(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// Write `text` to `dir/name`, owner-only as the reader requires.
+    fn owner_only(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    /// The far side of one gateway's tunnel: a tunnel on a loopback socket
+    /// at `peer_addr`, and the wg-quick file the fabric reads for the
+    /// client side at `client_addr`, written under `dir` as `name`. The
+    /// peer learns the client's endpoint from its first authenticated
+    /// initiation, so its own configured endpoint is a port nothing
+    /// answers on.
+    struct Peer {
+        tunnel: Tunnel,
+        conf: PathBuf,
+        private_key: String,
+    }
+
+    async fn peer(dir: &Path, name: &str, client_addr: &str, peer_addr: &str) -> Peer {
+        let client = secret();
+        let server = secret();
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let at = udp.local_addr().unwrap();
+        let nowhere: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let server_config = chan_wireguard::config::Config::parse(&format!(
+            "[Interface]\nPrivateKey = {}\nAddress = {peer_addr}/32\n[Peer]\nPublicKey = {}\nEndpoint = {nowhere}\nAllowedIPs = {client_addr}/32\n",
+            base64_of(&server.to_bytes()),
+            base64_of(PublicKey::from(&client).as_bytes()),
+        ))
+        .unwrap();
+        let tunnel = Tunnel::start_on(server_config, udp, nowhere).unwrap();
+        let private_key = base64_of(&client.to_bytes());
+        let conf = owner_only(
+            dir,
+            name,
+            &format!(
+                "[Interface]\nPrivateKey = {private_key}\nAddress = {client_addr}/32\n[Peer]\nPublicKey = {}\nEndpoint = {at}\nAllowedIPs = {peer_addr}/32\n",
+                base64_of(PublicKey::from(&server).as_bytes()),
+            ),
+        );
+        Peer {
+            tunnel,
+            conf,
+            private_key,
+        }
+    }
+
+    fn gateway(id: &str, wireguard: Option<&Path>) -> Gateway {
+        Gateway {
+            id: id.into(),
+            url: format!("https://{id}.test"),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: vec![],
+            wireguard: wireguard.map(Path::to_path_buf),
+        }
+    }
+
+    impl WireguardFabric {
+        fn proxy_addr(&self) -> SocketAddr {
+            proxy_socket_addr(self.proxy_url().expect("a bound proxy")).unwrap()
+        }
+
+        fn routes(&self) -> usize {
+            match &self.proxy {
+                Proxy::Bound { proxy, .. } => proxy.routes(),
+                Proxy::Unavailable(_) => 0,
+            }
+        }
+
+        /// A handle of the row's running tunnel, held apart from the
+        /// fabric's own.
+        fn tunnel(&self, gateway_id: &str) -> Option<Tunnel> {
+            match self.rows.lock().unwrap().get(gateway_id)? {
+                Row::Running { tunnel, .. } => Some(tunnel.clone()),
+                Row::Refused { .. } => None,
+            }
+        }
+    }
+
+    /// CONNECT `target` through the fabric's proxy: the proxy's status,
+    /// and the stream when it answered 200.
+    async fn connect_via(fabric: &WireguardFabric, target: SocketAddr) -> (u16, TcpStream) {
+        let mut stream = TcpStream::connect(fabric.proxy_addr()).await.unwrap();
+        stream
+            .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            let n = tokio::time::timeout(WAIT, stream.read(&mut byte))
+                .await
+                .expect("the proxy answers")
+                .unwrap();
+            assert_ne!(n, 0, "the proxy closed before a response head");
+            head.push(byte[0]);
+        }
+        (connect_status(&head).unwrap(), stream)
+    }
+
+    /// A CONNECT through the fabric to `peer`'s listener on `port` is
+    /// answered 200 and lands there from `client_addr`, and bytes cross.
+    async fn carried(
+        fabric: &WireguardFabric,
+        listener: &mut chan_wireguard::Listener,
+        client_addr: &str,
+        peer_addr: &str,
+    ) {
+        let target = SocketAddr::new(peer_addr.parse().unwrap(), listener.port());
+        let (status, mut client) = connect_via(fabric, target).await;
+        assert_eq!(status, 200, "CONNECT {target}");
+        let mut server = tokio::time::timeout(WAIT, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            server.peer_addr().ip(),
+            client_addr.parse::<IpAddr>().unwrap()
+        );
+        client.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        tokio::time::timeout(WAIT, server.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"ping");
     }
 
     #[tokio::test]
@@ -509,83 +737,257 @@ mod tests {
         use std::task::Poll;
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gateway.conf");
-        std::fs::write(&path, "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.7.0.1/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = pending.test:51820\nAllowedIPs = 10.7.0.0/24\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let gateways = [Gateway {
-            id: "pending".into(),
-            url: "https://gateway.test".into(),
-            label: String::new(),
-            enabled: true,
-            added_at: 0,
-            native_trust: vec![],
-            wireguard: Some(path.clone()),
-        }];
+        let path = owner_only(
+            dir.path(),
+            "gateway.conf",
+            "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.7.0.1/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nEndpoint = pending.test:51820\nAllowedIPs = 10.7.0.0/24\n",
+        );
+        let gateways = [gateway("pending", Some(&path))];
         let starting = start(&gateways);
         tokio::pin!(starting);
-        let (fabric, startup) = std::future::poll_fn(|cx| match starting.as_mut().poll(cx) {
+        let fabric = std::future::poll_fn(|cx| match starting.as_mut().poll(cx) {
             Poll::Ready(value) => Poll::Ready(value),
             Poll::Pending => panic!("startup waited before binding the proxy"),
         })
         .await;
-        let fabric = fabric.expect("a parsed configuration installs the proxy");
         assert_eq!(
-            startup.status("pending", Some(&path)).as_deref(),
+            fabric.status("pending", Some(&path)).as_deref(),
             Some("connecting")
         );
-        assert_eq!(startup.connect_refusal("pending", Some(&path)), None);
-        assert!(!startup.restart_required("pending", Some(&path), true));
+        assert_eq!(fabric.connect_refusal("pending", Some(&path)), None);
+        assert_eq!(fabric.tunnels(), 1);
         // This current-thread runtime has not yielded to a driver task. No
         // lookup can complete, but the listener already accepts connections.
-        let connection = std::net::TcpStream::connect(fabric.proxy.local_addr()).unwrap();
+        let connection = std::net::TcpStream::connect(fabric.proxy_addr()).unwrap();
         drop(connection);
-        drop(startup);
         drop(fabric);
     }
 
     #[tokio::test]
-    async fn gateway_state_reads_the_live_tunnel() {
-        let a_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let b_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let a_at = a_udp.local_addr().unwrap();
-        let b_at = b_udp.local_addr().unwrap();
-        let mut a_config = tunnel_config(
-            "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
-            b_at,
-            "10.7.0.1",
-        );
-        let mut b_config = tunnel_config(
-            "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
-            a_at,
-            "10.7.0.2",
-        );
-        a_config.peer.public_key = b_config.public_key();
-        b_config.peer.public_key = a_config.public_key();
-        let a = Tunnel::start_on(a_config, a_udp, b_at).unwrap();
-        let b = Tunnel::start_on(b_config, b_udp, a_at).unwrap();
-        let mut startup = WireguardStartup::for_test(&[("gateway", "/gateway.conf")], &[]);
-        startup.tunnels.insert("gateway".into(), a.clone());
-        let path = Some(Path::new("/gateway.conf"));
+    async fn start_binds_the_proxy_with_no_gateway() {
+        let fabric = start(&[]).await;
+        assert!(fabric.proxy_url().is_some());
+        assert_eq!(fabric.tunnels(), 0);
+        assert_eq!(fabric.routes(), 0);
+        // The proxy itself answers: a request in origin form is one to the
+        // proxy and is refused as malformed.
+        let mut stream = TcpStream::connect(fabric.proxy_addr()).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(WAIT, stream.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(connect_status(&response), Some(400), "{response:?}");
+    }
+
+    #[tokio::test]
+    async fn adopt_starts_routes_and_reports_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let fabric = start(&[]).await;
+        let status = fabric.adopt("gw", &far.conf, Vec::new());
+        assert_eq!(status.as_deref(), Ok("connecting"));
+        assert_eq!(fabric.tunnels(), 1);
         assert_eq!(
-            startup.status("gateway", path).as_deref(),
+            fabric.status("gw", Some(&far.conf)).as_deref(),
             Some("connecting")
         );
-        let mut listener = b.listen(80).unwrap();
-        let (client, server) = tokio::time::timeout(WAIT, async {
-            tokio::join!(a.connect("10.7.0.2:80".parse().unwrap()), listener.accept())
-        })
+        // The running proxy carries the adopted route.
+        carried(&fabric, &mut listener, "10.7.0.1", "10.7.0.2").await;
+        assert_eq!(fabric.status("gw", Some(&far.conf)).as_deref(), Some("up"));
+        // A row naming another file reads no status.
+        assert_eq!(fabric.status("gw", Some(Path::new("/changed.conf"))), None);
+        assert_eq!(fabric.status("gw", None), None);
+    }
+
+    #[tokio::test]
+    async fn adopt_replaces_a_running_tunnel_after_routing_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two peers at one tunnel address, told apart by the client
+        // address each file gives the fabric.
+        let first = peer(dir.path(), "first.conf", "10.7.0.1", "10.7.0.2").await;
+        let second = peer(dir.path(), "second.conf", "10.7.0.3", "10.7.0.2").await;
+        let mut first_listener = first.tunnel.listen(0).unwrap();
+        let mut second_listener = second.tunnel.listen(0).unwrap();
+        let fabric = start(&[]).await;
+        fabric.adopt("gw", &first.conf, Vec::new()).unwrap();
+        carried(&fabric, &mut first_listener, "10.7.0.1", "10.7.0.2").await;
+        // A stream of the test's own over the first tunnel, and the test's
+        // own handle of it.
+        let old = fabric.tunnel("gw").unwrap();
+        let mut old_stream = tokio::time::timeout(
+            WAIT,
+            old.connect(SocketAddr::new(
+                "10.7.0.2".parse().unwrap(),
+                first_listener.port(),
+            )),
+        )
         .await
+        .unwrap()
         .unwrap();
-        let (_client, _server) = (client.unwrap(), server.unwrap());
-        assert_eq!(startup.status("gateway", path).as_deref(), Some("up"));
+        let _held = first_listener.accept().await.unwrap();
+
         assert_eq!(
-            startup.status("gateway", Some(Path::new("/changed.conf"))),
-            None
+            fabric.adopt("gw", &second.conf, Vec::new()).as_deref(),
+            Ok("connecting")
         );
+        assert_eq!(fabric.tunnels(), 1);
+        assert_eq!(fabric.routes(), 1);
+        carried(&fabric, &mut second_listener, "10.7.0.3", "10.7.0.2").await;
+        assert_eq!(fabric.status("gw", Some(&first.conf)), None);
+
+        // The fabric let the first tunnel go; once the test's handle is
+        // gone too, its stack is closed under the stream.
+        drop(old);
+        let mut buf = [0u8; 4];
+        let err = tokio::time::timeout(WAIT, old_stream.read(&mut buf))
+            .await
+            .unwrap()
+            .expect_err("the first tunnel is closed");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted, "{err}");
+    }
+
+    #[tokio::test]
+    async fn adopt_of_the_running_path_is_a_no_op() {
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let fabric = start(&[]).await;
+        fabric.adopt("gw", &far.conf, Vec::new()).unwrap();
+        carried(&fabric, &mut listener, "10.7.0.1", "10.7.0.2").await;
+        // The same path again answers the live tunnel's status, `up`, where
+        // a fresh tunnel would read `connecting`, and starts nothing.
+        assert_eq!(
+            fabric.adopt("gw", &far.conf, Vec::new()).as_deref(),
+            Ok("up")
+        );
+        let started = lines
+            .infos()
+            .iter()
+            .filter(|line| line.contains("gateway WireGuard tunnel started"))
+            .count();
+        assert_eq!(started, 1, "{:?}", lines.infos());
+        assert_eq!(fabric.tunnels(), 1);
+    }
+
+    #[tokio::test]
+    async fn adopt_refuses_a_bad_file_and_disables_that_row_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = peer(dir.path(), "good.conf", "10.7.0.1", "10.7.0.2").await;
+        let changing = peer(dir.path(), "changing.conf", "10.7.0.3", "10.7.0.2").await;
+        let bad = owner_only(
+            dir.path(),
+            "bad.conf",
+            &std::fs::read_to_string(&good.conf)
+                .unwrap()
+                .replace("Address = 10.7.0.1/32", "Address = nowhere"),
+        );
+        let fabric = start(&[]).await;
+        fabric.adopt("good", &good.conf, Vec::new()).unwrap();
+        fabric
+            .adopt("changing", &changing.conf, Vec::new())
+            .unwrap();
+
+        let reason = fabric
+            .adopt("bad", &bad, Vec::new())
+            .expect_err("a bad file is refused");
+        assert!(reason.starts_with("WireGuard: "), "{reason}");
+        assert!(reason.contains(&bad.display().to_string()), "{reason}");
+        assert!(reason.contains("line 3"), "{reason}");
+        assert!(reason.contains("Address"), "{reason}");
+        assert!(!reason.contains(&good.private_key), "{reason}");
+        assert_eq!(fabric.status("bad", Some(&bad)), None);
+        assert_eq!(fabric.failure("bad", Some(&bad)), Some(reason.clone()));
+        assert_eq!(fabric.connect_refusal("bad", Some(&bad)), Some(reason));
+
+        // A running row pointed at the bad file loses its tunnel and
+        // carries the refusal; the other rows are untouched.
+        fabric
+            .adopt("changing", &bad, Vec::new())
+            .expect_err("the same bad file");
+        assert_eq!(fabric.status("changing", Some(&changing.conf)), None);
+        assert!(fabric.failure("changing", Some(&bad)).is_some());
+        assert_eq!(fabric.tunnels(), 1);
+        assert_eq!(fabric.routes(), 1);
+        assert_eq!(
+            fabric.status("good", Some(&good.conf)).as_deref(),
+            Some("connecting")
+        );
+        assert_eq!(fabric.connect_refusal("good", Some(&good.conf)), None);
+        let debug = format!("{fabric:?}");
+        assert!(!debug.contains(&good.private_key), "{debug}");
+        assert!(debug.contains("tunnels: 1"), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn retire_removes_the_route_and_the_status() {
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let fabric = start(&[]).await;
+        fabric.adopt("gw", &far.conf, Vec::new()).unwrap();
+        carried(&fabric, &mut listener, "10.7.0.1", "10.7.0.2").await;
+
+        assert!(fabric.retire("gw"));
+        assert_eq!(fabric.status("gw", Some(&far.conf)), None);
+        assert_eq!(fabric.tunnels(), 0);
+        assert_eq!(fabric.routes(), 0);
+        assert!(!fabric.retire("gw"), "nothing is left to retire");
+        let retired: Vec<String> = lines
+            .infos()
+            .into_iter()
+            .filter(|line| line.contains("gateway WireGuard tunnel retired"))
+            .collect();
+        assert_eq!(retired.len(), 1, "{:?}", lines.infos());
+        assert!(retired[0].contains("gateway=gw"), "{}", retired[0]);
+        // A retired row is adopted again from scratch.
+        assert_eq!(
+            fabric.adopt("gw", &far.conf, Vec::new()).as_deref(),
+            Ok("connecting")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bind_failure_degrades_every_row_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        // The proxy binds loopback only, so this address is refused.
+        let fabric = start_with_bind(
+            &[gateway("gw", Some(&far.conf))],
+            "192.0.2.1:0".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(fabric.proxy_url(), None);
+        assert_eq!(fabric.tunnels(), 0);
+        let reason = fabric
+            .adopt("gw", &far.conf, Vec::new())
+            .expect_err("no proxy, no tunnel");
+        assert!(
+            reason.starts_with("WireGuard: starting the proxy: "),
+            "{reason}"
+        );
+        assert_eq!(
+            fabric.connect_refusal("gw", Some(&far.conf)),
+            Some(reason.clone())
+        );
+        // Every row with a file reads the reason, one never adopted too;
+        // a row without a file has nothing to refuse.
+        assert_eq!(
+            fabric.connect_refusal("other", Some(Path::new("/other.conf"))),
+            Some(reason)
+        );
+        assert_eq!(fabric.connect_refusal("plain", None), None);
+        assert_eq!(fabric.status("gw", Some(&far.conf)), None);
+        assert_eq!(fabric.tunnels(), 0);
     }
 
     /// A failing lookup no longer takes a live session down, so the state
@@ -860,54 +1262,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restart_required_and_failure_follow_the_started_set() {
-        let startup = WireguardStartup::for_test(
-            &[("gw-a", "/home/u/a.conf")],
-            &[(
-                "gw-b",
-                "/home/u/b.conf",
-                "WireGuard: /home/u/b.conf: line 3: Address",
-            )],
-        );
-        let a = Path::new("/home/u/a.conf");
-        let b = Path::new("/home/u/b.conf");
+    #[tokio::test]
+    async fn failure_and_status_follow_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "a.conf", "10.7.0.1", "10.7.0.2").await;
+        let b = owner_only(dir.path(), "b.conf", "[Interface]\nAddress = 10.7.0.9/32\n");
         let other = Path::new("/home/u/other.conf");
-        // The started row, unchanged, needs nothing.
-        assert!(!startup.restart_required("gw-a", Some(a), true));
-        assert_eq!(startup.connect_refusal("gw-a", Some(a)), None);
-        // Its file changed, or was removed: the next start applies it.
-        assert!(startup.restart_required("gw-a", Some(other), true));
-        assert!(startup.restart_required("gw-a", None, true));
+        let fabric = start(&[gateway("gw-a", Some(&far.conf)), gateway("gw-b", Some(&b))]).await;
+        let a = far.conf.as_path();
+
+        // The running row, as it stands, reads its status and no refusal.
         assert_eq!(
-            startup.connect_refusal("gw-a", None).as_deref(),
-            Some(RESTART_REQUIRED)
+            fabric.status("gw-a", Some(a)).as_deref(),
+            Some("connecting")
         );
-        // A row that gained a file after the start.
-        assert!(startup.restart_required("gw-c", Some(other), true));
-        assert_eq!(
-            startup.connect_refusal("gw-c", Some(other)).as_deref(),
-            Some(RESTART_REQUIRED)
-        );
-        // A row without a file, and a disabled row, ask nothing.
-        assert!(!startup.restart_required("gw-c", None, true));
-        assert_eq!(startup.connect_refusal("gw-c", None), None);
-        assert!(!startup.restart_required("gw-a", None, false));
-        // The refused file carries its reason while the row names it, and
-        // a restart is what applies the fix.
-        assert_eq!(
-            startup.failure("gw-b", Some(b)),
-            Some("WireGuard: /home/u/b.conf: line 3: Address")
-        );
-        assert!(startup.restart_required("gw-b", Some(b), true));
-        assert_eq!(
-            startup.connect_refusal("gw-b", Some(b)).as_deref(),
-            Some("WireGuard: /home/u/b.conf: line 3: Address")
-        );
+        assert_eq!(fabric.failure("gw-a", Some(a)), None);
+        assert_eq!(fabric.connect_refusal("gw-a", Some(a)), None);
+        // Pointed elsewhere, or at nothing, it reads no status until it is
+        // adopted again.
+        assert_eq!(fabric.status("gw-a", Some(other)), None);
+        assert_eq!(fabric.status("gw-a", None), None);
+        // The refused file carries its reason while the row names it.
+        let reason = fabric.failure("gw-b", Some(&b)).expect("b was refused");
+        assert!(reason.contains(&b.display().to_string()), "{reason}");
+        assert_eq!(fabric.status("gw-b", Some(&b)), None);
+        assert_eq!(fabric.connect_refusal("gw-b", Some(&b)), Some(reason));
         // Pointed elsewhere, the old refusal no longer applies.
-        assert_eq!(startup.failure("gw-b", Some(other)), None);
-        assert_eq!(startup.failure("gw-b", None), None);
-        assert_eq!(startup.connect_refusal("gw-b", None), None);
+        assert_eq!(fabric.failure("gw-b", Some(other)), None);
+        assert_eq!(fabric.failure("gw-b", None), None);
+        assert_eq!(fabric.connect_refusal("gw-b", None), None);
+        // A row the fabric never saw asks nothing.
+        assert_eq!(fabric.status("gw-c", Some(other)), None);
+        assert_eq!(fabric.connect_refusal("gw-c", Some(other)), None);
     }
 
     #[test]
