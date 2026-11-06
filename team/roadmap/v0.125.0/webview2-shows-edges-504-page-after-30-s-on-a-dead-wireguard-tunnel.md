@@ -17,3 +17,9 @@ A decision for the owner, then the build:
 ## Acceptance
 
 `scripts/e2e/desktop-wireguard-windows.sh`'s wrong-key arm reads chan's page with the tunnel's reason in the window, and a live tunnel's window is unchanged.
+
+## Built
+
+The existing bundled connecting page shows the gateway tunnel's reason on failed probes, including a mapped tenant host that the proxy routes without OS lookup. It keeps the last reason in the give-up message. A request's SYN starts the handshake immediately; when the tunnel has no session, the proxy waits up to three seconds for the connect to complete and answers 502 if the tunnel remains dark. A live session keeps the existing connect deadline.
+
+The Linux `tunnel-page` arm observes a tenant window through loss and recovery with a devserver forwarded through the peer. The Windows `page` arm reads the live connecting page and its tenant handoff, while `wrong-key` reads the direct 502 control and chan's reason page. The mapped-name reason is pinned by unit tests; these guest arms use an address route because production adoption supplies no host routes yet. Guest runs are the remaining proof.

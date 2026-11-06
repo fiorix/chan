@@ -26,6 +26,8 @@
 #   refusals   the proxy refused nothing in the run.
 #   config     the gateway row and its file survive the desktop's rewrite of
 #              its config at start.
+#   tunnel-page a tenant window stays on chan's connecting page through a
+#               lost session, names the loss, then reaches the tenant again.
 #   wrong-key  (--wrong-key only) the desktop's log and gateway row name
 #              the missing handshake, endpoint and file without key values;
 #              the desktop sends repeated initiations,
@@ -79,7 +81,7 @@
 #   CHAN_BIN          a built chan (default: built here with --locked)
 #   WG_PEER_BIN       a built wg-peer example (default: built here)
 #
-# Needs xvfb-run, dbus-run-session and curl, and ss for the window arm's
+# Needs xvfb-run, dbus-run-session, curl and Node 22 or later, and ss for the window arm's
 # connection count (reported as unmeasured without it). Exits 2 when a
 # prerequisite is missing rather than passing. Everything runs under a
 # throwaway CHAN_HOME, HOME, XDG_RUNTIME_DIR and TMPDIR. The desktop and
@@ -134,12 +136,13 @@ verdict() {
 command -v xvfb-run >/dev/null 2>&1 || refuse "xvfb-run is not installed"
 command -v dbus-run-session >/dev/null 2>&1 || refuse "dbus-run-session is not installed"
 command -v curl >/dev/null 2>&1 || refuse "curl is not installed"
+command -v python3 >/dev/null 2>&1 || refuse "python3 is not installed"
+command -v node >/dev/null 2>&1 || refuse "node 22 or later is not installed"
+NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+[ "$NODE_MAJOR" -ge 22 ] || refuse "node 22 or later is required for inspect.mjs"
 [ -x "$CHAN_DESKTOP_BIN" ] || refuse "no chan-desktop binary at $CHAN_DESKTOP_BIN (set CHAN_DESKTOP_BIN)"
 INSPECT="$REPO/scripts/e2e/desktop-observations/inspect.mjs"
-if [ "$LIVE_ADOPT" = 1 ] || [ "$WRONG_KEY" = 1 ]; then
-    command -v node >/dev/null 2>&1 || refuse "node is not installed (the launcher read needs inspect.mjs)"
-    [ -f "$INSPECT" ] || refuse "no inspector helper at $INSPECT"
-fi
+[ -f "$INSPECT" ] || refuse "no inspector helper at $INSPECT"
 
 if [ -z "${CHAN_BIN:-}" ]; then
     log "building chan at $SHA"
@@ -195,6 +198,11 @@ cleanup() {
             kill "${tree[i]}" 2>/dev/null || true
         done
     fi
+    # A frozen peer or devserver cannot receive TERM until resumed.
+    for pid in "${PIDS[@]:-}"; do
+        [ -n "$pid" ] || continue
+        kill -s CONT "$pid" 2>/dev/null || true
+    done
     for pid in "${PIDS[@]:-}"; do
         [ -n "$pid" ] || continue
         kill "$pid" 2>/dev/null || true
@@ -279,13 +287,17 @@ session_expiry_logged() {
     desktop_log || return 1
     [ "$(session_warnings "$CLEAN")" -ge 1 ]
 }
+free_port() { python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
 
 log "work dir $WORK, chan $SHA"
 
 # 1. The far side: the peer, which writes the client's file.
-"$WG_PEER_BIN" "$WORK/client.conf" > "$WORK/peer.log" 2>&1 &
-PIDS+=("$!")
+DS_PORT="$(free_port)"
+"$WG_PEER_BIN" "$WORK/client.conf" --forward "8081=127.0.0.1:$DS_PORT" > "$WORK/peer.log" 2>&1 &
+PEER_PID=$!
+PIDS+=("$PEER_PID")
 wait_for 20 "the peer" peer_logged '^peer: ready' || fail "the peer did not start: $(cat "$WORK/peer.log")"
+peer_logged 'forward=10\.7\.0\.2:8081->127\.0\.0\.1:' || fail "the peer did not open its forwarded listener"
 PEER_URL="$(sed -n 's/^peer: ready url=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
 [ -n "$PEER_URL" ] || fail "the peer printed no URL: $(cat "$WORK/peer.log")"
 log "peer at $PEER_URL, client file $WORK/client.conf (mode $(stat -c %a "$WORK/client.conf"))"
@@ -314,11 +326,8 @@ elif [ "$NO_WIREGUARD" = 1 ]; then
 fi
 # The launcher's page is read through WebKitGTK's remote inspector, which
 # the desktop's webviews serve only when this is set before they start.
-INSPECTOR=""
-if [ "$LIVE_ADOPT" = 1 ] || [ "$WRONG_KEY" = 1 ]; then
-    INSPECTOR="127.0.0.1:$((20000 + RANDOM % 20000))"
-    export WEBKIT_INSPECTOR_HTTP_SERVER="$INSPECTOR"
-fi
+INSPECTOR="127.0.0.1:$(free_port)"
+export WEBKIT_INSPECTOR_HTTP_SERVER="$INSPECTOR"
 
 # 3. The desktop, headless.
 xvfb-run -a dbus-run-session "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
@@ -753,6 +762,102 @@ arm_rc=0
 grep -q "\"$GATEWAY_ID\"" "$CHAN_HOME/desktop/config.json" || arm_rc=1
 grep -q "$WORK/client.conf" "$CHAN_HOME/desktop/config.json" || arm_rc=1
 verdict config "$arm_rc" "row $GATEWAY_ID and its file in $CHAN_HOME/desktop/config.json"
+fi
+
+# tunnel-page: a real devserver behind the peer's second tunnel listener.
+page_fail() { verdict tunnel-page 1 "$*"; fail "$*"; }
+page_inspect() {
+    node "$INSPECT" "$INSPECTOR" all \
+        "({href:location.href,workspace:document.documentElement.innerHTML.includes('ws2'),reason:[...document.querySelectorAll('.log-row.fail .log-msg')].at(-1)?.textContent||'',attempt:Number(document.getElementById('attempt')?.textContent||0),actionsHidden:document.getElementById('actions')?.hidden})" \
+        > "$WORK/page-inspect.jsonl" 2>> "$WORK/inspect.err" || return 1
+}
+page_state() {
+    page_inspect && python3 -I "$REPO/scripts/e2e/desktop-wireguard-page-oracle.py" "$1" "$WORK/page-inspect.jsonl" > "$WORK/page-state.json" 2>> "$WORK/page-oracle.err"
+}
+log_since() {
+    desktop_log
+    sed -n "$(( $1 + 1 )),\$p" "$CLEAN" > "$WORK/desktop-since.log"
+}
+logged_since() { log_since "$1" && grep -qE -- "$2" "$WORK/desktop-since.log"; }
+wgds_connected() {
+    timeout 5 "$CHAN_BIN" devserver ls --json > "$WORK/wgds-ls.json" 2>> "$WORK/wgds.err" || return 1
+    python3 -I -c 'import json,sys; rows=json.load(open(sys.argv[1]))["devservers"]; sys.exit(0 if any(r.get("label")=="wgds" and r.get("status")=="connected" for r in rows) else 1)' "$WORK/wgds-ls.json"
+}
+page_ready() {
+    node "$INSPECT" "$INSPECTOR" eval "w=$WINDOW_ID&" 'document.readyState' 2>> "$WORK/inspect.err" | grep -qx '"complete"'
+}
+tenant_ready() {
+    node "$INSPECT" "$INSPECTOR" eval "w=$WINDOW_ID&" 'document.readyState === "complete" && !location.pathname.endsWith("/connecting.html")' 2>> "$WORK/inspect.err" | grep -qx 'true'
+}
+if [ "$NO_WIREGUARD" = 0 ]; then
+    DEV_HOME="$WORK/devserver-home"
+    mkdir -m 700 "$DEV_HOME"
+    CHAN_HOME="$DEV_HOME" "$CHAN_BIN" devserver run --service=none --bind 127.0.0.1 --port "$DS_PORT" > "$WORK/devserver.log" 2>&1 &
+    DEV_PID=$!
+    PIDS+=("$DEV_PID")
+    wait_for 60 "wgds devserver" grep -q 'listening on http://' "$WORK/devserver.log" || page_fail "devserver did not listen"
+    ( umask 077; python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["devserver_token"])' "$DEV_HOME/devserver/config.json" > "$WORK/devserver.token" )
+    ( umask 077; printf 'Authorization: Bearer %s\n' "$(< "$WORK/devserver.token")" > "$WORK/devserver.header" )
+    timeout 30 "$CHAN_BIN" devserver register "http://10.7.0.2:8081/?t=$(< "$WORK/devserver.token")" --name wgds > "$WORK/wgds-register.log" 2>&1 || page_fail "wgds register failed"
+    timeout 30 "$CHAN_BIN" devserver connect wgds > "$WORK/wgds-connect.log" 2>&1 || page_fail "wgds connect failed"
+    wait_for 60 "wgds connected" wgds_connected || page_fail "wgds not connected"
+    wait_for 30 "tunnel forwarding to wgds" logged 'forwarding .*target=10\.7\.0\.2:8081 route="tunnel"' || page_fail "no tunnel forward to wgds"
+    mkdir -p "$WORK/ws2"
+    printf '# ws2\n' > "$WORK/ws2/a.md"
+    timeout 45 "$CHAN_BIN" workspace serve "$WORK/ws2" --on wgds > "$WORK/ws2-serve.log" 2>&1 || page_fail "workspace serve on wgds failed"
+    python3 -I -c 'import json,sys; print(json.dumps({"kind":"workspace","workspace_path":sys.argv[1]}))' "$WORK/ws2" > "$WORK/ws2-mint-body.json"
+    mint_status="$(curl -sS -m 30 -H @"$WORK/devserver.header" -H 'Content-Type: application/json' --data @"$WORK/ws2-mint-body.json" -o "$WORK/ws2-mint.json" -w '%{http_code}' "http://127.0.0.1:$DS_PORT/api/library/windows" 2>> "$WORK/curl.err" || true)"
+    [ "$mint_status" = 200 ] || page_fail "ws2 window mint answered $mint_status"
+    curl -sS -m 10 -H @"$WORK/devserver.header" -o "$WORK/ws2-records.json" "http://127.0.0.1:$DS_PORT/api/library/windows" 2>> "$WORK/curl.err" || page_fail "ws2 records unreadable"
+    WINDOW_ID="$(python3 -I -c 'import json,sys; rows=json.load(open(sys.argv[1])); mine=[r for r in rows if r.get("workspace_path")==sys.argv[2]]; print(mine[0]["window_id"] if len(mine)==1 else "")' "$WORK/ws2-records.json" "$WORK/ws2")"
+    [ -n "$WINDOW_ID" ] || page_fail "ws2 has no unique window record"
+    wait_for 45 "initial ws2 page" tenant_ready || page_fail "initial ws2 tenant page not ready"
+    frozen=0
+    for attempt_no in 1 2; do
+        timeout 30 "$CHAN_BIN" devserver disconnect wgds > "$WORK/wgds-disconnect-$attempt_no.log" 2>&1 || page_fail "wgds disconnect failed"
+        start_line="$(wc -l < "$WORK/desktop.log")"
+        (
+            for _ in $(seq 1 3000); do
+                line="$(tail -n +"$((start_line + 1))" "$WORK/desktop.log" | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 -E "build_workspace_window_with_completion.*window=lib-[^ ]+::$WINDOW_ID( |$)" || true)"
+                if [ -n "$line" ]; then
+                    printf '%s\n' "$line" > "$WORK/page-build-line"
+                    kill -s STOP "$DEV_PID"
+                    exit 0
+                fi
+                sleep 0.01
+            done
+            exit 1
+        ) &
+        freezer=$!
+        PIDS+=("$freezer")
+        timeout 30 "$CHAN_BIN" devserver connect wgds > "$WORK/wgds-reconnect-$attempt_no.log" 2>&1 || page_fail "wgds reconnect failed"
+        wait "$freezer" || page_fail "the desktop never built a lib- window"
+        if wait_for 10 "the ws2 connecting page" page_state initial; then
+            frozen=1
+            break
+        fi
+        kill -s CONT "$DEV_PID"
+        wait_for 45 "ws2 page after a late freeze" tenant_ready || page_fail "late freeze left ws2 unreadable"
+    done
+    [ "$frozen" = 1 ] || page_fail "the freeze missed the connecting page twice"
+    kill -s STOP "$PEER_PID"
+    kill -s CONT "$DEV_PID"
+    DARK_AT="$(date +%s)"
+    DARK_LINE="$(wc -l < "$WORK/desktop.log")"
+    wait_for 130 "WireGuard session loss" logged_since "$DARK_LINE" 'WARN .*WireGuard session lost' || page_fail "no session-loss warning within 130 s"
+    LOSS_AT="$(date +%s)"
+    wait_for 10 "the lost-session reason on ws2" page_state lost || page_fail "ws2 did not show the tunnel loss within 10 s"
+    wait_for 20 "the proxy session refusal" logged_since "$DARK_LINE" 'proxy refused a connection through a tunnel with no session' || page_fail "no proxy session refusal after peer stopped"
+    wait_for 20 "the proxy 502 refusal" logged_since "$DARK_LINE" 'proxy request refused .*status=502' || page_fail "no proxy 502 after peer stopped"
+    refused_502="$(grep -cE 'proxy request refused .*status=502' "$WORK/desktop-since.log" || true)"
+    reason="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["reason"])' "$WORK/page-state.json")"
+    BACK_LINE="$(wc -l < "$WORK/desktop.log")"
+    kill -s CONT "$PEER_PID"
+    BACK_AT="$(date +%s)"
+    wait_for 60 "the tenant page after peer recovery" tenant_ready || page_fail "ws2 did not return to the tenant page"
+    wait_for 60 "WireGuard recovery warning" logged_since "$BACK_LINE" 'WireGuard session established' || page_fail "no WireGuard recovery warning"
+    wait_for 60 "forwarding after peer recovery" logged_since "$BACK_LINE" 'forwarding .*target=10\.7\.0\.2:8081 route="tunnel"' || page_fail "no tunnel forwarding after peer recovery"
+    verdict tunnel-page 0 "loss after $((LOSS_AT - DARK_AT)) s; reason '$(printf '%s' "$reason" | cut -c1-80)'; 502s $refused_502; tenant after $(($(date +%s) - BACK_AT)) s"
 fi
 
 if [ "$FAILED" != 0 ]; then
