@@ -3812,13 +3812,16 @@ fn restart_desktop_after_update(_app: tauri::AppHandle) -> Result<(), String> {
 /// tenants. Non-loopback targets also wait on gateway upstream failures (502
 /// and 504) and their first 15 consecutive 404s per window and target.
 /// `detail` is a short ASCII reason shown in the per-attempt row; `status` is the HTTP code
-/// when a response arrived.
+/// when a response arrived. `tunnel` is the routed tunnel's reason after
+/// a failed probe and is absent for reachable targets or no matching route.
 #[derive(Debug, Clone, Serialize)]
 struct ProbeResult {
     reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
     detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel: Option<String>,
 }
 
 /// Server-side cap so a black-hole host (packets dropped, no RST) can't
@@ -3898,6 +3901,7 @@ fn probe_result_for(
         reachable: probe_response_reachable(target, status, count),
         status: status.map(|status| status.as_u16()),
         detail,
+        tunnel: None,
     }
 }
 
@@ -3909,6 +3913,49 @@ pub(crate) fn clear_gateway_404_counts_for_window(
         .lock()
         .unwrap()
         .retain(|(window, _), _| window != label);
+}
+
+/// Read the route after a failed probe: a mapped host is routed without
+/// DNS, while any other host follows the proxy's resolved-address rule.
+async fn tunnel_reason_for_probe(fabric: &wireguard::WireguardFabric, url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host()?;
+    let port = parsed.port_or_known_default()?;
+    // The proxy matches host maps only for names, never address literals.
+    let name = match &host {
+        url::Host::Domain(name) => *name,
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => "",
+    };
+    if let Some(reason) = fabric.reason_for_destination(name, &[]) {
+        return reason;
+    }
+    let addresses: Vec<std::net::IpAddr> = match host {
+        url::Host::Ipv4(ip) => vec![ip.into()],
+        url::Host::Ipv6(ip) => vec![ip.into()],
+        url::Host::Domain(name) => tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::lookup_host((name, port)),
+        )
+        .await
+        .ok()?
+        .ok()?
+        .map(|address| address.ip())
+        .collect(),
+    };
+    fabric.reason_for_destination(name, &addresses).flatten()
+}
+
+async fn with_tunnel_reason(
+    mut result: ProbeResult,
+    fabric: Option<&wireguard::WireguardFabric>,
+    url: &str,
+) -> ProbeResult {
+    if !result.reachable {
+        if let Some(fabric) = fabric {
+            result.tunnel = tunnel_reason_for_probe(fabric, url).await;
+        }
+    }
+    result
 }
 
 /// Reachability probe used by the connecting page and directly by Rust when
@@ -3930,13 +3977,14 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     {
         Ok(c) => c,
         Err(e) => {
-            return probe_result_for(
+            let result = probe_result_for(
                 &state.gateway_404_counts,
                 label,
                 &url,
                 None,
                 format!("probe client error: {e}"),
             );
+            return with_tunnel_reason(result, state.wireguard.as_deref(), &url).await;
         }
     };
     let mut request = client.get(&url);
@@ -3954,7 +4002,7 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
             }
         }
     }
-    match request.send().await {
+    let result = match request.send().await {
         Ok(resp) => {
             let status = resp.status();
             probe_result_for(
@@ -3972,7 +4020,8 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
             None,
             probe_error_detail(&e),
         ),
-    }
+    };
+    with_tunnel_reason(result, state.wireguard.as_deref(), &url).await
 }
 
 /// Collapse a reqwest error to the transport-failure class the
@@ -8558,6 +8607,23 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn probe_result_serializes_tunnel_only_when_present() {
+        let counts = Mutex::new(HashMap::new());
+        let mut result = probe_result_for(
+            &counts,
+            "window",
+            "http://10.7.0.2/",
+            Some(reqwest::StatusCode::BAD_GATEWAY),
+            "502 Bad Gateway".into(),
+        );
+        let absent = serde_json::to_value(&result).unwrap();
+        assert!(absent.get("tunnel").is_none(), "{absent}");
+        result.tunnel = Some("the tunnel has no session".into());
+        let present = serde_json::to_value(&result).unwrap();
+        assert_eq!(present["tunnel"], "the tunnel has no session");
     }
 
     #[test]

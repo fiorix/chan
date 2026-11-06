@@ -21,7 +21,7 @@
 //                ?lib=<library-id>, assembled by Rust so the library-owned
 //                per-window state survives the navigation.
 //   * Reachability is probed through a single Tauri command:
-//         invoke('probe_url', { url }) -> { reachable, status, detail }
+//         invoke('probe_url', { url }) -> { reachable, status, detail, tunnel? }
 //     This page is the command's only caller. capabilities/workspace.json
 //     hands the `workspace-window` set to local app pages and to the
 //     `http://127.0.0.1:*` and `http://localhost:*` origins it lists in
@@ -93,6 +93,7 @@ const els = {
 wireActions();
 
 let attempt = 0;
+let lastReason = '';
 let startedAt = null; // wall-clock of the first attempt; drives the timer
 let stopped = false; // set once connected or on a hard error
 let elapsedTimer = null;
@@ -175,7 +176,8 @@ async function runLoop() {
       return;
     }
 
-    setRow(row, 'fail', `attempt ${attempt}: ${failReason(res)}`);
+    lastReason = (res && res.tunnel) || failReason(res);
+    setRow(row, 'fail', `attempt ${attempt}: ${lastReason}`);
     if (attempt >= GIVE_UP_AFTER_ATTEMPTS) {
       showGaveUp();
       return;
@@ -193,13 +195,13 @@ function showGaveUp() {
   els.body.classList.add('is-gaveup');
   els.title.textContent = label ? `Can't reach ${label}` : "Still can't connect";
   els.foot.textContent =
-    `${displayUrl} hasn't responded after ${attempt} attempts. Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu.`;
+    `Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu. ${displayUrl} hasn't responded after ${attempt} attempts: ${lastReason}`;
   els.actions.hidden = false;
   els.retry.focus();
   // The title and the foot sit outside the live region, so this row is
   // what tells a screen reader the retrying stopped and there is
   // something to do about it.
-  addRow('info', new Date(), `Gave up after ${attempt} attempts. Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu.`);
+  addRow('info', new Date(), `Gave up after ${attempt} attempts. Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu. Last reason: ${lastReason}`);
 }
 
 // Clear the gave-up state so the loop can resume from a clean header.
@@ -221,6 +223,7 @@ function wireActions() {
     if (!stopped) return;
     hideGaveUp();
     attempt = 0;
+    lastReason = '';
     stopped = false;
     startElapsedTimer();
     runLoop();
