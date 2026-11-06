@@ -2747,6 +2747,11 @@ pub(crate) mod log_capture {
             self.at(" INFO ")
         }
 
+        /// Everything captured, every level.
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+
         fn at(&self, level: &str) -> Vec<String> {
             String::from_utf8_lossy(&self.0.lock().unwrap())
                 .lines()

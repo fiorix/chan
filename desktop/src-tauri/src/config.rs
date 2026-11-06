@@ -186,6 +186,18 @@ impl Gateway {
             trust.owner_user_id == Some(owner_user_id) && trust.devserver_id == devserver_id
         })
     }
+
+    /// The row's host map as the proxy routes it, passed at every adopt of
+    /// the row's file.
+    pub fn host_routes(&self) -> Vec<chan_wireguard::HostRoute> {
+        self.wireguard_hosts
+            .iter()
+            .map(|host| chan_wireguard::HostRoute {
+                name: host.name.clone(),
+                addresses: host.addresses.clone(),
+            })
+            .collect()
+    }
 }
 
 /// Read one persisted shared-devserver trust decision. The gateway row is the
@@ -1056,7 +1068,7 @@ impl GatewayConfigRegistry {
             }
             Some(path) if gw.enabled && previous != Some(path) => {
                 // adopt logs the refusal and keeps it on the row.
-                let _ = fabric.adopt(&gw.id, path, Vec::new());
+                let _ = fabric.adopt(&gw.id, path, gw.host_routes());
             }
             _ => {}
         }
@@ -1273,6 +1285,41 @@ pub(crate) async fn generate_wireguard_key(
         manager.view(id),
         manager.wireguard().map(|fabric| fabric.as_ref()),
     )))
+}
+
+/// Record a sign-in's enrollment on gateway `id` and bring its tunnel up in
+/// the running process: write the client file beside the row's key, then,
+/// under the store's lock, name it as the row's file with the enrolled key
+/// and the host map in one save, and adopt it with that map. The row's
+/// previous tunnel is retired first, since the file is rewritten in place
+/// and an adopt leaves a row running from an unchanged path alone. Answers
+/// the client file's path and the adopt's answer (`None` with no fabric);
+/// a refused adopt also stays on the fabric, where the projection reads it
+/// as the row's `last_error`. An error is the write's or the save's, and the
+/// fabric is then left as it was.
+pub(crate) fn record_wireguard_enrollment(
+    store: &Arc<Mutex<ConfigStore>>,
+    manager: &crate::gateway::GatewayManager,
+    id: &str,
+    enrollment: crate::wireguard_keys::Enrollment,
+) -> Result<(PathBuf, Option<Result<String, String>>), String> {
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
+        return Err(format!("no gateway {id}"));
+    };
+    let conf = crate::wireguard_keys::write_client_file(&guard.wireguard_dir(), id, &enrollment)?;
+    gw.wireguard = Some(conf.clone());
+    gw.wireguard_enrolled_key = Some(enrollment.public_key);
+    gw.wireguard_hosts = enrollment.hosts;
+    let gw = gw.clone();
+    guard.save(&cfg).map_err(|e| e.to_string())?;
+    let adopted = manager.wireguard().map(|fabric| {
+        fabric.retire(id);
+        fabric.adopt(id, &conf, gw.host_routes())
+    });
+    drop(guard);
+    Ok((conf, adopted))
 }
 
 /// What the one-shot legacy migration did, for the startup log and the
