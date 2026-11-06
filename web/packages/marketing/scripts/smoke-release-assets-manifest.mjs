@@ -171,13 +171,13 @@ const windowsAssetCount = baseAssetCount + windowsAssets(version).length;
   }
 
   // A GA version: both spellings are the version itself, and the full
-  // required set is the 25 names a GA release carries.
+  // required set is the 27 names a GA release carries.
   const ga = "0.99.0";
   assertEqual(gatewayPackageVersion(ga), ga, "GA cargo-deb spelling");
   assertEqual(gatewayAssetVersion(ga), ga, "GA uploaded asset spelling");
   const gaRequired = requiredAssets(ga);
-  assertEqual(gaRequired.length, 25, "required assets at a GA version");
-  assertEqual(new Set(gaRequired).size, 25, "required assets are distinct");
+  assertEqual(gaRequired.length, 27, "required assets at a GA version");
+  assertEqual(new Set(gaRequired).size, 27, "required assets are distinct");
   for (const name of gaRequired) {
     assert(!name.includes("~"), `a GA asset name carries no tilde, got ${name}`);
   }

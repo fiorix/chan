@@ -31,7 +31,7 @@ const tag = `v${version}`;
 const prereleaseTag = "v9.9.9-rc1";
 const windowsZip = "chan-x86_64-pc-windows-msvc.zip";
 const publishedPrereleaseGateway = "chan-gateway-admin_9.9.9.rc1-1_amd64.deb";
-// Literal names reported by a published RC. In particular, the ten gateway
+// Literal names reported by a published RC. In particular, the twelve gateway
 // debs use GitHub's dot spelling; this fixture must not derive that boundary
 // from the manifest helper the verifier consumes.
 const publishedPrereleaseAssets = [
@@ -51,6 +51,8 @@ const publishedPrereleaseAssets = [
   "chan-gateway-devserver-proxy_9.9.9.rc1-1_arm64.deb",
   "chan-gateway-devserver-control_9.9.9.rc1-1_amd64.deb",
   "chan-gateway-devserver-control_9.9.9.rc1-1_arm64.deb",
+  "chan-gateway-wireguard-agent_9.9.9.rc1-1_amd64.deb",
+  "chan-gateway-wireguard-agent_9.9.9.rc1-1_arm64.deb",
   publishedPrereleaseGateway,
   "chan-gateway-admin_9.9.9.rc1-1_arm64.deb",
   "Chan_9.9.9-rc1_x64-setup.exe",
@@ -69,7 +71,7 @@ const freebsdTarballs = [
 const root = mkdtempSync(path.join(tmpdir(), "chan-verify-release-"));
 try {
   const v096Assets = requiredAssets("0.96.0");
-  assertEqual(v096Assets.length, 25, "v0.96.0 required asset count");
+  assertEqual(v096Assets.length, 27, "v0.96.0 required asset count");
   for (const tarball of freebsdTarballs) {
     assert(v096Assets.includes(tarball), `FreeBSD tarball is required: ${tarball}`);
   }
