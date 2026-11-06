@@ -53,6 +53,10 @@ pub struct Config {
     /// during rotation overlap).
     pub entry_signer: gateway_common::devserver_gate::EntrySigner,
     pub providers: Vec<Arc<dyn Provider>>,
+    /// Desktop peer enrollment; absent keeps key enrollment disabled.
+    pub wireguard: Option<crate::wireguard::WireguardEnrollment>,
+    /// Bearer accepted only by the internal WireGuard peer-list route.
+    pub wireguard_agent_token: String,
 }
 
 impl Config {
@@ -81,6 +85,13 @@ impl Config {
         let base_url = required_origin("BASE_URL")?;
         let devserver_proxy_origin = required_origin("DEVSERVER_PROXY_ORIGIN")?;
         let devserver_tunnel_origin = required_origin("DEVSERVER_TUNNEL_ORIGIN")?;
+
+        let wireguard = wireguard_from_vars(
+            |name| std::env::var(name).ok(),
+            &base_url,
+            &devserver_proxy_origin,
+            &devserver_tunnel_origin,
+        )?;
 
         let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
 
@@ -118,6 +129,7 @@ impl Config {
         // disabled rather than guarded by an empty string.
         let identity_admin_token = std::env::var("IDENTITY_ADMIN_TOKEN").unwrap_or_default();
         let account_admin_token = std::env::var("IDENTITY_ACCOUNT_ADMIN_TOKEN").unwrap_or_default();
+        let wireguard_agent_token = std::env::var("WIREGUARD_AGENT_TOKEN").unwrap_or_default();
         validate_distinct_auth_tokens(&[
             ("IDENTITY_INTERNAL_TOKEN", &internal_auth_token),
             (
@@ -126,6 +138,7 @@ impl Config {
             ),
             ("IDENTITY_ADMIN_TOKEN", &identity_admin_token),
             ("IDENTITY_ACCOUNT_ADMIN_TOKEN", &account_admin_token),
+            ("WIREGUARD_AGENT_TOKEN", &wireguard_agent_token),
         ])?;
 
         let admin_url: Url = std::env::var("DEVSERVER_ADMIN_URL")
@@ -190,6 +203,8 @@ impl Config {
             admission_lease_verifier,
             entry_signer,
             providers,
+            wireguard,
+            wireguard_agent_token,
         })
     }
 
@@ -428,6 +443,144 @@ fn providers_from_vars(
     Ok(providers)
 }
 
+fn wireguard_from_vars(
+    var: impl Fn(&str) -> Option<String>,
+    identity: &Url,
+    proxy: &Url,
+    tunnel: &Url,
+) -> anyhow::Result<Option<crate::wireguard::WireguardEnrollment>> {
+    use crate::wireguard::{HostRoute, WireguardEnrollment};
+    use gateway_common::wireguard::{canonical_public_key, valid_host};
+
+    let read = |name| {
+        var(name)
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty())
+    };
+    let names = [
+        "WIREGUARD_HOST_ID",
+        "WIREGUARD_ENDPOINT",
+        "WIREGUARD_PUBLIC_KEY",
+        "WIREGUARD_ALLOWED_IPS",
+        "WIREGUARD_HOSTS",
+    ];
+    let values = names.map(read);
+    let keepalive = read("WIREGUARD_PERSISTENT_KEEPALIVE");
+    if values.iter().all(Option::is_none) && keepalive.is_none() {
+        return Ok(None);
+    }
+    for (name, value) in names.iter().zip(&values) {
+        if value.is_none() {
+            anyhow::bail!("{name} is required when WireGuard enrollment is configured");
+        }
+    }
+    let [host_id, endpoint, public_key, allowed_ips, hosts] =
+        values.map(|value| value.expect("all required values checked"));
+    if !valid_host(&host_id) {
+        anyhow::bail!("WIREGUARD_HOST_ID must be one lowercase DNS label");
+    }
+    validate_wireguard_endpoint(&endpoint)?;
+    let public_key = canonical_public_key(&public_key)
+        .context("WIREGUARD_PUBLIC_KEY must be padded base64 for 32 bytes")?;
+    let networks = allowed_ips
+        .split(',')
+        .map(|value| value.trim().parse::<ipnet::IpNet>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("WIREGUARD_ALLOWED_IPS must contain comma-separated CIDRs")?;
+    let persistent_keepalive: u16 = keepalive
+        .as_deref()
+        .unwrap_or("25")
+        .parse()
+        .context("WIREGUARD_PERSISTENT_KEEPALIVE must be seconds in 0..=65535")?;
+    let proxy_host = proxy
+        .host_str()
+        .context("DEVSERVER_PROXY_ORIGIN must have a host")?;
+    let tunnel_host = tunnel
+        .host_str()
+        .context("DEVSERVER_TUNNEL_ORIGIN must have a host")?;
+    let identity_host = identity.host_str().context("BASE_URL must have a host")?;
+    let wildcard = format!("*.{proxy_host}");
+    let mut routes = Vec::new();
+    for entry in hosts.split(';') {
+        let (name, addresses) = entry
+            .trim()
+            .split_once('=')
+            .context("WIREGUARD_HOSTS must contain name=addr[,addr] entries")?;
+        let name = name.trim();
+        let dns_name = name.strip_prefix("*.").unwrap_or(name);
+        if dns_name.len() > 253 || !dns_name.split('.').all(valid_host) {
+            anyhow::bail!("WIREGUARD_HOSTS names must be lowercase DNS names or *.name");
+        }
+        if name == identity_host {
+            anyhow::bail!("WIREGUARD_HOSTS must not include BASE_URL's host");
+        }
+        if name != proxy_host && name != tunnel_host && name != wildcard {
+            anyhow::bail!("WIREGUARD_HOSTS must name DEVSERVER_PROXY_ORIGIN, DEVSERVER_TUNNEL_ORIGIN or the proxy wildcard");
+        }
+        let addresses = addresses
+            .split(',')
+            .map(|address| address.trim().parse::<std::net::IpAddr>())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("WIREGUARD_HOSTS must map names to IP addresses")?;
+        if addresses
+            .iter()
+            .any(|address| !networks.iter().any(|network| network.contains(address)))
+        {
+            anyhow::bail!("WIREGUARD_HOSTS address is outside WIREGUARD_ALLOWED_IPS");
+        }
+        if routes.iter().any(|route: &HostRoute| route.name == name) {
+            anyhow::bail!("WIREGUARD_HOSTS contains a duplicate name");
+        }
+        routes.push(HostRoute {
+            name: name.to_owned(),
+            addresses,
+        });
+    }
+    Ok(Some(WireguardEnrollment {
+        host_id,
+        endpoint,
+        public_key,
+        allowed_ips: networks.iter().map(ToString::to_string).collect(),
+        persistent_keepalive: (persistent_keepalive != 0).then_some(persistent_keepalive),
+        hosts: routes,
+    }))
+}
+
+fn validate_wireguard_endpoint(raw: &str) -> anyhow::Result<()> {
+    let (host, port) = if let Some(rest) = raw.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .context("WIREGUARD_ENDPOINT has an unterminated IPv6 literal")?;
+        host.parse::<std::net::Ipv6Addr>()
+            .context("WIREGUARD_ENDPOINT has an invalid IPv6 address")?;
+        (
+            host,
+            tail.strip_prefix(':')
+                .context("WIREGUARD_ENDPOINT must have a port")?,
+        )
+    } else {
+        let (host, port) = raw
+            .rsplit_once(':')
+            .context("WIREGUARD_ENDPOINT must be host:port")?;
+        if host.len() > 253
+            || !host
+                .to_ascii_lowercase()
+                .split('.')
+                .all(gateway_common::wireguard::valid_host)
+        {
+            anyhow::bail!("WIREGUARD_ENDPOINT must have a DNS host or bracketed IPv6 address");
+        }
+        (host, port)
+    };
+    let port = port
+        .parse::<u16>()
+        .context("WIREGUARD_ENDPOINT must have a numeric port")?;
+    if host.is_empty() || port == 0 {
+        anyhow::bail!("WIREGUARD_ENDPOINT must have a host and a nonzero port");
+    }
+    Ok(())
+}
+
 fn required_origin(name: &str) -> anyhow::Result<Url> {
     let raw = std::env::var(name).with_context(|| format!("{name} is required"))?;
     let url: Url = raw
@@ -505,6 +658,8 @@ pub(crate) fn test_config(apex: &str) -> Config {
         )
         .unwrap(),
         providers: vec![],
+        wireguard: None,
+        wireguard_agent_token: String::new(),
     }
 }
 
@@ -519,12 +674,14 @@ mod tests {
             "IDENTITY_SESSION_INTERNAL_TOKEN",
             "IDENTITY_ADMIN_TOKEN",
             "IDENTITY_ACCOUNT_ADMIN_TOKEN",
+            "WIREGUARD_AGENT_TOKEN",
         ];
         assert!(validate_distinct_auth_tokens(&[
             (names[0], "validation"),
             (names[1], "session"),
             (names[2], "operator"),
             (names[3], "account"),
+            (names[4], "wireguard"),
         ])
         .is_ok());
         assert!(validate_distinct_auth_tokens(&[
@@ -532,18 +689,20 @@ mod tests {
             (names[1], ""),
             (names[2], ""),
             (names[3], ""),
+            (names[4], ""),
         ])
         .is_ok());
 
         for left in 0..names.len() {
             for right in left + 1..names.len() {
-                let mut values = ["validation", "session", "operator", "account"];
+                let mut values = ["validation", "session", "operator", "account", "wireguard"];
                 values[right] = values[left];
                 let error = validate_distinct_auth_tokens(&[
                     (names[0], values[0]),
                     (names[1], values[1]),
                     (names[2], values[2]),
                     (names[3], values[3]),
+                    (names[4], values[4]),
                 ])
                 .expect_err("duplicate configured identity bearer");
                 let message = error.to_string();
@@ -926,5 +1085,112 @@ mod tests {
                 "{shape}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod wireguard_tests {
+    use super::*;
+    use base64::Engine;
+    use std::collections::BTreeMap;
+
+    fn vars() -> BTreeMap<String, String> {
+        [
+            ("WIREGUARD_HOST_ID", "p1".to_owned()),
+            ("WIREGUARD_ENDPOINT", "wg.example.test:51820".to_owned()),
+            ("WIREGUARD_PUBLIC_KEY", base64::engine::general_purpose::STANDARD.encode([7; 32])),
+            ("WIREGUARD_ALLOWED_IPS", "10.7.0.0/24,fd00:7::/64".to_owned()),
+            ("WIREGUARD_HOSTS", "proxy.example.test=10.7.0.1,fd00:7::1;*.proxy.example.test=10.7.0.1;tunnel.example.test=10.7.0.1".to_owned()),
+        ].into_iter().map(|(name,value)| (name.to_owned(),value)).collect()
+    }
+
+    fn parse(
+        vars: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<crate::wireguard::WireguardEnrollment>> {
+        wireguard_from_vars(
+            |name| vars.get(name).cloned(),
+            &"https://gw.example.test".parse().unwrap(),
+            &"https://proxy.example.test".parse().unwrap(),
+            &"https://tunnel.example.test".parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn wireguard_config_defaults_and_preserves_routing_parameters() {
+        assert!(parse(&BTreeMap::new()).unwrap().is_none());
+        let mut values = vars();
+        let cfg = parse(&values).unwrap().unwrap();
+        assert_eq!(cfg.host_id, "p1");
+        assert_eq!(cfg.endpoint, "wg.example.test:51820");
+        assert_eq!(cfg.public_key, values["WIREGUARD_PUBLIC_KEY"]);
+        assert_eq!(cfg.allowed_ips, ["10.7.0.0/24", "fd00:7::/64"]);
+        assert_eq!(cfg.persistent_keepalive, Some(25));
+        assert_eq!(cfg.hosts.len(), 3);
+        assert_eq!(
+            cfg.hosts[0]
+                .addresses
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["10.7.0.1", "fd00:7::1"]
+        );
+        values.insert("WIREGUARD_PERSISTENT_KEEPALIVE".into(), "0".into());
+        values.insert("WIREGUARD_ENDPOINT".into(), "[2001:db8::1]:51820".into());
+        let cfg = parse(&values).unwrap().unwrap();
+        assert_eq!(cfg.persistent_keepalive, None);
+        assert_eq!(cfg.endpoint, "[2001:db8::1]:51820");
+    }
+
+    #[test]
+    fn wireguard_config_refuses_partial_sets_and_invalid_routing() {
+        for name in vars().keys() {
+            let mut values = vars();
+            values.remove(name);
+            let error = parse(&values).unwrap_err().to_string();
+            assert!(error.contains(name), "{error}");
+        }
+        let error = parse(&[("WIREGUARD_PERSISTENT_KEEPALIVE".into(), "25".into())].into())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("WIREGUARD_HOST_ID"), "{error}");
+        for (name, invalid) in [
+            ("WIREGUARD_HOST_ID", "p1.example"),
+            ("WIREGUARD_HOST_ID", "P1"),
+            ("WIREGUARD_ENDPOINT", "wg.example.test:0"),
+            ("WIREGUARD_ENDPOINT", "[not-v6]:51820"),
+            ("WIREGUARD_ENDPOINT", "example.test:65536"),
+            ("WIREGUARD_ENDPOINT", "example.test"),
+            ("WIREGUARD_PUBLIC_KEY", "bad"),
+            ("WIREGUARD_ALLOWED_IPS", "10.7.0.0/33"),
+            ("WIREGUARD_ALLOWED_IPS", "10.7.0.1"),
+            ("WIREGUARD_HOSTS", "proxy.example.test=10.8.0.1"),
+            ("WIREGUARD_HOSTS", "proxy.other.test=10.7.0.1"),
+            ("WIREGUARD_HOSTS", "*.other.test=10.7.0.1"),
+            ("WIREGUARD_HOSTS", "*.p1.proxy.example.test=10.7.0.1"),
+            ("WIREGUARD_HOSTS", "gw.example.test=10.7.0.1"),
+            ("WIREGUARD_HOSTS", "proxy.example.test=not-an-ip"),
+            ("WIREGUARD_HOSTS", "proxy.example.test="),
+            (
+                "WIREGUARD_HOSTS",
+                "proxy.example.test=10.7.0.1;proxy.example.test=10.7.0.2",
+            ),
+            ("WIREGUARD_PERSISTENT_KEEPALIVE", "65536"),
+        ] {
+            let mut values = vars();
+            values.insert(name.into(), invalid.into());
+            let error = parse(&values).unwrap_err().to_string();
+            assert!(error.contains(name), "{name}: {error}");
+        }
+        let values = vars();
+        let identity_on_proxy = wireguard_from_vars(
+            |name| values.get(name).cloned(),
+            &"https://proxy.example.test".parse().unwrap(),
+            &"https://proxy.example.test".parse().unwrap(),
+            &"https://tunnel.example.test".parse().unwrap(),
+        );
+        assert!(identity_on_proxy
+            .unwrap_err()
+            .to_string()
+            .contains("WIREGUARD_HOSTS"));
     }
 }

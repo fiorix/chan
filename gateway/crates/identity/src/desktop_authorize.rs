@@ -202,6 +202,8 @@ pub struct RedeemPayload {
     /// Always present on the wire (`null` for a token that never
     /// expires); the desktop contract reads the key unconditionally.
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<crate::wireguard::Parameters>,
 }
 
 /// In-process single-use store for pending redemptions, shared via
@@ -371,6 +373,7 @@ pub struct AuthorizeQuery {
     /// non-positive values are rejected (the desktop flow expects a
     /// finite token, never an immortal one).
     expires_in: Option<i64>,
+    wireguard_public_key: Option<String>,
 }
 
 /// Validated form of [`AuthorizeQuery`] suitable for stashing in the
@@ -386,11 +389,13 @@ pub struct AuthorizeParams {
     code_challenge: String,
     scopes: Vec<String>,
     expires_in_secs: i64,
+    #[serde(default)]
+    wireguard_public_key: Option<String>,
 }
 
 /// Parse + validate. `Err` is a 400; the desktop client expects to fix
 /// and retry its query string before any loopback redirect happens.
-fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
+fn validate(q: AuthorizeQuery, enrollment_offered: bool) -> Result<AuthorizeParams> {
     validate_loopback_redirect_uri(&q.redirect_uri)?;
     if q.code_challenge_method != "S256" {
         return Err(Error::BadRequest("invalid code_challenge_method".into()));
@@ -437,6 +442,18 @@ fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
         Some(n) if n > 0 => n.min(MAX_EXPIRES_IN_SECS),
         _ => return Err(Error::BadRequest("invalid expires_in".into())),
     };
+    let wireguard_public_key = q
+        .wireguard_public_key
+        .as_deref()
+        .map(|raw| {
+            let key = gateway_common::wireguard::canonical_public_key(raw)
+                .ok_or_else(|| Error::BadRequest("invalid wireguard_public_key".into()))?;
+            if !enrollment_offered {
+                return Err(Error::BadRequest("wireguard enrollment not offered".into()));
+            }
+            Ok(key)
+        })
+        .transpose()?;
     Ok(AuthorizeParams {
         redirect_uri: q.redirect_uri,
         state: state.to_string(),
@@ -444,6 +461,7 @@ fn validate(q: AuthorizeQuery) -> Result<AuthorizeParams> {
         code_challenge: q.code_challenge,
         scopes,
         expires_in_secs,
+        wireguard_public_key,
     })
 }
 
@@ -464,7 +482,7 @@ pub fn success_url(params: &AuthorizeParams, code: &str) -> String {
 /// [`success_url`], never a `code`; the desktop client decides how to
 /// surface `reason` to the user. `reason` is a short stable token
 /// (`account_blocked`, `oauth_denied`, `user_cancelled`,
-/// `mint_failed`) so logs and downstream UI can branch without
+/// `mint_failed`, `wireguard_enroll_failed`) so logs and downstream UI can branch without
 /// parsing English.
 pub fn error_url(params: &AuthorizeParams, reason: &str) -> String {
     let mut query = String::new();
@@ -577,16 +595,26 @@ fn handoff_response(kind: &Handoff, target: &str) -> Response {
         .into_response()
 }
 
-/// Mint the PAT, stash it under a one-time redemption code bound to the
-/// request's PKCE challenge, and return the loopback success URL
-/// carrying the code. Called by the confirm POST when the user clicks
-/// Authorize.
+enum Completion {
+    Success(String),
+    WireguardEnrollmentFailed,
+}
+
+/// Mint and enroll before making the PAT available for one-time redemption.
 async fn complete(
     state: &AppState,
     headers: &HeaderMap,
     params: &AuthorizeParams,
     user: &User,
-) -> Result<String> {
+) -> Result<Completion> {
+    let enrollment = if params.wireguard_public_key.is_some() {
+        let Some(config) = state.cfg.wireguard.as_ref() else {
+            return Ok(Completion::WireguardEnrollmentFailed);
+        };
+        Some(config)
+    } else {
+        None
+    };
     let expires_at: DateTime<Utc> = Utc::now() + chrono::Duration::seconds(params.expires_in_secs);
     let CreatedToken { token, secret } = state
         .api_tokens
@@ -605,6 +633,31 @@ async fn complete(
             tracing::warn!(error = ?e, user = %user.username, "desktop authorize mint failed");
             e
         })?;
+    let wireguard = if let (Some(config), Some(key)) =
+        (enrollment, params.wireguard_public_key.as_deref())
+    {
+        match state
+            .cfg
+            .profile_client
+            .enroll_wireguard_peer(user.id, token.id, key, &config.host_id)
+            .await
+        {
+            Ok(peer) => Some(config.parameters(peer.addresses)),
+            Err(error) => {
+                tracing::warn!(%error, token_id = %token.id, "desktop WireGuard enrollment failed");
+                if let Err(error) = state
+                    .api_tokens
+                    .revoke(user.id, token.id, &request_meta(headers))
+                    .await
+                {
+                    tracing::error!(%error, token_id = %token.id, "failed to revoke undelivered desktop token");
+                }
+                return Ok(Completion::WireguardEnrollmentFailed);
+            }
+        }
+    } else {
+        None
+    };
     // A PAT is a devserver only when it can dial (tunnel scope): the
     // shared mint-site helper registers the roster row so the owner
     // sees it and can grant on it before it ever dials in; account
@@ -617,10 +670,11 @@ async fn complete(
             secret,
             label: token.label.clone(),
             expires_at: token.expires_at,
+            wireguard,
         },
         params.code_challenge.clone(),
     );
-    Ok(success_url(params, &code))
+    Ok(Completion::Success(success_url(params, &code)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,7 +726,7 @@ pub async fn authorize(
     session: Session,
     Query(q): Query<AuthorizeQuery>,
 ) -> Result<Redirect> {
-    let params = validate(q)?;
+    let params = validate(q, state.cfg.wireguard.is_some())?;
     let uid = current_user_id_optional(&state, &session).await?;
     session
         .insert(KEY_DESKTOP_AUTHORIZE, &params)
@@ -729,7 +783,15 @@ pub async fn consent(State(state): State<AppState>, session: Session) -> Result<
         .await
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("session insert desktop_csrf: {e}")))?;
 
-    let html = render_consent_html(&params, &user, &csrf);
+    if params.wireguard_public_key.is_some() && state.cfg.wireguard.is_none() {
+        return Err(Error::BadRequest("wireguard enrollment not offered".into()));
+    }
+    let endpoint = state
+        .cfg
+        .wireguard
+        .as_ref()
+        .map(|config| config.endpoint.as_str());
+    let html = render_consent_html(&params, &user, &csrf, endpoint);
     Ok((pages::security_headers(), Html(html)).into_response())
 }
 
@@ -786,8 +848,13 @@ pub async fn confirm(
                     &error_url(&params, "account_blocked"),
                 ));
             }
-            let url = complete(&state, &headers, &params, &user).await?;
-            Ok(handoff_response(&Handoff::Success, &url))
+            Ok(match complete(&state, &headers, &params, &user).await? {
+                Completion::Success(url) => handoff_response(&Handoff::Success, &url),
+                Completion::WireguardEnrollmentFailed => handoff_response(
+                    &Handoff::Error,
+                    &error_url(&params, "wireguard_enroll_failed"),
+                ),
+            })
         }
         "deny" => Ok(handoff_response(
             &Handoff::Cancelled,
@@ -802,7 +869,12 @@ pub async fn confirm(
 /// `csrf` / `action` fields are the wire contract the confirm POST
 /// (and the integration tests) read. Script-free within the shell's
 /// strict CSP.
-fn render_consent_html(params: &AuthorizeParams, user: &User, csrf: &str) -> String {
+fn render_consent_html(
+    params: &AuthorizeParams,
+    user: &User,
+    csrf: &str,
+    endpoint: Option<&str>,
+) -> String {
     let display = user
         .display_name
         .as_deref()
@@ -832,6 +904,13 @@ fn render_consent_html(params: &AuthorizeParams, user: &User, csrf: &str) -> Str
     } else {
         String::new()
     };
+    let (wireguard_row, wireguard_blurb) = match (&params.wireguard_public_key, endpoint) {
+        (Some(key), Some(endpoint)) => (
+            format!("      <div class=\"row\"><span class=\"k\">WireGuard key</span><span class=\"v\" style=\"font-family:monospace\">{}</span></div>\n", pages::html_escape(key)),
+            format!("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with the gateway's tunnel at {}; revoking the token removes it.</p>\n    ", pages::html_escape(endpoint)),
+        ),
+        _ => (String::new(), String::new()),
+    };
     let body = format!(
         r#"
     <span class="mark" aria-hidden="true"></span>
@@ -842,8 +921,8 @@ fn render_consent_html(params: &AuthorizeParams, user: &User, csrf: &str) -> Str
       <div class="row"><span class="k">Calls itself</span><span class="v">{label}</span></div>
       <div class="row"><span class="k">Scopes</span><span class="v">{scopes}</span></div>
       <div class="row"><span class="k">Expires in</span><span class="v">{expires_phrase}</span></div>
-    </div>
-    <p class="muted small">It will receive the result on this computer at 127.0.0.1, port {port}.</p>
+{wireguard_row}    </div>
+    {wireguard_blurb}<p class="muted small">It will receive the result on this computer at 127.0.0.1, port {port}.</p>
     <form method="post" action="/desktop/authorize/confirm">
       <input type="hidden" name="csrf" value="{csrf}">
       <button class="btn" type="submit" name="action" value="deny">Cancel</button>
@@ -906,6 +985,7 @@ mod tests {
             code_challenge: RFC_CHALLENGE.into(),
             scopes: vec!["tunnel".into()],
             expires_in_secs: 30 * 86_400,
+            wireguard_public_key: None,
         }
     }
 
@@ -920,6 +1000,7 @@ mod tests {
             code_challenge_method: "S256".into(),
             scopes: None,
             expires_in: Some(10),
+            wireguard_public_key: None,
         }
     }
 
@@ -929,6 +1010,7 @@ mod tests {
             secret: secret.into(),
             label: "box".into(),
             expires_at: None,
+            wireguard: None,
         }
     }
 
@@ -1009,7 +1091,7 @@ mod tests {
         let mut q = base_query();
         q.label = "chan-desktop".into();
         q.expires_in = Some(2_592_000);
-        let p = validate(q).unwrap();
+        let p = validate(q, false).unwrap();
         assert_eq!(p.scopes, vec!["tunnel".to_string()]);
         assert_eq!(p.expires_in_secs, 2_592_000);
         assert_eq!(p.code_challenge, RFC_CHALLENGE);
@@ -1026,7 +1108,7 @@ mod tests {
         ] {
             let mut q = base_query();
             q.redirect_uri = bad.into();
-            assert!(validate(q).is_err(), "{bad} should reject");
+            assert!(validate(q, false).is_err(), "{bad} should reject");
         }
     }
 
@@ -1035,7 +1117,7 @@ mod tests {
         for bad in ["plain", "s256", "S384", ""] {
             let mut q = base_query();
             q.code_challenge_method = bad.into();
-            assert!(validate(q).is_err(), "{bad} should reject");
+            assert!(validate(q, false).is_err(), "{bad} should reject");
         }
     }
 
@@ -1051,7 +1133,7 @@ mod tests {
         ] {
             let mut q = base_query();
             q.code_challenge = bad.clone();
-            assert!(validate(q).is_err(), "{bad} should reject");
+            assert!(validate(q, false).is_err(), "{bad} should reject");
         }
     }
 
@@ -1060,7 +1142,7 @@ mod tests {
         for bad in ["".to_string(), "   ".into(), "x".repeat(MAX_STATE_LEN + 1)] {
             let mut q = base_query();
             q.state = bad;
-            assert!(validate(q).is_err());
+            assert!(validate(q, false).is_err());
         }
     }
 
@@ -1068,14 +1150,14 @@ mod tests {
     fn rejects_unknown_scope() {
         let mut q = base_query();
         q.scopes = Some("tunnel,admin".into());
-        assert!(validate(q).is_err());
+        assert!(validate(q, false).is_err());
     }
 
     #[test]
     fn accepts_sole_account_scope() {
         let mut q = base_query();
         q.scopes = Some("desktop.account".into());
-        let p = validate(q).unwrap();
+        let p = validate(q, false).unwrap();
         assert_eq!(p.scopes, vec!["desktop.account"]);
     }
 
@@ -1090,7 +1172,7 @@ mod tests {
         ] {
             let mut q = base_query();
             q.scopes = Some(bad.into());
-            assert!(validate(q).is_err(), "{bad} should reject");
+            assert!(validate(q, false).is_err(), "{bad} should reject");
         }
     }
 
@@ -1101,7 +1183,7 @@ mod tests {
         for ok in ["tunnel", "tunnel,desktop.connect", "desktop.connect"] {
             let mut q = base_query();
             q.scopes = Some(ok.into());
-            assert!(validate(q).is_ok(), "{ok} should validate");
+            assert!(validate(q, false).is_ok(), "{ok} should validate");
         }
     }
 
@@ -1110,7 +1192,7 @@ mod tests {
         // Exercises comma-split + trim + empty-element filter.
         let mut q = base_query();
         q.scopes = Some(" tunnel , ".into());
-        let p = validate(q).unwrap();
+        let p = validate(q, false).unwrap();
         assert_eq!(p.scopes, vec!["tunnel"]);
     }
 
@@ -1118,7 +1200,7 @@ mod tests {
     fn clamps_expires_in() {
         let mut q = base_query();
         q.expires_in = Some(MAX_EXPIRES_IN_SECS * 10);
-        let p = validate(q).unwrap();
+        let p = validate(q, false).unwrap();
         assert_eq!(p.expires_in_secs, MAX_EXPIRES_IN_SECS);
     }
 
@@ -1127,7 +1209,7 @@ mod tests {
         for n in [0, -1, -3600] {
             let mut q = base_query();
             q.expires_in = Some(n);
-            assert!(validate(q).is_err());
+            assert!(validate(q, false).is_err());
         }
     }
 
@@ -1331,7 +1413,7 @@ mod tests {
             block_reason: None,
             avatar_url: None,
         };
-        let html = render_consent_html(&p, &user, "csrf-token");
+        let html = render_consent_html(&p, &user, "csrf-token", None);
         // The finding-3 copy: an untrusted local app, unverifiable.
         assert!(
             html.contains("<h1>Authorize an app on this computer?</h1>"),
@@ -1376,7 +1458,7 @@ mod tests {
             block_reason: None,
             avatar_url: None,
         };
-        let html = render_consent_html(&p, &user, "csrf-token");
+        let html = render_consent_html(&p, &user, "csrf-token", None);
         // Exposure-framed account blurb with the expiry.
         assert!(
             html.contains(
@@ -1398,5 +1480,118 @@ mod tests {
         assert_eq!(humanize_expires(86_400), "1 day");
         assert_eq!(humanize_expires(2 * 86_400), "2 days");
         assert_eq!(humanize_expires(30 * 86_400), "30 days");
+    }
+
+    fn wireguard_consent_user() -> User {
+        User {
+            id: Uuid::nil(),
+            email: "u@example.com".into(),
+            display_name: None,
+            username: "alice".into(),
+            username_edits: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            blocked_at: None,
+            block_reason: None,
+            avatar_url: None,
+        }
+    }
+
+    #[test]
+    fn validates_wireguard_public_key() {
+        let key = base64::engine::general_purpose::STANDARD.encode([7; 32]);
+        for invalid in [
+            key[..43].to_owned(),
+            format!("{key}="),
+            "!".repeat(44),
+            base64::engine::general_purpose::STANDARD.encode([7; 31]),
+        ] {
+            let mut query = base_query();
+            query.wireguard_public_key = Some(invalid);
+            assert!(
+                matches!(validate(query, true), Err(Error::BadRequest(message)) if message == "invalid wireguard_public_key")
+            );
+        }
+        let mut query = base_query();
+        query.wireguard_public_key = Some(key.clone());
+        assert!(
+            matches!(validate(query, false), Err(Error::BadRequest(message)) if message == "wireguard enrollment not offered")
+        );
+        let mut query = base_query();
+        query.wireguard_public_key = Some(key.clone());
+        let params = validate(query, true).unwrap();
+        assert_eq!(params.wireguard_public_key.as_ref(), Some(&key));
+        let mut stored = serde_json::to_value(params).unwrap();
+        assert_eq!(stored["wireguard_public_key"], key);
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("wireguard_public_key");
+        assert!(serde_json::from_value::<AuthorizeParams>(stored)
+            .unwrap()
+            .wireguard_public_key
+            .is_none());
+        assert!(validate(base_query(), false)
+            .unwrap()
+            .wireguard_public_key
+            .is_none());
+    }
+
+    #[test]
+    fn consent_html_renders_the_wireguard_key() {
+        let mut params = params();
+        params.wireguard_public_key = Some("<key & 'quoted'>".into());
+        let html = render_consent_html(
+            &params,
+            &wireguard_consent_user(),
+            "csrf-token",
+            Some("<endpoint&>:51820"),
+        );
+        assert!(html.contains(r#"<span class="k">WireGuard key</span>"#));
+        assert!(html.contains("font-family:monospace"));
+        assert!(html.contains("&lt;key &amp; &#39;quoted&#39;&gt;"));
+        assert!(html.contains("Approving also enrolls this computer's WireGuard key with the gateway's tunnel at &lt;endpoint&amp;&gt;:51820; revoking the token removes it."));
+        assert!(!html.contains("<key"));
+        assert!(!html.contains("<endpoint"));
+    }
+
+    #[test]
+    fn consent_html_without_a_key_is_unchanged() {
+        let body: String =
+            serde_json::from_str(include_str!("../tests/fixtures/desktop-consent.json")).unwrap();
+        let expected = pages::render(&pages::Page {
+            title: "Authorize an app on this computer",
+            head_extra: "",
+            body: &body,
+        });
+        for endpoint in [None, Some("wg.example.test:51820")] {
+            assert_eq!(
+                render_consent_html(&params(), &wireguard_consent_user(), "csrf-token", endpoint),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn redeem_payload_serializes_wireguard_params() {
+        let mut value = payload("test-pat");
+        let expected = serde_json::json!({"id":Uuid::nil(), "secret":"test-pat", "label":"box", "expires_at":null});
+        assert_eq!(serde_json::to_value(&value).unwrap(), expected);
+        value.wireguard = Some(crate::wireguard::Parameters {
+            server_public_key: "server-key".into(),
+            endpoint: "wg.example.test:51820".into(),
+            addresses: vec!["10.7.0.23/32".into()],
+            allowed_ips: vec!["10.7.0.1/32".into()],
+            persistent_keepalive: None,
+            hosts: vec![crate::wireguard::HostRoute {
+                name: "proxy.example.test".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }],
+        });
+        let actual = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            actual["wireguard"],
+            serde_json::json!({"server_public_key":"server-key", "endpoint":"wg.example.test:51820", "addresses":["10.7.0.23/32"], "allowed_ips":["10.7.0.1/32"], "hosts":[{"name":"proxy.example.test", "addresses":["10.7.0.1"]}]})
+        );
     }
 }

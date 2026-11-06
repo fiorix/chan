@@ -721,7 +721,7 @@ gateway-test: gateway-spa ## Execute gateway tests that do not require Postgres.
 		'gateway-test: EXECUTE: all gateway library unit tests' \
 		'gateway-test: EXECUTE: devserver-proxy unit, integration, and doc tests' \
 		'gateway-test: EXECUTE: unit tests of every gateway binary' \
-		'gateway-test: NOT RUN: 7 profile/identity integration-test files require TEST_DATABASE_URL'
+		'gateway-test: NOT RUN: 8 profile/identity integration-test files (full suite requires TEST_DATABASE_URL)'
 	# --locked for the reason gateway-build gives: the same stale lock would
 	# re-resolve here.
 	cd gateway && $(CARGO) test --locked --workspace --lib

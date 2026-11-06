@@ -53,6 +53,10 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
+        Self::with_wireguard(None).await
+    }
+
+    async fn with_wireguard(wireguard: Option<identity::wireguard::WireguardEnrollment>) -> Self {
         let (url, schema, pool, store) =
             test_db::create_schema(test_db::MigrationOrder::SessionsFirst).await;
 
@@ -82,6 +86,7 @@ impl TestApp {
 
         let cfg = Arc::new(Config {
             base_url,
+            wireguard,
             providers: vec![Arc::new(provider)],
             ..identity_config::test_config(&url, profile_client)
         });
@@ -1057,5 +1062,218 @@ async fn redemption_audit_failure_still_delivers_the_pat_once() {
         c.post_json("/desktop/authorize/redeem", &body).await.status,
         StatusCode::GONE
     );
+    app.cleanup().await;
+}
+#[tokio::test]
+async fn wireguard_authorize_requires_valid_keys_and_an_enrollment_offer() {
+    use base64::Engine;
+    let app = TestApp::new().await;
+    let key = base64::engine::general_purpose::STANDARD.encode([7; 32]);
+    let invalid = [
+        key[..43].to_owned(),
+        format!("{key}="),
+        "!".repeat(44),
+        base64::engine::general_purpose::STANDARD.encode([7; 31]),
+    ];
+    let mut client = Client::new(&app);
+    for (key, expected) in invalid
+        .iter()
+        .map(|key| (key, "invalid wireguard_public_key"))
+        .chain([(&key, "wireguard enrollment not offered")])
+    {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("wireguard_public_key", key)
+            .finish();
+        let response = client.get(&format!("{AUTH_URI}&{query}")).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+            json!({"error":expected})
+        );
+    }
+    app.cleanup().await;
+}
+
+fn wireguard_enrollment() -> identity::wireguard::WireguardEnrollment {
+    use base64::Engine;
+    identity::wireguard::WireguardEnrollment {
+        host_id: "p1".into(),
+        endpoint: "wg.example.test:51820".into(),
+        public_key: base64::engine::general_purpose::STANDARD.encode([9; 32]),
+        allowed_ips: vec!["10.7.0.1/32".into(), "fd00:7::1/128".into()],
+        persistent_keepalive: Some(25),
+        hosts: vec![identity::wireguard::HostRoute {
+            name: "*.proxy.example.test".into(),
+            addresses: vec!["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+        }],
+    }
+}
+
+async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uuid) -> String {
+    use base64::Engine;
+    let email = "wireguard@example.com";
+    app.insert_user(uid, email).await;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "wireguard_public_key",
+            &base64::engine::general_purpose::STANDARD.encode([7; 32]),
+        )
+        .finish();
+    let response = client
+        .get(&format!(
+            "{}&{query}",
+            AUTH_URI.replace("scopes=tunnel", "scopes=desktop.account")
+        ))
+        .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER);
+    assert_eq!(response.location, "/");
+    happy_login_resume(app, client, uid, email).await;
+    mock_get_user(app, uid, email, false).await;
+    let response = client.get("/desktop/authorize/consent").await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(response.body_str().contains("WireGuard key"));
+    assert!(response.body_str().contains("wg.example.test:51820"));
+    extract_csrf(response.body_str())
+}
+
+#[tokio::test]
+async fn full_flow_with_a_wireguard_key_enrolls_the_peer_and_returns_its_parameters() {
+    use base64::Engine;
+    let config = wireguard_enrollment();
+    let app = TestApp::with_wireguard(Some(config.clone())).await;
+    let uid = Uuid::new_v4();
+    let mut client = Client::new(&app);
+    let csrf = consent_with_wireguard(&app, &mut client, uid).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/users/{uid}/wireguard/peers")))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {PROFILE_TOKEN}"),
+        ))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = request.body_json().unwrap();
+            assert_eq!(body["host"], "p1");
+            assert_eq!(
+                body["public_key"],
+                base64::engine::general_purpose::STANDARD.encode([7; 32])
+            );
+            assert_eq!(body.as_object().unwrap().len(), 3);
+            ResponseTemplate::new(201).set_body_json(json!({
+                "id":Uuid::new_v4(), "user_id":uid, "token_id":body["token_id"],
+                "host":"p1", "public_key":body["public_key"],
+                "addresses":["10.7.0.23/32", "fd00:7::23/128"],
+                "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z",
+            }))
+        })
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    let response = client
+        .post_form(
+            "/desktop/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let query = parse_callback_query(&extract_handoff_url(response.body_str()));
+    assert!(!query.contains_key("error"));
+    let code = query.get("code").unwrap();
+    let response = client
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({"code":code, "code_verifier":PKCE_VERIFIER}),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(
+        payload["wireguard"],
+        json!({
+            "server_public_key":config.public_key, "endpoint":"wg.example.test:51820",
+            "addresses":["10.7.0.23/32", "fd00:7::23/128"], "allowed_ips":["10.7.0.1/32", "fd00:7::1/128"],
+            "persistent_keepalive":25, "hosts":[{"name":"*.proxy.example.test", "addresses":["10.7.0.1", "fd00:7::1"]}],
+        })
+    );
+    let token: Uuid = payload["id"].as_str().unwrap().parse().unwrap();
+    let rows = app.api_tokens.list(uid).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, token);
+    assert!(rows[0].revoked_at.is_none());
+    assert!(payload["secret"].as_str().unwrap().starts_with("chan_pat_"));
+    let requests = app.profile.received_requests().await.unwrap();
+    let enroll = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/wireguard/peers"))
+        .unwrap();
+    assert_eq!(
+        enroll.body_json::<serde_json::Value>().unwrap()["token_id"],
+        token.to_string()
+    );
+    let audits: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1 ORDER BY id")
+            .bind(token)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, ["created_via_desktop", "desktop.redeem"]);
+    assert_eq!(
+        client
+            .post_json(
+                "/desktop/authorize/redeem",
+                &json!({"code":code,"code_verifier":PKCE_VERIFIER})
+            )
+            .await
+            .status,
+        StatusCode::GONE
+    );
+    app.profile.verify().await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn enroll_failure_revokes_the_pat_and_reports_wireguard_enroll_failed() {
+    let app = TestApp::with_wireguard(Some(wireguard_enrollment())).await;
+    let uid = Uuid::new_v4();
+    let mut client = Client::new(&app);
+    let csrf = consent_with_wireguard(&app, &mut client, uid).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/users/{uid}/wireguard/peers")))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(json!({"error":"wireguard pool exhausted"})),
+        )
+        .expect(1)
+        .mount(&app.profile)
+        .await;
+    let response = client
+        .post_form(
+            "/desktop/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let query = parse_callback_query(&extract_handoff_url(response.body_str()));
+    assert_eq!(
+        query.get("error").map(String::as_str),
+        Some("wireguard_enroll_failed")
+    );
+    assert!(!query.contains_key("code"));
+    let rows = app.api_tokens.list(uid).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].revoked_at.is_some());
+    let audits: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1 ORDER BY id")
+            .bind(rows[0].id)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, ["created_via_desktop", "revoked"]);
+    let requests = app.profile.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .any(|request| request.url.path().ends_with("/wireguard/peers")));
+    assert!(!requests
+        .iter()
+        .any(|request| request.url.path().contains("revoke")));
+    app.profile.verify().await;
     app.cleanup().await;
 }

@@ -63,6 +63,7 @@ Each crate ships two documents: `README.md` is the consumer-facing entry (instal
 Every bearer is `openssl rand -hex 32`, and each crate's `packaging/*.env` file is the authoritative roster of what that service reads. The cross-service ones:
 
 - `PROFILE_AUTH_TOKEN`: identity to profile's service API. profile also accepts `PROFILE_ADMIN_TOKEN` there so a single-token deployment works, and runs both checks unconditionally so a wrong token never short-circuits on the first byte.
+- `WIREGUARD_AGENT_TOKEN`: peer agents to identity's internal `/internal/v1/wireguard/peers` route. Empty disables the route; it is distinct from every other identity bearer and grants no token or session lookup.
 - `IDENTITY_INTERNAL_TOKEN`: devserver-proxy to identity's `/internal/v1/tokens/validate`. Required, with no fallback to `PROFILE_AUTH_TOKEN`; rotating one does not rotate the other.
 - The devserver-control `/admin/v1/*` credentials are scoped per caller and rotation-capable (each accepts a list): `DEVSERVER_OPERATOR_ADMIN_TOKENS` for operator tooling, `DEVSERVER_IDENTITY_ADMIN_TOKENS` and `DEVSERVER_PROFILE_ADMIN_TOKENS` for the services, which present their own value through the singular `DEVSERVER_IDENTITY_ADMIN_TOKEN` and `DEVSERVER_PROFILE_ADMIN_TOKEN`. devserver-control rejects a credential reused across scopes, so a leaked service token never grants the operator tree.
 - `DEVSERVER_PROXY_TOKEN`: devserver-proxy to devserver-control's control session. Distinct from the admin credentials on purpose: a proxy node holds no operator credential.

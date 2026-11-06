@@ -105,6 +105,7 @@ Optional:
 | `INTERNAL_BIND_ADDR`              | `127.0.0.1:7001`   | internal listener       |
 | `COOKIE_SECURE`                   | `false`            | HTTPS-only cookie       |
 | `IDENTITY_SESSION_INTERNAL_TOKEN` | unset              | enables `whoami`        |
+| `WIREGUARD_AGENT_TOKEN`           | unset              | enables peer-list reads |
 | `IDENTITY_ADMIN_TOKEN`            | unset              | enables the admin tree  |
 | `IDENTITY_ACCOUNT_ADMIN_TOKEN`    | unset              | enables the composites  |
 | `DEVSERVER_POLICY_REQUIRED`       | `false`            | deny when policy absent |
@@ -114,6 +115,21 @@ Optional:
 | `IDENTITY_OAUTH_ENDPOINTS_BASE`   | unset              | GitHub endpoint override |
 
 Every configured identity bearer must be distinct or startup fails. An unset narrow token disables its caller scope. `RUSTRICT_ALLOWLIST` is a comma-separated list of usernames exempt from the profanity filter. `IDENTITY_OAUTH_ENDPOINTS_BASE` points the GitHub provider at a local stub for end-to-end tests and is never set in production.
+
+### WireGuard enrollment
+
+Set all five enrollment values together; a partial set refuses startup. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
+
+| Name | Value |
+| --- | --- |
+| `WIREGUARD_HOST_ID` | One lowercase ingress-host label |
+| `WIREGUARD_ENDPOINT` | Kernel interface `host:port`, IPv6 in brackets |
+| `WIREGUARD_PUBLIC_KEY` | Padded base64 for the interface's 32-byte key |
+| `WIREGUARD_ALLOWED_IPS` | Comma-separated CIDRs routed through the tunnel |
+| `WIREGUARD_HOSTS` | Semicolon-separated `name=addr[,addr]` mappings |
+| `WIREGUARD_PERSISTENT_KEEPALIVE` | Optional seconds, default 25; 0 omits it |
+
+Host-map addresses must be inside the allowed CIDRs. Names are the proxy or tunnel origin's host, or `*.` followed by the proxy apex; they are lowercase, and the identity origin's host is refused. Profile separately needs `WIREGUARD_POOL_V4` and may set `WIREGUARD_POOL_V6`, reservations and release grace. `configure.sh` generates the agent bearer and leaves the interface and pool values as commented examples.
 
 ## Routes
 
@@ -162,6 +178,8 @@ Desktop authorize (PAT mint for chan-desktop):
 | POST   | `/desktop/authorize/confirm` | allow or deny, then loopback      |
 | POST   | `/desktop/authorize/redeem`  | one-time code to PAT              |
 
+The optional `wireguard_public_key` authorize query carries a padded base64 32-byte key, shown on the consent page. Allow enrolls it in profile against the minted PAT before issuing the redemption code. Enrollment failure soft-revokes that undelivered PAT and hands back `error=wireguard_enroll_failed`. Successful redemption adds `wireguard` with `server_public_key`, `endpoint`, assigned `addresses`, `allowed_ips`, optional `persistent_keepalive` and the `hosts` map. Without a key the response shape is unchanged.
+
 Desktop API (Bearer PAT):
 
 | Method | Path                          | Purpose                          |
@@ -177,6 +195,9 @@ Internal listener (route-scoped bearers):
 |--------|--------------------------------|-----------------------------------|
 | POST   | `/internal/v1/tokens/validate` | `IDENTITY_INTERNAL_TOKEN`         |
 | POST   | `/internal/v1/sessions/whoami` | `IDENTITY_SESSION_INTERNAL_TOKEN` |
+| GET    | `/internal/v1/wireguard/peers` | `WIREGUARD_AGENT_TOKEN`           |
+
+The peer-list route requires `?host=<label>` and relays profile's JSON bytes, quoted ETag and conditional 304 unchanged. Missing or wrong bearer answers 401, an empty configured bearer 404, malformed host 400, and profile failure 502.
 
 The validate route serves PAT validation, Hello-name announcement and lease refresh for devserver-proxy; with `proxy_id` and `registration_id` present the response also carries the signed admission lease. See [Devserver publication](../../design.md#devserver-publication) for the contact inventory.
 

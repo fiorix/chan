@@ -247,8 +247,16 @@ pub fn routers(
             account_admin_auth,
         ));
 
+    let wireguard_internal = Router::new()
+        .route("/internal/v1/wireguard/peers", get(crate::wireguard::peers))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::wireguard::authenticate,
+        ));
+
     let internal = validation_internal
         .merge(session_internal)
+        .merge(wireguard_internal)
         .merge(operator_admin)
         .merge(account_admin)
         .with_state(state.clone())
@@ -335,6 +343,14 @@ struct GatewayDiscovery {
     devserver_proxy_origin: String,
     devserver_proxy_host_depth: u8,
     tunnel_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wireguard: Option<GatewayWireguardDiscovery>,
+}
+
+#[derive(Debug, Serialize)]
+struct GatewayWireguardDiscovery {
+    endpoint: String,
+    public_key: String,
 }
 
 async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<GatewayDiscovery>> {
@@ -374,6 +390,14 @@ async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<Gateway
         devserver_proxy_origin,
         devserver_proxy_host_depth: 2,
         tunnel_url: format!("{tunnel_origin}{}", chan_tunnel_proto::TUNNEL_PATH),
+        wireguard: state
+            .cfg
+            .wireguard
+            .as_ref()
+            .map(|config| GatewayWireguardDiscovery {
+                endpoint: config.endpoint.clone(),
+                public_key: config.public_key.clone(),
+            }),
     }))
 }
 

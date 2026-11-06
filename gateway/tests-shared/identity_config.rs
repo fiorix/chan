@@ -37,5 +37,7 @@ pub(crate) fn test_config(database_url: &str, profile_client: ProfileClient) -> 
         )
         .unwrap(),
         providers: vec![],
+        wireguard: None,
+        wireguard_agent_token: String::new(),
     }
 }

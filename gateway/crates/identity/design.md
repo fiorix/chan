@@ -16,7 +16,7 @@ Two routers on two listeners. The public listener carries the session layer at i
 2. `/api/*`: the session-gated JSON API for the embedded SPA: `me`, profile management, PAT lifecycle, owned and incoming devservers, and sharing grants.
 3. Public discovery and the desktop surface: `/.well-known/chan-gateway`, the `/desktop/authorize` consent flow, the PAT-gated roster and entry routes.
 4. `/s/{owner}` and `/s/{owner}/{workspace}`: the share landings that mint the browser entry credential.
-5. `/internal/v1/*` and `/admin/v1/*` on the internal listener: PAT validation for the proxies, OAuth-session `whoami` for the account caller, and the operator and account-composite admin trees, each behind its own bearer.
+5. `/internal/v1/*` and `/admin/v1/*` on the internal listener: PAT validation for the proxies, OAuth-session `whoami` for the account caller, active WireGuard peers for the node agent, and the operator and account-composite admin trees, each behind its own bearer.
 
 The SPA is baked in at build time with `rust_embed` and served by the shared static-file handler; unmatched paths without an extension fall through to `index.html`. HTML responses carry an application-layer CSP and `X-Frame-Options: DENY`; the production edge adds `nosniff` and a referrer policy.
 
@@ -79,6 +79,10 @@ Minting runs the same policy projection as validation and locks the user and fle
 chan-desktop obtains its PAT through an OAuth-style consent flow rather than copying a token by hand. The desktop is an RFC 8252 loopback client: it binds an ephemeral `127.0.0.1` listener and opens the system browser at `/desktop/authorize` with that loopback `redirect_uri` and a PKCE S256 challenge. An unauthenticated entry bounces through the SPA sign-in and resumes at the consent page. On allow, identity mints the PAT and navigates the browser to the loopback callback with a single-use redemption code, not the PAT secret; the desktop exchanges code plus verifier at `/desktop/authorize/redeem`, and the PAT is released only when the verifier hashes to the stored challenge. The PAT secret never rides the browser.
 
 The handoff to the loopback listener is a page the browser navigates from, not a redirect answering the form post, because a redirect chain off a form post falls under the page's `form-action` policy in Chrome. Deny and blocked outcomes reach the loopback target with a stable `error` reason. The redirect URI is validated structurally as a loopback URI (loopback host, `http`, the fixed callback path, a port, nothing else) rather than as a literal, the lifetime is required and clamped, and the scopes must come from a strict allowlist with `desktop.account` only ever alone. PKCE binds the redemption to the requesting process but does not close the login-CSRF residual on a shared multi-user host, which is why the consent copy presents the requester as an unverifiable local app; the `desktop_authorize` module doc carries the full hardening posture.
+
+When enrollment is configured, discovery includes the kernel ingress endpoint and public key. An optional padded-base64 `wireguard_public_key` rides the authorize session stash and appears on the escaped consent page with the endpoint. Allow mints the PAT, then asks profile to enroll the key for that token and host. An enrollment failure soft-revokes the undelivered token locally and returns `wireguard_enroll_failed` without creating a redemption code; no fleet cut is needed for a credential that never left identity. Success stores the allocated addresses and configured routing parameters beside the PAT in the redemption payload. Requests without a key retain the same consent and response shapes.
+
+The peer agent reads `/internal/v1/wireguard/peers?host=<label>` through the internal listener under `WIREGUARD_AGENT_TOKEN`. Identity validates the host and relays profile's response bytes, quoted ETag and 304 without reserialization. A profile failure answers 502 so the agent keeps its last set. Enrollment values form one optional configuration; all required values must be present together, mapped addresses must belong to the allowed CIDRs, and mapped names are limited to the configured proxy and tunnel hosts and the proxy wildcard. The identity host cannot be mapped into the tunnel.
 
 Redemption delivers the PAT once even when its audit write fails: the code stays consumed and the failure is logged without the secret, so audit availability cannot strand an already-minted credential.
 
@@ -179,7 +183,7 @@ identity alone holds `DEVSERVER_ENTRY_SIGNING_KEY`; proxy nodes receive only the
 
 ### Disjoint internal bearers
 
-The proxy's validate bearer, the account caller's session-lookup bearer, the operator bearer and the account-composite bearer are four variables. Validation is required; each narrow bearer is optional and an empty value disables its scope. Every configured value must be pairwise distinct or identity refuses to start, so a leaked service-scope token never grants the operator tree.
+The proxy's validate bearer, the account caller's session-lookup bearer, the peer agent's list bearer, the operator bearer and the account-composite bearer are separate variables. Validation is required; each narrow bearer is optional and an empty value disables its scope. Every configured value must be pairwise distinct or identity refuses to start, so a leaked service-scope token never grants the operator tree.
 
 ### Public origins are explicit configuration
 
