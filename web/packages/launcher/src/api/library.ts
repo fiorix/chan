@@ -448,6 +448,14 @@ export interface GatewayEntry {
   wireguard: string | null;
   /** Live tunnel state; absent on an older desktop, null without a tunnel. */
   wireguard_status?: string | null;
+  /** The public half of the WireGuard key the desktop generated for this
+   * gateway, base64; absent on an older desktop, null when none was
+   * generated. */
+  wireguard_public_key?: string | null;
+  /** The gateway enrolled the current key at a sign-in; false after a new
+   * key replaced an enrolled one, until the next sign-in. Absent on an older
+   * desktop. */
+  wireguard_enrolled?: boolean;
 }
 
 /** Write payload for add and update gateway. Save just adds -- no probe, no

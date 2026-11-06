@@ -657,6 +657,9 @@ mod tests {
             added_at: 0,
             native_trust: vec![],
             wireguard: wireguard.map(Path::to_path_buf),
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         }
     }
 

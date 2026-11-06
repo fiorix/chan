@@ -90,7 +90,7 @@ pub use config_watch::ServerConfigHook;
 // route layer names them through `crate::`.
 pub use chan_library::desktop_window_ops::{
     DesktopBridge, DesktopWindowOp, DesktopWindowSender, NewWindowKind, SetWorkspaceOnOutcome,
-    NO_DESKTOP,
+    WireguardKeyOutcome, NO_DESKTOP,
 };
 pub use chan_library::terminal_sessions::TerminalExit;
 pub use chan_library::terminal_sessions::{
@@ -114,7 +114,7 @@ pub use chan_library::{
     DevserverEntry, DevserverFeedSource, DevserverInput, DevserverRegistry, DevserverStatus,
     GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, HostedWorkspace, LauncherWorkspace,
     LocalColorStore, LocalThemeStore, PersistedWorkspace, WorkspaceHost, WorkspaceLifecycleOutcome,
-    WorkspaceOverlay, WorkspaceStatus,
+    WorkspaceOverlay, WorkspaceStatus, WIREGUARD_NOT_OFFERED,
 };
 pub use devserver::{
     persisted_devserver_port, persisted_devserver_token, rotate_persisted_devserver_token,

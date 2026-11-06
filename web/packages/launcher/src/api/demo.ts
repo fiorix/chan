@@ -157,6 +157,8 @@ function seed(): Seed {
         devserver_count: 1,
         last_error: null,
         wireguard: null,
+        wireguard_public_key: null,
+        wireguard_enrolled: false,
       },
     ],
     devserverWorkspaces: [
@@ -550,6 +552,8 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
         devserver_count: 0,
         last_error: null,
         wireguard: (input.wireguard ?? "").trim() || null,
+        wireguard_public_key: null,
+        wireguard_enrolled: false,
       };
       gateways.push(gw);
       notify();

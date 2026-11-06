@@ -19,6 +19,7 @@
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::gateway_registry::GatewayEntry;
 use crate::host::LauncherWorkspace;
 use crate::window_titles::SharedWindowTitles;
 
@@ -60,6 +61,22 @@ pub enum SetWorkspaceOnOutcome {
     /// An unforced off was refused: `active_terminals` live terminal sessions
     /// would be killed. The launcher confirms, then retries with `force: true`.
     NeedsForce { active_terminals: usize },
+}
+
+/// Outcome of a [`DesktopWindowOp::GenerateWireguardKey`] request. The
+/// refusals the launcher renders apart from a failure are their own
+/// variants, so the route answers each with its own status.
+#[derive(Debug)]
+pub enum WireguardKeyOutcome {
+    /// A key pair was generated and its public half stored on the row; the
+    /// row as the launcher lists it.
+    Generated(GatewayEntry),
+    /// No gateway has the id.
+    NotFound,
+    /// The gateway's discovery carries no `wireguard` entry, so it enrolls
+    /// no peers ([`WIREGUARD_NOT_OFFERED`](crate::WIREGUARD_NOT_OFFERED));
+    /// nothing was written.
+    NotOffered,
 }
 
 /// A window-management request the control socket hands to the desktop.
@@ -203,6 +220,17 @@ pub enum DesktopWindowOp {
     DisconnectGateway {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Generate a WireGuard key pair for a configured gateway by id: discover
+    /// the gateway, refuse when its discovery offers no enrollment, keep the
+    /// private half in the desktop's key file and store the public half on
+    /// the row, replacing any earlier key. The Gateways form's Generate
+    /// WireGuard key action drives this over the bridge. A failure (the
+    /// discovery, the key file, the config save) is the error string. Inert
+    /// without a desktop attached -- the route then answers [`NO_DESKTOP`].
+    GenerateWireguardKey {
+        id: String,
+        reply: oneshot::Sender<Result<WireguardKeyOutcome, String>>,
     },
     /// Open the OS native folder-picker dialog and return the chosen
     /// directory, or `None` when the user cancels. The launcher's

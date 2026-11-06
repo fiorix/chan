@@ -132,7 +132,7 @@ The New Workspace and Confirm dialogs share focus entry, Tab wrapping and Escape
 - **tmux**: the feed's snapshot carries one record per live `tmux -CC` connection and a window row's mark says which connection owns it; a closed request set (a new window, open a window, detach, end) goes to the connection's route.
 - **command capabilities**: mint from a tenant token and a live window; a token-redacted local snapshot, an approved action subset, and a launch redirect that revalidates.
 - **devservers**: the desktop-side registry over HTTP, plus the bridge operations (connect and disconnect, native trust, a terminal, workspace open, on, off and forget) that dispatch to the attached desktop; a registry-less surface lists nothing and the bridge operations refuse without a desktop.
-- **gateways**: the registry (URL, label and the optional wg-quick file path, `wireguard`) plus connect and disconnect; a gateway's roster rows synthesize read-only devserver entries, and the desktop forwards a fed tmux request to the owning devserver over its existing authenticated connection, so the browser holds no remote credentials.
+- **gateways**: the registry (URL, label and the optional wg-quick file path, `wireguard`, with the generated WireGuard key's public half and whether the gateway enrolled it) plus connect, disconnect and WireGuard key generation; a gateway's roster rows synthesize read-only devserver entries, and the desktop forwards a fed tmux request to the owning devserver over its existing authenticated connection, so the browser holds no remote credentials.
 
 ## Build integration
 

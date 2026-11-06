@@ -615,6 +615,8 @@ export const mockApi: LibraryApi = {
       // The desktop starts a file's tunnel as the row is saved, so a new row
       // with a file reads as connecting at once.
       wireguard_status: wireguard === null ? null : "connecting",
+      wireguard_public_key: null,
+      wireguard_enrolled: false,
     };
     gateways.push(gw);
     notify();

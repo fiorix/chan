@@ -10,9 +10,10 @@
 //! the headless devserver and plain `chan serve` install none, so the accessor
 //! returns `None` and the routes serve an empty list and 404 mutation.
 //!
-//! Connect/disconnect are NOT registry methods: like devserver connect, they
-//! operate the desktop's live connection state and ride the desktop window-ops
-//! bridge, answering the plain-text NO_DESKTOP 409 on bridge-less surfaces.
+//! Connect, disconnect and WireGuard key generation are NOT registry methods:
+//! like devserver connect, they operate the desktop's live state (connections,
+//! discovery, the key file) and ride the desktop window-ops bridge, answering
+//! the plain-text NO_DESKTOP 409 on bridge-less surfaces.
 //!
 //! The launcher SPA's TypeScript (`web/packages/launcher/src/api/library.ts`)
 //! mirrors these serde shapes exactly; a field change here must flow to that
@@ -92,7 +93,22 @@ pub struct GatewayEntry {
     /// anyway; `null` when no matching tunnel runs.
     #[serde(default)]
     pub wireguard_status: Option<String>,
+    /// The public half of the WireGuard key the desktop generated for this
+    /// gateway, base64 as `wg` prints it; `null` when none was generated.
+    /// The private half never leaves the desktop's key file.
+    #[serde(default)]
+    pub wireguard_public_key: Option<String>,
+    /// The gateway enrolled the current key at a sign-in. `false` with no
+    /// key, and after a new key replaced an enrolled one until the next
+    /// sign-in enrolls it.
+    #[serde(default)]
+    pub wireguard_enrolled: bool,
 }
+
+/// The refusal of a WireGuard key for a gateway whose discovery document
+/// carries no `wireguard` entry: that gateway enrolls no peers, so the
+/// desktop generates no key for it and sends none at sign-in.
+pub const WIREGUARD_NOT_OFFERED: &str = "this gateway does not enroll WireGuard peers";
 
 /// The add/update payload. `url` is required on add; on update the URL is
 /// the gateway's identity and stays immutable (changing the origin is a
@@ -161,13 +177,16 @@ mod tests {
             last_error: None,
             wireguard: None,
             wireguard_status: None,
+            wireguard_public_key: None,
+            wireguard_enrolled: false,
         };
         assert_eq!(
             serde_json::to_string(&entry).unwrap(),
             "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
              \"enabled\":true,\"status\":\"disconnected\",\"pending_signin\":false,\
              \"devserver_count\":3,\"last_error\":null,\"wireguard\":null,\
-             \"wireguard_status\":null}"
+             \"wireguard_status\":null,\"wireguard_public_key\":null,\
+             \"wireguard_enrolled\":false}"
         );
         // And the shape round-trips.
         let back: GatewayEntry =
@@ -220,5 +239,28 @@ mod tests {
         .unwrap();
         assert_eq!(entry.wireguard, None);
         assert_eq!(entry.wireguard_status, None);
+        assert_eq!(entry.wireguard_public_key, None);
+        assert!(!entry.wireguard_enrolled);
+    }
+
+    #[test]
+    fn entry_carries_the_wireguard_key_and_its_enrollment() {
+        let entry: GatewayEntry = serde_json::from_str(
+            "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
+             \"enabled\":true,\"wireguard_public_key\":\
+             \"xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\",\"wireguard_enrolled\":true}",
+        )
+        .unwrap();
+        assert_eq!(
+            entry.wireguard_public_key.as_deref(),
+            Some("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=")
+        );
+        assert!(entry.wireguard_enrolled);
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            json["wireguard_public_key"],
+            "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
+        );
+        assert_eq!(json["wireguard_enrolled"], true);
     }
 }

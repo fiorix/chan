@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chan_server::{
     DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus, GatewayEntry, GatewayInput,
-    GatewayRegistry,
+    GatewayRegistry, WireguardKeyOutcome,
 };
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +150,34 @@ pub struct Gateway {
     /// from before the field reads and writes unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard: Option<PathBuf>,
+    /// The public half of the WireGuard key generated for this gateway,
+    /// base64 as `wg` prints it; the private half is in the row's key file
+    /// under the desktop's `wireguard` directory and nowhere else. Absent
+    /// until a key is generated, and left off the file then, like the three
+    /// enrollment fields below it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_public_key: Option<String>,
+    /// The key the gateway enrolled at the last sign-in that sent one. A
+    /// generated key that differs, a replaced one among them, is not
+    /// enrolled yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_enrolled_key: Option<String>,
+    /// The host names the enrolling gateway routes through this row's
+    /// tunnel, with their tunnel addresses, so the proxy carries a request
+    /// for one of them through the tunnel with no lookup on the host. They
+    /// describe the file the enrollment wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wireguard_hosts: Vec<WireguardHost>,
+}
+
+/// One name of a gateway's host map as the row stores it: an exact
+/// lowercase DNS name, or `*.` and one, matching every label depth below it,
+/// with the tunnel addresses it is reached at. The serde mirror of
+/// chan-wireguard's `HostRoute`, which carries no serde of its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardHost {
+    pub name: String,
+    pub addresses: Vec<std::net::IpAddr>,
 }
 
 impl Gateway {
@@ -407,6 +435,12 @@ impl ConfigStore {
     #[cfg(test)]
     pub(crate) fn at_path(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    /// The directory of the gateways' WireGuard key and client files:
+    /// `wireguard` beside this file, `<chan home>/desktop/wireguard`.
+    pub fn wireguard_dir(&self) -> PathBuf {
+        self.path.with_file_name("wireguard")
     }
 
     pub fn get(&self) -> io::Result<Config> {
@@ -1052,6 +1086,9 @@ fn entry_from_gateway(
             .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, file))),
         wireguard: file.map(|path| path.display().to_string()),
         wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, file)),
+        wireguard_public_key: g.wireguard_public_key.clone(),
+        wireguard_enrolled: g.wireguard_public_key.is_some()
+            && g.wireguard_enrolled_key == g.wireguard_public_key,
     }
 }
 
@@ -1109,6 +1146,9 @@ impl GatewayRegistry for GatewayConfigRegistry {
             added_at: now_millis(),
             native_trust: Vec::new(),
             wireguard,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
         store.save(&cfg).map_err(|e| e.to_string())?;
@@ -1138,6 +1178,16 @@ impl GatewayRegistry for GatewayConfigRegistry {
         // The file is full-replace like the label, and the fabric follows
         // it once the row is saved.
         let previous = std::mem::replace(&mut gw.wireguard, wireguard);
+        // The host map and the enrolled key describe the file an enrollment
+        // wrote. Clearing the file drops both, so the key reads as not
+        // enrolled; another file drops the map, whose addresses belong to
+        // the enrolled tunnel. The key file and the public key stay.
+        if gw.wireguard != previous {
+            gw.wireguard_hosts.clear();
+            if gw.wireguard.is_none() {
+                gw.wireguard_enrolled_key = None;
+            }
+        }
         let gw = gw.clone();
         store.save(&cfg).map_err(|e| e.to_string())?;
         self.follow_wireguard(&gw, previous.as_deref());
@@ -1149,7 +1199,7 @@ impl GatewayRegistry for GatewayConfigRegistry {
     }
 
     fn remove(&self, id: &str) -> Result<bool, String> {
-        {
+        let keys = {
             let mut store = self.store.lock().unwrap();
             let mut cfg = store.get().map_err(|e| e.to_string())?;
             let before = cfg.gateways.len();
@@ -1158,7 +1208,8 @@ impl GatewayRegistry for GatewayConfigRegistry {
                 return Ok(false);
             }
             store.save(&cfg).map_err(|e| e.to_string())?;
-        }
+            store.wireguard_dir()
+        };
         // Row dropped: run the cascade so the HTTP DELETE matches the Tauri
         // command's teardown. Release the store first: every cascade takes it
         // before locking gateway state.
@@ -1168,8 +1219,60 @@ impl GatewayRegistry for GatewayConfigRegistry {
         if let Some(fabric) = self.fabric() {
             fabric.retire(id);
         }
+        // The row's key and client file go with it. The row is gone either
+        // way, so a file that cannot be deleted is logged, not refused.
+        if let Err(e) = crate::wireguard_keys::remove(&keys, id) {
+            tracing::warn!(gateway = %id, dir = %keys.display(), error = %e, "removing the gateway's WireGuard files");
+        }
         Ok(true)
     }
+}
+
+/// Generate a WireGuard key pair for gateway `id` (the Gateways form's
+/// Generate WireGuard key action, over the desktop bridge): discover the
+/// gateway, refuse when its discovery offers no enrollment, then write the
+/// private half to the row's key file and store the public half on the row
+/// in one save, replacing any earlier key. A replaced key reads as not
+/// enrolled. The key file is written and the row saved under the store's
+/// lock, so concurrent generations serialize and the last one's key is both
+/// the file's and the row's; nothing is written before the discovery
+/// answers.
+pub(crate) async fn generate_wireguard_key(
+    store: &Arc<Mutex<ConfigStore>>,
+    manager: &crate::gateway::GatewayManager,
+    id: &str,
+) -> Result<WireguardKeyOutcome, String> {
+    let url = {
+        let cfg = store.lock().unwrap().get().map_err(|e| e.to_string())?;
+        match cfg.gateways.iter().find(|g| g.id == id) {
+            Some(gw) => gw.url.clone(),
+            None => return Ok(WireguardKeyOutcome::NotFound),
+        }
+    };
+    let discovery = crate::devserver::discover_gateway(&url)
+        .await
+        .map_err(|e| format!("gateway discovery failed: {e}"))?;
+    if discovery.wireguard.is_none() {
+        return Ok(WireguardKeyOutcome::NotOffered);
+    }
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    // The URL is immutable, so the row found again is the one discovered,
+    // unless it was removed meanwhile.
+    let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
+        return Ok(WireguardKeyOutcome::NotFound);
+    };
+    let public = crate::wireguard_keys::generate(&guard.wireguard_dir(), id)?;
+    gw.wireguard_public_key = Some(public);
+    let gw = gw.clone();
+    guard.save(&cfg).map_err(|e| e.to_string())?;
+    drop(guard);
+    tracing::info!(gateway = %id, "gateway WireGuard key generated");
+    Ok(WireguardKeyOutcome::Generated(entry_from_gateway(
+        &gw,
+        manager.view(id),
+        manager.wireguard().map(|fabric| fabric.as_ref()),
+    )))
 }
 
 /// What the one-shot legacy migration did, for the startup log and the
@@ -1243,6 +1346,9 @@ fn split_legacy_gateway_rows(cfg: &mut Config) -> GatewayMigration {
             added_at: row.added_at,
             native_trust: Vec::new(),
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
         outcome.created.push(gw);
@@ -1282,6 +1388,9 @@ pub fn convert_devserver_row_to_gateway(
             added_at: row.added_at,
             native_trust: Vec::new(),
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
         gw
@@ -2489,6 +2598,9 @@ mod tests {
                 added_at: 1,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             }],
             ..Default::default()
         };
@@ -2631,6 +2743,9 @@ mod tests {
                     added_at: 1,
                     native_trust: Vec::new(),
                     wireguard: None,
+                    wireguard_public_key: None,
+                    wireguard_enrolled_key: None,
+                    wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
             };
@@ -2748,6 +2863,9 @@ mod tests {
                     added_at: 1,
                     native_trust: Vec::new(),
                     wireguard: None,
+                    wireguard_public_key: None,
+                    wireguard_enrolled_key: None,
+                    wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
             };
@@ -2848,6 +2966,9 @@ mod tests {
                     added_at: 1,
                     native_trust: Vec::new(),
                     wireguard: None,
+                    wireguard_public_key: None,
+                    wireguard_enrolled_key: None,
+                    wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
             };
@@ -3267,6 +3388,9 @@ mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: wireguard.cloned(),
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         };
         // The start runs A's tunnel and refuses B's file.
         let (_store, fabric, reg) = gateway_registry_over(
@@ -3329,5 +3453,333 @@ mod tests {
         assert!(reg.remove("gw-cccccccc").unwrap());
         assert_eq!(fabric.tunnels(), 1);
         assert_eq!(fabric.status("gw-cccccccc", Some(&a_file)), None);
+    }
+
+    /// A gateway's discovery document on a loopback listener, carrying
+    /// `wireguard` when given: its origin and its server.
+    async fn discovery_stub(
+        wireguard: Option<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let o = origin.clone();
+        let app = axum::Router::new().route(
+            "/.well-known/chan-gateway",
+            axum::routing::get(move || {
+                let o = o.clone();
+                let wireguard = wireguard.clone();
+                async move {
+                    let mut doc = serde_json::json!({
+                        "kind": "chan-gateway",
+                        "api_version": 1,
+                        "identity_origin": o,
+                        "desktop_authorize_url": format!("{o}/desktop/authorize"),
+                        "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
+                        "devserver_proxy_origin": "https://proxy.chan.app",
+                        "devserver_proxy_host_depth": 2,
+                    });
+                    if let Some(entry) = wireguard {
+                        doc["wireguard"] = entry;
+                    }
+                    axum::Json(doc)
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (origin, server)
+    }
+
+    /// A config store under `home` as the desktop lays it out
+    /// (`desktop/config.json`) holding one gateway row `id` at `url`.
+    fn store_with_gateway(home: &Path, id: &str, url: &str) -> Arc<Mutex<ConfigStore>> {
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            home.join("desktop").join("config.json"),
+        )));
+        let mut guard = store.lock().unwrap();
+        let mut cfg = guard.get().unwrap();
+        cfg.gateways.push(Gateway {
+            id: id.to_string(),
+            url: url.to_string(),
+            label: String::new(),
+            enabled: true,
+            added_at: 0,
+            native_trust: Vec::new(),
+            wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
+        });
+        guard.save(&cfg).unwrap();
+        drop(guard);
+        store
+    }
+
+    fn stored_gateway(store: &Arc<Mutex<ConfigStore>>, id: &str) -> Gateway {
+        store
+            .lock()
+            .unwrap()
+            .get()
+            .unwrap()
+            .gateway(id)
+            .unwrap()
+            .clone()
+    }
+
+    /// The public key the private key in `path` derives, base64.
+    fn public_of_key_file(path: &Path) -> String {
+        use base64::Engine;
+        let text = fs::read_to_string(path).unwrap();
+        let bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(text.trim_end())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let secret = chan_wireguard::x25519::StaticSecret::from(bytes);
+        base64::engine::general_purpose::STANDARD
+            .encode(chan_wireguard::x25519::PublicKey::from(&secret).as_bytes())
+    }
+
+    fn wireguard_entry() -> serde_json::Value {
+        serde_json::json!({"endpoint": "wg.chan.app:51820", "public_key": WG_PEER_KEY})
+    }
+
+    #[tokio::test]
+    async fn generate_wireguard_key_writes_the_key_and_stores_its_public_half() {
+        let (origin, server) = discovery_stub(Some(wireguard_entry())).await;
+        let home = tempfile::tempdir().unwrap();
+        let id = "gw-1a2b3c4d";
+        let store = store_with_gateway(home.path(), id, &origin);
+        let manager = crate::gateway::GatewayManager::default();
+        let WireguardKeyOutcome::Generated(entry) =
+            generate_wireguard_key(&store, &manager, id).await.unwrap()
+        else {
+            panic!("a gateway that enrolls peers gets a key");
+        };
+        let dir = home.path().join("desktop").join("wireguard");
+        let key_file = crate::wireguard_keys::key_path(&dir, id);
+        let public = public_of_key_file(&key_file);
+        assert_eq!(entry.wireguard_public_key.as_deref(), Some(public.as_str()));
+        assert!(!entry.wireguard_enrolled);
+        assert_eq!(
+            stored_gateway(&store, id).wireguard_public_key.as_deref(),
+            Some(public.as_str())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&key_file), 0o600);
+        }
+        // The private key is in its file and nowhere in the config.
+        let private = fs::read_to_string(&key_file).unwrap();
+        let private = private.trim_end();
+        let config = fs::read_to_string(home.path().join("desktop").join("config.json")).unwrap();
+        assert!(config.contains(&public), "the control finds the public key");
+        assert!(!config.contains(private));
+
+        // Once enrolled, the key reads as enrolled; a new key replaces the
+        // file and the row and reads as not enrolled.
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways[0].wireguard_enrolled_key = Some(public.clone());
+            guard.save(&cfg).unwrap();
+        }
+        let gw = stored_gateway(&store, id);
+        assert!(entry_from_gateway(&gw, None, None).wireguard_enrolled);
+        let WireguardKeyOutcome::Generated(again) =
+            generate_wireguard_key(&store, &manager, id).await.unwrap()
+        else {
+            panic!("generating again answers the row");
+        };
+        let replaced = public_of_key_file(&key_file);
+        assert_ne!(replaced, public);
+        assert_eq!(
+            again.wireguard_public_key.as_deref(),
+            Some(replaced.as_str())
+        );
+        assert!(!again.wireguard_enrolled);
+        let gw = stored_gateway(&store, id);
+        assert_eq!(gw.wireguard_public_key.as_deref(), Some(replaced.as_str()));
+        assert_eq!(gw.wireguard_enrolled_key.as_deref(), Some(public.as_str()));
+
+        // Removing the row deletes its key and client file.
+        let conf = crate::wireguard_keys::conf_path(&dir, id);
+        fs::write(&conf, "client file").unwrap();
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        assert!(reg.remove(id).unwrap());
+        assert!(!key_file.exists());
+        assert!(!conf.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_wireguard_key_refuses_a_gateway_that_enrolls_no_peers() {
+        let (origin, server) = discovery_stub(None).await;
+        let home = tempfile::tempdir().unwrap();
+        let store = store_with_gateway(home.path(), "gw-1a2b3c4d", &origin);
+        let manager = crate::gateway::GatewayManager::default();
+        let outcome = generate_wireguard_key(&store, &manager, "gw-1a2b3c4d").await;
+        assert!(
+            matches!(outcome, Ok(WireguardKeyOutcome::NotOffered)),
+            "{outcome:?}"
+        );
+        assert!(!home.path().join("desktop").join("wireguard").exists());
+        assert_eq!(
+            stored_gateway(&store, "gw-1a2b3c4d").wireguard_public_key,
+            None
+        );
+        // An unknown id is not found, before any discovery.
+        let outcome = generate_wireguard_key(&store, &manager, "gw-ghost0000").await;
+        assert!(
+            matches!(outcome, Ok(WireguardKeyOutcome::NotFound)),
+            "{outcome:?}"
+        );
+        server.abort();
+
+        // A discovery that fails writes nothing either and says why.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server =
+            tokio::spawn(async move { axum::serve(listener, axum::Router::new()).await.unwrap() });
+        let home = tempfile::tempdir().unwrap();
+        let store = store_with_gateway(home.path(), "gw-1a2b3c4d", &origin);
+        let err = generate_wireguard_key(&store, &manager, "gw-1a2b3c4d")
+            .await
+            .expect_err("a failed discovery is an error");
+        assert!(err.starts_with("gateway discovery failed: "), "{err}");
+        assert!(err.contains("404"), "{err}");
+        assert!(!home.path().join("desktop").join("wireguard").exists());
+        server.abort();
+    }
+
+    #[test]
+    fn gateway_row_writes_its_enrollment_fields_only_when_set() {
+        // A row from before the fields reads with them empty.
+        let old: Gateway = serde_json::from_str(
+            r#"{"id":"gw-1a2b3c4d","url":"https://gw.chan.app","wireguard":"/w/a.conf"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.wireguard_public_key, None);
+        assert_eq!(old.wireguard_enrolled_key, None);
+        assert!(old.wireguard_hosts.is_empty());
+        // A row without a key writes none of them.
+        let json = serde_json::to_value(&old).unwrap();
+        for key in [
+            "wireguard_public_key",
+            "wireguard_enrolled_key",
+            "wireguard_hosts",
+        ] {
+            assert!(json.get(key).is_none(), "{key} in {json}");
+        }
+        // A row with them round-trips.
+        let mut row = old;
+        row.wireguard_public_key = Some(WG_PEER_KEY.to_string());
+        row.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
+        row.wireguard_hosts = vec![
+            WireguardHost {
+                name: "proxy.chan.app".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            },
+            WireguardHost {
+                name: "*.proxy.chan.app".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+            },
+        ];
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            json["wireguard_hosts"],
+            serde_json::json!([
+                {"name": "proxy.chan.app", "addresses": ["10.7.0.1"]},
+                {"name": "*.proxy.chan.app", "addresses": ["10.7.0.1", "fd00:7::1"]},
+            ])
+        );
+        let back: Gateway = serde_json::from_value(json).unwrap();
+        assert_eq!(back, row);
+    }
+
+    #[test]
+    fn gateway_entry_reads_enrolled_only_for_the_current_key() {
+        let mut gw: Gateway =
+            serde_json::from_str(r#"{"id":"gw-1a2b3c4d","url":"https://gw.chan.app"}"#).unwrap();
+        let entry = entry_from_gateway(&gw, None, None);
+        assert_eq!(entry.wireguard_public_key, None);
+        assert!(!entry.wireguard_enrolled);
+        gw.wireguard_public_key = Some(WG_PEER_KEY.to_string());
+        let entry = entry_from_gateway(&gw, None, None);
+        assert_eq!(entry.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
+        assert!(
+            !entry.wireguard_enrolled,
+            "a key never sent is not enrolled"
+        );
+        gw.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
+        assert!(entry_from_gateway(&gw, None, None).wireguard_enrolled);
+        gw.wireguard_enrolled_key = Some(WG_PRIVATE_KEY.to_string());
+        assert!(
+            !entry_from_gateway(&gw, None, None).wireguard_enrolled,
+            "another key enrolled is not this one"
+        );
+        // An enrolled key with no current key is not an enrollment.
+        gw.wireguard_public_key = None;
+        assert!(!entry_from_gateway(&gw, None, None).wireguard_enrolled);
+    }
+
+    #[test]
+    fn clearing_the_file_drops_the_host_map_and_the_enrolled_key() {
+        let home = tempfile::tempdir().unwrap();
+        let a = wg_file(home.path(), "a.conf", &wg_text());
+        let b = wg_file(home.path(), "b.conf", &wg_text());
+        let id = "gw-1a2b3c4d";
+        let store = store_with_gateway(home.path(), id, "https://gw.chan.app");
+        let enrolled = |file: &Path| {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            let gw = &mut cfg.gateways[0];
+            gw.wireguard = Some(file.to_path_buf());
+            gw.wireguard_public_key = Some(WG_PEER_KEY.to_string());
+            gw.wireguard_enrolled_key = Some(WG_PEER_KEY.to_string());
+            gw.wireguard_hosts = vec![WireguardHost {
+                name: "proxy.chan.app".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }];
+            guard.save(&cfg).unwrap();
+        };
+        let reg = GatewayConfigRegistry::new(
+            Arc::clone(&store),
+            Arc::new(OnceLock::new()),
+            Arc::new(crate::gateway::GatewayManager::default()),
+        );
+        // A save that keeps the file keeps the enrollment.
+        enrolled(&a);
+        let kept = reg
+            .update(id, wg_input("", Some(a.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert!(kept.wireguard_enrolled);
+        assert_eq!(stored_gateway(&store, id).wireguard_hosts.len(), 1);
+        // Another file drops the map and keeps the enrolled key.
+        let moved = reg
+            .update(id, wg_input("", Some(b.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert!(moved.wireguard_enrolled);
+        let gw = stored_gateway(&store, id);
+        assert!(gw.wireguard_hosts.is_empty());
+        assert_eq!(gw.wireguard_enrolled_key.as_deref(), Some(WG_PEER_KEY));
+        // Clearing the file drops both and keeps the key.
+        enrolled(&a);
+        let cleared = reg.update(id, wg_input("", None)).unwrap().unwrap();
+        assert!(!cleared.wireguard_enrolled);
+        assert_eq!(cleared.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
+        let gw = stored_gateway(&store, id);
+        assert_eq!(gw.wireguard, None);
+        assert!(gw.wireguard_hosts.is_empty());
+        assert_eq!(gw.wireguard_enrolled_key, None);
+        assert_eq!(gw.wireguard_public_key.as_deref(), Some(WG_PEER_KEY));
     }
 }

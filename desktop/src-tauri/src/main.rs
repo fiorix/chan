@@ -31,6 +31,7 @@ mod window_ops;
 mod window_watcher;
 mod window_watcher_wiring;
 mod wireguard;
+mod wireguard_keys;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -10141,6 +10142,9 @@ mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
         }
@@ -10236,6 +10240,9 @@ mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
         }
@@ -10381,6 +10388,9 @@ mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
         }

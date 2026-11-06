@@ -43,7 +43,9 @@ pub use config::{
 };
 pub use devserver_registry::{DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus};
 pub use error::Error;
-pub use gateway_registry::{GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus};
+pub use gateway_registry::{
+    GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, WIREGUARD_NOT_OFFERED,
+};
 pub use host::{
     DevserverFeedSource, HostedWorkspace, LauncherWorkspace, LocalColorStore, LocalThemeStore,
     WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus, WORKSPACE_STILL_RELEASING,

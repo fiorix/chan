@@ -80,6 +80,8 @@ describe("liveApi gateway routes (frozen wire)", () => {
       last_error: null,
       wireguard: null,
       wireguard_status: null,
+      wireguard_public_key: null,
+      wireguard_enrolled: false,
     } satisfies GatewayEntry;
     stubFetch(200, [wire]);
     const list = await liveApi.listGateways();
@@ -87,6 +89,29 @@ describe("liveApi gateway routes (frozen wire)", () => {
     expect(entry).toEqual(wire);
     expect(entry.wireguard).toBeNull();
     expect(entry.wireguard_status).toBeNull();
+    expect(entry.wireguard_public_key).toBeNull();
+    expect(entry.wireguard_enrolled).toBe(false);
+  });
+
+  it("parses a row's generated WireGuard key and its enrollment", async () => {
+    const row = {
+      id: "gw-1a2b3c4d",
+      url: "https://gw.chan.app",
+      label: "",
+      enabled: true,
+      status: "connected",
+      pending_signin: false,
+      devserver_count: 1,
+      last_error: null,
+      wireguard: "/home/u/.chan/desktop/wireguard/gw-1a2b3c4d.conf",
+      wireguard_status: "up",
+      wireguard_public_key: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
+      wireguard_enrolled: true,
+    } satisfies GatewayEntry;
+    stubFetch(200, [row]);
+    const [entry] = await liveApi.listGateways();
+    expect(entry.wireguard_public_key).toBe("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=");
+    expect(entry.wireguard_enrolled).toBe(true);
   });
 
   it("parses WireGuard gateway rows: the stored path, the live status, a refusal reason", async () => {
@@ -184,6 +209,15 @@ describe("mock gateway registry", () => {
     expect((await mockApi.listGateways()).find((g) => g.id === gw.id)!.wireguard).toBeNull();
   });
 
+  it("serves the WireGuard key fields on an added gateway", async () => {
+    const gw = await mockApi.addGateway({ url: "https://gw.example", wireguard: "/w/gw.conf" });
+    expect(gw.wireguard_public_key).toBeNull();
+    expect(gw.wireguard_enrolled).toBe(false);
+    const listed = (await mockApi.listGateways()).find((g) => g.id === gw.id)!;
+    expect(listed.wireguard_public_key).toBeNull();
+    expect(listed.wireguard_enrolled).toBe(false);
+  });
+
   it("refuses a relative WireGuard path with the registry's 400 sentence", () => {
     let caught: unknown = null;
     try {
@@ -220,5 +254,15 @@ describe("demo gateway registry", () => {
   it("the empty variant seeds none", async () => {
     const demo = createLauncherDemoApi({ variant: "empty" });
     expect(await demo.listGateways()).toEqual([]);
+  });
+
+  it("serves the WireGuard key fields on the sample and on an added gateway", async () => {
+    const demo = createLauncherDemoApi();
+    const [sample] = await demo.listGateways();
+    expect(sample.wireguard_public_key).toBeNull();
+    expect(sample.wireguard_enrolled).toBe(false);
+    const added = await demo.addGateway({ url: "https://gw.example" });
+    expect(added.wireguard_public_key).toBeNull();
+    expect(added.wireguard_enrolled).toBe(false);
   });
 });

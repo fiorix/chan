@@ -41,8 +41,8 @@ use crate::static_assets::{serve_launcher, LauncherSurface};
 use crate::{
     CreateWindow, DesktopWindowOp, DevserverEntry, DevserverInput, GatewayEntry, GatewayInput,
     LauncherWorkspace, SetWorkspaceOnOutcome, TmuxRequest, TmuxWindowMark, WindowKind,
-    WindowOrigin, WindowRecord, WindowSet, WorkspaceHost, WorkspaceLifecycleOutcome,
-    WorkspaceStatus,
+    WindowOrigin, WindowRecord, WindowSet, WireguardKeyOutcome, WorkspaceHost,
+    WorkspaceLifecycleOutcome, WorkspaceStatus,
 };
 
 /// State shared by the `/api/library/workspaces` handlers: a host handle plus
@@ -457,6 +457,12 @@ fn build_launcher_router(
         .route(
             "/api/library/gateways/{id}/disconnect",
             post(handle_disconnect_gateway),
+        )
+        // Key generation discovers the gateway and writes the desktop's key
+        // file, so it is a bridge op too.
+        .route(
+            "/api/library/gateways/{id}/wireguard-key",
+            post(handle_generate_gateway_wireguard_key),
         )
         // Native folder picker -- another desktop-bridge dispatch (the launcher's
         // New-Workspace "Browse…"), so it sits with the other bridge ops.
@@ -2743,6 +2749,33 @@ async fn handle_disconnect_gateway(Host(host): Host, AxumPath(id): AxumPath<Stri
         reply,
     })
     .await
+}
+
+/// `POST /api/library/gateways/{id}/wireguard-key`: generate a WireGuard key
+/// pair for a configured gateway through the desktop bridge, replacing any
+/// earlier key. 200 with the row, its public key now set; 400
+/// ([`WIREGUARD_NOT_OFFERED`](crate::WIREGUARD_NOT_OFFERED)) when the
+/// gateway's discovery offers no enrollment, with nothing written; 404 when
+/// no gateway has the id; 409 with the message on a failure or with no
+/// desktop attached (`NO_DESKTOP`).
+async fn handle_generate_gateway_wireguard_key(
+    Host(host): Host,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    match host
+        .desktop_bridge()
+        .dispatch(|reply| DesktopWindowOp::GenerateWireguardKey { id, reply })
+        .await
+    {
+        Ok(WireguardKeyOutcome::Generated(entry)) => Json(entry).into_response(),
+        Ok(WireguardKeyOutcome::NotFound) => {
+            crate::error::err(StatusCode::NOT_FOUND, "gateway not found".into())
+        }
+        Ok(WireguardKeyOutcome::NotOffered) => {
+            crate::error::err(StatusCode::BAD_REQUEST, crate::WIREGUARD_NOT_OFFERED.into())
+        }
+        Err(msg) => crate::error::err(StatusCode::CONFLICT, msg),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6071,6 +6104,8 @@ mod gateway_route_tests {
                     last_error: None,
                     wireguard: None,
                     wireguard_status: None,
+                    wireguard_public_key: None,
+                    wireguard_enrolled: false,
                 }]),
             }
         }
@@ -6095,6 +6130,8 @@ mod gateway_route_tests {
                 last_error: None,
                 wireguard: None,
                 wireguard_status: None,
+                wireguard_public_key: None,
+                wireguard_enrolled: false,
             };
             self.rows.lock().unwrap().push(entry.clone());
             Ok(entry)
@@ -6379,8 +6416,8 @@ mod window_op_route_tests {
     use crate::route_authority::test_support::Caller;
     use crate::{
         DesktopBridge, DesktopWindowOp, DevserverFeedSource, LauncherWorkspace,
-        SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WorkspaceHost,
-        WorkspaceStatus, NO_DESKTOP,
+        SetWorkspaceOnOutcome, WindowKind, WindowOrigin, WindowRecord, WireguardKeyOutcome,
+        WorkspaceHost, WorkspaceStatus, NO_DESKTOP,
     };
 
     struct RemoteWindowFeed(WindowRecord);
@@ -6636,6 +6673,78 @@ mod window_op_route_tests {
         let (status, body) = post(&router, "/api/library/fs/pick-folder").await;
         assert_eq!(status, StatusCode::OK, "pick-folder");
         assert_eq!(body, "\"/picked/dir\"", "pick-folder path json");
+    }
+
+    #[tokio::test]
+    async fn gateway_wireguard_key_answers_each_desktop_outcome() {
+        // A fake desktop answers the key op by id: a generated row, a gateway
+        // that enrolls no peers, an unknown id and a failure.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<DesktopWindowOp>(4);
+        let bridge = DesktopBridge {
+            window_ops: Some(tx),
+            window_titles: Default::default(),
+        };
+        let host = Arc::new(WorkspaceHost::with_desktop_bridge(
+            library(),
+            bridge,
+            crate::route_builder(),
+        ));
+        tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                if let DesktopWindowOp::GenerateWireguardKey { id, reply } = op {
+                    let outcome = match id.as_str() {
+                        "gw-1" => Ok(WireguardKeyOutcome::Generated(crate::GatewayEntry {
+                            id,
+                            url: "https://gw.chan.app".into(),
+                            label: String::new(),
+                            enabled: true,
+                            status: crate::GatewayStatus::Disconnected,
+                            pending_signin: false,
+                            devserver_count: 0,
+                            last_error: None,
+                            wireguard: None,
+                            wireguard_status: None,
+                            wireguard_public_key: Some(
+                                "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into(),
+                            ),
+                            wireguard_enrolled: false,
+                        })),
+                        "gw-plain" => Ok(WireguardKeyOutcome::NotOffered),
+                        "gw-ghost" => Ok(WireguardKeyOutcome::NotFound),
+                        _ => Err("gateway discovery failed: offline".to_string()),
+                    };
+                    let _ = reply.send(outcome);
+                }
+            }
+        });
+        let router = launcher_router(host, None, None);
+        let (status, body) = post(&router, "/api/library/gateways/gw-1/wireguard-key").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let entry: crate::GatewayEntry = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            entry.wireguard_public_key.as_deref(),
+            Some("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=")
+        );
+        assert!(!entry.wireguard_enrolled);
+        let (status, body) = post(&router, "/api/library/gateways/gw-plain/wireguard-key").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "this gateway does not enroll WireGuard peers"})
+                .to_string()
+        );
+        let (status, body) = post(&router, "/api/library/gateways/gw-ghost/wireguard-key").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "gateway not found"}).to_string()
+        );
+        let (status, body) = post(&router, "/api/library/gateways/gw-down/wireguard-key").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "gateway discovery failed: offline"}).to_string()
+        );
     }
 
     #[tokio::test]
@@ -7043,12 +7152,13 @@ mod window_op_route_tests {
                 "{uri}"
             );
         }
-        // Gateway connect/disconnect are inert without a desktop. The 409
-        // envelope's error sentence distinguishes it from the live_terminals
-        // discriminator in the typed 409.
+        // Gateway connect/disconnect and key generation are inert without a
+        // desktop. The 409 envelope's error sentence distinguishes it from the
+        // live_terminals discriminator in the typed 409.
         for uri in [
             "/api/library/gateways/gw-1/connect",
             "/api/library/gateways/gw-1/disconnect",
+            "/api/library/gateways/gw-1/wireguard-key",
         ] {
             let (status, body) = post(&router, uri).await;
             assert_eq!(status, StatusCode::CONFLICT, "{uri}");

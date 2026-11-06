@@ -344,6 +344,7 @@ pub(crate) static LAUNCHER: RouteTable = &[
     ),
     (Post, "/api/library/gateways/{id}/connect", NonOwner),
     (Post, "/api/library/gateways/{id}/disconnect", NonOwner),
+    (Post, "/api/library/gateways/{id}/wireguard-key", NonOwner),
     (Post, "/api/library/fs/pick-folder", NonOwner),
     // A gateway leg is admitted only for the owner's desktop session; a local
     // caller holding the launcher bearer is admitted too. This classifies the

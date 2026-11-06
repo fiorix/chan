@@ -2662,6 +2662,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust,
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
         std::mem::forget(dir);
@@ -4947,6 +4950,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
         (dir, Arc::new(AppState::with_store(store)))
@@ -4991,6 +4997,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: Some(file.to_path_buf()),
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         };
         // The start refused the first row's file and ran the second row's
         // tunnel from a file the row no longer names.
@@ -5434,6 +5443,9 @@ pub(crate) mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
         }
@@ -5511,6 +5523,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
         let state = Arc::new(crate::AppState::with_store(store));
@@ -5650,6 +5665,9 @@ pub(crate) mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
         }
