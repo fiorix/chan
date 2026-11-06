@@ -47,6 +47,12 @@
 #                  proxies), and identity's /admin/v1/tokens. One
 #                  distinct bearer per destination; never reused.
 #
+#   - wireguard-agent  proxy-host agent that keeps the host's kernel
+#                  WireGuard peers equal to the gateway's peer table,
+#                  read from identity's internal listener and applied
+#                  with `wg` from wireguard-tools. It adds and removes
+#                  only the peers it added itself.
+#
 #   - gateway-common  shared library: profile-service and
 #                  devserver-control HTTP clients, the Ed25519
 #                  devserver-gate entry credential, internal-transport
@@ -65,6 +71,7 @@ members = [
     "crates/gateway-common",
     "crates/identity",
     "crates/profile",
+    "crates/wireguard-agent",
 ]
 
 [workspace.package]

@@ -18,6 +18,8 @@ The account, sign-in and reverse-proxy surface of a self-hosted chan gateway, a 
 
 **devserver-control**: The singleton, database-free control plane. Owns the dynamic proxy directory, the aggregate tunnel view, fleet admission and command routing; serves `/admin/v1/*` to identity, profile and the admin CLI. Every proxy node holds one authenticated h2 control session to it. _Avoid_: controller-service, fleet-db
 
+**wireguard-agent**: The proxy-host agent that keeps one kernel WireGuard interface's peers equal to the gateway's peer table for that host. It reads the host's active peers from identity's internal listener, applies them with `wg`, and adds and removes only the peers in its managed set, the ones it added itself. _Avoid_: wg-sync, peer daemon
+
 **devserver token**: The owner PAT (`chan_pat_*`) that authorizes a devserver to register over the tunnel. One token identifies one devserver; the gateway derives the devserver id from the token's digest. The PAT stays opaque. _Avoid_: tunnel-name, api-key
 
 **admission lease**: The short-lived Ed25519 credential identity signs on a successful PAT validation, binding owner, devserver id, registration id, proxy id and the signed per-user limit. devserver-control verifies it before reserving capacity; the proxy forwards it and cannot mint one. _Avoid_: admission token
