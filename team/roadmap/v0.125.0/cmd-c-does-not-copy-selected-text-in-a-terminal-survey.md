@@ -1,6 +1,6 @@
 # Cmd+C does not copy selected text in a terminal survey
 
-Status: raised by the owner on 2026-11-06, with a request to investigate and file if confirmed; confirmed in the JavaScript event path against `720b543c0` and the v0.125.0 integration snapshot `daf8a60e6`; built for v0.125.0. Native macOS clipboard validation remains open.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the owner's native macOS clipboard reading is taken from the candidate.
 
 ## What is there now
 

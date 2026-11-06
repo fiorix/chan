@@ -1,6 +1,6 @@
 # A WireGuard file set after start waits for a restart
 
-Status: raised by the owner on 2026-11-05 while the enrollment item was being ordered ("is there anything we can do about enrolling the desktop without restarting?"); accepted for v0.125.0 the same day with the default that the proxy is bound always; not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the macOS reading of WKWebView's loopback routing is the owner's, from the candidate.
 
 ## What is there now
 

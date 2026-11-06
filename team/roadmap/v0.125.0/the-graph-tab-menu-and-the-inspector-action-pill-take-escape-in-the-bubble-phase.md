@@ -1,6 +1,6 @@
 # The graph tab menu and the inspector action pill take Escape in the bubble phase
 
-Status: raised at the v0.124.0 close from the Escape fix for the terminal's menu; not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the rendered inspector pill was compared with the removed inline pill and not inspected in a browser.
 
 ## What is there now
 

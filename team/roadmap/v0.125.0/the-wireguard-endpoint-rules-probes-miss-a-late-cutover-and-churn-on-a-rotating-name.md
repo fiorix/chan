@@ -1,6 +1,6 @@
 # The WireGuard endpoint rule's probes miss a late cutover and churn on a rotating name
 
-Status: raised at the v0.124.0 close. Parts 1 and 2 are the third review's findings on the endpoint resolution change (`f14bee3e7..957e5ba97`), which the owner shipped as they are in v0.124.0 and carried here; part 3 is the open question the crate's design records. Not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the kernel suite's `dns` and `dns-late` arms read green against the kernel peer, with a dark-forward control red.
 
 ## What is there now
 

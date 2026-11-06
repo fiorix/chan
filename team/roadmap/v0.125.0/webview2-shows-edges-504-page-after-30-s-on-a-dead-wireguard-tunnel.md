@@ -1,6 +1,6 @@
 # WebView2 shows Edge's 504 page after 30 s on a dead WireGuard tunnel
 
-Status: raised at the v0.124.0 close from the Windows desktop WireGuard run, by the owner's word that its three findings become v0.125.0 rows; not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the Linux `tunnel-page` arm and the Windows `page` and `wrong-key` arms read green in the release's guests; the mapped-name route is pinned by unit tests alone.
 
 ## What was seen
 
@@ -23,3 +23,5 @@ A decision for the owner, then the build:
 The existing bundled connecting page shows the gateway tunnel's reason on failed probes, including a mapped tenant host that the proxy routes without OS lookup. It keeps the last reason in the give-up message. A request's SYN starts the handshake immediately; when the tunnel has no session, the proxy waits up to three seconds for the connect to complete and answers 502 if the tunnel remains dark. A live session keeps the existing connect deadline.
 
 The Linux `tunnel-page` arm observes a tenant window through loss and recovery with a devserver forwarded through the peer. The Windows `page` arm reads the live connecting page and its tenant handoff, while `wrong-key` reads the direct 502 control and chan's reason page. The mapped-name reason is pinned by unit tests; these guest arms use an address route because production adoption supplies no host routes yet. Guest runs are the remaining proof.
+
+Commits `3f99f9248`, `6b42f32c0`, `e41efbda2`, `30ee30758`, `4a7bf3f90` and `e8019619d` on `feat/desktop-wireguard-tunnel-page`, merged as `58ac52075`, and the Windows wrong-key arm scoped to its observable paths, `e0020fc1a`, merged as `525cd5b74`. The guest runs since: the Linux `tunnel-page` arm green in the release's desktop guest, and the Windows `page` and `wrong-key` arms green against the integration tip's installer from a Desktop Package Dry Run, the 502 within 3 s with the no-handshake reason where the previous release's installer answered the 504.

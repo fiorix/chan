@@ -1,6 +1,6 @@
 # The Windows uninstaller leaves chan's shims, Path entry and state behind
 
-Status: raised at the v0.124.0 close from the round's clean Windows 11 guest; not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); read in a clean Windows 11 guest against the v0.124.0 installer.
 
 ## What was seen
 

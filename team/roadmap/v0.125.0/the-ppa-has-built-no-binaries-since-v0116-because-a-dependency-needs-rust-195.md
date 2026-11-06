@@ -1,6 +1,6 @@
 # The PPA has built no binaries since v0.116.0 because a dependency needs Rust 1.95
 
-Status: implemented; vendored archive-compiler builds and the next release's successful Launchpad builds remain to be recorded.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); this release's Launchpad builds are read with `lp-builds.sh` after the tag.
 
 ## What was found
 

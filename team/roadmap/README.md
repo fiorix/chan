@@ -23,25 +23,26 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.125.0
 
-Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one the owner asked for and one its read-back found. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]). The release's read-back found that the PPA has built no binaries since v0.116.0, which the owner accepted ([ppabuild]). During the first release candidate the owner found chan windows coming back see-through after a display sleep on macOS, the webview presenting no frame after the wake, and accepted it for the candidate cycle ([wakeblank]).
+Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one the owner asked for and one its read-back found. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]). The release's read-back found that the PPA has built no binaries since v0.116.0, which the owner accepted ([ppabuild]). The release's live enrollment proof found that the packaged database role policy denied the token mint its row locks, so a packaged gateway answered 500 to every desktop sign-in; the owner accepted the fix as a row ([gwlocks]). During the first release candidate the owner found chan windows coming back see-through after a display sleep on macOS, the webview presenting no frame after the wake, and accepted it for the candidate cycle ([wakeblank]).
 
 | Item | State | Next |
 | --- | --- | --- |
-| [WireGuard enrollment at gateway sign-in][wgenrol] | accepted | decision |
-| [a wrong peer key reads as a discovery error][wgwrongkey] | raised | build |
-| [a WireGuard expiry logs at ERROR][wgexpiry] | raised | build |
-| [WebView2 shows Edge's 504 on a dead tunnel][wv2504] | raised | decision |
-| [the endpoint rule's probes and rotating names][wgrule] | raised | decision |
-| [the Windows uninstaller leaves chan behind][winuninst] | raised | decision |
-| [two WireGuard e2e suites reach past isolation][wge2e] | raised | build |
-| [a strip right-click leaves focus on body][stripfocus] | raised | reading |
-| [two menus take Escape in the bubble phase][bubbleesc] | raised | build |
-| [Homebrew packages move to fiorix/tap][tapmove] | accepted | build |
-| [the PPA has built nothing since v0.116.0][ppabuild] | accepted | build |
-| [a WireGuard file set after start waits for a restart][wgfabric] | accepted | build |
-| [the sdme build drivers' rootfs checks race their listing][sdmegrep] | accepted | build |
-| [Cmd+C does not copy selected survey text][surveycopy] | raised | build |
-| [windows come back see-through after a display sleep][wakeblank] | accepted | reading |
+| [WireGuard enrollment at gateway sign-in][wgenrol] | built | candidate |
+| [a wrong peer key reads as a discovery error][wgwrongkey] | built | candidate |
+| [a WireGuard expiry logs at ERROR][wgexpiry] | built | candidate |
+| [WebView2 shows Edge's 504 on a dead tunnel][wv2504] | built | candidate |
+| [the endpoint rule's probes and rotating names][wgrule] | built | candidate |
+| [the Windows uninstaller leaves chan behind][winuninst] | built | candidate |
+| [two WireGuard e2e suites reach past isolation][wge2e] | built | candidate |
+| [a strip right-click leaves focus on body][stripfocus] | built | candidate |
+| [two menus take Escape in the bubble phase][bubbleesc] | built | candidate |
+| [Homebrew packages move to fiorix/tap][tapmove] | built | candidate |
+| [the PPA has built nothing since v0.116.0][ppabuild] | built | candidate |
+| [a WireGuard file set after start waits for a restart][wgfabric] | built | candidate |
+| [the sdme build drivers' rootfs checks race their listing][sdmegrep] | built | candidate |
+| [Cmd+C does not copy selected survey text][surveycopy] | built | candidate |
+| [windows come back see-through after a display sleep][wakeblank] | accepted | build |
+| [the identity role cannot take the PAT mint's row locks][gwlocks] | built | candidate |
 
 [wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
 [wgwrongkey]: v0.125.0/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md
@@ -58,6 +59,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one t
 [sdmegrep]: v0.125.0/the-sdme-build-drivers-rootfs-checks-race-their-own-listing-under-pipefail.md
 [surveycopy]: v0.125.0/cmd-c-does-not-copy-selected-text-in-a-terminal-survey.md
 [wakeblank]: v0.125.0/windows-come-back-see-through-after-a-display-sleep.md
+[gwlocks]: v0.125.0/the-gateway-identity-role-cannot-take-the-row-locks-pat-minting-holds.md
 
 ## Completed
 

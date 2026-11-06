@@ -1,6 +1,6 @@
 # chan's Homebrew packages move from fiorix/chan to fiorix/tap
 
-Status: accepted by the owner on 2026-11-05 at the v0.124.0 close, to be done after the v0.124.0 tag; not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the first push to `fiorix/homebrew-tap` and the owner's Mac install steps follow the release.
 
 ## What was asked
 

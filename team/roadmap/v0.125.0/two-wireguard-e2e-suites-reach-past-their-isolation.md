@@ -1,6 +1,6 @@
 # Two WireGuard e2e suites reach past their isolation
 
-Status: raised at the v0.124.0 close, part 1 from the Windows desktop suite's review and parts 2 and 3 from the third review of the endpoint resolution change; not started.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the Linux desktop and Windows kernel suites read green at the isolation tip in the release's guests.
 
 ## What is there now
 

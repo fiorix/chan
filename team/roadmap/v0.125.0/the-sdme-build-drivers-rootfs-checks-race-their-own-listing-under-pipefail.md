@@ -1,6 +1,6 @@
 # The sdme build drivers' rootfs checks race their own listing under pipefail
 
-Status: raised by the lead on 2026-11-06 from gate run 3 of the v0.125.0 integration branch, where `make pre-push` stopped at the sdme contract check on the base's unchanged desktop driver; accepted for v0.125.0 the same day; widened the same day to every sdme driver with the shape after the contract check red again in the e2e driver; built.
+Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the e2e runtime check's change has syntax and shellcheck coverage alone.
 
 ## What is there now
 
