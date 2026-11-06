@@ -52,7 +52,6 @@ function gw(over: Partial<GatewayEntry> = {}): GatewayEntry {
     devserver_count: 0,
     last_error: null,
     wireguard: null,
-    wireguard_restart_required: false,
     ...over,
   };
 }
@@ -645,21 +644,15 @@ describe("Gateways screen", () => {
     }
   });
 
-  it.each([false, true])("the restart notice shows exactly when wireguard_restart_required=%s", (required) => {
-    library.gateways = [
-      gw({ label: "prod", wireguard: "/home/u/wg/chan.conf", wireguard_restart_required: required }),
-    ];
+  it("a badge with a WireGuard file shows its live status and asks for nothing", () => {
+    library.gateways = [gw({ label: "prod", wireguard: "/home/u/wg/chan.conf", wireguard_status: "connecting" })];
     const el = render();
     const card = el.querySelector("section.gateway-card")!;
-    const notice = card.querySelector(".gateway-prompt.restart");
-    if (required) {
-      expect(notice, "a changed WireGuard set must announce the restart").not.toBeNull();
-      expect(notice!.textContent!.trim()).toBe("Restart chan-desktop to apply the WireGuard change.");
-      expect(notice!.getAttribute("role")).toBe("status");
-    } else {
-      expect(notice, "an applied setting must not nag").toBeNull();
-      expect(card.textContent).not.toContain("Restart chan-desktop");
-    }
+    expect(card.querySelector(".gw-wg-status")!.textContent).toBe("connecting");
+    // A saved file runs at once and asks for nothing more: the status line
+    // is the badge's only prompt.
+    const prompts = [...card.querySelectorAll(".gateway-prompt")].map((p) => p.textContent!.trim());
+    expect(prompts, "a running file owes no action").toEqual(["Not connected."]);
   });
 
   it("a WireGuard failure at start narrates once as the row's last_error", () => {
@@ -671,12 +664,14 @@ describe("Gateways screen", () => {
     expect(card.textContent!.split(reason).length - 1, "the status line alone carries the reason").toBe(1);
   });
 
-  it("a gateway added with a WireGuard file deals a badge with the file and the restart notice", async () => {
+  it("a gateway added with a WireGuard file deals a badge with the file and its live status", async () => {
     await addGateway({ url: "https://wg-gw.example", label: "wg", wireguard: "~/.config/chan/gateway.conf" });
     const el = render();
     const card = el.querySelector("section.gateway-card")!;
     expect(card.querySelector(".gw-wg-file")!.textContent).toBe("~/.config/chan/gateway.conf");
-    expect(card.querySelector(".gateway-prompt.restart")).not.toBeNull();
+    expect(card.querySelector(".gw-wg-status")!.textContent).toBe("connecting");
+    const prompts = [...card.querySelectorAll(".gateway-prompt")].map((p) => p.textContent!.trim());
+    expect(prompts).toEqual(["Not connected."]);
   });
 
   it("the plug drives the connect action and the badge flips live", async () => {

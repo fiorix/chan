@@ -612,9 +612,9 @@ export const mockApi: LibraryApi = {
       devserver_count: 0,
       last_error: null,
       wireguard,
-      // The desktop decides its WireGuard fabric once per process, so a file
-      // on a new row waits for a restart like a changed one does.
-      wireguard_restart_required: wireguard !== null,
+      // The desktop starts a file's tunnel as the row is saved, so a new row
+      // with a file reads as connecting at once.
+      wireguard_status: wireguard === null ? null : "connecting",
     };
     gateways.push(gw);
     notify();
@@ -628,7 +628,7 @@ export const mockApi: LibraryApi = {
     if (!gw) throw new Error(`unknown gateway ${id}`);
     const wireguard = mockWireguardFile(input.wireguard);
     gw.label = (input.label ?? "").trim();
-    if (wireguard !== gw.wireguard) gw.wireguard_restart_required = true;
+    if (wireguard !== gw.wireguard) gw.wireguard_status = wireguard === null ? null : "connecting";
     gw.wireguard = wireguard;
     notify();
     return tick({ ...gw });

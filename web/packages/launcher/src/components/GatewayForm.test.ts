@@ -30,7 +30,6 @@ function gw(over: Partial<GatewayEntry> = {}): GatewayEntry {
     devserver_count: 0,
     last_error: null,
     wireguard: null,
-    wireguard_restart_required: false,
     ...over,
   };
 }
@@ -189,6 +188,7 @@ describe("GatewayForm WireGuard file", () => {
     const text = hint!.textContent!.replace(/\s+/g, " ").trim();
     expect(text).toContain("wg-quick");
     expect(text).toContain("chmod 600");
-    expect(text).toContain("takes effect when chan-desktop restarts");
+    expect(text).toContain("takes effect as soon as it is saved");
+    expect(text).toContain("changing the path restarts that gateway's tunnel");
   });
 });
