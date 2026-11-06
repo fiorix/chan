@@ -55,7 +55,7 @@ require_fixed() {
     esac
 }
 
-services=(profile identity devserver-control devserver-proxy)
+services=(profile identity devserver-control devserver-proxy wireguard-agent)
 for service in "${services[@]}"; do
     user="chan-gateway-$service"
     packaging="$REPO/gateway/crates/$service/packaging"
@@ -132,6 +132,56 @@ assert_contains "$REPO/gateway/crates/admin/packaging/postinst" \
 refute_pattern "a gateway daemon still uses the shared chan-gateway identity" \
     '^(User|Group)=chan-gateway$' \
     "$REPO"/gateway/crates/*/packaging/*.service
+
+# The WireGuard agent is the one gateway unit with a capability: wg needs
+# CAP_NET_ADMIN, held ambient and bounded to that alone, plus the netlink
+# family wg speaks; it keeps its managed set in its own state directory.
+agent_packaging="$REPO/gateway/crates/wireguard-agent/packaging"
+agent_unit="$agent_packaging/chan-gateway-wireguard-agent.service"
+for line in \
+    "CapabilityBoundingSet=CAP_NET_ADMIN" \
+    "AmbientCapabilities=CAP_NET_ADMIN" \
+    "NoNewPrivileges=true" \
+    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK" \
+    "SystemCallFilter=@system-service" \
+    "StateDirectory=chan-gateway/wireguard-agent" \
+    "UMask=0077" \
+    "EnvironmentFile=/etc/chan-gateway/wireguard-agent.env" \
+    "ExecStart=/usr/bin/chan-gateway-wireguard-agent"; do
+    assert_contains "$agent_unit" "$line"
+done
+other_units=()
+for unit in "$REPO"/gateway/crates/*/packaging/*.service; do
+    [[ "$unit" == "$agent_unit" ]] || other_units+=("$unit")
+done
+[[ ${#other_units[@]} -gt 0 ]] || die "no gateway units besides the WireGuard agent's"
+refute_pattern "a gateway unit other than the WireGuard agent grants a capability" \
+    '^(CapabilityBoundingSet|AmbientCapabilities)=.+' \
+    "${other_units[@]}"
+require_fixed "the WireGuard agent's deb does not depend on wireguard-tools" \
+    'depends = "$auto, adduser, wireguard-tools"' \
+    "$REPO/gateway/crates/wireguard-agent/Cargo.toml"
+assert_contains "$agent_packaging/wireguard-agent.env" "IDENTITY_URL=http://127.0.0.1:7004"
+assert_contains "$agent_packaging/wireguard-agent.env" "WIREGUARD_AGENT_TOKEN="
+refute_pattern "the WireGuard agent's env carries another service's bearer" \
+    '^(IDENTITY_INTERNAL_TOKEN|IDENTITY_SESSION_INTERNAL_TOKEN|IDENTITY_ACCOUNT_ADMIN_TOKEN|IDENTITY_ADMIN_TOKEN|PROFILE_AUTH_TOKEN|PROFILE_ADMIN_TOKEN|DEVSERVER_[A-Z_]*TOKENS?)=' \
+    "$agent_packaging/wireguard-agent.env"
+assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
+    'generate_unique_bearer_token; WIREGUARD_AGENT_TOKEN=$UNIQUE_BEARER_TOKEN'
+# The one bearer reaches both ends: each env file configure.sh writes is a
+# heredoc of its own, so each is read on its own.
+configure_env_body() {
+    awk -v target="write_env $1 " '
+        { line = $0; sub(/^[ \t]+/, "", line) }
+        !inside && index(line, target) == 1 { inside = 1; next }
+        inside && $0 == "EOF" { exit }
+        inside { print }
+    ' "$REPO/packaging/gateway/scripts/configure.sh"
+}
+for env_file in /etc/chan-gateway/identity.env /etc/chan-gateway/wireguard-agent.env; do
+    configure_env_body "$env_file" | grep -Fqx 'WIREGUARD_AGENT_TOKEN=${WIREGUARD_AGENT_TOKEN}' \
+        || die "configure.sh does not write WIREGUARD_AGENT_TOKEN into $env_file"
+done
 
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
     "install -d -m 0751 -o root -g root /etc/chan-gateway"

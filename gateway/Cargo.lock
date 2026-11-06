@@ -3952,6 +3952,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "wireguard-agent"
+version = "0.124.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "devserver-control-proto",
+ "gateway-common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "wiremock"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

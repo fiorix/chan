@@ -1,0 +1,52 @@
+[Unit]
+Description=chan-gateway wireguard-agent (kernel WireGuard peers from the gateway's peer table)
+Documentation=https://github.com/fiorix/chan/tree/main/gateway/crates/wireguard-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chan-gateway-wireguard-agent
+Group=chan-gateway-wireguard-agent
+EnvironmentFile=/etc/chan-gateway/wireguard-agent.env
+ExecStart=/usr/bin/chan-gateway-wireguard-agent
+# A refused bearer exits 1; the slow restart keeps retrying without
+# reaching the start limit.
+Restart=on-failure
+RestartSec=10
+# peers.json, the peers this agent added: /var/lib/chan-gateway/wireguard-agent.
+StateDirectory=chan-gateway/wireguard-agent
+StateDirectoryMode=0700
+
+# wg reads and changes peers over generic netlink, which needs
+# CAP_NET_ADMIN: the one capability, held ambient so the wg the agent runs
+# inherits it. Linux scopes it to the network namespace, not to the
+# interface; the agent names only WIREGUARD_INTERFACE.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

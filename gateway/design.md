@@ -14,6 +14,7 @@ The gateway splits into an account and control plane and a proxy data plane:
 - **profile** is internal only and is the only crate that touches the sharing tables. It owns users, OAuth identities, devservers and grants, durable per-user and fleet policy, feature flags and the auth audit, all in Postgres.
 - **devserver-control** is a singleton, database-free control plane: the dynamic proxy directory, signed-lease admission, the aggregate tunnel and tenant-session inventory, and command routing. No tenant data crosses it.
 - **devserver-proxy** nodes are the data plane. Each node terminates outbound devserver tunnels on an h2c listener behind its TLS edge and serves gated tenant traffic on one public listener that dispatches the node apex and the tenant wildcard on the raw `Host` header. A proxy holds no database and no signing keys.
+- **wireguard-agent** runs on a proxy host that terminates kernel WireGuard in front of its devserver-proxy. It reads the host's active peers from identity's internal listener and applies them to one interface with `wg`, adding and removing only the peers it added itself. It holds no database, no listener and no signing keys.
 - **Postgres** backs identity and profile only.
 - **admin** is the operator CLI. It holds no state and calls the scoped admin trees of profile, identity and devserver-control.
 
@@ -38,6 +39,7 @@ flowchart TB
         EDGE2["node TLS edge:<br/>{proxy}.proxy.{domain} + *.{proxy}.proxy.{domain}"]
         P1["devserver-proxy p1"]
         PN["devserver-proxy pN"]
+        WGA["wireguard-agent<br/>kernel WireGuard peers"]
     end
 
     subgraph machines["Devserver machines"]
@@ -58,6 +60,7 @@ flowchart TB
     PN <-->|"h2c control session"| CTL
     EDGE2 --> P1
     EDGE2 --> PN
+    WGA -->|"host's peer list"| ID
     DSA ==>|"outbound tunnel (PAT)"| EDGE2
     DSB ==>|"outbound tunnel (PAT)"| EDGE2
     DSC ==>|"outbound tunnel (PAT)"| EDGE2
@@ -175,6 +178,8 @@ identity, profile and the admin CLI read the aggregate `/admin/v1/*` view from t
 - **PAT revocation** durably revokes the token in profile, then identity makes a best-effort cut of the owner's live tunnels and browser sessions through the controller. Identity cuts all of the owner's tunnels rather than only the revoked PAT's, because the revoke path does not map the token to its devserver id; other PATs simply redial. Profile's durable worker confirms the cut again after the entry-credential quiet window, so a credential minted just before the revoke cannot outlive it.
 - **Blocking a user** is one profile transaction (block marker, every PAT revoked, audit row, durable outbox job); a background worker retries the fleet cut to a deadline and settles before reporting completion. Unblocking restores none of it: tokens stay revoked.
 - **Operator session and tunnel commands** are acknowledged distributed operations: the controller answers only when every addressed proxy has confirmed the kill or the session drain, and reports a partial failure explicitly instead of pretending coherence.
+
+A WireGuard peer needs no revocation path of its own. The list wireguard-agent reads holds only the rows whose PAT is live and unexpired and whose user is not blocked, so every path above drops the peer from the list in the same transaction that denies the token, and the agent removes it from the interface at its next poll. While identity is unreachable the agent keeps the last list it read; it never reads an unknown list as an empty one.
 
 ## Isolation model
 
