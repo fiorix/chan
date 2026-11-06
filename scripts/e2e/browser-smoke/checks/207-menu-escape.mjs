@@ -22,7 +22,7 @@
 // suite's server are restored to what the check found, and the terminals it
 // opened there are closed.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchWindows, goto, killChild, poll, spawnDevserver } from "../lib/launcher-devserver.mjs";
@@ -33,6 +33,7 @@ import {
   writePaneStripPreference,
 } from "../lib/pane-strip.mjs";
 import { readTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
+import { recordedSince, startRecorder } from "../lib/pty-recorder.mjs";
 
 const RUN = Date.now().toString(36);
 const ESC = "1b";
@@ -50,14 +51,6 @@ function centreOf(page, selector) {
     const r = el.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   });
-}
-
-async function waitFile(label, path, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() > deadline) throw new Error(`${label}: ${path} did not appear within ${timeoutMs}ms`);
-    await sleep(100);
-  }
 }
 
 /// Where the keyboard is: the terminal, the editor, or another element.
@@ -81,30 +74,6 @@ const OPEN = {
     await page.mouse.click(x, y, { button: "right" });
   },
 };
-
-/// Turn the active terminal's shell into a recorder: in raw mode, dd writes
-/// every byte the PTY receives to `file`, one at a time, with no line editing
-/// that a stray byte could leave in a state of its own.
-async function startRecorder(page, file) {
-  const host = await centreOf(page, `${TERMINAL} .terminal-host`);
-  await page.mouse.click(host.x, host.y);
-  await page.keyboard.type(`stty raw -echo && exec dd bs=1 status=none of=${file}`);
-  await page.keyboard.press("Enter");
-  await waitFile(`the recorder ${file}`, file, 30_000);
-  await sleep(300);
-}
-
-/// The bytes the recorder holds past `offset`, once the `x` that ends an arm
-/// is among them.
-async function recordedSince(label, file, offset) {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    const bytes = [...readFileSync(file).subarray(offset)].map((b) => b.toString(16).padStart(2, "0"));
-    if (bytes.includes(TYPED)) return bytes;
-    if (Date.now() > deadline) throw new Error(`${label}: the x typed after Escape never reached the PTY; it read ${JSON.stringify(bytes)}`);
-    await sleep(100);
-  }
-}
 
 /// One arm over the recorder: open the menu (or none, for the control),
 /// press Escape, read the menu and the focus, type `x`, and return every byte
@@ -132,7 +101,7 @@ async function terminalArm(page, file, label, open) {
     await sleep(200);
   }
   await page.keyboard.type("x");
-  return { arm: label, engine, opened, closed, focus, pty: await recordedSince(label, file, offset) };
+  return { arm: label, engine, opened, closed, focus, pty: await recordedSince(label, file, offset, TYPED) };
 }
 
 /// How many terminals the window mounts, once a reload's restored terminals
