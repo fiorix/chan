@@ -111,6 +111,39 @@ async fn until(mut predicate: impl FnMut() -> bool) {
     .unwrap();
 }
 
+/// Cancel the client's sole TCP dial and drain its closing reset before
+/// advancing the protocol clock; neither may restart an expired core.
+async fn cancel_connect(tunnel: &Tunnel, pending: JoinHandle<io::Result<Stream>>) {
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    timeout(WAIT, async {
+        while tunnel
+            .inner
+            .shared
+            .stack
+            .lock()
+            .sockets
+            .iter()
+            .next()
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cancelled client's socket drains before the clock advances");
+}
+
+async fn until_expired(tunnel: &Tunnel, message: &str) {
+    timeout(WAIT, async {
+        while !tunnel.inner.wire.lock().tunn.is_expired() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(message);
+}
+
 async fn exchange(a: &mut Stream, b: &mut Stream) {
     timeout(WAIT, async {
         a.write_all(b"ping").await.unwrap();
@@ -903,10 +936,15 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
         1,
         "the retry went to the known endpoint before the answer"
     );
-    // Both addresses have been tried. Expiry resets the set before the
-    // same IPv4 address can be selected again.
+    // Cancel TCP demand so a retransmitted SYN cannot restart the core
+    // before expiry is observed. Expiry resets the tried addresses.
+    cancel_connect(&f.a, connecting).await;
     clock::advance(Duration::from_secs(91));
-    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    until_expired(
+        &f.a,
+        "the unanswered IPv6 handshake expires after 91 seconds",
+    )
+    .await;
     let retry = tokio::spawn({
         let client = f.a.clone();
         async move { client.connect(b_port(81)).await }
@@ -921,7 +959,6 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
         "the old family socket is retained"
     );
     retry.abort();
-    connecting.abort();
 }
 
 /// `Tunnel::start` holds no socket until its first answer binds one of
@@ -1379,16 +1416,20 @@ async fn session_notice_unanswered_handshakes_warn_once_and_recover() {
     until(|| relay.dark_initiations() > 0).await;
     clock::advance(Duration::from_secs(6));
     until(|| relay.dark_initiations() > 0).await;
+    // A retransmitted TCP SYN would restart the core after expiry,
+    // making its expired state transient between predicate polls.
+    cancel_connect(&f.a, first).await;
     clock::advance(Duration::from_secs(85));
-    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    until_expired(&f.a, "first unanswered handshake expires after 85 seconds").await;
     // The expired core reports ConnectionExpired on each tick too; those
     // ticks must not masquerade as another expiry.
     tokio::time::sleep(2 * TICK).await;
     let second = start_connect();
     until(|| !f.a.inner.wire.lock().tunn.is_expired()).await;
     until(|| relay.dark_initiations() > 0).await;
+    cancel_connect(&f.a, second).await;
     clock::advance(Duration::from_secs(91));
-    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    until_expired(&f.a, "second unanswered handshake expires after 91 seconds").await;
     relay.set(VIA_OLD);
     let third = start_connect();
     until(|| {
@@ -1424,8 +1465,6 @@ async fn session_notice_unanswered_handshakes_warn_once_and_recover() {
         assert_eq!(line.field("last_handshake"), "never");
     }
     events.assert_session_levels(2);
-    first.abort();
-    second.abort();
     third.abort();
     answers.abort();
 }
