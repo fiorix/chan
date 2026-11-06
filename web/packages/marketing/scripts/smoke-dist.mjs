@@ -59,6 +59,7 @@ const checks = [
   { path: "/install/", status: 200, includes: "curl -fsSL https://chan.app/install.sh | sh" },
   { path: "/install/", status: 200, includes: 'data-release-download="desktop-linux-appimage"' },
   { path: "/install/", status: 200, includes: 'data-release-download="gateway-profile-deb-amd64"' },
+  { path: "/install/", status: 200, includes: 'data-release-download="gateway-wireguard-agent-deb-amd64"' },
   { path: "/install/", status: 200, includes: "ppa:fiorix/chan" },
   { path: "/install/", status: 200, includes: "dnf copr enable fiorix/chan" },
   { path: "/install/", status: 200, includes: "paru -S chan-desktop-bin</b>" },
