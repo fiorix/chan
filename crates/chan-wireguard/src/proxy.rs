@@ -4,12 +4,15 @@
 //! Every outbound leg the desktop has already knows how to dial through
 //! an HTTP proxy, so one proxy on loopback puts them all inside the
 //! tunnels without a TUN device and without a change to any of them. The
-//! routing table is the tunnels' AllowedIPs: a destination inside one
-//! tunnel's prefixes is opened through that tunnel, and anything else is
-//! connected directly on the host. The pass-through is load-bearing, not
-//! a convenience: a webview told to use a proxy sends every origin
-//! through it, loopback included on Linux, so a proxy that refused the
-//! rest would take the local windows down with it.
+//! routing table is a live list of routes, each a tunnel under an id the
+//! caller chose, which the caller edits while the proxy serves: a host
+//! name a route maps is opened through its tunnel with no lookup on the
+//! host, a destination inside one route's AllowedIPs is opened through
+//! that route's tunnel, and anything else is connected directly on the
+//! host. The pass-through is load-bearing, not a convenience: a webview
+//! told to use a proxy sends every origin through it, loopback included
+//! on Linux, so a proxy that refused the rest would take the local windows
+//! down with it.
 //!
 //! Two request shapes are served. `CONNECT host:port` is what a browser
 //! sends for an `https://` or `wss://` origin: the connection to the
@@ -39,7 +42,7 @@ use hyper::server::conn::http1 as server;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
@@ -74,6 +77,88 @@ const MAX_CONNECTIONS: usize = 256;
 /// the loop does not spin on the same error.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
+/// One route of a [`ConnectProxy`]'s table.
+#[derive(Clone, Debug)]
+pub struct ProxyRoute {
+    /// The tunnel that carries the destinations inside its peer's
+    /// AllowedIPs. The route holds a handle of its own, so the tunnel runs
+    /// at least as long as the route is in the table.
+    pub tunnel: Tunnel,
+    /// Host names the tunnel carries by name: a request for one connects
+    /// through `tunnel` to its addresses with no lookup on the host. Empty
+    /// for a route that carries destinations by address only.
+    pub hosts: Vec<HostRoute>,
+}
+
+/// A host name a route carries without a lookup on the host, and the
+/// tunnel addresses it stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRoute {
+    /// A DNS name, or `*.` followed by one, which matches a name with one
+    /// or more labels in front of that suffix but never the suffix alone.
+    /// Matched without regard to ASCII case.
+    pub name: String,
+    /// The addresses a request for the name connects to, in order: the
+    /// first of a family the tunnel has an address of is used. Each lies
+    /// inside the route's tunnel's AllowedIPs.
+    pub addresses: Vec<IpAddr>,
+}
+
+impl HostRoute {
+    /// Whether the request authority `name`, already a well-formed DNS
+    /// name, is this entry's name or falls under its wildcard.
+    fn matches(&self, name: &str) -> bool {
+        match self.name.strip_prefix("*.") {
+            Some(suffix) => {
+                // The suffix and the dot in front of it, after at least one
+                // label; every name here is ASCII, so byte offsets are
+                // character offsets.
+                let Some(head) = name.len().checked_sub(suffix.len() + 1) else {
+                    return false;
+                };
+                head > 0
+                    && name.as_bytes()[head] == b'.'
+                    && name[head + 1..].eq_ignore_ascii_case(suffix)
+            }
+            None => name.eq_ignore_ascii_case(&self.name),
+        }
+    }
+}
+
+/// Refuse a route whose host map could send a mapped name anywhere but
+/// through its tunnel: a name no request authority can match, or an
+/// address outside the tunnel's AllowedIPs, which `Tunnel::connect` would
+/// refuse and nothing would carry.
+fn check_route(route: &ProxyRoute) -> io::Result<()> {
+    for host in &route.hosts {
+        let suffix = host.name.strip_prefix("*.").unwrap_or(&host.name);
+        if !is_dns_name(suffix) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the route's host {:?} is not a DNS name or *. and a DNS name",
+                    host.name
+                ),
+            ));
+        }
+        let allowed = route.tunnel.allowed_ips();
+        if let Some(outside) = host
+            .addresses
+            .iter()
+            .find(|ip| !allowed.iter().any(|cidr| cidr.contains(**ip)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the route maps {} to {outside}, which is outside its tunnel's AllowedIPs",
+                    host.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// An HTTP proxy on a loopback address that routes by destination.
 ///
 /// Serves from the bound address until dropped, and every connection open
@@ -81,35 +166,82 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// binds loopback only: any process on the host may open a connection
 /// through a tunnel, the same reach a kernel WireGuard interface on the
 /// host would give it, and nothing beyond the host can.
+///
+/// The routes are live: [`add_route`](Self::add_route),
+/// [`replace_route`](Self::replace_route) and
+/// [`remove_route`](Self::remove_route) change them while the proxy serves,
+/// and each request reads the table as it is when its destination is
+/// opened. A connection already open keeps the stream it opened, so
+/// replacing or removing its route does not end it; it ends when its
+/// tunnel does, which is when the last handle of that tunnel is dropped,
+/// the route's own included.
 pub struct ConnectProxy {
     local: SocketAddr,
-    tunnels: usize,
+    router: Arc<Router>,
     accept: JoinHandle<()>,
 }
 
 impl ConnectProxy {
-    /// Bind `bind`, which must be a loopback address (port 0 picks one),
-    /// and serve CONNECT and plain-HTTP forwarding for the destinations
-    /// of `tunnels`, in order: the first tunnel whose peer's AllowedIPs
-    /// contain a resolved destination carries it, and a destination
-    /// inside none is connected directly. Must be called within a tokio
-    /// runtime, which the accept task runs on.
+    /// Bind `bind` and serve over `tunnels`, as
+    /// [`bind_routed`](Self::bind_routed) does with one route per tunnel,
+    /// in order, under the ids `"0"`, `"1"` and so on, and no host names.
     pub async fn bind(tunnels: Vec<Tunnel>, bind: SocketAddr) -> io::Result<ConnectProxy> {
+        let routes = tunnels
+            .into_iter()
+            .enumerate()
+            .map(|(index, tunnel)| {
+                let route = ProxyRoute {
+                    tunnel,
+                    hosts: Vec::new(),
+                };
+                (index.to_string(), route)
+            })
+            .collect();
+        Self::bind_routed(routes, bind).await
+    }
+
+    /// Bind `bind`, which must be a loopback address (port 0 picks one),
+    /// and serve CONNECT and plain-HTTP forwarding with `routes` as the
+    /// starting table, each under its id. A host name the table maps is
+    /// matched first, in table order, and connected through its route's
+    /// tunnel with no lookup on the host; any other destination is
+    /// resolved, and the first route, in table order, whose tunnel's
+    /// AllowedIPs contain a resolved address carries it, while a
+    /// destination inside none is connected directly. An empty table
+    /// connects everything directly until a route is added. Two routes
+    /// under one id are refused with `AlreadyExists`, and a host map that
+    /// [`add_route`](Self::add_route) refuses is refused here the same way.
+    /// Must be called within a tokio runtime, which the accept task runs
+    /// on.
+    pub async fn bind_routed(
+        routes: Vec<(String, ProxyRoute)>,
+        bind: SocketAddr,
+    ) -> io::Result<ConnectProxy> {
         if !bind.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the proxy has no authentication and binds a loopback address only",
             ));
         }
+        let mut table: Vec<(String, ProxyRoute)> = Vec::with_capacity(routes.len());
+        for (id, route) in routes {
+            check_route(&route)?;
+            if table.iter().any(|(held, _)| *held == id) {
+                return Err(held_id(&id));
+            }
+            table.push((id, route));
+        }
         let listener = TcpListener::bind(bind).await?;
         let local = listener.local_addr()?;
-        let router = Arc::new(Router { tunnels });
-        let count = router.tunnels.len();
-        let accept = tokio::spawn(accept_loop(listener, router));
-        tracing::debug!(%local, tunnels = count, "proxy listening");
+        let count = table.len();
+        let router = Arc::new(Router {
+            routes: RwLock::new(table),
+        });
+        let accept = tokio::spawn(accept_loop(listener, router.clone()));
+        tracing::debug!(%local, routes = count, "proxy listening");
         Ok(ConnectProxy {
             local,
-            tunnels: count,
+            router,
             accept,
         })
     }
@@ -118,6 +250,90 @@ impl ConnectProxy {
     pub fn local_addr(&self) -> SocketAddr {
         self.local
     }
+
+    /// Append `route` under `id`; the next connection to one of its
+    /// destinations goes through it. An id already in the table is refused
+    /// with `AlreadyExists`, and with `InvalidInput` a host entry whose
+    /// name is not a DNS name or `*.` and one, or whose address lies
+    /// outside the tunnel's AllowedIPs, so a mapped name can never take the
+    /// direct path; a refusal leaves the table as it was.
+    pub fn add_route(&self, id: &str, route: ProxyRoute) -> io::Result<()> {
+        check_route(&route)?;
+        let mut routes = self.router.routes.write();
+        if routes.iter().any(|(held, _)| held == id) {
+            return Err(held_id(id));
+        }
+        routes.push((id.to_owned(), route));
+        tracing::debug!(id, routes = routes.len(), "proxy route added");
+        Ok(())
+    }
+
+    /// Put `route` under `id`: in the place of the route held there, so
+    /// its order among the routes stands, or at the end when the id is
+    /// new. The route it replaces is dropped once the new one is in the
+    /// table, so the next connection goes through the new tunnel while the
+    /// connections the old one carries end only when its last handle does.
+    /// A host map [`add_route`](Self::add_route) refuses is refused the
+    /// same way, and the table is left as it was.
+    pub fn replace_route(&self, id: &str, route: ProxyRoute) -> io::Result<()> {
+        check_route(&route)?;
+        let replaced = {
+            let mut routes = self.router.routes.write();
+            let replaced = match routes.iter_mut().find(|(held, _)| held == id) {
+                Some((_, held)) => Some(std::mem::replace(held, route)),
+                None => {
+                    routes.push((id.to_owned(), route));
+                    None
+                }
+            };
+            tracing::debug!(
+                id,
+                replaced = replaced.is_some(),
+                routes = routes.len(),
+                "proxy route set"
+            );
+            replaced
+        };
+        // A tunnel's last handle stops its driver; that work stays outside
+        // the table's lock.
+        drop(replaced);
+        Ok(())
+    }
+
+    /// Remove the route under `id`, so its destinations are connected
+    /// directly from the next connection on; `false` when no route has
+    /// that id. Connections open through it end with its tunnel.
+    pub fn remove_route(&self, id: &str) -> bool {
+        let removed = {
+            let mut routes = self.router.routes.write();
+            let removed = routes
+                .iter()
+                .position(|(held, _)| held == id)
+                .map(|index| routes.remove(index));
+            tracing::debug!(
+                id,
+                removed = removed.is_some(),
+                routes = routes.len(),
+                "proxy route removed"
+            );
+            removed
+        };
+        let found = removed.is_some();
+        drop(removed);
+        found
+    }
+
+    /// How many routes the table holds.
+    pub fn routes(&self) -> usize {
+        self.router.routes.read().len()
+    }
+}
+
+fn held_id(id: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("the proxy already has a route with the id {id:?}"),
+    )
 }
 
 impl Drop for ConnectProxy {
@@ -131,21 +347,43 @@ impl fmt::Debug for ConnectProxy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectProxy")
             .field("local", &self.local)
-            .field("tunnels", &self.tunnels)
+            .field("routes", &self.routes())
             .finish()
     }
 }
 
+/// The live table, shared by the proxy, its accept task and every
+/// connection. A reader holds the lock only to find a route and clone its
+/// tunnel handle out, never across an await, and a writer only for one
+/// edit of the list, so the lock is never contended for long.
 struct Router {
-    tunnels: Vec<Tunnel>,
+    routes: RwLock<Vec<(String, ProxyRoute)>>,
 }
 
 impl Router {
-    /// The first tunnel whose peer's AllowedIPs contain `ip`.
-    fn tunnel_for(&self, ip: IpAddr) -> Option<&Tunnel> {
-        self.tunnels
+    /// The tunnel and the addresses of the first host entry, in table
+    /// order, that names `name`. A name with an empty label matches none.
+    fn mapped(&self, name: &str) -> Option<(Tunnel, Vec<IpAddr>)> {
+        if !is_dns_name(name) {
+            return None;
+        }
+        self.routes.read().iter().find_map(|(_, route)| {
+            route
+                .hosts
+                .iter()
+                .find(|host| host.matches(name))
+                .map(|host| (route.tunnel.clone(), host.addresses.clone()))
+        })
+    }
+
+    /// The tunnel of the first route whose peer's AllowedIPs contain `ip`.
+    fn tunnel_for(&self, ip: IpAddr) -> Option<Tunnel> {
+        self.routes
+            .read()
             .iter()
+            .map(|(_, route)| &route.tunnel)
             .find(|tunnel| tunnel.allowed_ips().iter().any(|cidr| cidr.contains(ip)))
+            .cloned()
     }
 }
 
@@ -569,13 +807,26 @@ fn is_name(host: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
 }
 
-/// Resolve the authority on the host, every time, so a name that moves is
-/// followed, then open the connection: through the first tunnel whose
-/// AllowedIPs contain a resolved address, or directly when none does.
+/// A name [`is_name`] accepts whose labels are all non-empty: the form a
+/// host entry's name, or the suffix of its wildcard, must take.
+fn is_dns_name(host: &str) -> bool {
+    is_name(host) && host.split('.').all(|label| !label.is_empty())
+}
+
+/// Open the connection to the authority. A name a route maps goes through
+/// that route's tunnel with no lookup on the host. Anything else is
+/// resolved on the host, every time, so a name that moves is followed,
+/// and goes through the tunnel of the first route whose AllowedIPs
+/// contain a resolved address, or directly when none does.
 async fn connect(
     router: &Router,
     authority: &Authority,
 ) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
+    if let Host::Name(name) = &authority.host {
+        if let Some((tunnel, addresses)) = router.mapped(name) {
+            return connect_mapped(&tunnel, &addresses, authority.port).await;
+        }
+    }
     let addrs: Vec<SocketAddr> = match &authority.host {
         Host::Ip(ip) => vec![SocketAddr::new(*ip, authority.port)],
         Host::Name(name) => tokio::net::lookup_host((name.as_str(), authority.port))
@@ -600,6 +851,31 @@ async fn connect(
     }
     let peer = stream.peer_addr()?;
     Ok((Box::new(stream), peer, "direct"))
+}
+
+/// Connect a mapped name through its tunnel to the first of its addresses
+/// whose family the tunnel has an address of. `Tunnel::connect` refuses a
+/// family it lacks with `AddrNotAvailable` before it sends anything, so
+/// that refusal moves on to the next address; a map with none of the
+/// tunnel's families fails with it, and nothing is ever dialed directly.
+async fn connect_mapped(
+    tunnel: &Tunnel,
+    addresses: &[IpAddr],
+    port: u16,
+) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
+    let mut lacking = io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "the mapped name has no address",
+    );
+    for ip in addresses {
+        let addr = SocketAddr::new(*ip, port);
+        match tunnel.connect(addr).await {
+            Ok(stream) => return Ok((Box::new(stream), addr, "tunnel")),
+            Err(e) if e.kind() == io::ErrorKind::AddrNotAvailable => lacking = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(lacking)
 }
 
 #[cfg(test)]
@@ -1354,13 +1630,445 @@ mod tests {
         assert!(v6.local_addr().ip().is_loopback());
     }
 
+    fn route(tunnel: Tunnel) -> ProxyRoute {
+        ProxyRoute {
+            tunnel,
+            hosts: Vec::new(),
+        }
+    }
+
+    fn mapped(tunnel: Tunnel, hosts: Vec<HostRoute>) -> ProxyRoute {
+        ProxyRoute { tunnel, hosts }
+    }
+
+    fn host(name: &str, addresses: &[&str]) -> HostRoute {
+        HostRoute {
+            name: name.to_owned(),
+            addresses: addresses.iter().map(|a| a.parse().unwrap()).collect(),
+        }
+    }
+
+    /// CONNECT `target` and expect the 200 first, then the tunnel's
+    /// listener to hold the connection, from A's tunnel address.
+    async fn through_tunnel(proxy: &ConnectProxy, target: &str, listener: &mut crate::Listener) {
+        let mut client = send_connect(proxy, target).await;
+        let head = timeout(WAIT, read_head(&mut client))
+            .await
+            .unwrap()
+            .expect("a response head");
+        assert_eq!(status_of(&head), 200, "CONNECT {target}");
+        let server = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+        assert_eq!(
+            server.peer_addr().ip(),
+            A_ADDR.parse::<IpAddr>().unwrap(),
+            "CONNECT {target}"
+        );
+        exchange(client, server).await;
+    }
+
+    // The mapped names below are under `.invalid`, which never resolves
+    // (RFC 2606): a request for one that reaches the peer was not looked
+    // up, and one that takes the resolver's path is refused with 502.
+
     #[tokio::test]
-    async fn debug_names_the_address_and_the_tunnel_count() {
+    async fn a_mapped_name_goes_through_its_tunnel_without_a_lookup() {
         let Pair { a, b, .. } = pair().await;
-        let proxy = ConnectProxy::bind(vec![a, b], loopback()).await.unwrap();
+        let mut listener = b.listen(0).unwrap();
+        let port = listener.port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("gateway.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        for name in ["gateway.chan.invalid", "Gateway.CHAN.Invalid"] {
+            through_tunnel(&proxy, &format!("{name}:{port}"), &mut listener).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_entry_matches_every_label_depth_below_it() {
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        let port = listener.port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("*.proxy.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        for name in [
+            "alice--x1.proxy.chan.invalid",
+            "a.b.c.proxy.chan.invalid",
+            "Alice.PROXY.chan.invalid",
+        ] {
+            through_tunnel(&proxy, &format!("{name}:{port}"), &mut listener).await;
+        }
+        // The bare suffix, a name that only ends in the suffix's letters and
+        // names with an empty label are not under the wildcard: they take
+        // the resolver's path, which `.invalid` fails.
+        for name in [
+            "proxy.chan.invalid",
+            "xproxy.chan.invalid",
+            ".proxy.chan.invalid",
+            "a..proxy.chan.invalid",
+        ] {
+            expect_refusal(
+                &proxy,
+                &format!("CONNECT {name}:{port} HTTP/1.1\r\n\r\n"),
+                502,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unmapped_name_still_resolves_on_the_host() {
+        let Pair { a, .. } = pair().await;
+        let listener = TcpListener::bind(loopback()).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("gateway.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        // `localhost` is in no map: it is resolved on the host and, being
+        // outside every route's AllowedIPs, connected directly.
+        let mut client = send_connect(&proxy, &format!("localhost:{port}")).await;
+        let (head, server) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut client), listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let (server, from) = server.unwrap();
+        assert!(from.ip().is_loopback(), "{from}");
+        exchange(client, server).await;
+    }
+
+    #[tokio::test]
+    async fn bind_routed_refuses_an_address_outside_allowed_ips() {
+        let Pair { a, b, .. } = pair().await;
+        let outside = || {
+            mapped(
+                a.clone(),
+                vec![host("gateway.chan.invalid", &[B_ADDR, "10.9.9.9"])],
+            )
+        };
+        let err = ConnectProxy::bind_routed(vec![("gw".into(), outside())], loopback())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains("10.9.9.9"), "{err}");
+
+        let proxy = ConnectProxy::bind_routed(vec![("gw".into(), route(a.clone()))], loopback())
+            .await
+            .unwrap();
+        let err = proxy.add_route("other", outside()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        let err = proxy.replace_route("gw", outside()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert_eq!(proxy.routes(), 1);
+        assert!(
+            !proxy.remove_route("other"),
+            "a refused add leaves no route"
+        );
+
+        // A malformed name is refused the same way, so no entry can stand
+        // that no request could match.
+        for name in [
+            "",
+            "*",
+            "*.",
+            "*chan.invalid",
+            "*.*.chan.invalid",
+            "gateway.*.invalid",
+            "gateway..chan.invalid",
+            ".chan.invalid",
+            "chan.invalid.",
+            "gate way.chan.invalid",
+            "gate/way.chan.invalid",
+        ] {
+            let err = proxy
+                .add_route("bad", mapped(a.clone(), vec![host(name, &[B_ADDR])]))
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name:?}: {err}");
+        }
+        assert_eq!(proxy.routes(), 1);
+
+        // The control: exact and wildcard entries inside AllowedIPs are
+        // taken.
+        proxy
+            .add_route(
+                "good",
+                mapped(
+                    b,
+                    vec![
+                        host("gateway.chan.invalid", &[A_ADDR]),
+                        host("*.proxy.chan.invalid", &[A_ADDR]),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(proxy.routes(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_mapped_name_takes_the_first_address_of_a_family_its_tunnel_has() {
+        // A side routes an IPv6 prefix too but holds only an IPv4 address,
+        // so a mapped IPv6 address is inside AllowedIPs and of a family A
+        // has no address of.
+        let a_key = StaticSecret::random_from_rng(OsRng);
+        let b_key = StaticSecret::random_from_rng(OsRng);
+        let a_pub = PublicKey::from(&a_key);
+        let b_pub = PublicKey::from(&b_key);
+        let a_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a_at = a_udp.local_addr().unwrap();
+        let b_at = b_udp.local_addr().unwrap();
+        let mut a_config = config(a_key, b_pub, A_ADDR, B_ADDR, b_at);
+        a_config.peer.allowed_ips.push(crate::config::Cidr {
+            addr: "fd00:7::2".parse().unwrap(),
+            prefix: 128,
+        });
+        let a = Tunnel::start_on(a_config, a_udp, b_at).unwrap();
+        let b = Tunnel::start_on(config(b_key, a_pub, B_ADDR, A_ADDR, a_at), b_udp, a_at).unwrap();
+        let mut listener = b.listen(0).unwrap();
+        let port = listener.port();
+        let host_listener = TcpListener::bind(loopback()).await.unwrap();
+        let host_port = host_listener.local_addr().unwrap().port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(
+                    a,
+                    vec![
+                        host("both.chan.invalid", &["fd00:7::2", B_ADDR]),
+                        host("localhost", &["fd00:7::2"]),
+                    ],
+                ),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+
+        // The IPv6 address is passed over for the IPv4 one after it.
+        through_tunnel(&proxy, &format!("both.chan.invalid:{port}"), &mut listener).await;
+
+        // With no address of a family the tunnel has, a mapped name is
+        // refused. `localhost` would resolve on the host and reach the
+        // listener there, so the 502 also shows it was never looked up.
+        expect_refusal(
+            &proxy,
+            &format!("CONNECT localhost:{host_port} HTTP/1.1\r\n\r\n"),
+            502,
+        )
+        .await;
+        assert!(
+            timeout(2 * TICK, host_listener.accept()).await.is_err(),
+            "the mapped name never reached the host's own listener"
+        );
+    }
+
+    /// A port on the host's loopback that nothing listens on, so a
+    /// connection there taking the direct path is refused at once.
+    async fn released_port() -> u16 {
+        let listener = TcpListener::bind(loopback()).await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// A CONNECT to `127.0.0.1:port`, as a request a refusal is read from.
+    fn connect_request(port: u16) -> String {
+        format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+    }
+
+    // The peer's tunnel address in the live-table tests is 127.0.0.1, so a
+    // destination the table does not route takes the direct path to the
+    // host's own loopback, where nothing listens on the port: the refusal
+    // is immediate and the same on every host, where a private address
+    // with no route could hang until the connect deadline.
+
+    #[tokio::test]
+    async fn a_route_added_after_bind_carries_the_next_connect() {
+        let Pair { a, b, .. } = pair_at(A_ADDR, "127.0.0.1").await;
+        let port = released_port().await;
+        let mut listener = b.listen(port).unwrap();
+        let proxy = ConnectProxy::bind_routed(Vec::new(), loopback())
+            .await
+            .unwrap();
+        assert_eq!(proxy.routes(), 0);
+        // With no route the destination is connected directly, and the
+        // host refuses it.
+        expect_refusal(&proxy, &connect_request(port), 502).await;
+
+        proxy.add_route("gw", route(a.clone())).unwrap();
+        assert_eq!(proxy.routes(), 1);
+        let mut client = send_connect(&proxy, &format!("127.0.0.1:{port}")).await;
+        let (head, server) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut client), listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let server = server.unwrap();
+        assert_eq!(server.peer_addr().ip(), A_ADDR.parse::<IpAddr>().unwrap());
+        exchange(client, server).await;
+
+        // A held id is refused and the table stands.
+        let err = proxy.add_route("gw", route(a.clone())).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(proxy.routes(), 1);
+        let err = ConnectProxy::bind_routed(
+            vec![("gw".into(), route(a.clone())), ("gw".into(), route(a))],
+            loopback(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_route_carries_new_connects_and_old_splices_end_with_their_tunnel() {
+        // Two peers at the same tunnel address, told apart by the address
+        // each client side connects from.
+        let first = pair_at("10.7.0.1", B_ADDR).await;
+        let second = pair_at("10.7.0.3", B_ADDR).await;
+        let mut first_listener = first.b.listen(0).unwrap();
+        let mut second_listener = second.b.listen(0).unwrap();
+        let proxy =
+            ConnectProxy::bind_routed(vec![("gw".into(), route(first.a.clone()))], loopback())
+                .await
+                .unwrap();
+
+        let target = format!("{B_ADDR}:{}", first_listener.port());
+        let mut old = send_connect(&proxy, &target).await;
+        let (head, server) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut old), first_listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let mut old_server = server.unwrap();
+        assert_eq!(
+            old_server.peer_addr().ip(),
+            "10.7.0.1".parse::<IpAddr>().unwrap()
+        );
+
+        proxy.replace_route("gw", route(second.a.clone())).unwrap();
+        assert_eq!(proxy.routes(), 1);
+        let target = format!("{B_ADDR}:{}", second_listener.port());
+        let mut new = send_connect(&proxy, &target).await;
+        let (head, server) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut new), second_listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let server = server.unwrap();
+        assert_eq!(
+            server.peer_addr().ip(),
+            "10.7.0.3".parse::<IpAddr>().unwrap()
+        );
+        exchange(new, server).await;
+
+        // The old splice still moves bytes both ways: the test holds a
+        // handle of the first tunnel, so it still runs.
+        let mut buf = [0u8; 4];
+        old.write_all(b"ping").await.unwrap();
+        timeout(WAIT, old_server.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"ping");
+        old_server.write_all(b"pong").await.unwrap();
+        timeout(WAIT, old.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"pong");
+
+        // Its last handle gone, the first tunnel closes its stack, the
+        // splice's tunnel side fails and the proxy closes the client. The
+        // far end inside the tunnel is told nothing: a closed tunnel sends
+        // no reset.
+        drop(first.a);
+        let mut rest = [0u8; 8];
+        assert_eq!(
+            timeout(WAIT, old.read(&mut rest)).await.unwrap().unwrap(),
+            0,
+            "the client sees the splice end with its tunnel"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_removed_route_falls_back_to_the_direct_path() {
+        // A tunnel whose endpoint is a probe socket, so every datagram it
+        // sends is seen, routing 127.0.0.1.
+        let key = StaticSecret::random_from_rng(OsRng);
+        let peer = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let probe_at = probe.local_addr().unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let tunnel = Tunnel::start_on(
+            config(key, peer, A_ADDR, "127.0.0.1", probe_at),
+            udp,
+            probe_at,
+        )
+        .unwrap();
+        let port = released_port().await;
+        let proxy =
+            ConnectProxy::bind_routed(vec![("gw".into(), route(tunnel.clone()))], loopback())
+                .await
+                .unwrap();
+
+        assert!(proxy.remove_route("gw"));
+        assert!(!proxy.remove_route("gw"), "the id is gone");
+        assert_eq!(proxy.routes(), 0);
+        expect_refusal(&proxy, &connect_request(port), 502).await;
+        tokio::time::sleep(2 * TICK).await;
+        let mut buf = [0u8; 256];
+        assert!(
+            probe.try_recv_from(&mut buf).is_err(),
+            "a removed route sends nothing to its peer"
+        );
+
+        // The control: routed, the same destination reaches the endpoint,
+        // as the handshake initiation that precedes its SYN.
+        proxy.add_route("gw", route(tunnel)).unwrap();
+        let _pending = send_connect(&proxy, &format!("127.0.0.1:{port}")).await;
+        let (len, _) = timeout(WAIT, probe.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 148, "a handshake initiation");
+        assert_eq!(&buf[..4], &[1, 0, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn debug_names_the_live_route_count() {
+        let Pair { a, b, .. } = pair().await;
+        let proxy = ConnectProxy::bind(vec![a, b.clone()], loopback())
+            .await
+            .unwrap();
         let text = format!("{proxy:?}");
         assert!(text.contains(&proxy.local_addr().to_string()), "{text}");
-        assert!(text.contains("tunnels: 2"), "{text}");
+        assert!(text.contains("routes: 2"), "{text}");
+        // `bind` names its routes by their index.
+        assert!(proxy.remove_route("1"));
+        assert!(format!("{proxy:?}").contains("routes: 1"), "{proxy:?}");
+        proxy.add_route("b", route(b)).unwrap();
+        assert!(format!("{proxy:?}").contains("routes: 2"), "{proxy:?}");
     }
 
     #[tokio::test]

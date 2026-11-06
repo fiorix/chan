@@ -440,17 +440,12 @@ export interface GatewayEntry {
   /** How many roster devservers this gateway currently synthesizes. */
   devserver_count: number;
   /** The last connection/roster error, or null. A `WireGuard: ...` reason
-   * means the file failed at the desktop's start and the row refuses to
-   * connect until the file is fixed and the desktop restarts. */
+   * means the desktop refused the row's file and the row refuses to connect
+   * until the file reads again, at the next save of the path or connect. */
   last_error: string | null;
   /** The wg-quick file this gateway is reached through, as stored; null when
    * the gateway is reached directly. */
   wireguard: string | null;
-  /** The row's WireGuard setting differs from the one the running desktop
-   * started with (a file added, removed, changed or refused since), so it
-   * takes effect at the next start; the desktop refuses to connect the row
-   * until then. Always false on a headless surface. */
-  wireguard_restart_required: boolean;
   /** Live tunnel state; absent on an older desktop, null without a tunnel. */
   wireguard_status?: string | null;
 }

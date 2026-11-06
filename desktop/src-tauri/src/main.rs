@@ -282,10 +282,10 @@ pub struct AppState {
     /// the command that wrote it) sends nothing again. `None` until the first
     /// announcement; a window reads its first value through the command.
     pub terminal_background_opacity: Mutex<Option<u32>>,
-    /// The WireGuard tunnels and the proxy over them, when an enabled
-    /// gateway carried a wg-quick file at start. Held here for the process:
-    /// dropping it ends the proxy and every connection through it.
-    pub wireguard: Option<wireguard::WireguardFabric>,
+    /// The WireGuard proxy and the tunnels behind it. Held here for the
+    /// process: dropping it ends the proxy and every connection through it.
+    /// `None` only in tests that build no fabric.
+    pub wireguard: Option<Arc<wireguard::WireguardFabric>>,
 }
 
 impl AppState {
@@ -338,17 +338,17 @@ impl AppState {
         }
     }
 
-    /// Hand the state the WireGuard fabric the start decided and what it
-    /// decided per gateway, which the Gateways projection and connect read.
-    pub(crate) fn with_wireguard(
-        mut self,
-        fabric: Option<wireguard::WireguardFabric>,
-        startup: wireguard::WireguardStartup,
-    ) -> Self {
-        self.wireguard = fabric;
-        if self.gateway_manager.set_wireguard_startup(startup).is_err() {
-            tracing::warn!("the WireGuard start outcome was recorded twice");
+    /// Hand the state the WireGuard fabric, which the Gateways projection,
+    /// the registry's writes and connect reach through the gateway manager.
+    pub(crate) fn with_wireguard(mut self, fabric: Arc<wireguard::WireguardFabric>) -> Self {
+        if self
+            .gateway_manager
+            .set_wireguard(Arc::clone(&fabric))
+            .is_err()
+        {
+            tracing::warn!("the WireGuard fabric was recorded twice");
         }
+        self.wireguard = Some(fabric);
         self
     }
 
@@ -5470,12 +5470,12 @@ fn main() {
             None
         }
     };
-    // The WireGuard fabric: a tunnel per enabled gateway with a wg-quick
-    // file and one loopback proxy over them, decided here, before any
-    // webview or HTTP client exists. The webview proxy is process-wide on
-    // Windows and the HTTP clients pin the proxy at their first build, so
-    // the decision cannot move later; nothing starts when no gateway
-    // carries a file.
+    // The WireGuard fabric: the loopback proxy, bound here before any
+    // webview or HTTP client exists and whatever the gateways say, and a
+    // tunnel per enabled gateway with a wg-quick file. The webview proxy is
+    // process-wide on Windows and the HTTP clients pin the proxy at their
+    // first build, so the address cannot move later; the tunnels behind it
+    // can, and later files join the running proxy.
     let gateways = match store.lock().unwrap().get() {
         Ok(cfg) => cfg.gateways,
         Err(e) => {
@@ -5483,10 +5483,10 @@ fn main() {
             Vec::new()
         }
     };
-    let (fabric, wireguard_startup) = tauri::async_runtime::block_on(wireguard::start(&gateways));
-    wireguard::install_proxy(fabric.as_ref().map(|f| f.proxy_url().clone()))
+    let fabric = Arc::new(tauri::async_runtime::block_on(wireguard::start(&gateways)));
+    wireguard::install_proxy(fabric.proxy_url().cloned())
         .expect("the WireGuard proxy is decided before any HTTP client is built");
-    let state = Arc::new(AppState::with_store(store).with_wireguard(fabric, wireguard_startup));
+    let state = Arc::new(AppState::with_store(store).with_wireguard(fabric));
     *state.gateway_migration.lock().unwrap() = migration_outcome;
     let state_for_exit = Arc::clone(&state);
     let state_for_setup = Arc::clone(&state);
