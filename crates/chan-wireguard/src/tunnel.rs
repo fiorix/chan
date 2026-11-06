@@ -621,6 +621,10 @@ impl Driver {
     }
 
     async fn handle_datagram(&mut self, datagram: &[u8], from: SocketAddr, work: &mut [u8]) {
+        if datagram.is_empty() {
+            tracing::trace!(%from, "dropping an empty network datagram");
+            return;
+        }
         let mut to_network: Vec<Vec<u8>> = Vec::new();
         let mut to_stack: Vec<Vec<u8>> = Vec::new();
         {

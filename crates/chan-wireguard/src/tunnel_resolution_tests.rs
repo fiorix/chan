@@ -1961,3 +1961,60 @@ async fn endpoint_stale_retry_moves_only_once_even_when_its_lookup_finishes() {
     assert_eq!(f.a.status().endpoint, Some(addresses[2]));
     connecting.abort();
 }
+
+#[tokio::test]
+async fn endpoint_empty_datagram_does_not_roam_or_replace_the_session() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // See lookup_failures_warn_when_they_start_or_change.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let (mut a, mut b) = f.establish().await;
+    exchange(&mut a, &mut b).await;
+    tokio::time::sleep(4 * TICK).await;
+    clock::advance(Duration::from_secs(1));
+    let HandshakeState::Live(before) = f.a.status().handshake else {
+        panic!("the control establishes a session");
+    };
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let other_at = other.local_addr().unwrap();
+    other.send_to(&[], f.a_at).await.unwrap();
+    // A malformed marker from the same socket is read after the empty
+    // payload, giving the receive loop a positive progress control.
+    other.send_to(&[0], f.a_at).await.unwrap();
+    until(|| {
+        events.0.lock().iter().any(|event| {
+            event.target == "chan_wireguard::tunnel"
+                && event.message == "dropping a datagram"
+                && event.field("from") == other_at.to_string()
+        })
+    })
+    .await;
+    let after = f.a.status();
+    assert_eq!(
+        after.endpoint,
+        Some(f.b_at),
+        "an empty network datagram authenticates no sender"
+    );
+    assert!(
+        matches!(after.handshake, HandshakeState::Live(age) if age >= before),
+        "the same session remains usable: {after:?}"
+    );
+    exchange(&mut a, &mut b).await;
+
+    // The same source can move the endpoint when it carries a genuinely
+    // authenticated packet from the peer's current session.
+    let mut work = [0; 256];
+    let sealed = {
+        let mut wire = f.b.inner.wire.lock();
+        let TunnResult::WriteToNetwork(packet) = wire.tunn.encapsulate(&[], &mut work) else {
+            panic!("the peer retains the established session");
+        };
+        packet.to_vec()
+    };
+    other.send_to(&sealed, f.a_at).await.unwrap();
+    until(|| f.a.status().endpoint == Some(other_at)).await;
+    assert!(matches!(f.a.status().handshake, HandshakeState::Live(age) if age >= before));
+}
