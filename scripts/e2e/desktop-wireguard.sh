@@ -55,12 +55,38 @@
 #   --no-wireguard  no gateway row at all: proxy-first, then the window,
 #                   launcher and refusals arms, which prove the always-bound
 #                   proxy is the local windows' path on Linux.
+#   --enroll        a gateway that enrolls WireGuard keys: the row starts
+#                   with no key and no file, its gateway is the stand-in
+#                   identity `stub-identity.mjs`, and the desktop's browser
+#                   is a stand-in `xdg-open` that records the URL it is given
+#                   and walks the redirect with curl. The peer starts once
+#                   the desktop has minted the key it admits.
+#     proxy-first, launcher-bearer  as for --live-adopt.
+#     key           the library's key route answers the row with a public
+#                   key, not enrolled, and the key file is owner-only in an
+#                   owner-only directory.
+#     authorize     Connect answers 204 and the desktop opens one authorize
+#                   URL carrying that key, which the identity records; the
+#                   walk is redirected to the desktop's callback, which
+#                   answers 303.
+#     adopt         the redeem's parameters become the row's client file, the
+#                   running fabric starts its tunnel and the peer handshakes,
+#                   the row reads enrolled and connected, in the same desktop
+#                   process with the same proxy address; the private key is
+#                   in the client file and in no other file of the run.
+#     tenant        a second, disabled row whose gateway is at the name the
+#                   enrollment maps, which resolves nowhere: its connect's
+#                   discovery GET and a launcher fetch to a name under the
+#                   mapped wildcard reach the peer from the desktop's tunnel
+#                   address, and the same two, sent before the sign-in, did
+#                   not.
 #
 # What it cannot prove: a real gateway's TLS and identity behind the proxy
-# (the peer answers 404 to everything), the macOS and Windows webviews, and
-# a peer behind NAT or at a changing address.
+# (the peer answers 404 to everything, and --enroll's identity has no OAuth
+# or consent page), the macOS and Windows webviews, and a peer behind NAT or
+# at a changing address.
 #
-# Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key | --live-adopt | --no-wireguard]
+# Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key | --live-adopt | --no-wireguard | --enroll]
 #   --unresolved-endpoint proves startup and the proxy with a missing name;
 #                         it runs instead of the connected-peer arms.
 #   --wrong-key           proves expiry with a wrong peer public key instead
@@ -68,6 +94,8 @@
 #   --live-adopt          proves the live fabric (above); needs node 22 or
 #                         later for the inspector reads.
 #   --no-wireguard        proves the always-bound proxy with no gateway row.
+#   --enroll              proves enrollment at sign-in (above); needs node 22
+#                         or later for the identity and the inspector reads.
 #   The modes are exclusive: one is taken, and anything after it is refused.
 #   CHAN_DESKTOP_BIN  a built debug chan-desktop (default
 #                     target/debug/chan-desktop). It is not built here: it
@@ -86,7 +114,9 @@
 # private key that is worthless once the peer process is gone, but treat
 # it as a credential until deleted. A kept --live-adopt work dir also
 # holds the launcher bearer of a desktop that is gone, in bearer.header,
-# read by curl so it is on no command line.
+# read by curl so it is on no command line. A kept --enroll work dir holds
+# the desktop's key file and client file under chan-home, worthless once
+# the peer is gone.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -97,11 +127,13 @@ UNRESOLVED=0
 WRONG_KEY=0
 LIVE_ADOPT=0
 NO_WIREGUARD=0
+ENROLL=0
 case "${1:-}" in
     --unresolved-endpoint) UNRESOLVED=1; shift ;;
     --wrong-key) WRONG_KEY=1; shift ;;
     --live-adopt) LIVE_ADOPT=1; shift ;;
     --no-wireguard) NO_WIREGUARD=1; shift ;;
+    --enroll) ENROLL=1; shift ;;
 esac
 [ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
 
@@ -150,6 +182,12 @@ if [ -z "${WG_PEER_BIN:-}" ]; then
     WG_PEER_BIN="$REPO/target/debug/examples/wg-peer"
 fi
 [ -x "$WG_PEER_BIN" ] || refuse "no wg-peer binary at $WG_PEER_BIN"
+IDENTITY="$REPO/scripts/e2e/stub-identity.mjs"
+if [ "$ENROLL" = 1 ]; then
+    command -v node >/dev/null 2>&1 || refuse "node is not installed (--enroll runs stub-identity.mjs and reads the launcher through inspect.mjs)"
+    [ -f "$INSPECT" ] || refuse "no inspector helper at $INSPECT"
+    [ -f "$IDENTITY" ] || refuse "no stand-in identity at $IDENTITY"
+fi
 
 PIDS=()
 descendants() {
@@ -269,6 +307,46 @@ desktop_log() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/desktop.log" > "$CLEAN"; }
 logged() { desktop_log; grep -qE -- "$1" "$CLEAN"; }
 count() { desktop_log; grep -cE -- "$1" "$CLEAN" || true; }
 peer_logged() { grep -qE -- "$1" "$WORK/peer.log"; }
+identity_logged() { grep -qE -- "$1" "$WORK/identity.log"; }
+
+# --enroll's second row: a gateway at the name the enrollment maps, which
+# resolves nowhere, and a name under the mapped wildcard for the launcher's
+# fetch. The peer listens on its default port 8080.
+TENANT_ID="gw-e2e00002"
+TENANT_NAME="tenant.chan-e2e.invalid"
+TENANT_URL="http://$TENANT_NAME:8080"
+PROBE_URL="http://probe.$TENANT_NAME:8080"
+
+# identity_peer <server public key> <endpoint>: the WireGuard parameters the
+# stand-in identity offers and answers a redeem with, replaced whole: the
+# wg-peer example's tunnel addresses, its keepalive, and the second row's
+# name and wildcard mapped to the peer.
+identity_peer() {
+    printf '{"server_public_key":"%s","endpoint":"%s","addresses":["10.7.0.1/32"],"allowed_ips":["10.7.0.2/32"],"persistent_keepalive":5,"hosts":[{"name":"%s","addresses":["10.7.0.2"]},{"name":"*.%s","addresses":["10.7.0.2"]}]}\n' \
+        "$1" "$2" "$TENANT_NAME" "$TENANT_NAME" > "$WORK/identity-peer.json.new"
+    mv -f "$WORK/identity-peer.json.new" "$WORK/identity-peer.json"
+}
+
+# The desktop's browser for --enroll, an `xdg-open` first on its PATH, in
+# the work dir's bin: it records the URL it is given and walks the answer's
+# redirect to the desktop's callback with curl, recording both statuses.
+# The callback URL carries the one-time code, so it is not recorded, and
+# curl reads it from a config line on stdin rather than its command line.
+stand_in_browser() {
+    cat <<'SH'
+#!/usr/bin/env bash
+work="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$1" >> "$work/browser.urls"
+answer="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' "$1" 2>>"$work/browser.err" || echo curl-failed)"
+status="${answer%% *}" callback="${answer#* }" landing=none
+if [ "$status" = 302 ] && [ -n "$callback" ]; then
+    quoted="${callback//\\/\\\\}"
+    quoted="${quoted//\"/\\\"}"
+    landing="$(printf 'url = "%s"\n' "$quoted" | curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -K - 2>>"$work/browser.err" || echo curl-failed)"
+fi
+printf 'browser: authorize=%s callback=%s\n' "$status" "$landing" >> "$work/browser.log"
+SH
+}
 session_warnings() {
     awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
 }
@@ -279,6 +357,9 @@ session_expiry_logged() {
 
 log "work dir $WORK, chan $SHA"
 
+# --enroll starts its peer in the arm, once the desktop has minted the key
+# the peer must admit.
+if [ "$ENROLL" = 0 ]; then
 # 1. The far side: the peer, which writes the client's file.
 "$WG_PEER_BIN" "$WORK/client.conf" > "$WORK/peer.log" 2>&1 &
 PIDS+=("$!")
@@ -293,23 +374,42 @@ elif [ "$WRONG_KEY" = 1 ]; then
     sed -i "s|^PublicKey = .*|PublicKey = $wrong_pub|" "$WORK/client.conf"
     unset wrong_pub
 fi
+fi
 
-# 2. The desktop's config: one enabled gateway behind the file.
-cat > "$CHAN_HOME/desktop/config.json" <<JSON
-{"gateways":[{"id":"$GATEWAY_ID","url":"$PEER_URL","label":"wg","enabled":true,"added_at":0,"native_trust":[],"wireguard":"$WORK/client.conf"}]}
-JSON
-# --live-adopt starts the row without its file; --no-wireguard has no row.
+# 2. The desktop's config, one branch per mode: one enabled gateway behind
+# the file, except that --live-adopt starts the row without its file,
+# --no-wireguard has no row and --enroll has no peer yet.
 if [ "$LIVE_ADOPT" = 1 ]; then
     cat > "$CHAN_HOME/desktop/config.json" <<JSON
 {"gateways":[{"id":"$GATEWAY_ID","url":"$PEER_URL","label":"wg","enabled":true,"added_at":0,"native_trust":[]}]}
 JSON
 elif [ "$NO_WIREGUARD" = 1 ]; then
     printf '{"gateways":[]}\n' > "$CHAN_HOME/desktop/config.json"
+elif [ "$ENROLL" = 1 ]; then
+    # The identity offers enrollment from the start; until the arm starts
+    # the peer, the parameters name a placeholder one.
+    identity_peer "$(head -c 32 /dev/urandom | base64)" 127.0.0.1:9
+    node "$IDENTITY" "$WORK/identity-peer.json" > "$WORK/identity.log" 2>&1 &
+    PIDS+=("$!")
+    wait_for 20 "the identity" identity_logged '^identity: ready' || fail "the identity did not start: $(cat "$WORK/identity.log")"
+    IDENTITY_ORIGIN="$(sed -n 's/^identity: ready origin=\(http:[^ ]*\)$/\1/p' "$WORK/identity.log" | head -1)"
+    [ -n "$IDENTITY_ORIGIN" ] || fail "the identity printed no origin: $(cat "$WORK/identity.log")"
+    cat > "$CHAN_HOME/desktop/config.json" <<JSON
+{"gateways":[{"id":"$GATEWAY_ID","url":"$IDENTITY_ORIGIN","label":"wg","enabled":true,"added_at":0,"native_trust":[]},{"id":"$TENANT_ID","url":"$TENANT_URL","label":"tenant","enabled":false,"added_at":0,"native_trust":[]}]}
+JSON
+    mkdir -p "$WORK/bin"
+    stand_in_browser > "$WORK/bin/xdg-open"
+    chmod 700 "$WORK/bin/xdg-open"
+    export PATH="$WORK/bin:$PATH"
+else
+    cat > "$CHAN_HOME/desktop/config.json" <<JSON
+{"gateways":[{"id":"$GATEWAY_ID","url":"$PEER_URL","label":"wg","enabled":true,"added_at":0,"native_trust":[],"wireguard":"$WORK/client.conf"}]}
+JSON
 fi
 # The launcher's page is read through WebKitGTK's remote inspector, which
 # the desktop's webviews serve only when this is set before they start.
 INSPECTOR=""
-if [ "$LIVE_ADOPT" = 1 ]; then
+if [ "$LIVE_ADOPT" = 1 ] || [ "$ENROLL" = 1 ]; then
     INSPECTOR="127.0.0.1:$((20000 + RANDOM % 20000))"
     export WEBKIT_INSPECTOR_HTTP_SERVER="$INSPECTOR"
 fi
@@ -448,28 +548,31 @@ library_call() {
 STARTED_BEFORE=0
 started_grew() { [ "$(count 'gateway WireGuard tunnel started')" -gt "$STARTED_BEFORE" ]; }
 
-live_adopt_arms() {
-    local arm_rc control pid_before pid_after adopt_status adopt_body
-    local listening addresses peer_requests probe retire_status retire_body
-    local toggled=no control_sent=no
-    proxy_first_arm
-
-    # The bearer of the library's routes, from the launcher page, which the
-    # toggle chord opens when the start showed none.
-    arm_rc=0
+# launcher-bearer: the bearer of the library's routes, from the launcher
+# page, which the toggle chord opens when the start showed none.
+launcher_bearer_arm() {
+    local arm_rc=0 control toggled=no token
     if ! page_listed 'Chan Launcher'; then
         wait_for 60 "the terminal window's page in the inspector" terminal_listed || arm_rc=1
         if toggle_launcher; then toggled=yes; else arm_rc=1; fi
     fi
     wait_for 60 "the launcher page in the inspector" launcher_href || arm_rc=1
     ORIGIN="${LAUNCHER_HREF%%/\?t=*}"
-    local token="${LAUNCHER_HREF##*\?t=}"
+    token="${LAUNCHER_HREF##*\?t=}"
     token="${token%%&*}"
     ( umask 077; printf 'Authorization: Bearer %s\n' "$token" > "$WORK/bearer.header" )
     control="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$ORIGIN/api/library/gateways" 2>>"$WORK/curl.err" || echo curl-failed)"
     [ "$control" = 401 ] || arm_rc=1
     verdict launcher-bearer "$arm_rc" "launcher page at ${ORIGIN:-none} (opened by the toggle chord: $toggled), an unauthenticated list answered $control (want 401)"
-    [ "$arm_rc" = 0 ] || fail "no launcher bearer: the adopt arm needs it"
+    [ "$arm_rc" = 0 ] || fail "no launcher bearer: the arms after it need it"
+}
+
+live_adopt_arms() {
+    local arm_rc pid_before pid_after adopt_status adopt_body
+    local listening addresses peer_requests probe retire_status retire_body
+    local control_sent=no
+    proxy_first_arm
+    launcher_bearer_arm
 
     # The control for the tenant arm: before the file, the webview's fetch
     # to the peer has no route to it. Whether it was sent is the tenant
@@ -536,8 +639,162 @@ live_adopt_arms() {
     verdict retire "$arm_rc" "PUT answered $retire_status, retire lines $(count 'gateway WireGuard tunnel retired'), CONNECT to the peer answered ${probe:-nothing} (want 502 or 504), peer requests $peer_requests -> $(grep -c '^request: ' "$WORK/peer.log" || true), file in config $(grep -c "$WORK/client.conf" "$CHAN_HOME/desktop/config.json" || true) (want 0)"
 }
 
+# The named field of a library entry as text: the entry the file holds or,
+# given an id, the row with that id in the list it holds; "absent" when
+# there is no such field and "unread" when the file is not JSON.
+entry_field() {
+    node -e '
+        const [file, field, id] = process.argv.slice(1);
+        let entry = JSON.parse(require("fs").readFileSync(file, "utf8"));
+        if (id) entry = entry.find((row) => row.id === id) ?? {};
+        process.stdout.write(field in entry ? String(entry[field]) : "absent");
+    ' "$@" 2>/dev/null || echo unread
+}
+
+# The origin and path of a URL the desktop opened, and its
+# wireguard_public_key decoded.
+authorize_read() {
+    node -e '
+        const url = new URL(process.argv[1]);
+        process.stdout.write(`${url.origin}${url.pathname} ${url.searchParams.get("wireguard_public_key") ?? "absent"}`);
+    ' "$1" 2>/dev/null || echo "unread unread"
+}
+
+peer_discoveries() { grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' "$WORK/peer.log" || true; }
+row_connected() {
+    [ "$(library_call GET /api/library/gateways '' "$WORK/rows.json")" = 200 ] &&
+        [ "$(entry_field "$WORK/rows.json" status "$GATEWAY_ID")" = connected ]
+}
+
+enroll_arms() {
+    local arm_rc keys key_file conf key_status client_key enrolled key_mode dir_mode
+    local control_connect control_404=no control_discoveries control_sent=no
+    local peer_key peer_udp connect_status opened read_back sent_url sent_key recorded walk
+    local pid_before pid_after listening addresses row_file row_enrolled row_wg row_status row_error
+    local conf_mode redeemed rostered private_key holder in_key=no in_conf=no leaked=""
+    local key_sent=no key_recorded=no tenant_status tenant_404=no
+    keys="$CHAN_HOME/desktop/wireguard"
+    key_file="$keys/$GATEWAY_ID.key"
+    conf="$keys/$GATEWAY_ID.conf"
+    proxy_first_arm
+    launcher_bearer_arm
+
+    # key: the gateway form's Generate WireGuard key, through the library.
+    arm_rc=0
+    key_status="$(library_call POST "/api/library/gateways/$GATEWAY_ID/wireguard-key" '' "$WORK/key.json")"
+    [ "$key_status" = 200 ] || arm_rc=1
+    client_key="$(entry_field "$WORK/key.json" wireguard_public_key)"
+    [[ "$client_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || arm_rc=1
+    enrolled="$(entry_field "$WORK/key.json" wireguard_enrolled)"
+    [ "$enrolled" = false ] || arm_rc=1
+    key_mode="$(stat -c %a "$key_file" 2>/dev/null || echo none)"
+    dir_mode="$(stat -c %a "$keys" 2>/dev/null || echo none)"
+    [ "$key_mode" = 600 ] && [ "$dir_mode" = 700 ] || arm_rc=1
+    verdict key "$arm_rc" "POST answered $key_status, a public key of ${#client_key} characters, enrolled $enrolled (want false), key file mode $key_mode in a $dir_mode directory (want 600 in 700)"
+    [ "$arm_rc" = 0 ] || fail "no WireGuard key: the sign-in needs it"
+
+    # The peer, admitting that key, and the identity naming it, so the
+    # sign-in's discovery and redeem carry its key and endpoint.
+    "$WG_PEER_BIN" --client-key "$client_key" > "$WORK/peer.log" 2>&1 &
+    PIDS+=("$!")
+    wait_for 20 "the peer" peer_logged '^peer: ready' || fail "the peer did not start: $(cat "$WORK/peer.log")"
+    peer_key="$(sed -n 's/^peer: ready .* public_key=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
+    peer_udp="$(sed -n 's/^peer: ready .* udp=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
+    [ -n "$peer_key" ] && [ -n "$peer_udp" ] || fail "the peer printed no key or UDP address: $(head -1 "$WORK/peer.log")"
+    identity_peer "$peer_key" "$peer_udp"
+
+    # The controls for the tenant arm: before the sign-in, neither the
+    # second row's discovery nor a launcher fetch under the mapped names has
+    # a route to the peer. They are judged there.
+    control_connect="$(library_call POST "/api/library/gateways/$TENANT_ID/connect" '' "$WORK/control-connect.json")"
+    if grep -q 'HTTP 404' "$WORK/control-connect.json" 2>/dev/null; then control_404=yes; fi
+    control_discoveries="$(peer_discoveries)"
+    if launcher_fetch "$PROBE_URL/webview-probe-before"; then control_sent=yes; fi
+
+    # authorize: Connect signs in in the browser, since the key is not
+    # enrolled, and the stand-in browser walks it.
+    arm_rc=0
+    pid_before="$(desktop_pid || echo none)"
+    STARTED_BEFORE="$(count 'gateway WireGuard tunnel started')"
+    connect_status="$(library_call POST "/api/library/gateways/$GATEWAY_ID/connect" '' "$WORK/connect.json")"
+    [ "$connect_status" = 204 ] || arm_rc=1
+    wait_for 30 "the browser's walk" test -s "$WORK/browser.log" || arm_rc=1
+    opened="$(grep -c . "$WORK/browser.urls" 2>/dev/null || true)"
+    [ "$opened" = 1 ] || arm_rc=1
+    read_back="$(authorize_read "$(head -1 "$WORK/browser.urls" 2>/dev/null)")"
+    sent_url="${read_back%% *}"
+    sent_key="${read_back#* }"
+    [ "$sent_url" = "$IDENTITY_ORIGIN/desktop/authorize" ] || arm_rc=1
+    if [ "$sent_key" = "$client_key" ]; then key_sent=yes; else arm_rc=1; fi
+    recorded="$(sed -n 's/^identity: authorize wireguard_public_key=//p' "$WORK/identity.log" | tail -1)"
+    if [ "$recorded" = "$client_key" ]; then key_recorded=yes; else arm_rc=1; fi
+    walk="$(tail -1 "$WORK/browser.log" 2>/dev/null || true)"
+    [ "$walk" = 'browser: authorize=302 callback=303' ] || arm_rc=1
+    verdict authorize "$arm_rc" "connect answered $connect_status (want 204), URLs opened ${opened:-0} (want 1) at ${sent_url:-none}, its key is the row's: $key_sent, the identity recorded it: $key_recorded, ${walk:-no walk} (want 302 then 303)"
+
+    # adopt: the redeem writes the row's client file and the running fabric
+    # adopts it, with no restart.
+    arm_rc=0
+    wait_for 30 "the enrolled tunnel's start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID .*file=$conf " || arm_rc=1
+    wait_for 30 "the handshake at the peer" peer_logged '^status: handshake=[0-9]' || arm_rc=1
+    wait_for 30 "the row connected" row_connected || arm_rc=1
+    row_file="$(entry_field "$WORK/rows.json" wireguard "$GATEWAY_ID")"
+    row_enrolled="$(entry_field "$WORK/rows.json" wireguard_enrolled "$GATEWAY_ID")"
+    row_wg="$(entry_field "$WORK/rows.json" wireguard_status "$GATEWAY_ID")"
+    row_status="$(entry_field "$WORK/rows.json" status "$GATEWAY_ID")"
+    row_error="$(entry_field "$WORK/rows.json" last_error "$GATEWAY_ID")"
+    [ "$row_file" = "$conf" ] && [ "$row_enrolled" = true ] || arm_rc=1
+    case "$row_wg" in connecting|up) ;; *) arm_rc=1 ;; esac
+    conf_mode="$(stat -c %a "$conf" 2>/dev/null || echo none)"
+    [ "$conf_mode" = 600 ] || arm_rc=1
+    redeemed="$(grep -c '^identity: redeem pkce=ok wireguard=sent$' "$WORK/identity.log" || true)"
+    rostered="$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log" || true)"
+    [ "$redeemed" = 1 ] && [ "$rostered" -ge 1 ] || arm_rc=1
+    listening="$(count 'gateway WireGuard proxy listening')"
+    addresses="$(proxy_addresses | sort -u | tr '\n' ' ')"
+    [ "$listening" = 1 ] && [ "$addresses" = "$PROXY " ] || arm_rc=1
+    pid_after="$(desktop_pid || echo none)"
+    [ "$pid_before" != none ] && [ "$pid_after" = "$pid_before" ] || arm_rc=1
+    # Every file of the run that holds the private key, read from its file
+    # and handed to grep on a descriptor, never on a command line: the
+    # search must find the key file and the client file, and nothing else.
+    private_key="$(head -1 "$key_file" 2>/dev/null || true)"
+    if [ -n "$private_key" ]; then
+        while IFS= read -r holder; do
+            case "$holder" in
+                "$key_file") in_key=yes ;;
+                "$conf") in_conf=yes ;;
+                *) leaked+="${holder#"$WORK"/} " ;;
+            esac
+        done < <(grep -rlF -D skip -f <(printf '%s\n' "$private_key") "$WORK" 2>/dev/null || true)
+    fi
+    unset private_key
+    [ "$in_key" = yes ] && [ "$in_conf" = yes ] && [ -z "$leaked" ] || arm_rc=1
+    verdict adopt "$arm_rc" "tunnel start lines $STARTED_BEFORE -> $(count 'gateway WireGuard tunnel started'), the row's file $row_file (want $conf) mode $conf_mode, enrolled $row_enrolled, WireGuard $row_wg, status $row_status, last error $row_error; identity redeems $redeemed, roster reads $rostered; proxy lines $listening at ${addresses% }, desktop pid $pid_before -> $pid_after; peer $(grep -E '^status: ' "$WORK/peer.log" | tail -1 | cut -d' ' -f2-); the private key found in the key file: $in_key, the client file: $in_conf, any other file: ${leaked:-none}"
+
+    # tenant: the desktop's HTTP leg and the launcher's webview reach the
+    # peer by the enrolled names through the adopted tunnel.
+    arm_rc=0
+    tenant_status="$(library_call POST "/api/library/gateways/$TENANT_ID/connect" '' "$WORK/tenant.json")"
+    # The peer answers discovery 404, which the bridge answers 409 with the
+    # desktop's reason.
+    [ "$tenant_status" = 409 ] || arm_rc=1
+    if grep -q 'gateway discovery returned HTTP 404' "$WORK/tenant.json" 2>/dev/null; then tenant_404=yes; else arm_rc=1; fi
+    wait_for 30 "the second row's discovery at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' || arm_rc=1
+    launcher_fetch "$PROBE_URL/webview-probe" || arm_rc=1
+    wait_for 30 "the webview's fetch at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' || arm_rc=1
+    [ "$control_connect" = 409 ] && [ "$control_404" = no ] && [ "$control_discoveries" = 0 ] || arm_rc=1
+    [ "$control_sent" = yes ] || arm_rc=1
+    if peer_logged 'line=GET /webview-probe-before '; then arm_rc=1; fi
+    verdict tenant "$arm_rc" "connect answered $tenant_status naming the discovery 404: $tenant_404 (want 409, yes), discovery requests from the tunnel address $(peer_discoveries), webview probe $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' "$WORK/peer.log" || true); before the sign-in: connect answered $control_connect naming a 404: $control_404 with $control_discoveries discovery requests at the peer (want 409, no, 0), the probe sent $control_sent and reached the peer $(grep -c 'line=GET /webview-probe-before ' "$WORK/peer.log" || true) (want yes, 0)"
+}
+
 if [ "$LIVE_ADOPT" = 1 ]; then
     live_adopt_arms
+    finish_mode
+fi
+if [ "$ENROLL" = 1 ]; then
+    enroll_arms
     finish_mode
 fi
 if [ "$NO_WIREGUARD" = 1 ]; then
