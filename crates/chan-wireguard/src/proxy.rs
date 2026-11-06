@@ -5,13 +5,14 @@
 //! an HTTP proxy, so one proxy on loopback puts them all inside the
 //! tunnels without a TUN device and without a change to any of them. The
 //! routing table is a live list of routes, each a tunnel under an id the
-//! caller chose, which the caller edits while the proxy serves: a
-//! destination inside one route's AllowedIPs is opened through that
-//! route's tunnel, and anything else is connected directly on the host.
-//! The pass-through is load-bearing, not a convenience: a webview told to
-//! use a proxy sends every origin through it, loopback included on Linux,
-//! so a proxy that refused the rest would take the local windows down with
-//! it.
+//! caller chose, which the caller edits while the proxy serves: a host
+//! name a route maps is opened through its tunnel with no lookup on the
+//! host, a destination inside one route's AllowedIPs is opened through
+//! that route's tunnel, and anything else is connected directly on the
+//! host. The pass-through is load-bearing, not a convenience: a webview
+//! told to use a proxy sends every origin through it, loopback included
+//! on Linux, so a proxy that refused the rest would take the local windows
+//! down with it.
 //!
 //! Two request shapes are served. `CONNECT host:port` is what a browser
 //! sends for an `https://` or `wss://` origin: the connection to the
@@ -83,6 +84,79 @@ pub struct ProxyRoute {
     /// AllowedIPs. The route holds a handle of its own, so the tunnel runs
     /// at least as long as the route is in the table.
     pub tunnel: Tunnel,
+    /// Host names the tunnel carries by name: a request for one connects
+    /// through `tunnel` to its addresses with no lookup on the host. Empty
+    /// for a route that carries destinations by address only.
+    pub hosts: Vec<HostRoute>,
+}
+
+/// A host name a route carries without a lookup on the host, and the
+/// tunnel addresses it stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRoute {
+    /// A DNS name, or `*.` followed by one, which matches a name with one
+    /// or more labels in front of that suffix but never the suffix alone.
+    /// Matched without regard to ASCII case.
+    pub name: String,
+    /// The addresses a request for the name connects to, in order: the
+    /// first of a family the tunnel has an address of is used. Each lies
+    /// inside the route's tunnel's AllowedIPs.
+    pub addresses: Vec<IpAddr>,
+}
+
+impl HostRoute {
+    /// Whether the request authority `name`, already a well-formed DNS
+    /// name, is this entry's name or falls under its wildcard.
+    fn matches(&self, name: &str) -> bool {
+        match self.name.strip_prefix("*.") {
+            Some(suffix) => {
+                // The suffix and the dot in front of it, after at least one
+                // label; every name here is ASCII, so byte offsets are
+                // character offsets.
+                let Some(head) = name.len().checked_sub(suffix.len() + 1) else {
+                    return false;
+                };
+                head > 0
+                    && name.as_bytes()[head] == b'.'
+                    && name[head + 1..].eq_ignore_ascii_case(suffix)
+            }
+            None => name.eq_ignore_ascii_case(&self.name),
+        }
+    }
+}
+
+/// Refuse a route whose host map could send a mapped name anywhere but
+/// through its tunnel: a name no request authority can match, or an
+/// address outside the tunnel's AllowedIPs, which `Tunnel::connect` would
+/// refuse and nothing would carry.
+fn check_route(route: &ProxyRoute) -> io::Result<()> {
+    for host in &route.hosts {
+        let suffix = host.name.strip_prefix("*.").unwrap_or(&host.name);
+        if !is_dns_name(suffix) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the route's host {:?} is not a DNS name or *. and a DNS name",
+                    host.name
+                ),
+            ));
+        }
+        let allowed = route.tunnel.allowed_ips();
+        if let Some(outside) = host
+            .addresses
+            .iter()
+            .find(|ip| !allowed.iter().any(|cidr| cidr.contains(**ip)))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the route maps {} to {outside}, which is outside its tunnel's AllowedIPs",
+                    host.name
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// An HTTP proxy on a loopback address that routes by destination.
@@ -110,24 +184,35 @@ pub struct ConnectProxy {
 impl ConnectProxy {
     /// Bind `bind` and serve over `tunnels`, as
     /// [`bind_routed`](Self::bind_routed) does with one route per tunnel,
-    /// in order, under the ids `"0"`, `"1"` and so on.
+    /// in order, under the ids `"0"`, `"1"` and so on, and no host names.
     pub async fn bind(tunnels: Vec<Tunnel>, bind: SocketAddr) -> io::Result<ConnectProxy> {
         let routes = tunnels
             .into_iter()
             .enumerate()
-            .map(|(index, tunnel)| (index.to_string(), ProxyRoute { tunnel }))
+            .map(|(index, tunnel)| {
+                let route = ProxyRoute {
+                    tunnel,
+                    hosts: Vec::new(),
+                };
+                (index.to_string(), route)
+            })
             .collect();
         Self::bind_routed(routes, bind).await
     }
 
     /// Bind `bind`, which must be a loopback address (port 0 picks one),
     /// and serve CONNECT and plain-HTTP forwarding with `routes` as the
-    /// starting table, each under its id: the first route, in table order,
-    /// whose tunnel's AllowedIPs contain a resolved destination carries
-    /// it, and a destination inside none is connected directly. An empty
-    /// table connects everything directly until a route is added. Two
-    /// routes under one id are refused with `AlreadyExists`. Must be
-    /// called within a tokio runtime, which the accept task runs on.
+    /// starting table, each under its id. A host name the table maps is
+    /// matched first, in table order, and connected through its route's
+    /// tunnel with no lookup on the host; any other destination is
+    /// resolved, and the first route, in table order, whose tunnel's
+    /// AllowedIPs contain a resolved address carries it, while a
+    /// destination inside none is connected directly. An empty table
+    /// connects everything directly until a route is added. Two routes
+    /// under one id are refused with `AlreadyExists`, and a host map that
+    /// [`add_route`](Self::add_route) refuses is refused here the same way.
+    /// Must be called within a tokio runtime, which the accept task runs
+    /// on.
     pub async fn bind_routed(
         routes: Vec<(String, ProxyRoute)>,
         bind: SocketAddr,
@@ -140,6 +225,7 @@ impl ConnectProxy {
         }
         let mut table: Vec<(String, ProxyRoute)> = Vec::with_capacity(routes.len());
         for (id, route) in routes {
+            check_route(&route)?;
             if table.iter().any(|(held, _)| *held == id) {
                 return Err(held_id(&id));
             }
@@ -167,8 +253,12 @@ impl ConnectProxy {
 
     /// Append `route` under `id`; the next connection to one of its
     /// destinations goes through it. An id already in the table is refused
-    /// with `AlreadyExists` and the table is left as it was.
+    /// with `AlreadyExists`, and with `InvalidInput` a host entry whose
+    /// name is not a DNS name or `*.` and one, or whose address lies
+    /// outside the tunnel's AllowedIPs, so a mapped name can never take the
+    /// direct path; a refusal leaves the table as it was.
     pub fn add_route(&self, id: &str, route: ProxyRoute) -> io::Result<()> {
+        check_route(&route)?;
         let mut routes = self.router.routes.write();
         if routes.iter().any(|(held, _)| held == id) {
             return Err(held_id(id));
@@ -183,7 +273,10 @@ impl ConnectProxy {
     /// new. The route it replaces is dropped once the new one is in the
     /// table, so the next connection goes through the new tunnel while the
     /// connections the old one carries end only when its last handle does.
+    /// A host map [`add_route`](Self::add_route) refuses is refused the
+    /// same way, and the table is left as it was.
     pub fn replace_route(&self, id: &str, route: ProxyRoute) -> io::Result<()> {
+        check_route(&route)?;
         let replaced = {
             let mut routes = self.router.routes.write();
             let replaced = match routes.iter_mut().find(|(held, _)| held == id) {
@@ -268,6 +361,21 @@ struct Router {
 }
 
 impl Router {
+    /// The tunnel and the addresses of the first host entry, in table
+    /// order, that names `name`. A name with an empty label matches none.
+    fn mapped(&self, name: &str) -> Option<(Tunnel, Vec<IpAddr>)> {
+        if !is_dns_name(name) {
+            return None;
+        }
+        self.routes.read().iter().find_map(|(_, route)| {
+            route
+                .hosts
+                .iter()
+                .find(|host| host.matches(name))
+                .map(|host| (route.tunnel.clone(), host.addresses.clone()))
+        })
+    }
+
     /// The tunnel of the first route whose peer's AllowedIPs contain `ip`.
     fn tunnel_for(&self, ip: IpAddr) -> Option<Tunnel> {
         self.routes
@@ -699,14 +807,26 @@ fn is_name(host: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
 }
 
-/// Resolve the authority on the host, every time, so a name that moves is
-/// followed, then open the connection: through the tunnel of the first
-/// route whose AllowedIPs contain a resolved address, or directly when
-/// none does.
+/// A name [`is_name`] accepts whose labels are all non-empty: the form a
+/// host entry's name, or the suffix of its wildcard, must take.
+fn is_dns_name(host: &str) -> bool {
+    is_name(host) && host.split('.').all(|label| !label.is_empty())
+}
+
+/// Open the connection to the authority. A name a route maps goes through
+/// that route's tunnel with no lookup on the host. Anything else is
+/// resolved on the host, every time, so a name that moves is followed,
+/// and goes through the tunnel of the first route whose AllowedIPs
+/// contain a resolved address, or directly when none does.
 async fn connect(
     router: &Router,
     authority: &Authority,
 ) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
+    if let Host::Name(name) = &authority.host {
+        if let Some((tunnel, addresses)) = router.mapped(name) {
+            return connect_mapped(&tunnel, &addresses, authority.port).await;
+        }
+    }
     let addrs: Vec<SocketAddr> = match &authority.host {
         Host::Ip(ip) => vec![SocketAddr::new(*ip, authority.port)],
         Host::Name(name) => tokio::net::lookup_host((name.as_str(), authority.port))
@@ -731,6 +851,31 @@ async fn connect(
     }
     let peer = stream.peer_addr()?;
     Ok((Box::new(stream), peer, "direct"))
+}
+
+/// Connect a mapped name through its tunnel to the first of its addresses
+/// whose family the tunnel has an address of. `Tunnel::connect` refuses a
+/// family it lacks with `AddrNotAvailable` before it sends anything, so
+/// that refusal moves on to the next address; a map with none of the
+/// tunnel's families fails with it, and nothing is ever dialed directly.
+async fn connect_mapped(
+    tunnel: &Tunnel,
+    addresses: &[IpAddr],
+    port: u16,
+) -> io::Result<(Box<dyn Io>, SocketAddr, &'static str)> {
+    let mut lacking = io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "the mapped name has no address",
+    );
+    for ip in addresses {
+        let addr = SocketAddr::new(*ip, port);
+        match tunnel.connect(addr).await {
+            Ok(stream) => return Ok((Box::new(stream), addr, "tunnel")),
+            Err(e) if e.kind() == io::ErrorKind::AddrNotAvailable => lacking = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(lacking)
 }
 
 #[cfg(test)]
@@ -1486,7 +1631,254 @@ mod tests {
     }
 
     fn route(tunnel: Tunnel) -> ProxyRoute {
-        ProxyRoute { tunnel }
+        ProxyRoute {
+            tunnel,
+            hosts: Vec::new(),
+        }
+    }
+
+    fn mapped(tunnel: Tunnel, hosts: Vec<HostRoute>) -> ProxyRoute {
+        ProxyRoute { tunnel, hosts }
+    }
+
+    fn host(name: &str, addresses: &[&str]) -> HostRoute {
+        HostRoute {
+            name: name.to_owned(),
+            addresses: addresses.iter().map(|a| a.parse().unwrap()).collect(),
+        }
+    }
+
+    /// CONNECT `target` and expect the 200 first, then the tunnel's
+    /// listener to hold the connection, from A's tunnel address.
+    async fn through_tunnel(proxy: &ConnectProxy, target: &str, listener: &mut crate::Listener) {
+        let mut client = send_connect(proxy, target).await;
+        let head = timeout(WAIT, read_head(&mut client))
+            .await
+            .unwrap()
+            .expect("a response head");
+        assert_eq!(status_of(&head), 200, "CONNECT {target}");
+        let server = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+        assert_eq!(
+            server.peer_addr().ip(),
+            A_ADDR.parse::<IpAddr>().unwrap(),
+            "CONNECT {target}"
+        );
+        exchange(client, server).await;
+    }
+
+    // The mapped names below are under `.invalid`, which never resolves
+    // (RFC 2606): a request for one that reaches the peer was not looked
+    // up, and one that takes the resolver's path is refused with 502.
+
+    #[tokio::test]
+    async fn a_mapped_name_goes_through_its_tunnel_without_a_lookup() {
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        let port = listener.port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("gateway.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        for name in ["gateway.chan.invalid", "Gateway.CHAN.Invalid"] {
+            through_tunnel(&proxy, &format!("{name}:{port}"), &mut listener).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_entry_matches_every_label_depth_below_it() {
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(0).unwrap();
+        let port = listener.port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("*.proxy.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        for name in [
+            "alice--x1.proxy.chan.invalid",
+            "a.b.c.proxy.chan.invalid",
+            "Alice.PROXY.chan.invalid",
+        ] {
+            through_tunnel(&proxy, &format!("{name}:{port}"), &mut listener).await;
+        }
+        // The bare suffix, a name that only ends in the suffix's letters and
+        // names with an empty label are not under the wildcard: they take
+        // the resolver's path, which `.invalid` fails.
+        for name in [
+            "proxy.chan.invalid",
+            "xproxy.chan.invalid",
+            ".proxy.chan.invalid",
+            "a..proxy.chan.invalid",
+        ] {
+            expect_refusal(
+                &proxy,
+                &format!("CONNECT {name}:{port} HTTP/1.1\r\n\r\n"),
+                502,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unmapped_name_still_resolves_on_the_host() {
+        let Pair { a, .. } = pair().await;
+        let listener = TcpListener::bind(loopback()).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("gateway.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        // `localhost` is in no map: it is resolved on the host and, being
+        // outside every route's AllowedIPs, connected directly.
+        let mut client = send_connect(&proxy, &format!("localhost:{port}")).await;
+        let (head, server) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut client), listener.accept())
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let (server, from) = server.unwrap();
+        assert!(from.ip().is_loopback(), "{from}");
+        exchange(client, server).await;
+    }
+
+    #[tokio::test]
+    async fn bind_routed_refuses_an_address_outside_allowed_ips() {
+        let Pair { a, b, .. } = pair().await;
+        let outside = || {
+            mapped(
+                a.clone(),
+                vec![host("gateway.chan.invalid", &[B_ADDR, "10.9.9.9"])],
+            )
+        };
+        let err = ConnectProxy::bind_routed(vec![("gw".into(), outside())], loopback())
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains("10.9.9.9"), "{err}");
+
+        let proxy = ConnectProxy::bind_routed(vec![("gw".into(), route(a.clone()))], loopback())
+            .await
+            .unwrap();
+        let err = proxy.add_route("other", outside()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        let err = proxy.replace_route("gw", outside()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert_eq!(proxy.routes(), 1);
+        assert!(
+            !proxy.remove_route("other"),
+            "a refused add leaves no route"
+        );
+
+        // A malformed name is refused the same way, so no entry can stand
+        // that no request could match.
+        for name in [
+            "",
+            "*",
+            "*.",
+            "*chan.invalid",
+            "*.*.chan.invalid",
+            "gateway.*.invalid",
+            "gateway..chan.invalid",
+            ".chan.invalid",
+            "chan.invalid.",
+            "gate way.chan.invalid",
+            "gate/way.chan.invalid",
+        ] {
+            let err = proxy
+                .add_route("bad", mapped(a.clone(), vec![host(name, &[B_ADDR])]))
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name:?}: {err}");
+        }
+        assert_eq!(proxy.routes(), 1);
+
+        // The control: exact and wildcard entries inside AllowedIPs are
+        // taken.
+        proxy
+            .add_route(
+                "good",
+                mapped(
+                    b,
+                    vec![
+                        host("gateway.chan.invalid", &[A_ADDR]),
+                        host("*.proxy.chan.invalid", &[A_ADDR]),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(proxy.routes(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_mapped_name_takes_the_first_address_of_a_family_its_tunnel_has() {
+        // A side routes an IPv6 prefix too but holds only an IPv4 address,
+        // so a mapped IPv6 address is inside AllowedIPs and of a family A
+        // has no address of.
+        let a_key = StaticSecret::random_from_rng(OsRng);
+        let b_key = StaticSecret::random_from_rng(OsRng);
+        let a_pub = PublicKey::from(&a_key);
+        let b_pub = PublicKey::from(&b_key);
+        let a_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let b_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a_at = a_udp.local_addr().unwrap();
+        let b_at = b_udp.local_addr().unwrap();
+        let mut a_config = config(a_key, b_pub, A_ADDR, B_ADDR, b_at);
+        a_config.peer.allowed_ips.push(crate::config::Cidr {
+            addr: "fd00:7::2".parse().unwrap(),
+            prefix: 128,
+        });
+        let a = Tunnel::start_on(a_config, a_udp, b_at).unwrap();
+        let b = Tunnel::start_on(config(b_key, a_pub, B_ADDR, A_ADDR, a_at), b_udp, a_at).unwrap();
+        let mut listener = b.listen(0).unwrap();
+        let port = listener.port();
+        let host_listener = TcpListener::bind(loopback()).await.unwrap();
+        let host_port = host_listener.local_addr().unwrap().port();
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(
+                    a,
+                    vec![
+                        host("both.chan.invalid", &["fd00:7::2", B_ADDR]),
+                        host("localhost", &["fd00:7::2"]),
+                    ],
+                ),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+
+        // The IPv6 address is passed over for the IPv4 one after it.
+        through_tunnel(&proxy, &format!("both.chan.invalid:{port}"), &mut listener).await;
+
+        // With no address of a family the tunnel has, a mapped name is
+        // refused. `localhost` would resolve on the host and reach the
+        // listener there, so the 502 also shows it was never looked up.
+        expect_refusal(
+            &proxy,
+            &format!("CONNECT localhost:{host_port} HTTP/1.1\r\n\r\n"),
+            502,
+        )
+        .await;
+        assert!(
+            timeout(2 * TICK, host_listener.accept()).await.is_err(),
+            "the mapped name never reached the host's own listener"
+        );
     }
 
     /// A port on the host's loopback that nothing listens on, so a

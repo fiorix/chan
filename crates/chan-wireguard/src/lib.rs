@@ -17,9 +17,9 @@
 //! host. [`config::Config`] is read from the wg-quick file format.
 //! [`ConnectProxy`] is a loopback HTTP proxy over a live table of tunnels
 //! for the dialers that cannot call `connect` themselves, a webview among
-//! them: it serves CONNECT and forwards plain-HTTP requests, and a
-//! destination inside a tunnel's AllowedIPs goes through that tunnel
-//! while anything else is connected directly.
+//! them: it serves CONNECT and forwards plain-HTTP requests, and a host
+//! name a route maps, or a destination inside a tunnel's AllowedIPs, goes
+//! through that tunnel while anything else is connected directly.
 //!
 //! The `noise` module and the clock derive from Cloudflare's boringtun
 //! under BSD-3-Clause; the notice is the LICENSE file beside the crate's
@@ -38,7 +38,7 @@ mod stream;
 mod testing;
 mod tunnel;
 
-pub use proxy::{ConnectProxy, ProxyRoute};
+pub use proxy::{ConnectProxy, HostRoute, ProxyRoute};
 pub use stream::{Listener, Stream};
 pub use tunnel::{Status, Tunnel};
 
