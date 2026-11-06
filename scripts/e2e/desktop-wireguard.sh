@@ -24,14 +24,20 @@
 #   refusals   the proxy refused nothing in the run.
 #   config     the gateway row and its file survive the desktop's rewrite of
 #              its config at start.
+#   wrong-key  (--wrong-key only) the desktop sends repeated initiations,
+#              the peer never handshakes, one session expiry logs at WARN
+#              within 100 s of tunnel start, and no ERROR-level line appears.
 #
 # What it cannot prove: a real gateway's TLS and identity behind the proxy
 # (the peer answers 404 to everything), the macOS and Windows webviews, and
 # a peer behind NAT or at a changing address.
 #
-# Usage: desktop-wireguard.sh [--unresolved-endpoint]
+# Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key]
 #   --unresolved-endpoint proves startup and the proxy with a missing name;
 #                         it runs instead of the connected-peer arms.
+#   --wrong-key           proves expiry with a wrong peer public key instead
+#                         of the connected-peer arms; exclusive with the
+#                         unresolved-endpoint mode.
 #   CHAN_DESKTOP_BIN  a built debug chan-desktop (default
 #                     target/debug/chan-desktop). It is not built here: it
 #                     needs the web bundles, `make web` then
@@ -54,7 +60,11 @@ SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 CHAN_DESKTOP_BIN="${CHAN_DESKTOP_BIN:-$REPO/target/debug/chan-desktop}"
 GATEWAY_ID="gw-e2e00001"
 UNRESOLVED=0
-if [ "${1:-}" = --unresolved-endpoint ]; then UNRESOLVED=1; shift; fi
+WRONG_KEY=0
+case "${1:-}" in
+    --unresolved-endpoint) UNRESOLVED=1; shift ;;
+    --wrong-key) WRONG_KEY=1; shift ;;
+esac
 [ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
 
 log() { printf 'desktop-wireguard: %s\n' "$*" >&2; }
@@ -216,6 +226,13 @@ desktop_log() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/desktop.log" > "$CLEAN"; }
 logged() { desktop_log; grep -qE -- "$1" "$CLEAN"; }
 count() { desktop_log; grep -cE -- "$1" "$CLEAN" || true; }
 peer_logged() { grep -qE -- "$1" "$WORK/peer.log"; }
+session_warnings() {
+    awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
+}
+session_expiry_logged() {
+    desktop_log || return 1
+    [ "$(session_warnings "$CLEAN")" -ge 1 ]
+}
 
 log "work dir $WORK, chan $SHA"
 
@@ -228,6 +245,10 @@ PEER_URL="$(sed -n 's/^peer: ready url=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head
 log "peer at $PEER_URL, client file $WORK/client.conf (mode $(stat -c %a "$WORK/client.conf"))"
 if [ "$UNRESOLVED" = 1 ]; then
     sed -i 's/^Endpoint = .*/Endpoint = chan-endpoint-missing.invalid:51820/' "$WORK/client.conf"
+elif [ "$WRONG_KEY" = 1 ]; then
+    wrong_pub="$(head -c 32 /dev/urandom | base64)"
+    sed -i "s|^PublicKey = .*|PublicKey = $wrong_pub|" "$WORK/client.conf"
+    unset wrong_pub
 fi
 
 # 2. The desktop's config: one enabled gateway behind the file.
@@ -239,6 +260,27 @@ JSON
 xvfb-run -a dbus-run-session "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
 XVFB_RUN_PID=$!
 PIDS+=("$XVFB_RUN_PID")
+
+if [ "$WRONG_KEY" = 1 ]; then
+    arm_rc=0
+    wait_for 30 "the tunnel start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID" || arm_rc=1
+    wait_for 100 "the session-expiry warning" session_expiry_logged || arm_rc=1
+    desktop_log || arm_rc=1
+    INITIATIONS="$(count 'Sending handshake_initiation')"
+    HANDSHAKE="$(awk '/^status: / { last=$0 } END { print last }' "$WORK/peer.log")"
+    expiry_warns="$(session_warnings "$CLEAN")"
+    error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$CLEAN")"
+    [ "$INITIATIONS" -ge 2 ] || arm_rc=1
+    case "$HANDSHAKE" in 'status: handshake=never '*) ;; *) arm_rc=1 ;; esac
+    [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+    verdict wrong-key "$arm_rc" "desktop sent $INITIATIONS initiations, peer ${HANDSHAKE:-no status}, session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
+    [ "$arm_rc" = 0 ] || fail "wrong-key expiry"
+    cleanup
+    trap - EXIT
+    rm -rf "${WORK:?}"
+    exit 0
+fi
+
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
 
 # `chan serve` hands a workspace to the desktop only when its own

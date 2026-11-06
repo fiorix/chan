@@ -49,7 +49,8 @@
 #                 logs no request and its handshake stamp does not move, and
 #                 the initiations the desktop logs sending arrive at the peer
 #                 as UDP datagrams (the control that the positive arms are
-#                 not vacuous).
+#                 not vacuous). One session expiry logs at WARN within
+#                 100 s of tunnel start, and no ERROR-level line appears.
 #
 # What it cannot prove: a real gateway's TLS and identity behind the proxy,
 # the window feed's WebSocket (the stand-in has no roster), the launcher
@@ -606,6 +607,13 @@ PS
 }
 logged() { desktop_log "$1" && grep -qE -- "$2" "$WORK/$1.log"; }
 count() { grep -cE -- "$2" "$WORK/$1.log" || true; }
+session_warnings() {
+    awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
+}
+session_expiry_logged() {
+    desktop_log "$1" || return 1
+    [ "$(session_warnings "$WORK/$1.log")" -ge 1 ]
+}
 
 # The remote debugging port, forwarded to a free port on this host for the run.
 LOCAL_CDP="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
@@ -768,9 +776,14 @@ REQ_BEFORE="$(peer_count '^request: ')"
 arm_rc=0
 start_desktop neg client-wrong-key.conf || arm_rc=1
 wait_for 60 "the wrong-key tunnel start line" logged neg "gateway WireGuard tunnel started gateway=$GATEWAY_ID file=.*client-wrong-key\\.conf" || arm_rc=1
+expiry_deadline=$((SECONDS + 100))
 PAGE=""
 wait_for 60 "a window's page target on the debugging port" page_target || arm_rc=1
 navigate "$WORK/wrong-key" "$PEER_ORIGIN/?arm=wrong-key-$NONCE" 5000
+# Navigation spends part of the bound that starts at the tunnel-start line.
+expiry_wait=$((expiry_deadline - SECONDS))
+[ "$expiry_wait" -ge 0 ] || expiry_wait=0
+wait_for "$expiry_wait" "the session-expiry warning" session_expiry_logged neg || arm_rc=1
 doc="$(jfield "$WORK/wrong-key.json" '(r["documents"][0]["status"] if r["documents"] else None, r["errorText"])')"
 text="$(jfield "$WORK/wrong-key.json" 'r["page"]["text"].replace(chr(10), " ")')"
 HS_AFTER="$(peer_handshake)"
@@ -783,7 +796,10 @@ INITIATIONS="$(count neg 'Sending handshake_initiation')"
 [ "$HS_AFTER" = "$HS_BEFORE" ] || arm_rc=1
 [ "$INITIATIONS" -ge 2 ] && [ $((UDP_AFTER - UDP_BEFORE)) -ge 2 ] || arm_rc=1
 grep -qE 'proxy request refused .*status=504' "$WORK/neg.log" || arm_rc=1
-verdict wrong-key "$arm_rc" "document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms, page '$(printf '%s' "$text" | cut -c1-70)', peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE))"
+expiry_warns="$(session_warnings "$WORK/neg.log")"
+error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$WORK/neg.log")"
+[ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+verdict wrong-key "$arm_rc" "document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms, page '$(printf '%s' "$text" | cut -c1-70)', peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
 stop_desktop
 
 if [ "$FAILED" != 0 ]; then
