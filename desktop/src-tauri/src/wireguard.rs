@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,8 @@ pub struct WireguardFabric {
     /// One row per adopted gateway. Adopt and retire hold it from the check
     /// to the swap, so two adopts of one row never start two tunnels.
     rows: Mutex<HashMap<String, Row>>,
+    /// The proxy preserves a route's place on replace and appends new ids.
+    next_route_order: AtomicU64,
 }
 
 enum Proxy {
@@ -84,6 +87,8 @@ enum Row {
     Running {
         path: PathBuf,
         tunnel: Tunnel,
+        hosts: Vec<HostRoute>,
+        route_order: u64,
         endpoint: String,
         started: Instant,
         #[cfg(test)]
@@ -155,6 +160,11 @@ impl WireguardFabric {
             let _runtime = self.runtime.enter();
             start_tunnel(gateway_id, conf)
         };
+        let row_hosts = hosts.clone();
+        let route_order = match rows.get(gateway_id) {
+            Some(Row::Running { route_order, .. }) => *route_order,
+            _ => self.next_route_order.fetch_add(1, Ordering::Relaxed),
+        };
         let routed = started.and_then(|(tunnel, endpoint)| {
             let route = ProxyRoute {
                 tunnel: tunnel.clone(),
@@ -180,6 +190,8 @@ impl WireguardFabric {
                 let row = Row::Running {
                     path: conf.to_owned(),
                     tunnel,
+                    hosts: row_hosts,
+                    route_order,
                     endpoint,
                     started: Instant::now(),
                     #[cfg(test)]
@@ -230,6 +242,64 @@ impl WireguardFabric {
                 Some(describe(row.tunnel_status()?))
             }
             _ => None,
+        }
+    }
+
+    /// A matched route's missing-session reason. Host maps take precedence
+    /// over resolved addresses, as they do in the proxy. The outer option
+    /// says a route matched; its inner value is absent when that route is
+    /// live, so a later dark route cannot explain a live destination.
+    pub(crate) fn reason_for_destination(
+        &self,
+        host: &str,
+        addresses: &[IpAddr],
+    ) -> Option<Option<String>> {
+        let rows = self.rows.lock().unwrap();
+        let mapped = rows
+            .values()
+            .filter_map(|row| match row {
+                Row::Running {
+                    hosts, route_order, ..
+                } if hosts
+                    .iter()
+                    .any(|route| host_route_matches(&route.name, host)) =>
+                {
+                    Some((*route_order, row))
+                }
+                _ => None,
+            })
+            .min_by_key(|(order, _)| *order)
+            .map(|(_, row)| row);
+        let row = mapped.or_else(|| {
+            addresses.iter().find_map(|ip| {
+                rows.values()
+                    .filter_map(|row| match row {
+                        Row::Running {
+                            tunnel,
+                            route_order,
+                            ..
+                        } if tunnel.allowed_ips().iter().any(|cidr| cidr.contains(*ip)) => {
+                            Some((*route_order, row))
+                        }
+                        _ => None,
+                    })
+                    .min_by_key(|(order, _)| *order)
+                    .map(|(_, row)| row)
+            })
+        })?;
+        match row {
+            row @ Row::Running {
+                path,
+                endpoint,
+                started,
+                ..
+            } => Some(missing_handshake_reason(
+                row.tunnel_status()?,
+                endpoint,
+                path,
+                started.elapsed(),
+            )),
+            Row::Refused { .. } => None,
         }
     }
 
@@ -385,6 +455,22 @@ fn format_age(age: Duration) -> String {
     }
 }
 
+/// Match the proxy's exact and wildcard host routes without a host
+/// lookup. The wildcard needs at least one label before its suffix.
+fn host_route_matches(route: &str, host: &str) -> bool {
+    match route.strip_prefix("*.") {
+        Some(suffix) => {
+            let Some(head) = host.len().checked_sub(suffix.len() + 1) else {
+                return false;
+            };
+            head > 0
+                && host.as_bytes()[head] == b'.'
+                && host[head + 1..].eq_ignore_ascii_case(suffix)
+        }
+        None => host.eq_ignore_ascii_case(route),
+    }
+}
+
 fn missing_handshake_reason(
     status: chan_wireguard::Status,
     endpoint: &str,
@@ -442,6 +528,7 @@ async fn start_with_bind(gateways: &[Gateway], bind: SocketAddr) -> WireguardFab
         proxy,
         runtime: tokio::runtime::Handle::current(),
         rows: Mutex::new(HashMap::new()),
+        next_route_order: AtomicU64::new(0),
     };
     for gateway in gateways.iter().filter(|g| g.enabled) {
         if let Some(path) = &gateway.wireguard {
@@ -881,6 +968,191 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(connect_status(&response), Some(400), "{response:?}");
+    }
+
+    #[tokio::test]
+    async fn reason_for_destination_uses_a_mapped_name_before_address_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        let fabric = start(&[]).await;
+        fabric
+            .adopt(
+                "gw",
+                &far.conf,
+                vec![HostRoute {
+                    name: "tenant.proxy.chan.invalid".into(),
+                    addresses: vec!["10.7.0.2".parse().unwrap()],
+                }],
+            )
+            .unwrap();
+        let tunnel = fabric.tunnel("gw").unwrap();
+        tokio::time::timeout(WAIT, async {
+            while tunnel.status().endpoint.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let reason = fabric
+            .reason_for_destination("tenant.proxy.chan.invalid", &[])
+            .expect("the name is routed")
+            .expect("the routed tunnel has no session");
+        assert!(
+            reason.contains("no WireGuard handshake with the peer at 127.0.0.1:"),
+            "{reason}"
+        );
+        assert!(reason.contains("since the tunnel started"), "{reason}");
+        assert!(reason.contains(&far.conf.display().to_string()), "{reason}");
+        assert!(reason.contains("check PublicKey"), "{reason}");
+        assert!(!reason.contains(&far.private_key), "{reason}");
+        let counts = Mutex::new(HashMap::new());
+        let failed = crate::probe_result_for(
+            &counts,
+            "window",
+            "http://tenant.proxy.chan.invalid/",
+            Some(reqwest::StatusCode::BAD_GATEWAY),
+            "502 Bad Gateway".into(),
+        );
+        let decorated =
+            crate::with_tunnel_reason(failed, Some(&fabric), "http://tenant.proxy.chan.invalid/")
+                .await;
+        assert!(decorated
+            .tunnel
+            .unwrap()
+            .contains(&far.conf.display().to_string()));
+        let reachable = crate::probe_result_for(
+            &counts,
+            "window",
+            "http://unmapped.chan.invalid/",
+            Some(reqwest::StatusCode::OK),
+            "200 OK".into(),
+        );
+        let decorated =
+            crate::with_tunnel_reason(reachable, Some(&fabric), "http://unmapped.chan.invalid/")
+                .await;
+        assert!(decorated.reachable);
+        assert_eq!(decorated.tunnel, None);
+        assert_eq!(
+            fabric.reason_for_destination("unmapped.chan.invalid", &[]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn reason_for_destination_preserves_route_order_on_replace_and_retire() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = peer(dir.path(), "first.conf", "10.7.0.1", "10.7.0.2").await;
+        let second = peer(dir.path(), "second.conf", "10.7.0.1", "10.7.0.2").await;
+        let replacement = peer(dir.path(), "replacement.conf", "10.7.0.1", "10.7.0.2").await;
+        let fabric = start(&[]).await;
+        let hosts = || {
+            vec![HostRoute {
+                name: "tenant.proxy.chan.invalid".into(),
+                addresses: vec!["10.7.0.2".parse().unwrap()],
+            }]
+        };
+        fabric.adopt("first", &first.conf, hosts()).unwrap();
+        fabric.adopt("second", &second.conf, hosts()).unwrap();
+        let reason = |fabric: &WireguardFabric| {
+            fabric
+                .reason_for_destination("tenant.proxy.chan.invalid", &[])
+                .flatten()
+                .unwrap()
+        };
+        for id in ["first", "second"] {
+            let tunnel = fabric.tunnel(id).unwrap();
+            tokio::time::timeout(WAIT, async {
+                while tunnel.status().endpoint.is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert!(reason(&fabric).contains(&first.conf.display().to_string()));
+        fabric.adopt("first", &replacement.conf, hosts()).unwrap();
+        let tunnel = fabric.tunnel("first").unwrap();
+        tokio::time::timeout(WAIT, async {
+            while tunnel.status().endpoint.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(reason(&fabric).contains(&replacement.conf.display().to_string()));
+        assert!(fabric.retire("first"));
+        fabric.adopt("first", &first.conf, hosts()).unwrap();
+        assert!(reason(&fabric).contains(&second.conf.display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn reason_for_destination_uses_the_first_routed_address_and_skips_live_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let far_a = peer(dir.path(), "a.conf", "10.7.0.1", "10.7.0.2").await;
+        let far_b = peer(dir.path(), "b.conf", "10.8.0.1", "10.8.0.2").await;
+        let fabric = start(&[]).await;
+        fabric.adopt("a", &far_a.conf, Vec::new()).unwrap();
+        fabric
+            .adopt(
+                "b",
+                &far_b.conf,
+                vec![HostRoute {
+                    name: "*.proxy.chan.invalid".into(),
+                    addresses: vec!["10.8.0.2".parse().unwrap()],
+                }],
+            )
+            .unwrap();
+        for id in ["a", "b"] {
+            let tunnel = fabric.tunnel(id).unwrap();
+            tokio::time::timeout(WAIT, async {
+                while tunnel.status().endpoint.is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let ip_a = "10.7.0.2".parse().unwrap();
+        let ip_b = "10.8.0.2".parse().unwrap();
+        let outside = "192.0.2.9".parse().unwrap();
+        assert_eq!(
+            fabric.reason_for_destination("none.invalid", &[outside]),
+            None
+        );
+        let reason = fabric
+            .reason_for_destination("none.invalid", &[outside, ip_b])
+            .expect("the second address is routed")
+            .expect("the second tunnel has no session");
+        assert!(
+            reason.contains(&far_b.conf.display().to_string()),
+            "{reason}"
+        );
+        let mapped = fabric
+            .reason_for_destination("A.tenant.PROXY.chan.invalid", &[ip_a])
+            .expect("the wildcard name is routed")
+            .expect("its tunnel has no session");
+        assert!(
+            mapped.contains(&far_b.conf.display().to_string()),
+            "{mapped}"
+        );
+        let mut listener = far_a.tunnel.listen(80).unwrap();
+        let connecting = tokio::spawn({
+            let tunnel = fabric.tunnel("a").unwrap();
+            async move { tunnel.connect(SocketAddr::new(ip_a, 80)).await.unwrap() }
+        });
+        let _server = tokio::time::timeout(WAIT, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let _client = tokio::time::timeout(WAIT, connecting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fabric.reason_for_destination("none.invalid", &[ip_a, ip_b]),
+            Some(None),
+            "the first routed address is live, so a later dark route is irrelevant"
+        );
     }
 
     #[tokio::test]

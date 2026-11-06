@@ -37,6 +37,8 @@
 #                 a proxy as CONNECT, is answered 101 and delivers the peer's
 #                 frame; the proxy logged a CONNECT through the tunnel past
 #                 the probes arm's.
+#   page          chan's connecting page probes the live peer, then navigates
+#                 the same window to its 200 page through the proxy.
 #   loopback      nothing on loopback entered the proxy, in a log that holds
 #                 the proxy's tunnel forwards: the local window's own origin
 #                 is direct on Windows.
@@ -47,7 +49,8 @@
 #   wrong-key     the desktop restarted on a file naming a wrong peer key:
 #                 the start-up log and gateway row name the missing handshake
 #                 and file without key values; the window's peer navigation
-#                 document ends in the proxy's 504, the peer
+#                 document ends in the proxy's 502 within 8 s, then chan's
+#                 connecting page names the never-handshaken reason; the peer
 #                 logs no request and its handshake stamp does not move, and
 #                 the initiations the desktop logs sending arrive at the peer
 #                 as UDP datagrams (the control that the positive arms are
@@ -681,6 +684,7 @@ navigate() {
     node "$HELPERS/cdp.mjs" nav "$LOCAL_CDP" "$PAGE" "$2" "$1" "${3:-8000}" >/dev/null 2>"$1.err" || true
 }
 jfield() { python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {}, {"r": r}))' "$@" 2>/dev/null || echo "?"; }
+urlencode() { python3 -I -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 launcher_target() {
     LAUNCHER_TARGET="$(node "$HELPERS/cdp.mjs" launcher "$LOCAL_CDP" 2>>"$WORK/cdp-eval.err")" || return 1
     [ -n "$LAUNCHER_TARGET" ]
@@ -785,6 +789,24 @@ connects_grew() { desktop_log pos && [ "$CONNECTS_BEFORE" != unread ] && [ "$(co
 connects_grew || arm_rc=1
 verdict webview-ws "$arm_rc" "page read '$ws_text', handshake $(jfield "$WORK/webview.json" 'r["wsHandshakes"]'), proxy CONNECTs through the tunnel $CONNECTS_BEFORE -> $(count pos "$TUNNEL_CONNECT")"
 
+# page: navigate the local window to chan's bundled connecting screen, which
+# probes the live peer before handing this same window to its 200 document.
+arm_rc=0
+PAGE_PEER="$PEER_ORIGIN/?arm=page-$NONCE"
+PAGE_APP="http://tauri.localhost/connecting.html?url=$(urlencode "$PAGE_PEER")&target=$(urlencode "$PAGE_PEER")"
+navigate "$WORK/page" "$PAGE_APP" 12000
+page_app="$(jfield "$WORK/page.json" 'r["documents"][0]["url"] == r["url"] and r["documents"][0]["status"] == 200')"
+page_peer="$(jfield "$WORK/page.json" '[(d["status"],d["remote"]) for d in r["documents"][1:] if d["url"].startswith("'"$PEER_ORIGIN"'")]')"
+page_title="$(jfield "$WORK/page.json" 'r["page"]["title"]')"
+page_error="$(jfield "$WORK/page.json" 'r["errorText"]')"
+page_requests="$(peer_count "GET_/\\?arm=page-$NONCE")"
+[ "$page_app" = True ] || arm_rc=1
+case "$page_peer" in *"(200, '$PROXY')"*) ;; *) arm_rc=1 ;; esac
+[ "$page_title" = "wg-webview $NONCE" ] && [ "$page_error" = None ] || arm_rc=1
+[ "$page_requests" -ge 2 ] || arm_rc=1
+peer_logged "from=$CLIENT_IP:[0-9]+ line=GET_/\\?arm=page-$NONCE""_HTTP/1\\.1 status=200 .*Edg/" || arm_rc=1
+verdict page "$arm_rc" "app document 200: $page_app; peer document $page_peer; title '$page_title', error $page_error; peer GETs $page_requests (want at least 2)"
+
 # loopback: no loopback target in the proxy's log, read in the same fetch
 # that shows its tunnel forwards, so an empty log cannot pass.
 arm_rc=0
@@ -838,14 +860,18 @@ if python3 -I "$HERE/wgwrongkey-oracle.py" startup "$WORK/neg.log" "$ENDPOINT" "
 else
     arm_rc=1
 fi
-# The terminal is the only page on some starts. Its key bridge opens the
-# launcher, whose own webview can read the bearer-gated library list.
+# The terminal is the only page on some starts. Send the real chord through
+# CDP Input so its key bridge opens the launcher and its bearer-gated list.
 LAUNCHER_TARGET=""
 if ! launcher_target; then
-    if ! node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$PAGE" \
-        "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'P', code: 'KeyP', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true}))" \
+    node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$PAGE" 'Boolean(window.__TAURI__?.core?.invoke)' \
+        > "$WORK/host-bridge.out" 2>>"$WORK/cdp-eval.err" || true
+    if ! node "$HELPERS/cdp.mjs" launcher-key "$LOCAL_CDP" "$PAGE" \
         > "$WORK/toggle-launcher.out" 2>>"$WORK/cdp-eval.err"; then arm_rc=1; fi
-    wait_for 60 "the launcher target" launcher_target || arm_rc=1
+    if ! wait_for 60 "the launcher target" launcher_target; then
+        node "$HELPERS/cdp.mjs" targets "$LOCAL_CDP" > "$WORK/launcher-targets.json" 2>>"$WORK/cdp-eval.err" || true
+        arm_rc=1
+    fi
 fi
 list_status=unread
 row_error=unread
@@ -873,15 +899,38 @@ if ! printf '%s\n' "$WRONG_PUB" "$SERVER_PUB" |
     python3 -I "$HERE/wgwrongkey-oracle.py" clean-log "$WORK/neg.log" > /dev/null 2>>"$WORK/oracle.err"; then
     arm_rc=1
 fi
-[ "$doc" = "(504, 'net::ERR_HTTP_RESPONSE_CODE_FAILURE')" ] || arm_rc=1
+[ "$(jfield "$WORK/wrong-key.json" 'r["documents"][0]["status"]')" = 502 ] || arm_rc=1
+[ "$(jfield "$WORK/wrong-key.json" 'r["navigateMs"]')" -lt 8000 ] || arm_rc=1
 [ "$REQ_AFTER" != unread ] && [ "$REQ_AFTER" = "$REQ_BEFORE" ] || arm_rc=1
 [ "$HS_AFTER" = "$HS_BEFORE" ] || arm_rc=1
 [ "$INITIATIONS" -ge 2 ] && [ $((UDP_AFTER - UDP_BEFORE)) -ge 2 ] || arm_rc=1
-grep -qE 'proxy request refused .*status=504' "$WORK/neg.log" || arm_rc=1
+grep -qF 'proxy refused a connection through a tunnel with no session' "$WORK/neg.log" || arm_rc=1
+grep -qE 'proxy request refused .*status=502' "$WORK/neg.log" || arm_rc=1
+if grep -qE 'proxy request refused .*status=504' "$WORK/neg.log"; then arm_rc=1; fi
 expiry_warns="$(session_warnings "$WORK/neg.log")"
 error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$WORK/neg.log")"
 [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
-verdict wrong-key "$arm_rc" "startup named=$startup_ok, list HTTP $list_status, row '$(printf '%s' "$row_error" | cut -c1-80)', document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms, page '$(printf '%s' "$text" | cut -c1-70)', peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
+# The direct navigation above is B's control. Now drive the same local
+# window through chan's page and read the failed probe's reason there.
+WRONG_PAGE_PEER="$PEER_ORIGIN/?arm=wrong-key-page-$NONCE"
+WRONG_PAGE_APP="http://tauri.localhost/connecting.html?url=$(urlencode "$WRONG_PAGE_PEER")&target=$(urlencode "$WRONG_PAGE_PEER")"
+navigate "$WORK/wrong-key-page" "$WRONG_PAGE_APP" 12000
+wrong_page_app="$(jfield "$WORK/wrong-key-page.json" 'r["documents"][0]["url"] == r["url"] and r["documents"][0]["status"] == 200')"
+wrong_page_error="$(jfield "$WORK/wrong-key-page.json" 'r["errorText"]')"
+wrong_page_title="$(jfield "$WORK/wrong-key-page.json" 'r["page"]["title"]')"
+wrong_page_text="$(jfield "$WORK/wrong-key-page.json" 'r["page"]["text"]')"
+[ "$wrong_page_app" = True ] && [ "$wrong_page_error" = None ] || arm_rc=1
+[ "$wrong_page_title" = 'Connecting...' ] || arm_rc=1
+grep -qF "no WireGuard handshake with the peer at $ENDPOINT since the tunnel started" <<< "$wrong_page_text" || arm_rc=1
+grep -qF 'client-wrong-key.conf' <<< "$wrong_page_text" || arm_rc=1
+grep -qF 'check PublicKey' <<< "$wrong_page_text" || arm_rc=1
+grep -qF 'attempt 2' <<< "$wrong_page_text" || arm_rc=1
+for forbidden in "$WRONG_PUB" "$SERVER_PUB" 'ERR_HTTP_RESPONSE_CODE_FAILURE'; do
+    if grep -qF -- "$forbidden" <<< "$wrong_page_text"; then arm_rc=1; fi
+done
+peer_absent "wrong-key-page-$NONCE" || arm_rc=1
+[ -s "$WORK/wrong-key-page.png" ] || arm_rc=1
+verdict wrong-key "$arm_rc" "startup named=$startup_ok, list HTTP $list_status, row '$(printf '%s' "$row_error" | cut -c1-80)', direct document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms; app document 200: $wrong_page_app, title '$wrong_page_title', error $wrong_page_error, reason '$(printf '%s' "$wrong_page_text" | grep -o 'no WireGuard handshake.*' | head -1 | cut -c1-80)', screenshot $(stat -c %s "$WORK/wrong-key-page.png" 2>/dev/null || echo 0) bytes; peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
 stop_desktop
 
 if [ "$FAILED" != 0 ]; then

@@ -3212,6 +3212,7 @@ mod tests {
             reachable,
             status: Some(if reachable { 200 } else { 503 }),
             detail: String::new(),
+            tunnel: None,
         }
     }
 

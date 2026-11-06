@@ -63,10 +63,14 @@ const MAX_HEAD: usize = 64 * 1024;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long resolving the authority and opening the connection may take
-/// together before the client is told the gateway timed out. A connect
-/// through a tunnel whose peer is silent never fails on its own, so this
-/// is the only bound on it.
+/// together before the client is told the gateway timed out. This remains
+/// the bound when a tunnel still has a session or awaits endpoint resolution.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A request's SYN starts a handshake attempt when a tunnel has no session.
+/// Give that attempt time to finish before refusing; the bound stays below
+/// the connecting page's probe timeout so it can read the refusal and state.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Connections served at once. Past this the proxy stops accepting until
 /// one ends, so a runaway local client cannot take every descriptor the
@@ -841,7 +845,7 @@ async fn connect(
     }
     for addr in &addrs {
         if let Some(tunnel) = router.tunnel_for(addr.ip()) {
-            let stream = tunnel.connect(*addr).await?;
+            let stream = connect_tunnel(&tunnel, *addr).await?;
             return Ok((Box::new(stream), *addr, "tunnel"));
         }
     }
@@ -869,13 +873,42 @@ async fn connect_mapped(
     );
     for ip in addresses {
         let addr = SocketAddr::new(*ip, port);
-        match tunnel.connect(addr).await {
+        match connect_tunnel(tunnel, addr).await {
             Ok(stream) => return Ok((Box::new(stream), addr, "tunnel")),
             Err(e) if e.kind() == io::ErrorKind::AddrNotAvailable => lacking = e,
             Err(e) => return Err(e),
         }
     }
     Err(lacking)
+}
+
+/// Keep the handshake's initiating SYN in flight while a tunnel with a
+/// known endpoint has no session. A session that appears at the deadline
+/// still gets the outer connect deadline; a dark tunnel gets a 502.
+async fn connect_tunnel(tunnel: &Tunnel, addr: SocketAddr) -> io::Result<crate::Stream> {
+    let status = tunnel.status();
+    if matches!(status.handshake, crate::HandshakeState::Live(_)) || status.endpoint.is_none() {
+        return tunnel.connect(addr).await;
+    }
+    let connecting = tunnel.connect(addr);
+    tokio::pin!(connecting);
+    tokio::select! {
+        result = &mut connecting => result,
+        _ = tokio::time::sleep(SESSION_TIMEOUT) => {
+            let status = tunnel.status();
+            if matches!(status.handshake, crate::HandshakeState::Live(_)) {
+                connecting.await
+            } else {
+                tracing::debug!(
+                    target = %addr,
+                    route = "tunnel",
+                    handshake = ?status.handshake,
+                    "proxy refused a connection through a tunnel with no session"
+                );
+                Err(io::Error::new(io::ErrorKind::TimedOut, "the tunnel has no session"))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -896,6 +929,44 @@ mod tests {
 
     fn loopback() -> SocketAddr {
         "127.0.0.1:0".parse().unwrap()
+    }
+
+    type EventFields = Vec<(String, String)>;
+
+    #[derive(Clone, Default)]
+    struct ProxyEvents(Arc<Mutex<Vec<EventFields>>>);
+
+    impl tracing::Subscriber for ProxyEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(Vec<(String, String)>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+                    self.0.push((field.name().into(), format!("{value:?}")));
+                }
+            }
+            let mut fields = Fields(Vec::new());
+            event.record(&mut fields);
+            fields
+                .0
+                .push(("event_target".into(), event.metadata().target().into()));
+            self.0.lock().push(fields.0);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
     }
 
     /// Open a connection to the proxy and send a CONNECT for `target`,
@@ -1597,12 +1668,233 @@ mod tests {
             let listener = TcpListener::bind(loopback()).await.unwrap();
             listener.local_addr().unwrap().port()
         };
+        let started = std::time::Instant::now();
         expect_refusal(
             &proxy,
             &format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
             502,
         )
         .await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A socket bound but never read by its peer leaves the handshake dark.
+    async fn silent_tunnel() -> (Tunnel, UdpSocket) {
+        let a_key = StaticSecret::random_from_rng(OsRng);
+        let b_key = StaticSecret::random_from_rng(OsRng);
+        let a_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let silent = UdpSocket::bind(loopback()).await.unwrap();
+        let at = silent.local_addr().unwrap();
+        let a = Tunnel::start_on(
+            config(a_key, PublicKey::from(&b_key), A_ADDR, B_ADDR, at),
+            a_udp,
+            at,
+        )
+        .unwrap();
+        (a, silent)
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_without_a_session_refuses_connect_and_forward_after_three_seconds() {
+        let (a, _silent) = silent_tunnel().await;
+        let proxy = ConnectProxy::bind(vec![a], loopback()).await.unwrap();
+        for request in [
+            format!("CONNECT {B_ADDR}:80 HTTP/1.1\r\nHost: {B_ADDR}:80\r\n\r\n"),
+            format!("GET http://{B_ADDR}:80/ HTTP/1.1\r\nHost: {B_ADDR}:80\r\n\r\n"),
+        ] {
+            let started = std::time::Instant::now();
+            let mut client = TcpStream::connect(proxy.local_addr()).await.unwrap();
+            client.write_all(request.as_bytes()).await.unwrap();
+            let head = timeout(Duration::from_secs(5), read_head(&mut client))
+                .await
+                .expect("a dark tunnel is refused before the outer deadline")
+                .unwrap();
+            assert_eq!(status_of(&head), 502);
+            assert!(started.elapsed() >= Duration::from_secs(3) - TICK);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_established_during_the_wait_connects() {
+        let a_key = StaticSecret::random_from_rng(OsRng);
+        let b_key = StaticSecret::random_from_rng(OsRng);
+        let a_pub = PublicKey::from(&a_key);
+        let b_pub = PublicKey::from(&b_key);
+        let a_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let b_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let a_at = a_udp.local_addr().unwrap();
+        let b_at = b_udp.local_addr().unwrap();
+        let a = Tunnel::start_on(config(a_key, b_pub, A_ADDR, B_ADDR, b_at), a_udp, b_at).unwrap();
+        let proxy = ConnectProxy::bind(vec![a], loopback()).await.unwrap();
+        let delayed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let b =
+                Tunnel::start_on(config(b_key, a_pub, B_ADDR, A_ADDR, a_at), b_udp, a_at).unwrap();
+            let mut listener = b.listen(80).unwrap();
+            (b, listener.accept().await.unwrap())
+        });
+        let mut client = send_connect(&proxy, &format!("{B_ADDR}:80")).await;
+        let (head, joined) = timeout(WAIT, async {
+            tokio::join!(read_head(&mut client), delayed)
+        })
+        .await
+        .unwrap();
+        assert_eq!(status_of(&head.unwrap()), 200);
+        let (_b, server) = joined.unwrap();
+        exchange(client, server).await;
+    }
+
+    #[tokio::test]
+    async fn a_new_session_keeps_a_pending_connect_past_the_session_deadline() {
+        const THIRD_ADDR: &str = "10.7.0.3";
+        let a_key = StaticSecret::random_from_rng(OsRng);
+        let b_key = StaticSecret::random_from_rng(OsRng);
+        let a_pub = PublicKey::from(&a_key);
+        let b_pub = PublicKey::from(&b_key);
+        let a_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let b_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let a_at = a_udp.local_addr().unwrap();
+        let b_at = b_udp.local_addr().unwrap();
+        let mut a_config = config(a_key, b_pub, A_ADDR, B_ADDR, b_at);
+        a_config.peer.allowed_ips.push(cidr(THIRD_ADDR));
+        let a = Tunnel::start_on(a_config, a_udp, b_at).unwrap();
+        let status = a.clone();
+        let proxy = ConnectProxy::bind(vec![a], loopback()).await.unwrap();
+        let delayed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Tunnel::start_on(config(b_key, a_pub, B_ADDR, A_ADDR, a_at), b_udp, a_at).unwrap()
+        });
+        let mut client = send_connect(&proxy, &format!("{THIRD_ADDR}:80")).await;
+        let b = delayed.await.unwrap();
+        // B discards a SYN for an address it does not own. Its handshake
+        // still completes, so the second status read must keep this TCP
+        // connect pending under the outer deadline.
+        assert!(
+            timeout(Duration::from_millis(4500), read_head(&mut client))
+                .await
+                .is_err(),
+            "a live tunnel must not be refused at the session deadline"
+        );
+        assert!(matches!(
+            status.status().handshake,
+            crate::HandshakeState::Live(_)
+        ));
+        drop(client);
+        drop(b);
+    }
+
+    #[tokio::test]
+    async fn a_lost_session_is_refused_after_three_seconds() {
+        let events = ProxyEvents::default();
+        let dispatch = tracing::Dispatch::new(events.clone());
+        let _second = tracing::Dispatch::new(ProxyEvents::default());
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let _clock = crate::clock::test_offset_guard();
+        let Pair { a, b, .. } = pair().await;
+        let mut listener = b.listen(80).unwrap();
+        let connecting = tokio::spawn({
+            let a = a.clone();
+            async move { a.connect(b_port(80)).await.unwrap() }
+        });
+        let mut server = timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+        let mut client = timeout(WAIT, connecting).await.unwrap().unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        timeout(WAIT, server.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"ping");
+        drop(client);
+        drop(server);
+        drop(listener);
+        drop(b);
+        crate::clock::advance(Duration::from_secs(181));
+        let lost = timeout(WAIT, async {
+            loop {
+                let status = a.status();
+                if let crate::HandshakeState::Lost(age) = status.handshake {
+                    break age;
+                }
+                tokio::time::sleep(TICK).await;
+            }
+        })
+        .await
+        .expect("the core drops an expired session");
+        assert!(lost >= Duration::from_secs(180));
+        let proxy = ConnectProxy::bind(vec![a], loopback()).await.unwrap();
+        let started = std::time::Instant::now();
+        let mut client = send_connect(&proxy, &format!("{B_ADDR}:80")).await;
+        let head = timeout(Duration::from_secs(5), read_head(&mut client))
+            .await
+            .expect("a lost tunnel is refused before the outer deadline")
+            .unwrap();
+        assert_eq!(status_of(&head), 502);
+        assert!(started.elapsed() >= Duration::from_secs(3) - TICK);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let lines = events.0.lock();
+        let refusals: Vec<_> = lines
+            .iter()
+            .filter(|fields| {
+                fields.iter().any(|(key, value)| {
+                    key == "message"
+                        && value
+                            .contains("proxy refused a connection through a tunnel with no session")
+                })
+            })
+            .collect();
+        assert_eq!(refusals.len(), 1, "{lines:?}");
+        for (key, expected) in [
+            ("event_target", "chan_wireguard::proxy"),
+            ("target", B_ADDR),
+            ("route", "tunnel"),
+            ("handshake", "Lost("),
+        ] {
+            assert!(
+                refusals[0]
+                    .iter()
+                    .any(|(field, value)| field == key && value.contains(expected)),
+                "{key}: {:?}",
+                refusals[0]
+            );
+        }
+        let age = refusals[0]
+            .iter()
+            .find(|(key, _)| key == "handshake")
+            .unwrap()
+            .1
+            .split_once("Lost(")
+            .unwrap()
+            .1
+            .split_once('s')
+            .unwrap()
+            .0
+            .parse::<f64>()
+            .unwrap();
+        assert!(age >= 180.0, "{age}");
+    }
+
+    #[tokio::test]
+    async fn a_mapped_name_without_a_session_gets_the_same_refusal() {
+        let (a, _silent) = silent_tunnel().await;
+        let proxy = ConnectProxy::bind_routed(
+            vec![(
+                "gw".into(),
+                mapped(a, vec![host("gateway.chan.invalid", &[B_ADDR])]),
+            )],
+            loopback(),
+        )
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        let mut client = send_connect(&proxy, "gateway.chan.invalid:80").await;
+        let head = timeout(Duration::from_secs(5), read_head(&mut client))
+            .await
+            .expect("a mapped dark tunnel is refused before the outer deadline")
+            .unwrap();
+        assert_eq!(status_of(&head), 502);
+        assert!(started.elapsed() >= SESSION_TIMEOUT - TICK);
     }
 
     #[tokio::test]
