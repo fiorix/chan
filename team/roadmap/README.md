@@ -40,6 +40,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one t
 | [the PPA has built nothing since v0.116.0][ppabuild] | accepted | build |
 | [a WireGuard file set after start waits for a restart][wgfabric] | accepted | build |
 | [the sdme build drivers' rootfs checks race their listing][sdmegrep] | accepted | build |
+| [Cmd+C does not copy selected survey text][surveycopy] | raised | build |
 
 [wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
 [wgwrongkey]: v0.125.0/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md
@@ -54,6 +55,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one t
 [ppabuild]: v0.125.0/the-ppa-has-built-no-binaries-since-v0116-because-a-dependency-needs-rust-195.md
 [wgfabric]: v0.125.0/a-wireguard-file-set-after-start-waits-for-a-restart.md
 [sdmegrep]: v0.125.0/the-sdme-build-drivers-rootfs-checks-race-their-own-listing-under-pipefail.md
+[surveycopy]: v0.125.0/cmd-c-does-not-copy-selected-text-in-a-terminal-survey.md
 
 ## Completed
 
