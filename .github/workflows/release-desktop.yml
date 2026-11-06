@@ -446,6 +446,13 @@ jobs:
                   throw "Silent NSIS uninstall left $installedFile installed"
                 }
               }
+              # The uninstall hook deletes the installer's key on every
+              # uninstall that is not an update, and nothing here launched
+              # the desktop, so the key is the hook's one visible effect.
+              $installerKey = "HKCU:\Software\chan\Chan"
+              if (Test-Path -LiteralPath $installerKey) {
+                throw "Silent NSIS uninstall left $installerKey; the uninstall hook did not run"
+              }
               if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
                 Remove-Item -LiteralPath $uninstaller -Force
               }
