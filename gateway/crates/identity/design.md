@@ -8,6 +8,8 @@ Callers: browsers (the SPA, OAuth callbacks, share landings), chan-desktop (disc
 
 identity owns only its own auth artifacts: the `tower_sessions` rows, the `identity_session_index` and the `api_tokens` tables. It does not own user data. The canonical user record, identities and audit live in profile-service and are reached over HTTP; because identity and profile share one Postgres, the PAT queries join the shared `users` table directly. identity never applies schema changes at serve time; migrations are the dedicated `CHAN_GATEWAY_MIGRATIONS=only` step, run by the same binary under the database-owner credential.
 
+The packaged identity database role reads `users` and `devserver_fleet_policy` and has column-level UPDATE only on their `updated_at` fields. PostgreSQL requires UPDATE on at least one column for the PAT mint's user `FOR UPDATE` and fleet `FOR SHARE` locks, which serialize minting with profile's account and admission-policy writes. This also permits identity to assign those timestamps; account state and admission-policy columns remain read-only to identity.
+
 ## Surfaces
 
 Two routers on two listeners. The public listener carries the session layer at its outermost edge; the internal listener never mounts it and never loads caller cookies.

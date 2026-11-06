@@ -38,7 +38,7 @@ case "$1" in
       require_one_line /etc/chan-gateway/profile.env \
         '^EXPECTED_SQLX_MIGRATION=17$' 'release EXPECTED_SQLX_MIGRATION=17 setting'
       require_one_line /etc/chan-gateway/profile.env \
-        '^DATABASE_ROLE_POLICY_VERSION=1$' 'release DATABASE_ROLE_POLICY_VERSION=1 setting'
+        '^DATABASE_ROLE_POLICY_VERSION=2$' 'release DATABASE_ROLE_POLICY_VERSION=2 setting'
     fi
     ;;
 esac

@@ -41,7 +41,7 @@ case "$1" in
       require_one_line /etc/chan-gateway/identity.env \
         '^EXPECTED_SQLX_MIGRATION=17$' 'release EXPECTED_SQLX_MIGRATION=17 setting'
       require_one_line /etc/chan-gateway/identity.env \
-        '^DATABASE_ROLE_POLICY_VERSION=1$' 'release DATABASE_ROLE_POLICY_VERSION=1 setting'
+        '^DATABASE_ROLE_POLICY_VERSION=2$' 'release DATABASE_ROLE_POLICY_VERSION=2 setting'
     fi
     if [ -f /etc/chan-gateway/migrate.env ]; then
       chown root:chan-gateway-migrate /etc/chan-gateway/migrate.env
@@ -59,8 +59,8 @@ case "$1" in
         '^EXPECTED_SQLX_MIGRATION=17$' \
         'release EXPECTED_SQLX_MIGRATION=17 setting'
       require_one_line /etc/chan-gateway/migrate.env \
-        '^DATABASE_ROLE_POLICY_VERSION=1$' \
-        'release DATABASE_ROLE_POLICY_VERSION=1 setting'
+        '^DATABASE_ROLE_POLICY_VERSION=2$' \
+        'release DATABASE_ROLE_POLICY_VERSION=2 setting'
     fi
     ;;
 esac

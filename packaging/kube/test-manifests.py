@@ -318,7 +318,7 @@ latest_migration = max(
     int(path.name.split("_", 1)[0]) for path in (ROOT / "gateway" / "migrations").glob("*.sql")
 )
 assert int(config["EXPECTED_SQLX_MIGRATION"]) == latest_migration
-assert int(config["DATABASE_ROLE_POLICY_VERSION"]) > 0
+assert config["DATABASE_ROLE_POLICY_VERSION"] == "2"
 for name in (
     "BASE_URL",
     "DEVSERVER_PROXY_ORIGIN",

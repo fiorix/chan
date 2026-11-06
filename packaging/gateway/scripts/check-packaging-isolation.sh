@@ -102,7 +102,7 @@ for service in profile identity; do
     assert_contains "$REPO/gateway/crates/$service/packaging/$service.env" \
         "EXPECTED_SQLX_MIGRATION=17"
     assert_contains "$REPO/gateway/crates/$service/packaging/$service.env" \
-        "DATABASE_ROLE_POLICY_VERSION=1"
+        "DATABASE_ROLE_POLICY_VERSION=2"
     if grep -Fq 'postgres://chan:chan@' \
         "$REPO/gateway/crates/$service/packaging/$service.env"; then
         die "$service env still carries the database-owner URL"
@@ -110,7 +110,7 @@ for service in profile identity; do
 done
 assert_contains "$migrate_packaging/migrate.env" "CHAN_GATEWAY_MIGRATIONS=only"
 assert_contains "$migrate_packaging/migrate.env" "EXPECTED_SQLX_MIGRATION=17"
-assert_contains "$migrate_packaging/migrate.env" "DATABASE_ROLE_POLICY_VERSION=1"
+assert_contains "$migrate_packaging/migrate.env" "DATABASE_ROLE_POLICY_VERSION=2"
 assert_contains "$migrate_packaging/postinst" \
     "      chown root:chan-gateway-migrate /etc/chan-gateway/migrate.env"
 assert_contains "$migrate_packaging/postinst" \

@@ -55,7 +55,7 @@ CREATE TABLE tower_sessions.session (
 SQL
 
 export EXPECTED_SQLX_MIGRATION=$latest_migration
-export DATABASE_ROLE_POLICY_VERSION=1
+export DATABASE_ROLE_POLICY_VERSION=2
 
 # An impossible target must fail and leave the durable marker invalid.
 if EXPECTED_SQLX_MIGRATION=$((latest_migration + 1)) \
@@ -75,6 +75,8 @@ BEGIN
         'chan_gateway_identity', 'public.api_tokens', 'SELECT,INSERT,UPDATE'
     ) OR has_table_privilege(
         'chan_gateway_identity', 'public.api_tokens', 'DELETE'
+    ) OR has_table_privilege(
+        'chan_gateway_identity', 'public.users', 'INSERT,UPDATE,DELETE'
     ) OR NOT has_table_privilege(
         'chan_gateway_profile', 'public.users', 'SELECT,INSERT,UPDATE,DELETE'
     ) OR has_table_privilege(
@@ -144,6 +146,99 @@ DATABASE_URL="postgres://chan_gateway_profile:${PROFILE_DATABASE_PASSWORD}@127.0
     | grep -qx "$latest_migration"
 "${profile_psql[@]}" -Atqc 'SELECT count(*) FROM public.users' | grep -qx 0
 
+assert_identity_lock() {
+    local name=$1 sql=$2 expected=$3 result
+    if ! result=$("${identity_psql[@]}" -X -v ON_ERROR_STOP=1 \
+        -v VERBOSITY=verbose -Atqc "$sql" 2>&1); then
+        printf 'FAIL: identity %s\n%s\n' "$name" "$result" >&2
+        return 1
+    fi
+    if [[ $result != "$expected" ]]; then
+        printf 'FAIL: identity %s did not return the seeded row\n' "$name" >&2
+        return 1
+    fi
+    printf 'PASS: identity %s\n' "$name"
+}
+
+assert_identity_update_denied() {
+    local name=$1 sql=$2 result status
+    if result=$("${identity_psql[@]}" -X -v ON_ERROR_STOP=1 \
+        -v VERBOSITY=verbose -Atqc "BEGIN; $sql; ROLLBACK" 2>&1); then
+        printf 'FAIL: identity unexpectedly updated %s\n' "$name" >&2
+        return 1
+    else
+        status=$?
+    fi
+    if ! grep -Eq '^ERROR:[[:space:]]+42501:' <<< "$result"; then
+        printf 'FAIL: identity %s denial was not SQLSTATE 42501 (rc=%s)\n%s\n' \
+            "$name" "$status" "$result" >&2
+        return 1
+    fi
+    printf 'PASS: identity %s update denied with SQLSTATE 42501\n' "$name"
+}
+
+check_identity_mint_permissions() {
+    local failed=0 timestamps before after snapshot_sql
+    # Run both locks even on failure so a missing grant cannot hide its peer.
+    assert_identity_lock 'user FOR UPDATE' \
+        "SELECT id, blocked_at FROM public.users WHERE id = '$test_user_id' FOR UPDATE" \
+        "$test_user_id|" || failed=1
+    assert_identity_lock 'fleet FOR SHARE' \
+        'SELECT admissions_enabled FROM public.devserver_fleet_policy WHERE singleton = true FOR SHARE' \
+        f || failed=1
+    [[ $failed == 0 ]] || return 1
+
+    psql "$DATABASE_URL" --no-password -X -v ON_ERROR_STOP=1 <<'SQL'
+DO $check$
+DECLARE
+    target regclass;
+    column_row record;
+BEGIN
+    FOREACH target IN ARRAY ARRAY['public.users'::regclass, 'public.devserver_fleet_policy'::regclass]
+    LOOP
+        IF has_table_privilege('chan_gateway_identity', target, 'INSERT,UPDATE,DELETE') THEN
+            RAISE EXCEPTION 'identity has table write privileges on %', target;
+        END IF;
+        FOR column_row IN
+            SELECT attname, attnum FROM pg_attribute
+            WHERE attrelid = target AND attnum > 0 AND NOT attisdropped
+        LOOP
+            IF has_column_privilege('chan_gateway_identity', target, column_row.attnum, 'UPDATE')
+                   IS DISTINCT FROM (column_row.attname = 'updated_at')
+               OR has_column_privilege('chan_gateway_identity', target, column_row.attnum, 'INSERT') THEN
+                RAISE EXCEPTION 'identity column write privileges differ on %.%', target, column_row.attname;
+            END IF;
+        END LOOP;
+    END LOOP;
+END
+$check$;
+SQL
+
+    assert_identity_update_denied users.blocked_at \
+        "UPDATE public.users SET blocked_at = now() WHERE id = '$test_user_id'"
+    assert_identity_update_denied devserver_fleet_policy.admissions_enabled \
+        'UPDATE public.devserver_fleet_policy SET admissions_enabled = true WHERE singleton'
+
+    snapshot_sql="SELECT updated_at FROM public.users WHERE id = '$test_user_id';
+        SELECT updated_at FROM public.devserver_fleet_policy WHERE singleton"
+    before=$("${identity_psql[@]}" -X -v ON_ERROR_STOP=1 -Atqc "$snapshot_sql")
+    timestamps=$("${identity_psql[@]}" -X -v ON_ERROR_STOP=1 -Atq \
+        -c 'BEGIN' \
+        -c "UPDATE public.users SET updated_at = '2000-01-01 00:00:00+00'
+            WHERE id = '$test_user_id'
+            RETURNING updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'" \
+        -c "UPDATE public.devserver_fleet_policy SET updated_at = '2000-01-01 00:00:00+00'
+            WHERE singleton
+            RETURNING updated_at = TIMESTAMPTZ '2000-01-01 00:00:00+00'" \
+        -c 'ROLLBACK')
+    [[ $timestamps == $'t\nt' ]] \
+        || { echo 'identity did not update both seeded timestamps' >&2; return 1; }
+    after=$("${identity_psql[@]}" -X -v ON_ERROR_STOP=1 -Atqc "$snapshot_sql")
+    [[ $before == "$after" ]] \
+        || { echo 'identity timestamp updates did not roll back' >&2; return 1; }
+    printf 'PASS: identity timestamp-only UPDATE capability and rollback\n'
+}
+
 test_user_id=00000000-0000-0000-0000-000000000001
 "${profile_psql[@]}" -v ON_ERROR_STOP=1 \
     -c "INSERT INTO public.users (id, email, username) VALUES ('$test_user_id', 'role-test@example.com', 'role-test')" \
@@ -155,6 +250,7 @@ test_user_id=00000000-0000-0000-0000-000000000001
 "${identity_psql[@]}" -Atqc \
     'SELECT admissions_enabled FROM public.devserver_fleet_policy WHERE singleton' \
     | grep -qx f
+check_identity_mint_permissions
 "${identity_psql[@]}" -v ON_ERROR_STOP=1 \
     -c "INSERT INTO public.identity_session_index (user_id, store_id, authenticated_at) VALUES ('$test_user_id', 'role-test-session', now())" \
     -c "UPDATE public.identity_session_index SET authenticated_at = now() WHERE store_id = 'role-test-session'" \
@@ -238,5 +334,15 @@ fi
     'SELECT migration_version FROM public.chan_gateway_deployment_state WHERE singleton') == -1 ]]
 psql "$DATABASE_URL" --no-password -c 'DROP TABLE public.rogue_table' >/dev/null
 "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null
+
+# Reconciliation replaces both missing and over-broad column grants.
+psql "$DATABASE_URL" --no-password -X -v ON_ERROR_STOP=1 <<'SQL'
+REVOKE UPDATE (updated_at) ON public.users, public.devserver_fleet_policy
+    FROM chan_gateway_identity;
+GRANT UPDATE (blocked_at) ON public.users TO chan_gateway_identity;
+GRANT UPDATE (admissions_enabled) ON public.devserver_fleet_policy TO chan_gateway_identity;
+SQL
+"$SCRIPT_DIR/reconcile-database-roles.sh"
+check_identity_mint_permissions
 
 printf 'PASS: exact database-role prepare/reconcile contract\n'

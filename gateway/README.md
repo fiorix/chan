@@ -127,6 +127,8 @@ sudo systemctl enable --now chan-gateway-devserver-control
 sudo systemctl enable --now chan-gateway-devserver-proxy
 ```
 
+The database role policy is version 2 at schema migration 17. Identity can lock the user and fleet-policy rows during PAT minting and can update only their `updated_at` columns; it cannot change account state or admission policy. For an existing deployment, set `DATABASE_ROLE_POLICY_VERSION=2` in `migrate.env`, `identity.env` and `profile.env` and retain `EXPECTED_SQLX_MIGRATION=17` before installing the new packages, because the postinst scripts reject policy version 1; after installation, restart `chan-gateway-migrate` before restarting identity and profile. The migration unit prepares the roles, runs pending schema migrations, and reapplies the exact grants before publishing the ready marker. Restart the migration unit even when no schema migration is pending; its completed oneshot state does not rerun reconciliation by itself.
+
 The binaries listen on loopback by default: identity public `7000`, identity internal `7004`, profile `7001`, control `7003`/`7101`, and proxy `7002`/`7100`. Front only identity `7000` and proxy `7002`/`7100` with TLS. Never publish identity `7004` or either control listener.
 
 A proxy host that terminates kernel WireGuard for enrolled desktops also runs the WireGuard agent, which listens on nothing. Bring the interface up first ([`crates/wireguard-agent/README.md`](crates/wireguard-agent/README.md) shows how), then install the package, which depends on `wireguard-tools`, set `WIREGUARD_AGENT_TOKEN` in `/etc/chan-gateway/wireguard-agent.env` to identity's value along with the host id and interface name (`configure.sh` does both on a host that runs identity too), and start it:
