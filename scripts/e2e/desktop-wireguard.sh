@@ -45,7 +45,8 @@
 #                   and the peer sees a handshake, in the same desktop
 #                   process with the same proxy address.
 #     tenant        the gateway connect answers 409 naming the stand-in's
-#                   discovery 404, its discovery GET and a fetch from the
+#                   discovery 404 and the row's last_error names it too,
+#                   its discovery GET and a fetch from the
 #                   launcher page reach the peer from the desktop's tunnel
 #                   address, and the same fetch, sent before the update, did
 #                   not.
@@ -445,6 +446,19 @@ library_call() {
         ${body:+--data "$body"} "$ORIGIN$path" 2>>"$WORK/curl.err" || echo curl-failed
 }
 
+# Whether the row's last_error, read back through the library's gateway
+# list, names the stand-in's discovery 404: the desktop's reading of an
+# explicit connect's failure is stored on the row, not logged.
+row_names_the_404() {
+    [ "$(library_call GET /api/library/gateways "" "$WORK/gateways.json")" = 200 ] || return 1
+    node -e '
+        const rows = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+        const row = rows.find((r) => r.id === process.argv[2]);
+        const reason = row && row.last_error;
+        process.exit(typeof reason === "string" && reason.includes("gateway discovery returned HTTP 404") ? 0 : 1);
+    ' "$WORK/gateways.json" "$GATEWAY_ID"
+}
+
 STARTED_BEFORE=0
 started_grew() { [ "$(count 'gateway WireGuard tunnel started')" -gt "$STARTED_BEFORE" ]; }
 
@@ -507,12 +521,13 @@ live_adopt_arms() {
     [ "$connect_status" = 409 ] || arm_rc=1
     grep -q 'gateway discovery returned HTTP 404' "$WORK/connect.json" 2>/dev/null || arm_rc=1
     wait_for 60 "the discovery request at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' || arm_rc=1
-    wait_for 30 "the desktop to read the 404" logged 'gateway discovery.*404' || arm_rc=1
+    local row_reason=no
+    if wait_for 30 "the row's last_error to name the discovery 404" row_names_the_404; then row_reason=yes; else arm_rc=1; fi
     launcher_fetch "$PEER_URL/webview-probe" || arm_rc=1
     wait_for 30 "the webview's fetch at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' || arm_rc=1
     if peer_logged 'line=GET /webview-probe-before '; then arm_rc=1; fi
     [ "$control_sent" = yes ] || arm_rc=1
-    verdict tenant "$arm_rc" "connect answered $connect_status (want 409 naming the discovery 404); discovery requests from the tunnel address $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' "$WORK/peer.log" || true) of $(grep -cE '^request: .*GET /\.well-known/chan-gateway' "$WORK/peer.log" || true), desktop read 404 $(count 'gateway discovery.*404'), webview probe $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' "$WORK/peer.log" || true), the probe sent before the file: sent $control_sent, reached the peer $(grep -cE 'line=GET /webview-probe-before ' "$WORK/peer.log" || true) (want sent yes, reached 0)"
+    verdict tenant "$arm_rc" "connect answered $connect_status (want 409 naming the discovery 404); discovery requests from the tunnel address $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' "$WORK/peer.log" || true) of $(grep -cE '^request: .*GET /\.well-known/chan-gateway' "$WORK/peer.log" || true), the row's last_error names the 404: $row_reason, webview probe $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' "$WORK/peer.log" || true), the probe sent before the file: sent $control_sent, reached the peer $(grep -cE 'line=GET /webview-probe-before ' "$WORK/peer.log" || true) (want sent yes, reached 0)"
 
     # retire: clearing the file takes the tunnel out of the running proxy.
     arm_rc=0
