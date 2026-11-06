@@ -74,10 +74,9 @@
 # Everything runs under a throwaway work dir on this host, a per-run
 # directory under the client's TEMP and a per-run work dir on the peer. The
 # client and peer directories are deleted as the run exits; the host one is
-# deleted on success and kept on failure. The kept work dir holds the run's
-# client files with a private key that is worthless once the peer interface
-# is deleted, which the exit path does, but treat it as a credential until
-# it is gone.
+# deleted on success and kept on failure. The client files travel on the
+# ssh channel's stdin, so the private key is not in a command line or a
+# PowerShell script block. The host keeps only redacted copies.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -198,6 +197,14 @@ client_ps() {
     timeout "$secs" ssh -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR "${CLIENT_SSH_OPTS[@]}" "$CLIENT_SSH" -- \
         powershell -NoProfile -NonInteractive -EncodedCommand "$encoded" 2>>"$WORK/client-stderr.log"
 }
+client_ps_data() {
+    # client_ps_data <seconds> <script> < data: run the script as client_ps
+    # does, with data on the ssh channel's stdin rather than in its argv.
+    local secs="$1" encoded
+    encoded="$(printf '%s\n' "$2" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.read().encode("utf-16-le")).decode())')"
+    timeout "$secs" ssh -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR "${CLIENT_SSH_OPTS[@]}" "$CLIENT_SSH" -- \
+        powershell -NoProfile -NonInteractive -EncodedCommand "$encoded" 2>>"$WORK/client-stderr.log"
+}
 strip_cr() { sed -i 's/\r$//' "$1"; }
 
 # Every prerequisite on the peer is probed before anything is created there.
@@ -274,7 +281,7 @@ PEER
     fi
 }
 trap cleanup EXIT
-trap 'log "aborted: the command at line $LINENO failed; work dir kept at $WORK"' ERR
+trap 'log "aborted: the command at line $LINENO failed; work dir kept at $WORK with client files redacted"' ERR
 
 FAILED=0
 verdict() {
@@ -420,29 +427,24 @@ DEBUG_SITES="$(setup_field debug_sites)"
 [ "${DEBUG_SITES:-0}" -gt 0 ] || { log "the peer's wireguard module has no debug messages switched on"; exit 1; }
 log "peer interface $IFACE up at $PEER_CIDR, serving $PEER_IP:$HTTP_PORT, $DEBUG_SITES kernel debug sites on; client public key $CLIENT_PUB"
 
-# 3. The client files: on the client, as UTF-8 without a byte order mark and
-# with LF line endings, the shape `wg genkey` and an editor on the peer
-# produce; and a copy in the work dir, owner-only, for the record.
-client_file_text() {
-    # client_file_text <peer public key> [extra peer lines...]
-    local pub="$1"; shift
-    printf '[Interface]\nPrivateKey = %s\nAddress = %s/32\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\n' \
-        "$CLIENT_KEY" "$CLIENT_IP" "$pub" "$ENDPOINT" "$PEER_NET"
-    for line in "$@"; do printf '%s\n' "$line"; done
-}
+# 3. The client files are UTF-8 without a byte order mark and have LF line
+# endings. Their text travels on the ssh channel's stdin; only redacted
+# copies stay in the host work dir.
 write_client_file() {
     # write_client_file <name> <peer public key> [extra peer lines...]
-    local name="$1"; shift
-    (umask 077; client_file_text "$@" > "$WORK/$name")
-    client_ps 60 <<PS >/dev/null
-\$ErrorActionPreference = 'Stop'
-\$text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(base64 -w0 < "$WORK/$name")'))
-[IO.File]::WriteAllText("$CLIENT_DIR\\$name", \$text, (New-Object Text.UTF8Encoding \$false))
-PS
+    local name="$1" pub="$2" text line; shift 2
+    text="$(printf '[Interface]\nPrivateKey = %s\nAddress = %s/32\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\n' \
+        "$CLIENT_KEY" "$CLIENT_IP" "$pub" "$ENDPOINT" "$PEER_NET"; for line in "$@"; do printf '%s\n' "$line"; done)"
+    printf '%s\n' "$text" | sed 's/^PrivateKey = .*/PrivateKey = (redacted)/' > "$WORK/$name.redacted"
+    printf '%s\n' "$text" | base64 -w0 | client_ps_data 60 "\$ErrorActionPreference = 'Stop'
+\$text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()))
+[IO.File]::WriteAllText('$CLIENT_DIR\\$name', \$text, (New-Object Text.UTF8Encoding \$false))" >/dev/null \
+        || { log "writing $name on the client failed: $(tail -3 "$WORK/client-stderr.log")"; exit 1; }
 }
 write_client_file client.conf "$SERVER_PUB"
 write_client_file client-keepalive.conf "$SERVER_PUB" "PersistentKeepalive = 25"
 write_client_file client-wrong-key.conf "$WRONG_PUB"
+unset CLIENT_KEY SETUP
 
 body_sha() { sed -n "s/^body $2: [0-9]* bytes, sha256 \([0-9a-f]*\)$/\1/p" "$1"; }
 example_status() {
@@ -790,7 +792,7 @@ if runs devserver-wrong-key; then
 fi
 
 if [ "$FAILED" != 0 ]; then
-    log "FAIL: $FAILED arm(s) failed at $SHA; work dir kept at $WORK"
+    log "FAIL: $FAILED arm(s) failed at $SHA; work dir kept at $WORK with client files redacted"
     exit 1
 fi
 log "PASS at $SHA: client $CLIENT_SSH ($CLIENT_OS) against $PEER_SSH ($PEER_KERNEL); work dir $WORK removed"
