@@ -1025,7 +1025,9 @@ fn publish_discovery<R: tauri::Runtime>(
 ) -> Result<Option<GatewayDiscovery>, String> {
     // Read the row's current file before taking the gateway-state lock.
     // An edited config or a retired tunnel must not explain this failure.
-    let tunnel_reason = if matches!(&result, Err(GatewayDiscoveryError::Transport(_))) {
+    // The proxy's no-session 502 is an Other error, but still came from the
+    // tunnel; a live tunnel or absent row returns no WireGuard reason.
+    let tunnel_reason = if result.is_err() {
         let configured = state.store.lock().unwrap().get().ok().and_then(|config| {
             config
                 .gateways
@@ -5178,6 +5180,39 @@ pub(crate) mod tests {
             "gw-changed",
             fixed_status(chan_wireguard::HandshakeState::Never),
         );
+        let attempt = begin_connect(&state, "gw-changed")
+            .unwrap()
+            .unwrap()
+            .attempt;
+        let proxy_error = publish_discovery(
+            app.handle(),
+            &state,
+            "gw-changed",
+            "test",
+            &attempt,
+            Err(GatewayDiscoveryError::Other(
+                "gateway discovery returned HTTP 502 Bad Gateway".into(),
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            proxy_error.starts_with("gateway discovery failed: no WireGuard handshake with the peer at 192.0.2.1:51820 since the tunnel started "),
+            "{proxy_error}"
+        );
+        assert!(proxy_error.contains(&named.display().to_string()));
+        assert!(proxy_error.contains("check PublicKey"));
+        assert_eq!(
+            state
+                .gateway_manager
+                .view("gw-changed")
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some(proxy_error.as_str())
+        );
+
+        // Without a running tunnel, an HTTP error keeps its own text.
+        assert!(fabric.retire("gw-changed"));
         let attempt = begin_connect(&state, "gw-changed")
             .unwrap()
             .unwrap()

@@ -1746,6 +1746,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_session_keeps_a_pending_connect_past_the_session_deadline() {
+        const THIRD_ADDR: &str = "10.7.0.3";
+        let a_key = StaticSecret::random_from_rng(OsRng);
+        let b_key = StaticSecret::random_from_rng(OsRng);
+        let a_pub = PublicKey::from(&a_key);
+        let b_pub = PublicKey::from(&b_key);
+        let a_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let b_udp = UdpSocket::bind(loopback()).await.unwrap();
+        let a_at = a_udp.local_addr().unwrap();
+        let b_at = b_udp.local_addr().unwrap();
+        let mut a_config = config(a_key, b_pub, A_ADDR, B_ADDR, b_at);
+        a_config.peer.allowed_ips.push(cidr(THIRD_ADDR));
+        let a = Tunnel::start_on(a_config, a_udp, b_at).unwrap();
+        let status = a.clone();
+        let proxy = ConnectProxy::bind(vec![a], loopback()).await.unwrap();
+        let delayed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Tunnel::start_on(config(b_key, a_pub, B_ADDR, A_ADDR, a_at), b_udp, a_at).unwrap()
+        });
+        let mut client = send_connect(&proxy, &format!("{THIRD_ADDR}:80")).await;
+        let b = delayed.await.unwrap();
+        // B discards a SYN for an address it does not own. Its handshake
+        // still completes, so the second status read must keep this TCP
+        // connect pending under the outer deadline.
+        assert!(
+            timeout(Duration::from_millis(4500), read_head(&mut client))
+                .await
+                .is_err(),
+            "a live tunnel must not be refused at the session deadline"
+        );
+        assert!(matches!(
+            status.status().handshake,
+            crate::HandshakeState::Live(_)
+        ));
+        drop(client);
+        drop(b);
+    }
+
+    #[tokio::test]
     async fn a_lost_session_is_refused_after_three_seconds() {
         let events = ProxyEvents::default();
         let dispatch = tracing::Dispatch::new(events.clone());
@@ -1848,12 +1887,14 @@ mod tests {
         )
         .await
         .unwrap();
+        let started = std::time::Instant::now();
         let mut client = send_connect(&proxy, "gateway.chan.invalid:80").await;
         let head = timeout(Duration::from_secs(5), read_head(&mut client))
             .await
             .expect("a mapped dark tunnel is refused before the outer deadline")
             .unwrap();
         assert_eq!(status_of(&head), 502);
+        assert!(started.elapsed() >= SESSION_TIMEOUT - TICK);
     }
 
     #[tokio::test]
