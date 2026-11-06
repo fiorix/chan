@@ -165,6 +165,10 @@ GRANT SELECT ON
     public.users, public.api_tokens, public.api_token_audit,
     public.devserver_fleet_policy, public.devserver_user_policies
     TO chan_gateway_identity;
+-- Row locks require UPDATE on at least one column. These grants also permit
+-- timestamp writes, while account state and admission policy remain read-only.
+GRANT UPDATE (updated_at) ON public.users, public.devserver_fleet_policy
+    TO chan_gateway_identity;
 GRANT INSERT, UPDATE ON public.api_tokens TO chan_gateway_identity;
 GRANT INSERT ON public.api_token_audit TO chan_gateway_identity;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.identity_session_index
