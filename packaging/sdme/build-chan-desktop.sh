@@ -79,8 +79,9 @@ fi
 #    rebuild with REBUILD_ROOTFS=1 (an existing rootfs is NOT auto-rebuilt on a
 #    template change, so a dep added to the .sdme would otherwise be silently
 #    missing from the container).
+# Read to EOF to avoid SIGPIPE; a failed listing still triggers a rebuild.
 if [ "${REBUILD_ROOTFS:-0}" = "1" ] \
-    || ! $SDME fs ls 2>/dev/null | grep -qE "^${ROOTFS}[[:space:]]"; then
+    || ! $SDME fs ls 2>/dev/null | grep -E "^${ROOTFS}[[:space:]]" >/dev/null; then
     echo "==> building rootfs ${ROOTFS}"
     # A container holding this rootfs blocks the rebuild; drop it first (it is
     # recreated below regardless).

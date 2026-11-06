@@ -62,7 +62,16 @@ state="${STUB_STATE:?}"
 case "$SDME_STUB_COMMAND" in
     fs)
         case "${SDME_STUB_PAYLOAD[*]}" in
-            'ls') printf 'ubuntu ready\nchan-desktop-ubuntu ready\ngateway-build ready\n' ;;
+            'ls')
+                if [ "${STUB_LONG_ROOTFS_LIST:-0}" = 1 ]; then
+                    printf 'chan-desktop-ubuntu ready\n'
+                    # The tail exceeds pipe capacity after an early match.
+                    seq -f 'unused-rootfs-%g ready' 1 100000
+                else
+                    printf 'ubuntu ready\nchan-desktop-ubuntu ready\ngateway-build ready\n'
+                fi
+                exit "${STUB_FS_LIST_EXIT:-0}"
+                ;;
             *) printf 'stub sdme: unsupported fs call\n' >&2; exit 2 ;;
         esac
         ;;
@@ -176,6 +185,21 @@ run_one_limit() {
         SDME="$bin/sdme --config $work/sdme.conf" "SDME_BUILD_${key}_CPUS=1.5" \
         OUT_DIR="$work/one-limit-out" REBUILD_CONTAINER=0 REBUILD_ROOTFS=0 "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
+
+if [ "$kind" = desktop ]; then
+    run_one_limit "SDME_BUILD_${key}_MEMORY=" "SDME_BUILD_${key}_JOBS=" \
+        "SDME_BUILD_${key}_TIMEOUT=" STUB_FS_LIST_EXIT=23
+    assert_status 2 "$status" 'failed rootfs listing takes the rebuild path'
+    assert_line '==> building rootfs chan-desktop-ubuntu' "$state/driver.log" 'failed listing rebuilds the rootfs even after a match'
+    assert_line 'stub sdme: unsupported fs call' "$state/driver.log" 'failed listing reaches the rootfs build'
+    [ ! -e "$state/build-args" ] || { printf 'not ok - build ran after failed rootfs rebuild\n' >&2; exit 1; }
+
+    run_one_limit "SDME_BUILD_${key}_MEMORY=" "SDME_BUILD_${key}_JOBS=" \
+        "SDME_BUILD_${key}_TIMEOUT=" STUB_LONG_ROOTFS_LIST=1
+    assert_status 0 "$status" 'running guest with one limit and a long rootfs listing succeeds'
+    [ ! -e "$state/create-args" ] || { printf 'not ok - long rootfs listing recreated a running guest\n' >&2; exit 1; }
+    assert_exact_set --disk 44G --cpus 1.5
+fi
 
 run_driver absent OUT_DIR="$work/out"
 assert_status 0 "$status" 'configured build succeeds'
