@@ -1,6 +1,6 @@
 # Cmd+C does not copy selected text in a terminal survey
 
-Status: raised by the owner on 2026-11-06, with a request to investigate and file if confirmed; confirmed in the JavaScript event path against `720b543c0` and the v0.125.0 integration snapshot `daf8a60e6`; not started. Native macOS clipboard validation remains open.
+Status: raised by the owner on 2026-11-06, with a request to investigate and file if confirmed; confirmed in the JavaScript event path against `720b543c0` and the v0.125.0 integration snapshot `daf8a60e6`; built for v0.125.0. Native macOS clipboard validation remains open.
 
 ## What is there now
 
@@ -38,3 +38,11 @@ Make terminal copy routing respect DOM selection and editable descendant ownersh
 3. Survey option keys, F, X and Escape retain their behavior. Scope Ctrl+Shift+C coverage to the terminal-root ownership problem and preserve ordinary browser text-copy behavior on non-macOS clients.
 4. In chan-desktop on macOS, select survey text, press Cmd+C, and verify the pasted result in another application with each terminal backend. Repeat with old terminal output selected, and check Edit > Copy separately. Record browser and native results distinctly.
 5. Run `make web-check` for the implementation and record the macOS smoke result separately from the automated checks.
+
+## Built
+
+- The accepted menu Escape fix was merged as `25eaa9b14` before the survey copy change. `fix(workspace-app): copy the selection that owns the key under a terminal survey` (this commit) leaves native copy to an editable descendant or a noncollapsed DOM selection inside the terminal root but outside its renderer host; renderer-owned Cmd+C and Ctrl+Shift+C still copy only the renderer selection through the existing backend handler. The design paragraph records the ownership rule. No survey protocol, CLI grammar, dependency manifest or lockfile changed.
+- Mounted tests were red first against the merged base: a per-terminal survey with no renderer selection canceled native Cmd+C, one with a stale renderer selection wrote that old terminal text, and the selected find input's Cmd+C was canceled (3 failed, 28 passed). The window-wide survey control and renderer copy controls passed there. The final focused survey, clipboard and survey-store suites passed 65/65, covering macOS Cmd+C and non-macOS Ctrl+Shift+C, exact-once renderer copy, empty renderer selection, no PTY input, and the option, F, X and Escape survey keys.
+- Negative controls were restored after capture: forcing the wrong renderer selection made both renderer copy chords and the empty-selection test fail (3 failed); bypassing the survey card's unmodified key handler made its mounted option, F, X and Escape tests fail (4 failed). The final source contains neither mutation.
+- The clean merge commit passed `taskset -c 0-7 make web-check`: shared 243/243, launcher 763/763, workspace 8581/8581 and profile 20/20, with clean Svelte checks and production builds. The implementation code passed the same committed-state gate on its third unchanged run: 243/243, 763/763, 8594/8594 and 20/20, clean checks and builds. Its first full run aborted during workspace Vitest without a suite summary under host load; its second timed out starting three unrelated launcher workers, which then passed alone 24/24. The final row-only amendment followed the green code gate.
+- The owner's macOS check remains separate: select and copy survey text with each terminal backend, repeat with stale terminal output selected, paste into another application, then check Edit > Copy independently. No browser or native clipboard verdict is inferred from the mounted tests.

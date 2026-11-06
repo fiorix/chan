@@ -2915,16 +2915,32 @@
     return handleTerminalMetaKey(e, sendUserInput, tab.keyboardProtocol);
   }
 
+  function descendantOwnsCopy(e: KeyboardEvent): boolean {
+    const target = e.target;
+    const root = e.currentTarget;
+    if (!(target instanceof Element) || !(root instanceof Element)) return false;
+    const renderer = root.querySelector(".terminal-host");
+    if (target.closest(".terminal-host")) return false;
+    if (target.closest("input, textarea, select, [contenteditable]")) return true;
+    const selection = root.ownerDocument.getSelection();
+    const anchor = selection?.anchorNode;
+    const focus = selection?.focusNode;
+    return Boolean(
+      selection && !selection.isCollapsed && anchor && focus &&
+      root.contains(anchor) && root.contains(focus) &&
+      !renderer?.contains(anchor) && !renderer?.contains(focus)
+    );
+  }
+
   function onShellKeydown(e: KeyboardEvent): void {
     if (closeExitedTabFromKey(e)) {
       return;
     }
-    // The terminal claims the copy chord whether or not its renderer has
-    // focus, and this is the dispatch point that sees it when it does not:
-    // a chord raised on the component root never reaches the renderer's
-    // custom handler. A focused renderer handles it there and stops it
-    // before it arrives here, so it is acted on exactly once either way.
+    // The renderer's custom handler stops its own copy chord before it gets
+    // here. The root claims a copy only when a descendant has no editable
+    // field or DOM selection to hand to the browser's native copy path.
     if (isTerminalCopyChord(e, currentOS())) {
+      if (descendantOwnsCopy(e)) return;
       e.preventDefault();
       e.stopPropagation();
       void copySelectionToClipboard();
