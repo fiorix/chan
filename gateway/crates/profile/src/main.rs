@@ -76,6 +76,7 @@ async fn run() -> anyhow::Result<()> {
             pool,
             auth_token: cfg.auth_token.clone(),
             admin_token: cfg.admin_token.clone(),
+            wireguard: cfg.wireguard.clone(),
         },
         cfg.workspace_admin.clone(),
         cfg.devserver_retention,

@@ -66,6 +66,7 @@ pub struct AppState {
     /// route 401, which is the safe default if the env var was
     /// forgotten on a fresh deploy.
     pub admin_token: Option<String>,
+    pub wireguard: crate::wireguard::Config,
 }
 
 /// How long shutdown waits for the background workers to finish the pass
@@ -79,9 +80,9 @@ pub struct AppState {
 pub const WORKER_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Run profile-service on `listener` until `shutdown` resolves. The durable
-/// revocation worker and, when `sweeper_retention` is set, the registry
-/// sweeper start with the service and share its pool; once the HTTP server
-/// has drained, both are told to stop and joined, and aborted if they are
+/// revocation worker and the peer/registry sweeper start with the service
+/// and share its pool; once the HTTP server has drained, both are told
+/// to stop and joined, and aborted if they are
 /// still running after [`WORKER_DRAIN`].
 pub async fn serve(
     listener: tokio::net::TcpListener,
@@ -97,14 +98,13 @@ pub async fn serve(
         control.clone(),
         stopped.clone(),
     ));
-    if let Some(retention) = sweeper_retention {
-        workers.spawn(crate::sweeper::run(
-            state.pool.clone(),
-            control,
-            retention,
-            stopped,
-        ));
-    }
+    workers.spawn(crate::sweeper::run(
+        state.pool.clone(),
+        control,
+        sweeper_retention,
+        state.wireguard.release_grace,
+        stopped,
+    ));
 
     let served = axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown)
@@ -179,6 +179,11 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/users/{id}/grants/claim", post(claim_grants))
         .route("/v1/users/{id}/flags", get(get_user_flags))
         .route("/v1/auth-audit", post(write_auth_audit))
+        .route(
+            "/v1/users/{id}/wireguard/peers",
+            post(crate::wireguard::enroll),
+        )
+        .route("/v1/wireguard/peers", get(crate::wireguard::list))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
 
     let admin = Router::new()

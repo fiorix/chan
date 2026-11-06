@@ -1,4 +1,4 @@
-//! Devserver registry sweeper.
+//! Devserver registry and denied WireGuard peer sweeper.
 //!
 //! Identity registers one `devservers` row per tunnel-scope PAT (the
 //! devserver id is the SHA-256 of the raw token), and revoking or
@@ -10,7 +10,7 @@
 //! where offline age is `now() - COALESCE(last_seen_at, created_at)`.
 //!
 //! Fail-safe rule (load-bearing, test-pinned): a tick that cannot
-//! fetch the live-tunnel snapshot marks and deletes NOTHING. Marking
+//! fetch the live-tunnel snapshot changes no devserver rows. Marking
 //! runs strictly before deletion inside a tick, so rows only age
 //! toward deletion while ticks are succeeding -- a devserver-control
 //! outage longer than the retention cannot wipe a live registry.
@@ -33,7 +33,7 @@
 //! aggregate, so registrations on every connected proxy count as live.
 //!
 //! `http::serve` starts the loop with the service and stops and joins it
-//! at shutdown. A sweep is two statements, mark then delete, so a process
+//! at shutdown. A devserver sweep is two statements, mark then delete, so a process
 //! that dies between or during them leaves at most a mark without its
 //! delete, which the next tick repeats.
 
@@ -109,14 +109,16 @@ pub async fn sweep_once(
     })
 }
 
-/// Sweep loop: one tick per minute, the first at once, each tick gated on a
-/// SUCCESSFUL `list_all_tunnels` fetch; any fetch error skips the whole
-/// tick. The loop returns when `stop` turns true or its sender is dropped,
+/// Sweep loop: one tick per minute, the first at once. Peer release reads
+/// durable denial state independently of the optional devserver sweep,
+/// whose writes require a successful `list_all_tunnels` fetch.
+/// The loop returns when `stop` turns true or its sender is dropped,
 /// read between ticks so a sweep in flight finishes first.
 pub async fn run(
     pool: PgPool,
     admin: DevserverControlClient,
-    retention: Duration,
+    retention: Option<Duration>,
+    wireguard_grace: Duration,
     mut stop: watch::Receiver<bool>,
 ) {
     const TICK: Duration = Duration::from_secs(60);
@@ -128,6 +130,16 @@ pub async fn run(
             _ = stop.wait_for(|stopped| *stopped) => break,
             _ = interval.tick() => {}
         }
+        match crate::wireguard::release_once(&pool, wireguard_grace).await {
+            Ok(released) if released > 0 => {
+                tracing::info!(released, "wireguard sweep released denied peers")
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "wireguard peer release failed"),
+        }
+        let Some(retention) = retention else {
+            continue;
+        };
         let snapshot = match admin.list_all_tunnels().await {
             Ok(tunnels) => tunnels,
             Err(err) => {

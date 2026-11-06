@@ -110,6 +110,17 @@ BEGIN
         'SELECT,INSERT,UPDATE'
     ) OR has_table_privilege(
         'chan_gateway_profile', 'public.devserver_user_policies', 'DELETE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_profile', 'public.wireguard_peers', 'SELECT'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_profile', 'public.wireguard_peers', 'INSERT'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_profile', 'public.wireguard_peers', 'UPDATE'
+    ) OR NOT has_table_privilege(
+        'chan_gateway_profile', 'public.wireguard_peers', 'DELETE'
+    ) OR has_table_privilege(
+        'chan_gateway_identity', 'public.wireguard_peers',
+        'SELECT,INSERT,UPDATE,DELETE'
     ) OR has_table_privilege(
         'chan_gateway_profile', 'public.identity_session_index',
         'SELECT,INSERT,UPDATE,DELETE'
@@ -148,6 +159,22 @@ test_user_id=00000000-0000-0000-0000-000000000001
     -c "INSERT INTO public.identity_session_index (user_id, store_id, authenticated_at) VALUES ('$test_user_id', 'role-test-session', now())" \
     -c "UPDATE public.identity_session_index SET authenticated_at = now() WHERE store_id = 'role-test-session'" \
     -c "DELETE FROM public.identity_session_index WHERE store_id = 'role-test-session'"
+
+test_token_id=00000000-0000-0000-0000-000000000002
+"${identity_psql[@]}" -v ON_ERROR_STOP=1 \
+    -c "INSERT INTO public.api_tokens (id, user_id, label, token_hash) VALUES ('$test_token_id', '$test_user_id', 'wireguard', 'role-test-token-digest')"
+"${profile_psql[@]}" -v ON_ERROR_STOP=1 \
+    -c "INSERT INTO public.wireguard_peers (user_id, token_id, host, public_key, address_v4) VALUES ('$test_user_id', '$test_token_id', 'p1', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', '10.7.0.2')" \
+    -c "UPDATE public.wireguard_peers SET address_v4 = '10.7.0.3' WHERE token_id = '$test_token_id'"
+"${profile_psql[@]}" -Atqc \
+    "SELECT address_v4 FROM public.wireguard_peers WHERE token_id = '$test_token_id'" \
+    | grep -qx '10.7.0.3'
+"${profile_psql[@]}" -v ON_ERROR_STOP=1 \
+    -c "DELETE FROM public.wireguard_peers WHERE token_id = '$test_token_id'"
+if "${identity_psql[@]}" -c 'SELECT * FROM public.wireguard_peers' >/dev/null 2>&1; then
+    echo 'identity role unexpectedly read profile-only WireGuard peers' >&2
+    exit 1
+fi
 
 if "${identity_psql[@]}" -c 'CREATE TABLE public.forbidden (id int)' >/dev/null 2>&1; then
     echo "identity role unexpectedly created a table" >&2

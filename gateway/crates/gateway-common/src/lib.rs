@@ -20,6 +20,8 @@
 //!     thin trait-level adapter.
 //!   * `validators`: username shape validation and the lifetime
 //!     rename cap, shared by identity, profile, and devserver-proxy.
+//!   * `wireguard`: enrollment key and host validation, peer response
+//!     types and conditional-list responses shared by identity and profile.
 //!   * `devserver_control_client`: typed HTTP client for
 //!     devserver-control's `/admin/v1/*` tree. Used by identity-service
 //!     (on revoke / delete / dashboard reads) and profile-service (on
@@ -41,5 +43,6 @@ pub mod shutdown;
 pub mod static_files;
 pub mod token_bucket;
 pub mod validators;
+pub mod wireguard;
 
 pub use shutdown::shutdown_signal;

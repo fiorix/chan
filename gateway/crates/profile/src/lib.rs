@@ -14,6 +14,7 @@ pub mod http;
 pub mod models;
 pub mod revocation;
 pub mod sweeper;
+pub mod wireguard;
 
 pub use config::Config;
 pub use error::{Error, Result};

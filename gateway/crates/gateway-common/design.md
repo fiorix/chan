@@ -35,6 +35,7 @@ The module contracts:
 - `internal_transport`: the repository-wide rule for internal listeners and URLs: HTTPS always, cleartext only to a loopback literal or under the explicitly declared protected overlay.
 - `token_bucket`: a bounded per-fingerprint bucket shared by both PAT-validation throttles. A new fingerprint begins with one token rather than a full burst, so a cold brute-force attempt gets no head start.
 - `validators`: the canonical username shape and the lifetime rename cap, shared by identity and profile.
+- `wireguard`: canonical public-key and ingress-host validation, enrollment response types and the active peer list. The profile client's conditional peer-list response retains the original bytes and ETag so a relay preserves the validator's meaning.
 - `static_files`: the generic embedded-SPA fallback used by identity.
 - `shutdown`: the common SIGTERM and Ctrl-C graceful-shutdown future.
 

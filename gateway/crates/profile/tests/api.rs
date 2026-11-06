@@ -52,6 +52,7 @@ impl TestApp {
             pool: self.pool.clone(),
             auth_token: TOKEN.to_string(),
             admin_token: Some(ADMIN_TOKEN.to_string()),
+            wireguard: profile::wireguard::Config::default(),
         }
     }
 
@@ -111,6 +112,583 @@ impl TestApp {
         };
         (status, json)
     }
+}
+
+async fn wireguard_app(v4: &str, v6: Option<&str>, reserved: Option<&str>) -> TestApp {
+    let mut app = TestApp::new().await;
+    let mut state = app.state();
+    state.wireguard = profile::wireguard::Config::parse(Some(v4), v6, reserved, None).unwrap();
+    app.router = profile::http::app(state);
+    app
+}
+
+fn wireguard_key(index: u8) -> String {
+    format!("{}{}=", char::from(b'A' + index), "A".repeat(42))
+}
+
+async fn enroll_peer(app: &TestApp, owner: &str, index: u8, host: &str) -> (StatusCode, Value) {
+    let token = insert_api_token(&app.pool, owner.parse().unwrap(), &format!("peer-{index}")).await;
+    app.req(
+        Method::POST,
+        &format!("/v1/users/{owner}/wireguard/peers"),
+        Some(json!({"token_id": token, "public_key": wireguard_key(index), "host": host})),
+    )
+    .await
+}
+
+async fn peer_list(app: &TestApp, host: &str, etag: Option<&str>) -> (StatusCode, String, Vec<u8>) {
+    let mut request = Request::builder()
+        .uri(format!("/v1/wireguard/peers?host={host}"))
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"));
+    if let Some(etag) = etag {
+        request = request.header(header::IF_NONE_MATCH, etag);
+    }
+    let response = app
+        .router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, etag, body)
+}
+
+#[tokio::test]
+async fn wireguard_enroll_allocates_moves_and_refuses() {
+    let app = wireguard_app("10.7.0.0/24", Some("fd00:7::/64"), None).await;
+    let owner = mk_user(&app, "wireguard@example.com").await;
+    let owner_id: Uuid = owner.parse().unwrap();
+    let token = insert_api_token(&app.pool, owner_id, "wireguard").await;
+    let key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    let (status, row) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/wireguard/peers"),
+            Some(json!({"token_id": token, "public_key": key, "host": "p1"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_eq!(row["addresses"], json!(["10.7.0.2/32", "fd00:7::2/128"]));
+    let replacement = insert_api_token(&app.pool, owner_id, "wireguard-replacement").await;
+    let (status, moved) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/wireguard/peers"),
+            Some(json!({"token_id": replacement, "public_key": key, "host": "p1"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["id"], row["id"]);
+    assert_eq!(moved["addresses"], row["addresses"]);
+    assert_eq!(moved["token_id"], replacement.to_string());
+    let stranger = mk_user(&app, "wireguard-stranger@example.com").await;
+    let stranger_token = insert_api_token(&app.pool, stranger.parse().unwrap(), "stranger").await;
+    let (status, error) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{stranger}/wireguard/peers"),
+            Some(json!({"token_id": stranger_token, "public_key": key, "host": "p1"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"], "wireguard key in use");
+    let rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT token_id, action FROM api_token_audit WHERE action = 'wireguard_enrolled' ORDER BY id")
+        .fetch_all(&app.pool).await.unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (token, "wireguard_enrolled".into()),
+            (replacement, "wireguard_enrolled".into())
+        ]
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_pool_exhaustion_is_409() {
+    let app = wireguard_app("10.7.0.0/30", None, None).await;
+    let owner = mk_user(&app, "pool@example.com").await;
+    let (status, first) = enroll_peer(&app, &owner, 0, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["addresses"], json!(["10.7.0.2/32"]));
+    let (status, error) = enroll_peer(&app, &owner, 1, "p1").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"], "wireguard pool exhausted");
+    let (status, other_host) = enroll_peer(&app, &owner, 2, "p2").await;
+    assert_eq!(status, StatusCode::CREATED, "{other_host}");
+    assert_eq!(other_host["addresses"], first["addresses"]);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_pool_skips_reserved_and_serializes_concurrent_enrollments() {
+    let app = wireguard_app(
+        "10.7.0.0/29",
+        Some("fd00:7::/125"),
+        Some("10.7.0.2,10.7.0.4,fd00:7::2,fd00:7::4"),
+    )
+    .await;
+    let owner = mk_user(&app, "parallel-a@example.com").await;
+    let other = mk_user(&app, "parallel-b@example.com").await;
+    let (a, b) = tokio::join!(
+        enroll_peer(&app, &owner, 0, "p1"),
+        enroll_peer(&app, &other, 1, "p1")
+    );
+    assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
+    assert_eq!(b.0, StatusCode::CREATED, "{}", b.1);
+    let mut actual = vec![a.1["addresses"].clone(), b.1["addresses"].clone()];
+    actual.sort_by_key(ToString::to_string);
+    assert_eq!(
+        actual,
+        vec![
+            json!(["10.7.0.3/32", "fd00:7::3/128"]),
+            json!(["10.7.0.5/32", "fd00:7::5/128"])
+        ]
+    );
+    let (status, last) = enroll_peer(&app, &owner, 2, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{last}");
+    assert_eq!(last["addresses"], json!(["10.7.0.6/32", "fd00:7::6/128"]));
+    assert_eq!(
+        enroll_peer(&app, &owner, 3, "p1").await.0,
+        StatusCode::CONFLICT
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_enrollment_validates_owner_key_host_and_pool() {
+    let app = wireguard_app("10.7.0.0/24", None, None).await;
+    let owner = mk_user(&app, "validation@example.com").await;
+    let token = insert_api_token(&app.pool, owner.parse().unwrap(), "validation").await;
+    let path = format!("/v1/users/{owner}/wireguard/peers");
+    for (key, host) in [
+        ("bad".to_string(), "p1"),
+        (wireguard_key(0), "P1"),
+        (wireguard_key(0), "bad.host"),
+    ] {
+        assert_eq!(
+            app.req(
+                Method::POST,
+                &path,
+                Some(json!({"token_id":token, "public_key":key, "host":host}))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let body = json!({"token_id":token, "public_key":wireguard_key(0), "host":"p1"});
+    assert_eq!(
+        app.req_as("wrong", Method::POST, &path, Some(body.clone()))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.req_as("wrong", Method::GET, "/v1/wireguard/peers?host=p1", None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let stranger = mk_user(&app, "validation-stranger@example.com").await;
+    for user in [stranger, Uuid::new_v4().to_string()] {
+        assert_eq!(
+            app.req(
+                Method::POST,
+                &format!("/v1/users/{user}/wireguard/peers"),
+                Some(body.clone())
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let unknown = json!({"token_id":Uuid::new_v4(), "public_key":wireguard_key(0), "host":"p1"});
+    assert_eq!(
+        app.req(Method::POST, &path, Some(unknown)).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.req(Method::GET, "/v1/wireguard/peers?host=Bad", None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let unconfigured = profile::http::app(app.state());
+    let response = unconfigured
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["error"], "wireguard pool not configured");
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_peers_list_drops_revoked_expired_and_blocked() {
+    let app = wireguard_app("10.7.0.0/24", Some("fd00:7::/64"), None).await;
+    let mut enrolled = Vec::new();
+    for i in 0..4 {
+        let owner = mk_user(&app, &format!("active-{i}@example.com")).await;
+        let (status, row) = enroll_peer(&app, &owner, 3 - i, "p1").await;
+        assert_eq!(status, StatusCode::CREATED, "{row}");
+        enrolled.push(row);
+    }
+    let (status, original_etag, body) = peer_list(&app, "p1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let list: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(list["host"], "p1");
+    let expected: Vec<Value> = enrolled
+        .iter()
+        .rev()
+        .map(|row| json!({"public_key":row["public_key"], "allowed_ips":row["addresses"]}))
+        .collect();
+    assert_eq!(list["peers"], json!(expected));
+    let (status, etag, empty) = peer_list(&app, "p1", Some(&original_etag)).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert_eq!(etag, original_etag);
+    assert!(empty.is_empty());
+    let mut previous_etag = original_etag;
+    for (i, row) in enrolled.iter().take(3).enumerate() {
+        let token: Uuid = row["token_id"].as_str().unwrap().parse().unwrap();
+        let user: Uuid = row["user_id"].as_str().unwrap().parse().unwrap();
+        match i {
+            0 => {
+                sqlx::query("UPDATE api_tokens SET revoked_at = now() WHERE id = $1")
+                    .bind(token)
+                    .execute(&app.pool)
+                    .await
+                    .unwrap();
+            }
+            1 => {
+                sqlx::query(
+                    "UPDATE api_tokens SET expires_at = now() - interval '1 second' WHERE id = $1",
+                )
+                .bind(token)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+            }
+            _ => {
+                sqlx::query("UPDATE users SET blocked_at = now() WHERE id = $1")
+                    .bind(user)
+                    .execute(&app.pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        let (status, etag, body) = peer_list(&app, "p1", Some(&previous_etag)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(etag, previous_etag);
+        let list: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(list["peers"].as_array().unwrap().len(), 3 - i);
+        assert!(!list["peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|peer| peer["public_key"] == row["public_key"]));
+        previous_etag = etag;
+    }
+    let (_, _, body) = peer_list(&app, "unknown", None).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"host":"unknown", "peers":[]})
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_release_frees_an_address_only_after_the_grace() {
+    let app = wireguard_app("10.7.0.0/30", None, None).await;
+    let owner = mk_user(&app, "release@example.com").await;
+    let (status, row) = enroll_peer(&app, &owner, 0, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let token: Uuid = row["token_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("UPDATE wireguard_peers SET updated_at = now() - interval '1 day'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET revoked_at = now() WHERE id = $1")
+        .bind(token)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let grace = std::time::Duration::from_secs(300);
+    assert_eq!(
+        profile::wireguard::release_once(&app.pool, grace)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        enroll_peer(&app, &owner, 1, "p1").await.0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE api_tokens SET revoked_at = now() - interval '6 minutes' WHERE id = $1")
+        .bind(token)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        profile::wireguard::release_once(&app.pool, grace)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        profile::wireguard::release_once(&app.pool, grace)
+            .await
+            .unwrap(),
+        0
+    );
+    let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM api_token_audit WHERE token_id = $1 AND action = 'wireguard_released'").bind(token).fetch_one(&app.pool).await.unwrap();
+    assert_eq!(audits, 1);
+    let (status, replacement) = enroll_peer(&app, &owner, 2, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{replacement}");
+    assert_eq!(replacement["addresses"], row["addresses"]);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_release_preserves_an_active_peer_older_than_the_grace() {
+    let app = wireguard_app("10.7.0.0/30", None, None).await;
+    let owner = mk_user(&app, "active-old-peer@example.com").await;
+    let (status, row) = enroll_peer(&app, &owner, 0, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    let token: Uuid = row["token_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query(
+        "UPDATE wireguard_peers SET updated_at = now() - interval '1 day' WHERE token_id = $1",
+    )
+    .bind(token)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        profile::wireguard::release_once(&app.pool, std::time::Duration::from_secs(300))
+            .await
+            .unwrap(),
+        0
+    );
+    let address: String =
+        sqlx::query_scalar("SELECT address_v4 FROM wireguard_peers WHERE token_id = $1")
+            .bind(token)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(format!("{address}/32"), row["addresses"][0]);
+    let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM api_token_audit WHERE token_id = $1 AND action = 'wireguard_released'")
+        .bind(token)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(audits, 0);
+    assert_eq!(
+        enroll_peer(&app, &owner, 1, "p1").await.0,
+        StatusCode::CONFLICT
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_release_uses_each_denial_and_preserves_recent_enrollment() {
+    let app = wireguard_app("10.7.0.0/24", None, None).await;
+    let mut rows = Vec::new();
+    for i in 0..4 {
+        let owner = mk_user(&app, &format!("release-{i}@example.com")).await;
+        let (status, row) = enroll_peer(&app, &owner, i, "p1").await;
+        assert_eq!(status, StatusCode::CREATED, "{row}");
+        rows.push(row);
+    }
+    sqlx::query("UPDATE wireguard_peers SET updated_at = now() - interval '1 day'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let token = |i: usize| {
+        rows[i]["token_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap()
+    };
+    let user = rows[1]["user_id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET expires_at = now() - interval '6 minutes' WHERE id = $1")
+        .bind(token(0))
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET blocked_at = now() - interval '6 minutes' WHERE id = $1")
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE api_tokens SET expires_at = now() - interval '6 minutes', revoked_at = now() WHERE id = $1").bind(token(2)).execute(&app.pool).await.unwrap();
+    sqlx::query("UPDATE api_tokens SET revoked_at = now() - interval '6 minutes' WHERE id = $1")
+        .bind(token(3))
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE wireguard_peers SET updated_at = now() WHERE token_id = $1")
+        .bind(token(3))
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        profile::wireguard::release_once(&app.pool, std::time::Duration::from_secs(300))
+            .await
+            .unwrap(),
+        3
+    );
+    let remaining: Vec<Uuid> = sqlx::query_scalar("SELECT token_id FROM wireguard_peers")
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec![token(3)]);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_sweeper_releases_without_registry_retention_or_control() {
+    let app = wireguard_app("10.7.0.0/30", None, None).await;
+    let owner = mk_user(&app, "sweeper@example.com").await;
+    assert_eq!(
+        enroll_peer(&app, &owner, 0, "p1").await.0,
+        StatusCode::CREATED
+    );
+    sqlx::query("UPDATE api_tokens SET revoked_at = now() - interval '6 minutes'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE wireguard_peers SET updated_at = now() - interval '1 day'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let control = gateway_common::devserver_control_client::DevserverControlClient::new(
+        "http://127.0.0.1:1".parse().unwrap(),
+        "unused-test-control".into(),
+    )
+    .unwrap();
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(profile::sweeper::run(
+        app.pool.clone(),
+        control,
+        None,
+        std::time::Duration::from_secs(300),
+        stopped,
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let released: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM api_token_audit WHERE action = 'wireguard_released'",
+            )
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+            if released == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer release runs without the controller");
+    stop.send(true).unwrap();
+    worker.await.unwrap();
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn wireguard_profile_client_preserves_conditional_responses() {
+    use gateway_common::profile_client::{ProfileClient, ProfileError};
+    use gateway_common::wireguard::PeerListResponse;
+
+    let app = wireguard_app("10.7.0.0/24", None, None).await;
+    let owner: Uuid = mk_user(&app, "client@example.com").await.parse().unwrap();
+    let token = insert_api_token(&app.pool, owner, "client").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let router = app.router.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let client = ProfileClient::new(url, TOKEN.into())
+        .unwrap()
+        .with_admin_token("wrong-admin-token".into())
+        .unwrap();
+    let enrolled = client
+        .enroll_wireguard_peer(owner, token, &wireguard_key(0), "p1")
+        .await
+        .unwrap();
+    assert_eq!(enrolled.addresses, ["10.7.0.2/32"]);
+    let PeerListResponse::Modified { body, etag } =
+        client.list_wireguard_peers("p1", None).await.unwrap()
+    else {
+        panic!("first fetch must have a body");
+    };
+    let (_, direct_etag, direct_body) = peer_list(&app, "p1", None).await;
+    assert_eq!(body, direct_body);
+    assert_eq!(etag, direct_etag);
+    let PeerListResponse::NotModified { etag: unchanged } = client
+        .list_wireguard_peers("p1", Some(&etag))
+        .await
+        .unwrap()
+    else {
+        panic!("conditional fetch must return 304");
+    };
+    assert_eq!(unchanged, etag);
+    assert!(matches!(
+        client
+            .enroll_wireguard_peer(owner, Uuid::new_v4(), &wireguard_key(0), "p1")
+            .await,
+        Err(ProfileError::NotFound)
+    ));
+    assert!(matches!(
+        client
+            .enroll_wireguard_peer(owner, token, "bad", "p1")
+            .await,
+        Err(ProfileError::BadRequest(_))
+    ));
+    let stranger: Uuid = mk_user(&app, "client-stranger@example.com")
+        .await
+        .parse()
+        .unwrap();
+    let token = insert_api_token(&app.pool, stranger, "stranger").await;
+    assert!(matches!(
+        client
+            .enroll_wireguard_peer(stranger, token, &wireguard_key(0), "p1")
+            .await,
+        Err(ProfileError::Conflict(_))
+    ));
+    server.abort();
+    let _ = server.await;
+    assert!(client.list_wireguard_peers("p1", None).await.is_err());
+    app.cleanup().await;
 }
 
 #[tokio::test]

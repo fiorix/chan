@@ -62,7 +62,8 @@ BEGIN
         'api_token_audit', 'api_tokens', 'auth_audit',
         'control_revocation_jobs', 'devserver_fleet_policy', 'devserver_grants',
         'devserver_user_policies', 'devservers', 'feature_flag_overrides',
-        'feature_flags', 'identities', 'identity_session_index', 'users'
+        'feature_flags', 'identities', 'identity_session_index', 'users',
+        'wireguard_peers'
     ]::text[] THEN
         RAISE EXCEPTION 'unexpected public table inventory: %', actual_public_tables;
     END IF;
@@ -178,7 +179,7 @@ GRANT SELECT ON
     public.auth_audit, public.control_revocation_jobs, public.devservers,
     public.devserver_fleet_policy, public.devserver_grants,
     public.devserver_user_policies, public.feature_flags,
-    public.feature_flag_overrides
+    public.feature_flag_overrides, public.wireguard_peers
     TO chan_gateway_profile;
 GRANT INSERT, UPDATE, DELETE ON public.users TO chan_gateway_profile;
 GRANT INSERT ON public.identities TO chan_gateway_profile;
@@ -186,7 +187,7 @@ GRANT UPDATE ON public.api_tokens TO chan_gateway_profile;
 GRANT INSERT ON public.api_token_audit, public.auth_audit TO chan_gateway_profile;
 GRANT INSERT, UPDATE, DELETE ON
     public.control_revocation_jobs, public.devservers, public.devserver_grants,
-    public.feature_flags, public.feature_flag_overrides
+    public.feature_flags, public.feature_flag_overrides, public.wireguard_peers
     TO chan_gateway_profile;
 GRANT INSERT, UPDATE ON
     public.devserver_fleet_policy, public.devserver_user_policies

@@ -29,6 +29,7 @@ pub struct Config {
     /// (`None`); anything unparseable fails startup -- a typo must not
     /// silently pick a policy that deletes rows.
     pub devserver_retention: Option<std::time::Duration>,
+    pub wireguard: crate::wireguard::Config,
 }
 
 impl std::fmt::Debug for Config {
@@ -43,6 +44,7 @@ impl std::fmt::Debug for Config {
             )
             .field("workspace_admin", &self.workspace_admin)
             .field("devserver_retention", &self.devserver_retention)
+            .field("wireguard", &self.wireguard)
             .finish()
     }
 }
@@ -104,6 +106,14 @@ impl Config {
                 .as_deref(),
         )?;
 
+        let wireguard = crate::wireguard::Config::parse(
+            std::env::var("WIREGUARD_POOL_V4").ok().as_deref(),
+            std::env::var("WIREGUARD_POOL_V6").ok().as_deref(),
+            std::env::var("WIREGUARD_POOL_RESERVED").ok().as_deref(),
+            std::env::var("WIREGUARD_RELEASE_GRACE_MINUTES")
+                .ok()
+                .as_deref(),
+        )?;
         Ok(Self {
             bind_addr,
             database_url,
@@ -111,6 +121,7 @@ impl Config {
             admin_token,
             workspace_admin,
             devserver_retention,
+            wireguard,
         })
     }
 }
@@ -174,6 +185,7 @@ mod tests {
             )
             .unwrap(),
             devserver_retention: None,
+            wireguard: crate::wireguard::Config::default(),
         };
         let debug = format!("{cfg:?}");
         for secret in [
