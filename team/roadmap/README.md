@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.125.0
 
-Opened 2026-11-05 at the v0.124.0 close with nine items that version left and one the owner asked for. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]).
+Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one the owner asked for and one its read-back found. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]). The release's read-back found that the PPA has built no binaries since v0.116.0, which the owner accepted ([ppabuild]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -37,6 +37,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left and on
 | [a strip right-click leaves focus on body][stripfocus] | raised | reading |
 | [two menus take Escape in the bubble phase][bubbleesc] | raised | build |
 | [Homebrew packages move to fiorix/tap][tapmove] | accepted | build |
+| [the PPA has built nothing since v0.116.0][ppabuild] | accepted | build |
 
 [wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
 [wgwrongkey]: v0.125.0/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md
@@ -48,6 +49,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left and on
 [stripfocus]: v0.125.0/a-right-click-on-the-pane-strips-empty-stretch-leaves-focus-on-the-body.md
 [bubbleesc]: v0.125.0/the-graph-tab-menu-and-the-inspector-action-pill-take-escape-in-the-bubble-phase.md
 [tapmove]: v0.125.0/chans-homebrew-packages-move-from-fiorix-chan-to-fiorix-tap.md
+[ppabuild]: v0.125.0/the-ppa-has-built-no-binaries-since-v0116-because-a-dependency-needs-rust-195.md
 
 ## Completed
 
