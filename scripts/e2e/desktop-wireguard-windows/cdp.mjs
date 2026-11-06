@@ -4,6 +4,10 @@
 //     prints the id of the first window's page target and, after a space,
 //     its URL without the query (which carries the window's token); exits 1
 //     when there is none. The launcher, served at the root, is not a window.
+//   node cdp.mjs launcher PORT
+//     prints the launcher's target id, never its URL or bearer.
+//   node cdp.mjs eval PORT TARGET_ID EXPRESSION
+//     evaluates in that webview and prints only the returned value.
 //   node cdp.mjs nav PORT TARGET_ID URL OUT_PREFIX [WAIT_MS]
 //     navigates the target, waits WAIT_MS (default 8000) for the page's own
 //     fetch and WebSocket, then writes OUT_PREFIX.json (the main document's
@@ -31,7 +35,20 @@ if (mode === 'page') {
   console.log(`${page.t.id} ${page.u.origin}${page.u.pathname}`);
   process.exit(0);
 }
-if (mode !== 'nav') {
+if (mode === 'launcher') {
+  const launcher = (await targets()).find((target) => {
+    try {
+      const url = new URL(target.url);
+      return target.type === 'page' && url.hostname === '127.0.0.1' && url.pathname === '/' && url.searchParams.has('t');
+    } catch {
+      return false;
+    }
+  });
+  if (!launcher) process.exit(1);
+  console.log(launcher.id);
+  process.exit(0);
+}
+if (mode !== 'nav' && mode !== 'eval') {
   console.error(`unknown mode ${mode}`);
   process.exit(2);
 }
@@ -77,6 +94,13 @@ const send = (method, params = {}, timeoutMs = 90000) => {
     }, timeoutMs);
   });
 };
+if (mode === 'eval') {
+  const result = await send('Runtime.evaluate', { expression: url, awaitPromise: true, returnByValue: true }, 30000);
+  if (result.exceptionDetails || !Object.hasOwn(result.result, 'value')) throw new Error('webview evaluation failed');
+  console.log(result.result.value);
+  ws.close();
+  process.exit(0);
+}
 await send('Page.enable');
 await send('Network.enable');
 await send('Network.setCacheDisabled', { cacheDisabled: true });
