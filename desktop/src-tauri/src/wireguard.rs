@@ -33,7 +33,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chan_wireguard::{ConnectProxy, HostRoute, ProxyRoute, Tunnel};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -81,7 +81,14 @@ enum Proxy {
 /// What the fabric holds for one gateway.
 enum Row {
     /// The tunnel runs from `path` and its route is in the proxy.
-    Running { path: PathBuf, tunnel: Tunnel },
+    Running {
+        path: PathBuf,
+        tunnel: Tunnel,
+        endpoint: String,
+        started: Instant,
+        #[cfg(test)]
+        test_status: Option<chan_wireguard::Status>,
+    },
     /// The file at `path` was refused, for `reason`; nothing runs.
     Refused { path: PathBuf, reason: String },
 }
@@ -139,7 +146,7 @@ impl WireguardFabric {
             Proxy::Unavailable(reason) => return Err(reason.clone()),
         };
         let mut rows = self.rows.lock().unwrap();
-        if let Some(Row::Running { path, tunnel }) = rows.get(gateway_id) {
+        if let Some(Row::Running { path, tunnel, .. }) = rows.get(gateway_id) {
             if path == conf {
                 return Ok(describe(tunnel.status()));
             }
@@ -173,6 +180,10 @@ impl WireguardFabric {
                 let row = Row::Running {
                     path: conf.to_owned(),
                     tunnel,
+                    endpoint,
+                    started: Instant::now(),
+                    #[cfg(test)]
+                    test_status: None,
                 };
                 (row, Ok(status))
             }
@@ -215,8 +226,24 @@ impl WireguardFabric {
     /// them, reads no status until it is adopted.
     pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
         match self.rows.lock().unwrap().get(gateway_id)? {
-            Row::Running { path, tunnel } if Some(path.as_path()) == configured => {
-                Some(describe(tunnel.status()))
+            row @ Row::Running { path, .. } if Some(path.as_path()) == configured => {
+                Some(describe(row.tunnel_status()?))
+            }
+            _ => None,
+        }
+    }
+
+    /// Why discovery through this gateway's running tunnel lacks a session.
+    /// A row whose configured file changed cannot explain the new row.
+    pub fn discovery_failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        match self.rows.lock().unwrap().get(gateway_id)? {
+            row @ Row::Running {
+                path,
+                endpoint,
+                started,
+                ..
+            } if Some(path.as_path()) == configured => {
+                missing_handshake_reason(row.tunnel_status()?, endpoint, path, started.elapsed())
             }
             _ => None,
         }
@@ -242,6 +269,32 @@ impl WireguardFabric {
         match &self.proxy {
             Proxy::Unavailable(reason) if configured.is_some() => Some(reason.clone()),
             _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_status(&self, gateway_id: &str, status: chan_wireguard::Status) {
+        let mut rows = self.rows.lock().unwrap();
+        let Some(Row::Running { test_status, .. }) = rows.get_mut(gateway_id) else {
+            panic!("test gateway has no running tunnel");
+        };
+        *test_status = Some(status);
+    }
+}
+
+impl Row {
+    fn tunnel_status(&self) -> Option<chan_wireguard::Status> {
+        #[cfg(test)]
+        if let Row::Running {
+            test_status: Some(status),
+            ..
+        } = self
+        {
+            return Some(status.clone());
+        }
+        match self {
+            Row::Running { tunnel, .. } => Some(tunnel.status()),
+            Row::Refused { .. } => None,
         }
     }
 }
@@ -301,14 +354,60 @@ fn describe(status: chan_wireguard::Status) -> String {
             format!("{error}, retrying")
         }
     });
-    match (
-        matches!(status.handshake, chan_wireguard::HandshakeState::Live(_)),
-        failure,
-    ) {
-        (true, None) => "up".to_string(),
-        (true, Some(failure)) => format!("up; {failure}"),
-        (false, Some(failure)) => failure,
-        (false, None) => "connecting".to_string(),
+    match (status.handshake, failure) {
+        (chan_wireguard::HandshakeState::Never, None) => "connecting".to_string(),
+        (chan_wireguard::HandshakeState::Never, Some(failure)) => failure,
+        (chan_wireguard::HandshakeState::Live(_), None) => "up".to_string(),
+        (chan_wireguard::HandshakeState::Live(_), Some(failure)) => format!("up; {failure}"),
+        (chan_wireguard::HandshakeState::Lost(age), None) => {
+            format!("lost; no handshake for {}", format_age(age))
+        }
+        (chan_wireguard::HandshakeState::Lost(age), Some(failure)) => {
+            format!("lost; no handshake for {}; {failure}", format_age(age))
+        }
+    }
+}
+
+fn format_age(age: Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else if seconds < 3600 {
+        format!("{} min", seconds / 60)
+    } else {
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        if minutes == 0 {
+            format!("{hours} h")
+        } else {
+            format!("{hours} h {minutes} min")
+        }
+    }
+}
+
+fn missing_handshake_reason(
+    status: chan_wireguard::Status,
+    endpoint: &str,
+    file: &Path,
+    since_start: Duration,
+) -> Option<String> {
+    match status.handshake {
+        chan_wireguard::HandshakeState::Live(_) => None,
+        chan_wireguard::HandshakeState::Never if status.endpoint.is_none() => {
+            Some(describe(status))
+        }
+        _ if status.endpoint.is_none() && status.resolution_error.is_some() => {
+            Some(describe(status))
+        }
+        chan_wireguard::HandshakeState::Never => Some(format!(
+            "no WireGuard handshake with the peer at {endpoint} since the tunnel started {} ago; check PublicKey in {} and that the peer lists this client's key",
+            format_age(since_start),
+            file.display()
+        )),
+        chan_wireguard::HandshakeState::Lost(age) => Some(format!(
+            "no WireGuard handshake with the peer at {endpoint} for {}; the tunnel had a session and lost it",
+            format_age(age)
+        )),
     }
 }
 
@@ -1011,7 +1110,7 @@ mod tests {
         assert_eq!(describe(status(false, None, false)), "connecting");
         let mut lost = status(false, None, false);
         lost.handshake = chan_wireguard::HandshakeState::Lost(Duration::from_secs(212));
-        assert_eq!(describe(lost), "connecting");
+        assert_eq!(describe(lost.clone()), "lost; no handshake for 3 min");
         assert_eq!(describe(status(true, None, false)), "up");
         assert_eq!(
             describe(status(false, Some(failure), false)),
@@ -1030,6 +1129,107 @@ mod tests {
             describe(status(true, Some(timeout), true)),
             format!("up; {timeout}; stalled, waiting for the system resolver")
         );
+        lost.resolution_error = Some(failure.into());
+        assert_eq!(
+            describe(lost),
+            format!("lost; no handshake for 3 min; {failure}, retrying")
+        );
+    }
+
+    #[test]
+    fn missing_handshake_reason_names_state_without_key_values() {
+        let status = |handshake, endpoint, error: Option<&str>| chan_wireguard::Status {
+            handshake,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            endpoint,
+            resolution_error: error.map(str::to_string),
+            resolution_stalled: false,
+        };
+        let endpoint = "127.0.0.1:51820";
+        let resolved = Some(endpoint.parse().unwrap());
+        let file = Path::new("/tmp/client.conf");
+        assert_eq!(
+            missing_handshake_reason(
+                status(chan_wireguard::HandshakeState::Never, resolved, None),
+                endpoint,
+                file,
+                Duration::from_secs(64),
+            )
+            .as_deref(),
+            Some("no WireGuard handshake with the peer at 127.0.0.1:51820 since the tunnel started 1 min ago; check PublicKey in /tmp/client.conf and that the peer lists this client's key")
+        );
+        assert_eq!(
+            missing_handshake_reason(
+                status(chan_wireguard::HandshakeState::Lost(Duration::from_secs(3690)), resolved, None),
+                endpoint,
+                file,
+                Duration::from_secs(5),
+            )
+            .as_deref(),
+            Some("no WireGuard handshake with the peer at 127.0.0.1:51820 for 1 h 1 min; the tunnel had a session and lost it")
+        );
+        assert_eq!(
+            missing_handshake_reason(
+                status(chan_wireguard::HandshakeState::Never, None, None),
+                endpoint,
+                file,
+                Duration::from_secs(5),
+            )
+            .as_deref(),
+            Some("connecting")
+        );
+        let failure = "endpoint did not resolve: gw.test:51820, retrying";
+        assert_eq!(
+            missing_handshake_reason(
+                status(
+                    chan_wireguard::HandshakeState::Never,
+                    None,
+                    Some("endpoint did not resolve: gw.test:51820")
+                ),
+                endpoint,
+                file,
+                Duration::from_secs(5),
+            )
+            .as_deref(),
+            Some(failure)
+        );
+    }
+
+    #[test]
+    fn live_handshake_has_no_missing_reason() {
+        let status = chan_wireguard::Status {
+            handshake: chan_wireguard::HandshakeState::Live(Duration::from_secs(3)),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            endpoint: Some("127.0.0.1:51820".parse().unwrap()),
+            resolution_error: None,
+            resolution_stalled: false,
+        };
+        assert_eq!(
+            missing_handshake_reason(
+                status,
+                "127.0.0.1:51820",
+                Path::new("/tmp/client.conf"),
+                Duration::from_secs(5),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn age_rounds_down_at_each_display_boundary() {
+        for (seconds, expected) in [
+            (0, "0 s"),
+            (59, "59 s"),
+            (60, "1 min"),
+            (3599, "59 min"),
+            (3600, "1 h"),
+            (3660, "1 h 1 min"),
+            (7200, "2 h"),
+        ] {
+            assert_eq!(format_age(Duration::from_secs(seconds)), expected);
+        }
     }
 
     /// A stand-in HTTP peer on loopback: it records the request line of
@@ -1278,10 +1478,26 @@ mod tests {
         );
         assert_eq!(fabric.failure("gw-a", Some(a)), None);
         assert_eq!(fabric.connect_refusal("gw-a", Some(a)), None);
+        fabric.set_test_status(
+            "gw-a",
+            chan_wireguard::Status {
+                handshake: chan_wireguard::HandshakeState::Never,
+                tx_bytes: 0,
+                rx_bytes: 0,
+                endpoint: Some("127.0.0.1:51820".parse().unwrap()),
+                resolution_error: None,
+                resolution_stalled: false,
+            },
+        );
+        let reason = fabric.discovery_failure("gw-a", Some(a)).unwrap();
+        assert!(reason.contains("no WireGuard handshake"), "{reason}");
+        assert!(reason.contains(&a.display().to_string()), "{reason}");
         // Pointed elsewhere, or at nothing, it reads no status until it is
         // adopted again.
         assert_eq!(fabric.status("gw-a", Some(other)), None);
         assert_eq!(fabric.status("gw-a", None), None);
+        assert_eq!(fabric.discovery_failure("gw-a", Some(other)), None);
+        assert_eq!(fabric.discovery_failure("gw-a", None), None);
         // The refused file carries its reason while the row names it.
         let reason = fabric.failure("gw-b", Some(&b)).expect("b was refused");
         assert!(reason.contains(&b.display().to_string()), "{reason}");

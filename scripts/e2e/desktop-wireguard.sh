@@ -26,7 +26,9 @@
 #   refusals   the proxy refused nothing in the run.
 #   config     the gateway row and its file survive the desktop's rewrite of
 #              its config at start.
-#   wrong-key  (--wrong-key only) the desktop sends repeated initiations,
+#   wrong-key  (--wrong-key only) the desktop's log and gateway row name
+#              the missing handshake, endpoint and file without key values;
+#              the desktop sends repeated initiations,
 #              the peer never handshakes, one session expiry logs at WARN
 #              within 100 s of tunnel start, and no ERROR-level line appears.
 #
@@ -63,8 +65,9 @@
 # Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key | --live-adopt | --no-wireguard]
 #   --unresolved-endpoint proves startup and the proxy with a missing name;
 #                         it runs instead of the connected-peer arms.
-#   --wrong-key           proves expiry with a wrong peer public key instead
-#                         of the connected-peer arms.
+#   --wrong-key           proves the missing-handshake error and expiry with
+#                         a wrong peer public key instead of the connected arms;
+#                         needs node 22 or later for the gateway-list read.
 #   --live-adopt          proves the live fabric (above); needs node 22 or
 #                         later for the inspector reads.
 #   --no-wireguard        proves the always-bound proxy with no gateway row.
@@ -133,8 +136,8 @@ command -v dbus-run-session >/dev/null 2>&1 || refuse "dbus-run-session is not i
 command -v curl >/dev/null 2>&1 || refuse "curl is not installed"
 [ -x "$CHAN_DESKTOP_BIN" ] || refuse "no chan-desktop binary at $CHAN_DESKTOP_BIN (set CHAN_DESKTOP_BIN)"
 INSPECT="$REPO/scripts/e2e/desktop-observations/inspect.mjs"
-if [ "$LIVE_ADOPT" = 1 ]; then
-    command -v node >/dev/null 2>&1 || refuse "node is not installed (--live-adopt reads the launcher through inspect.mjs)"
+if [ "$LIVE_ADOPT" = 1 ] || [ "$WRONG_KEY" = 1 ]; then
+    command -v node >/dev/null 2>&1 || refuse "node is not installed (the launcher read needs inspect.mjs)"
     [ -f "$INSPECT" ] || refuse "no inspector helper at $INSPECT"
 fi
 
@@ -289,9 +292,12 @@ log "peer at $PEER_URL, client file $WORK/client.conf (mode $(stat -c %a "$WORK/
 if [ "$UNRESOLVED" = 1 ]; then
     sed -i 's/^Endpoint = .*/Endpoint = chan-endpoint-missing.invalid:51820/' "$WORK/client.conf"
 elif [ "$WRONG_KEY" = 1 ]; then
-    wrong_pub="$(head -c 32 /dev/urandom | base64)"
-    sed -i "s|^PublicKey = .*|PublicKey = $wrong_pub|" "$WORK/client.conf"
-    unset wrong_pub
+    PEER_PUBLIC_KEY="$(sed -n 's/^PublicKey = //p' "$WORK/client.conf")"
+    CLIENT_PRIVATE_KEY="$(sed -n 's/^PrivateKey = //p' "$WORK/client.conf")"
+    WG_ENDPOINT="$(sed -n 's/^Endpoint = //p' "$WORK/client.conf")"
+    WRONG_PUBLIC_KEY="$(head -c 32 /dev/urandom | base64)"
+    [ -n "$PEER_PUBLIC_KEY" ] && [ -n "$CLIENT_PRIVATE_KEY" ] && [ -n "$WG_ENDPOINT" ] && [ -n "$WRONG_PUBLIC_KEY" ] || fail "the client file lacks a key or endpoint"
+    sed -i "s|^PublicKey = .*|PublicKey = $WRONG_PUBLIC_KEY|" "$WORK/client.conf"
 fi
 
 # 2. The desktop's config: one enabled gateway behind the file.
@@ -309,7 +315,7 @@ fi
 # The launcher's page is read through WebKitGTK's remote inspector, which
 # the desktop's webviews serve only when this is set before they start.
 INSPECTOR=""
-if [ "$LIVE_ADOPT" = 1 ]; then
+if [ "$LIVE_ADOPT" = 1 ] || [ "$WRONG_KEY" = 1 ]; then
     INSPECTOR="127.0.0.1:$((20000 + RANDOM % 20000))"
     export WEBKIT_INSPECTOR_HTTP_SERVER="$INSPECTOR"
 fi
@@ -318,26 +324,6 @@ fi
 xvfb-run -a dbus-run-session "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
 XVFB_RUN_PID=$!
 PIDS+=("$XVFB_RUN_PID")
-
-if [ "$WRONG_KEY" = 1 ]; then
-    arm_rc=0
-    wait_for 30 "the tunnel start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID" || arm_rc=1
-    wait_for 100 "the session-expiry warning" session_expiry_logged || arm_rc=1
-    desktop_log || arm_rc=1
-    INITIATIONS="$(count 'Sending handshake_initiation')"
-    HANDSHAKE="$(awk '/^status: / { last=$0 } END { print last }' "$WORK/peer.log")"
-    expiry_warns="$(session_warnings "$CLEAN")"
-    error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$CLEAN")"
-    [ "$INITIATIONS" -ge 2 ] || arm_rc=1
-    case "$HANDSHAKE" in 'status: handshake=never '*) ;; *) arm_rc=1 ;; esac
-    [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
-    verdict wrong-key "$arm_rc" "desktop sent $INITIATIONS initiations, peer ${HANDSHAKE:-no status}, session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
-    [ "$arm_rc" = 0 ] || fail "wrong-key expiry"
-    cleanup
-    trap - EXIT
-    rm -rf "${WORK:?}"
-    exit 0
-fi
 
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
 
@@ -445,6 +431,62 @@ library_call() {
         ${body:+--data "$body"} "$ORIGIN$path" 2>>"$WORK/curl.err" || echo curl-failed
 }
 
+wrong_key_arm() {
+    local arm_rc=0 startup_ok=no list_status=unread row_error=unread
+    local expiry_deadline expiry_wait origin token initiations handshake expiry_warns error_lines
+    wait_for 30 "the tunnel start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID" || arm_rc=1
+    expiry_deadline=$((SECONDS + 100))
+    wait_for 60 "the wrong-key discovery error" logged 'startup gateway connect failed' || arm_rc=1
+    desktop_log || arm_rc=1
+    if python3 -I "$REPO/scripts/e2e/wgwrongkey-oracle.py" startup "$CLEAN" "$WG_ENDPOINT" "$WORK/client.conf" > /dev/null 2>>"$WORK/oracle.err"; then
+        startup_ok=yes
+    else
+        arm_rc=1
+    fi
+    # The per-launch bearer comes from the launcher webview, opened from the
+    # standalone terminal as in the live-adopt arm.
+    if ! page_listed 'Chan Launcher'; then
+        wait_for 60 "the terminal window's page in the inspector" terminal_listed || arm_rc=1
+        if ! toggle_launcher; then arm_rc=1; fi
+    fi
+    if wait_for 60 "the launcher page in the inspector" launcher_href; then
+        origin="${LAUNCHER_HREF%%/\?t=*}"
+        token="${LAUNCHER_HREF##*\?t=}"
+        token="${token%%&*}"
+        ORIGIN="$origin"
+        ( umask 077; printf 'Authorization: Bearer %s\n' "$token" > "$WORK/bearer.header" )
+        list_status="$(library_call GET '/api/library/gateways' '' "$WORK/wrong-key-gateways.json")"
+        [ "$list_status" = 200 ] || arm_rc=1
+        row_error="$(python3 -I "$REPO/scripts/e2e/wgwrongkey-oracle.py" wrong-key "$WORK/wrong-key-gateways.json" "$GATEWAY_ID" "$WG_ENDPOINT" "$WORK/client.conf" 2>>"$WORK/oracle.err")" || arm_rc=1
+    else
+        arm_rc=1
+    fi
+
+    expiry_wait=$((expiry_deadline - SECONDS))
+    [ "$expiry_wait" -ge 0 ] || expiry_wait=0
+    wait_for "$expiry_wait" "the session-expiry warning" session_expiry_logged || arm_rc=1
+    desktop_log || arm_rc=1
+    # Keys go to the scanner on stdin, never in argv, output or a verdict.
+    if ! printf '%s\n' "$PEER_PUBLIC_KEY" "$WRONG_PUBLIC_KEY" "$CLIENT_PRIVATE_KEY" |
+        python3 -I "$REPO/scripts/e2e/wgwrongkey-oracle.py" clean-log "$CLEAN" > /dev/null 2>>"$WORK/oracle.err"; then
+        arm_rc=1
+    fi
+    initiations="$(count 'Sending handshake_initiation')"
+    handshake="$(awk '/^status: / { last=$0 } END { print last }' "$WORK/peer.log")"
+    expiry_warns="$(session_warnings "$CLEAN")"
+    error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$CLEAN")"
+    [ "$initiations" -ge 2 ] || arm_rc=1
+    case "$handshake" in 'status: handshake=never '*) ;; *) arm_rc=1 ;; esac
+    [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+    verdict wrong-key "$arm_rc" "startup named=$startup_ok, list HTTP $list_status, row '$(printf '%s' "$row_error" | cut -c1-80)', desktop sent $initiations initiations, peer ${handshake:-no status}, session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
+    unset PEER_PUBLIC_KEY WRONG_PUBLIC_KEY CLIENT_PRIVATE_KEY
+    finish_mode
+}
+
+if [ "$WRONG_KEY" = 1 ]; then
+    wrong_key_arm
+fi
+
 STARTED_BEFORE=0
 started_grew() { [ "$(count 'gateway WireGuard tunnel started')" -gt "$STARTED_BEFORE" ]; }
 
@@ -504,18 +546,24 @@ live_adopt_arms() {
     # The stand-in gateway answers 404 to discovery, so the connect fails
     # there, and the desktop bridge answers a failed connect 409 with the
     # desktop's reason; any other status means the call itself was refused.
-    # The body is where the desktop's reading of the 404 shows: a row that
-    # has never discovered has no runtime to keep it as its last_error, and
-    # the desktop does not log the reason.
+    # The response body and the gateway list independently name the 404.
     [ "$connect_status" = 409 ] || arm_rc=1
     local body_404=no
     if grep -q 'gateway discovery returned HTTP 404' "$WORK/connect.json" 2>/dev/null; then body_404=yes; else arm_rc=1; fi
+    local list_status row_404=no row_error=unread
+    list_status="$(library_call GET '/api/library/gateways' '' "$WORK/tenant-gateways.json")"
+    [ "$list_status" = 200 ] || arm_rc=1
+    if row_error="$(python3 -I "$REPO/scripts/e2e/wgwrongkey-oracle.py" tenant "$WORK/tenant-gateways.json" "$GATEWAY_ID" 2>>"$WORK/oracle.err")"; then
+        row_404=yes
+    else
+        arm_rc=1
+    fi
     wait_for 60 "the discovery request at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' || arm_rc=1
     launcher_fetch "$PEER_URL/webview-probe" || arm_rc=1
     wait_for 30 "the webview's fetch at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' || arm_rc=1
     if peer_logged 'line=GET /webview-probe-before '; then arm_rc=1; fi
     [ "$control_sent" = yes ] || arm_rc=1
-    verdict tenant "$arm_rc" "connect answered $connect_status (want 409 naming the discovery 404); discovery requests from the tunnel address $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' "$WORK/peer.log" || true) of $(grep -cE '^request: .*GET /\.well-known/chan-gateway' "$WORK/peer.log" || true), the body names the 404: $body_404, webview probe $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' "$WORK/peer.log" || true), the probe sent before the file: sent $control_sent, reached the peer $(grep -cE 'line=GET /webview-probe-before ' "$WORK/peer.log" || true) (want sent yes, reached 0)"
+    verdict tenant "$arm_rc" "connect answered $connect_status (want 409 naming the discovery 404); body names 404: $body_404, list HTTP $list_status, row names 404: $row_404 ('$(printf '%s' "$row_error" | cut -c1-80)'); discovery requests from the tunnel address $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' "$WORK/peer.log" || true) of $(grep -cE '^request: .*GET /\.well-known/chan-gateway' "$WORK/peer.log" || true), webview probe $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' "$WORK/peer.log" || true), the probe sent before the file: sent $control_sent, reached the peer $(grep -cE 'line=GET /webview-probe-before ' "$WORK/peer.log" || true) (want sent yes, reached 0)"
 
     # retire: clearing the file takes the tunnel out of the running proxy.
     arm_rc=0
