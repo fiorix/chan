@@ -102,6 +102,13 @@ async fn handle(app: AppHandle, state: Arc<AppState>, op: DesktopWindowOp) {
             // sign-in hand-off when needed, roster fetch, poll spawn.
             let _ = reply.send(crate::gateway::connect_gateway(app, state, id, true).await);
         }
+        DesktopWindowOp::GenerateWireguardKey { id, reply } => {
+            // The Gateways form's Generate WireGuard key action.
+            let _ = reply.send(
+                crate::config::generate_wireguard_key(&state.store, &state.gateway_manager, &id)
+                    .await,
+            );
+        }
         DesktopWindowOp::DisconnectGateway { id, reply } => {
             crate::gateway::cascade_disconnect(
                 &app,

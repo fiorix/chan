@@ -636,6 +636,23 @@ pub struct GatewayDiscovery {
     /// gateways simply omit it.
     #[serde(default)]
     pub roster_url: Option<String>,
+    /// The gateway's WireGuard ingress. Presence means the gateway enrolls
+    /// a WireGuard key at sign-in; absence means it does not, and the
+    /// desktop then offers no key generation and sends no key.
+    /// `#[serde(default)]`: an older gateway omits it.
+    #[serde(default)]
+    pub wireguard: Option<WireguardDiscovery>,
+}
+
+/// Where a gateway's WireGuard ingress listens and the public key of its
+/// interface, as the discovery document names them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WireguardDiscovery {
+    /// `host:port`, an IPv6 literal in brackets, as a wg-quick
+    /// `Endpoint` reads.
+    pub endpoint: String,
+    /// The interface's public key as `wg` prints it.
+    pub public_key: String,
 }
 
 fn origin_of(raw: &str) -> Result<String, String> {
@@ -702,6 +719,15 @@ fn validate_gateway_discovery(
             return Err("chan-gateway discovery is cross-origin".to_string());
         }
         require_https_unless_loopback(roster_url)?;
+    }
+    // The enrollment entry is read with the wg-quick file's own grammars,
+    // since the desktop writes both values into a client file.
+    if let Some(wireguard) = &d.wireguard {
+        let valid = chan_wireguard::config::Endpoint::parse(&wireguard.endpoint).is_ok()
+            && chan_wireguard::config::parse_public_key(&wireguard.public_key).is_ok();
+        if !valid {
+            return Err("chan-gateway discovery has an invalid wireguard entry".to_string());
+        }
     }
 
     for raw in [
@@ -2747,6 +2773,11 @@ pub(crate) mod log_capture {
             self.at(" INFO ")
         }
 
+        /// Everything captured, every level.
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+
         fn at(&self, level: &str) -> Vec<String> {
             String::from_utf8_lossy(&self.0.lock().unwrap())
                 .lines()
@@ -2799,6 +2830,7 @@ mod tests {
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
+            wireguard: None,
         }
     }
 
@@ -2848,6 +2880,7 @@ mod tests {
             devserver_proxy_origin: "http://127.0.0.1:7002".into(),
             devserver_proxy_host_depth: 2,
             roster_url: None,
+            wireguard: None,
         };
         validate_gateway_discovery("http://localhost:7000", d)
             .expect("loopback http is explicit dev use");
@@ -3120,6 +3153,7 @@ mod tests {
             devserver_proxy_origin: proxy_apex,
             devserver_proxy_host_depth: 2,
             roster_url: None,
+            wireguard: None,
         };
         let err = gateway_conn(&discovery, "pat".into(), Some(test_entry_target()))
             .await
@@ -3203,6 +3237,7 @@ mod tests {
             devserver_proxy_origin: proxy_apex,
             devserver_proxy_host_depth: 2,
             roster_url: None,
+            wireguard: None,
         };
 
         let gw = gateway_conn(&discovery, "pat".into(), Some(test_entry_target()))
@@ -3239,6 +3274,82 @@ mod tests {
         let mut d = valid_gateway_discovery();
         d.roster_url = None;
         validate_gateway_discovery("https://gw.chan.app", d).expect("absent roster_url is valid");
+    }
+
+    /// A discovery document as identity serves it, with `wireguard` spliced
+    /// in after `roster_url` when given.
+    fn discovery_document(wireguard: Option<&str>) -> String {
+        let extra = wireguard
+            .map(|entry| format!(",\"wireguard\":{entry}"))
+            .unwrap_or_default();
+        format!(
+            "{{\"kind\":\"chan-gateway\",\"api_version\":1,\
+             \"identity_origin\":\"https://gw.chan.app\",\
+             \"desktop_authorize_url\":\"https://gw.chan.app/desktop/authorize\",\
+             \"desktop_entry_url\":\"https://gw.chan.app/desktop/v1/devserver/entry\",\
+             \"roster_url\":\"https://gw.chan.app/desktop/v1/devservers\",\
+             \"devserver_proxy_origin\":\"https://proxy.chan.app\",\
+             \"devserver_proxy_host_depth\":2,\
+             \"tunnel_url\":\"https://proxy.chan.app/v1/tunnel\"{extra}}}"
+        )
+    }
+
+    const WG_SERVER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+
+    #[test]
+    fn gateway_discovery_reads_the_wireguard_entry() {
+        let entry =
+            format!("{{\"endpoint\":\"wg.chan.app:51820\",\"public_key\":\"{WG_SERVER_KEY}\"}}");
+        let d: GatewayDiscovery = serde_json::from_str(&discovery_document(Some(&entry))).unwrap();
+        let d = validate_gateway_discovery("https://gw.chan.app", d).expect("a good entry");
+        assert_eq!(
+            d.wireguard,
+            Some(WireguardDiscovery {
+                endpoint: "wg.chan.app:51820".into(),
+                public_key: WG_SERVER_KEY.into(),
+            })
+        );
+        // A bracketed IPv6 endpoint is the file's grammar too.
+        let mut d = valid_gateway_discovery();
+        d.wireguard = Some(WireguardDiscovery {
+            endpoint: "[2001:db8::7]:51820".into(),
+            public_key: WG_SERVER_KEY.into(),
+        });
+        validate_gateway_discovery("https://gw.chan.app", d).expect("an IPv6 endpoint");
+    }
+
+    #[test]
+    fn gateway_discovery_tolerates_absent_wireguard() {
+        // An older gateway, or one that enrolls no peers, omits the key; the
+        // document still validates and the desktop sends no key.
+        let d: GatewayDiscovery = serde_json::from_str(&discovery_document(None)).unwrap();
+        assert_eq!(d.wireguard, None);
+        validate_gateway_discovery("https://gw.chan.app", d).expect("absent wireguard is valid");
+    }
+
+    #[test]
+    fn gateway_discovery_rejects_a_bad_wireguard_entry() {
+        for (endpoint, public_key) in [
+            ("wg.chan.app", WG_SERVER_KEY),
+            ("wg.chan.app:0", WG_SERVER_KEY),
+            ("wg.chan.app:51820", &WG_SERVER_KEY[..43]),
+            (
+                "wg.chan.app:51820",
+                "not base64 at all, but forty-four chars long",
+            ),
+        ] {
+            let mut d = valid_gateway_discovery();
+            d.wireguard = Some(WireguardDiscovery {
+                endpoint: endpoint.into(),
+                public_key: public_key.into(),
+            });
+            let err = validate_gateway_discovery("https://gw.chan.app", d)
+                .expect_err("a bad entry is refused");
+            assert_eq!(
+                err, "chan-gateway discovery has an invalid wireguard entry",
+                "{endpoint} {public_key}"
+            );
+        }
     }
 
     #[test]

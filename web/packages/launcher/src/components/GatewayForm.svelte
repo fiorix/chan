@@ -10,7 +10,25 @@
   // for the command deck's Add gateway, and the Gateways deck's Add gateway
   // card renders it on the card's back face. Each host mounts the form fresh,
   // so its fields seed from the edit target.
-  import { addGateway, updateGateway } from "../state/library.svelte";
+  //
+  // On the desktop the form also generates the gateway's WireGuard key. The
+  // key belongs to a saved row, so on a new gateway the action adds the row
+  // first and the form then stays open as that row's form: it shows the
+  // public key, which the gateway's consent page shows again at sign-in, the
+  // URL is fixed, and the primary button reads Done and saves any later
+  // edit to the label or the file. A sign-in that enrolls the key names the
+  // row's client file while the form may still be open, so Done and Save
+  // send the file field only when the user changed it, and otherwise the
+  // row's file as the registry holds it then. The private key never reaches
+  // the launcher. A gateway that enrolls no peers refuses with the desktop's
+  // 400 sentence, rendered like a file refusal.
+  import {
+    addGateway,
+    updateGateway,
+    currentGateway,
+    generateWireguardKey,
+  } from "../state/library.svelte";
+  import { hasDesktopBridge } from "../state/capabilities";
   import type { GatewayEntry } from "../api/library";
 
   interface Props {
@@ -32,8 +50,16 @@
   let url = $state(target?.url ?? "");
   let name = $state(target?.label ?? "");
   let wireguard = $state(target?.wireguard ?? "");
+  // The file field as the row last held it here: seeded, or saved by the
+  // key action's add.
+  let savedFile = target?.wireguard ?? "";
   let error = $state<string | null>(null);
   let submitting = $state(false);
+  // The row this form writes: the edited gateway, or a new one once the key
+  // action has added it.
+  let savedId = $state<string | null>(target?.id ?? null);
+  let publicKey = $state<string | null>(target?.wireguard_public_key ?? null);
+  let copied = $state(false);
 
   function msg(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
@@ -46,6 +72,30 @@
     }
   }
 
+  /** The URL field as an http(s) URL, or null with the form's error set. */
+  function enteredUrl(): string | null {
+    const raw = url.trim();
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+      error = "Enter the gateway URL, like https://gateway.example.com";
+      return null;
+    }
+    return raw;
+  }
+
+  /** The file a save of row `id` sends: the field when the user changed it,
+   * else the row's file now, which a sign-in may have set meanwhile. */
+  async function fileToSave(id: string, file: string | undefined): Promise<string | undefined> {
+    if (wireguard.trim() !== savedFile.trim()) return file;
+    const row = await currentGateway(id);
+    return row ? (row.wireguard ?? undefined) : file;
+  }
+
   async function submit(): Promise<void> {
     // Both optional fields are full-replace on the wire: a blank one rides as
     // absent, which the registry reads as "clear".
@@ -56,19 +106,21 @@
       // Edit: the URL field is disabled, so the stored origin rides back
       // unchanged (the registry re-checks it) and only the label and the
       // WireGuard file move.
-      save = () => updateGateway(target.id, { url: target.url, label, wireguard: file });
+      save = async () =>
+        updateGateway(target.id, {
+          url: target.url,
+          label,
+          wireguard: await fileToSave(target.id, file),
+        });
+    } else if (savedId) {
+      // Done on a gateway the key action added: the URL is fixed now, and
+      // the label and the file save as an edit would.
+      const id = savedId;
+      save = async () =>
+        updateGateway(id, { url: url.trim(), label, wireguard: await fileToSave(id, file) });
     } else {
-      const raw = url.trim();
-      let parsed: URL | null = null;
-      try {
-        parsed = new URL(raw);
-      } catch {
-        parsed = null;
-      }
-      if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
-        error = "Enter the gateway URL, like https://gateway.example.com";
-        return;
-      }
+      const raw = enteredUrl();
+      if (raw === null) return;
       save = () => addGateway({ url: raw, label, wireguard: file });
     }
     submitting = true;
@@ -80,6 +132,42 @@
       error = msg(e);
     } finally {
       submitting = false;
+    }
+  }
+
+  async function generateKey(): Promise<void> {
+    error = null;
+    copied = false;
+    submitting = true;
+    try {
+      let id = savedId;
+      if (id === null) {
+        const raw = enteredUrl();
+        if (raw === null) return;
+        id = await addGateway({
+          url: raw,
+          label: name.trim() || undefined,
+          wireguard: wireguard.trim() || undefined,
+        });
+        savedId = id;
+        savedFile = wireguard;
+      }
+      const entry = await generateWireguardKey(id);
+      publicKey = entry.wireguard_public_key ?? null;
+    } catch (e) {
+      error = msg(e);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function copyKey(): Promise<void> {
+    if (!publicKey) return;
+    try {
+      await navigator.clipboard.writeText(publicKey);
+      copied = true;
+    } catch (e) {
+      error = `Copy failed (${msg(e)}); select the key and copy it.`;
     }
   }
 </script>
@@ -105,7 +193,7 @@
       placeholder="https://gateway.example.com"
       autocomplete="off"
       spellcheck="false"
-      disabled={target != null}
+      disabled={target != null || savedId != null}
       onkeydown={onFieldKey} />
   </label>
   <label class="field">
@@ -130,9 +218,36 @@
     <span class="field-hint">
       A wg-quick peer file, readable only by you (<code>chmod 600</code>). The gateway is then
       reached through an in-process WireGuard tunnel; the file takes effect as soon as it is
-      saved, and changing the path restarts that gateway's tunnel.
+      saved, and changing the path restarts that gateway's tunnel. A generated WireGuard key
+      fills this field at sign-in.
     </span>
   </label>
+
+  {#if hasDesktopBridge}
+    <div class="field wg-key">
+      {#if publicKey}
+        WireGuard public key
+        <div class="key-row">
+          <input
+            type="text"
+            class="mono"
+            readonly
+            value={publicKey}
+            aria-label="WireGuard public key"
+            onfocus={(e) => e.currentTarget.select()} />
+          <button class="btn" type="button" onclick={copyKey}>{copied ? "Copied" : "Copy"}</button>
+        </div>
+      {/if}
+      <button class="btn wg-generate" type="button" disabled={submitting} onclick={generateKey}>
+        Generate WireGuard key
+      </button>
+      <span class="field-hint">
+        {publicKey
+          ? "Generating again replaces this key; the gateway enrolls the new one at the next sign-in."
+          : "The desktop keeps the private key; the gateway enrolls the public key at sign-in."}
+      </span>
+    </div>
+  {/if}
 
   {#if error}
     <div class="error" role="alert">{error}</div>
@@ -145,7 +260,7 @@
       </button>
     {/if}
     <button class="btn primary" type="button" disabled={submitting} onclick={submit}>
-      {target ? "Save changes" : "Add gateway"}
+      {target ? "Save changes" : savedId ? "Done" : "Add gateway"}
     </button>
   </div>
 </div>
@@ -199,6 +314,20 @@
     line-height: 1.45;
     color: var(--text-secondary);
     opacity: 0.85;
+  }
+
+  .key-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .key-row input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .wg-generate {
+    align-self: flex-start;
   }
 
   .field-hint code {

@@ -233,6 +233,17 @@ struct PendingAuth {
     /// The ephemeral port the loopback listener bound. Rides the
     /// `redirect_uri`; the callback's `Host` must name it.
     port: u16,
+    /// The WireGuard key this sign-in sent for enrollment, if any.
+    enrolling: Option<Enrolling>,
+}
+
+/// The WireGuard key a sign-in sends and the discovery entry it was sent
+/// against: the redeem's parameters must name that same peer. The public
+/// key only; the private half stays in its file.
+#[derive(Debug, Clone)]
+pub(crate) struct Enrolling {
+    pub(crate) public_key: String,
+    pub(crate) entry: crate::devserver::WireguardDiscovery,
 }
 
 impl std::fmt::Debug for PendingAuth {
@@ -245,6 +256,7 @@ impl std::fmt::Debug for PendingAuth {
             .field("code_verifier", &"<redacted>")
             .field("created_at", &self.created_at)
             .field("port", &self.port)
+            .field("enrolling", &self.enrolling)
             .finish_non_exhaustive()
     }
 }
@@ -497,21 +509,17 @@ fn launch_signin<R: tauri::Runtime>(
     let state_nonce = new_state()?;
     let verifier = new_verifier()?;
     let challenge = challenge_for(&verifier);
+    let enrolling = enrolling_key(app_state, id, discovery)?;
     let (listener, port) = bind()?;
     let label = format!("chan-desktop @ {}", hostname());
-    let url = url::Url::parse_with_params(
-        &discovery.desktop_authorize_url,
-        &[
-            ("redirect_uri", loopback_redirect_uri(port)),
-            ("state", state_nonce.clone()),
-            ("label", label),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256".to_string()),
-            ("scopes", DESKTOP_ACCOUNT_SCOPES.to_string()),
-            ("expires_in", EXPIRES_IN_SECONDS.to_string()),
-        ],
-    )
-    .map_err(|e| format!("building authorize URL: {e}"))?;
+    let url = authorize_url(
+        discovery,
+        port,
+        &state_nonce,
+        label,
+        challenge,
+        enrolling.as_ref().map(|key| key.public_key.as_str()),
+    )?;
     let gateway = GatewaySignin {
         id: id.into(),
         attempt: Arc::clone(attempt),
@@ -526,6 +534,7 @@ fn launch_signin<R: tauri::Runtime>(
         created_at: Instant::now(),
         shutdown: shutdown_tx,
         port,
+        enrolling,
     })?;
     #[cfg(test)]
     if let Some(after_install) = attempt.signin_hooks.after_install.lock().unwrap().take() {
@@ -550,6 +559,61 @@ fn launch_signin<R: tauri::Runtime>(
         return Err(error);
     }
     Ok(())
+}
+
+/// The WireGuard key this sign-in enrolls: the row's generated public key,
+/// read now, when the gateway's discovery offers enrollment; `None` when
+/// either is missing, and the sign-in then sends no key.
+fn enrolling_key(
+    app_state: &crate::AppState,
+    id: &str,
+    discovery: &crate::devserver::GatewayDiscovery,
+) -> Result<Option<Enrolling>, String> {
+    let Some(entry) = &discovery.wireguard else {
+        return Ok(None);
+    };
+    let cfg = app_state
+        .store
+        .lock()
+        .unwrap()
+        .get()
+        .map_err(|e| e.to_string())?;
+    let key = cfg
+        .gateways
+        .into_iter()
+        .find(|g| g.id == id)
+        .and_then(|g| g.wireguard_public_key);
+    Ok(key.map(|public_key| Enrolling {
+        public_key,
+        entry: entry.clone(),
+    }))
+}
+
+/// The gateway's authorize page with the sign-in's parameters. A WireGuard
+/// public key rides as `wireguard_public_key` only when the discovery offers
+/// enrollment, so a gateway that enrolls no peers never receives one.
+fn authorize_url(
+    discovery: &crate::devserver::GatewayDiscovery,
+    port: u16,
+    state_nonce: &str,
+    label: String,
+    challenge: String,
+    wireguard_public_key: Option<&str>,
+) -> Result<url::Url, String> {
+    let mut params = vec![
+        ("redirect_uri", loopback_redirect_uri(port)),
+        ("state", state_nonce.to_string()),
+        ("label", label),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256".to_string()),
+        ("scopes", DESKTOP_ACCOUNT_SCOPES.to_string()),
+        ("expires_in", EXPIRES_IN_SECONDS.to_string()),
+    ];
+    if let (Some(key), Some(_)) = (wireguard_public_key, &discovery.wireguard) {
+        params.push(("wireguard_public_key", key.to_string()));
+    }
+    url::Url::parse_with_params(&discovery.desktop_authorize_url, &params)
+        .map_err(|e| format!("building authorize URL: {e}"))
 }
 
 async fn serve_signin_listener<R: tauri::Runtime>(
@@ -794,6 +858,8 @@ enum CallbackAction {
         /// The taken slot's listener shutdown, fired once this callback
         /// owns the flow.
         shutdown: watch::Sender<bool>,
+        /// The WireGuard key the sign-in sent, which the redeem enrolled.
+        enrolling: Option<Enrolling>,
     },
     /// Emit AUTH_ERROR and settle this attempt if it still owns the row
     /// (a matching-state error or a matching-state callback missing its code).
@@ -927,6 +993,7 @@ fn classify_callback(query: &str, pending: &mut Option<PendingAuth>) -> Callback
         account: expected.account,
         gateway: expected.gateway,
         shutdown: expected.shutdown,
+        enrolling: expected.enrolling,
     }
 }
 
@@ -954,6 +1021,7 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             account,
             gateway,
             shutdown,
+            enrolling,
         } => {
             let _ = shutdown.send(true);
             let state = Arc::clone(&app.state::<Arc<crate::AppState>>());
@@ -964,13 +1032,23 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             else {
                 return;
             };
-            let redeemed = match redeemed {
+            let mut redeemed = match redeemed {
                 Ok(redeemed) => redeemed,
                 Err(error) => {
                     fail_signin(&app, &state, &gateway, &error);
                     return;
                 }
             };
+            // A refused enrollment stores nothing, the token included.
+            let enrollment =
+                match prepare_enrollment(&state, &gateway.id, enrolling, redeemed.wireguard.take())
+                {
+                    Ok(enrollment) => enrollment,
+                    Err(error) => {
+                        fail_signin(&app, &state, &gateway, &error);
+                        return;
+                    }
+                };
             let pat = StoredPat {
                 id: redeemed.id,
                 secret: redeemed.secret,
@@ -978,11 +1056,27 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                 expires_at: redeemed.expires_at.unwrap_or_default(),
             };
             let flow = gateway.clone();
+            let recording = Arc::clone(&state);
             // Once this worker starts, join it even after cancellation: a
             // committed PAT must be acknowledged, never silently abandoned.
+            // The enrollment is recorded first, so a token is stored only
+            // beside its peer's client file and row; a failed store leaves
+            // that file, which the next sign-in enrolls again. The worker
+            // logs to this task's subscriber, where the sign-in's own lines
+            // go.
+            let dispatch = tracing::dispatcher::get_default(|dispatch| dispatch.clone());
             let committed = tokio::task::spawn_blocking(move || {
+                let _logging = tracing::dispatcher::set_default(&dispatch);
                 flow.attempt
                     .commit_credentials(|| {
+                        if let Some(enrollment) = enrollment {
+                            crate::config::record_wireguard_enrollment(
+                                &recording.store,
+                                &recording.gateway_manager,
+                                &flow.id,
+                                enrollment,
+                            )?;
+                        }
                         #[cfg(test)]
                         if let Some(store) = flow.attempt.signin_hooks.store.lock().unwrap().take()
                         {
@@ -1032,6 +1126,40 @@ struct RedeemedPat {
     /// expires.
     #[serde(default)]
     expires_at: Option<String>,
+    /// What the gateway enrolled the sent WireGuard key with; absent when
+    /// no key was sent.
+    #[serde(default)]
+    wireguard: Option<crate::wireguard_keys::EnrollmentParams>,
+}
+
+/// The enrollment a redeem completes, checked before anything is stored:
+/// `None` when the sign-in sent no key, whatever the answer carries. A key
+/// sent and answered without parameters is refused, since the gateway never
+/// delivers a token without its peer, and so are parameters that name
+/// another peer or that the client file cannot hold.
+fn prepare_enrollment(
+    state: &crate::AppState,
+    gateway_id: &str,
+    enrolling: Option<Enrolling>,
+    params: Option<crate::wireguard_keys::EnrollmentParams>,
+) -> Result<Option<crate::wireguard_keys::Enrollment>, String> {
+    let Some(enrolling) = enrolling else {
+        return Ok(None);
+    };
+    let Some(params) = params else {
+        return Err(
+            "sign-in failed: the gateway returned no WireGuard parameters for the key".to_string(),
+        );
+    };
+    let dir = state.store.lock().unwrap().wireguard_dir();
+    crate::wireguard_keys::prepare(
+        &dir,
+        gateway_id,
+        &enrolling.public_key,
+        &enrolling.entry,
+        &params,
+    )
+    .map(Some)
 }
 
 /// Swap the one-time code plus the PKCE verifier for the PAT at the
@@ -1083,6 +1211,9 @@ fn signin_error_message(reason: &str) -> String {
         "oauth_denied" => "sign-in was denied by the identity provider".to_string(),
         "account_blocked" => "sign-in failed: this account is blocked".to_string(),
         "mint_failed" => "sign-in failed: the gateway could not issue an access token".to_string(),
+        "wireguard_enroll_failed" => {
+            "sign-in failed: the gateway could not enroll the WireGuard key".to_string()
+        }
         other => format!("sign-in failed in the browser: {other}"),
     }
 }
@@ -1218,6 +1349,18 @@ pub(crate) mod tests {
         origin: &str,
         query: &str,
     ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        enrolling_callback_for_test(app, id, attempt, origin, query, None)
+    }
+
+    /// A callback to a sign-in that sent `enrolling` for enrollment.
+    pub(crate) fn enrolling_callback_for_test(
+        app: AppHandle<tauri::test::MockRuntime>,
+        id: &str,
+        attempt: &Arc<GatewayAttempt>,
+        origin: &str,
+        query: &str,
+        enrolling: Option<Enrolling>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
         let mut slot = pending("nonce-1");
         let pending = slot.as_mut().unwrap();
         pending.gateway = GatewaySignin {
@@ -1226,6 +1369,7 @@ pub(crate) mod tests {
         };
         pending.identity_origin = origin.into();
         pending.account = gateway_account(origin);
+        pending.enrolling = enrolling;
         let action = classify_callback(query, &mut slot);
         assert!(slot.is_none(), "test callback must consume the slot");
         settle(app, action)
@@ -1416,9 +1560,75 @@ pub(crate) mod tests {
             "sign-in failed: the gateway could not issue an access token"
         );
         assert_eq!(
+            signin_error_message("wireguard_enroll_failed"),
+            "sign-in failed: the gateway could not enroll the WireGuard key"
+        );
+        assert_eq!(
             signin_error_message("quota_exceeded"),
             "sign-in failed in the browser: quota_exceeded"
         );
+    }
+
+    #[test]
+    fn authorize_url_carries_the_wireguard_key_only_when_offered() {
+        const KEY: &str = "VC4iwoJ2wtcsxQssd+OIlaneI45CL0CRy1vZSsryu38=";
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let plain = crate::gateway::tests::runtime_with(Vec::new()).discovery;
+        let mut offering = plain.clone();
+        offering.wireguard = Some(crate::devserver::WireguardDiscovery {
+            endpoint: "wg.chan.app:51820".into(),
+            public_key: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into(),
+        });
+        let url_for = |discovery: &crate::devserver::GatewayDiscovery| {
+            let enrolling = enrolling_key(&state, "gw-keychain", discovery).unwrap();
+            authorize_url(
+                discovery,
+                54321,
+                "nonce-1",
+                "chan-desktop @ host".into(),
+                "challenge".into(),
+                enrolling.as_ref().map(|key| key.public_key.as_str()),
+            )
+            .unwrap()
+        };
+        let pairs = |url: &url::Url| -> Vec<(String, String)> {
+            url.query_pairs()
+                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                .collect()
+        };
+        let base: Vec<(String, String)> = [
+            ("redirect_uri", "http://127.0.0.1:54321/auth/callback"),
+            ("state", "nonce-1"),
+            ("label", "chan-desktop @ host"),
+            ("code_challenge", "challenge"),
+            ("code_challenge_method", "S256"),
+            ("scopes", "desktop.account"),
+            ("expires_in", "2592000"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        // A row without a key sends none, whether or not it is offered.
+        assert_eq!(pairs(&url_for(&plain)), base);
+        assert_eq!(pairs(&url_for(&offering)), base);
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(KEY.into());
+            store.save(&cfg).unwrap();
+        }
+        // A key on the row goes only to a gateway that offers enrollment,
+        // as the stored value, every other parameter unchanged.
+        assert_eq!(pairs(&url_for(&plain)), base);
+        let mut with_key = base.clone();
+        with_key.push(("wireguard_public_key".into(), KEY.into()));
+        assert_eq!(pairs(&url_for(&offering)), with_key);
+        // The builder never sends one to a gateway that does not offer it.
+        let url =
+            authorize_url(&plain, 54321, "nonce-1", "l".into(), "c".into(), Some(KEY)).unwrap();
+        assert!(url
+            .query_pairs()
+            .all(|(name, _)| name != "wireguard_public_key"));
     }
 
     // --- PKCE construction, pinned against silent drift ---
@@ -1491,6 +1701,7 @@ pub(crate) mod tests {
             created_at: Instant::now(),
             shutdown,
             port: 54321,
+            enrolling: None,
         })
     }
 

@@ -31,6 +31,7 @@ mod window_ops;
 mod window_watcher;
 mod window_watcher_wiring;
 mod wireguard;
+mod wireguard_keys;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -10207,6 +10208,9 @@ mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
         }
@@ -10219,6 +10223,7 @@ mod tests {
             devserver_proxy_origin: "https://devserver.example.test".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://id.example.test/desktop/v1/devservers".into()),
+            wireguard: None,
         };
         state.gateway_manager.seed_test_runtime(
             gateway_id,
@@ -10301,6 +10306,9 @@ mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
         }
@@ -10315,6 +10323,7 @@ mod tests {
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+                wireguard: None,
             },
             vec![gateway::RosterDevserver {
                 owner_user_id: uuid::Uuid::from_u128(1),
@@ -10445,6 +10454,9 @@ mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
         }
@@ -10459,6 +10471,7 @@ mod tests {
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+                wireguard: None,
             },
             vec![gateway::RosterDevserver {
                 owner_user_id: uuid::Uuid::from_u128(1),

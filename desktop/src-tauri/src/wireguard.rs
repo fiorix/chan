@@ -498,7 +498,7 @@ fn missing_handshake_reason(
 }
 
 /// Bind the proxy on loopback with no tunnel, then adopt every enabled
-/// gateway with a WireGuard file. Never waits for an endpoint lookup or a
+/// gateway with a WireGuard file, with its host map. Never waits for an endpoint lookup or a
 /// handshake. A file that cannot be read or a tunnel that cannot start
 /// fails that row alone; a proxy that cannot bind fails every row, since
 /// nothing can reach a tunnel without it. Must run on the tokio runtime
@@ -533,7 +533,7 @@ async fn start_with_bind(gateways: &[Gateway], bind: SocketAddr) -> WireguardFab
     for gateway in gateways.iter().filter(|g| g.enabled) {
         if let Some(path) = &gateway.wireguard {
             // A refusal is logged and kept on the row by adopt itself.
-            let _ = fabric.adopt(&gateway.id, path, Vec::new());
+            let _ = fabric.adopt(&gateway.id, path, gateway.host_routes());
         }
     }
     fabric
@@ -762,7 +762,7 @@ pub fn with_launcher_proxy(builder: wry::WebViewBuilder<'_>) -> wry::WebViewBuil
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::Engine;
     use chan_wireguard::x25519::{PublicKey, StaticSecret};
@@ -799,13 +799,13 @@ mod tests {
     /// peer learns the client's endpoint from its first authenticated
     /// initiation, so its own configured endpoint is a port nothing
     /// answers on.
-    struct Peer {
-        tunnel: Tunnel,
-        conf: PathBuf,
-        private_key: String,
+    pub(crate) struct Peer {
+        pub(crate) tunnel: Tunnel,
+        pub(crate) conf: PathBuf,
+        pub(crate) private_key: String,
     }
 
-    async fn peer(dir: &Path, name: &str, client_addr: &str, peer_addr: &str) -> Peer {
+    pub(crate) async fn peer(dir: &Path, name: &str, client_addr: &str, peer_addr: &str) -> Peer {
         let client = secret();
         let server = secret();
         let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -843,6 +843,9 @@ mod tests {
             added_at: 0,
             native_trust: vec![],
             wireguard: wireguard.map(Path::to_path_buf),
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         }
     }
 
@@ -871,6 +874,12 @@ mod tests {
     /// CONNECT `target` through the fabric's proxy: the proxy's status,
     /// and the stream when it answered 200.
     async fn connect_via(fabric: &WireguardFabric, target: SocketAddr) -> (u16, TcpStream) {
+        connect_authority(fabric, &target.to_string()).await
+    }
+
+    /// CONNECT `target`, an address or a name with its port, through the
+    /// fabric's proxy.
+    async fn connect_authority(fabric: &WireguardFabric, target: &str) -> (u16, TcpStream) {
         let mut stream = TcpStream::connect(fabric.proxy_addr()).await.unwrap();
         stream
             .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
@@ -968,6 +977,166 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(connect_status(&response), Some(400), "{response:?}");
+    }
+
+    /// A CONNECT through the fabric to `name` on `peer`'s listener port is
+    /// answered 200 and lands on the listener from `client_addr`. Every
+    /// name these tests use ends in `.invalid`, which never resolves, so a
+    /// carried name went by the host map.
+    pub(crate) async fn carried_by_name(
+        fabric: &WireguardFabric,
+        listener: &mut chan_wireguard::Listener,
+        client_addr: &str,
+        name: &str,
+    ) {
+        let target = format!("{name}:{}", listener.port());
+        let (status, mut client) = connect_authority(fabric, &target).await;
+        assert_eq!(status, 200, "CONNECT {target}");
+        let mut server = tokio::time::timeout(WAIT, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            server.peer_addr().ip(),
+            client_addr.parse::<IpAddr>().unwrap()
+        );
+        client.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        tokio::time::timeout(WAIT, server.read_exact(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf, b"ping");
+    }
+
+    fn host(name: &str, address: &str) -> crate::config::WireguardHost {
+        crate::config::WireguardHost {
+            name: name.into(),
+            addresses: vec![address.parse().unwrap()],
+        }
+    }
+
+    #[tokio::test]
+    async fn start_routes_a_rows_host_map_by_name_with_no_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "gw.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let mut row = gateway("gw", Some(&far.conf));
+        row.wireguard_hosts = vec![
+            host("gw.chan.invalid", "10.7.0.2"),
+            host("*.proxy.chan.invalid", "10.7.0.2"),
+        ];
+        let fabric = start(&[row]).await;
+        // The exact name, and the wildcard one and three labels deep.
+        for name in [
+            "gw.chan.invalid",
+            "alice--a1.proxy.chan.invalid",
+            "x.y.alice--a1.proxy.chan.invalid",
+        ] {
+            carried_by_name(&fabric, &mut listener, "10.7.0.1", name).await;
+        }
+        // The wildcard's bare suffix is not under it: it takes the lookup,
+        // which fails.
+        let bare = format!("proxy.chan.invalid:{}", listener.port());
+        let (status, _) = connect_authority(&fabric, &bare).await;
+        assert_ne!(status, 200, "CONNECT {bare}");
+        drop(fabric);
+        // The same file with no map routes no name, as before.
+        let plain = start(&[gateway("gw", Some(&far.conf))]).await;
+        let named = format!("gw.chan.invalid:{}", listener.port());
+        let (status, _) = connect_authority(&plain, &named).await;
+        assert_ne!(status, 200, "CONNECT {named} with no map");
+    }
+
+    #[tokio::test]
+    async fn an_enrollment_adopts_its_tunnel_and_routes_its_names_at_once() {
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let started = || {
+            lines
+                .infos()
+                .iter()
+                .filter(|line| line.contains("gateway WireGuard tunnel started"))
+                .count()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "far.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        // What a redeem answers for this peer, and the discovery entry the
+        // sign-in sent its key against.
+        let client = chan_wireguard::config::read_file(&far.conf).unwrap();
+        let server_key = base64_of(client.peer.public_key.as_bytes());
+        let endpoint = client.peer.endpoint.to_string();
+        let sent = base64_of(PublicKey::from(&client.private_key).as_bytes());
+        let entry = crate::devserver::WireguardDiscovery {
+            endpoint: endpoint.clone(),
+            public_key: server_key.clone(),
+        };
+        let params = crate::wireguard_keys::EnrollmentParams {
+            server_public_key: server_key,
+            endpoint,
+            addresses: vec!["10.7.0.1/32".into()],
+            allowed_ips: vec!["10.7.0.2/32".into()],
+            persistent_keepalive: None,
+            hosts: vec![host("tenant.chan.invalid", "10.7.0.2")],
+        };
+        // The row, with no file yet, and its key file holding the client key.
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("desktop").join("config.json"),
+        )));
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways.push(gateway("gw-enroll", None));
+            guard.save(&cfg).unwrap();
+        }
+        let keys = store.lock().unwrap().wireguard_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        owner_only(
+            &keys,
+            "gw-enroll.key",
+            &format!(
+                "{}
+",
+                far.private_key
+            ),
+        );
+        let fabric = Arc::new(start(&[]).await);
+        let manager = crate::gateway::GatewayManager::default();
+        manager.set_wireguard(Arc::clone(&fabric)).unwrap();
+
+        let enrollment =
+            crate::wireguard_keys::prepare(&keys, "gw-enroll", &sent, &entry, &params).unwrap();
+        let (conf, adopted) =
+            crate::config::record_wireguard_enrollment(&store, &manager, "gw-enroll", enrollment)
+                .unwrap();
+        // The running fabric took it: the badge reads the adopt's answer,
+        // and a name in the map reaches the peer through the tunnel at once.
+        assert_eq!(adopted, Some(Ok("connecting".to_string())));
+        assert_eq!(fabric.tunnels(), 1);
+        assert_eq!(started(), 1);
+        carried_by_name(&fabric, &mut listener, "10.7.0.1", "tenant.chan.invalid").await;
+        assert_eq!(
+            fabric.status("gw-enroll", Some(&conf)).as_deref(),
+            Some("up")
+        );
+        let row = store.lock().unwrap().get().unwrap().gateways[0].clone();
+        assert_eq!(row.wireguard.as_deref(), Some(conf.as_path()));
+        assert_eq!(row.wireguard_enrolled_key.as_deref(), Some(sent.as_str()));
+        assert_eq!(row.wireguard_hosts, params.hosts);
+
+        // Enrolling again rewrites the file in place; the row's tunnel is
+        // retired and adopted again, so the new file runs.
+        let enrollment =
+            crate::wireguard_keys::prepare(&keys, "gw-enroll", &sent, &entry, &params).unwrap();
+        let (again, adopted) =
+            crate::config::record_wireguard_enrollment(&store, &manager, "gw-enroll", enrollment)
+                .unwrap();
+        assert_eq!(again, conf);
+        assert_eq!(adopted, Some(Ok("connecting".to_string())));
+        assert_eq!(started(), 2);
+        assert_eq!(fabric.tunnels(), 1);
+        carried_by_name(&fabric, &mut listener, "10.7.0.1", "tenant.chan.invalid").await;
     }
 
     #[tokio::test]

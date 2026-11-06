@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! wg-peer CLIENT_FILE [--port PORT] [--status SECS] [--forward PORT=ADDR]
+//! wg-peer --client-key KEY [--port PORT] [--status SECS] [--forward PORT=ADDR]
 //! ```
 //!
 //! Mints a key pair for each side and writes `CLIENT_FILE`, owner-only
@@ -23,6 +24,11 @@
 //! the handshake age, the byte counters and the endpoint; runs until
 //! killed.
 //!
+//! With `--client-key`, the client holds its own key pair: the peer takes
+//! the client's public key (base64, as `wg` prints it), writes no file and
+//! adds `public_key=` with its own public key to the ready line, so a
+//! client given that key and the UDP address can dial it.
+//!
 //! The peer's endpoint for the client is a placeholder, the discard port
 //! on loopback: the client's UDP port is unknown until it starts, nothing
 //! is sent before it speaks, and the first datagram it authenticates
@@ -35,7 +41,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use base64::Engine as _;
-use chan_wireguard::config::Config;
+use chan_wireguard::config::{parse_public_key, Config};
 use chan_wireguard::x25519::{PublicKey, StaticSecret};
 use chan_wireguard::{Stream, Tunnel};
 use rand_core::OsRng;
@@ -43,7 +49,7 @@ use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
 const USAGE: &str =
-    "usage: wg-peer CLIENT_FILE [--port PORT] [--status SECS] [--forward PORT=ADDR]";
+    "usage: wg-peer CLIENT_FILE | --client-key KEY [--port PORT] [--status SECS] [--forward PORT=ADDR]";
 const PEER_ADDRESS: &str = "10.7.0.2";
 const CLIENT_ADDRESS: &str = "10.7.0.1";
 const PLACEHOLDER_ENDPOINT: &str = "127.0.0.1:9";
@@ -53,8 +59,16 @@ const MAX_HEAD: usize = 16 * 1024;
 
 const RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
+/// The client the peer admits.
+enum Client {
+    /// Minted here and written to this file.
+    File(PathBuf),
+    /// Holding its own private key; this is its public half.
+    Key(PublicKey),
+}
+
 struct Args {
-    file: PathBuf,
+    client: Client,
     port: u16,
     status: Duration,
     forward: Option<(u16, SocketAddr)>,
@@ -62,12 +76,18 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut positional = Vec::new();
+    let mut client_key = None;
     let mut port = 8080;
     let mut status = Duration::from_secs(2);
     let mut forward = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--client-key" => {
+                let key = args.next().ok_or("--client-key needs a public key")?;
+                client_key =
+                    Some(parse_public_key(&key).map_err(|e| format!("--client-key: {e}"))?);
+            }
             "--port" => {
                 port = args
                     .next()
@@ -97,11 +117,13 @@ fn parse_args() -> Result<Args, String> {
             _ => positional.push(arg),
         }
     }
-    if positional.len() != 1 {
-        return Err(USAGE.to_string());
-    }
+    let client = match (positional.as_slice(), client_key) {
+        ([file], None) => Client::File(PathBuf::from(file)),
+        ([], Some(key)) => Client::Key(key),
+        _ => return Err(USAGE.to_string()),
+    };
     Ok(Args {
-        file: PathBuf::from(&positional[0]),
+        client,
         port,
         status,
         forward,
@@ -149,7 +171,6 @@ fn write_private(path: &Path, contents: &str) -> Result<(), String> {
 }
 
 async fn run(args: Args) -> Result<(), String> {
-    let client_key = StaticSecret::random_from_rng(OsRng);
     let peer_key = StaticSecret::random_from_rng(OsRng);
     let udp = UdpSocket::bind("127.0.0.1:0")
         .await
@@ -158,20 +179,27 @@ async fn run(args: Args) -> Result<(), String> {
         .local_addr()
         .map_err(|e| format!("reading the UDP address: {e}"))?;
 
-    let client_file = format!(
-        "[Interface]\nPrivateKey = {}\nAddress = {CLIENT_ADDRESS}/32\n\n\
-         [Peer]\nPublicKey = {}\nEndpoint = {udp_at}\nAllowedIPs = {PEER_ADDRESS}/32\n\
-         PersistentKeepalive = 5\n",
-        base64(&client_key.to_bytes()),
-        base64(PublicKey::from(&peer_key).as_bytes()),
-    );
-    write_private(&args.file, &client_file)?;
+    let client_public = match &args.client {
+        Client::File(path) => {
+            let client_key = StaticSecret::random_from_rng(OsRng);
+            let client_file = format!(
+                "[Interface]\nPrivateKey = {}\nAddress = {CLIENT_ADDRESS}/32\n\n\
+                 [Peer]\nPublicKey = {}\nEndpoint = {udp_at}\nAllowedIPs = {PEER_ADDRESS}/32\n\
+                 PersistentKeepalive = 5\n",
+                base64(&client_key.to_bytes()),
+                base64(PublicKey::from(&peer_key).as_bytes()),
+            );
+            write_private(path, &client_file)?;
+            PublicKey::from(&client_key)
+        }
+        Client::Key(key) => *key,
+    };
 
     let peer_file = format!(
         "[Interface]\nPrivateKey = {}\nAddress = {PEER_ADDRESS}/32\n\n\
          [Peer]\nPublicKey = {}\nEndpoint = {PLACEHOLDER_ENDPOINT}\nAllowedIPs = {CLIENT_ADDRESS}/32\n",
         base64(&peer_key.to_bytes()),
-        base64(PublicKey::from(&client_key).as_bytes()),
+        base64(client_public.as_bytes()),
     );
     let config = Config::parse(&peer_file).map_err(|e| format!("the peer's configuration: {e}"))?;
     let placeholder: SocketAddr = PLACEHOLDER_ENDPOINT.parse().expect("a literal address");
@@ -194,11 +222,16 @@ async fn run(args: Args) -> Result<(), String> {
         .map_or_else(String::new, |(listener, addr)| {
             format!(" forward={PEER_ADDRESS}:{}->{addr}", listener.port())
         });
+    let client = match &args.client {
+        Client::File(path) => format!("file={}", path.display()),
+        Client::Key(_) => format!(
+            "public_key={}",
+            base64(PublicKey::from(&peer_key).as_bytes())
+        ),
+    };
     println!(
-        "peer: ready url=http://{PEER_ADDRESS}:{} udp={udp_at} file={}{}",
-        listener.port(),
-        args.file.display(),
-        forward_ready
+        "peer: ready url=http://{PEER_ADDRESS}:{} udp={udp_at} {client}{forward_ready}",
+        listener.port()
     );
 
     if let Some((mut listener, addr)) = forward {

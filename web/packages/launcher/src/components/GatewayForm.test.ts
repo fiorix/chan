@@ -192,3 +192,176 @@ describe("GatewayForm WireGuard file", () => {
     expect(text).toContain("changing the path restarts that gateway's tunnel");
   });
 });
+
+describe("GatewayForm WireGuard key", () => {
+  const KEY = "VC4iwoJ2wtcsxQssd+OIlaneI45CL0CRy1vZSsryu38=";
+  const keyField = (el: HTMLElement) =>
+    el.querySelector('input[aria-label="WireGuard public key"]') as HTMLInputElement | null;
+  const primary = (el: HTMLElement) => el.querySelector("button.primary") as HTMLButtonElement;
+
+  function stubClipboard(writeText: (text: string) => Promise<void>): void {
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  }
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+  });
+
+  it("a new gateway's key action adds the row, generates its key and stays open with Done", async () => {
+    const add = vi.spyOn(backend, "addGateway");
+    const generate = vi.spyOn(backend, "generateWireguardKey");
+    const { el, onsaved } = render();
+    setInput(urlField(el), URL_);
+    btn(el, "Generate WireGuard key").click();
+    await settle();
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(wireBody(add.mock.calls[0][0])).toBe(wireBody({ url: URL_ }));
+    expect(generate).toHaveBeenCalledTimes(1);
+    const id = generate.mock.calls[0][0];
+    const stored = (await backend.listGateways()).find((g) => g.id === id)!;
+    expect(stored.wireguard_public_key).toHaveLength(44);
+    expect(keyField(el)!.value).toBe(stored.wireguard_public_key);
+    expect(keyField(el)!.readOnly).toBe(true);
+    expect(primary(el).textContent!.trim()).toBe("Done");
+    expect(urlField(el).disabled).toBe(true);
+    expect(onsaved).not.toHaveBeenCalled();
+    // Done saves a later edit as an update of the same row, then closes.
+    setInput(nameField(el), "prod");
+    const update = vi.spyOn(backend, "updateGateway");
+    primary(el).click();
+    await settle();
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][0]).toBe(id);
+    expect(wireBody(update.mock.calls[0][1])).toBe(wireBody({ url: URL_, label: "prod" }));
+    expect(onsaved).toHaveBeenCalledWith(id);
+  });
+
+  it("Done after a sign-in enrolled the key keeps the client file the sign-in named", async () => {
+    // With the file field blank, and with a file typed before the key
+    // action, which the add saved.
+    for (const typed of ["", FILE]) {
+      const { resetMockGateways } = await import("../api/mock");
+      resetMockGateways();
+      const { el, onsaved } = render();
+      setInput(urlField(el), URL_);
+      setInput(fileField(el), typed);
+      btn(el, "Generate WireGuard key").click();
+      await settle();
+      const id = (await backend.listGateways()).find((g) => g.url === URL_)!.id;
+      // The badge's Connect signs in while the form is open, and the
+      // redeem names the row's client file.
+      await backend.connectGateway(id);
+      const enrolled = (await backend.listGateways()).find((g) => g.id === id)!.wireguard;
+      expect(enrolled, typed).toMatch(/\.conf$/);
+      const update = vi.spyOn(backend, "updateGateway");
+      setInput(nameField(el), "prod");
+      primary(el).click();
+      await settle();
+      expect(wireBody(update.mock.calls[0][1]), typed).toBe(
+        wireBody({ url: URL_, label: "prod", wireguard: enrolled }),
+      );
+      expect((await backend.listGateways()).find((g) => g.id === id)!.wireguard).toBe(enrolled);
+      expect(onsaved).toHaveBeenCalledWith(id);
+      update.mockRestore();
+      unmount(app!);
+      target!.remove();
+      app = null;
+      target = null;
+    }
+  });
+
+  it("an edit saved after a sign-in keeps the row's file unless the field was changed", async () => {
+    const id = await backend.addGateway({ url: URL_ }).then((g) => g.id);
+    const row = (await backend.generateWireguardKey(id))!;
+    const { el } = render(row);
+    await backend.connectGateway(id);
+    const enrolled = (await backend.listGateways()).find((g) => g.id === id)!.wireguard;
+    const update = vi.spyOn(backend, "updateGateway");
+    setInput(nameField(el), "prod");
+    btn(el, "Save changes").click();
+    await settle();
+    expect(wireBody(update.mock.calls[0][1])).toBe(
+      wireBody({ url: URL_, label: "prod", wireguard: enrolled }),
+    );
+    // A file typed into the field is what the user asked for.
+    unmount(app!);
+    target!.remove();
+    const second = render(row);
+    setInput(fileField(second.el), FILE);
+    btn(second.el, "Save changes").click();
+    await settle();
+    expect(wireBody(update.mock.calls[1][1])).toBe(wireBody({ url: URL_, wireguard: FILE }));
+  });
+
+  it("an existing gateway's key action calls the key route directly", async () => {
+    const add = vi.spyOn(backend, "addGateway");
+    const generate = vi
+      .spyOn(backend, "generateWireguardKey")
+      .mockResolvedValue(gw({ wireguard_public_key: KEY }));
+    const { el, onsaved } = render(gw());
+    expect(keyField(el)).toBeNull();
+    btn(el, "Generate WireGuard key").click();
+    await settle();
+    expect(add).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalledWith("gw-test0001");
+    expect(keyField(el)!.value).toBe(KEY);
+    expect(primary(el).textContent!.trim()).toBe("Save changes");
+    expect(onsaved).not.toHaveBeenCalled();
+  });
+
+  it("an edited gateway with a key shows it", () => {
+    const { el } = render(gw({ wireguard_public_key: KEY }));
+    expect(keyField(el)!.value).toBe(KEY);
+  });
+
+  it("a gateway that enrolls no peers renders the refusal verbatim", async () => {
+    const { el } = render();
+    setInput(urlField(el), "https://direct.chan.app");
+    btn(el, "Generate WireGuard key").click();
+    await settle();
+    expect(el.querySelector(".error")!.textContent).toBe(
+      "this gateway does not enroll WireGuard peers",
+    );
+    expect(keyField(el)).toBeNull();
+    // The row was added before the refusal, so the form is that row's now.
+    expect(primary(el).textContent!.trim()).toBe("Done");
+    expect((await backend.listGateways()).map((g) => g.url)).toEqual(["https://direct.chan.app"]);
+  });
+
+  it("an invalid URL is refused before anything is added", async () => {
+    const add = vi.spyOn(backend, "addGateway");
+    const { el } = render();
+    setInput(urlField(el), "gw.chan.app");
+    btn(el, "Generate WireGuard key").click();
+    await settle();
+    expect(add).not.toHaveBeenCalled();
+    expect(el.querySelector(".error")!.textContent).toBe(
+      "Enter the gateway URL, like https://gateway.example.com",
+    );
+  });
+
+  it("Copy writes the public key to the clipboard, and a refused write says so", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    const { el } = render(gw({ wireguard_public_key: KEY }));
+    btn(el, "Copy").click();
+    await settle();
+    expect(writeText).toHaveBeenCalledWith(KEY);
+    expect(btn(el, "Copied")).toBeTruthy();
+    stubClipboard(() => Promise.reject(new Error("not allowed")));
+    btn(el, "Copied").click();
+    await settle();
+    expect(el.querySelector(".error")!.textContent).toBe(
+      "Copy failed (not allowed); select the key and copy it.",
+    );
+  });
+
+  it("the file field's hint says a generated key fills it at sign-in", () => {
+    const { el } = render();
+    const hint = fileField(el).closest("label")!.querySelector(".field-hint")!;
+    expect(hint.textContent!.replace(/\s+/g, " ")).toContain(
+      "A generated WireGuard key fills this field at sign-in.",
+    );
+  });
+});

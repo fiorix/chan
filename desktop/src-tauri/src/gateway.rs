@@ -818,17 +818,21 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
 /// Adopt `gateway_id`'s WireGuard file before it connects, so a file
 /// refused earlier and fixed in place, or a config edited by hand, comes
 /// up here without a save; a tunnel already running from the file is left
-/// as it is. `Some` with the reason when the file or the fabric cannot
-/// carry the row: a connect that ran anyway would reach the gateway the
-/// wrong way or not at all, so the row says what to fix instead.
+/// as it is. The row's host map rides the adopt. `Some` with the reason
+/// when the file or the fabric cannot carry the row: a connect that ran
+/// anyway would reach the gateway the wrong way or not at all, so the row
+/// says what to fix instead.
+///
+/// The adopt runs under the store's lock, as the registry's saves adopt,
+/// so a save naming another file and this connect take the fabric in the
+/// order they read the row, and the older file's tunnel is never the one
+/// left routed.
 fn adopt_wireguard(
     state: &AppState,
     gateway_id: &str,
 ) -> Result<Option<(Gateway, String)>, String> {
-    let gateway = state
-        .store
-        .lock()
-        .unwrap()
+    let store = state.store.lock().unwrap();
+    let gateway = store
         .get()
         .map_err(|e| e.to_string())?
         .gateways
@@ -841,10 +845,22 @@ fn adopt_wireguard(
     ) else {
         return Ok(None);
     };
-    match fabric.adopt(&gateway.id, file, Vec::new()) {
+    let adopted = fabric.adopt(&gateway.id, file, gateway.host_routes());
+    drop(store);
+    match adopted {
         Ok(_) => Ok(None),
         Err(reason) => Ok(Some((gateway, reason))),
     }
+}
+
+/// Whether a connect must sign in through the browser to enroll the row's
+/// WireGuard key: the row holds a key, the gateway offers enrollment, and
+/// the key the gateway enrolled last is not this one. A stored token does
+/// not enroll a key, so it is not enough.
+fn wireguard_key_unenrolled(gateway: &Gateway, discovery: &GatewayDiscovery) -> bool {
+    discovery.wireguard.is_some()
+        && gateway.wireguard_public_key.is_some()
+        && gateway.wireguard_enrolled_key != gateway.wireguard_public_key
 }
 
 /// Connect a configured gateway. Non-interactive startup never opens a browser.
@@ -917,6 +933,19 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     else {
         return Ok(());
     };
+    if interactive && gateway.wireguard_public_key.is_some() && discovery.wireguard.is_none() {
+        // The row keeps its key; this gateway signs in and connects
+        // without one. Said to a Connect click, not at every start.
+        emit_notice(
+            &app,
+            "info",
+            "gateway",
+            &gateway_id,
+            &label,
+            "Gateway WireGuard",
+            chan_server::WIREGUARD_NOT_OFFERED,
+        );
+    }
     // A keyring read can block. Its result remains owned by this attempt even
     // when cancellation stops waiting for the blocking task.
     let origin = discovery.identity_origin.clone();
@@ -942,16 +971,48 @@ pub async fn connect_gateway<R: tauri::Runtime>(
     else {
         return Ok(());
     };
-    let Some(pat) = pat else {
-        return signin_leg(
-            &app,
-            &state,
-            &gateway_id,
-            &label,
-            &discovery,
-            &attempt,
-            interactive,
-        );
+    let pat = match pat {
+        Some(pat) if !wireguard_key_unenrolled(&gateway, &discovery) => pat,
+        stored => {
+            // Only a browser sign-in enrolls a key, so a stored token for a
+            // row whose key is not enrolled signs in again; a start-up
+            // connect opens no browser and parks the row saying why.
+            if stored.is_some() && !interactive {
+                return park_for_signin(
+                    &app,
+                    &state,
+                    &gateway_id,
+                    &label,
+                    &discovery,
+                    &attempt,
+                    SigninPark {
+                        error: WIREGUARD_UNENROLLED_PARK,
+                        title: "Gateway WireGuard",
+                        message: WIREGUARD_UNENROLLED_PARK,
+                    },
+                );
+            }
+            if stored.is_some() {
+                emit_notice(
+                    &app,
+                    "info",
+                    "gateway",
+                    &gateway_id,
+                    &label,
+                    "Gateway WireGuard",
+                    "the WireGuard key is not enrolled yet; signing in",
+                );
+            }
+            return signin_leg(
+                &app,
+                &state,
+                &gateway_id,
+                &label,
+                &discovery,
+                &attempt,
+                interactive,
+            );
+        }
     };
     connect_with_pat(
         &app,
@@ -1246,6 +1307,55 @@ async fn finish_first_fetch<R: tauri::Runtime>(
 }
 
 /// The browser leg keeps its attempt while parked. Auth owns the slot itself.
+/// Why a start-up connect that needs the browser stops: the row's
+/// `last_error` and the notice that says so.
+struct SigninPark {
+    error: &'static str,
+    title: &'static str,
+    message: &'static str,
+}
+
+/// A stored token whose row holds a key the gateway has not enrolled.
+const WIREGUARD_UNENROLLED_PARK: &str =
+    "the WireGuard key is not enrolled yet; click Connect to sign in";
+
+/// Park a connect that needs the browser where none may open: the row is
+/// disconnected with `park.error` until a Connect click signs in.
+fn park_for_signin<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    gateway_id: &str,
+    label: &str,
+    discovery: &GatewayDiscovery,
+    attempt: &Arc<GatewayAttempt>,
+    park: SigninPark,
+) -> Result<(), String> {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return Ok(());
+    }
+    live.attempts.remove(gateway_id);
+    let rt = live
+        .runtimes
+        .entry(gateway_id.into())
+        .or_insert_with(|| new_runtime(discovery.clone()));
+    rt.status = GatewayStatus::Disconnected;
+    rt.pending_signin = false;
+    rt.last_error = Some(park.error.into());
+    drop(live);
+    emit_notice(
+        app,
+        "info",
+        "gateway",
+        gateway_id,
+        label,
+        park.title,
+        park.message,
+    );
+    signal_rows_changed(app, state);
+    Ok(())
+}
+
 fn signin_leg<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,
@@ -1265,30 +1375,20 @@ fn signin_leg<R: tauri::Runtime>(
         return Ok(());
     }
     if !interactive {
-        let mut live = state.gateway_manager.state.lock().unwrap();
-        if !live.owns(gateway_id, attempt) {
-            return Ok(());
-        }
-        live.attempts.remove(gateway_id);
-        let rt = live
-            .runtimes
-            .entry(gateway_id.into())
-            .or_insert_with(|| new_runtime(discovery.clone()));
-        rt.status = GatewayStatus::Disconnected;
-        rt.pending_signin = false;
-        rt.last_error = Some("sign-in required - click Connect".into());
-        drop(live);
-        emit_notice(
+        return park_for_signin(
             app,
-            "info",
-            "gateway",
+            state,
             gateway_id,
             label,
-            "Sign-in required",
-            "this gateway needs a browser sign-in; click Connect on the Gateways screen",
+            discovery,
+            attempt,
+            SigninPark {
+                error: "sign-in required - click Connect",
+                title: "Sign-in required",
+                message:
+                    "this gateway needs a browser sign-in; click Connect on the Gateways screen",
+            },
         );
-        signal_rows_changed(app, state);
-        return Ok(());
     }
     if state
         .gateway_manager
@@ -1912,6 +2012,21 @@ pub(crate) mod tests {
                 query,
             )
         }
+
+        fn enrolling_callback(
+            &self,
+            query: &str,
+            enrolling: Option<auth::Enrolling>,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            auth::tests::enrolling_callback_for_test(
+                self.app.handle().clone(),
+                "gw-keychain",
+                &self.attempt,
+                &self.discovery.identity_origin,
+                query,
+                enrolling,
+            )
+        }
     }
 
     fn auth_events(
@@ -2332,6 +2447,327 @@ pub(crate) mod tests {
         (origin, requests, server)
     }
 
+    /// Identity's redeem answering `answer` and recording each request
+    /// body, beside a one-row roster so the resumed connect completes.
+    async fn redeem_stub(
+        answer: serde_json::Value,
+    ) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&bodies);
+        let router = axum::Router::new()
+            .route(
+                "/desktop/authorize/redeem",
+                axum::routing::post(move |body: String| {
+                    let answer = answer.clone();
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        seen.lock().unwrap().push(body);
+                        axum::Json(answer)
+                    }
+                }),
+            )
+            .route(
+                "/desktop/v1/devservers",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "user_id": "11111111-1111-1111-1111-111111111111",
+                        "username": "alice",
+                        "devservers": [],
+                    }))
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (origin, bodies, server)
+    }
+
+    const WG_SERVER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+    /// A TEST-NET address: no lookup, and no handshake ever completes.
+    const WG_ENDPOINT: &str = "192.0.2.1:51820";
+
+    fn redeem_answer(wireguard: Option<serde_json::Value>) -> serde_json::Value {
+        let mut answer = serde_json::json!({
+            "id": "pat-wg",
+            "secret": "fixture-only",
+            "label": "test",
+            "expires_at": null,
+        });
+        if let Some(params) = wireguard {
+            answer["wireguard"] = params;
+        }
+        answer
+    }
+
+    fn redeem_params(server_public_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "server_public_key": server_public_key,
+            "endpoint": WG_ENDPOINT,
+            "addresses": ["10.7.0.23/32", "fd00:7::23/128"],
+            "allowed_ips": ["10.7.0.1/32"],
+            "persistent_keepalive": 25,
+            "hosts": [
+                {"name": "proxy.chan.invalid", "addresses": ["10.7.0.1"]},
+                {"name": "*.proxy.chan.invalid", "addresses": ["10.7.0.1"]},
+            ],
+        })
+    }
+
+    /// One sign-in callback against a redeem answering `answer`, for a row
+    /// whose key is generated and stored, sending that key when `send`:
+    /// the fixture, the running fabric, the key directory, the key sent
+    /// and the redeem's request bodies.
+    struct EnrollingSignin {
+        f: SigninFixture,
+        fabric: Arc<crate::wireguard::WireguardFabric>,
+        keys: std::path::PathBuf,
+        sent: String,
+        bodies: Arc<Mutex<Vec<String>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn enrolling_signin(answer: serde_json::Value, send: bool) -> EnrollingSignin {
+        enrolling_signin_with(answer, send, |_| {}).await
+    }
+
+    /// [`enrolling_signin`], with `prepare` run over the key directory
+    /// before the callback.
+    async fn enrolling_signin_with(
+        answer: serde_json::Value,
+        send: bool,
+        prepare: impl FnOnce(&std::path::Path),
+    ) -> EnrollingSignin {
+        let (origin, bodies, server) = redeem_stub(answer).await;
+        let f = SigninFixture::new(&origin);
+        let fabric = Arc::new(crate::wireguard::start(&[]).await);
+        f.state
+            .gateway_manager
+            .set_wireguard(Arc::clone(&fabric))
+            .unwrap();
+        let keys = f.state.store.lock().unwrap().wireguard_dir();
+        let sent = crate::wireguard_keys::generate(&keys, "gw-keychain").unwrap();
+        {
+            let mut store = f.state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(sent.clone());
+            store.save(&cfg).unwrap();
+        }
+        prepare(&keys);
+        let stored_origin = origin.clone();
+        *f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(stored_origin, pat.clone());
+            Ok(())
+        }));
+        let enrolling = send.then(|| auth::Enrolling {
+            public_key: sent.clone(),
+            entry: crate::devserver::WireguardDiscovery {
+                endpoint: WG_ENDPOINT.into(),
+                public_key: WG_SERVER_KEY.into(),
+            },
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            f.enrolling_callback("code=test-code&state=nonce-1", enrolling),
+        )
+        .await
+        .expect("the callback settles");
+        EnrollingSignin {
+            f,
+            fabric,
+            keys,
+            sent,
+            bodies,
+            server,
+        }
+    }
+
+    impl EnrollingSignin {
+        fn row(&self) -> Gateway {
+            gateway_row(&self.f.state, "gw-keychain").unwrap()
+        }
+
+        fn stored_pat(&self) -> bool {
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .contains_key(&self.f.discovery.identity_origin)
+        }
+
+        async fn finish(self) {
+            self.f.cancel().await;
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .remove(&self.f.discovery.identity_origin);
+            self.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn redeem_with_wireguard_writes_the_file_and_updates_the_row() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let run = enrolling_signin(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), true).await;
+        let conf = crate::wireguard_keys::conf_path(&run.keys, "gw-keychain");
+
+        // The client file holds what the redeem answered.
+        let read = chan_wireguard::config::read_file(&conf).expect("the enrolled file reads");
+        let cidrs = |list: &[chan_wireguard::config::Cidr]| -> Vec<String> {
+            list.iter()
+                .map(|c| format!("{}/{}", c.addr, c.prefix))
+                .collect()
+        };
+        assert_eq!(cidrs(&read.addresses), ["10.7.0.23/32", "fd00:7::23/128"]);
+        assert_eq!(cidrs(&read.peer.allowed_ips), ["10.7.0.1/32"]);
+        assert_eq!(read.peer.endpoint.to_string(), WG_ENDPOINT);
+        assert_eq!(read.peer.persistent_keepalive, Some(25));
+        {
+            use base64::Engine;
+            let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+            assert_eq!(b64(read.peer.public_key.as_bytes()), WG_SERVER_KEY);
+            assert_eq!(
+                b64(chan_wireguard::x25519::PublicKey::from(&read.private_key).as_bytes()),
+                run.sent
+            );
+        }
+        // The row names it, with the enrolled key and the host map, and the
+        // projection reads the key as enrolled.
+        let row = run.row();
+        assert_eq!(row.wireguard.as_deref(), Some(conf.as_path()));
+        assert_eq!(
+            row.wireguard_enrolled_key.as_deref(),
+            Some(run.sent.as_str())
+        );
+        let hosts: Vec<(String, Vec<std::net::IpAddr>)> = row
+            .wireguard_hosts
+            .iter()
+            .map(|h| (h.name.clone(), h.addresses.clone()))
+            .collect();
+        let tunnel_address: std::net::IpAddr = "10.7.0.1".parse().unwrap();
+        assert_eq!(
+            hosts,
+            [
+                ("proxy.chan.invalid".to_string(), vec![tunnel_address]),
+                ("*.proxy.chan.invalid".to_string(), vec![tunnel_address]),
+            ]
+        );
+        // The running fabric adopted it once, from that file.
+        let adopts = lines
+            .infos()
+            .iter()
+            .filter(|line| line.contains("gateway WireGuard tunnel started"))
+            .count();
+        assert_eq!(adopts, 1);
+        assert_eq!(run.fabric.tunnels(), 1);
+        assert_eq!(
+            run.fabric.status("gw-keychain", Some(&conf)).as_deref(),
+            Some("connecting")
+        );
+        assert!(run.stored_pat(), "the token is stored as before");
+
+        // The private key is in its file and the client file, and nowhere
+        // else: not the config, not the log, not a request.
+        let key_text =
+            std::fs::read_to_string(crate::wireguard_keys::key_path(&run.keys, "gw-keychain"))
+                .unwrap();
+        let private = key_text.trim_end();
+        assert!(
+            std::fs::read_to_string(&conf).unwrap().contains(private),
+            "the grep finds the key where it is"
+        );
+        let config = std::fs::read_to_string(run.keys.with_file_name("config.json")).unwrap();
+        assert!(config.contains(&run.sent), "the grep reads the config");
+        assert!(!config.contains(private));
+        let log = lines.text();
+        assert!(log.contains("gateway WireGuard tunnel started"), "{log}");
+        assert!(!log.contains(private));
+        let bodies = run.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("test-code"), "{bodies:?}");
+        assert!(!bodies[0].contains(private));
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn redeem_refuses_another_peer_or_missing_parameters_and_stores_nothing() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        for (answer, message) in [
+            (
+                redeem_answer(Some(redeem_params(
+                    "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
+                ))),
+                "sign-in failed: the gateway's WireGuard peer changed during sign-in",
+            ),
+            (
+                redeem_answer(None),
+                "sign-in failed: the gateway returned no WireGuard parameters for the key",
+            ),
+        ] {
+            let run = enrolling_signin(answer, true).await;
+            let conf = crate::wireguard_keys::conf_path(&run.keys, "gw-keychain");
+            assert!(!conf.exists(), "{message}");
+            let row = run.row();
+            assert_eq!(row.wireguard, None);
+            assert_eq!(row.wireguard_enrolled_key, None);
+            assert!(row.wireguard_hosts.is_empty());
+            assert!(!run.stored_pat(), "{message}: no token without its peer");
+            assert_eq!(run.fabric.tunnels(), 0);
+            let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+            assert_eq!(view.last_error.as_deref(), Some(message));
+            run.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn redeem_whose_client_file_cannot_be_written_stores_no_token() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        // A directory where the client file goes: the write fails on every
+        // platform.
+        let run = enrolling_signin_with(
+            redeem_answer(Some(redeem_params(WG_SERVER_KEY))),
+            true,
+            |keys| {
+                std::fs::create_dir(crate::wireguard_keys::conf_path(keys, "gw-keychain")).unwrap()
+            },
+        )
+        .await;
+        assert!(!run.stored_pat(), "no token without its peer's client file");
+        let row = run.row();
+        assert_eq!(row.wireguard, None);
+        assert_eq!(row.wireguard_enrolled_key, None);
+        assert!(row.wireguard_hosts.is_empty());
+        assert_eq!(run.fabric.tunnels(), 0);
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert!(
+            view.last_error.is_some(),
+            "the sign-in fails with the write's error"
+        );
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn redeem_without_a_key_sent_behaves_as_before() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        // Parameters a sign-in never asked for are not written either.
+        for answer in [
+            redeem_answer(None),
+            redeem_answer(Some(redeem_params(WG_SERVER_KEY))),
+        ] {
+            let run = enrolling_signin(answer, false).await;
+            assert!(run.stored_pat());
+            assert!(!crate::wireguard_keys::conf_path(&run.keys, "gw-keychain").exists());
+            let row = run.row();
+            assert_eq!(row.wireguard, None);
+            assert_eq!(row.wireguard_enrolled_key, None);
+            assert_eq!(run.fabric.tunnels(), 0);
+            run.finish().await;
+        }
+    }
+
     #[tokio::test]
     async fn cancelled_redemption_joins_before_held_response_and_stores_nothing() {
         let (origin, mut requests, server) = held_redemption().await;
@@ -2693,6 +3129,7 @@ pub(crate) mod tests {
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
+            wireguard: None,
         });
         rt.roster = rows;
         rt.status = GatewayStatus::Connected;
@@ -2713,6 +3150,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust,
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
         std::mem::forget(dir);
@@ -3005,6 +3445,7 @@ pub(crate) mod tests {
                 devserver_proxy_origin: "https://devserver.example.test".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some("https://id.example.test/desktop/v1/devservers".into()),
+                wireguard: None,
             },
             vec![shared],
         );
@@ -3271,6 +3712,15 @@ pub(crate) mod tests {
         unauthorized: bool,
         hold: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
+        spawn_gateway_stub_full(unauthorized, hold, None).await
+    }
+
+    /// The gateway stub, its discovery carrying `wireguard` when given.
+    async fn spawn_gateway_stub_full(
+        unauthorized: bool,
+        hold: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
+        wireguard: Option<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use axum::{response::IntoResponse, routing::get};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -3280,8 +3730,9 @@ pub(crate) mod tests {
                 "/.well-known/chan-gateway",
                 get(move || {
                     let o = disc_origin.clone();
+                    let wireguard = wireguard.clone();
                     async move {
-                        axum::Json(serde_json::json!({
+                        let mut doc = serde_json::json!({
                             "kind": "chan-gateway",
                             "api_version": 1,
                             "identity_origin": o,
@@ -3290,7 +3741,11 @@ pub(crate) mod tests {
                             "devserver_proxy_origin": "https://proxy.chan.app",
                             "devserver_proxy_host_depth": 2,
                             "roster_url": format!("{o}/desktop/v1/devservers"),
-                        }))
+                        });
+                        if let Some(entry) = wireguard {
+                            doc["wireguard"] = entry;
+                        }
+                        axum::Json(doc)
                     }
                 }),
             )
@@ -4997,6 +5452,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
         (dir, Arc::new(AppState::with_store(store)))
@@ -5042,6 +5500,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: Some(file.to_path_buf()),
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         };
         // The start refused the first row's file and ran the second row's
         // tunnel from a file the row no longer names.
@@ -5640,6 +6101,248 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn connect_adopts_a_rows_file_with_its_host_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let far =
+            crate::wireguard::tests::peer(dir.path(), "far.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        {
+            let mut cfg = config::Config::default();
+            cfg.gateways.push(Gateway {
+                id: "gw-mapped".into(),
+                url: "https://gw-mapped.test".into(),
+                label: String::new(),
+                enabled: true,
+                added_at: 0,
+                native_trust: Vec::new(),
+                wireguard: Some(far.conf.clone()),
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: vec![config::WireguardHost {
+                    name: "tenant.chan.invalid".into(),
+                    addresses: vec!["10.7.0.2".parse().unwrap()],
+                }],
+            });
+            store.lock().unwrap().save(&cfg).unwrap();
+        }
+        let state = crate::AppState::with_store(store);
+        // A fabric that runs nothing yet, as after a disconnect.
+        let fabric = Arc::new(crate::wireguard::start(&[]).await);
+        state
+            .gateway_manager
+            .set_wireguard(Arc::clone(&fabric))
+            .unwrap();
+        assert!(adopt_wireguard(&state, "gw-mapped").unwrap().is_none());
+        assert_eq!(fabric.tunnels(), 1);
+        // The connect's adopt carries the row's map: the name reaches the
+        // peer through the tunnel with no lookup.
+        crate::wireguard::tests::carried_by_name(
+            &fabric,
+            &mut listener,
+            "10.7.0.1",
+            "tenant.chan.invalid",
+        )
+        .await;
+    }
+
+    /// What one Connect click on a row did: its view after, the authorize
+    /// URL it opened in the browser, if any, and its WireGuard notices.
+    struct KeyedConnect {
+        view: GatewayRuntimeView,
+        opened: Option<url::Url>,
+        notices: Vec<String>,
+    }
+
+    /// Connect a row at `origin` holding `public_key`, whose gateway last
+    /// enrolled `enrolled`, with a token stored for it: a Connect click when
+    /// `interactive`, the start-up connect otherwise.
+    async fn connect_keyed_row(
+        origin: &str,
+        public_key: Option<&str>,
+        enrolled: Option<&str>,
+        interactive: bool,
+    ) -> KeyedConnect {
+        use tauri::Listener;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        {
+            let mut cfg = config::Config::default();
+            cfg.gateways.push(Gateway {
+                id: "gw-keyed".into(),
+                url: origin.into(),
+                label: String::new(),
+                enabled: true,
+                added_at: 0,
+                native_trust: Vec::new(),
+                wireguard: None,
+                wireguard_public_key: public_key.map(str::to_string),
+                wireguard_enrolled_key: enrolled.map(str::to_string),
+                wireguard_hosts: Vec::new(),
+            });
+            store.lock().unwrap().save(&cfg).unwrap();
+        }
+        let state = Arc::new(crate::AppState::with_store(store));
+        let app = tauri::test::mock_app();
+        let (notice_tx, notices) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            let notice: serde_json::Value = serde_json::from_str(event.payload()).unwrap();
+            let _ = notice_tx.send(notice["message"].as_str().unwrap_or_default().to_string());
+        });
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.into(),
+            auth::StoredPat {
+                id: "pat-keyed".into(),
+                secret: "fixture-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        // The browser opener belongs to the attempt the connect makes, so
+        // it is installed once that attempt exists.
+        let (open_tx, opened) = std::sync::mpsc::channel();
+        let hooked = Arc::clone(&state);
+        *state.gateway_manager.before_discovery.lock().unwrap() = Some(Box::new(move || {
+            let live = hooked.gateway_manager.state.lock().unwrap();
+            *live.attempts["gw-keyed"]
+                .signin_hooks
+                .opener
+                .lock()
+                .unwrap() = Some(Box::new(move |url| {
+                open_tx.send(url.to_string()).unwrap();
+                Ok(())
+            }));
+        }));
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_gateway(
+                app.handle().clone(),
+                Arc::clone(&state),
+                "gw-keyed".into(),
+                interactive,
+            ),
+        )
+        .await
+        .expect("connect must finish")
+        .unwrap();
+        let view = state.gateway_manager.view("gw-keyed").unwrap();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keyed",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        auth::test_gateway_pats().lock().unwrap().remove(origin);
+        KeyedConnect {
+            view,
+            opened: opened
+                .try_recv()
+                .ok()
+                .map(|url| url::Url::parse(&url).unwrap()),
+            notices: notices
+                .try_iter()
+                .filter(|message| message.contains("WireGuard"))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_signs_in_again_to_enroll_a_key_the_gateway_has_not() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        const KEY: &str = "VC4iwoJ2wtcsxQssd+OIlaneI45CL0CRy1vZSsryu38=";
+        const OLD: &str = "cHzvwfTqX71JR0jjDGLSdNyLN/ffb5MprmyLwagERGc=";
+        let entry = serde_json::json!({"endpoint": WG_ENDPOINT, "public_key": WG_SERVER_KEY});
+        let (origin, server) = spawn_gateway_stub_full(false, None, Some(entry)).await;
+        // A key never enrolled, and one replacing an enrolled key, sign in
+        // through the browser despite the stored token, sending the key.
+        for enrolled in [None, Some(OLD)] {
+            let run = connect_keyed_row(&origin, Some(KEY), enrolled, true).await;
+            let url = run.opened.expect("the browser leg ran");
+            let sent: Vec<String> = url
+                .query_pairs()
+                .filter(|(name, _)| name == "wireguard_public_key")
+                .map(|(_, value)| value.into_owned())
+                .collect();
+            assert_eq!(sent, [KEY], "{enrolled:?}");
+            assert!(run.view.pending_signin, "{enrolled:?}");
+            assert_eq!(
+                run.notices,
+                ["the WireGuard key is not enrolled yet; signing in"]
+            );
+        }
+        // The enrolled key, and a row without a key, use the stored token.
+        for (public_key, enrolled) in [(Some(KEY), Some(KEY)), (None, None)] {
+            let run = connect_keyed_row(&origin, public_key, enrolled, true).await;
+            assert!(run.opened.is_none(), "{public_key:?}");
+            assert_eq!(run.view.status, GatewayStatus::Connected, "{public_key:?}");
+            assert!(run.notices.is_empty(), "{:?}", run.notices);
+        }
+        server.abort();
+
+        // A key against a gateway that enrolls no peers connects without it
+        // and says so.
+        let (plain, plain_server) = spawn_gateway_stub(false).await;
+        let run = connect_keyed_row(&plain, Some(KEY), None, true).await;
+        assert!(run.opened.is_none());
+        assert_eq!(run.view.status, GatewayStatus::Connected);
+        assert_eq!(
+            run.notices,
+            ["this gateway does not enroll WireGuard peers"]
+        );
+        plain_server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_start_up_connect_parks_an_unenrolled_key_and_says_why() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        const KEY: &str = "VC4iwoJ2wtcsxQssd+OIlaneI45CL0CRy1vZSsryu38=";
+        let entry = serde_json::json!({"endpoint": WG_ENDPOINT, "public_key": WG_SERVER_KEY});
+        let (origin, server) = spawn_gateway_stub_full(false, None, Some(entry)).await;
+        // No browser at start: the row waits for a Connect click, naming
+        // the key rather than a missing sign-in.
+        let run = connect_keyed_row(&origin, Some(KEY), None, false).await;
+        assert!(run.opened.is_none());
+        assert_eq!(run.view.status, GatewayStatus::Disconnected);
+        assert!(!run.view.pending_signin);
+        assert_eq!(
+            run.view.last_error.as_deref(),
+            Some(WIREGUARD_UNENROLLED_PARK)
+        );
+        assert_eq!(run.notices, [WIREGUARD_UNENROLLED_PARK]);
+        // With no token at all the sign-in is what is missing, and the row
+        // says so as any row without a token does.
+        {
+            let _absent = auth::absent_gateway_pat_for_test(&origin);
+            let run = connect_keyed_row(&origin, Some(KEY), None, false).await;
+            assert!(run.opened.is_none());
+            assert_eq!(run.view.status, GatewayStatus::Disconnected);
+            assert_eq!(
+                run.view.last_error.as_deref(),
+                Some("sign-in required - click Connect")
+            );
+            assert!(run.notices.is_empty(), "{:?}", run.notices);
+        }
+        // An enrolled key connects at start with the stored token.
+        let run = connect_keyed_row(&origin, Some(KEY), Some(KEY), false).await;
+        assert_eq!(run.view.status, GatewayStatus::Connected);
+        assert!(run.notices.is_empty(), "{:?}", run.notices);
+        server.abort();
+
+        // A key against a gateway that enrolls no peers connects at start
+        // without a word; a Connect click says so.
+        let (plain, plain_server) = spawn_gateway_stub(false).await;
+        let run = connect_keyed_row(&plain, Some(KEY), None, false).await;
+        assert_eq!(run.view.status, GatewayStatus::Connected);
+        assert!(run.notices.is_empty(), "{:?}", run.notices);
+        plain_server.abort();
+    }
+
     /// A Connect click on a runtime a finished connect left Connecting runs
     /// a connect: no connect is in flight to finish on its own.
     #[tokio::test]
@@ -5659,6 +6362,9 @@ pub(crate) mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
         }
@@ -5675,6 +6381,7 @@ pub(crate) mod tests {
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+            wireguard: None,
         });
         assert_eq!(rt.status, GatewayStatus::Connecting, "fixture");
         state
@@ -5735,6 +6442,9 @@ pub(crate) mod tests {
             added_at: 0,
             native_trust: Vec::new(),
             wireguard: None,
+            wireguard_public_key: None,
+            wireguard_enrolled_key: None,
+            wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
         let state = Arc::new(crate::AppState::with_store(store));
@@ -5874,6 +6584,9 @@ pub(crate) mod tests {
                 added_at: 0,
                 native_trust: Vec::new(),
                 wireguard: None,
+                wireguard_public_key: None,
+                wireguard_enrolled_key: None,
+                wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
         }
@@ -5896,6 +6609,7 @@ pub(crate) mod tests {
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+                wireguard: None,
             });
             rt.pending_signin = true;
             let mut gateway_state = state.gateway_manager.state.lock().unwrap();

@@ -8,7 +8,10 @@
   // live state beside it: the desktop runs a file as soon as the row is
   // saved, so the state follows a change within one refresh. A file the
   // desktop refused arrives as the row's `last_error`, which the status line
-  // already narrates. Select mode reveals per-badge
+  // already narrates. A badge with a generated WireGuard key shows the
+  // public key's first eight characters with a copy action and whether the
+  // gateway enrolled it; a key not enrolled yet asks for a connect, whose
+  // sign-in enrolls it and names the file it writes. Select mode reveals per-badge
   // checkboxes feeding the same global bulk bar as the Computers screen; the
   // screen is reachable only on the desktop surface (the TopBar toggle gates
   // on the bridge), and the controls carry the same bridge gate.
@@ -17,7 +20,7 @@
   // (Carousel): the gateways sorted by name, then the Add gateway card, which
   // turns over to the gateway form. Other surfaces list the badges one under
   // another.
-  import { ArrowRightLeft, LoaderCircle, Pencil, Plug, Unplug } from "@lucide/svelte";
+  import { ArrowRightLeft, Copy, LoaderCircle, Pencil, Plug, Unplug } from "@lucide/svelte";
   import Carousel from "./Carousel.svelte";
   import AddCard from "./AddCard.svelte";
   import GatewayForm from "./GatewayForm.svelte";
@@ -87,6 +90,10 @@
     repeatedEnter = false;
   }
 
+  async function copyPublicKey(key: string): Promise<void> {
+    await navigator.clipboard.writeText(key);
+  }
+
   // Per-badge action failures surface as notice bubbles (uniform with the
   // Library rows: the actions throw, the caller catches here).
   async function run(action: Promise<void>): Promise<void> {
@@ -128,6 +135,25 @@
           <span class="gw-glyph"></span>
           <span class="gw-url" title={gw.url}>{gw.url}</span>
         </span>
+        {#if gw.wireguard_public_key}
+          <span class="gw-addr-row gw-wg-key">
+            <span class="gw-glyph"></span>
+            <span class="chip">WireGuard key</span>
+            <span class="gw-url gw-wg-key-prefix" title={gw.wireguard_public_key}
+              >{gw.wireguard_public_key.slice(0, 8)}</span>
+            <button
+              class="icon-btn gw-wg-copy"
+              type="button"
+              title="Copy the WireGuard public key"
+              aria-label={`Copy the WireGuard public key of ${gatewayName(gw)}`}
+              onclick={() => run(copyPublicKey(gw.wireguard_public_key!))}>
+              <Copy size={12} />
+            </button>
+            <span class="gw-url gw-wg-enrolled">
+              {gw.wireguard_enrolled ? "enrolled" : "not enrolled: connect to sign in"}
+            </span>
+          </span>
+        {/if}
         {#if gw.wireguard}
           <span class="gw-addr-row gw-wireguard">
             <span class="gw-glyph"></span>
