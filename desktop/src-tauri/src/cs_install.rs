@@ -436,7 +436,7 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
 pub fn install_bin_shims() -> std::io::Result<u32> {
     use windows_shim::{
         ensure_on_user_path, install_one, install_roots, resolve_cli_target, shim_bin_dir,
-        SHIM_NAMES,
+        write_path_record, SHIM_NAMES,
     };
 
     // Stable install path only: a dev `cargo run` from target\{debug,release}\
@@ -473,10 +473,19 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
     }
     // Put the bin dir on PATH so a new shell finds `chan` / `cs`. Best-effort:
     // a registry failure is logged, never fatal, and the written shims still
-    // work via an absolute path or a manually-extended PATH.
+    // work via an absolute path or a manually-extended PATH. What an append
+    // changed is recorded for the uninstaller, which removes the entry again;
+    // a lost record costs only its emptied-value decision, so it is not fatal
+    // either.
     if changed > 0 {
-        if let Err(e) = ensure_on_user_path(&bin_dir) {
-            tracing::warn!(error = %e, "adding chan bin dir to user PATH failed");
+        match ensure_on_user_path(&bin_dir) {
+            Ok(Some(record)) => {
+                if let Err(e) = write_path_record(&record) {
+                    tracing::warn!(error = %e, "recording the user PATH entry failed");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "adding chan bin dir to user PATH failed"),
         }
     }
     Ok(changed)
@@ -500,6 +509,8 @@ pub fn is_installed_desktop_exe() -> bool {
 mod windows_shim {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+
+    use super::user_path::{path_record, path_with_dir_appended, RegWrite, CREATED_PATH_KIND};
 
     /// The two names we own. Both re-exec the same chan-desktop.exe; the
     /// `ARGV0` the wrapper sets picks the behavior.
@@ -733,27 +744,6 @@ mod windows_shim {
         }
     }
 
-    /// The new per-user `Path` value once `dir` is appended, or `None` when
-    /// `dir` is already present (case-insensitive). Pure string surgery so the
-    /// membership + join logic is testable without the registry.
-    pub(super) fn path_with_dir_appended(current: &str, dir: &str) -> Option<String> {
-        let dir_norm = dir.trim_end_matches(['\\', '/']).to_lowercase();
-        let present = current
-            .split(';')
-            .map(|e| e.trim().trim_end_matches(['\\', '/']).to_lowercase())
-            .any(|e| e == dir_norm);
-        if present {
-            return None;
-        }
-        if current.is_empty() {
-            Some(dir.to_string())
-        } else if current.ends_with(';') {
-            Some(format!("{current}{dir}"))
-        } else {
-            Some(format!("{current};{dir}"))
-        }
-    }
-
     /// Best-effort append of `dir` to the per-user `Path` (HKCU\Environment) via
     /// `reg.exe` -- no extra crate dependency for the write itself, mirroring how
     /// `linux_gui_stack` shells out to `ldconfig`. Reads the current value +
@@ -762,12 +752,17 @@ mod windows_shim {
     /// ("Environment") so processes spawned afterward (Explorer, new shells)
     /// inherit the new PATH without a logout; an already-open shell still needs
     /// a relaunch. Any failure is returned for the caller to log.
-    pub(super) fn ensure_on_user_path(dir: &Path) -> std::io::Result<()> {
+    ///
+    /// An append returns the record of what it changed, for the caller to
+    /// store with [`write_path_record`]; `None` means `dir` was already on the
+    /// `Path` and nothing was written. The store is the caller's so this
+    /// function's registry proof leaves an installed desktop's record alone.
+    pub(super) fn ensure_on_user_path(dir: &Path) -> std::io::Result<Option<[RegWrite; 3]>> {
         use std::process::Command;
         let dir = dir.to_string_lossy().into_owned();
-        let (current, kind) = read_user_path()?;
-        let Some(new_value) = path_with_dir_appended(&current, &dir) else {
-            return Ok(()); // already on PATH
+        let read = read_user_path()?;
+        let Some(new_value) = path_with_dir_appended(&read.value, &dir) else {
+            return Ok(None); // already on PATH
         };
         let status = Command::new("reg")
             .args([
@@ -776,7 +771,7 @@ mod windows_shim {
                 "/v",
                 "Path",
                 "/t",
-                &kind,
+                &read.kind,
                 "/d",
                 &new_value,
                 "/f",
@@ -788,6 +783,27 @@ mod windows_shim {
             )));
         }
         broadcast_environment_change();
+        Ok(Some(path_record(
+            &dir,
+            read.existed.then_some(read.kind.as_str()),
+        )))
+    }
+
+    /// Store an append's record under the installer's key through `reg add`,
+    /// the same mechanism as the `Path` write. The first failed value stops
+    /// the store and is returned for the caller to log.
+    pub(super) fn write_path_record(record: &[RegWrite]) -> std::io::Result<()> {
+        use std::process::Command;
+        for write in record {
+            let status = Command::new("reg").args(write.reg_add_args()).status()?;
+            if !status.success() {
+                return Err(std::io::Error::other(format!(
+                    "reg add {} {} exited with {status}",
+                    super::user_path::INSTALLER_KEY,
+                    write.name,
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -822,15 +838,29 @@ mod windows_shim {
         }
     }
 
+    /// The per-user `Path` as `reg query` reported it.
+    struct UserPathValue {
+        value: String,
+        kind: String,
+        /// False when the user has no `Path` value; an append then creates it.
+        existed: bool,
+    }
+
     /// Current per-user `Path` value and its registry type (`REG_EXPAND_SZ` /
     /// `REG_SZ`). A fresh user with no `Path` value yields an empty string typed
     /// `REG_EXPAND_SZ` (the default for an env var that may contain `%VAR%`).
-    fn read_user_path() -> std::io::Result<(String, String)> {
+    fn read_user_path() -> std::io::Result<UserPathValue> {
         use std::process::Command;
         let out = Command::new("reg")
             .args(["query", "HKCU\\Environment", "/v", "Path"])
             .output()?;
-        decode_user_path(out.status.success(), &out.stdout)
+        let existed = out.status.success();
+        let (value, kind) = decode_user_path(existed, &out.stdout)?;
+        Ok(UserPathValue {
+            value,
+            kind,
+            existed,
+        })
     }
 
     /// Decide what `reg query HKCU\Environment /v Path` actually reported.
@@ -855,7 +885,7 @@ mod windows_shim {
     fn decode_user_path(query_succeeded: bool, stdout: &[u8]) -> std::io::Result<(String, String)> {
         if !query_succeeded {
             // No Path value yet: create it as REG_EXPAND_SZ.
-            return Ok((String::new(), "REG_EXPAND_SZ".to_string()));
+            return Ok((String::new(), CREATED_PATH_KIND.to_string()));
         }
         let text = std::str::from_utf8(stdout).map_err(|e| {
             std::io::Error::other(format!(
@@ -1106,31 +1136,6 @@ mod windows_shim {
         }
 
         #[test]
-        fn path_append_is_idempotent_and_boundary_aware() {
-            let dir = "C:\\Users\\me\\AppData\\Local\\chan\\bin";
-            // Absent -> appended with a separator.
-            assert_eq!(
-                path_with_dir_appended("C:\\Windows;C:\\Windows\\System32", dir),
-                Some(format!("C:\\Windows;C:\\Windows\\System32;{dir}"))
-            );
-            // Empty PATH -> just the dir.
-            assert_eq!(path_with_dir_appended("", dir), Some(dir.to_string()));
-            // Trailing ';' -> no doubled separator.
-            assert_eq!(
-                path_with_dir_appended("C:\\Windows;", dir),
-                Some(format!("C:\\Windows;{dir}"))
-            );
-            // Already present (case-insensitive, trailing-slash tolerant) -> None.
-            assert_eq!(
-                path_with_dir_appended(
-                    "c:\\users\\me\\appdata\\local\\chan\\bin\\;C:\\Windows",
-                    dir
-                ),
-                None
-            );
-        }
-
-        #[test]
         fn reg_query_parse_extracts_value_and_type() {
             let out = "\r\nHKEY_CURRENT_USER\\Environment\r\n    \
                 Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\tools\r\n\r\n";
@@ -1260,17 +1265,28 @@ mod windows_shim {
                 "the unique test directory must not already be on PATH"
             );
 
-            ensure_on_user_path(Path::new(&dir)).expect("write the user PATH");
-            let (written, written_kind) = read_user_path().expect("read back the user PATH");
+            let record = ensure_on_user_path(Path::new(&dir))
+                .expect("write the user PATH")
+                .expect("an append returns its record");
+            // The record describes the append against the value read before
+            // it; storing it is the caller's, so nothing reaches the
+            // installer's key here.
+            assert_eq!(
+                record,
+                path_record(&dir, restore.existed.then_some(restore.kind.as_str())),
+            );
+            let written = read_user_path().expect("read back the user PATH");
             let normalized = dir.trim_end_matches(['\\', '/']).to_lowercase();
             assert!(
                 written
+                    .value
                     .split(';')
                     .map(|entry| entry.trim().trim_end_matches(['\\', '/']).to_lowercase())
                     .any(|entry| entry == normalized),
-                "the registry PATH must contain the test directory: {written}"
+                "the registry PATH must contain the test directory: {}",
+                written.value,
             );
-            assert_eq!(written_kind, restore.kind);
+            assert_eq!(written.kind, restore.kind);
 
             restore.restore().expect("restore the original user PATH");
             let restored = Command::new("reg")
@@ -1332,6 +1348,393 @@ mod windows_shim {
             let (value, _) = decode_user_path(true, utf8.as_bytes()).unwrap();
             assert!(!value.contains('\u{fffd}'), "{value}");
         }
+    }
+}
+
+/// The per-user `Path` rules the Windows desktop shares with its NSIS
+/// uninstaller (`windows/installer-hooks.nsh`), and the record the desktop
+/// leaves for it. Pure, so the suite runs them on every host; outside the
+/// tests only the Windows shim code calls them.
+#[cfg(any(windows, test))]
+mod user_path {
+    /// The NSIS installer's own key (`${MANUPRODUCTKEY}` under HKCU). Every
+    /// uninstall that is not an update deletes it whole, so a record kept
+    /// here lives exactly as long as the install it describes.
+    pub(super) const INSTALLER_KEY: &str = r"HKCU\Software\chan\Chan";
+
+    /// The type the desktop gives a `Path` value it creates: an environment
+    /// value that may hold `%VAR%` references.
+    pub(super) const CREATED_PATH_KIND: &str = "REG_EXPAND_SZ";
+
+    /// Whether one `Path` entry names `dir`: trimmed, a trailing `\` or `/`
+    /// ignored, case folded. The uninstaller matches the entries it removes
+    /// the same way.
+    pub(super) fn entry_names_dir(entry: &str, dir: &str) -> bool {
+        entry.trim().trim_end_matches(['\\', '/']).to_lowercase()
+            == dir.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+
+    /// The new per-user `Path` value once `dir` is appended, or `None` when
+    /// `dir` is already present. A value that ends in `;` keeps that last
+    /// separator after `dir`: the uninstaller drops every entry naming `dir`
+    /// and joins the rest with `;`, which then gives back the value exactly
+    /// as it was.
+    pub(super) fn path_with_dir_appended(current: &str, dir: &str) -> Option<String> {
+        if current.split(';').any(|entry| entry_names_dir(entry, dir)) {
+            return None;
+        }
+        if current.is_empty() {
+            Some(dir.to_string())
+        } else if current.ends_with(';') {
+            Some(format!("{current}{dir};"))
+        } else {
+            Some(format!("{current};{dir}"))
+        }
+    }
+
+    /// One value the desktop stores under [`INSTALLER_KEY`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct RegWrite {
+        pub(super) name: &'static str,
+        pub(super) kind: &'static str,
+        pub(super) data: String,
+    }
+
+    impl RegWrite {
+        /// The `reg add` arguments that store this value, replacing any value
+        /// of the same name.
+        pub(super) fn reg_add_args(&self) -> [&str; 9] {
+            [
+                "add",
+                INSTALLER_KEY,
+                "/v",
+                self.name,
+                "/t",
+                self.kind,
+                "/d",
+                &self.data,
+                "/f",
+            ]
+        }
+    }
+
+    /// The record of one append to the user `Path`, given the directory as
+    /// appended and the type `reg query` read (`None` when there was no
+    /// value): `PathEntry`, the directory exactly as appended; `PathType`,
+    /// the type the value was written with; `PathCreated`, 1 when the append
+    /// created the value, else 0. The uninstaller removes entries by name with
+    /// or without a record; it reads `PathCreated` to decide whether a value
+    /// its removal leaves empty is deleted (created) or kept (it existed).
+    pub(super) fn path_record(appended: &str, read_kind: Option<&str>) -> [RegWrite; 3] {
+        let (path_kind, created) = match read_kind {
+            Some(kind) => (kind, "0"),
+            None => (CREATED_PATH_KIND, "1"),
+        };
+        [
+            RegWrite {
+                name: "PathEntry",
+                kind: "REG_SZ",
+                data: appended.to_string(),
+            },
+            RegWrite {
+                name: "PathType",
+                kind: "REG_SZ",
+                data: path_kind.to_string(),
+            },
+            RegWrite {
+                name: "PathCreated",
+                kind: "REG_DWORD",
+                data: created.to_string(),
+            },
+        ]
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const DIR: &str = r"C:\Users\me\AppData\Local\chan\bin";
+
+        /// The uninstaller's removal (`un.chanPathWithout` in
+        /// `windows/installer-hooks.nsh`): every entry naming `dir` dropped,
+        /// the rest joined with `;`.
+        fn path_with_dir_removed(value: &str, dir: &str) -> String {
+            value
+                .split(';')
+                .filter(|entry| !entry_names_dir(entry, dir))
+                .collect::<Vec<_>>()
+                .join(";")
+        }
+
+        #[test]
+        fn path_append_is_idempotent_and_boundary_aware() {
+            // Absent -> appended with a separator.
+            assert_eq!(
+                path_with_dir_appended(r"C:\Windows;C:\Windows\System32", DIR),
+                Some(format!(r"C:\Windows;C:\Windows\System32;{DIR}"))
+            );
+            // Empty PATH -> just the dir.
+            assert_eq!(path_with_dir_appended("", DIR), Some(DIR.to_string()));
+            // Trailing ';' -> no doubled separator, and the value keeps its
+            // trailing separator.
+            assert_eq!(
+                path_with_dir_appended(r"C:\Windows;", DIR),
+                Some(format!(r"C:\Windows;{DIR};"))
+            );
+            // Already present (case-insensitive, trailing-slash tolerant) -> None.
+            assert_eq!(
+                path_with_dir_appended(r"c:\users\me\appdata\local\chan\bin\;C:\Windows", DIR),
+                None
+            );
+        }
+
+        #[test]
+        fn an_entry_names_the_dir_in_the_spellings_the_append_accepts() {
+            assert!(entry_names_dir(DIR, DIR));
+            assert!(entry_names_dir(
+                r"  c:\users\me\appdata\local\chan\bin\ ",
+                DIR
+            ));
+            assert!(entry_names_dir(r"C:\Users\me\AppData\Local\chan\bin/", DIR));
+            assert!(!entry_names_dir(
+                r"C:\Users\me\AppData\Local\chan\bin2",
+                DIR
+            ));
+            assert!(!entry_names_dir(r"C:\Users\me\AppData\Local\chan", DIR));
+            assert!(!entry_names_dir("", DIR));
+        }
+
+        #[test]
+        fn the_uninstallers_removal_gives_back_the_value_before_the_append() {
+            for before in [
+                "",
+                ";",
+                r"C:\Windows",
+                r"C:\Windows;",
+                "A;B",
+                "A;;B",
+                r"%USERPROFILE%\AppData\Local\Microsoft\WindowsApps;",
+            ] {
+                let after = path_with_dir_appended(before, DIR).expect("dir is absent");
+                assert_eq!(path_with_dir_removed(&after, DIR), before, "after: {after}");
+                // An entry the user adds behind the desktop's stays, and so
+                // does the separator in front of it.
+                if !before.is_empty() {
+                    let edited = format!(r"{after};C:\keep-me");
+                    assert_eq!(
+                        path_with_dir_removed(&edited, DIR),
+                        format!(r"{before};C:\keep-me"),
+                        "edited: {edited}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn the_path_record_says_what_the_append_changed() {
+            // No value before: the append created it, as REG_EXPAND_SZ.
+            assert_eq!(
+                path_record(DIR, None),
+                [
+                    RegWrite {
+                        name: "PathEntry",
+                        kind: "REG_SZ",
+                        data: DIR.to_string(),
+                    },
+                    RegWrite {
+                        name: "PathType",
+                        kind: "REG_SZ",
+                        data: "REG_EXPAND_SZ".to_string(),
+                    },
+                    RegWrite {
+                        name: "PathCreated",
+                        kind: "REG_DWORD",
+                        data: "1".to_string(),
+                    },
+                ]
+            );
+            // A REG_SZ value before: it existed, and the append kept its type.
+            let existed = path_record(DIR, Some("REG_SZ"));
+            assert_eq!(existed[1].data, "REG_SZ");
+            assert_eq!(existed[2].data, "0");
+            // The entry is the directory exactly as appended.
+            let spelled = r"C:\Users\Me\AppData\Local\chan\bin\";
+            assert_eq!(path_record(spelled, Some("REG_EXPAND_SZ"))[0].data, spelled);
+            // Each value replaces its namesake under the installer's key.
+            assert_eq!(
+                path_record(DIR, None)[2].reg_add_args(),
+                [
+                    "add",
+                    r"HKCU\Software\chan\Chan",
+                    "/v",
+                    "PathCreated",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "1",
+                    "/f"
+                ],
+            );
+        }
+    }
+}
+
+/// The NSIS uninstall hooks compile only in the Windows bundler, so their
+/// shape is pinned here, on every host, from the files the bundle reads.
+#[cfg(test)]
+mod installer_hook_tests {
+    use std::path::Path;
+
+    fn manifest_file(relative: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    fn configured_hooks(config: &str) -> String {
+        let value: serde_json::Value =
+            serde_json::from_str(&manifest_file(config)).expect("parse the config");
+        value["bundle"]["windows"]["nsis"]["installerHooks"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{config} names no bundle.windows.nsis.installerHooks"))
+            .to_string()
+    }
+
+    fn hooks() -> String {
+        manifest_file(&configured_hooks("tauri.windows.conf.json"))
+    }
+
+    /// Each `!macro NAME ... !macroend` block: the name and the body lines.
+    fn macros(nsh: &str) -> Vec<(String, Vec<String>)> {
+        let mut found = Vec::new();
+        let mut open: Option<(String, Vec<String>)> = None;
+        for line in nsh.lines().map(str::trim) {
+            if let Some(rest) = line.strip_prefix("!macro ") {
+                let name = rest.split_whitespace().next().unwrap_or_default();
+                open = Some((name.to_string(), Vec::new()));
+            } else if line == "!macroend" {
+                found.extend(open.take());
+            } else if let Some((_, body)) = open.as_mut() {
+                body.push(line.to_string());
+            }
+        }
+        found
+    }
+
+    /// The statements of a body: blank lines and whole-line comments dropped.
+    fn statements(body: &[String]) -> Vec<&str> {
+        body.iter()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty() && !line.starts_with(';') && !line.starts_with('#'))
+            .collect()
+    }
+
+    /// The conditions the line containing `needle` runs under, outermost
+    /// first: each open `${If}` block's condition joined with its `${AndIf}`
+    /// terms. A block past `${Else}`, widened by `${OrIf}`, or opened by a
+    /// negation counts as no condition.
+    fn conditions_at(body: &[String], needle: &str) -> Vec<String> {
+        let mut open: Vec<Option<String>> = Vec::new();
+        for line in statements(body) {
+            if line.contains(needle) {
+                return open.into_iter().flatten().collect();
+            }
+            if let Some(condition) = line.strip_prefix("${If}") {
+                open.push(Some(condition.trim().to_string()));
+            } else if line.starts_with("${IfNot}") || line.starts_with("${Unless}") {
+                open.push(None);
+            } else if let Some(term) = line.strip_prefix("${AndIf}") {
+                if let Some(Some(condition)) = open.last_mut() {
+                    condition.push_str(" && ");
+                    condition.push_str(term.trim());
+                }
+            } else if line.starts_with("${OrIf}") || line.starts_with("${Else") {
+                if let Some(top) = open.last_mut() {
+                    *top = None;
+                }
+            } else if line.starts_with("${EndIf}") || line.starts_with("${EndUnless}") {
+                open.pop();
+            }
+        }
+        panic!("no statement contains {needle}");
+    }
+
+    #[test]
+    fn both_windows_configs_name_the_same_hook_file() {
+        let release = configured_hooks("tauri.windows.conf.json");
+        let ci = configured_hooks("tauri.ci.windows.conf.json");
+        assert_eq!(release, ci);
+        // The bundler resolves the path against desktop/src-tauri.
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(&release)
+                .is_file(),
+            "{release} is not a file"
+        );
+    }
+
+    #[test]
+    fn the_hooks_are_uninstall_macros_that_do_nothing_on_an_update() {
+        let nsh = hooks();
+        let all = macros(&nsh);
+        let mut hooks: Vec<&str> = all
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| name.starts_with("NSIS_HOOK_"))
+            .collect();
+        hooks.sort_unstable();
+        assert_eq!(hooks, ["NSIS_HOOK_POSTUNINSTALL"]);
+        for (name, body) in all
+            .iter()
+            .filter(|(name, _)| name.starts_with("NSIS_HOOK_"))
+        {
+            // Every statement sits inside one `${If} $UpdateMode <> 1` block:
+            // the self-updater's `/UPDATE` uninstall keeps everything.
+            let statements = statements(body);
+            assert_eq!(
+                statements.first(),
+                Some(&"${If} $UpdateMode <> 1"),
+                "{name}"
+            );
+            assert_eq!(statements.last(), Some(&"${EndIf}"), "{name}");
+            let mut depth = 0usize;
+            for (i, line) in statements.iter().enumerate() {
+                if line.starts_with("${If}") || line.starts_with("${IfNot}") {
+                    depth += 1;
+                } else if line.starts_with("${EndIf}") {
+                    depth = depth
+                        .checked_sub(1)
+                        .unwrap_or_else(|| panic!("{name}: an unmatched EndIf at line {i}"));
+                    assert!(
+                        depth > 0 || i == statements.len() - 1,
+                        "{name}: a statement after line {i} runs outside the update guard"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hooks_remove_state_only_with_the_state_choice_and_show_nothing() {
+        let nsh = hooks();
+        let (_, post) = macros(&nsh)
+            .into_iter()
+            .find(|(name, _)| name == "NSIS_HOOK_POSTUNINSTALL")
+            .expect("the post-uninstall hook");
+        let conditions = conditions_at(&post, r"$PROFILE\.chan");
+        assert!(
+            conditions.iter().any(|c| c == "$UpdateMode <> 1"),
+            "{conditions:?}"
+        );
+        assert!(
+            conditions
+                .iter()
+                .any(|c| c == "$DeleteAppDataCheckboxState = 1"),
+            "the chan home is removed outside the state choice: {conditions:?}"
+        );
+        // A silent uninstall stays silent and exits 0, and the hooks stay in
+        // the current user's hive.
+        assert!(!nsh.to_lowercase().contains("messagebox"));
+        assert!(!nsh.contains("HKLM"));
     }
 }
 
