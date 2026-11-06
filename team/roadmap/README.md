@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.125.0
 
-Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one the owner asked for and one its read-back found. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]). The release's read-back found that the PPA has built no binaries since v0.116.0, which the owner accepted ([ppabuild]).
+Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one the owner asked for and one its read-back found. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]). The release's read-back found that the PPA has built no binaries since v0.116.0, which the owner accepted ([ppabuild]). During the first release candidate the owner found chan windows coming back see-through after a display sleep on macOS, the webview presenting no frame after the wake, and accepted it for the candidate cycle ([wakeblank]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -41,6 +41,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one t
 | [a WireGuard file set after start waits for a restart][wgfabric] | accepted | build |
 | [the sdme build drivers' rootfs checks race their listing][sdmegrep] | accepted | build |
 | [Cmd+C does not copy selected survey text][surveycopy] | raised | build |
+| [windows come back see-through after a display sleep][wakeblank] | accepted | reading |
 
 [wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
 [wgwrongkey]: v0.125.0/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md
@@ -56,6 +57,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one t
 [wgfabric]: v0.125.0/a-wireguard-file-set-after-start-waits-for-a-restart.md
 [sdmegrep]: v0.125.0/the-sdme-build-drivers-rootfs-checks-race-their-own-listing-under-pipefail.md
 [surveycopy]: v0.125.0/cmd-c-does-not-copy-selected-text-in-a-terminal-survey.md
+[wakeblank]: v0.125.0/windows-come-back-see-through-after-a-display-sleep.md
 
 ## Completed
 
