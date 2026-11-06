@@ -814,9 +814,7 @@ pub(super) fn process_foreground(_pid: u32) -> Foreground {
 ))]
 fn process_foreground_from_table(pid: u32) -> Foreground {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    let Ok(mut system) = System::new() else {
-        return Foreground::default();
-    };
+    let mut system = System::new();
     let pid = Pid::from_u32(pid);
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
