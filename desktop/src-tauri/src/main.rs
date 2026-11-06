@@ -26,6 +26,9 @@ mod terminal_opacity;
 #[cfg(not(target_os = "freebsd"))]
 mod update_floor;
 mod upload;
+// Only macOS observes a wake; the tests run its schedule everywhere.
+#[cfg(any(target_os = "macos", test))]
+mod wake_repaint;
 mod watcher;
 mod window_ops;
 mod window_watcher;
@@ -5562,6 +5565,9 @@ fn main() {
             // The launcher webviews live outside Tauri; this forwards the
             // events the launcher listens to into each of them.
             launcher_panel::install(app.handle());
+            // Every window repaints after a display wake (wake_repaint.rs).
+            #[cfg(target_os = "macos")]
+            wake_repaint::install(app.handle());
 
             tauri::async_runtime::spawn_blocking(|| {
                 let Some(dir) = download::downloads_dir() else {
