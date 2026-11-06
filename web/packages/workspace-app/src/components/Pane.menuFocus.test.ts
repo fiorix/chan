@@ -17,8 +17,10 @@ import { setSocketFactory } from "../api/transport";
 import { refreshTree, refreshWorkspace } from "../state/store.svelte";
 import { cancelPaneMode, enterPaneMode, layout, type LeafNode, type Tab } from "../state/tabs.svelte";
 import { installTerminalDom, resetTerminals, terminalTab, xterm } from "../__tests__/terminalTab";
+import { fileTab } from "../__tests__/tabs";
 
 installTerminalDom();
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
 
 const PANE = "menu-focus-pane";
 const mounted: Array<Record<string, unknown>> = [];
@@ -88,12 +90,30 @@ async function mountSplitPane(otherTabs: Tab[] = []): Promise<{ target: HTMLElem
   mounted.push(mount(Workspace, { target }));
   await vi.waitFor(() => expect(xterm.terminals.length).toBeGreaterThan(0));
   await settle();
-  const surface = xterm.terminals.at(-1)?.textarea;
+  const surface = xterm.terminals[0]?.textarea;
   const other = target.querySelector<HTMLElement>(`[data-pane-id="${right.id}"]`);
   if (!surface || !other) throw new Error("the split pane did not mount");
   surface.focus();
   expect(document.activeElement).toBe(surface);
   return { target, surface, other };
+}
+
+async function mountFilePane(): Promise<{ target: HTMLElement; surface: HTMLElement }> {
+  const tab = fileTab({ id: "menu-focus-file", mode: "source", content: "source body", saved: "source body" });
+  const pane: LeafNode = { kind: "leaf", id: PANE, tabs: [tab], activeTabId: tab.id };
+  layout.nodes = { [PANE]: pane };
+  layout.rootId = PANE;
+  layout.activePaneId = PANE;
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Workspace, { target }));
+  await vi.waitFor(() => expect(target.querySelector(".cm-content")).not.toBeNull());
+  await settle();
+  const surface = target.querySelector<HTMLElement>(".cm-content");
+  if (!surface) throw new Error("the source editor did not mount");
+  surface.focus();
+  expect(document.activeElement).toBe(surface);
+  return { target, surface };
 }
 
 /// jsdom omits the browser's mousedown focus default. Model it once, after
@@ -234,5 +254,46 @@ describe("pane menu focus", () => {
     expect(context.defaultPrevented).toBe(false);
     expect(menu()).toBeNull();
     expect(document.activeElement).toBe(holder);
+  });
+});
+
+describe("left press on the pane strip stretch", () => {
+  test("focuses the terminal after closing its menu", async () => {
+    const { target, surface } = await mountPane();
+    const stretch = target.querySelector<HTMLElement>(".tabs .dead-zone")!;
+    rightClick(stretch);
+    await settle();
+    const press = pressWithBrowserFocus(stretch, 0);
+    await settle();
+    expect(menu()).toBeNull();
+    expect(document.activeElement).toBe(surface);
+    expect(press.defaultPrevented).toBe(true);
+  });
+
+  test("focuses the source editor", async () => {
+    const { target, surface } = await mountFilePane();
+    const press = pressWithBrowserFocus(target.querySelector<HTMLElement>(".tabs .dead-zone")!, 0);
+    await settle();
+    expect(document.activeElement).toBe(surface);
+    expect(press.defaultPrevented).toBe(true);
+  });
+
+  test("focuses the empty pane's welcome", async () => {
+    const { target, surface } = await mountPane(false);
+    const press = pressWithBrowserFocus(target.querySelector<HTMLElement>(".tabs .dead-zone")!, 0);
+    await settle();
+    expect(document.activeElement).toBe(surface);
+    expect(press.defaultPrevented).toBe(true);
+  });
+
+  test("focuses another pane's active terminal", async () => {
+    const { other } = await mountSplitPane([terminalTab({ id: "menu-focus-other-terminal" })]);
+    const destination = xterm.terminals[1]?.textarea;
+    if (!destination) throw new Error("the other terminal did not mount");
+    const press = pressWithBrowserFocus(other.querySelector<HTMLElement>(".tabs .dead-zone")!, 0);
+    await settle();
+    expect(layout.activePaneId).toBe("menu-focus-other");
+    expect(document.activeElement).toBe(destination);
+    expect(press.defaultPrevented).toBe(true);
   });
 });

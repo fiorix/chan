@@ -1429,6 +1429,12 @@
     ondragleave={onDragLeave}
     ondrop={onDrop}
     onmousedown={(e) => {
+      if (e.button === 0 && (e.target as Element | null)?.closest(".dead-zone")) {
+        e.preventDefault();
+        setActivePane(pane.id);
+        if (active?.kind === "terminal" || active?.kind === "file") bumpTabFocusPulse();
+        else if (!active) paneEl?.querySelector<HTMLElement>(".welcome")?.focus({ preventScroll: true });
+      }
       // The browser blurs the current surface on a right press in empty
       // strip space, or focuses an action button before its native menu.
       if (e.button === 2 && !(e.target as Element | null)?.closest(".tab")) e.preventDefault();

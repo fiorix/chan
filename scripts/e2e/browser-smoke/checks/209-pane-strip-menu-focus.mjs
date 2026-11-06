@@ -166,7 +166,7 @@ async function terminalWindow(ctx, dir, engine, failures) {
     for (const action of ["control", "escape", "outside", "commands", "left"]) {
       const result = await terminalArm(page, file, engine, `${engine}-${action}`, action);
       results.push(result);
-      if (action !== "left") checkTerminal(result, failures);
+      checkTerminal(result, failures);
     }
     const host = await centreOf(page, `${TERMINAL} .terminal-host`);
     await page.mouse.click(host.x, host.y);
@@ -174,7 +174,9 @@ async function terminalWindow(ctx, dir, engine, failures) {
     await page.waitForFunction(() => document.querySelectorAll(".pane").length === 2, { timeout: 10_000 });
     const splitHost = await centreOf(page, `${TERMINAL} .terminal-host`);
     await page.mouse.click(splitHost.x, splitHost.y);
-    results.push(await terminalArm(page, file, engine, `${engine}-split`, "split", true));
+    const split = await terminalArm(page, file, engine, `${engine}-split`, "split", true);
+    results.push(split);
+    checkTerminal(split, failures);
     await ctx.shot(`209-${engine}`, page);
     return results;
   } catch (error) {
@@ -231,6 +233,15 @@ async function emptyWindow(ctx, failures) {
     const command = { arm: "empty-commands", engine: null, opened: commandsOpened, closed: commandsClosed, focus: commandsFocus, pty: null };
     results.push(command);
     if (command.opened !== "welcome" || !command.closed || command.focus !== "welcome") failures.push(`${command.arm}: ${JSON.stringify(command)}`);
+    await page.mouse.click(welcome.x, welcome.y);
+    await openStretch(page);
+    const leftOpened = await focusOf(page);
+    await clickStretchOutsideMenu(page);
+    const leftClosed = await page.waitForSelector(MENU, { hidden: true, timeout: 2_000 }).then(() => true, () => false);
+    const leftFocus = await focusOf(page);
+    const left = { arm: "empty-left", engine: null, opened: leftOpened, closed: leftClosed, focus: leftFocus, pty: null };
+    results.push(left);
+    if (left.opened !== "welcome" || !left.closed || left.focus !== "welcome") failures.push(`${left.arm}: ${JSON.stringify(left)}`);
     await ctx.shot("209-empty", page);
     return results;
   } finally {
