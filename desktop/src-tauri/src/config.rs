@@ -2589,6 +2589,7 @@ mod tests {
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
+            wireguard: None,
         }
     }
 

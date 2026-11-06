@@ -2641,6 +2641,7 @@ pub(crate) mod tests {
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://gw.chan.app/desktop/v1/devservers".into()),
+            wireguard: None,
         });
         rt.roster = rows;
         rt.status = GatewayStatus::Connected;
@@ -2953,6 +2954,7 @@ pub(crate) mod tests {
                 devserver_proxy_origin: "https://devserver.example.test".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some("https://id.example.test/desktop/v1/devservers".into()),
+                wireguard: None,
             },
             vec![shared],
         );
@@ -5448,6 +5450,7 @@ pub(crate) mod tests {
             devserver_proxy_origin: "https://proxy.chan.app".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+            wireguard: None,
         });
         assert_eq!(rt.status, GatewayStatus::Connecting, "fixture");
         state
@@ -5669,6 +5672,7 @@ pub(crate) mod tests {
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+                wireguard: None,
             });
             rt.pending_signin = true;
             let mut gateway_state = state.gateway_manager.state.lock().unwrap();

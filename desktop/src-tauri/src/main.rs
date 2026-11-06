@@ -10153,6 +10153,7 @@ mod tests {
             devserver_proxy_origin: "https://devserver.example.test".into(),
             devserver_proxy_host_depth: 2,
             roster_url: Some("https://id.example.test/desktop/v1/devservers".into()),
+            wireguard: None,
         };
         state.gateway_manager.seed_test_runtime(
             gateway_id,
@@ -10249,6 +10250,7 @@ mod tests {
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+                wireguard: None,
             },
             vec![gateway::RosterDevserver {
                 owner_user_id: uuid::Uuid::from_u128(1),
@@ -10393,6 +10395,7 @@ mod tests {
                 devserver_proxy_origin: "https://proxy.chan.app".into(),
                 devserver_proxy_host_depth: 2,
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+                wireguard: None,
             },
             vec![gateway::RosterDevserver {
                 owner_user_id: uuid::Uuid::from_u128(1),

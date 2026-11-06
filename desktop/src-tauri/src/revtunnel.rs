@@ -415,6 +415,7 @@ mod tests {
             devserver_proxy_origin: format!("http://localtest.me:{port}"),
             devserver_proxy_host_depth: 2,
             roster_url: None,
+            wireguard: None,
         };
         let gateway = crate::devserver::gateway_conn(
             &discovery,
