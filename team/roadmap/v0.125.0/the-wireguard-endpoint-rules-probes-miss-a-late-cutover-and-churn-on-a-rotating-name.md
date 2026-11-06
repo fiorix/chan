@@ -23,3 +23,13 @@ Proposed by the third review for parts 1 and 2; part 3 needs a decision.
 1. Resolution tests over the resolver seam: a record moved before its new host is up is followed within one handshake attempt of the host coming up, not at 135 s; a lost probe datagram is followed by the next attempt's probe; answers alternating between two dead addresses cause no re-handshake with the live peer; and, for the option part 3 takes, a rotating answer set on a stale session ends on an address the peer answers from.
 2. Each red under a mutation that restores the v0.124.0 behaviour, with the existing 28 resolution tests green.
 3. The kernel suite's `dns` arm, and an arm that moves the record before the second peer port answers, green against the kernel peer.
+
+## Built
+
+Three implementation commits: `a0184cb1b` (the endpoint rule and full resolver answer sets), `40bcf942a` (empty network datagrams cannot move the peer endpoint), and `test(wireguard): prove late endpoint cutover before stale recovery` (the kernel suite's `dns-late` arm and its staged proof).
+
+The driver copies the current initiation for at most one live probe per genuine attempt, defers late answers, keeps a live endpoint present in the answer set, and tries unvisited members across stale retries. A lost live probe remains eligible when the old path becomes stale, a record can move away and back while the session lives, and a refused bind does not prevent trying another address. Authenticated roaming and the `start_on` previous-answer rule remain intact. Empty UDP payloads are dropped before the protocol core's internal queue-drain sentinel.
+
+Verification: 105 chan-wireguard tests, three chan-server WireGuard tests and 14 desktop WireGuard tests pass. Six endpoint-rule mutations and removal of the empty-datagram guard produce their named regression failures with controls green, and the no-op controls pass. The Rust scoped gates pass. Constructed fixtures execute the committed DNS helper and shell verdict logic: both DNS modes accept the positive control and reject missing or wrong bodies; the late-cutover mode rejects a new path that stays dark, missing probe/rekey/confirmation/next-attempt controls, and stale-only recovery. Shell, workflow, e2e syntax, formatting and Nix hash checks pass.
+
+Open: the ordinary DNS and late-cutover arms require live kernel-peer execution in a guest, including a dark-forward negative control. Constructed fixtures establish the harness decisions, not those runtime results.
