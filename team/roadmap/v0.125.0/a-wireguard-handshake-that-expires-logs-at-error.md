@@ -16,3 +16,11 @@ A tunnel whose peer never answers (a wrong key, a peer that is down) logs `CONNE
 
 1. A tracing test over a tunnel whose peer is silent: no ERROR line, one warn line naming the endpoint, and one warn line when the peer comes back.
 2. The kernel suite's wrong-key arms and the desktop suites' wrong-key arms read no ERROR line in the client's log.
+
+## Built
+
+Three implementation commits: `13dcb72df` (the core's debug levels and the driver's retained handshake state and session notices), `f1b78b610` (the kernel suites' expiry controls at the production warn filter), and `test(desktop): assert wrong-key tunnel expiry on both platforms` (the desktop suites' expiry controls and the Linux `--wrong-key` mode).
+
+Verification: 92 chan-wireguard tests, three chan-server WireGuard tests and 14 desktop WireGuard tests pass; six committed mutations make the corresponding session-notice tests fail. The four suites' committed assertion code rejects constructed logs with ERROR-level events or no session warning, and accepts the warning control with no ERROR. The desktop controls also reject missing tunnel starts and insufficient initiations; the Linux arm rejects a peer whose latest status has a handshake. The scoped Rust gate and the per-commit shell, workflow, Bash syntax, e2e syntax, formatting and Nix lock-digest checks pass.
+
+Open: the live kernel suite and its reverted-error control, the Linux desktop plain and wrong-key runs, the Windows kernel suite, and the Windows desktop suite require guest execution. Constructed logs do not establish those runtime results.

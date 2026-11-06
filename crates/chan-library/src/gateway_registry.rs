@@ -87,12 +87,6 @@ pub struct GatewayEntry {
     /// when the gateway is reached directly.
     #[serde(default)]
     pub wireguard: Option<String>,
-    /// The row's WireGuard setting is not the one the running desktop
-    /// started with (a file added, removed, changed or refused since the
-    /// start), so it takes effect at the next start: the webview proxy is
-    /// decided once per process. Always `false` on a headless surface.
-    #[serde(default)]
-    pub wireguard_restart_required: bool,
     /// Live WireGuard state: `connecting`, `up`, or the latest lookup
     /// error with its retry notice, after `up; ` while a session lives
     /// anyway; `null` when no matching tunnel runs.
@@ -166,7 +160,6 @@ mod tests {
             devserver_count: 3,
             last_error: None,
             wireguard: None,
-            wireguard_restart_required: false,
             wireguard_status: None,
         };
         assert_eq!(
@@ -174,7 +167,7 @@ mod tests {
             "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
              \"enabled\":true,\"status\":\"disconnected\",\"pending_signin\":false,\
              \"devserver_count\":3,\"last_error\":null,\"wireguard\":null,\
-             \"wireguard_restart_required\":false,\"wireguard_status\":null}"
+             \"wireguard_status\":null}"
         );
         // And the shape round-trips.
         let back: GatewayEntry =
@@ -226,7 +219,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(entry.wireguard, None);
-        assert!(!entry.wireguard_restart_required);
         assert_eq!(entry.wireguard_status, None);
     }
 }

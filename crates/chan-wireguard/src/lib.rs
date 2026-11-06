@@ -15,11 +15,11 @@
 //! TCP connections to the peer's addresses with [`Tunnel::connect`] and
 //! gets a tokio [`Stream`], with no interface, route or privilege on the
 //! host. [`config::Config`] is read from the wg-quick file format.
-//! [`ConnectProxy`] is a loopback HTTP proxy over a set of tunnels for
-//! the dialers that cannot call `connect` themselves, a webview among
-//! them: it serves CONNECT and forwards plain-HTTP requests, and a
-//! destination inside a tunnel's AllowedIPs goes through that tunnel
-//! while anything else is connected directly.
+//! [`ConnectProxy`] is a loopback HTTP proxy over a live table of tunnels
+//! for the dialers that cannot call `connect` themselves, a webview among
+//! them: it serves CONNECT and forwards plain-HTTP requests, and a host
+//! name a route maps, or a destination inside a tunnel's AllowedIPs, goes
+//! through that tunnel while anything else is connected directly.
 //!
 //! The `noise` module and the clock derive from Cloudflare's boringtun
 //! under BSD-3-Clause; the notice is the LICENSE file beside the crate's
@@ -38,9 +38,9 @@ mod stream;
 mod testing;
 mod tunnel;
 
-pub use proxy::ConnectProxy;
+pub use proxy::{ConnectProxy, HostRoute, ProxyRoute};
 pub use stream::{Listener, Stream};
-pub use tunnel::{Status, Tunnel};
+pub use tunnel::{HandshakeState, Status, Tunnel};
 
 /// The Curve25519 key types a tunnel is built from.
 pub mod x25519 {

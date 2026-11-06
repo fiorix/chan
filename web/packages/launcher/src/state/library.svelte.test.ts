@@ -525,7 +525,6 @@ describe("workspace polling", () => {
     const row = {
       ...library.gateways[0]!,
       wireguard: "/tmp/gateway.conf",
-      wireguard_restart_required: false,
       wireguard_status: "connecting",
     };
     const list = vi.spyOn(backend, "listGateways").mockResolvedValue([row]);

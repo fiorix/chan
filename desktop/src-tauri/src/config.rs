@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1002,12 +1002,37 @@ impl GatewayConfigRegistry {
             manager,
         }
     }
+
+    fn fabric(&self) -> Option<&crate::wireguard::WireguardFabric> {
+        self.manager.wireguard().map(|fabric| fabric.as_ref())
+    }
+
+    /// Bring the fabric to the file a saved row names: an enabled row whose
+    /// path changed adopts its file, a cleared path retires the row's
+    /// tunnel, and an unchanged path or a disabled row starts nothing (a
+    /// disabled row's connect adopts it). A refusal stays on the fabric,
+    /// where the projection reads it as the row's `last_error`.
+    fn follow_wireguard(&self, gw: &Gateway, previous: Option<&Path>) {
+        let Some(fabric) = self.fabric() else {
+            return;
+        };
+        match gw.wireguard.as_deref() {
+            None if previous.is_some() => {
+                fabric.retire(&gw.id);
+            }
+            Some(path) if gw.enabled && previous != Some(path) => {
+                // adopt logs the refusal and keeps it on the row.
+                let _ = fabric.adopt(&gw.id, path, Vec::new());
+            }
+            _ => {}
+        }
+    }
 }
 
 fn entry_from_gateway(
     g: &Gateway,
     view: Option<crate::gateway::GatewayRuntimeView>,
-    wireguard: &crate::wireguard::WireguardStartup,
+    wireguard: Option<&crate::wireguard::WireguardFabric>,
 ) -> GatewayEntry {
     let view = view.unwrap_or_default();
     let file = g.wireguard.as_deref();
@@ -1019,14 +1044,14 @@ fn entry_from_gateway(
         status: view.status,
         pending_signin: view.pending_signin,
         devserver_count: view.devserver_count,
-        // A row whose file was refused at start has no runtime to carry the
-        // reason, so the projection carries it until a connect sets its own.
+        // A row whose file was refused has no runtime to carry the reason,
+        // so the projection carries it until a connect sets its own; so
+        // does every row with a file while the proxy could not bind.
         last_error: view
             .last_error
-            .or_else(|| wireguard.failure(&g.id, file).map(str::to_string)),
+            .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, file))),
         wireguard: file.map(|path| path.display().to_string()),
-        wireguard_restart_required: wireguard.restart_required(&g.id, file, g.enabled),
-        wireguard_status: wireguard.status(&g.id, file),
+        wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, file)),
     }
 }
 
@@ -1062,13 +1087,7 @@ impl GatewayRegistry for GatewayConfigRegistry {
             .map(|cfg| {
                 cfg.gateways
                     .iter()
-                    .map(|g| {
-                        entry_from_gateway(
-                            g,
-                            self.manager.view(&g.id),
-                            self.manager.wireguard_startup(),
-                        )
-                    })
+                    .map(|g| entry_from_gateway(g, self.manager.view(&g.id), self.fabric()))
                     .collect()
             })
             .unwrap_or_default()
@@ -1093,11 +1112,10 @@ impl GatewayRegistry for GatewayConfigRegistry {
         };
         cfg.gateways.push(gw.clone());
         store.save(&cfg).map_err(|e| e.to_string())?;
-        Ok(entry_from_gateway(
-            &gw,
-            None,
-            self.manager.wireguard_startup(),
-        ))
+        // After the save, still under the store's lock, so the fabric takes
+        // a row's saves in the order they were written.
+        self.follow_wireguard(&gw, None);
+        Ok(entry_from_gateway(&gw, None, self.fabric()))
     }
 
     fn update(&self, id: &str, input: GatewayInput) -> Result<Option<GatewayEntry>, String> {
@@ -1117,12 +1135,20 @@ impl GatewayRegistry for GatewayConfigRegistry {
         // Label is full-replace: empty clears, and the badge derives from
         // the URL host again.
         gw.label = input.label.unwrap_or_default().trim().to_string();
-        // The file is full-replace like the label; the tunnel it names
-        // starts at the next start, which the projection says.
-        gw.wireguard = wireguard;
-        let entry = entry_from_gateway(gw, self.manager.view(id), self.manager.wireguard_startup());
+        // The file is full-replace like the label, and the fabric follows
+        // it once the row is saved.
+        let previous = std::mem::replace(&mut gw.wireguard, wireguard);
+        let gw = gw.clone();
         store.save(&cfg).map_err(|e| e.to_string())?;
-        Ok(Some(entry))
+        if previous.as_deref() != gw.wireguard.as_deref() {
+            self.manager.clear_discovery_error(id);
+        }
+        self.follow_wireguard(&gw, previous.as_deref());
+        Ok(Some(entry_from_gateway(
+            &gw,
+            self.manager.view(id),
+            self.fabric(),
+        )))
     }
 
     fn remove(&self, id: &str) -> Result<bool, String> {
@@ -1141,6 +1167,9 @@ impl GatewayRegistry for GatewayConfigRegistry {
         // before locking gateway state.
         if let Some(hook) = self.on_remove.get() {
             hook(id);
+        }
+        if let Some(fabric) = self.fabric() {
+            fabric.retire(id);
         }
         Ok(true)
     }
@@ -3082,23 +3111,35 @@ mod tests {
         path
     }
 
-    fn gateway_registry_over(
+    /// A registry over a config holding `gateways`, with a fabric started
+    /// over them on the test's runtime, as `main` starts it before the
+    /// embedded server serves the launcher.
+    async fn gateway_registry_over(
         dir: &std::path::Path,
+        gateways: Vec<Gateway>,
     ) -> (
         Arc<Mutex<ConfigStore>>,
-        Arc<crate::gateway::GatewayManager>,
+        Arc<crate::wireguard::WireguardFabric>,
         GatewayConfigRegistry,
     ) {
         let store = Arc::new(Mutex::new(ConfigStore {
             path: dir.join("config.json"),
         }));
+        if !gateways.is_empty() {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways = gateways.clone();
+            guard.save(&cfg).unwrap();
+        }
+        let fabric = Arc::new(crate::wireguard::start(&gateways).await);
         let manager = Arc::new(crate::gateway::GatewayManager::default());
+        manager.set_wireguard(Arc::clone(&fabric)).unwrap();
         let reg = GatewayConfigRegistry::new(
             Arc::clone(&store),
             Arc::new(OnceLock::new()),
             Arc::clone(&manager),
         );
-        (store, manager, reg)
+        (store, fabric, reg)
     }
 
     fn wg_input(url: &str, wireguard: Option<&str>) -> GatewayInput {
@@ -3109,10 +3150,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gateway_registry_add_and_update_read_the_wireguard_file_and_refuse_a_bad_one() {
+    #[tokio::test]
+    async fn gateway_registry_add_and_update_read_the_wireguard_file_and_refuse_a_bad_one() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, _manager, reg) = gateway_registry_over(dir.path());
+        let (store, fabric, reg) = gateway_registry_over(dir.path(), Vec::new()).await;
         let good = wg_file(dir.path(), "good.conf", &wg_text());
         let bad_line = wg_file(
             dir.path(),
@@ -3143,14 +3184,15 @@ mod tests {
         assert!(err.contains(&missing.display().to_string()), "{err}");
         assert!(reg.list().is_empty());
 
-        // A good file is stored as given, trimmed. No tunnel started in
-        // this process, so the row waits for a restart.
+        // A good file is stored as given, trimmed, and its tunnel starts in
+        // the running process.
         let added = reg
             .add(wg_input(url, Some(&format!("  {}  ", good.display()))))
             .expect("add");
         assert_eq!(added.wireguard.as_deref(), good.to_str());
-        assert!(added.wireguard_restart_required);
+        assert_eq!(added.wireguard_status.as_deref(), Some("connecting"));
         assert_eq!(added.last_error, None);
+        assert_eq!(fabric.tunnels(), 1);
         let cfg = store.lock().unwrap().get().unwrap();
         assert_eq!(cfg.gateways[0].wireguard.as_deref(), Some(good.as_path()));
 
@@ -3168,7 +3210,8 @@ mod tests {
             .expect("update")
             .expect("row exists");
         assert_eq!(cleared.wireguard, None);
-        assert!(!cleared.wireguard_restart_required);
+        assert_eq!(cleared.wireguard_status, None);
+        assert_eq!(fabric.tunnels(), 0, "a cleared file retires its tunnel");
         let cfg = store.lock().unwrap().get().unwrap();
         assert_eq!(cfg.gateways[0].wireguard, None);
         let text = fs::read_to_string(dir.path().join("config.json")).unwrap();
@@ -3176,12 +3219,12 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn gateway_registry_refuses_a_shared_wireguard_file_naming_the_fix() {
+    #[tokio::test]
+    async fn gateway_registry_refuses_a_shared_wireguard_file_naming_the_fix() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
-        let (_store, _manager, reg) = gateway_registry_over(dir.path());
+        let (_store, _fabric, reg) = gateway_registry_over(dir.path(), Vec::new()).await;
         let shared = wg_file(dir.path(), "shared.conf", &wg_text());
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o644)).unwrap();
         let err = reg
@@ -3199,12 +3242,24 @@ mod tests {
         assert!(reg.list().is_empty());
     }
 
-    #[test]
-    fn gateway_list_projects_the_wireguard_start() {
+    #[tokio::test]
+    async fn gateway_list_projects_the_live_fabric() {
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let started = || {
+            lines
+                .infos()
+                .iter()
+                .filter(|line| line.contains("gateway WireGuard tunnel started"))
+                .count()
+        };
         let dir = tempfile::tempdir().unwrap();
-        let (store, manager, reg) = gateway_registry_over(dir.path());
         let a_file = wg_file(dir.path(), "a.conf", &wg_text());
-        let b_file = wg_file(dir.path(), "b.conf", &wg_text());
+        let b_file = wg_file(
+            dir.path(),
+            "b.conf",
+            &wg_text().replace("10.7.0.2/32", "nowhere"),
+        );
         let other = wg_file(dir.path(), "other.conf", &wg_text());
         let row = |id: &str, url: &str, wireguard: Option<&PathBuf>| Gateway {
             id: id.to_string(),
@@ -3215,59 +3270,66 @@ mod tests {
             native_trust: Vec::new(),
             wireguard: wireguard.cloned(),
         };
-        {
-            let mut guard = store.lock().unwrap();
-            let mut cfg = guard.get().unwrap();
-            cfg.gateways = vec![
+        // The start runs A's tunnel and refuses B's file.
+        let (_store, fabric, reg) = gateway_registry_over(
+            dir.path(),
+            vec![
                 row("gw-aaaaaaaa", "https://a.example", Some(&a_file)),
                 row("gw-bbbbbbbb", "https://b.example", Some(&b_file)),
                 row("gw-cccccccc", "https://c.example", None),
-            ];
-            guard.save(&cfg).unwrap();
-        }
-        // The start ran A's tunnel and refused B's file; it is recorded
-        // before anything projects the rows, as `main` records it before
-        // the embedded server serves the launcher.
-        let reason = format!(
-            "WireGuard: {}: line 3: Address: not an IP address",
-            b_file.display()
-        );
-        manager
-            .set_wireguard_startup(crate::wireguard::WireguardStartup::for_test(
-                &[("gw-aaaaaaaa", a_file.to_str().unwrap())],
-                &[("gw-bbbbbbbb", b_file.to_str().unwrap(), &reason)],
-            ))
-            .unwrap();
+            ],
+        )
+        .await;
+        assert_eq!(started(), 1);
         let by_id = |id: &str| reg.list().into_iter().find(|e| e.id == id).unwrap();
         let a_row = by_id("gw-aaaaaaaa");
         assert_eq!(a_row.wireguard.as_deref(), a_file.to_str());
-        assert!(!a_row.wireguard_restart_required);
+        assert_eq!(a_row.wireguard_status.as_deref(), Some("connecting"));
         assert_eq!(a_row.last_error, None);
         let b_row = by_id("gw-bbbbbbbb");
-        assert!(b_row.wireguard_restart_required);
-        assert_eq!(b_row.last_error.as_deref(), Some(reason.as_str()));
+        assert_eq!(b_row.wireguard_status, None);
+        let reason = b_row.last_error.expect("B's refusal is its last_error");
+        assert!(reason.starts_with("WireGuard: "), "{reason}");
+        assert!(reason.contains(&b_file.display().to_string()), "{reason}");
+        assert!(reason.contains("line 3"), "{reason}");
+        assert!(!reason.contains(WG_PRIVATE_KEY), "{reason}");
         let plain_row = by_id("gw-cccccccc");
-        assert!(!plain_row.wireguard_restart_required);
         assert_eq!(plain_row.wireguard, None);
-        // A changes its file: the next start applies it.
+        assert_eq!(plain_row.wireguard_status, None);
+        assert_eq!(plain_row.last_error, None);
+
+        // A changes its file: the new file runs at once.
         let changed = reg
             .update("gw-aaaaaaaa", wg_input("", Some(other.to_str().unwrap())))
             .unwrap()
             .unwrap();
-        assert!(changed.wireguard_restart_required);
-        // B drops its file: the refusal no longer applies, and a row that
-        // asks for no tunnel waits for nothing.
+        assert_eq!(changed.wireguard.as_deref(), other.to_str());
+        assert_eq!(changed.wireguard_status.as_deref(), Some("connecting"));
+        assert_eq!(started(), 2);
+        assert_eq!(fabric.status("gw-aaaaaaaa", Some(&a_file)), None);
+        // A save that leaves the path alone restarts nothing.
+        reg.update("gw-aaaaaaaa", wg_input("", Some(other.to_str().unwrap())))
+            .unwrap()
+            .unwrap();
+        assert_eq!(started(), 2);
+        // B drops its file: the refusal no longer applies.
         let dropped = reg
             .update("gw-bbbbbbbb", wg_input("", None))
             .unwrap()
             .unwrap();
         assert_eq!(dropped.last_error, None);
-        assert!(!dropped.wireguard_restart_required);
-        // A plain row that gains a file waits for a restart.
+        assert_eq!(dropped.wireguard_status, None);
+        // A plain row that gains a file runs it at once.
         let gained = reg
-            .update("gw-cccccccc", wg_input("", Some(other.to_str().unwrap())))
+            .update("gw-cccccccc", wg_input("", Some(a_file.to_str().unwrap())))
             .unwrap()
             .unwrap();
-        assert!(gained.wireguard_restart_required);
+        assert_eq!(gained.wireguard_status.as_deref(), Some("connecting"));
+        assert_eq!(started(), 3);
+        assert_eq!(fabric.tunnels(), 2);
+        // Removing a row retires its tunnel.
+        assert!(reg.remove("gw-cccccccc").unwrap());
+        assert_eq!(fabric.tunnels(), 1);
+        assert_eq!(fabric.status("gw-cccccccc", Some(&a_file)), None);
     }
 }

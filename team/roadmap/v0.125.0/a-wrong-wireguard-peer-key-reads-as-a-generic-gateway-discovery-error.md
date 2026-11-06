@@ -16,3 +16,9 @@ In the Windows 11 guest, a chan-desktop gateway row whose wg-quick file names th
 
 1. Unit: the desktop's error for a discovery failure over a tunnel with no handshake, over one with a stale handshake, and over a live one (unchanged).
 2. `scripts/e2e/desktop-wireguard-windows.sh` and `scripts/e2e/desktop-wireguard.sh`: the wrong-key arm reads the new text on the Gateways state.
+
+## Built
+
+The WireGuard tunnel status distinguishes a peer that never handshook, a live session and a session that was lost. On a discovery transport failure, the desktop reads that status and puts the matching reason on the gateway row, in the notice and in the start-up log. A pending first endpoint lookup remains `connecting`; a failed lookup keeps its own retry text. The message names the configured endpoint and file, without printing key values.
+
+The Linux and Windows wrong-key arms read the gateway list's `last_error` and the start-up log, check that both name the missing handshake and file, and reject known key values in the desktop log. The Linux live-adopt tenant arm checks the discovery 404 in both the connect body and the gateway row. The Windows wrong-key arm selects the peer navigation's 504 document by URL, so another window's document cannot satisfy or hide it.

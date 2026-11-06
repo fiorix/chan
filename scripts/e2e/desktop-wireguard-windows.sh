@@ -45,11 +45,14 @@
 #   refusals      the proxy refused nothing in the positive run, in a log
 #                 that holds its forwards and CONNECTs.
 #   wrong-key     the desktop restarted on a file naming a wrong peer key:
-#                 the window's navigation ends in the proxy's 504, the peer
+#                 the start-up log and gateway row name the missing handshake
+#                 and file without key values; the window's peer navigation
+#                 document ends in the proxy's 504, the peer
 #                 logs no request and its handshake stamp does not move, and
 #                 the initiations the desktop logs sending arrive at the peer
 #                 as UDP datagrams (the control that the positive arms are
-#                 not vacuous).
+#                 not vacuous). One session expiry logs at WARN within
+#                 100 s of tunnel start, and no ERROR-level line appears.
 #
 # What it cannot prove: a real gateway's TLS and identity behind the proxy,
 # the window feed's WebSocket (the stand-in has no roster), the launcher
@@ -606,6 +609,13 @@ PS
 }
 logged() { desktop_log "$1" && grep -qE -- "$2" "$WORK/$1.log"; }
 count() { grep -cE -- "$2" "$WORK/$1.log" || true; }
+session_warnings() {
+    awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
+}
+session_expiry_logged() {
+    desktop_log "$1" || return 1
+    [ "$(session_warnings "$WORK/$1.log")" -ge 1 ]
+}
 
 # The remote debugging port, forwarded to a free port on this host for the run.
 LOCAL_CDP="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
@@ -626,6 +636,10 @@ navigate() {
     node "$HELPERS/cdp.mjs" nav "$LOCAL_CDP" "$PAGE" "$2" "$1" "${3:-8000}" >/dev/null 2>"$1.err" || true
 }
 jfield() { python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {}, {"r": r}))' "$@" 2>/dev/null || echo "?"; }
+launcher_target() {
+    LAUNCHER_TARGET="$(node "$HELPERS/cdp.mjs" launcher "$LOCAL_CDP" 2>>"$WORK/cdp-eval.err")" || return 1
+    [ -n "$LAUNCHER_TARGET" ]
+}
 
 # 4. The positive run.
 HS_BEFORE="$(peer_handshake)"
@@ -768,22 +782,61 @@ REQ_BEFORE="$(peer_count '^request: ')"
 arm_rc=0
 start_desktop neg client-wrong-key.conf || arm_rc=1
 wait_for 60 "the wrong-key tunnel start line" logged neg "gateway WireGuard tunnel started gateway=$GATEWAY_ID file=.*client-wrong-key\\.conf" || arm_rc=1
+expiry_deadline=$((SECONDS + 100))
 PAGE=""
 wait_for 60 "a window's page target on the debugging port" page_target || arm_rc=1
+wait_for 60 "the wrong-key discovery error" logged neg 'startup gateway connect failed' || arm_rc=1
+expected_file="$CLIENT_DIR\\client-wrong-key.conf"
+startup_ok=no
+if python3 -I "$HERE/wgwrongkey-oracle.py" startup "$WORK/neg.log" "$ENDPOINT" "$expected_file" > /dev/null 2>>"$WORK/oracle.err"; then
+    startup_ok=yes
+else
+    arm_rc=1
+fi
+# The terminal is the only page on some starts. Its key bridge opens the
+# launcher, whose own webview can read the bearer-gated library list.
+LAUNCHER_TARGET=""
+if ! launcher_target; then
+    if ! node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$PAGE" \
+        "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'P', code: 'KeyP', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true}))" \
+        > "$WORK/toggle-launcher.out" 2>>"$WORK/cdp-eval.err"; then arm_rc=1; fi
+    wait_for 60 "the launcher target" launcher_target || arm_rc=1
+fi
+list_status=unread
+row_error=unread
+if [ -n "$LAUNCHER_TARGET" ]; then
+    if ! node "$HELPERS/cdp.mjs" eval "$LOCAL_CDP" "$LAUNCHER_TARGET" \
+        '(async () => { const token = new URL(location.href).searchParams.get("t"); const response = await fetch("/api/library/gateways", {headers: {Authorization: `Bearer ${token}`}}); return JSON.stringify({http_status: response.status, rows: await response.json()}); })()' \
+        > "$WORK/wrong-key-gateways.json" 2>>"$WORK/cdp-eval.err"; then arm_rc=1; fi
+    list_status="$(jfield "$WORK/wrong-key-gateways.json" 'r["http_status"]')"
+    [ "$list_status" = 200 ] || arm_rc=1
+    row_error="$(python3 -I "$HERE/wgwrongkey-oracle.py" wrong-key "$WORK/wrong-key-gateways.json" "$GATEWAY_ID" "$ENDPOINT" "$expected_file" 2>>"$WORK/oracle.err")" || arm_rc=1
+fi
 navigate "$WORK/wrong-key" "$PEER_ORIGIN/?arm=wrong-key-$NONCE" 5000
-doc="$(jfield "$WORK/wrong-key.json" '(r["documents"][0]["status"] if r["documents"] else None, r["errorText"])')"
+# Navigation spends part of the bound that starts at the tunnel-start line.
+expiry_wait=$((expiry_deadline - SECONDS))
+[ "$expiry_wait" -ge 0 ] || expiry_wait=0
+wait_for "$expiry_wait" "the session-expiry warning" session_expiry_logged neg || arm_rc=1
+doc="$(python3 -I "$HERE/wgwrongkey-oracle.py" document "$WORK/wrong-key.json" 2>>"$WORK/oracle.err")" || arm_rc=1
 text="$(jfield "$WORK/wrong-key.json" 'r["page"]["text"].replace(chr(10), " ")')"
 HS_AFTER="$(peer_handshake)"
 UDP_AFTER="$(peer_udp_in)"
 REQ_AFTER="$(peer_count '^request: ')"
 desktop_log neg || arm_rc=1
 INITIATIONS="$(count neg 'Sending handshake_initiation')"
+if ! printf '%s\n' "$WRONG_PUB" "$SERVER_PUB" |
+    python3 -I "$HERE/wgwrongkey-oracle.py" clean-log "$WORK/neg.log" > /dev/null 2>>"$WORK/oracle.err"; then
+    arm_rc=1
+fi
 [ "$doc" = "(504, 'net::ERR_HTTP_RESPONSE_CODE_FAILURE')" ] || arm_rc=1
 [ "$REQ_AFTER" != unread ] && [ "$REQ_AFTER" = "$REQ_BEFORE" ] || arm_rc=1
 [ "$HS_AFTER" = "$HS_BEFORE" ] || arm_rc=1
 [ "$INITIATIONS" -ge 2 ] && [ $((UDP_AFTER - UDP_BEFORE)) -ge 2 ] || arm_rc=1
 grep -qE 'proxy request refused .*status=504' "$WORK/neg.log" || arm_rc=1
-verdict wrong-key "$arm_rc" "document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms, page '$(printf '%s' "$text" | cut -c1-70)', peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE))"
+expiry_warns="$(session_warnings "$WORK/neg.log")"
+error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$WORK/neg.log")"
+[ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+verdict wrong-key "$arm_rc" "startup named=$startup_ok, list HTTP $list_status, row '$(printf '%s' "$row_error" | cut -c1-80)', document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms, page '$(printf '%s' "$text" | cut -c1-70)', peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
 stop_desktop
 
 if [ "$FAILED" != 0 ]; then

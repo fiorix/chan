@@ -44,7 +44,6 @@ function gateway(over: Partial<GatewayEntry> = {}): GatewayEntry {
     devserver_count: 0,
     last_error: null,
     wireguard: null,
-    wireguard_restart_required: false,
     ...over,
   };
 }

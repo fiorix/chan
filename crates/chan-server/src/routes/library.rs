@@ -6070,7 +6070,6 @@ mod gateway_route_tests {
                     devserver_count: 0,
                     last_error: None,
                     wireguard: None,
-                    wireguard_restart_required: false,
                     wireguard_status: None,
                 }]),
             }
@@ -6095,7 +6094,6 @@ mod gateway_route_tests {
                 devserver_count: 0,
                 last_error: None,
                 wireguard: None,
-                wireguard_restart_required: false,
                 wireguard_status: None,
             };
             self.rows.lock().unwrap().push(entry.clone());

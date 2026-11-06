@@ -282,10 +282,7 @@ async fn settle_then_mute(relay: &Relay, a: &mut Stream, b: &mut Stream) {
 }
 
 fn fresh_handshake(tunnel: &Tunnel, within: Duration) -> bool {
-    tunnel
-        .status()
-        .last_handshake
-        .is_some_and(|age| age < within)
+    matches!(tunnel.status().handshake, HandshakeState::Live(age) if age < within)
 }
 
 #[tokio::test]
@@ -295,7 +292,7 @@ async fn unresolved_start_returns_and_recovers_without_restart() {
     // No task has been polled: construction cannot wait on the resolver.
     assert_eq!(f.a.status().endpoint, None);
     let query = f.query().await;
-    assert_eq!(f.a.status().last_handshake, None);
+    assert_eq!(f.a.status().handshake, HandshakeState::Never);
     let connecting = tokio::spawn({
         let a = f.a.clone();
         async move { a.connect(b_port(80)).await }
@@ -320,7 +317,7 @@ async fn unresolved_start_returns_and_recovers_without_restart() {
     // brings the tunnel up with no new demand and no restart.
     clock::advance(REKEY_TIMEOUT + TICK);
     f.query().await.send(Ok(f.b_at)).unwrap();
-    until(|| f.a.status().last_handshake.is_some()).await;
+    until(|| matches!(f.a.status().handshake, HandshakeState::Live(_))).await;
     assert_eq!(f.a.status().resolution_error, None);
     let (mut a, mut b) = f.connect().await;
     exchange(&mut a, &mut b).await;
@@ -343,7 +340,7 @@ async fn live_rekey_and_expiry_follow_the_next_lookup() {
         .unwrap();
     initiation(&moved).await;
     assert!(
-        f.a.status().last_handshake.is_some(),
+        matches!(f.a.status().handshake, HandshakeState::Live(_)),
         "rekey while the session lives"
     );
     // Keep the old peer from initiating a handshake of its own at expiry.
@@ -438,9 +435,7 @@ async fn failing_lookups_keep_rekeying_to_the_known_endpoint() {
     exchange(&mut a, &mut b).await;
     let status = f.a.status();
     assert!(
-        status
-            .last_handshake
-            .is_some_and(|age| age < Duration::from_secs(180)),
+        matches!(status.handshake, HandshakeState::Live(age) if age < Duration::from_secs(180)),
         "{status:?}"
     );
     assert!(
@@ -953,17 +948,31 @@ async fn a_bind_failure_reads_as_one() {
     );
 }
 
-/// Records the level and message of every event on this thread.
+/// Records events on this thread, including their structured fields.
 #[derive(Clone, Default)]
-struct Events(Arc<Mutex<Vec<(String, String)>>>);
+struct Events(Arc<Mutex<Vec<RecordedEvent>>>);
+
+#[derive(Clone, Debug)]
+struct RecordedEvent {
+    level: String,
+    target: String,
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+impl RecordedEvent {
+    fn field(&self, name: &str) -> &str {
+        &self.fields.iter().find(|(key, _)| key == name).unwrap().1
+    }
+}
 
 impl Events {
     fn endpoint_lines(&self) -> Vec<(String, String)> {
         self.0
             .lock()
             .iter()
-            .filter(|(_, message)| message.starts_with("WireGuard endpoint"))
-            .cloned()
+            .filter(|event| event.message.starts_with("WireGuard endpoint"))
+            .map(|event| (event.level.clone(), event.message.clone()))
             .collect()
     }
 }
@@ -982,19 +991,31 @@ impl tracing::Subscriber for Events {
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
 
     fn event(&self, event: &tracing::Event<'_>) {
-        struct Message(String);
-        impl tracing::field::Visit for Message {
+        struct Fields {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        impl tracing::field::Visit for Fields {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 if field.name() == "message" {
-                    self.0 = format!("{value:?}");
+                    self.message = format!("{value:?}");
+                } else {
+                    self.fields
+                        .push((field.name().to_string(), format!("{value:?}")));
                 }
             }
         }
-        let mut message = Message(String::new());
-        event.record(&mut message);
-        self.0
-            .lock()
-            .push((event.metadata().level().to_string(), message.0));
+        let mut fields = Fields {
+            message: String::new(),
+            fields: Vec::new(),
+        };
+        event.record(&mut fields);
+        self.0.lock().push(RecordedEvent {
+            level: event.metadata().level().to_string(),
+            target: event.metadata().target().to_string(),
+            message: fields.message,
+            fields: fields.fields,
+        });
     }
 
     fn enter(&self, _: &tracing::span::Id) {}
@@ -1028,7 +1049,7 @@ async fn lookup_failures_warn_when_they_start_or_change() {
     }
     clock::advance(REKEY_TIMEOUT + TICK);
     f.query().await.send(Ok(f.b_at)).unwrap();
-    until(|| f.a.status().last_handshake.is_some()).await;
+    until(|| matches!(f.a.status().handshake, HandshakeState::Live(_))).await;
     // The rekey's lookup fails as the last one before the recovery did:
     // a new failure, not a repeat.
     clock::advance(Duration::from_secs(121));
@@ -1230,4 +1251,246 @@ async fn a_stalled_lookup_reads_as_stalled_until_its_call_returns() {
             ("WARN", "WireGuard endpoint lookup recovered"),
         ]
     );
+}
+
+fn answer_session_lookups(f: &mut Fixture, address: SocketAddr) -> JoinHandle<()> {
+    let mut queries = std::mem::replace(&mut f.queries, mpsc::unbounded_channel().1);
+    tokio::spawn(async move {
+        while let Some(query) = queries.recv().await {
+            query.send(Ok(address)).unwrap();
+        }
+    })
+}
+
+impl Events {
+    fn session_lines(&self) -> Vec<RecordedEvent> {
+        self.0
+            .lock()
+            .iter()
+            .filter(|event| event.message.starts_with("WireGuard session"))
+            .cloned()
+            .collect()
+    }
+
+    fn assert_session_levels(&self, expiries: usize) {
+        let events = self.0.lock();
+        assert!(
+            !events.iter().any(|event| event.level == "ERROR"),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.level == "WARN"
+                    && event.target.starts_with("chan_wireguard::noise")),
+            "{events:?}"
+        );
+        let expiry: Vec<_> = events
+            .iter()
+            .filter(|event| event.message.starts_with("CONNECTION_EXPIRED("))
+            .collect();
+        assert_eq!(expiry.len(), expiries, "{expiry:?}");
+        assert!(
+            expiry.iter().all(|event| event.level == "DEBUG"),
+            "{expiry:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_notice_unanswered_handshakes_warn_once_and_recover() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // See lookup_failures_warn_when_they_start_or_change.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    relay.set(MUTE);
+    let answers = answer_session_lookups(&mut f, relay.old);
+    let listener = f.b.listen(0).unwrap();
+    let port = listener.port();
+    let start_connect = || {
+        let client = f.a.clone();
+        tokio::spawn(async move { client.connect(b_port(port)).await })
+    };
+    let first = start_connect();
+    until(|| relay.dark_initiations() > 0).await;
+    clock::advance(Duration::from_secs(6));
+    until(|| relay.dark_initiations() > 0).await;
+    clock::advance(Duration::from_secs(85));
+    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    // The expired core reports ConnectionExpired on each tick too; those
+    // ticks must not masquerade as another expiry.
+    tokio::time::sleep(2 * TICK).await;
+    let second = start_connect();
+    until(|| !f.a.inner.wire.lock().tunn.is_expired()).await;
+    until(|| relay.dark_initiations() > 0).await;
+    clock::advance(Duration::from_secs(91));
+    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    relay.set(VIA_OLD);
+    let third = start_connect();
+    until(|| {
+        f.a.inner
+            .wire
+            .lock()
+            .tunn
+            .time_since_last_handshake()
+            .is_some()
+    })
+    .await;
+    let lines = events.session_lines();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|event| (event.level.as_str(), event.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("WARN", "WireGuard session handshake has not completed"),
+            ("DEBUG", "WireGuard session handshake has not completed"),
+            ("WARN", "WireGuard session established"),
+        ]
+    );
+    for line in &lines {
+        assert_eq!(line.target, "chan_wireguard::tunnel");
+        assert_eq!(
+            line.field("endpoint"),
+            format!("peer.test:{}", f.b_at.port())
+        );
+        assert_eq!(line.field("address"), format!("Some({})", relay.old));
+    }
+    for line in &lines[..2] {
+        assert_eq!(line.field("last_handshake"), "never");
+    }
+    events.assert_session_levels(2);
+    first.abort();
+    second.abort();
+    third.abort();
+    answers.abort();
+}
+
+#[tokio::test]
+async fn session_notice_retains_lost_handshake_age_and_recovers_data() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // See lookup_failures_warn_when_they_start_or_change.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    assert_eq!(f.a.status().handshake, HandshakeState::Never);
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    assert!(matches!(f.a.status().handshake, HandshakeState::Live(age) if age < WAIT));
+    let answers = answer_session_lookups(&mut f, relay.old);
+    assert!(events.session_lines().is_empty());
+    settle_then_mute(&relay, &mut a, &mut b).await;
+    clock::advance(Duration::from_secs(121));
+    until(|| relay.dark_initiations() > 0).await;
+    clock::advance(Duration::from_secs(91));
+    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    assert!(f
+        .a
+        .inner
+        .wire
+        .lock()
+        .tunn
+        .time_since_last_handshake()
+        .is_none());
+    assert!(
+        matches!(f.a.status().handshake, HandshakeState::Lost(age) if age >= Duration::from_secs(200))
+    );
+    let lost = events.session_lines();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].level, "WARN");
+    assert_eq!(lost[0].message, "WireGuard session lost");
+    let age: f64 = lost[0]
+        .field("last_handshake")
+        .strip_suffix('s')
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(age >= 200.0, "{lost:?}");
+    relay.set(VIA_OLD);
+    a.write_all(b"after expiry").await.unwrap();
+    let mut bytes = [0; 12];
+    timeout(WAIT, b.read_exact(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes, b"after expiry");
+    exchange(&mut a, &mut b).await;
+    assert!(matches!(f.a.status().handshake, HandshakeState::Live(age) if age < WAIT));
+    let lines = events.session_lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[1].level, "WARN");
+    assert_eq!(lines[1].message, "WireGuard session established");
+    for line in &lines {
+        assert_eq!(
+            line.field("endpoint"),
+            format!("peer.test:{}", f.b_at.port())
+        );
+        assert_eq!(line.field("address"), format!("Some({})", relay.old));
+    }
+    events.assert_session_levels(1);
+    answers.abort();
+}
+
+#[tokio::test]
+async fn session_notice_untransmitted_handshake_is_debug_only() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // See lookup_failures_warn_when_they_start_or_change.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let query = f.query().await;
+    let connecting = tokio::spawn({
+        let client = f.a.clone();
+        async move { client.connect(b_port(80)).await }
+    });
+    tokio::time::sleep(2 * TICK).await;
+    query.send(Err(not_found("name absent"))).unwrap();
+    assert!(timeout(WAIT, connecting).await.unwrap().unwrap().is_err());
+    clock::advance(Duration::from_secs(91));
+    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    let lines = events.session_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].level, "DEBUG");
+    assert_eq!(lines[0].field("last_handshake"), "never");
+    assert_eq!(lines[0].field("address"), "None");
+    let warnings: Vec<_> = events
+        .0
+        .lock()
+        .iter()
+        .filter(|event| event.level == "WARN")
+        .map(|event| event.message.clone())
+        .collect();
+    assert_eq!(warnings, ["WireGuard endpoint failed; retrying"]);
+    events.assert_session_levels(1);
+}
+
+#[tokio::test]
+async fn session_notice_idle_expiry_is_debug_only() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    // See lookup_failures_warn_when_they_start_or_change.
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    drop(f.b);
+    f.queries.recv().await.unwrap().send(Ok(f.b_at)).unwrap();
+    until(|| f.a.status().endpoint == Some(f.b_at)).await;
+    clock::advance(Duration::from_secs(541));
+    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    let lines = events.session_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].level, "DEBUG");
+    assert_eq!(lines[0].field("last_handshake"), "never");
+    assert_eq!(f.a.status().handshake, HandshakeState::Never);
+    assert!(!events.0.lock().iter().any(|event| event.level == "WARN"));
+    events.assert_session_levels(1);
 }

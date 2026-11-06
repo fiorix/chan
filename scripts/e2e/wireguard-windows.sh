@@ -32,7 +32,9 @@
 #               the devserver, the connector, the stack and the kernel. The
 #               dial then fails at the HTTP level, which is expected.
 #   devserver-wrong-key
-#               the same dial with the wrong peer key reaches nothing.
+#               the same dial with the wrong peer key reaches nothing,
+#               logs one session expiry at WARN within 100 s of tunnel
+#               start, and logs no ERROR at the production warn filter.
 #
 # What it cannot prove: a peer behind a real NAT or a changing address, a
 # tunnel URL by name, anything the gateway answers past the preface, the
@@ -74,10 +76,9 @@
 # Everything runs under a throwaway work dir on this host, a per-run
 # directory under the client's TEMP and a per-run work dir on the peer. The
 # client and peer directories are deleted as the run exits; the host one is
-# deleted on success and kept on failure. The kept work dir holds the run's
-# client files with a private key that is worthless once the peer interface
-# is deleted, which the exit path does, but treat it as a credential until
-# it is gone.
+# deleted on success and kept on failure. The client files travel on the
+# ssh channel's stdin, so the private key is not in a command line or a
+# PowerShell script block. The host keeps only redacted copies.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -198,6 +199,14 @@ client_ps() {
     timeout "$secs" ssh -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR "${CLIENT_SSH_OPTS[@]}" "$CLIENT_SSH" -- \
         powershell -NoProfile -NonInteractive -EncodedCommand "$encoded" 2>>"$WORK/client-stderr.log"
 }
+client_ps_data() {
+    # client_ps_data <seconds> <script> < data: run the script as client_ps
+    # does, with data on the ssh channel's stdin rather than in its argv.
+    local secs="$1" encoded
+    encoded="$(printf '%s\n' "$2" | python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.read().encode("utf-16-le")).decode())')"
+    timeout "$secs" ssh -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR "${CLIENT_SSH_OPTS[@]}" "$CLIENT_SSH" -- \
+        powershell -NoProfile -NonInteractive -EncodedCommand "$encoded" 2>>"$WORK/client-stderr.log"
+}
 strip_cr() { sed -i 's/\r$//' "$1"; }
 
 # Every prerequisite on the peer is probed before anything is created there.
@@ -274,7 +283,7 @@ PEER
     fi
 }
 trap cleanup EXIT
-trap 'log "aborted: the command at line $LINENO failed; work dir kept at $WORK"' ERR
+trap 'log "aborted: the command at line $LINENO failed; work dir kept at $WORK with client files redacted"' ERR
 
 FAILED=0
 verdict() {
@@ -420,29 +429,24 @@ DEBUG_SITES="$(setup_field debug_sites)"
 [ "${DEBUG_SITES:-0}" -gt 0 ] || { log "the peer's wireguard module has no debug messages switched on"; exit 1; }
 log "peer interface $IFACE up at $PEER_CIDR, serving $PEER_IP:$HTTP_PORT, $DEBUG_SITES kernel debug sites on; client public key $CLIENT_PUB"
 
-# 3. The client files: on the client, as UTF-8 without a byte order mark and
-# with LF line endings, the shape `wg genkey` and an editor on the peer
-# produce; and a copy in the work dir, owner-only, for the record.
-client_file_text() {
-    # client_file_text <peer public key> [extra peer lines...]
-    local pub="$1"; shift
-    printf '[Interface]\nPrivateKey = %s\nAddress = %s/32\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\n' \
-        "$CLIENT_KEY" "$CLIENT_IP" "$pub" "$ENDPOINT" "$PEER_NET"
-    for line in "$@"; do printf '%s\n' "$line"; done
-}
+# 3. The client files are UTF-8 without a byte order mark and have LF line
+# endings. Their text travels on the ssh channel's stdin; only redacted
+# copies stay in the host work dir.
 write_client_file() {
     # write_client_file <name> <peer public key> [extra peer lines...]
-    local name="$1"; shift
-    (umask 077; client_file_text "$@" > "$WORK/$name")
-    client_ps 60 <<PS >/dev/null
-\$ErrorActionPreference = 'Stop'
-\$text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$(base64 -w0 < "$WORK/$name")'))
-[IO.File]::WriteAllText("$CLIENT_DIR\\$name", \$text, (New-Object Text.UTF8Encoding \$false))
-PS
+    local name="$1" pub="$2" text line; shift 2
+    text="$(printf '[Interface]\nPrivateKey = %s\nAddress = %s/32\n\n[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\n' \
+        "$CLIENT_KEY" "$CLIENT_IP" "$pub" "$ENDPOINT" "$PEER_NET"; for line in "$@"; do printf '%s\n' "$line"; done)"
+    printf '%s\n' "$text" | sed 's/^PrivateKey = .*/PrivateKey = (redacted)/' > "$WORK/$name.redacted"
+    printf '%s\n' "$text" | base64 -w0 | client_ps_data 60 "\$ErrorActionPreference = 'Stop'
+\$text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()))
+[IO.File]::WriteAllText('$CLIENT_DIR\\$name', \$text, (New-Object Text.UTF8Encoding \$false))" >/dev/null \
+        || { log "writing $name on the client failed: $(tail -3 "$WORK/client-stderr.log")"; exit 1; }
 }
 write_client_file client.conf "$SERVER_PUB"
 write_client_file client-keepalive.conf "$SERVER_PUB" "PersistentKeepalive = 25"
 write_client_file client-wrong-key.conf "$WRONG_PUB"
+unset CLIENT_KEY SETUP
 
 body_sha() { sed -n "s/^body $2: [0-9]* bytes, sha256 \([0-9a-f]*\)$/\1/p" "$1"; }
 example_status() {
@@ -691,6 +695,7 @@ start_devserver() {
 \$env:CHAN_HOME = "$CLIENT_DIR\\$name-home"
 New-Item -ItemType Directory -Path \$env:CHAN_HOME -Force | Out-Null
 \$env:CHAN_UPDATE_CHECK = '0'
+\$env:RUST_LOG = 'warn'
 \$p = Start-Process -FilePath "$CLIENT_DIR\chan.exe" -ArgumentList @('devserver', 'run', '--bind', '127.0.0.1', '--port', '$port', '--tunnel-wireguard', "$CLIENT_DIR\\$file", '--tunnel-url', 'http://$PEER_IP:$RAW_PORT/v1/tunnel', '--tunnel-token', 'chan_pat_wireguard_windows_e2e') -RedirectStandardOutput "$CLIENT_DIR\\$name.out" -RedirectStandardError "$CLIENT_DIR\\$name.err" -WindowStyle Hidden -PassThru
 Set-Content -LiteralPath "$CLIENT_DIR\\$name.pid" -Value \$p.Id
 Wait-Process -Id \$p.Id
@@ -720,18 +725,28 @@ PS
 }
 devserver_log() {
     # devserver_log <name>: both of the devserver's streams, fetched into
-    # the work dir.
-    client_ps 60 > "$WORK/$1.log" <<PS || true
-Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.out" -ErrorAction SilentlyContinue
-Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.err" -ErrorAction SilentlyContinue
+    # the work dir. A failed fetch must not stand in for an ERROR-free log.
+    client_ps 60 > "$WORK/$1.raw.log" <<PS || return 1
+\$ErrorActionPreference = 'Stop'
+Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.out"
+Get-Content -Raw -LiteralPath "$CLIENT_DIR\\$1.err"
 PS
-    strip_cr "$WORK/$1.log"
+    # tracing colours redirected stderr too; the level follows the timestamp.
+    sed 's/\x1b\[[0-9;]*m//g; s/\r$//' "$WORK/$1.raw.log" > "$WORK/$1.log"
 }
 tunnel_start_logged() {
     # tunnel_start_logged <name> <client file name>
-    devserver_log "$1"
+    devserver_log "$1" || return 1
     grep -qF "chan devserver: WireGuard tunnel started from $CLIENT_DIR\\$2: endpoint " "$WORK/$1.log" \
         && grep -qF "public key $CLIENT_PUB" "$WORK/$1.log"
+}
+
+session_warnings() {
+    awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
+}
+session_expiry_logged() {
+    devserver_log "$1" || return 1
+    [ "$(session_warnings "$WORK/$1.log")" -ge 1 ]
 }
 
 DEVSERVER_PID=""
@@ -768,19 +783,22 @@ if runs devserver-wrong-key; then
         before="$(peer_handshake)"
         if start_devserver devserver-wrong-key client-wrong-key.conf; then
             wait_for 60 "the tunnel-start line" tunnel_start_logged devserver-wrong-key client-wrong-key.conf || arm_rc=1
-            # The dial has 20 s to reach the listener; with a wrong key it must not.
-            sleep 20
+            # The expiry warning proves the wrong-key attempt ran past 90 s.
+            wait_for 100 "the session-expiry warning" session_expiry_logged devserver-wrong-key || arm_rc=1
         else
             arm_rc=1
         fi
         capture="$(peer_capture devserver-wrong-key)"
         after="$(peer_handshake)"
         stop_devserver
-        devserver_log devserver-wrong-key
+        devserver_log devserver-wrong-key || arm_rc=1
         [ "$capture" = absent ] || arm_rc=1
         [ "$before" = "$after" ] || arm_rc=1
         ! grep -q 'tunnel connected' "$WORK/devserver-wrong-key.log" || arm_rc=1
-        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, listener accepted nothing in 20 s (capture $capture), peer handshake stamp $before -> $after"
+        expiry_warns="$(session_warnings "$WORK/devserver-wrong-key.log")"
+        error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$WORK/devserver-wrong-key.log")"
+        [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+        verdict devserver-wrong-key "$arm_rc" "tunnel start logged, session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0), listener capture $capture (want absent), peer handshake stamp $before -> $after"
         { grep 'WireGuard tunnel started' "$WORK/devserver-wrong-key.log"; peer_wg_show; } >&2
     else
         arm_rc=1
@@ -790,7 +808,7 @@ if runs devserver-wrong-key; then
 fi
 
 if [ "$FAILED" != 0 ]; then
-    log "FAIL: $FAILED arm(s) failed at $SHA; work dir kept at $WORK"
+    log "FAIL: $FAILED arm(s) failed at $SHA; work dir kept at $WORK with client files redacted"
     exit 1
 fi
 log "PASS at $SHA: client $CLIENT_SSH ($CLIENT_OS) against $PEER_SSH ($PEER_KERNEL); work dir $WORK removed"

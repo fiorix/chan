@@ -19,3 +19,9 @@ Status: raised at the v0.124.0 close, part 1 from the Windows desktop suite's re
 1. A whole `wireguard-windows.sh` run green, after which the client's PowerShell operational log holds no block with a `PrivateKey` line and the host work directory holds no private key.
 2. A `desktop-wireguard.sh` run green from a shell with `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS` set, with the desktop's `/proc/<pid>/environ` carrying the Xvfb display and a bus address of its own.
 3. A refused `desktop-wireguard.sh` run, constructed so its runtime directory resolves to the caller's own, exits 2 having created, changed and left behind nothing.
+
+## Built
+
+Four commits: `48749b605` (Windows client files travel on SSH stdin and leave only redacted host copies), `b5950c317` (the desktop uses an Xvfb display and a private D-Bus session), `921dd5368` (the runtime path is checked before directory changes and refusal removes the work directory), and `docs(e2e): describe WireGuard DNS and unresolved startup` (the suite reference names the DNS arm, all kernel options and the unresolved startup verdict).
+
+Verification: the constructed client-file, environment, runtime-guard and README checks fail at the base and pass at the tip. The Windows suite passes all six arms at the tip; its host work directory holds only redacted client files, and no PowerShell 4104 block carries the encoded client file while the probe's `platform=` and `Get-FileHash` blocks remain visible. The Linux desktop suite passes its connected and unresolved-endpoint runs; chan-desktop and its WebKit processes use the Xvfb display and a private D-Bus session, with neither caller Wayland variable. The constructed refusal exits 2, removes its work directory, leaves the caller's runtime directory unchanged and starts no process.
