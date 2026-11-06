@@ -9,6 +9,7 @@
 //! current endpoint sit under a second lock, held for one call at a time,
 //! so the status read never waits on a poll.
 
+use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -88,15 +89,11 @@ pub struct Status {
     pub resolution_stalled: bool,
 }
 
-/// While the latest handshake is younger than this, a lookup answer never
-/// moves the endpoint: one that differs from the previous answer gets a
-/// handshake initiation, and the endpoint follows only when the peer
-/// answers from there. Past it, three rekey retries have gone unanswered
-/// since `REKEY_AFTER_TIME` (120 s plus three `REKEY_TIMEOUT`s), the path
-/// is presumed dead and any answer is taken. wireguard-tools'
-/// `reresolve-dns.sh` uses the same 135 s for the same decision, and it
-/// sits below `REJECT_AFTER_TIME` (180 s), so the switch comes before the
-/// session is rejected.
+/// A live session keeps its authenticated endpoint; a differing DNS answer
+/// gets only a probe. Past 120 s plus three rekey retries, the path is
+/// presumed dead and each retry may move to an untried answered address.
+/// This matches wireguard-tools' `reresolve-dns.sh` threshold and precedes
+/// session rejection at 180 s.
 const STALE_HANDSHAKE: Duration = Duration::from_secs(135);
 
 struct Wire {
@@ -204,12 +201,14 @@ impl Tunnel {
             resolver,
             resolution_tx,
             looked_up_at: None,
-            last_answer: endpoint,
+            last_adopted: endpoint,
+            answers: Vec::new(),
+            tried: HashSet::new(),
+            initiation: None,
             logged_failure: None,
             logged_session_loss: false,
             transmitted_initiation: false,
             pending_initiation: false,
-            initiation_ahead: false,
         };
         let driver = tokio::spawn(driver.run());
         Ok(Tunnel {
@@ -363,8 +362,6 @@ fn is_handshake_initiation(datagram: &[u8]) -> bool {
 /// What a lookup answer did to the endpoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Adoption {
-    /// The endpoint stands and the answer needs nothing sent.
-    Kept,
     /// The endpoint moved to the answer.
     Moved,
     /// A live session stays where it is; the answer gets an initiation,
@@ -388,7 +385,7 @@ enum Event {
     Kick,
     Tick,
     StackTimer,
-    Resolved(io::Result<SocketAddr>),
+    Resolved(io::Result<Vec<SocketAddr>>),
     ResolveTimeout,
 }
 
@@ -480,8 +477,13 @@ struct Driver {
     resolution_tx: watch::Sender<Resolution>,
     /// When the latest lookup ended: an answer, a failure or its deadline.
     looked_up_at: Option<Instant>,
-    /// The latest usable answer, or the endpoint `start_on` was given.
-    last_answer: Option<SocketAddr>,
+    /// An adopted answer, never a probe: an unchanged record must not
+    /// pull a live session back from its authenticated roaming address.
+    last_adopted: Option<SocketAddr>,
+    answers: Vec<SocketAddr>,
+    /// Retained across retries, cleared by a handshake or an expiry.
+    tried: HashSet<SocketAddr>,
+    initiation: Option<Initiation>,
     /// The failure last logged at warn; a repeat of it logs at debug.
     logged_failure: Option<String>,
     /// A loss logged at warn, cleared only by a completed handshake.
@@ -491,10 +493,14 @@ struct Driver {
     /// An initiation held for want of an endpoint, generated afresh when
     /// a lookup gives one, so its retry clock starts at transmission.
     pending_initiation: bool,
-    /// An initiation left for the known endpoint while a lookup was
-    /// outstanding: if that lookup moves the endpoint, the new address
-    /// gets an initiation of its own at once, not at the next retry.
-    initiation_ahead: bool,
+}
+
+/// The latest core-produced initiation. A retry replaces its bytes, but
+/// does not permit another probe while the same handshake is in progress.
+struct Initiation {
+    bytes: Vec<u8>,
+    probed: bool,
+    retargeted: bool,
 }
 
 impl Driver {
@@ -619,6 +625,7 @@ impl Driver {
         let mut to_stack: Vec<Vec<u8>> = Vec::new();
         {
             let mut wire = self.wire.lock();
+            let previous_age = wire.tunn.time_since_last_handshake();
             let mut authenticated = false;
             let mut drain = false;
             match wire.tunn.decapsulate(Some(from.ip()), datagram, work) {
@@ -653,6 +660,10 @@ impl Driver {
                     wire.endpoint = Some(from);
                 }
                 if let Some(age) = wire.tunn.time_since_last_handshake() {
+                    if previous_age.is_none_or(|previous| age < previous) {
+                        self.initiation = None;
+                        self.tried.clear();
+                    }
                     wire.last_handshake = Some((Instant::now(), age));
                     if std::mem::take(&mut self.logged_session_loss) {
                         tracing::warn!(
@@ -664,6 +675,14 @@ impl Driver {
                 }
                 if datagram.len() == 92 && datagram[..4] == [2, 0, 0, 0] {
                     self.pending_initiation = false;
+                    if self
+                        .initiation
+                        .as_ref()
+                        .is_some_and(|initiation| datagram[8..12] == initiation.bytes[4..8])
+                    {
+                        self.initiation = None;
+                        self.tried.clear();
+                    }
                 }
             }
         }
@@ -742,7 +761,8 @@ impl Driver {
         }
         if expired {
             self.pending_initiation = false;
-            self.initiation_ahead = false;
+            self.initiation = None;
+            self.tried.clear();
             self.looked_up_at = None;
         } else if self.pending_initiation {
             self.resolver.start();
@@ -789,71 +809,109 @@ impl Driver {
         });
     }
 
-    /// A lookup's outcome. An initiation held for it leaves first, then
-    /// any the answer earns, which so becomes the handshake the core
-    /// retries until it is answered.
-    async fn resolved(&mut self, result: io::Result<SocketAddr>) {
-        let ahead = std::mem::take(&mut self.initiation_ahead);
-        let mut handshake_with = None;
+    /// A late answer stays available for the next core-produced attempt;
+    /// resolution itself never starts a handshake on a live session.
+    async fn resolved(&mut self, result: io::Result<Vec<SocketAddr>>) {
         match result {
             Err(error) => self.failed(self.unresolved(error)),
-            Ok(answer) => match self.sockets.ensure(answer) {
-                Err(error) => self.failed(io::Error::new(
-                    error.kind(),
-                    format!("binding a UDP socket for {answer}: {error}"),
-                )),
-                Ok(()) => {
-                    let adoption = self.adopt(answer);
-                    self.last_answer = Some(answer);
-                    if self.logged_failure.take().is_some() {
-                        tracing::warn!(endpoint = %answer, "WireGuard endpoint lookup recovered");
-                    }
-                    self.resolution_tx.send_replace(Resolution::default());
-                    if adoption == Adoption::Probe || (adoption == Adoption::Moved && ahead) {
-                        handshake_with = Some(answer);
+            Ok(answers) => {
+                if self
+                    .last_adopted
+                    .is_some_and(|address| !answers.contains(&address))
+                {
+                    self.last_adopted = None;
+                }
+                self.answers = answers;
+                match self.apply_answer().await {
+                    Err(error) => self.failed(error),
+                    Ok(_) => {
+                        if self.logged_failure.take().is_some() {
+                            tracing::warn!(endpoint = %self.endpoint_name, "WireGuard endpoint lookup recovered");
+                        }
+                        self.resolution_tx.send_replace(Resolution::default());
                     }
                 }
-            },
+            }
         }
         self.lookup_ended().await;
-        if let Some(to) = handshake_with {
-            self.initiate(to).await;
-        }
     }
 
-    /// The endpoint rule. With no endpoint known, or the latest handshake
-    /// older than [`STALE_HANDSHAKE`], the answer takes the endpoint. While
-    /// a younger session lives, the endpoint stays on the address the peer
-    /// last authenticated from: an answer that differs from the previous
-    /// one is only handshaken with, and one that does not needs nothing.
-    fn adopt(&self, answer: SocketAddr) -> Adoption {
-        let mut wire = self.wire.lock();
+    /// Keep an address still in the answer set while its session is live.
+    /// A stale path may move on each retry, without revisiting an address
+    /// already tried in this handshake. A live path gets one probe only.
+    fn adopt(&self) -> Option<(SocketAddr, Adoption)> {
+        let wire = self.wire.lock();
         let Some(current) = wire.endpoint else {
-            tracing::info!(new = %answer, "endpoint resolved");
-            wire.endpoint = Some(answer);
-            return Adoption::Moved;
+            return self
+                .answers
+                .first()
+                .copied()
+                .map(|answer| (answer, Adoption::Moved));
         };
-        if current == answer {
-            return Adoption::Kept;
-        }
         let stale = wire
             .tunn
             .time_since_last_handshake()
             .is_none_or(|age| age > STALE_HANDSHAKE);
+        let initiation = self.initiation.as_ref()?;
         if stale {
-            tracing::info!(old = %current, new = %answer, "endpoint resolved");
-            wire.endpoint = Some(answer);
-            Adoption::Moved
-        } else if self.last_answer == Some(answer) {
-            Adoption::Kept
-        } else {
-            tracing::info!(
-                endpoint = %current,
-                answer = %answer,
-                "endpoint name answered a new address; handshaking with it"
-            );
-            Adoption::Probe
+            if initiation.retargeted
+                || (!self.tried.contains(&current) && self.answers.contains(&current))
+            {
+                return None;
+            }
+        } else if initiation.probed || self.answers.contains(&current) {
+            return None;
         }
+        let answer = self.answers.iter().copied().find(|answer| {
+            *answer != current
+                && !self.tried.contains(answer)
+                && (stale || Some(*answer) != self.last_adopted)
+        })?;
+        Some((
+            answer,
+            if stale {
+                Adoption::Moved
+            } else {
+                Adoption::Probe
+            },
+        ))
+    }
+
+    async fn apply_answer(&mut self) -> io::Result<Option<Adoption>> {
+        let Some((answer, adoption)) = self.adopt() else {
+            return Ok(None);
+        };
+        self.sockets.ensure(answer).map_err(|error| {
+            self.tried.insert(answer);
+            io::Error::new(
+                error.kind(),
+                format!("binding a UDP socket for {answer}: {error}"),
+            )
+        })?;
+        {
+            let mut wire = self.wire.lock();
+            if adoption == Adoption::Moved {
+                tracing::info!(old = ?wire.endpoint, new = %answer, "endpoint resolved");
+                wire.endpoint = Some(answer);
+                self.last_adopted = Some(answer);
+            } else {
+                tracing::info!(endpoint = ?wire.endpoint, answer = %answer,
+                    "endpoint name answered a new address; probing with the current handshake");
+            }
+        }
+        if let Some(initiation) = &mut self.initiation {
+            if adoption == Adoption::Probe {
+                initiation.probed = true;
+            } else {
+                self.tried.insert(answer);
+                initiation.retargeted = true;
+            }
+            if !self.pending_initiation {
+                let bytes = initiation.bytes.clone();
+                self.send_to(&bytes, answer).await;
+            }
+        }
+        Ok(Some(adoption))
     }
 
     /// A lookup ended, by an answer, a failure or its deadline. An
@@ -867,8 +925,8 @@ impl Driver {
         }
     }
 
-    /// A fresh initiation straight to `to`, asking for no lookup: the one
-    /// that decided where it goes has just ended.
+    /// Regenerate a held initiation when its first address arrives, so
+    /// time spent resolving does not consume its transmission retry clock.
     async fn initiate(&mut self, to: SocketAddr) {
         self.pending_initiation = false;
         let mut initiation = [0; 148];
@@ -879,6 +937,12 @@ impl Driver {
                 _ => return,
             }
         };
+        self.initiation = Some(Initiation {
+            bytes: initiation[..len].to_vec(),
+            probed: false,
+            retargeted: true,
+        });
+        self.tried.insert(to);
         self.send_to(&initiation[..len], to).await;
     }
 
@@ -893,19 +957,49 @@ impl Driver {
         if !(known && fresh) {
             self.resolver.start();
         }
-        if known {
-            self.initiation_ahead |= self.resolver.outstanding();
-        }
     }
 
     async fn transmit(&mut self, datagram: &[u8]) {
         let endpoint = self.wire.lock().endpoint;
-        if is_handshake_initiation(datagram) {
+        let initiating = is_handshake_initiation(datagram);
+        if initiating {
+            match &mut self.initiation {
+                Some(initiation) => {
+                    initiation.bytes = datagram.to_vec();
+                    initiation.retargeted = false;
+                }
+                None => {
+                    self.initiation = Some(Initiation {
+                        bytes: datagram.to_vec(),
+                        probed: false,
+                        retargeted: false,
+                    })
+                }
+            }
             self.look_up_on_initiation(endpoint.is_some());
             self.pending_initiation = endpoint.is_none();
         }
-        if let Some(endpoint) = endpoint {
+        let mut moved = false;
+        let live = self
+            .wire
+            .lock()
+            .tunn
+            .time_since_last_handshake()
+            .is_some_and(|age| age <= STALE_HANDSHAKE);
+        // The first attempt after a completed handshake or expiry asks for
+        // a current answer before redirecting a stale path. Later retries
+        // can advance through the set already returned for that attempt.
+        if initiating && (live || !self.tried.is_empty()) {
+            match self.apply_answer().await {
+                Ok(adoption) => moved = adoption == Some(Adoption::Moved),
+                Err(error) => self.failed(error),
+            }
+        }
+        if let Some(endpoint) = endpoint.filter(|_| !moved) {
             self.send_to(datagram, endpoint).await;
+            if initiating {
+                self.tried.insert(endpoint);
+            }
         }
     }
 

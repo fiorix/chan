@@ -16,13 +16,13 @@ use crate::config::Endpoint;
 use crate::noise::REKEY_TIMEOUT;
 
 pub(crate) const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-type LookupFuture = Pin<Box<dyn Future<Output = io::Result<SocketAddr>> + Send>>;
+type LookupFuture = Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send>>;
 pub(crate) type Lookup = Arc<dyn Fn(Endpoint) -> LookupFuture + Send + Sync>;
 
 pub(crate) struct Resolver {
     name: Endpoint,
     lookup: Lookup,
-    task: Option<JoinHandle<io::Result<SocketAddr>>>,
+    task: Option<JoinHandle<io::Result<Vec<SocketAddr>>>>,
     last_attempt: Option<Instant>,
     deadline: Option<tokio::time::Instant>,
 }
@@ -70,25 +70,24 @@ impl Resolver {
         self.deadline = None;
     }
 
-    /// A lookup started and has not returned yet.
-    pub(crate) fn outstanding(&self) -> bool {
-        self.task.is_some()
-    }
-
     /// A lookup outlived its deadline and still holds the OS call, so no
     /// other lookup can start until it returns.
     pub(crate) fn stalled(&self) -> bool {
         self.task.is_some() && self.deadline.is_none()
     }
 
-    pub(crate) async fn completed(&mut self) -> io::Result<SocketAddr> {
+    pub(crate) async fn completed(&mut self) -> io::Result<Vec<SocketAddr>> {
         let Some(task) = &mut self.task else {
             return pending().await;
         };
         let result = task.await;
         self.task = None;
         self.deadline = None;
-        result.unwrap_or_else(|e| Err(io::Error::other(e)))
+        let addresses = result.unwrap_or_else(|e| Err(io::Error::other(e)))?;
+        if addresses.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no usable address"));
+        }
+        Ok(addresses)
     }
 }
 
@@ -107,9 +106,10 @@ pub(crate) async fn deadline(at: Option<tokio::time::Instant>) {
     }
 }
 
-async fn resolve(endpoint: Endpoint) -> io::Result<SocketAddr> {
-    tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
-        .await?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no usable address"))
+async fn resolve(endpoint: Endpoint) -> io::Result<Vec<SocketAddr>> {
+    Ok(
+        tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+            .await?
+            .collect(),
+    )
 }

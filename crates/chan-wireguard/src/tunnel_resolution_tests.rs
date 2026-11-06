@@ -3,12 +3,25 @@ use crate::clock;
 use crate::resolver::{Lookup, RESOLVE_TIMEOUT};
 use crate::testing::*;
 use crate::x25519::{PublicKey, StaticSecret};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-type Answer = oneshot::Sender<io::Result<SocketAddr>>;
+struct Answer(oneshot::Sender<io::Result<Vec<SocketAddr>>>);
+
+impl Answer {
+    fn send(self, answer: io::Result<SocketAddr>) -> Result<(), io::Result<Vec<SocketAddr>>> {
+        self.0.send(answer.map(|address| vec![address]))
+    }
+
+    fn send_all(
+        self,
+        answers: io::Result<Vec<SocketAddr>>,
+    ) -> Result<(), io::Result<Vec<SocketAddr>>> {
+        self.0.send(answers)
+    }
+}
 
 struct Fixture {
     a: Tunnel,
@@ -22,7 +35,7 @@ fn controlled_lookup() -> (Lookup, mpsc::UnboundedReceiver<Answer>) {
     let (queries, receiver) = mpsc::unbounded_channel();
     let lookup: Lookup = Arc::new(move |_| {
         let (answer, result) = oneshot::channel();
-        queries.send(answer).unwrap();
+        queries.send(Answer(answer)).unwrap();
         Box::pin(async move { result.await.unwrap() })
     });
     (lookup, receiver)
@@ -163,22 +176,34 @@ struct Relay {
     back: SocketAddr,
     mode: Arc<AtomicU8>,
     from_peer: mpsc::UnboundedReceiver<Vec<u8>>,
+    to_peer: mpsc::UnboundedReceiver<Vec<u8>>,
+    at_new: mpsc::UnboundedReceiver<Vec<u8>>,
+    old_socket: Arc<UdpSocket>,
+    hold_responses: Arc<AtomicBool>,
+    drop_next_probe: Arc<AtomicBool>,
     dark: mpsc::UnboundedReceiver<Vec<u8>>,
     task: JoinHandle<()>,
 }
 
 impl Relay {
     async fn new(to: SocketAddr) -> Self {
-        let old = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let old = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let new = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (old_at, new_at) = (old.local_addr().unwrap(), new.local_addr().unwrap());
         let back_at = back.local_addr().unwrap();
         let mode = Arc::new(AtomicU8::new(VIA_OLD));
         let (copy, from_peer) = mpsc::unbounded_channel();
+        let (forwarded, to_peer) = mpsc::unbounded_channel();
+        let (seen_new, at_new) = mpsc::unbounded_channel();
+        let hold_responses = Arc::new(AtomicBool::new(false));
+        let drop_next_probe = Arc::new(AtomicBool::new(false));
         let (dropped, dark) = mpsc::unbounded_channel();
         let task = tokio::spawn({
             let mode = mode.clone();
+            let old = old.clone();
+            let hold_responses = hold_responses.clone();
+            let drop_next_probe = drop_next_probe.clone();
             async move {
                 let mut client = None;
                 let mut at_old = [0u8; 2048];
@@ -190,6 +215,7 @@ impl Relay {
                             let Ok((len, from)) = received else { continue };
                             if matches!(mode.load(Ordering::SeqCst), VIA_OLD | ONLY_OLD) {
                                 client = Some(from);
+                                let _ = forwarded.send(at_old[..len].to_vec());
                                 let _ = back.send_to(&at_old[..len], to).await;
                             } else {
                                 let _ = dropped.send(at_old[..len].to_vec());
@@ -197,16 +223,24 @@ impl Relay {
                         }
                         received = new.recv_from(&mut at_new) => {
                             let Ok((len, from)) = received else { continue };
+                            let _ = seen_new.send(at_new[..len].to_vec());
+                            if is_initiation(&at_new[..len]) && drop_next_probe.swap(false, Ordering::SeqCst) {
+                                continue;
+                            }
                             if matches!(mode.load(Ordering::SeqCst), VIA_OLD | VIA_NEW) {
                                 client = Some(from);
+                                let _ = forwarded.send(at_new[..len].to_vec());
                                 let _ = back.send_to(&at_new[..len], to).await;
                             }
                         }
                         received = back.recv_from(&mut at_back) => {
                             let Ok((len, _)) = received else { continue };
                             let _ = copy.send(at_back[..len].to_vec());
+                            if hold_responses.load(Ordering::SeqCst) {
+                                continue;
+                            }
                             let front = match mode.load(Ordering::SeqCst) {
-                                VIA_OLD | ONLY_OLD => &old,
+                                VIA_OLD | ONLY_OLD => old.as_ref(),
                                 VIA_NEW => &new,
                                 _ => continue,
                             };
@@ -224,6 +258,11 @@ impl Relay {
             back: back_at,
             mode,
             from_peer,
+            to_peer,
+            at_new,
+            old_socket: old,
+            hold_responses,
+            drop_next_probe,
             dark,
             task,
         }
@@ -323,15 +362,16 @@ async fn unresolved_start_returns_and_recovers_without_restart() {
     exchange(&mut a, &mut b).await;
 }
 
-/// A live session's rekey lookup answers a new address, which gets an
-/// initiation of its own; after expiry the next answer takes the endpoint
-/// and gets the attempt's initiation at once.
+/// A live session's rekey lookup answers a new address while the old
+/// path is muted, so it gets a copy of the initiation in flight. After
+/// expiry the next answer takes the endpoint and gets a fresh initiation.
 #[tokio::test]
 async fn live_rekey_and_expiry_follow_the_next_lookup() {
     let _clock = clock::test_offset_guard();
     let mut f = Fixture::new().await;
-    let (mut a, mut b) = f.establish().await;
-    exchange(&mut a, &mut b).await;
+    let relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    settle_then_mute(&relay, &mut a, &mut b).await;
     let moved = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     clock::advance(Duration::from_secs(121));
     f.query()
@@ -863,7 +903,14 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
         1,
         "the retry went to the known endpoint before the answer"
     );
-    clock::advance(Duration::from_secs(6));
+    // Both addresses have been tried. Expiry resets the set before the
+    // same IPv4 address can be selected again.
+    clock::advance(Duration::from_secs(91));
+    until(|| f.a.inner.wire.lock().tunn.is_expired()).await;
+    let retry = tokio::spawn({
+        let client = f.a.clone();
+        async move { client.connect(b_port(81)).await }
+    });
     f.query()
         .await
         .send(Ok(silent4.local_addr().unwrap()))
@@ -873,6 +920,7 @@ async fn endpoint_moves_between_ipv4_and_ipv6() {
         f.a_at,
         "the old family socket is retained"
     );
+    retry.abort();
     connecting.abort();
 }
 
@@ -1100,11 +1148,9 @@ async fn slow_lookup_starts_the_retry_clock_at_transmission() {
     connecting.abort();
 }
 
-/// A name whose addresses rotate, one of them dead (the re-review's
-/// rotation probe): a healthy session's rekey lookup answers the dead one.
-/// It gets handshake initiations alone, the data stays on the address the
-/// peer answers from and the session carries on, and when the rotation
-/// comes back to the live address nothing moves.
+/// A differing answer received after a rekey waits for the next genuine
+/// attempt. Its probe carries no session data, and an answer naming the
+/// live endpoint leaves that endpoint alone.
 #[tokio::test]
 async fn a_changed_answer_gets_only_a_handshake_while_the_session_is_fresh() {
     let _clock = clock::test_offset_guard();
@@ -1114,15 +1160,16 @@ async fn a_changed_answer_gets_only_a_handshake_while_the_session_is_fresh() {
     let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     clock::advance(Duration::from_secs(121));
     let query = f.query().await;
-    tokio::time::sleep(8 * TICK).await;
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
     query.send(Ok(dead.local_addr().unwrap())).unwrap();
+    tokio::time::sleep(2 * TICK).await;
+    assert!(drain(&dead).is_empty(), "a late answer starts no handshake");
+    exchange(&mut a, &mut b).await;
+    clock::advance(Duration::from_secs(121));
+    f.query().await.send(Ok(relay.old)).unwrap();
     initiation(&dead).await;
     assert_eq!(f.a.status().endpoint, Some(relay.old));
     exchange(&mut a, &mut b).await;
-    clock::advance(REKEY_TIMEOUT + TICK);
-    f.query().await.send(Ok(relay.old)).unwrap();
-    exchange(&mut a, &mut b).await;
-    assert_eq!(f.a.status().endpoint, Some(relay.old));
     for datagram in drain(&dead) {
         assert!(is_initiation(&datagram), "data reached the dead address");
     }
@@ -1185,10 +1232,10 @@ async fn a_slow_lookup_does_not_delay_a_rekey_to_the_known_endpoint() {
     assert_eq!(f.a.status().endpoint, Some(f.b_at));
 }
 
-/// The slow answer names another address: it still gets an initiation of
-/// its own when it arrives, and the session stays where it is.
+/// A differing slow answer arrives after the rekey completed. It is
+/// remembered for the next genuine attempt instead of starting another.
 #[tokio::test]
-async fn a_differing_slow_answer_gets_an_initiation_of_its_own() {
+async fn a_differing_slow_answer_waits_for_the_next_attempt() {
     let _clock = clock::test_offset_guard();
     let mut f = Fixture::new().await;
     let (mut a, mut b) = f.establish().await;
@@ -1196,6 +1243,14 @@ async fn a_differing_slow_answer_gets_an_initiation_of_its_own() {
     let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let (query, _) = rekey_beside_a_slow_lookup(&mut f).await;
     query.send(Ok(other.local_addr().unwrap())).unwrap();
+    tokio::time::sleep(2 * TICK).await;
+    assert!(
+        drain(&other).is_empty(),
+        "a late answer starts no handshake"
+    );
+    exchange(&mut a, &mut b).await;
+    clock::advance(Duration::from_secs(121));
+    f.query().await.send(Ok(f.b_at)).unwrap();
     initiation_within(&other, REKEY_TIMEOUT / 2).await;
     assert_eq!(f.a.status().endpoint, Some(f.b_at));
     exchange(&mut a, &mut b).await;
@@ -1493,4 +1548,416 @@ async fn session_notice_idle_expiry_is_debug_only() {
     assert_eq!(f.a.status().handshake, HandshakeState::Never);
     assert!(!events.0.lock().iter().any(|event| event.level == "WARN"));
     events.assert_session_levels(1);
+}
+
+async fn next_initiation(packets: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
+    timeout(WAIT, async {
+        loop {
+            let packet = packets.recv().await.expect("relay remains alive");
+            if is_initiation(&packet) {
+                return packet;
+            }
+        }
+    })
+    .await
+    .expect("an initiation reaches the observed path")
+}
+
+#[tokio::test]
+async fn endpoint_probe_copies_the_in_flight_initiation() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    settle_then_mute(&relay, &mut a, &mut b).await;
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    clock::advance(Duration::from_secs(121));
+    let query = f.query().await;
+    let in_flight = next_initiation(&mut relay.dark).await;
+    query.send(Ok(other.local_addr().unwrap())).unwrap();
+    let mut probe = [0; 256];
+    let (len, _) = timeout(WAIT, other.recv_from(&mut probe))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &probe[..len],
+        in_flight,
+        "a probe copies the in-flight handshake without replacing it"
+    );
+    assert_eq!(f.a.status().endpoint, Some(relay.old));
+}
+
+#[tokio::test]
+async fn endpoint_probes_do_not_churn_the_live_peer() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    while relay.to_peer.try_recv().is_ok() {}
+    let dead_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    while relay.from_peer.try_recv().is_ok() {}
+    relay.hold_responses.store(true, Ordering::SeqCst);
+    clock::advance(Duration::from_secs(121));
+    let query = f.query().await;
+    query.send(Ok(dead_a.local_addr().unwrap())).unwrap();
+    initiation(&dead_a).await;
+    let response = next_response(&mut relay.from_peer).await;
+    relay.hold_responses.store(false, Ordering::SeqCst);
+    relay.old_socket.send_to(&response, f.a_at).await.unwrap();
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
+    for address in [
+        dead_b.local_addr().unwrap(),
+        dead_a.local_addr().unwrap(),
+        dead_b.local_addr().unwrap(),
+    ] {
+        clock::advance(REKEY_TIMEOUT + TICK);
+        tokio::time::sleep(2 * TICK).await;
+        while let Ok(query) = f.queries.try_recv() {
+            query.send(Ok(address)).unwrap();
+        }
+        exchange(&mut a, &mut b).await;
+    }
+    let mut initiations = 0;
+    while let Ok(packet) = relay.to_peer.try_recv() {
+        initiations += usize::from(is_initiation(&packet));
+    }
+    assert_eq!(
+        initiations, 1,
+        "only the scheduled rekey reaches the live peer; lookup probes add none"
+    );
+    assert_eq!(f.a.status().endpoint, Some(relay.old));
+}
+
+async fn delayed_probe_recovery(drop_one: bool) {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    tokio::time::sleep(4 * TICK).await;
+    while relay.from_peer.try_recv().is_ok() {}
+    relay.hold_responses.store(true, Ordering::SeqCst);
+    if drop_one {
+        relay.drop_next_probe.store(true, Ordering::SeqCst);
+    } else {
+        relay.set(ONLY_OLD);
+    }
+    clock::advance(Duration::from_secs(121));
+    f.query().await.send(Ok(relay.new)).unwrap();
+    next_initiation(&mut relay.at_new).await;
+    assert!(
+        !relay.drop_next_probe.load(Ordering::SeqCst),
+        "the lost-packet arm actually drops its first probe"
+    );
+    // Complete the same attempt on its old path after the new-address
+    // probe was lost. The saved response is authenticated by the client.
+    let response = next_response(&mut relay.from_peer).await;
+    relay.hold_responses.store(false, Ordering::SeqCst);
+    relay.old_socket.send_to(&response, f.a_at).await.unwrap();
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
+    assert_eq!(f.a.status().endpoint, Some(relay.old));
+    let answers = answer_session_lookups(&mut f, relay.new);
+    relay.set(VIA_NEW);
+    let moved_at = Instant::now();
+    let tx = f.a.status().tx_bytes;
+    a.write_all(b"cutover").await.unwrap();
+    until(|| f.a.status().tx_bytes > tx).await;
+    clock::advance(Duration::from_secs(16));
+    next_initiation(&mut relay.at_new).await;
+    until(|| f.a.status().endpoint == Some(relay.new)).await;
+    assert!(
+        moved_at.elapsed() < Duration::from_secs(25),
+        "the next dead-peer attempt follows the cutover before the stale interval"
+    );
+    let mut bytes = [0; 7];
+    timeout(WAIT, b.read_exact(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes, b"cutover");
+    exchange(&mut a, &mut b).await;
+    answers.abort();
+}
+
+#[tokio::test]
+async fn endpoint_probe_retries_a_record_that_moved_before_the_host() {
+    delayed_probe_recovery(false).await;
+}
+
+#[tokio::test]
+async fn endpoint_probe_retries_a_lost_datagram_on_the_next_attempt() {
+    delayed_probe_recovery(true).await;
+}
+
+#[tokio::test]
+async fn endpoint_probe_does_not_repeat_on_five_second_retries() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    settle_then_mute(&relay, &mut a, &mut b).await;
+    clock::advance(Duration::from_secs(121));
+    f.query().await.send(Ok(relay.new)).unwrap();
+    next_initiation(&mut relay.at_new).await;
+    // Stay below the stale threshold: each retry still belongs to the
+    // same handshake and must not send another live-session probe.
+    for _ in 0..2 {
+        clock::advance(REKEY_TIMEOUT + TICK);
+        f.query().await.send(Ok(relay.new)).unwrap();
+        tokio::time::sleep(TICK).await;
+        assert!(
+            relay.at_new.try_recv().is_err(),
+            "a retry is not a new live-session probe"
+        );
+    }
+}
+
+#[tokio::test]
+async fn endpoint_rotating_answers_try_each_stale_address_once() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let dead_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (a_at, b_at) = (dead_a.local_addr().unwrap(), dead_b.local_addr().unwrap());
+    f.query()
+        .await
+        .send_all(Ok(vec![a_at, b_at, f.b_at]))
+        .unwrap();
+    let mut listener = f.b.listen(0).unwrap();
+    let port = listener.port();
+    let connecting = tokio::spawn({
+        let client = f.a.clone();
+        async move { client.connect(b_port(port)).await }
+    });
+    initiation(&dead_a).await;
+    assert_eq!(f.a.status().endpoint, Some(a_at));
+    clock::advance(REKEY_TIMEOUT + TICK);
+    let query = f.query().await;
+    initiation(&dead_b).await;
+    assert_eq!(f.a.status().endpoint, Some(b_at));
+    query.send_all(Ok(vec![b_at, a_at, f.b_at])).unwrap();
+    tokio::time::sleep(TICK).await;
+    clock::advance(REKEY_TIMEOUT + TICK);
+    let query = f.query().await;
+    query.send_all(Ok(vec![a_at, b_at, f.b_at])).unwrap();
+    let (a, b) = timeout(WAIT, async { tokio::join!(connecting, listener.accept()) })
+        .await
+        .unwrap();
+    exchange(&mut a.unwrap().unwrap(), &mut b.unwrap()).await;
+    assert_eq!(f.a.status().endpoint, Some(f.b_at));
+    assert!(
+        drain(&dead_a).is_empty(),
+        "the first dead address is not retried through a rotated list"
+    );
+    assert!(
+        drain(&dead_b).is_empty(),
+        "the second dead address is not retried through a rotated list"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_rotating_answers_keep_a_live_member() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let (mut a, mut b) = f.establish().await;
+    let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    clock::advance(Duration::from_secs(121));
+    f.query()
+        .await
+        .send_all(Ok(vec![dead.local_addr().unwrap(), f.b_at]))
+        .unwrap();
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
+    exchange(&mut a, &mut b).await;
+    assert!(
+        drain(&dead).is_empty(),
+        "answer order cannot probe a dead address when the live address is present"
+    );
+    assert_eq!(f.a.status().endpoint, Some(f.b_at));
+}
+
+#[tokio::test]
+async fn endpoint_empty_answer_fails_without_discarding_the_endpoint() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::build(true).await;
+    f.query().await.send_all(Ok(Vec::new())).unwrap();
+    until(|| f.a.status().resolution_error.is_some()).await;
+    assert!(f
+        .a
+        .status()
+        .resolution_error
+        .unwrap()
+        .contains("no usable address"));
+    assert_eq!(f.a.status().endpoint, Some(f.b_at));
+    let (mut a, mut b) = f.connect().await;
+    exchange(&mut a, &mut b).await;
+}
+
+async fn next_response(packets: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
+    timeout(WAIT, async {
+        loop {
+            let packet = packets.recv().await.expect("relay remains alive");
+            if packet.len() == 92 && packet[..4] == [2, 0, 0, 0] {
+                return packet;
+            }
+        }
+    })
+    .await
+    .expect("the relay holds a handshake response")
+}
+
+#[tokio::test]
+async fn endpoint_lost_probe_remains_available_when_the_path_goes_stale() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    settle_then_mute(&relay, &mut a, &mut b).await;
+    relay.drop_next_probe.store(true, Ordering::SeqCst);
+    clock::advance(Duration::from_secs(121));
+    let attempt = Instant::now();
+    f.query().await.send(Ok(relay.new)).unwrap();
+    next_initiation(&mut relay.dark).await;
+    next_initiation(&mut relay.at_new).await;
+    assert!(!relay.drop_next_probe.load(Ordering::SeqCst));
+    assert_eq!(f.a.status().endpoint, Some(relay.old));
+    // The peer's post-jump keepalive must die before the new path opens,
+    // or it would roam the endpoint without a successful initiation.
+    tokio::time::sleep(2 * TICK).await;
+    relay.set(VIA_NEW);
+    let answers = answer_session_lookups(&mut f, relay.new);
+    for _ in 0..4 {
+        clock::advance(REKEY_TIMEOUT + TICK);
+        tokio::time::sleep(2 * TICK).await;
+        if f.a.status().endpoint == Some(relay.new) {
+            break;
+        }
+    }
+    assert_eq!(
+        f.a.status().endpoint,
+        Some(relay.new),
+        "a lost live probe must remain eligible for the first stale retries"
+    );
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
+    assert!(
+        attempt.elapsed() < Duration::from_secs(30),
+        "recovery must not wait for the 90-second attempt expiry"
+    );
+    exchange(&mut a, &mut b).await;
+    answers.abort();
+}
+
+#[tokio::test]
+async fn endpoint_record_can_move_back_while_the_new_path_is_live() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let mut relay = Relay::new(f.b_at).await;
+    let (mut a, mut b) = session_through(&relay, &mut f).await;
+    settle_then_mute(&relay, &mut a, &mut b).await;
+    relay.set(VIA_NEW);
+    clock::advance(Duration::from_secs(121));
+    f.query().await.send(Ok(relay.new)).unwrap();
+    until(|| f.a.status().endpoint == Some(relay.new)).await;
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
+    exchange(&mut a, &mut b).await;
+    tokio::time::sleep(4 * TICK).await;
+    while relay.dark.try_recv().is_ok() {}
+    while relay.from_peer.try_recv().is_ok() {}
+    relay.hold_responses.store(true, Ordering::SeqCst);
+    clock::advance(Duration::from_secs(121));
+    let attempt = Instant::now();
+    f.query().await.send(Ok(relay.old)).unwrap();
+    next_response(&mut relay.from_peer).await;
+    next_initiation(&mut relay.dark).await;
+    assert!(attempt.elapsed() < REKEY_TIMEOUT);
+    assert_eq!(f.a.status().endpoint, Some(relay.new));
+    assert!(matches!(f.a.status().handshake, HandshakeState::Live(age) if age < STALE_HANDSHAKE));
+}
+
+#[tokio::test]
+async fn endpoint_bind_failure_tries_another_answer() {
+    let events = Events::default();
+    let dispatch = tracing::Dispatch::new(events.clone());
+    let _second = tracing::Dispatch::new(Events::default());
+    let _subscriber = tracing::dispatcher::set_default(&dispatch);
+    let _clock = clock::test_offset_guard();
+    let _refuse = RefuseBind::new();
+    let mut f = Fixture::new().await;
+    let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let next = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    f.query()
+        .await
+        .send(Ok(first.local_addr().unwrap()))
+        .unwrap();
+    let connecting = tokio::spawn({
+        let client = f.a.clone();
+        async move { client.connect(b_port(80)).await }
+    });
+    initiation(&first).await;
+    clock::advance(REKEY_TIMEOUT + TICK);
+    f.query()
+        .await
+        .send_all(Ok(vec![
+            "[::1]:51820".parse().unwrap(),
+            next.local_addr().unwrap(),
+        ]))
+        .unwrap();
+    until(|| f.a.status().resolution_error.is_some()).await;
+    assert!(f
+        .a
+        .status()
+        .resolution_error
+        .unwrap()
+        .starts_with("binding a UDP socket for [::1]:51820: "));
+    clock::advance(REKEY_TIMEOUT + TICK);
+    let _query = f.query().await;
+    initiation(&next).await;
+    assert_eq!(f.a.status().endpoint, Some(next.local_addr().unwrap()));
+    assert_eq!(
+        events.endpoint_lines(),
+        [("WARN".into(), "WireGuard endpoint failed; retrying".into())]
+    );
+    connecting.abort();
+}
+
+#[tokio::test]
+async fn endpoint_stale_retry_moves_only_once_even_when_its_lookup_finishes() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::new().await;
+    let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let third = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addresses = vec![
+        first.local_addr().unwrap(),
+        second.local_addr().unwrap(),
+        third.local_addr().unwrap(),
+    ];
+    f.query().await.send_all(Ok(addresses.clone())).unwrap();
+    let connecting = tokio::spawn({
+        let client = f.a.clone();
+        async move { client.connect(b_port(80)).await }
+    });
+    initiation(&first).await;
+    clock::advance(REKEY_TIMEOUT + TICK);
+    let query = f.query().await;
+    initiation(&second).await;
+    assert_eq!(f.a.status().endpoint, Some(addresses[1]));
+    query
+        .send_all(Ok(vec![addresses[2], addresses[0], addresses[1]]))
+        .unwrap();
+    tokio::time::sleep(2 * TICK).await;
+    assert_eq!(
+        f.a.status().endpoint,
+        Some(addresses[1]),
+        "one retry cannot consume two candidates"
+    );
+    assert!(
+        drain(&third).is_empty(),
+        "the lookup result does not send a second stale move"
+    );
+    clock::advance(REKEY_TIMEOUT + TICK);
+    let _query = f.query().await;
+    initiation(&third).await;
+    assert_eq!(f.a.status().endpoint, Some(addresses[2]));
+    connecting.abort();
 }
