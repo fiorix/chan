@@ -11,12 +11,11 @@
 </script>
 
 <script lang="ts">
-  // Primary-action "pill" plus a caret that drops the secondary actions. The
+  // Primary-action pill plus a caret that drops the secondary actions. The
   // category logic lives in each caller's action model; this component owns
-  // only the markup, the dropdown open/close state, and the outside-click /
-  // Escape dismissal. Extracted from FileInfoBody's inline action row so the
-  // workspace-root inspector renders the identical control.
+  // the markup, dropdown state, and outside-click / Escape dismissal.
   import { ChevronDown } from "@lucide/svelte";
+  import { menuEscape } from "./menuEscape";
 
   let {
     main,
@@ -30,6 +29,12 @@
   /// selection doesn't inherit an open menu.
   let menuOpen = $state(false);
   let actionsEl = $state<HTMLDivElement | null>(null);
+  const menuKeys = menuEscape({
+    open: () => menuOpen,
+    inside: (target) =>
+      target instanceof Node && !!actionsEl?.querySelector(".action-menu")?.contains(target),
+    close: () => (menuOpen = false),
+  });
   $effect(() => {
     void main;
     void secondary;
@@ -40,14 +45,11 @@
     const onDocPointer = (e: MouseEvent) => {
       if (actionsEl && !actionsEl.contains(e.target as Node)) menuOpen = false;
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") menuOpen = false;
-    };
     document.addEventListener("mousedown", onDocPointer);
-    document.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", menuKeys.capture, true);
     return () => {
       document.removeEventListener("mousedown", onDocPointer);
-      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", menuKeys.capture, true);
     };
   });
 </script>
@@ -73,7 +75,7 @@
     {/if}
   </div>
   {#if menuOpen && secondary.length > 0}
-    <div class="action-menu" role="menu">
+    <div class="action-menu" role="menu" tabindex="-1" onkeydown={menuKeys.bubble}>
       {#each secondary as item (item.label)}
         <button
           class="action-menu-item"

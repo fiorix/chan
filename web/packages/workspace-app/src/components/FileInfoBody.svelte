@@ -70,7 +70,8 @@
   } from "../state/fileActions";
   import CodeReportSection from "./CodeReportSection.svelte";
   import KindChip from "./KindChip.svelte";
-  import { ChevronDown, Copy } from "@lucide/svelte";
+  import InspectorActionPill, { type InspectorAction } from "./InspectorActionPill.svelte";
+  import { Copy } from "@lucide/svelte";
   import "../editor/copy_button.css";
 
   /// Visual / behavioural kind for a file reference. Images route to
@@ -552,13 +553,6 @@
   /// through capabilities: the editor "Show Details" inspector binds
   /// no onOpen (the file is already open there), so its file main
   /// action is "Show file" instead of "Open".
-  type InspectorAction = {
-    label: string;
-    onClick: () => void;
-    title?: string;
-    disabled?: boolean;
-  };
-
   /// "Open" for a directory: a NEW File Browser tab expanded into the
   /// directory. The dashboard binds onReveal to the same reveal-and-enter
   /// call, so prefer it when present; other surfaces fall back to the
@@ -677,30 +671,6 @@
       },
     );
     return { main: actionFor(set.main), secondary: set.secondary.map(actionFor) };
-  });
-
-  /// Dropdown open state for the secondary-action menu. Resets whenever
-  /// the selection changes so a new entry doesn't inherit an open menu.
-  let menuOpen = $state(false);
-  let actionsEl = $state<HTMLDivElement | null>(null);
-  $effect(() => {
-    void path;
-    menuOpen = false;
-  });
-  $effect(() => {
-    if (!menuOpen) return;
-    const onDocPointer = (e: MouseEvent) => {
-      if (actionsEl && !actionsEl.contains(e.target as Node)) menuOpen = false;
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") menuOpen = false;
-    };
-    document.addEventListener("mousedown", onDocPointer);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocPointer);
-      document.removeEventListener("keydown", onKey);
-    };
   });
 
   /// chan-report integration. The "Code" section shows language /
@@ -823,47 +793,7 @@
           </div>
         {/if}
       {/if}
-      <!-- Pill + dropdown: one primary action plus a caret that opens the
-           secondary actions. Built from actionModel so the category logic
-           lives in the script, not the template. -->
-      <div class="action-actions" bind:this={actionsEl}>
-        <div class="action-pill" class:has-caret={actionModel.secondary.length > 0}>
-          <button
-            class="pill-main"
-            type="button"
-            onclick={actionModel.main.onClick}
-            disabled={actionModel.main.disabled}
-            title={actionModel.main.title}>{actionModel.main.label}</button
-          >
-          {#if actionModel.secondary.length > 0}
-            <button
-              class="pill-caret"
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              aria-label="More actions"
-              onclick={() => (menuOpen = !menuOpen)}
-            ><ChevronDown size={15} aria-hidden="true" /></button>
-          {/if}
-        </div>
-        {#if menuOpen && actionModel.secondary.length > 0}
-          <div class="action-menu" role="menu">
-            {#each actionModel.secondary as item (item.label)}
-              <button
-                class="action-menu-item"
-                type="button"
-                role="menuitem"
-                disabled={item.disabled}
-                title={item.title}
-                onclick={() => {
-                  menuOpen = false;
-                  item.onClick();
-                }}>{item.label}</button
-              >
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <InspectorActionPill main={actionModel.main} secondary={actionModel.secondary} />
       <input
         bind:this={uploadInput}
         class="file-picker"
@@ -1403,91 +1333,6 @@
   .actions-section {
     margin: 0.2rem 0 0.6rem 0;
   }
-  /* Anchor for the absolutely-positioned dropdown. The actions sit near
-     the top of the inspector, so the menu opens downward without
-     clipping against the aside's overflow. */
-  .action-actions {
-    position: relative;
-    margin-top: 0.2rem;
-  }
-  .action-pill {
-    display: flex;
-    align-items: stretch;
-    width: 100%;
-  }
-  .pill-main {
-    flex: 1;
-    min-width: 0;
-    background: var(--btn-bg);
-    color: var(--text);
-    border: 1px solid var(--btn-border);
-    border-radius: 4px;
-    padding: 5px 0;
-    cursor: pointer;
-    font: inherit;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .pill-main:hover { border-color: var(--btn-hover); }
-  .pill-main:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .pill-main:disabled:hover { border-color: var(--btn-border); }
-  /* With a caret present the two halves merge into one control: square
-     the shared edge and drop the doubled border between them. */
-  .action-pill.has-caret .pill-main {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-    border-right: none;
-  }
-  .pill-caret {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px;
-    background: var(--btn-bg);
-    color: var(--text);
-    border: 1px solid var(--btn-border);
-    border-top-right-radius: 4px;
-    border-bottom-right-radius: 4px;
-    cursor: pointer;
-    line-height: 0;
-  }
-  .pill-caret:hover { border-color: var(--btn-hover); }
-  .action-menu {
-    position: absolute;
-    top: calc(100% + 3px);
-    left: 0;
-    right: 0;
-    z-index: 5;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 3px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
-  }
-  .action-menu-item {
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-radius: 3px;
-    color: var(--text);
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    padding: 5px 8px;
-  }
-  .action-menu-item:hover { background: var(--hover-bg, rgba(127, 127, 127, 0.15)); }
-  .action-menu-item:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .action-menu-item:disabled:hover { background: transparent; }
   .path-toggle {
     background: none;
     border: none;
