@@ -1,6 +1,6 @@
 # Rendered by packaging/distros/homebrew/make-homebrew-package.sh, which
 # fills the version and DMG checksum from a GA release; CI pushes the result
-# to the fiorix/homebrew-chan tap at this relative path. The DMG asset name
+# to the fiorix/homebrew-tap tap at this relative path. The DMG asset name
 # must match web/packages/marketing/scripts/release-assets.mjs (desktopAssets).
 cask "chan-desktop" do
   version "@PKGVER@"
@@ -54,7 +54,7 @@ cask "chan-desktop" do
 
   caveats <<~EOS
     Chan installs `chan` and `cs` shims into ~/.local/bin on first launch.
-    The headless CLI formula (fiorix/chan/chan) provides the same commands;
+    The headless CLI formula (fiorix/tap/chan) provides the same commands;
     install one or the other, not both.
   EOS
 end

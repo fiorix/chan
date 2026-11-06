@@ -1,6 +1,6 @@
 # Rendered by packaging/distros/homebrew/make-homebrew-package.sh, which
 # fills the version and tarball checksum from a GA release; CI pushes the
-# result to the fiorix/homebrew-chan tap at this relative path. A
+# result to the fiorix/homebrew-tap tap at this relative path. A
 # prebuilt-binary formula is fine in a personal tap (homebrew-core rules do
 # not apply). The tarball asset name must match
 # web/packages/marketing/scripts/release-assets.mjs (cliAssets).
@@ -33,7 +33,7 @@ class Chan < Formula
 
   def caveats
     <<~EOS
-      The Chan Desktop cask (fiorix/chan/chan-desktop) provides the same
+      The Chan Desktop cask (fiorix/tap/chan-desktop) provides the same
       `chan` and `cs` commands via ~/.local/bin; install one or the other.
 
       Prefer `brew upgrade chan` over `chan upgrade`: the self-updater

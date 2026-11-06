@@ -5,7 +5,7 @@
 #
 # chan renders Formula/chan.rb from the released CLI tarball; chan-desktop
 # renders Casks/chan-desktop.rb from the released DMG. Output paths mirror
-# the fiorix/homebrew-chan tap layout so publication is a plain copy.
+# the fiorix/homebrew-tap tap layout so publication is a plain copy.
 #
 # HOMEBREW_LOCAL_ASSET may name a local copy of the release asset. This is
 # the pre-release path; production leaves it unset and hashes the published
