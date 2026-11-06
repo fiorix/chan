@@ -179,9 +179,11 @@ async fn run(args: Args) -> Result<(), String> {
             let s = status.status();
             println!(
                 "status: handshake={} rx={} tx={} endpoint={}",
-                match s.last_handshake {
-                    Some(ago) => format!("{:.1}s", ago.as_secs_f64()),
-                    None => "never".to_string(),
+                match s.handshake {
+                    chan_wireguard::HandshakeState::Live(ago) =>
+                        format!("{:.1}s", ago.as_secs_f64()),
+                    chan_wireguard::HandshakeState::Never
+                    | chan_wireguard::HandshakeState::Lost(_) => "never".to_string(),
                 },
                 s.rx_bytes,
                 s.tx_bytes,

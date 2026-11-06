@@ -301,7 +301,10 @@ fn describe(status: chan_wireguard::Status) -> String {
             format!("{error}, retrying")
         }
     });
-    match (status.last_handshake.is_some(), failure) {
+    match (
+        matches!(status.handshake, chan_wireguard::HandshakeState::Live(_)),
+        failure,
+    ) {
         (true, None) => "up".to_string(),
         (true, Some(failure)) => format!("up; {failure}"),
         (false, Some(failure)) => failure,
@@ -993,7 +996,11 @@ mod tests {
     #[test]
     fn describe_reads_a_live_session_as_up_beside_a_failing_lookup() {
         let status = |handshake: bool, error: Option<&str>, stalled: bool| chan_wireguard::Status {
-            last_handshake: handshake.then_some(Duration::from_secs(3)),
+            handshake: if handshake {
+                chan_wireguard::HandshakeState::Live(Duration::from_secs(3))
+            } else {
+                chan_wireguard::HandshakeState::Never
+            },
             tx_bytes: 0,
             rx_bytes: 0,
             endpoint: None,
@@ -1002,6 +1009,9 @@ mod tests {
         };
         let failure = "endpoint did not resolve: gw.test:51820: name absent";
         assert_eq!(describe(status(false, None, false)), "connecting");
+        let mut lost = status(false, None, false);
+        lost.handshake = chan_wireguard::HandshakeState::Lost(Duration::from_secs(212));
+        assert_eq!(describe(lost), "connecting");
         assert_eq!(describe(status(true, None, false)), "up");
         assert_eq!(
             describe(status(false, Some(failure), false)),

@@ -53,12 +53,23 @@ const RECEIVE_BURST: usize = 32;
 /// one. The kernel may grant less; the request is best effort.
 const SOCKET_BUFFER_HINT: usize = 4 * 1024 * 1024;
 
+/// Whether the tunnel has a usable session, retaining the last handshake's
+/// age after the protocol core discards that session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeState {
+    /// No handshake has completed.
+    Never,
+    /// A session is usable; the duration is the age of its handshake.
+    Live(Duration),
+    /// No session is usable; the duration is the age of the last handshake.
+    Lost(Duration),
+}
+
 /// A point in time report on the tunnel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
-    /// Time since the current session's handshake completed; `None`
-    /// before the first one.
-    pub last_handshake: Option<Duration>,
+    /// The session's state and the age of its last completed handshake.
+    pub handshake: HandshakeState,
     /// Payload bytes sealed for the peer.
     pub tx_bytes: u64,
     /// Payload bytes opened from the peer.
@@ -91,6 +102,9 @@ const STALE_HANDSHAKE: Duration = Duration::from_secs(135);
 struct Wire {
     tunn: Tunn,
     endpoint: Option<SocketAddr>,
+    /// The driver retains the observation instant and age together because
+    /// the core drops its handshake stamp when it discards a session.
+    last_handshake: Option<(Instant, Duration)>,
 }
 
 /// What the driver publishes after each lookup outcome, for `connect` and
@@ -175,7 +189,11 @@ impl Tunnel {
             index,
             None,
         );
-        let wire = Arc::new(Mutex::new(Wire { tunn, endpoint }));
+        let wire = Arc::new(Mutex::new(Wire {
+            tunn,
+            endpoint,
+            last_handshake: None,
+        }));
         let (resolution_tx, resolution) = watch::channel(Resolution::default());
         let driver = Driver {
             shared: shared.clone(),
@@ -188,6 +206,8 @@ impl Tunnel {
             looked_up_at: None,
             last_answer: endpoint,
             logged_failure: None,
+            logged_session_loss: false,
+            transmitted_initiation: false,
             pending_initiation: false,
             initiation_ahead: false,
         };
@@ -290,8 +310,19 @@ impl Tunnel {
         let wire = self.inner.wire.lock();
         let (last_handshake, tx_bytes, rx_bytes, _, _) = wire.tunn.stats();
         let resolution = self.inner.resolution.borrow();
+        let handshake = match wire.last_handshake {
+            None => HandshakeState::Never,
+            Some((at, age)) => {
+                let age = age + at.elapsed();
+                if last_handshake.is_some() {
+                    HandshakeState::Live(age)
+                } else {
+                    HandshakeState::Lost(age)
+                }
+            }
+        };
         Status {
-            last_handshake,
+            handshake,
             tx_bytes: tx_bytes as u64,
             rx_bytes: rx_bytes as u64,
             endpoint: wire.endpoint,
@@ -453,6 +484,10 @@ struct Driver {
     last_answer: Option<SocketAddr>,
     /// The failure last logged at warn; a repeat of it logs at debug.
     logged_failure: Option<String>,
+    /// A loss logged at warn, cleared only by a completed handshake.
+    logged_session_loss: bool,
+    /// A held initiation is not evidence that the peer failed to answer.
+    transmitted_initiation: bool,
     /// An initiation held for want of an endpoint, generated afresh when
     /// a lookup gives one, so its retry clock starts at transmission.
     pending_initiation: bool,
@@ -617,6 +652,16 @@ impl Driver {
                     tracing::info!(old = ?wire.endpoint, new = %from, "peer endpoint moved");
                     wire.endpoint = Some(from);
                 }
+                if let Some(age) = wire.tunn.time_since_last_handshake() {
+                    wire.last_handshake = Some((Instant::now(), age));
+                    if std::mem::take(&mut self.logged_session_loss) {
+                        tracing::warn!(
+                            endpoint = %self.endpoint_name,
+                            address = ?wire.endpoint,
+                            "WireGuard session established"
+                        );
+                    }
+                }
                 if datagram.len() == 92 && datagram[..4] == [2, 0, 0, 0] {
                     self.pending_initiation = false;
                 }
@@ -646,9 +691,43 @@ impl Driver {
     async fn tick(&mut self, work: &mut [u8]) {
         let (len, expired) = {
             let mut wire = self.wire.lock();
+            let was_expired = wire.tunn.is_expired();
             match wire.tunn.update_timers(work) {
                 TunnResult::WriteToNetwork(sealed) => (sealed.len(), false),
-                TunnResult::Err(WireGuardError::ConnectionExpired) => (0, true),
+                TunnResult::Err(WireGuardError::ConnectionExpired) => {
+                    // The expired core returns this error on every later tick.
+                    if !was_expired {
+                        let age = wire.last_handshake.map(|(at, age)| age + at.elapsed());
+                        let last_handshake = age.map_or_else(
+                            || "never".to_string(),
+                            |age| format!("{:.1}s", age.as_secs_f64()),
+                        );
+                        let message = if wire.last_handshake.is_some() {
+                            "WireGuard session lost"
+                        } else {
+                            "WireGuard session handshake has not completed"
+                        };
+                        if !self.logged_session_loss
+                            && (self.transmitted_initiation || wire.last_handshake.is_some())
+                        {
+                            tracing::warn!(
+                                endpoint = %self.endpoint_name,
+                                address = ?wire.endpoint,
+                                last_handshake = %last_handshake,
+                                "{message}"
+                            );
+                            self.logged_session_loss = true;
+                        } else {
+                            tracing::debug!(
+                                endpoint = %self.endpoint_name,
+                                address = ?wire.endpoint,
+                                last_handshake = %last_handshake,
+                                "{message}"
+                            );
+                        }
+                    }
+                    (0, true)
+                }
                 TunnResult::Err(e) => {
                     tracing::debug!(error = %e, "timer tick");
                     (0, false)
@@ -830,12 +909,14 @@ impl Driver {
         }
     }
 
-    async fn send_to(&self, datagram: &[u8], to: SocketAddr) {
+    async fn send_to(&mut self, datagram: &[u8], to: SocketAddr) {
         let Some(socket) = self.sockets.get(to.is_ipv4()) else {
             return;
         };
         if let Err(e) = socket.send_to(datagram, to).await {
             tracing::debug!(error = %e, endpoint = %to, "tunnel socket send");
+        } else if is_handshake_initiation(datagram) {
+            self.transmitted_initiation = true;
         }
     }
 }
@@ -1113,7 +1194,7 @@ mod tests {
     async fn status_reports_the_handshake_and_the_bytes() {
         let Pair { a, b, a_at, b_at } = pair().await;
         let before = a.status();
-        assert_eq!(before.last_handshake, None);
+        assert_eq!(before.handshake, HandshakeState::Never);
         assert_eq!((before.tx_bytes, before.rx_bytes), (0, 0));
         assert_eq!(before.endpoint, Some(b_at));
 
@@ -1138,12 +1219,17 @@ mod tests {
             .unwrap();
 
         let after = a.status();
-        assert!(after.last_handshake.is_some(), "{after:?}");
-        assert!(after.last_handshake.unwrap() < WAIT);
+        assert!(
+            matches!(after.handshake, HandshakeState::Live(age) if age < WAIT),
+            "{after:?}"
+        );
         assert!(after.tx_bytes > 0 && after.rx_bytes > 0, "{after:?}");
         assert_eq!(after.endpoint, Some(b_at));
         let b_status = b.status();
-        assert!(b_status.last_handshake.is_some(), "{b_status:?}");
+        assert!(
+            matches!(b_status.handshake, HandshakeState::Live(_)),
+            "{b_status:?}"
+        );
         assert_eq!(b_status.endpoint, Some(a_at));
     }
 

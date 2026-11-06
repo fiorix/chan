@@ -40,7 +40,7 @@ mod tunnel;
 
 pub use proxy::{ConnectProxy, HostRoute, ProxyRoute};
 pub use stream::{Listener, Stream};
-pub use tunnel::{Status, Tunnel};
+pub use tunnel::{HandshakeState, Status, Tunnel};
 
 /// The Curve25519 key types a tunnel is built from.
 pub mod x25519 {

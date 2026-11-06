@@ -26,6 +26,9 @@
 #   refusals   the proxy refused nothing in the run.
 #   config     the gateway row and its file survive the desktop's rewrite of
 #              its config at start.
+#   wrong-key  (--wrong-key only) the desktop sends repeated initiations,
+#              the peer never handshakes, one session expiry logs at WARN
+#              within 100 s of tunnel start, and no ERROR-level line appears.
 #
 # Two modes prove the always-bound proxy and the live fabric instead of
 # the connected-peer arms:
@@ -57,13 +60,15 @@
 # (the peer answers 404 to everything), the macOS and Windows webviews, and
 # a peer behind NAT or at a changing address.
 #
-# Usage: desktop-wireguard.sh [--unresolved-endpoint | --live-adopt | --no-wireguard]
+# Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key | --live-adopt | --no-wireguard]
 #   --unresolved-endpoint proves startup and the proxy with a missing name;
 #                         it runs instead of the connected-peer arms.
+#   --wrong-key           proves expiry with a wrong peer public key instead
+#                         of the connected-peer arms.
 #   --live-adopt          proves the live fabric (above); needs node 22 or
 #                         later for the inspector reads.
 #   --no-wireguard        proves the always-bound proxy with no gateway row.
-#   The modes are exclusive.
+#   The modes are exclusive: one is taken, and anything after it is refused.
 #   CHAN_DESKTOP_BIN  a built debug chan-desktop (default
 #                     target/debug/chan-desktop). It is not built here: it
 #                     needs the web bundles, `make web` then
@@ -71,17 +76,17 @@
 #   CHAN_BIN          a built chan (default: built here with --locked)
 #   WG_PEER_BIN       a built wg-peer example (default: built here)
 #
-# Needs xvfb-run and curl, and ss for the window arm's connection count
-# (reported as unmeasured without it). Exits 2 when a prerequisite is
-# missing rather than passing. Everything runs under a throwaway CHAN_HOME, HOME,
-# XDG_RUNTIME_DIR and TMPDIR, with no Wayland display and GTK held to X11,
-# so the desktop renders on the Xvfb display only and never on the
-# caller's compositor; the work dir is deleted on success and kept
-# on failure. The kept work dir holds the run's client file with a private
-# key that is worthless once the peer process is gone, which the exit path
-# ends, but treat it as a credential until it is deleted. A kept
-# --live-adopt work dir also holds the launcher bearer of a desktop that is
-# gone, in bearer.header, read by curl so it is on no command line.
+# Needs xvfb-run, dbus-run-session and curl, and ss for the window arm's
+# connection count (reported as unmeasured without it). Exits 2 when a
+# prerequisite is missing rather than passing. Everything runs under a
+# throwaway CHAN_HOME, HOME, XDG_RUNTIME_DIR and TMPDIR. The desktop and
+# its webviews use Xvfb and a private session bus, with no caller display
+# or bus inherited. The work dir is deleted on success or refusal and kept
+# on test failure. The kept work dir holds the run's client file with a
+# private key that is worthless once the peer process is gone, but treat
+# it as a credential until deleted. A kept --live-adopt work dir also
+# holds the launcher bearer of a desktop that is gone, in bearer.header,
+# read by curl so it is on no command line.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -89,16 +94,23 @@ SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 CHAN_DESKTOP_BIN="${CHAN_DESKTOP_BIN:-$REPO/target/debug/chan-desktop}"
 GATEWAY_ID="gw-e2e00001"
 UNRESOLVED=0
+WRONG_KEY=0
 LIVE_ADOPT=0
 NO_WIREGUARD=0
-if [ "${1:-}" = --unresolved-endpoint ]; then UNRESOLVED=1; shift; fi
-if [ "${1:-}" = --live-adopt ]; then LIVE_ADOPT=1; shift; fi
-if [ "${1:-}" = --no-wireguard ]; then NO_WIREGUARD=1; shift; fi
+case "${1:-}" in
+    --unresolved-endpoint) UNRESOLVED=1; shift ;;
+    --wrong-key) WRONG_KEY=1; shift ;;
+    --live-adopt) LIVE_ADOPT=1; shift ;;
+    --no-wireguard) NO_WIREGUARD=1; shift ;;
+esac
 [ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
-[ $((UNRESOLVED + LIVE_ADOPT + NO_WIREGUARD)) -le 1 ] || { printf 'the modes are exclusive\n' >&2; exit 2; }
 
 log() { printf 'desktop-wireguard: %s\n' "$*" >&2; }
-refuse() { log "cannot run: $*"; exit 2; }
+refuse() {
+    log "cannot run: $*"
+    [ -z "${WORK:-}" ] || rm -rf -- "$WORK"
+    exit 2
+}
 fail() {
     log "FAIL: $*"
     log "work dir kept at $WORK"
@@ -117,6 +129,7 @@ verdict() {
 }
 
 command -v xvfb-run >/dev/null 2>&1 || refuse "xvfb-run is not installed"
+command -v dbus-run-session >/dev/null 2>&1 || refuse "dbus-run-session is not installed"
 command -v curl >/dev/null 2>&1 || refuse "curl is not installed"
 [ -x "$CHAN_DESKTOP_BIN" ] || refuse "no chan-desktop binary at $CHAN_DESKTOP_BIN (set CHAN_DESKTOP_BIN)"
 INSPECT="$REPO/scripts/e2e/desktop-observations/inspect.mjs"
@@ -138,35 +151,92 @@ if [ -z "${WG_PEER_BIN:-}" ]; then
 fi
 [ -x "$WG_PEER_BIN" ] || refuse "no wg-peer binary at $WG_PEER_BIN"
 
+PIDS=()
+descendants() {
+    local parent child
+    local -a pending=("$1")
+    while [ "${#pending[@]}" -gt 0 ]; do
+        parent="${pending[0]}"
+        pending=("${pending[@]:1}")
+        while IFS= read -r child; do
+            [ -n "$child" ] || continue
+            printf '%s\n' "$child"
+            pending+=("$child")
+        done < <(pgrep -P "$parent" || true)
+    done
+}
+desktop_pid() {
+    local child bin
+    bin="$(readlink -f "$CHAN_DESKTOP_BIN")"
+    for child in $(descendants "$XVFB_RUN_PID"); do
+        [ "$(readlink -f "/proc/$child/exe" 2>/dev/null || true)" = "$bin" ] || continue
+        printf '%s\n' "$child"
+        return 0
+    done
+    return 1
+}
+cleanup() {
+    # End the desktop first so dbus-run-session can end its daemon, then
+    # end any surviving descendants of this run's xvfb-run process.
+    local pid desktop i
+    local -a tree=()
+    if [ -n "${XVFB_RUN_PID:-}" ]; then
+        mapfile -t tree < <(descendants "$XVFB_RUN_PID")
+        desktop="$(desktop_pid || true)"
+        [ -z "$desktop" ] || kill "$desktop" 2>/dev/null || true
+        for i in {1..10}; do
+            kill -0 "$XVFB_RUN_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+        for ((i=${#tree[@]}-1; i>=0; i--)); do
+            kill "${tree[i]}" 2>/dev/null || true
+        done
+    fi
+    for pid in "${PIDS[@]:-}"; do
+        [ -n "$pid" ] || continue
+        kill "$pid" 2>/dev/null || true
+    done
+    [ "${#PIDS[@]}" -gt 0 ] || return 0
+    sleep 1
+    for pid in "${tree[@]}"; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    for pid in "${PIDS[@]:-}"; do
+        [ -n "$pid" ] || continue
+        kill -9 "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT
+
 WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/chan-desktop-wireguard.XXXXXX")"
 export CHAN_HOME="$WORK/chan-home"
 export HOME="$WORK/home"
 export XDG_RUNTIME_DIR="$WORK/run"
 export TMPDIR="$WORK/tmp"
-mkdir -p "$CHAN_HOME/desktop" "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
-chmod 700 "$XDG_RUNTIME_DIR"
 # A test launched from inside a chan terminal must not inherit session
 # state, handoff hints, or credentials.
 for v in $(compgen -v | grep -E '^CHAN_' | grep -vE '^CHAN_(HOME|BIN|DESKTOP_BIN)$'); do unset "$v"; done
-# The caller's Wayland session: WAYLAND_DISPLAY may be an absolute socket
-# path and WAYLAND_SOCKET an inherited descriptor, and either would put the
-# desktop and its webviews on the caller's compositor instead of Xvfb.
-unset WAYLAND_DISPLAY WAYLAND_SOCKET
+# DISPLAY reaches X11 clients outside xvfb-run, while a session bus address
+# reaches GTK and WebKitGTK clients inside it. Wayland names a socket or an
+# inherited descriptor that could put the webviews on the caller's compositor.
+unset DISPLAY DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY WAYLAND_SOCKET
 export GDK_BACKEND=x11
-# The desktop publishes its handoff socket, and the chan processes here
-# discover devservers, in XDG_RUNTIME_DIR. The caller's own
-# (/run/user/<uid>) holds their live desktop's and devserver's sockets, so
-# refuse to start anything unless it is a private directory.
+# The desktop and devserver control sockets live in XDG_RUNTIME_DIR. This
+# run derives a private path inside its work dir, but checks its resolved
+# destination before creating or changing it to protect the caller's
+# own (/run/user/<uid>) desktop and devserver sockets.
 private_runtime_dir_reason() {
     local dir="${XDG_RUNTIME_DIR:-}" actual own
     [ -n "$dir" ] || { echo "XDG_RUNTIME_DIR is unset"; return; }
-    actual="$(realpath -e -- "$dir" 2>/dev/null)" || { echo "XDG_RUNTIME_DIR=$dir does not exist"; return; }
+    actual="$(realpath -m -- "$dir")"
     own="/run/user/$(id -u)"
     own="$(realpath -e -- "$own" 2>/dev/null || echo "$own")"
     [ "$actual" != "$own" ] || echo "XDG_RUNTIME_DIR=$dir is this user's own runtime directory ($own)"
 }
 reason="$(private_runtime_dir_reason)"
 [ -z "$reason" ] || refuse "$reason"
+mkdir -p "$CHAN_HOME/desktop" "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 export CHAN_UPDATE_CHECK=0
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
@@ -176,25 +246,6 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # response statuses, which name the socket routes, from chan_server and
 # tower_http at debug.
 export CHAN_LOG="chan_desktop=debug,chan_wireguard=debug,chan_server=debug,tower_http=debug,warn"
-
-PIDS=()
-cleanup() {
-    # Each pid is ours (the peer, xvfb-run). xvfb-run leaves Xvfb and the
-    # desktop as its children, so they are ended through it, never by name.
-    local pid
-    for pid in "${PIDS[@]:-}"; do
-        [ -n "$pid" ] || continue
-        pkill -TERM -P "$pid" 2>/dev/null || true
-        kill "$pid" 2>/dev/null || true
-    done
-    sleep 1
-    for pid in "${PIDS[@]:-}"; do
-        [ -n "$pid" ] || continue
-        pkill -KILL -P "$pid" 2>/dev/null || true
-        kill -9 "$pid" 2>/dev/null || true
-    done
-}
-trap cleanup EXIT
 
 wait_for() {
     # wait_for <seconds> <description> <command...>: poll until the command
@@ -218,6 +269,13 @@ desktop_log() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/desktop.log" > "$CLEAN"; }
 logged() { desktop_log; grep -qE -- "$1" "$CLEAN"; }
 count() { desktop_log; grep -cE -- "$1" "$CLEAN" || true; }
 peer_logged() { grep -qE -- "$1" "$WORK/peer.log"; }
+session_warnings() {
+    awk '$2 == "WARN" && $3 == "chan_wireguard::tunnel:" && $4 == "WireGuard" && $5 == "session" { n++ } END { print n+0 }' "$1"
+}
+session_expiry_logged() {
+    desktop_log || return 1
+    [ "$(session_warnings "$CLEAN")" -ge 1 ]
+}
 
 log "work dir $WORK, chan $SHA"
 
@@ -230,6 +288,10 @@ PEER_URL="$(sed -n 's/^peer: ready url=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head
 log "peer at $PEER_URL, client file $WORK/client.conf (mode $(stat -c %a "$WORK/client.conf"))"
 if [ "$UNRESOLVED" = 1 ]; then
     sed -i 's/^Endpoint = .*/Endpoint = chan-endpoint-missing.invalid:51820/' "$WORK/client.conf"
+elif [ "$WRONG_KEY" = 1 ]; then
+    wrong_pub="$(head -c 32 /dev/urandom | base64)"
+    sed -i "s|^PublicKey = .*|PublicKey = $wrong_pub|" "$WORK/client.conf"
+    unset wrong_pub
 fi
 
 # 2. The desktop's config: one enabled gateway behind the file.
@@ -253,9 +315,30 @@ if [ "$LIVE_ADOPT" = 1 ]; then
 fi
 
 # 3. The desktop, headless.
-xvfb-run -a "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
+xvfb-run -a dbus-run-session "$CHAN_DESKTOP_BIN" > "$WORK/desktop.log" 2>&1 &
 XVFB_RUN_PID=$!
 PIDS+=("$XVFB_RUN_PID")
+
+if [ "$WRONG_KEY" = 1 ]; then
+    arm_rc=0
+    wait_for 30 "the tunnel start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID" || arm_rc=1
+    wait_for 100 "the session-expiry warning" session_expiry_logged || arm_rc=1
+    desktop_log || arm_rc=1
+    INITIATIONS="$(count 'Sending handshake_initiation')"
+    HANDSHAKE="$(awk '/^status: / { last=$0 } END { print last }' "$WORK/peer.log")"
+    expiry_warns="$(session_warnings "$CLEAN")"
+    error_lines="$(awk '$2 == "ERROR" { n++ } END { print n+0 }' "$CLEAN")"
+    [ "$INITIATIONS" -ge 2 ] || arm_rc=1
+    case "$HANDSHAKE" in 'status: handshake=never '*) ;; *) arm_rc=1 ;; esac
+    [ "$expiry_warns" = 1 ] && [ "$error_lines" = 0 ] || arm_rc=1
+    verdict wrong-key "$arm_rc" "desktop sent $INITIATIONS initiations, peer ${HANDSHAKE:-no status}, session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
+    [ "$arm_rc" = 0 ] || fail "wrong-key expiry"
+    cleanup
+    trap - EXIT
+    rm -rf "${WORK:?}"
+    exit 0
+fi
+
 wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.sock" || { desktop_log; fail "the desktop did not come up: $(tail -5 "$CLEAN")"; }
 
 # `chan serve` hands a workspace to the desktop only when its own
@@ -263,19 +346,17 @@ wait_for 90 "the desktop handoff socket" test -S "$XDG_RUNTIME_DIR/chan-desktop.
 # alone; without it serve starts a standalone server that never returns.
 # The CLI calls below take the desktop's display, read from its process.
 desktop_display() {
-    local child bin
-    bin="$(readlink -f "$CHAN_DESKTOP_BIN")"
-    for child in $(pgrep -P "$XVFB_RUN_PID" || true); do
-        [ "$(readlink -f "/proc/$child/exe" 2>/dev/null || true)" = "$bin" ] || continue
-        tr '\0' '\n' < "/proc/$child/environ" | sed -n 's/^DISPLAY=//p'
-        return 0
-    done
-    return 1
+    local child
+    child="$(desktop_pid)" || return 1
+    tr '\0' '\n' < "/proc/$child/environ" | sed -n '/^DISPLAY=/p; /^DBUS_SESSION_BUS_ADDRESS=/p'
 }
-DISPLAY="$(desktop_display)" || fail "no chan-desktop process under xvfb-run (pid $XVFB_RUN_PID)"
+desktop_env="$(desktop_display)" || fail "no chan-desktop process under xvfb-run (pid $XVFB_RUN_PID)"
+DISPLAY="$(printf '%s\n' "$desktop_env" | sed -n 's/^DISPLAY=//p')"
+DBUS_SESSION_BUS_ADDRESS="$(printf '%s\n' "$desktop_env" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')"
 [ -n "$DISPLAY" ] || fail "the desktop's environment names no DISPLAY"
+[ -n "$DBUS_SESSION_BUS_ADDRESS" ] || fail "the desktop's environment names no session bus"
 export DISPLAY
-log "the desktop runs on display $DISPLAY"
+log "the desktop runs on display $DISPLAY with bus $DBUS_SESSION_BUS_ADDRESS"
 
 # The chan-desktop process under xvfb-run, found by its executable among
 # xvfb-run's descendants.
