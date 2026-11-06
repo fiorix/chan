@@ -125,6 +125,8 @@ Plus `GET /healthz` (no auth).
 
 Block, pending delete, PAT revoke and claimed-grant delete each reserve a durable revocation job in the same transaction as the state change, answer accepted, and let the background worker confirm the fleet cut through devserver-control with retries that survive restarts. `POST /v1/admin/users/{id}/access/revoke` only revokes PATs and writes the audit row; identity's composite admin route performs the live cuts. Policy routes only persist state; identity owns the drain that follows a stricter user policy or a fleet pause.
 
+Identity supplies the peer's public key, ingress-host id and newly minted token id after browser consent. The private key and PAT secret never enter enrollment storage. Agents read the active set through identity's internal relay; they hold no profile bearer.
+
 ## Design rationale
 
 See [`design.md`](design.md).

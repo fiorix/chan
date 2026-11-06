@@ -19,6 +19,7 @@ pub mod profile_client;
 pub mod providers;
 pub mod static_files;
 pub mod token_throttle;
+pub mod wireguard;
 
 pub use config::Config;
 pub use error::{Error, Result};
