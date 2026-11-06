@@ -18,6 +18,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 
 import TerminalTab from "./TerminalTab.svelte";
 import { chordFor, osChord, SHORTCUTS } from "../state/shortcuts";
+import { showSurvey, surveyState } from "../state/survey.svelte";
 import { handleTerminalClipboardChord } from "../terminal/clipboardChord";
 import {
   attach,
@@ -41,7 +42,110 @@ Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipb
 
 afterEach(() => {
   resetTerminals();
+  surveyState.byTab = {};
+  surveyState.windowWide = null;
+  document.getSelection()?.removeAllRanges();
   clipboard.writeText.mockClear();
+  vi.restoreAllMocks();
+});
+
+describe("copy owned by a terminal descendant", () => {
+  async function attached() {
+    xterm.textareaFocus = true;
+    const [tab] = seatTerminals([terminalTab()]);
+    const mounted = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    socket.sent.splice(0);
+    return { ...mounted, socket, tab: tab! };
+  }
+
+  test.each([
+    ["Cmd+C with no renderer selection", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", { metaKey: true }, ""],
+    ["Cmd+C with stale renderer selection", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", { metaKey: true }, "old terminal output"],
+    ["Ctrl+Shift+C with stale renderer selection", "Mozilla/5.0 (X11; Linux x86_64)", { ctrlKey: true, shiftKey: true }, "old terminal output"],
+  ])("a selected survey body keeps native %s", async (_name, agent, chord, rendererSelection) => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent);
+    const { target, term, socket, tab } = await attached();
+    term.selection = rendererSelection;
+    showSurvey({ surveyId: "copy-survey", title: null, bodyMarkdown: "Copy this survey text", options: ["OK"] }, tab.id);
+    await tick();
+    const card = target.querySelector<HTMLElement>(".survey-card")!;
+    const body = card.querySelector<HTMLElement>(".survey-body")!;
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    const selection = document.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    card.focus();
+    expect(selection.toString().trim()).toBe("Copy this survey text");
+    expect(document.activeElement).toBe(card);
+
+    const event = new KeyboardEvent("keydown", { key: "c", code: "KeyC", ...chord, bubbles: true, cancelable: true });
+    card.dispatchEvent(event);
+    await tick();
+
+    expect(clipboard.writeText, "the renderer selection cannot replace the survey text").not.toHaveBeenCalled();
+    expect(event.defaultPrevented, "the browser retains its selected-text copy").toBe(false);
+    expect(sentFrames(socket).filter((frame) => frame.type === "input")).toEqual([]);
+  });
+
+  test.each([
+    ["Cmd+C", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", { metaKey: true }],
+    ["Ctrl+Shift+C", "Mozilla/5.0 (X11; Linux x86_64)", { ctrlKey: true, shiftKey: true }],
+  ])("selected find input text keeps native %s", async (_name, agent, chord) => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent);
+    const { target, term, socket } = await attached();
+    term.selection = "old terminal output";
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.find.open" } }));
+    await tick();
+    const input = target.querySelector<HTMLInputElement>(".terminal-find input")!;
+    expect(input).not.toBeNull();
+    input.value = "find text";
+    input.focus();
+    input.setSelectionRange(0, 4);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(4);
+
+    const event = new KeyboardEvent("keydown", { key: "c", code: "KeyC", ...chord, bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    await tick();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(sentFrames(socket).filter((frame) => frame.type === "input")).toEqual([]);
+  });
+
+  test.each([
+    ["Cmd+C", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", { key: "c", code: "KeyC", metaKey: true }],
+    ["Ctrl+Shift+C", "Mozilla/5.0 (X11; Linux x86_64)", { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }],
+  ])("%s on the renderer copies its selection once and never writes to the PTY", async (_name, agent, chord) => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent);
+    const { term, socket } = await attached();
+    term.selection = "renderer selection";
+    term.textarea!.addEventListener("keydown", (event) => term.keyHandler?.(event), { capture: true });
+    const event = new KeyboardEvent("keydown", { ...chord, bubbles: true, cancelable: true });
+    term.textarea!.dispatchEvent(event);
+    await tick();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(clipboard.writeText).toHaveBeenCalledExactlyOnceWith("renderer selection");
+    expect(sentFrames(socket).filter((frame) => frame.type === "input")).toEqual([]);
+  });
+
+  test("an empty renderer selection makes the copy chord a no-op", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
+    const { term, socket } = await attached();
+    term.selection = "";
+    term.textarea!.addEventListener("keydown", (event) => term.keyHandler?.(event), { capture: true });
+    const event = new KeyboardEvent("keydown", { key: "c", code: "KeyC", metaKey: true, bubbles: true, cancelable: true });
+    term.textarea!.dispatchEvent(event);
+    await tick();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(sentFrames(socket).filter((frame) => frame.type === "input")).toEqual([]);
+  });
 });
 
 describe("the chord registry", () => {

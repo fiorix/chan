@@ -66,6 +66,26 @@ describe("survey overlay", () => {
     expect(options[1].querySelector(".survey-option-label")?.textContent).toBe("Semantic");
   });
 
+  test("window-wide selected survey text keeps the browser's copy chord", async () => {
+    surveyState.windowWide = { spec: spec({ bodyMarkdown: "Copy the window survey" }), busy: false };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: null } }));
+    await tick();
+    const card = target.querySelector<HTMLElement>(".survey-card")!;
+    const range = document.createRange();
+    range.selectNodeContents(card.querySelector(".survey-body")!);
+    const selection = document.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    card.focus();
+    const event = new KeyboardEvent("keydown", { key: "c", code: "KeyC", metaKey: true, bubbles: true, cancelable: true });
+    card.dispatchEvent(event);
+    expect(selection.toString().trim()).toBe("Copy the window survey");
+    expect(event.defaultPrevented).toBe(false);
+    selection.removeAllRanges();
+  });
+
   test("takes focus after a terminal's pending refocus", async () => {
     const terminal = document.createElement("textarea");
     const target = document.createElement("div");
@@ -225,6 +245,25 @@ describe("survey overlay", () => {
 });
 
 describe("the survey card's keys", () => {
+  test.each([
+    ["1", "option", 0],
+    ["F", "followup", undefined],
+    ["X", "dismissed", undefined],
+    ["Escape", "dismissed", undefined],
+  ])("%s answers the per-terminal survey as %s", async (key, kind, optionIndex) => {
+    const reply = vi.spyOn(api, "surveyReply").mockResolvedValue(undefined);
+    surveyState.byTab = { t1: { spec: spec(), busy: false } };
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(BubbleOverlay, { target, props: { tabId: "t1" } }));
+    await tick();
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    target.querySelector(".survey-card")!.dispatchEvent(event);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ surveyId: "survey-1", kind, ...(optionIndex === undefined ? {} : { optionIndex }) }));
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   // The card answers its keys unmodified, as the viewers do: a chord with
   // Ctrl, Cmd or Alt held is the app's and travels on.
   test.each([
