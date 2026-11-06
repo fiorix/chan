@@ -89,9 +89,16 @@
 # run makes: no chan-desktop install or uninstall entry, `~/.chan`, app or
 # WebView2 data, installer registry key, shortcut, or the desktop's
 # `%LOCALAPPDATA%\chan\bin` on the user Path. The run installs, then
-# uninstalls and deletes all of it, and puts the user Path back as it found
-# it. On this host: ssh, scp, python3, sha256sum, base64, timeout and Node 22
-# or later. Exits 2 when a prerequisite is missing rather than passing.
+# uninstalls with the installer's own silent uninstaller and checks what that
+# leaves: nothing that points at the install (the install directory with the
+# shims in it, the installer's registry key, the uninstall entry, the
+# shortcuts, and a user Path that reads as it did before the install, type
+# included), while the `~/.chan` and webview data the run made, which a
+# silent uninstall keeps, are still there. Each miss is named and fails the
+# run. It then deletes the run's state and anything the uninstaller left, and
+# puts the user Path back when it reads as the desktop's append left it. On
+# this host: ssh, scp, python3, sha256sum, base64, timeout and Node 22 or
+# later. Exits 2 when a prerequisite is missing rather than passing.
 #
 # Everything runs under a throwaway work dir on this host, a per-run
 # directory under the client's TEMP and a per-run work dir on the peer. The
@@ -256,6 +263,7 @@ $bin = (Join-Path $env:LOCALAPPDATA 'chan\bin').ToLower()
 if (@(([string]$path).Split(';') | Where-Object { [Environment]::ExpandEnvironmentVariables($_.Trim()).TrimEnd('\', '/').ToLower() -eq $bin }).Count) { $state += "$bin on the user Path" }
 "state=$($state -join '; ')"
 "userpath_had=$($null -ne $path)"
+"userpath_kind=$(if ($null -ne $path) { (Get-Item HKCU:\Environment).GetValueKind('Path') })"
 "userpath_b64=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$path)))"
 PS
 )"; then
@@ -271,6 +279,7 @@ client_field() { printf '%s\n' "$CLIENT_PROBE" | sed -n "s/^$1=//p"; }
 [ "$(client_field running)" = 0 ] || refuse "chan-desktop is running on $CLIENT_SSH"
 [ -z "$(client_field state)" ] || refuse "chan has state on $CLIENT_SSH that this run would delete: $(client_field state)"
 USERPATH_HAD="$(client_field userpath_had)"
+USERPATH_KIND="$(client_field userpath_kind)"
 USERPATH_B64="$(client_field userpath_b64)"
 case "$USERPATH_HAD" in True | False) ;; *) refuse "the user Path on $CLIENT_SSH could not be read: $CLIENT_PROBE" ;; esac
 CLIENT_OS="$(client_field os), WebView2 $(client_field webview2)"
@@ -293,9 +302,10 @@ cleanup() {
         [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
     done
     # On the client: the task, the desktop and its webviews, the install by
-    # its own uninstaller and then what a silent uninstall keeps (the app
-    # data, the installer's registry key, the bin dir the desktop put on the
-    # user Path), and the run's directory, which holds the client files.
+    # its own silent uninstaller, then a check of what that left: nothing
+    # that points at the install, and the user's state it keeps. Then the
+    # run's own state and anything the uninstaller left go, and the run's
+    # directory, which holds the client files.
     if [ -n "$CLIENT_DIR" ]; then
         if out="$(client_ps 300 <<PS
 \$left = @()
@@ -303,32 +313,67 @@ Unregister-ScheduledTask -TaskName '$TAG' -Confirm:\$false -ErrorAction Silently
 Get-Process chan-desktop -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like "\$env:LOCALAPPDATA\Chan\*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 for (\$i = 0; \$i -lt 40; \$i++) { if (-not (Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { \$_.CommandLine -like '*app.chan.desktop*' })) { break }; Start-Sleep -Milliseconds 250 }
 if ('$INSTALLED') {
-    \$un = "\$env:LOCALAPPDATA\Chan\uninstall.exe"
+    \$dir = "\$env:LOCALAPPDATA\Chan"
+    \$un = "\$dir\uninstall.exe"
+    # A silent uninstall keeps the user's state; what of it the run made
+    # before the uninstall must still be there after it.
+    \$kept = @("\$env:USERPROFILE\.chan", "\$env:LOCALAPPDATA\app.chan.desktop") | Where-Object { Test-Path -LiteralPath \$_ }
     if (Test-Path -LiteralPath \$un) {
-        \$u = Start-Process -FilePath \$un -ArgumentList '/S' -PassThru -Wait
-        "uninstall=exit \$(\$u.ExitCode), chan-desktop.exe still there: \$(Test-Path "\$env:LOCALAPPDATA\Chan\chan-desktop.exe")"
+        # _?= keeps NSIS in this process, so -Wait is the end of the
+        # uninstall; it also leaves the uninstaller itself behind, which goes
+        # with the directory once that is empty, as in the release workflows.
+        \$u = Start-Process -FilePath \$un -ArgumentList '/S', "_?=\$dir" -PassThru -Wait
+        "uninstall=exit \$(\$u.ExitCode), chan-desktop.exe still there: \$(Test-Path "\$dir\chan-desktop.exe")"
+        Remove-Item -LiteralPath \$un -Force -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath \$dir) -and -not (Get-ChildItem -LiteralPath \$dir -Force)) { Remove-Item -LiteralPath \$dir -Force -ErrorAction SilentlyContinue }
     } else {
         "uninstall=no uninstaller"
     }
-    foreach (\$p in "\$env:USERPROFILE\.chan", "\$env:LOCALAPPDATA\app.chan.desktop", "\$env:APPDATA\app.chan.desktop", "\$env:LOCALAPPDATA\Chan") {
-        if (Test-Path -LiteralPath \$p) { Remove-Item -LiteralPath \$p -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath \$dir) {
+        \$what = @(Get-ChildItem -LiteralPath \$dir -Recurse -Force | ForEach-Object { \$_.FullName.Substring(\$dir.Length + 1) }) -join ', '
+        \$left += "left by the uninstaller: \$dir (\$what)"
     }
-    Remove-Item -LiteralPath 'HKCU:\Software\chan\Chan' -Recurse -Force -ErrorAction SilentlyContinue
-    \$manu = Get-Item -LiteralPath 'HKCU:\Software\chan' -ErrorAction SilentlyContinue
-    if (\$manu -and \$manu.SubKeyCount -eq 0 -and \$manu.ValueCount -eq 0) { Remove-Item -LiteralPath 'HKCU:\Software\chan' -Force -ErrorAction SilentlyContinue }
-    foreach (\$p in "\$env:LOCALAPPDATA\Chan", "\$env:USERPROFILE\.chan", "\$env:LOCALAPPDATA\app.chan.desktop", "\$env:APPDATA\app.chan.desktop", 'HKCU:\Software\chan\Chan', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Chan', "\$([Environment]::GetFolderPath('Programs'))\Chan.lnk", "\$([Environment]::GetFolderPath('Desktop'))\Chan.lnk") {
-        if (Test-Path -LiteralPath \$p) { \$left += \$p }
+    foreach (\$p in 'HKCU:\Software\chan\Chan', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Chan', "\$([Environment]::GetFolderPath('Programs'))\Chan.lnk", "\$([Environment]::GetFolderPath('Desktop'))\Chan.lnk") {
+        if (Test-Path -LiteralPath \$p) { \$left += "left by the uninstaller: \$p" }
     }
-    # The desktop appends its bin dir to the user Path the way
-    # path_with_dir_appended does; only that exact value is put back, and
-    # any other is left alone and reported.
+    # The user Path reads as it did before the install, unexpanded and with
+    # the same type, or is absent when it was.
     \$bin = Join-Path \$env:LOCALAPPDATA 'chan\bin'
     \$orig = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$USERPATH_B64'))
     \$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', \$true)
     \$cur = \$envKey.GetValue('Path', \$null, 'DoNotExpandEnvironmentNames')
     if ('$USERPATH_HAD' -eq 'True') {
-        \$added = if (\$orig -eq '') { \$bin } elseif (\$orig.EndsWith(';')) { "\$orig\$bin" } else { "\$orig;\$bin" }
-        if (\$cur -ceq \$added) { \$envKey.SetValue('Path', \$orig, \$envKey.GetValueKind('Path')) }
+        if (\$null -eq \$cur) {
+            \$left += 'left by the uninstaller: no user Path, which existed before the install'
+        } elseif (\$cur -cne \$orig) {
+            \$left += "left by the uninstaller: the user Path '\$cur', which read '\$orig' before the install"
+        } elseif ([string]\$envKey.GetValueKind('Path') -cne '$USERPATH_KIND') {
+            \$left += "left by the uninstaller: the user Path as \$(\$envKey.GetValueKind('Path')), which was $USERPATH_KIND before the install"
+        }
+    } elseif (\$null -ne \$cur) {
+        \$left += "left by the uninstaller: the user Path '\$cur', which did not exist before the install"
+    }
+    foreach (\$p in \$kept) {
+        if (-not (Test-Path -LiteralPath \$p)) { \$left += "removed by the silent uninstall, which keeps it: \$p" }
+    }
+    foreach (\$p in "\$env:USERPROFILE\.chan", "\$env:LOCALAPPDATA\app.chan.desktop", "\$env:APPDATA\app.chan.desktop", \$dir) {
+        if (Test-Path -LiteralPath \$p) { Remove-Item -LiteralPath \$p -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    Remove-Item -LiteralPath 'HKCU:\Software\chan\Chan' -Recurse -Force -ErrorAction SilentlyContinue
+    \$manu = Get-Item -LiteralPath 'HKCU:\Software\chan' -ErrorAction SilentlyContinue
+    if (\$manu -and \$manu.SubKeyCount -eq 0 -and \$manu.ValueCount -eq 0) { Remove-Item -LiteralPath 'HKCU:\Software\chan' -Force -ErrorAction SilentlyContinue }
+    foreach (\$p in \$dir, "\$env:USERPROFILE\.chan", "\$env:LOCALAPPDATA\app.chan.desktop", "\$env:APPDATA\app.chan.desktop", 'HKCU:\Software\chan\Chan', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Chan', "\$([Environment]::GetFolderPath('Programs'))\Chan.lnk", "\$([Environment]::GetFolderPath('Desktop'))\Chan.lnk") {
+        if (Test-Path -LiteralPath \$p) { \$left += \$p }
+    }
+    # An uninstaller that left the desktop's entry is already a failure
+    # above; the value is still put back when it reads exactly as a desktop
+    # append leaves it (path_with_dir_appended; after a value that ends in a
+    # semicolon, with or without one after the entry), so the next run can
+    # start. Any other value is left alone and reported.
+    \$cur = \$envKey.GetValue('Path', \$null, 'DoNotExpandEnvironmentNames')
+    if ('$USERPATH_HAD' -eq 'True') {
+        \$added = if (\$orig -eq '') { @(\$bin) } elseif (\$orig.EndsWith(';')) { @("\$orig\$bin;", "\$orig\$bin") } else { @("\$orig;\$bin") }
+        if (\$added -ccontains \$cur) { \$envKey.SetValue('Path', \$orig, \$envKey.GetValueKind('Path')) }
         if (\$envKey.GetValue('Path', \$null, 'DoNotExpandEnvironmentNames') -cne \$orig) { \$left += 'the user Path' }
     } else {
         if (\$cur -ceq \$bin) { \$envKey.DeleteValue('Path') }
