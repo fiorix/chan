@@ -250,9 +250,10 @@ fn print_status(tunnel: &Tunnel, when: &str) {
     let status = tunnel.status();
     println!(
         "status {when}: handshake {}, tx {} bytes, rx {} bytes, endpoint {}",
-        match status.last_handshake {
-            Some(ago) => format!("{:.1}s ago", ago.as_secs_f64()),
-            None => "never".to_string(),
+        match status.handshake {
+            chan_wireguard::HandshakeState::Live(ago) => format!("{:.1}s ago", ago.as_secs_f64()),
+            chan_wireguard::HandshakeState::Never | chan_wireguard::HandshakeState::Lost(_) =>
+                "never".to_string(),
         },
         status.tx_bytes,
         status.rx_bytes,
