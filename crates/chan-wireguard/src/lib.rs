@@ -15,8 +15,8 @@
 //! TCP connections to the peer's addresses with [`Tunnel::connect`] and
 //! gets a tokio [`Stream`], with no interface, route or privilege on the
 //! host. [`config::Config`] is read from the wg-quick file format.
-//! [`ConnectProxy`] is a loopback HTTP proxy over a set of tunnels for
-//! the dialers that cannot call `connect` themselves, a webview among
+//! [`ConnectProxy`] is a loopback HTTP proxy over a live table of tunnels
+//! for the dialers that cannot call `connect` themselves, a webview among
 //! them: it serves CONNECT and forwards plain-HTTP requests, and a
 //! destination inside a tunnel's AllowedIPs goes through that tunnel
 //! while anything else is connected directly.
@@ -38,7 +38,7 @@ mod stream;
 mod testing;
 mod tunnel;
 
-pub use proxy::ConnectProxy;
+pub use proxy::{ConnectProxy, ProxyRoute};
 pub use stream::{Listener, Stream};
 pub use tunnel::{Status, Tunnel};
 
