@@ -47,15 +47,21 @@ profile-service never migrates the schema at serve time. `CHAN_GATEWAY_MIGRATION
 | `DEVSERVER_ADMIN_URL`           | yes      | devserver-control admin base    |
 | `DEVSERVER_PROFILE_ADMIN_TOKEN` | yes      | profile-scoped control token    |
 | `DEVSERVER_RETENTION_MINUTES`   | no       | sweeper retention; `0` disables |
+| `WIREGUARD_POOL_V4`            | no       | IPv4 CIDR; enables enrollment  |
+| `WIREGUARD_POOL_V6`            | no       | optional IPv6 CIDR             |
+| `WIREGUARD_POOL_RESERVED`      | no       | comma-separated excluded IPs   |
+| `WIREGUARD_RELEASE_GRACE_MINUTES` | no    | denial-to-release delay; 5 min |
 | `RUST_LOG`                      | no       | tracing filter, default info    |
 
 A missing or empty `PROFILE_ADMIN_TOKEN` makes every `/v1/admin/*` route answer unauthorized; that is the safe default for a fresh deploy. `DEVSERVER_RETENTION_MINUTES` drives the devserver registry sweeper; unset means the built-in default and an unparseable value fails startup.
+
+WireGuard enrollment requires `WIREGUARD_POOL_V4`; without it enrollment answers 503. The IPv6 pool and reserved list require that IPv4 pool. Pools exclude their network and first host address, plus the last IPv4 address and explicit reservations. The release grace is a nonnegative whole number of minutes; `0` releases denied peers on the next sweep. Disabling devserver retention does not disable peer release.
 
 ## Routes
 
 All routes are bearer-gated. The service-tier middleware accepts either the regular or the admin token, so single-token deployments can set `PROFILE_ADMIN_TOKEN = PROFILE_AUTH_TOKEN`.
 
-Service API (`/v1/users/*`, `/v1/auth-audit`):
+Service API (`/v1/users/*`, `/v1/auth-audit`, `/v1/wireguard/peers`):
 
 | Method | Path                                      | Purpose                          |
 |--------|-------------------------------------------|----------------------------------|
@@ -82,6 +88,12 @@ Service API (`/v1/users/*`, `/v1/auth-audit`):
 | POST   | `/v1/users/{id}/grants/claim`             | claim pending grants by email    |
 | GET    | `/v1/users/{id}/flags`                    | resolved flags for one user      |
 | POST   | `/v1/auth-audit`                          | append an auth event             |
+| POST   | `/v1/users/{id}/wireguard/peers`           | enroll key or replace its PAT    |
+| GET    | `/v1/wireguard/peers?host=p1`              | active peers; ETag and 304        |
+
+Enrollment takes `{token_id, public_key, host}`. Keys are padded standard base64 encoding exactly 32 bytes; hosts are single lowercase DNS labels. A new key returns 201 with `{id, user_id, token_id, host, public_key, addresses, created_at, updated_at}`; addresses use `/32` and optional `/128` host prefixes. The same user's key moves to the supplied token, preserves its addresses and returns 200. Another user's key or an exhausted pool returns 409; an unknown or differently owned token returns 404. Enrollment and release append `wireguard_enrolled` and `wireguard_released` to the token audit.
+
+The active list returns `{host, peers: [{public_key, allowed_ips}]}`, sorted by public key. Revocation, expiry and user block remove a peer from this response immediately; unknown hosts return an empty list. `ETag` is the quoted hex SHA-256 of the response bytes, and a matching `If-None-Match` returns 304 without a body. Denied peers keep their addresses until the sweeper releases them after the configured grace.
 
 Admin API (`/v1/admin/*`):
 

@@ -16,6 +16,7 @@ One Postgres database, migrated only by the dedicated `CHAN_GATEWAY_MIGRATIONS=o
 
 - `users` and `identities`: the canonical record and its provider identities, unique per `(provider, provider_subject)`. Email and username are unique case-insensitively.
 - `api_tokens` and `api_token_audit`: PATs by digest with their scopes, and the per-token history. identity writes these directly; profile serves the admin views over them.
+- `wireguard_peers`: one enrolled public key per host, tied to its user and PAT, with unique per-host IPv4 and optional IPv6 addresses. Profile owns enrollment, active-list reads and address release; identity has no direct table privileges.
 - `auth_audit`: login, logout, denial, block and similar events per user.
 - `devservers`: an owner's shareable devserver, keyed by `(owner_user_id, devserver_id)`, where the id is the digest of the owner's PAT. It is the FK target for grants and lets the dashboard list a devserver that has no grant and no live tunnel yet.
 - `devserver_grants`: one binary, whole-devserver grant per `(owner, devserver, grantee email)`, with the grantee user filled in when a matching sign-in is observed. There is no role column.
@@ -50,6 +51,16 @@ erDiagram
         bigint id PK
         uuid token_id FK
         text action "created/used/revoked"
+    }
+    WIREGUARD_PEERS {
+        uuid id PK
+        uuid user_id FK
+        uuid token_id FK "unique"
+        text host "UK part"
+        text public_key "UK with host"
+        text address_v4 "UK with host"
+        text address_v6 "nullable; UK with host"
+        timestamptz updated_at
     }
     AUTH_AUDIT {
         bigint id PK
@@ -92,6 +103,8 @@ erDiagram
     USERS ||--o{ FEATURE_FLAG_OVERRIDES : "user_id cascade"
     USERS ||--o| DEVSERVER_USER_POLICIES : "user_id"
     API_TOKENS ||--o{ API_TOKEN_AUDIT : "token_id cascade"
+    API_TOKENS ||--o| WIREGUARD_PEERS : "token_id cascade"
+    USERS ||--o{ WIREGUARD_PEERS : "user_id cascade"
     DEVSERVERS ||--o{ DEVSERVER_GRANTS : "owner+devserver_id cascade"
     FEATURE_FLAGS ||--o{ FEATURE_FLAG_OVERRIDES : "flag_key cascade"
 ```
@@ -100,11 +113,11 @@ erDiagram
 
 ## Routing and authentication
 
-Two tiers behind two bearers. The service tier (`/v1/users/*`, `/v1/auth-audit`) admits either `PROFILE_AUTH_TOKEN` or `PROFILE_ADMIN_TOKEN`; the admin tier (`/v1/admin/*`) admits only the admin token. Both checks always run, in constant time, so a wrong token cannot oracle which leg matched. The service tier accepting the admin token is what lets a single-token deployment work without code changes, while deployments that want independent rotation just set different values.
+Two tiers behind two bearers. The service tier (`/v1/users/*`, `/v1/auth-audit`, `/v1/wireguard/peers`) admits either `PROFILE_AUTH_TOKEN` or `PROFILE_ADMIN_TOKEN`; the admin tier (`/v1/admin/*`) admits only the admin token. Both checks always run, in constant time, so a wrong token cannot oracle which leg matched. The service tier accepting the admin token is what lets a single-token deployment work without code changes, while deployments that want independent rotation just set different values.
 
 ## Background work
 
-Two workers start with the HTTP server and stop with it: the revocation worker and the devserver registry sweeper. `http::app` builds the router alone and starts no background work, so tests compose the router without them.
+Two workers start with the HTTP server and stop with it: the revocation worker and the sweeper. The sweeper releases denied WireGuard peers and, when registry retention is enabled, sweeps devservers. `http::app` builds the router alone and starts no background work, so tests compose the router without them.
 
 ### Durable revocation
 
@@ -114,7 +127,15 @@ An account-delete job is never dropped: an exhausted one is reset and reschedule
 
 ### Registry sweeper
 
-The sweeper marks `devservers` rows from the controller's live-tunnel snapshot once a minute and deletes rows that have been offline longer than the configured retention. Rows carrying grants are never swept, and a tick that cannot fetch the snapshot deletes nothing. identity recreates the row on the next validate a dial or lease refresh drives, so a swept devserver is back as soon as it dials again.
+The sweeper marks `devservers` rows from the controller's live-tunnel snapshot once a minute and deletes rows that have been offline longer than the configured retention. Rows carrying grants are never swept, and a tick that cannot fetch the snapshot changes no devserver rows. identity recreates the row on the next validate a dial or lease refresh drives, so a swept devserver is back as soon as it dials again.
+
+### WireGuard peers and address release
+
+Enrollment locks the user before the token, then takes a host-scoped transaction advisory lock for allocation and replacement. Each configured pool assigns its lowest unheld address, skipping the network, first host, explicit reservations and IPv4 broadcast address. Rows retain their addresses while denied. A same-user key moves to the new token without reallocating; another user's key is a conflict. The row and its `wireguard_enrolled` audit entry commit together.
+
+The active list joins tokens and users, excludes revoked or expired tokens and blocked users, and sorts keys in byte order. Its ETag is the quoted hexadecimal SHA-256 of the serialized response bytes, computed by PostgreSQL; conditional reads return 304 for the same validator. There is no cached authorization state.
+
+Every sweep releases denied rows whose grace has elapsed since the earliest applicable denial timestamp: token revocation, past expiry or user block, bounded below by the peer's latest enrollment timestamp. Release uses the same host lock as allocation, deletes the row and writes `wireguard_released` in one transaction. It runs even when the registry sweep is disabled or its controller is unavailable. An address is reusable only after that deletion; user and token deletion also remove peers through their foreign keys.
 
 ## Key decisions
 

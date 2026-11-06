@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 gateway-common = { workspace = true }
+ipnet = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }

@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
+use crate::wireguard::{EnrolledPeer, PeerListResponse};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
     #[error("not found")]
@@ -783,6 +785,66 @@ impl ProfileClient {
             StatusCode::NOT_FOUND => Err(ProfileError::NotFound),
             StatusCode::BAD_REQUEST => Err(ProfileError::BadRequest(read_error(res).await)),
             s => Err(upstream(s, res).await),
+        }
+    }
+
+    /// Enroll a public key, retaining its addresses when the owner replaces its token.
+    pub async fn enroll_wireguard_peer(
+        &self,
+        user_id: Uuid,
+        token_id: Uuid,
+        public_key: &str,
+        host: &str,
+    ) -> ProfileResult<EnrolledPeer> {
+        let res = self
+            .req(
+                reqwest::Method::POST,
+                &format!("/v1/users/{user_id}/wireguard/peers"),
+            )
+            .json(
+                &serde_json::json!({"token_id": token_id, "public_key": public_key, "host": host}),
+            )
+            .send()
+            .await?;
+        match res.status() {
+            StatusCode::CREATED | StatusCode::OK => Ok(res.json().await?),
+            StatusCode::NOT_FOUND => Err(ProfileError::NotFound),
+            StatusCode::BAD_REQUEST => Err(ProfileError::BadRequest(read_error(res).await)),
+            StatusCode::CONFLICT => Err(ProfileError::Conflict(read_error(res).await)),
+            status => Err(upstream(status, res).await),
+        }
+    }
+
+    /// Read the active peer set, preserving the response body and its validator.
+    pub async fn list_wireguard_peers(
+        &self,
+        host: &str,
+        if_none_match: Option<&str>,
+    ) -> ProfileResult<PeerListResponse> {
+        let mut request = self
+            .req(reqwest::Method::GET, "/v1/wireguard/peers")
+            .query(&[("host", host)]);
+        if let Some(etag) = if_none_match {
+            request = request.header(header::IF_NONE_MATCH, etag);
+        }
+        let res = request.send().await?;
+        let status = res.status();
+        if status != StatusCode::OK && status != StatusCode::NOT_MODIFIED {
+            return Err(upstream(status, res).await);
+        }
+        let etag = res
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| ProfileError::Upstream("peer list has no valid ETag".into()))?
+            .to_string();
+        if status == StatusCode::NOT_MODIFIED {
+            Ok(PeerListResponse::NotModified { etag })
+        } else {
+            Ok(PeerListResponse::Modified {
+                body: res.bytes().await?.to_vec(),
+                etag,
+            })
         }
     }
 
