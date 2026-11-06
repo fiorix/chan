@@ -1,6 +1,6 @@
 # The PPA has built no binaries since v0.116.0 because a dependency needs Rust 1.95
 
-Status: accepted by the owner on 2026-11-05 at the v0.124.0 close; not started.
+Status: implemented; vendored archive-compiler builds and the next release's successful Launchpad builds remain to be recorded.
 
 ## What was found
 
@@ -25,3 +25,11 @@ The v0.124.0 read-back found every Launchpad build of `chan` and `chan-desktop` 
 1. With the change, `chan` and `chan-desktop` build from the vendored source package in a noble chroot with `rustc-1.91` and in a resolute chroot with `rustc-1.93`, both arches or the arch the chroot gives, and the tmux foreground test passes on Linux.
 2. A check run by the gate or CI fails when a dependency's rust-version exceeds the oldest builder Rust, shown red by reverting the pin and green with it.
 3. The next release's Launchpad builds succeed, and its record reads them from Launchpad's API.
+
+## Implementation and validation
+
+`sysinfo` is held at 0.38.4 for the PPA builders, with its process-table constructor used as a value. `make rust-floor-check` checks external normal/build dependencies of both Linux packages against the one Debian floor and verifies both control files agree, with whole dependency paths in failures; workspace members remain exempt under `--ignore-rust-version`. The gate runs the checker and its constructed graph tests.
+
+`lp-builds.sh` reads the exact suffixed source version and the publication's paginated `getBuilds` records, distinguishing success, failure, pending and API errors. The release procedure requires successful reads for both packages on both series, and the upload workflow prints the reader command without waiting for builds. The fixture suite uses the recorded two-architecture response and a curl stand-in.
+
+The host checks cover the tmux process-table regression, both package compiles, clippy, formatting, dependency-floor and control-file refusals, Launchpad response verdicts and pagination, and packaging static checks. The committed mutation and restored-result records are in the release coordination evidence. The Linux chroot builds with the archive compilers, the Nix build cross-check, macOS/FreeBSD compilation, and the next release's successful binary publication are separate proofs; these host checks do not establish them.

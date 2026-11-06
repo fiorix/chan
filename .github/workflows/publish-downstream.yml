@@ -419,7 +419,9 @@ jobs:
 
       - name: Upload to the PPA
         if: env.SKIP_PPA != '1' && env.PUBLISH == 'true'
-        run: packaging/distros/debian/upload.sh
+        run: |
+          packaging/distros/debian/upload.sh
+          echo "After the binary builds finish, run for both packages on each series: packaging/distros/debian/lp-builds.sh <source-name> <full-debian-version> <series>"
 
       # The report names only what the steps observed: a dry run that claims
       # work it did not do is worse than no dry run, and so is one that blames
