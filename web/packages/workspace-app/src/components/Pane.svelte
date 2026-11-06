@@ -561,9 +561,14 @@
     e.preventDefault();
     const held = document.activeElement;
     paneContextOpener = held instanceof HTMLElement && held !== document.body ? held : null;
-    setActivePane(pane.id);
     closePaneHamburgerMenu();
     paneContextMenu?.openAtCursor(e.clientX, e.clientY);
+  }
+
+  function keepsRightPressFocus(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+    if (target.closest(".tabs") && !target.closest(".tab")) return true;
+    return Boolean(target.closest(".editor-wrap") && (!active || paneMode.active || active.kind === "dashboard" || active.kind === "extension"));
   }
 
   /// Fire the same `chan:command` event the keymap layer uses so
@@ -1396,6 +1401,7 @@
   data-pane-id={pane.id}
   onmousedown={(e) => {
     if (paneMode.stale) return;
+    if (e.button === 2 && keepsRightPressFocus(e.target)) return;
     if (!(e.button === 0 && pendingTerminalPress)) setActivePane(pane.id);
   }}
   onanimationend={(e) => {
@@ -1422,6 +1428,17 @@
     ondragover={onDragOver}
     ondragleave={onDragLeave}
     ondrop={onDrop}
+    onmousedown={(e) => {
+      if (e.button === 0 && (e.target as Element | null)?.closest(".dead-zone")) {
+        e.preventDefault();
+        setActivePane(pane.id);
+        if (active?.kind === "terminal" || active?.kind === "file") bumpTabFocusPulse();
+        else if (!active) paneEl?.querySelector<HTMLElement>(".welcome")?.focus({ preventScroll: true });
+      }
+      // The browser blurs the current surface on a right press in empty
+      // strip space, or focuses an action button before its native menu.
+      if (e.button === 2 && !(e.target as Element | null)?.closest(".tab")) e.preventDefault();
+    }}
     oncontextmenu={(e) => {
       if ((e.target as Element | null)?.closest(".tab, .actions")) return;
       openPaneContextAt(e);
@@ -1836,6 +1853,10 @@
     ondragover={onBodyDragOver}
     ondragleave={onBodyDragLeave}
     ondropcapture={onBodyDropCapture}
+    onmousedown={(e) => {
+      // These surfaces have no caret to take focus from the current holder.
+      if (e.button === 2 && keepsRightPressFocus(e.target)) e.preventDefault();
+    }}
     oncontextmenu={onBodyContextMenu}
     role="group"
     aria-label="pane content"
