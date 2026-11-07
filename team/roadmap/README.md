@@ -41,7 +41,7 @@ Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one t
 | [a WireGuard file set after start waits for a restart][wgfabric] | built | candidate |
 | [the sdme build drivers' rootfs checks race their listing][sdmegrep] | built | candidate |
 | [Cmd+C does not copy selected survey text][surveycopy] | built | candidate |
-| [windows come back see-through after a display sleep][wakeblank] | accepted | build |
+| [windows come back see-through after a display sleep][wakeblank] | built | candidate |
 | [the identity role cannot take the PAT mint's row locks][gwlocks] | built | candidate |
 
 [wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
