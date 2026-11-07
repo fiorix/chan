@@ -138,8 +138,8 @@ objc2 = "0.6"
 # (what `addButtonWithTitle` returns) and `NSResponder` gates
 # `NSApplication`; the dialog's calls on both types sit behind them.
 # `NSWorkspace` carries the workspace notification center and its wake
-# notification names, and `NSWindow` gates `NSApplication::windows` and a
-# window's content view, which the wake repaint walks for its webviews
+# notification names, and `NSWindow` the occlusion notification name and a
+# window's occlusion state, which the wake repaint observes
 # (src/wake_repaint.rs).
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSPasteboard", "NSResponder", "NSView", "NSWindow", "NSWorkspace"] }
 # `NSString` carries the dialog text and the pasteboard names and types;
@@ -147,10 +147,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # `NSEnumerator` gates the `NSArray::iter` that walks it. `NSProcessInfo`
 # reads the running macOS version so the updater can refuse a build whose
 # minimum system version exceeds it (src/update_floor.rs). `NSNotification`
-# types the wake observer's argument and its center; `NSGeometry` with
-# `objc2-core-foundation` gives the `NSRect` a webview frame is read and set
-# as (src/wake_repaint.rs).
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry", "NSNotification", "NSProcessInfo", "NSString", "objc2-core-foundation"] }
+# types the wake observer's argument and both notification centers
+# (src/wake_repaint.rs).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSNotification", "NSProcessInfo", "NSString"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
