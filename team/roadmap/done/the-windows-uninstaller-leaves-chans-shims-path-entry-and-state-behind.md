@@ -1,6 +1,8 @@
 # The Windows uninstaller leaves chan's shims, Path entry and state behind
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); read in a clean Windows 11 guest against the v0.124.0 installer.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); read in a clean Windows 11 guest against the v0.124.0 installer.
 
 ## What was seen
 

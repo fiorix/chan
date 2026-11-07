@@ -1,6 +1,8 @@
 # Cmd+C does not copy selected text in a terminal survey
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the owner's native macOS clipboard reading is taken from the candidate.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the owner's native macOS clipboard reading is taken from the candidate.
 
 ## What is there now
 

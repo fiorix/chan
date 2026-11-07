@@ -1,6 +1,8 @@
 # A wrong WireGuard peer key reads as a generic gateway discovery error
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the Linux and Windows wrong-key arms read green in the release's guests.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the Linux and Windows wrong-key arms read green in the release's guests.
 
 ## What was seen
 

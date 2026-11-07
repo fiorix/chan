@@ -21,47 +21,48 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.125.0
+### v0.126.0
 
-Opened 2026-11-05 at the v0.124.0 close with nine items that version left, one the owner asked for and one its read-back found. The owner accepted WireGuard enrollment at gateway sign-in the same day, with its design decided and two questions open ([wgenrol]). The Windows desktop WireGuard run left three findings, made rows by the owner's word: a wrong peer key read as a generic discovery error ([wgwrongkey]), the core's ERROR-level expiry line ([wgexpiry]) and WebView2's own 504 page ([wv2504]). The third review of the endpoint resolution change left two defects in the endpoint rule, shipped as they are by the owner's word, joined here with the rotating name the rule's design leaves open ([wgrule]). The round's Windows guest found the uninstaller's leftovers ([winuninst]); two WireGuard e2e suites reach past their isolation ([wge2e]); and the Escape fix for the terminal's menu left two menu findings ([stripfocus], [bubbleesc]). After the Mac reading of the release commit the owner asked to move the Homebrew packages to `fiorix/tap` once v0.124.0 is tagged ([tapmove]). The release's read-back found that the PPA has built no binaries since v0.116.0, which the owner accepted ([ppabuild]). The release's live enrollment proof found that the packaged database role policy denied the token mint its row locks, so a packaged gateway answered 500 to every desktop sign-in; the owner accepted the fix as a row ([gwlocks]). During the first release candidate the owner found chan windows coming back see-through after a display sleep on macOS, the webview presenting no frame after the wake, and accepted it for the candidate cycle ([wakeblank]).
+Opened 2026-11-07 at the v0.125.0 close with six items that release's readings and proofs found and the owner placed here at its cut, none of them built in it. The integration gate's red runs name a set of chan-server and chan-desktop tests whose wall-clock bounds a loaded host breaks ([timebound]). The reading of the desktop enrollment found a minted PAT that nothing revokes when the desktop refuses the redeem's answer or its token store fails ([patrevoke]). The enrollment proof ran without TLS because the desktop's and the peer agent's Rust clients trust the bundled roots alone and ignore a CA in the system store ([systemca]). The Windows kernel suite's first run refused a target the pinned toolchain had, because its preflight reads rustup outside the checkout ([winpreflight]). The Mac reading of the display-sleep repaint found WebKit logging a visibility transition at each wake that the terminal tab's comment says never reaches the page, and the owner sees a window back with its title bar alone for a second or two before the terminal paints ([wakevis]). The role-lock work found that no CI job runs the gateway's manifest, packaging isolation and database roles suites, which let the Kubernetes ConfigMap's copy of the reconcile script drift ([gwci]).
 
 | Item | State | Next |
 | --- | --- | --- |
-| [WireGuard enrollment at gateway sign-in][wgenrol] | built | candidate |
-| [a wrong peer key reads as a discovery error][wgwrongkey] | built | candidate |
-| [a WireGuard expiry logs at ERROR][wgexpiry] | built | candidate |
-| [WebView2 shows Edge's 504 on a dead tunnel][wv2504] | built | candidate |
-| [the endpoint rule's probes and rotating names][wgrule] | built | candidate |
-| [the Windows uninstaller leaves chan behind][winuninst] | built | candidate |
-| [two WireGuard e2e suites reach past isolation][wge2e] | built | candidate |
-| [a strip right-click leaves focus on body][stripfocus] | built | candidate |
-| [two menus take Escape in the bubble phase][bubbleesc] | built | candidate |
-| [Homebrew packages move to fiorix/tap][tapmove] | built | candidate |
-| [the PPA has built nothing since v0.116.0][ppabuild] | built | candidate |
-| [a WireGuard file set after start waits for a restart][wgfabric] | built | candidate |
-| [the sdme build drivers' rootfs checks race their listing][sdmegrep] | built | candidate |
-| [Cmd+C does not copy selected survey text][surveycopy] | built | candidate |
-| [windows come back see-through after a display sleep][wakeblank] | built | candidate |
-| [the identity role cannot take the PAT mint's row locks][gwlocks] | built | candidate |
+| [time-bound tests go red on a loaded host][timebound] | not started | design |
+| [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
+| [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
+| [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | not started | build |
+| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | not started | reading |
+| [no CI job runs the gateway packaging and roles suites][gwci] | not started | build |
 
-[wgenrol]: v0.125.0/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md
-[wgwrongkey]: v0.125.0/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md
-[wgexpiry]: v0.125.0/a-wireguard-handshake-that-expires-logs-at-error.md
-[wv2504]: v0.125.0/webview2-shows-edges-504-page-after-30-s-on-a-dead-wireguard-tunnel.md
-[wgrule]: v0.125.0/the-wireguard-endpoint-rules-probes-miss-a-late-cutover-and-churn-on-a-rotating-name.md
-[winuninst]: v0.125.0/the-windows-uninstaller-leaves-chans-shims-path-entry-and-state-behind.md
-[wge2e]: v0.125.0/two-wireguard-e2e-suites-reach-past-their-isolation.md
-[stripfocus]: v0.125.0/a-right-click-on-the-pane-strips-empty-stretch-leaves-focus-on-the-body.md
-[bubbleesc]: v0.125.0/the-graph-tab-menu-and-the-inspector-action-pill-take-escape-in-the-bubble-phase.md
-[tapmove]: v0.125.0/chans-homebrew-packages-move-from-fiorix-chan-to-fiorix-tap.md
-[ppabuild]: v0.125.0/the-ppa-has-built-no-binaries-since-v0116-because-a-dependency-needs-rust-195.md
-[wgfabric]: v0.125.0/a-wireguard-file-set-after-start-waits-for-a-restart.md
-[sdmegrep]: v0.125.0/the-sdme-build-drivers-rootfs-checks-race-their-own-listing-under-pipefail.md
-[surveycopy]: v0.125.0/cmd-c-does-not-copy-selected-text-in-a-terminal-survey.md
-[wakeblank]: v0.125.0/windows-come-back-see-through-after-a-display-sleep.md
-[gwlocks]: v0.125.0/the-gateway-identity-role-cannot-take-the-row-locks-pat-minting-holds.md
+[timebound]: v0.126.0/time-bound-tests-go-red-on-a-loaded-host.md
+[patrevoke]: v0.126.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
+[systemca]: v0.126.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
+[winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
+[wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
+[gwci]: v0.126.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
 
 ## Completed
+
+### v0.125.0
+
+Shipped 2026-11-07; see [release-v0.125.0](../release/release-v0.125.0.md). A three-candidate release by the owner's word: twenty-nine `--no-ff` merges of verified tips from nineteen branches into the integration branch `v0125/int` over `main` at the v0.124.0 tag `279ce66f8`, under sixteen rows, all shipped; those rows are in [`done/`](done/). One fix shipped with no row of its own: two test-only repairs of the chan-wireguard resolution tests.
+
+- [a-right-click-on-the-pane-strips-empty-stretch-leaves-focus-on-the-body](done/a-right-click-on-the-pane-strips-empty-stretch-leaves-focus-on-the-body.md) - A right-click on the pane strip's empty stretch leaves focus on the body.
+- [a-wireguard-file-set-after-start-waits-for-a-restart](done/a-wireguard-file-set-after-start-waits-for-a-restart.md) - A WireGuard file set after start waits for a restart.
+- [a-wireguard-handshake-that-expires-logs-at-error](done/a-wireguard-handshake-that-expires-logs-at-error.md) - A WireGuard handshake that expires logs at ERROR.
+- [a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error](done/a-wrong-wireguard-peer-key-reads-as-a-generic-gateway-discovery-error.md) - A wrong WireGuard peer key reads as a generic gateway discovery error.
+- [chans-homebrew-packages-move-from-fiorix-chan-to-fiorix-tap](done/chans-homebrew-packages-move-from-fiorix-chan-to-fiorix-tap.md) - chan's Homebrew packages move from fiorix/chan to fiorix/tap.
+- [cmd-c-does-not-copy-selected-text-in-a-terminal-survey](done/cmd-c-does-not-copy-selected-text-in-a-terminal-survey.md) - Cmd+C does not copy selected text in a terminal survey.
+- [the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in](done/the-add-gateway-form-enrolls-a-wireguard-key-with-the-gateway-at-sign-in.md) - The Add Gateway form enrolls a WireGuard key with the gateway at sign-in.
+- [the-gateway-identity-role-cannot-take-the-row-locks-pat-minting-holds](done/the-gateway-identity-role-cannot-take-the-row-locks-pat-minting-holds.md) - The gateway identity role cannot take the row locks PAT minting holds.
+- [the-graph-tab-menu-and-the-inspector-action-pill-take-escape-in-the-bubble-phase](done/the-graph-tab-menu-and-the-inspector-action-pill-take-escape-in-the-bubble-phase.md) - The graph tab menu and the inspector action pill take Escape in the bubble phase.
+- [the-ppa-has-built-no-binaries-since-v0116-because-a-dependency-needs-rust-195](done/the-ppa-has-built-no-binaries-since-v0116-because-a-dependency-needs-rust-195.md) - The PPA has built no binaries since v0.116.0 because a dependency needs Rust 1.95.
+- [the-sdme-build-drivers-rootfs-checks-race-their-own-listing-under-pipefail](done/the-sdme-build-drivers-rootfs-checks-race-their-own-listing-under-pipefail.md) - The sdme build drivers' rootfs checks race their own listing under pipefail.
+- [the-windows-uninstaller-leaves-chans-shims-path-entry-and-state-behind](done/the-windows-uninstaller-leaves-chans-shims-path-entry-and-state-behind.md) - The Windows uninstaller leaves chan's shims, Path entry and state behind.
+- [the-wireguard-endpoint-rules-probes-miss-a-late-cutover-and-churn-on-a-rotating-name](done/the-wireguard-endpoint-rules-probes-miss-a-late-cutover-and-churn-on-a-rotating-name.md) - The WireGuard endpoint rule's probes miss a late cutover and churn on a rotating name.
+- [two-wireguard-e2e-suites-reach-past-their-isolation](done/two-wireguard-e2e-suites-reach-past-their-isolation.md) - Two WireGuard e2e suites reach past their isolation.
+- [webview2-shows-edges-504-page-after-30-s-on-a-dead-wireguard-tunnel](done/webview2-shows-edges-504-page-after-30-s-on-a-dead-wireguard-tunnel.md) - WebView2 shows Edge's 504 page after 30 s on a dead WireGuard tunnel.
+- [windows-come-back-see-through-after-a-display-sleep](done/windows-come-back-see-through-after-a-display-sleep.md) - Windows come back see-through after a display sleep.
 
 ### v0.124.0
 

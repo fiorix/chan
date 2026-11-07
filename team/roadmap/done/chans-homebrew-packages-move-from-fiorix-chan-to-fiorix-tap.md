@@ -1,6 +1,8 @@
 # chan's Homebrew packages move from fiorix/chan to fiorix/tap
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the first push to `fiorix/homebrew-tap` and the owner's Mac install steps follow the release.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the first push to `fiorix/homebrew-tap` and the owner's Mac install steps follow the release.
 
 ## What was asked
 

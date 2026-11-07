@@ -1,0 +1,25 @@
+# Time-bound tests go red on a loaded host
+
+Status: raised on 2026-11-07 from the v0.125.0 release's integration gate runs; accepted by the owner for v0.126.0 at the v0.125.0 cut; not started.
+
+## What is there now
+
+A set of chan-server and chan-desktop tests assert that an operation completes, answers or releases within a wall-clock bound, and each bound is a fixed number of seconds chosen for an idle machine. When the gate runs in a guest that shares a host under load (loads of 17 to 54 on 16 cores were read beside the reds), the scheduler delays the test's own tasks past the bound and the test fails with no defect in the code: six of the release's seven red full-gate runs red on these tests alone, each on a different test, never twice on one test at one tip, and every one went green on a rerun of the same sha. The tests are chan-server's `--lib` suites `routes::library::devserver_route_tests` (the still-releasing answers, a forced workspace removal, a launcher delete beside an abandoned open), `routes::storage::tests` (an import beside a late reference), `routes::upload_incomplete_tests` and `routes::files::write_tests` (a stalled upload released before the reset), `routes::report::tests` (an unread report stream freeing its pool thread), `routes::open::tests` (a hosted open through the built tenant), `mcp_bridge::tests` (an unmount stopping a running tool body), `reindex_cancel_at_shutdown_tests` and `scene_sessions::tests`, and chan-desktop's `tests::hung_root::held_restore::a_relinked_forget_answers_in_the_handoff_reply_budget` and `tests::hung_root::forgetting_a_workspace_answers_while_another_root_hangs`. Each guards a real resilience property: a call that answers while another root hangs, a release that completes after its holder drops, a budget that a handoff reply keeps. The property is what matters; the wall-clock bound is how the test reads it today, and the bound is what a loaded host breaks.
+
+## Desired contract
+
+1. Each of these tests asserts its resilience property without a wall-clock bound a loaded host can exceed: the order of events (the answer arrives while the hang holds, the release completes after the drop), a controlled clock where the product contract is a duration (tokio's paused time or an injected clock for the reply budgets), or a bound measured against the test's own observed scheduling latency on that run.
+2. The property stays under test: breaking the code the test guards (a hang that is not isolated, a release that never completes, a budget that is not kept) fails the test on an idle host and on a loaded one alike.
+3. A full gate run on a loaded host no longer reds on these tests; a red on one of them reads as code.
+
+## Boundaries
+
+- The tests and the test-only clock or ordering helpers they need; no product change except a test seam the clock injection requires, gated by the same `cfg` as its callers.
+- The same tests under the same names where a name still says what is asserted; no test deleted, no assertion weakened to a completion check.
+- No new dependency; tokio's `test-util` time is already in the tree for chan-server and the desktop.
+
+## Acceptance
+
+1. Each named test, run in a loop under an induced CPU load (a load generator beside the suite, or the suite confined to a CPU-capped cgroup), passes every time where the old assertion red at least once under the same load, run by run in one record.
+2. For each test, a constructed break of the property it guards (the fixture made not to answer, not to release, or to exceed the budget) reds the new assertion.
+3. `make pre-push` green at the tip in a gate guest; the chan-server and chan-desktop suites green on an idle host as well.

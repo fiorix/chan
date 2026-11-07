@@ -1,6 +1,8 @@
 # A right-click on the pane strip's empty stretch leaves focus on the body
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); check 209 read green at the final tip in the release's guest.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); check 209 read green at the final tip in the release's guest.
 
 ## What was seen
 

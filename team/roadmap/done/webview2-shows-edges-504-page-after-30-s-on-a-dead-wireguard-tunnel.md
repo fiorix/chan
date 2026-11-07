@@ -1,6 +1,8 @@
 # WebView2 shows Edge's 504 page after 30 s on a dead WireGuard tunnel
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the Linux `tunnel-page` arm and the Windows `page` and `wrong-key` arms read green in the release's guests; the mapped-name route is pinned by unit tests alone.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the Linux `tunnel-page` arm and the Windows `page` and `wrong-key` arms read green in the release's guests; the mapped-name route is pinned by unit tests alone.
 
 ## What was seen
 

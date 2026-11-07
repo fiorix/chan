@@ -1,6 +1,8 @@
 # The PPA has built no binaries since v0.116.0 because a dependency needs Rust 1.95
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); this release's Launchpad builds are read with `lp-builds.sh` after the tag.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); this release's Launchpad builds are read with `lp-builds.sh` after the tag.
 
 ## What was found
 

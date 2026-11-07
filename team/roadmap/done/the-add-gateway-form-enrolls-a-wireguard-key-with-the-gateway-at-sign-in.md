@@ -1,6 +1,8 @@
 # The Add Gateway form enrolls a WireGuard key with the gateway at sign-in
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the two open questions are answered in the build (identity's discovery document carries a `wireguard` entry, and the redeem returns the gateway's host names with their tunnel addresses); whether each webview grants the Copy action's clipboard write is unread.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the two open questions are answered in the build (identity's discovery document carries a `wireguard` entry, and the redeem returns the gateway's host names with their tunnel addresses); whether each webview grants the Copy action's clipboard write is unread.
 
 Asked by the owner on 2026-11-05 while v0.124.0 was integrated ("on chan-desktop, i will want the possibility to create a key pair for each gateway; so it'll be on the Computers window, on the actual Gateways surface, then in the Add Gateway form; in there we should be able to generate a pubkey so that once we auth with oauth, we can provide this public key to the gw.{domain} site and so that they can somehow use that to configure wireguard on the proxy servers"). Decided the same day: identity stays public, the proxy hosts terminate kernel WireGuard with a peer-sync agent, the key rides the desktop authorize flow. It supersedes a row that would only show the desktop's public key in the launcher.
 

@@ -1,6 +1,8 @@
 # The gateway identity role cannot take the row locks PAT minting holds
 
-Status: raised on 2026-11-06 by the release's live enrollment proof, the first run of the packaged database role policy against the real token mint; accepted for v0.125.0 by the owner the same day; built, and carried in the first release candidate `0.125.0-rc0` (`67fd26b38`).
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: raised on 2026-11-06 by the release's live enrollment proof, the first run of the packaged database role policy against the real token mint; accepted for v0.125.0 by the owner the same day; built, and carried in the first release candidate `0.125.0-rc0` (`67fd26b38`).
 
 ## What is there now
 

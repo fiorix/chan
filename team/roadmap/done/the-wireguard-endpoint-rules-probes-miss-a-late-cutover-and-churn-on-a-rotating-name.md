@@ -1,6 +1,8 @@
 # The WireGuard endpoint rule's probes miss a late cutover and churn on a rotating name
 
-Status: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the kernel suite's `dns` and `dns-late` arms read green against the kernel peer, with a dark-forward control red.
+Status: shipped in [v0.125.0](../../release/release-v0.125.0.md).
+
+Record before the release: built for v0.125.0 and carried in its first release candidate `0.125.0-rc0` (`67fd26b38`); the kernel suite's `dns` and `dns-late` arms read green against the kernel peer, with a dark-forward control red.
 
 ## What is there now
 
