@@ -84,6 +84,9 @@
 #   --cdp-port PORT       WebView2's remote debugging port on the client (default
 #                         9222; refused when something listens there)
 #   --keep                keep the host work dir (screenshots, records, logs) on success
+#   --occlusion-wake      read local and devserver windows after 120 s minimized,
+#                         and after a separately labelled CDP renderer freeze;
+#                         this does not prove CoreWebView2.IsSuspended
 #
 # Prerequisites. On the peer: Linux with the wireguard module,
 # wireguard-tools, iproute2, python3, and passwordless sudo (`sudo -n`) for
@@ -128,6 +131,7 @@ LISTEN_PORT=""
 IFACE=chanwg0
 CDP_PORT=9222
 KEEP=""
+OCCLUSION_WAKE=0
 HTTP_PORT=8080
 GATEWAY_ID="gw-e2e00002"
 POSITIONAL=()
@@ -150,6 +154,7 @@ while [ $# -gt 0 ]; do
         --interface) IFACE="$2"; shift 2 ;;
         --cdp-port) CDP_PORT="$2"; shift 2 ;;
         --keep) KEEP=1; shift ;;
+        --occlusion-wake) OCCLUSION_WAKE=1; shift ;;
         -h | --help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | cut -c3-; exit 0 ;;
         -*) refuse "unknown option $1" ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -165,6 +170,11 @@ INSTALLER="${POSITIONAL[4]}"
 for tool in ssh scp python3 sha256sum base64 timeout node; do
     command -v "$tool" >/dev/null 2>&1 || refuse "$tool is not installed"
 done
+if [ "$OCCLUSION_WAKE" = 1 ]; then
+    command -v convert >/dev/null 2>&1 || refuse "ImageMagick convert is required for --occlusion-wake"
+    [ -f "$HERE/wake-pixels.py" ] && [ -f "$HELPERS/wake.sh" ] && [ -f "$HELPERS/wake-window.ps1" ] && \
+        [ -f "$HELPERS/wake-fixture.ps1" ] && [ -f "$HELPERS/wake-devserver.ps1" ] && [ -f "$HELPERS/wake-cdp.mjs" ] || refuse 'occlusion-wake helpers are absent'
+fi
 node -e 'process.exit(typeof WebSocket === "function" && typeof fetch === "function" ? 0 : 1)' \
     || refuse "node $(node --version) has no global WebSocket; Node 22 or later is needed"
 [ -f "$INSTALLER" ] || refuse "no installer at $INSTALLER"
@@ -316,6 +326,13 @@ cleanup() {
         if out="$(client_ps 300 <<PS
 \$left = @()
 Unregister-ScheduledTask -TaskName '$TAG' -Confirm:\$false -ErrorAction SilentlyContinue
+Stop-ScheduledTask -TaskName '$TAG-wake' -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName '$TAG-wake' -Confirm:\$false -ErrorAction SilentlyContinue
+\$wakePidPath = '$CLIENT_DIR\wake-devserver.pid'
+\$wakePid = 0
+if (Test-Path -LiteralPath \$wakePidPath) { \$wakePid = [int](Get-Content -Raw -LiteralPath \$wakePidPath); if (\$wakePid -gt 0) { \$wakeProcess = Get-Process -Id \$wakePid -ErrorAction SilentlyContinue; if (\$wakeProcess -and \$wakeProcess.Path -like "\$env:LOCALAPPDATA\Chan\*") { Stop-Process -Id \$wakePid -Force -ErrorAction SilentlyContinue } } }
+Stop-ScheduledTask -TaskName '$TAG-wake-devserver' -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName '$TAG-wake-devserver' -Confirm:\$false -ErrorAction SilentlyContinue
 Get-Process chan-desktop -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like "\$env:LOCALAPPDATA\Chan\*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 for (\$i = 0; \$i -lt 40; \$i++) { if (-not (Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { \$_.CommandLine -like '*app.chan.desktop*' })) { break }; Start-Sleep -Milliseconds 250 }
 if ('$INSTALLED') {
@@ -388,6 +405,8 @@ if ('$INSTALLED') {
 }
 if (Get-Process chan-desktop -ErrorAction SilentlyContinue) { \$left += 'a chan-desktop process' }
 if (Get-ScheduledTask -TaskName '$TAG' -ErrorAction SilentlyContinue) { \$left += 'the $TAG task' }
+if (Get-ScheduledTask -TaskName '$TAG-wake-devserver' -ErrorAction SilentlyContinue) { \$left += 'the $TAG-wake-devserver task' }
+if (\$wakePid -gt 0) { \$wakeProcess = Get-Process -Id \$wakePid -ErrorAction SilentlyContinue; if (\$wakeProcess -and \$wakeProcess.Path -like "\$env:LOCALAPPDATA\Chan\*") { \$left += "the wake devserver process \$wakePid" } }
 if (Test-Path -LiteralPath '$CLIENT_DIR') { Remove-Item -LiteralPath '$CLIENT_DIR' -Recurse -Force -ErrorAction SilentlyContinue }
 if (Test-Path -LiteralPath '$CLIENT_DIR') { \$left += '$CLIENT_DIR' }
 "left=\$(\$left -join '; ')"
@@ -904,6 +923,25 @@ peer_absent "wrong-key-page-$NONCE" || arm_rc=1
 [ -s "$WORK/wrong-key-page.png" ] || arm_rc=1
 verdict wrong-key "$arm_rc" "startup named=$startup_ok, direct document and error $doc after $(jfield "$WORK/wrong-key.json" 'r["navigateMs"]') ms; app document 200: $wrong_page_app, title '$wrong_page_title', error $wrong_page_error, reason '$(printf '%s' "$wrong_page_text" | grep -o 'no WireGuard handshake.*' | head -1 | cut -c1-80)', screenshot $(stat -c %s "$WORK/wrong-key-page.png" 2>/dev/null || echo 0) bytes; peer requests $REQ_BEFORE -> $REQ_AFTER, handshake stamp $HS_BEFORE -> $HS_AFTER, desktop sent $INITIATIONS initiations, peer UDP in +$((UDP_AFTER - UDP_BEFORE)), session warnings $expiry_warns (want 1), ERROR lines $error_lines (want 0)"
 stop_desktop
+
+if [ "$OCCLUSION_WAKE" = 1 ]; then
+    WAKE_RESULT=0
+    if start_desktop wake client.conf && wait_for 60 'a WebView2 page for the occlusion reading' page_target; then
+        # shellcheck source=scripts/e2e/desktop-wireguard-windows/wake.sh
+        . "$HELPERS/wake.sh"
+    else
+        log 'INCONCLUSIVE precondition windows: positive desktop did not restart for occlusion reading'
+        WAKE_RESULT=3
+    fi
+    stop_desktop
+    if declare -F wake_copy_diagnostics >/dev/null; then wake_copy_diagnostics; fi
+fi
+
+if [ "${WAKE_RESULT:-0}" = 1 ]; then FAILED=$((FAILED + 1)); fi
+if [ "${WAKE_RESULT:-0}" = 3 ] && [ "$FAILED" = 0 ]; then
+    log "INCONCLUSIVE precondition: occlusion-wake could not prove every hidden/frozen native frame; work dir kept at $WORK"
+    exit 3
+fi
 
 if [ "$FAILED" != 0 ]; then
     log "FAIL: $FAILED arm(s) failed (suite at $SHA); work dir kept at $WORK"
