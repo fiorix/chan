@@ -359,6 +359,38 @@ pub(crate) async fn set_launcher_focus_color(
     apply_focus_color(&app, window.label(), &color).await
 }
 
+/// Whether `host` has its launcher built. Main thread. Compiled everywhere so
+/// every platform's build checks it; only the macOS wake repaint calls it.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only the macOS wake repaint reads it")
+)]
+pub(crate) fn has_launcher(host: &str) -> bool {
+    LAUNCHERS.with(|launchers| {
+        launchers
+            .try_borrow()
+            .is_ok_and(|launchers| launchers.contains_key(host))
+    })
+}
+
+/// Evaluate `script` in `host`'s launcher, when it has one. Main thread.
+/// Compiled everywhere like [`has_launcher`].
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only the macOS wake repaint calls it")
+)]
+pub(crate) fn evaluate_in_launcher(host: &str, script: &str) {
+    LAUNCHERS.with(|launchers| {
+        if let Ok(launchers) = launchers.try_borrow() {
+            if let Some(webview) = launchers.get(host) {
+                if let Err(e) = webview.evaluate_script(script) {
+                    tracing::warn!(host, error = %e, "evaluating a script in the launcher failed");
+                }
+            }
+        }
+    });
+}
+
 async fn apply_focus_color(app: &AppHandle, host: &str, color: &str) -> Result<(), String> {
     let host = host.to_string();
     let js = format!(
