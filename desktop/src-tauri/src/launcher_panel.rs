@@ -201,14 +201,16 @@ pub(crate) fn install(app: &AppHandle) {
     }
 }
 
-/// Route the menubar's Toggle Launcher by the focused window.
-pub(crate) fn toggle_for_focused(app: &AppHandle) {
+/// Route the menu's Toggle Launcher: for the window a title bar menu was
+/// popped up for (`invoked_for`), where the launcher holds the keyboard and no
+/// window reports the focus, else for the focused window, as from a menubar.
+pub(crate) fn toggle_for_menu(app: &AppHandle, invoked_for: Option<&str>) {
     let focused = app
         .webview_windows()
         .into_iter()
         .find(|(_, w)| w.is_focused().unwrap_or(false))
         .map(|(label, _)| label);
-    match toggle_target(focused.as_deref()) {
+    match toggle_target(crate::menu_window(invoked_for, focused.as_deref())) {
         ToggleTarget::TogglePanelOf(host) => toggle(app, &host),
         ToggleTarget::OpenTerminal => crate::spawn_terminal_window(app),
     }
@@ -1173,7 +1175,7 @@ fn handle_ipc(app: &AppHandle, host: &str, body: &str) {
                 .get_webview_window(host)
                 .is_some_and(|window| serves_menu_chords(&window))
             {
-                crate::run_menu_item(app, id);
+                crate::run_menu_item(app, id, Some(host));
                 Ok(())
             } else {
                 Err(format!("the menubar carries {id} for {host}"))
@@ -1594,8 +1596,8 @@ mod tests {
             .find("serves_menu_chords(&window)")
             .expect("the item runs only where the bridge serves it");
         let run = item
-            .find("crate::run_menu_item(app, id);")
-            .expect("as the menubar runs it");
+            .find("crate::run_menu_item(app, id, Some(host));")
+            .expect("as the menubar runs it, for the window the chord came from");
         assert!(gate < run);
     }
 

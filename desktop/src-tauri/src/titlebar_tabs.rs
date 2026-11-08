@@ -656,9 +656,18 @@ fn popup_menu(
     // keystrokes reach the launcher and never the covered page, and the
     // keyboard stays with the launcher once the menu closes.
     crate::launcher_panel::reclaim_keyboard(label);
-    window
-        .popup_menu_at(&submenu, menu_position(x, y, page_zoom(window)))
-        .map_err(|e| format!("showing the {} menu on {label}: {e}", which.label()))
+    // The pick's menu event names no window, and with the launcher holding
+    // the keyboard no window reports the focus, so the window goes with it:
+    // the next menu event takes it. muda queues that event before the popup
+    // returns; the clear, sent from another thread so that it is queued too,
+    // lands behind it, and a dismissed menu leaves no window behind.
+    crate::set_menu_popup_host(Some(label.to_string()));
+    let shown = window.popup_menu_at(&submenu, menu_position(x, y, page_zoom(window)));
+    let clear = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = clear.run_on_main_thread(|| crate::set_menu_popup_host(None));
+    });
+    shown.map_err(|e| format!("showing the {} menu on {label}: {e}", which.label()))
 }
 
 /// Where a menu popped up under the bar opens, in logical points (DIP) from
@@ -2194,10 +2203,18 @@ mod tests {
         let reclaim = popup
             .find("crate::launcher_panel::reclaim_keyboard(label);")
             .expect("the launcher takes the keyboard back");
+        let named = popup
+            .find("crate::set_menu_popup_host(Some(label.to_string()));")
+            .expect("the menu event that follows learns the window");
         let shown = popup
             .find(".popup_menu_at(&submenu, menu_position(x, y, page_zoom(window)))")
             .expect("the submenu pops up at the page's point");
+        let cleared = popup
+            .find(".run_on_main_thread(|| crate::set_menu_popup_host(None))")
+            .expect("a clear is queued behind the pick's event");
         assert!(reclaim < shown, "before the menu opens");
+        assert!(named < shown && shown < cleared);
+        assert!(popup.contains("tauri::async_runtime::spawn(async move {"));
     }
 
     /// The page's close button closes as the native close button and Alt+F4
