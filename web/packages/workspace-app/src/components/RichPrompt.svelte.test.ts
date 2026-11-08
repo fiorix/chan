@@ -60,6 +60,7 @@ import App from "../App.svelte";
 import RichPrompt from "./RichPrompt.svelte";
 import { draftPath } from "../__tests__/drafts";
 import { api } from "../api/client";
+import * as desktop from "../api/desktop";
 import { ApiError } from "../api/errors";
 import { installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
@@ -405,6 +406,36 @@ describe("the keymap", () => {
 });
 
 describe("a submit", () => {
+  test.each(["standalone", "workspace"])("renders a native clipboard image and submits its bare absolute path (%s)", async (kind) => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    const path = kind === "workspace" ? draftPath("rp") : ".Drafts/rp/draft.md";
+    const imagePath = kind === "workspace" ? draftPath("rp", "pasted-image.png") : ".Drafts/rp/pasted-image.png";
+    const absolute = kind === "workspace"
+      ? "/home/me/.chan/workspaces/k/Drafts/rp/pasted-image.png"
+      : "/home/me/ws/.Drafts/rp/pasted-image.png";
+    const upload = vi.spyOn(api, "uploadAttachment").mockResolvedValue({ path: imagePath });
+    const paths = vi.spyOn(api, "draftTerminalPaths").mockResolvedValue([absolute]);
+    vi.spyOn(desktop, "isTauriDesktop").mockReturnValue(true);
+    const read = vi.spyOn(desktop, "readClipboardImage").mockResolvedValue(new Uint8Array([1, 2, 3]));
+    const { target, view, content } = await composer(makeTab({ richPromptDraftPath: path }));
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { types: ["Files"], items: [], files: [], getData: () => "" },
+    });
+    // WebKit targets the BR in an empty composer for this clipboard shape.
+    (content.querySelector("br") ?? content).dispatchEvent(event);
+
+    await vi.waitFor(() => expect(view.state.doc.toString()).toBe("![](./pasted-image.png#w=250)\n"));
+    await vi.waitFor(() => expect(target.querySelector(".cm-md-image-wrap img")).not.toBeNull());
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledTimes(1);
+    submit(content);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]!.data.trimEnd()).toBe(absolute);
+    expect(paths.mock.calls).toEqual(kind === "workspace" ? [[[imagePath]]] : []);
+  });
+
   test("delivers the images of a prompt file under the root as their absolute path on disk", async () => {
     // A prompt file under the root, as a standalone window's draft is: its
     // images hang off the root, with no question to the server.
