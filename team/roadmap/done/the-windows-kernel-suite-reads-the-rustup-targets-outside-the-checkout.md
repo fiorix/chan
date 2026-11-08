@@ -1,6 +1,8 @@
 # The Windows kernel suite reads the rustup targets outside the checkout
 
-Status: raised on 2026-11-07 from the v0.125.0 release's Windows kernel suite run; accepted by the owner for v0.126.0 at the v0.125.0 cut; built on `fix/windows-suite-preflight-toolchain` as `0ab2f131b`, merged into the integration branch, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised on 2026-11-07 from the v0.125.0 release's Windows kernel suite run; accepted by the owner for v0.126.0 at the v0.125.0 cut; built on `fix/windows-suite-preflight-toolchain` as `0ab2f131b`, merged into the integration branch, awaiting the release.
 
 ## What is there now
 

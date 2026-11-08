@@ -1,6 +1,8 @@
 # The Computers screen shows every address and token while the screen is shared
 
-Status: raised by the owner on 2026-11-08 with the code on `codex/privacy-mode` (`c94869906`); accepted for v0.126.0; built by the owner, merged into the integration branch, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised by the owner on 2026-11-08 with the code on `codex/privacy-mode` (`c94869906`); accepted for v0.126.0; built by the owner, merged into the integration branch, awaiting the release.
 
 ## What is there now
 

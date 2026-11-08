@@ -1,6 +1,8 @@
 # chan close reports a standalone serve closed while it keeps running
 
-Status: raised on 2026-11-08 while writing the chan.app tutorials; accepted by the owner for v0.126.0; built the same day on `fix/close-reports-running-serve` as `268f6afbd`, reviewed and merged into the integration branch, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised on 2026-11-08 while writing the chan.app tutorials; accepted by the owner for v0.126.0; built the same day on `fix/close-reports-running-serve` as `268f6afbd`, reviewed and merged into the integration branch, awaiting the release.
 
 ## What is there now
 

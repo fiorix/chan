@@ -1,6 +1,8 @@
 # configure.sh points the admin CLI at identity's public port
 
-Status: raised on 2026-11-08 while writing the chan.app gateway tutorial; accepted by the owner for v0.126.0; built on `fix/configure-admin-identity-url` as `3be3ea821`, merged into the integration branch, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised on 2026-11-08 while writing the chan.app gateway tutorial; accepted by the owner for v0.126.0; built on `fix/configure-admin-identity-url` as `3be3ea821`, merged into the integration branch, awaiting the release.
 
 ## What is there now
 

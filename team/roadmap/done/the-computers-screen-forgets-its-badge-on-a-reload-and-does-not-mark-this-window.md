@@ -1,6 +1,8 @@
 # The Computers screen forgets its badge on a reload and does not mark this window
 
-Status: raised by the owner on 2026-11-08 with the code on `codex/computers-visual-state` (`bee14f9bf`); accepted for v0.126.0; built by the owner, merged into the integration branch, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised by the owner on 2026-11-08 with the code on `codex/computers-visual-state` (`bee14f9bf`); accepted for v0.126.0; built by the owner, merged into the integration branch, awaiting the release.
 
 ## What is there now
 

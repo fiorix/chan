@@ -21,59 +21,13 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.126.0
-
-Opened 2026-11-07 at the v0.125.0 close with six items that release's readings and proofs found and the owner placed here at its cut, none of them built in it. The integration gate's red runs name a set of chan-server and chan-desktop tests whose wall-clock bounds a loaded host breaks ([timebound]). The reading of the desktop enrollment found a minted PAT that nothing revokes when the desktop refuses the redeem's answer or its token store fails ([patrevoke]). The enrollment proof ran without TLS because the desktop's and the peer agent's Rust clients trust the bundled roots alone and ignore a CA in the system store ([systemca]). The Windows kernel suite's first run refused a target the pinned toolchain had, because its preflight reads rustup outside the checkout ([winpreflight]). The Mac reading of the display-sleep repaint found WebKit logging a visibility transition at each wake that the terminal tab's comment says never reaches the page, and the owner sees a window back with its title bar alone for a second or two before the terminal paints ([wakevis]). The role-lock work found that no CI job runs the gateway's manifest, packaging isolation and database roles suites, which let the Kubernetes ConfigMap's copy of the reconcile script drift ([gwci]).
-
-On 2026-11-08 the owner added six items found while writing the chan.app tutorials. With Chan Desktop running, `chan close` of a standalone `chan serve` prints `closed:` while the server keeps running ([closelie]). `chan serve --help` still calls Cmd+P Team Work, though the desktop binds it to the Computers screen ([cmdphelp]). configure.sh's admin.env leaves the admin CLI on identity's public port, where no admin route answers ([adminenv]). The gateway setup defaults to the maintainer's domains, its docs disagree on where devservers dial in, and the sdme provisioner claims a default tunnel URL chan does not have ([gwdefaults]). The account page tells users to run a tunnel without its URL, with the token on the command line ([tunnelhint]). Ten statements in the manual and the design docs contradict the product ([docsdrift]).
-
-The same day, planning the chan.app WireGuard rollout, the owner found that v0.125.0's one ingress per gateway would carry every enrolled desktop's traffic for every proxy node through one host, and decided that each node terminates its own WireGuard and the desktop runs one tunnel per node, replacing that release's decision ([wgnode]).
-
-Later the same day, from a ranking of the items by size, the owner moved every item of medium size or larger to v0.127.0 ("all M, L, and XL move to v0.127; the only M stayign in v126 is wakevis"): [timebound], [patrevoke], [systemca], [gwci] and [wgnode]. [wakevis] stays here, as do the small items.
-
-The same day the owner reported, with a screenshot, that Cmd+P does not open the Computers screen over a devserver window that is reconnecting ([rclaunch]).
-
-The owner also brings his title bar work, built on his Mac. A chan-desktop window spends the title bar's row and one tab strip per pane on chrome, so on macOS the active pane's tabs move into the title bar, with a pane tree and a strip that scrolls only its tabs ([titlebarmac]), and on Windows the window goes frameless and draws the window controls and the launcher menus in that bar ([titlebarwin]).
-
-The owner also brings a privacy mode, built by his agent and read on his Mac: recording or sharing a chan window showed every computer's name and address, the connect scripts, the gateway URLs and keys and the connection errors, and nothing concealed them ([privacy]).
-
-A second branch of his agent's followed the same day: a reload of the Computers screen returned to its first card and the Computers deck, and no row said which window the launcher was shown in ([visualstate]).
-
-| Item | State | Next |
-| --- | --- | --- |
-| [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | built | candidate |
-| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
-| [chan close reports a running serve closed][closelie] | built | candidate |
-| [chan serve --help names Cmd+P as Team Work][cmdphelp] | built | candidate |
-| [admin.env points at identity's public port][adminenv] | built | candidate |
-| [the gateway setup defaults name chan.app][gwdefaults] | built | candidate |
-| [the account page's tunnel hint has no URL][tunnelhint] | built | candidate |
-| [the manual and design docs contradict chan][docsdrift] | built | candidate |
-| [Cmd+P does nothing over a reconnecting window][rclaunch] | built | candidate |
-| [a window's tabs sit below the title bar on macOS][titlebarmac] | built | candidate |
-| [a window's tabs sit below the title bar on Windows][titlebarwin] | built | candidate |
-| [the Computers screen shows every address and token while the screen is shared][privacy] | built | candidate |
-| [the Computers screen forgets its badge on a reload and does not mark this window][visualstate] | built | candidate |
-
-[winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
-[wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
-[closelie]: v0.126.0/chan-close-reports-a-standalone-serve-closed-while-it-keeps-running.md
-[cmdphelp]: v0.126.0/chan-serve-help-names-cmd-p-as-team-work.md
-[adminenv]: v0.126.0/configure-sh-points-the-admin-cli-at-identitys-public-port.md
-[gwdefaults]: v0.126.0/the-gateway-setup-defaults-name-the-maintainers-deployment.md
-[tunnelhint]: v0.126.0/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md
-[docsdrift]: v0.126.0/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md
-[rclaunch]: v0.126.0/the-launcher-chord-does-nothing-over-a-reconnecting-window.md
-[titlebarmac]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-macos.md
-[titlebarwin]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-windows.md
-[privacy]: v0.126.0/the-computers-screen-shows-every-address-and-token-while-the-screen-is-shared.md
-[visualstate]: v0.126.0/the-computers-screen-forgets-its-badge-on-a-reload-and-does-not-mark-this-window.md
-
 ### v0.127.0
 
 Opened 2026-11-08 with the five items the owner moved from v0.126.0 the same day, each sized medium or larger; v0.126.0's text above records why each was raised. In size order: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]); the time-bound tests a loaded host breaks ([timebound]); the system CA store for the Rust TLS clients, read on three platforms ([systemca]); the PAT the redeem orphans, which shares the redeem's completion with [wgnode] ([patrevoke]); and the gateway packaging and roles suites in CI ([gwci]).
 
 The reading behind [docsdrift] added a sixth, placed here by the owner the same day: identity serves a shared devserver's root link to its owner alone, so the account page's Copy link refuses the people the devserver is shared with, though the per-workspace landing and the desktop admit them ([grantroot]).
+
+At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake-visibility reading had run on his Mac, so that row moves here with its reading procedure shipped: the terminal tab's comment says WKWebView fires no `visibilitychange` across a sleep, while the owner's Mac log shows WebKit's visibility change at each wake ([wakevis]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -83,6 +37,7 @@ The reading behind [docsdrift] added a sixth, placed here by the owner the same 
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
 | [no CI job runs the gateway packaging and roles suites][gwci] | not started | build |
 | [a shared devserver's root link refuses its grantees][grantroot] | not started | build |
+| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 
 [wgnode]: v0.127.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
@@ -90,8 +45,26 @@ The reading behind [docsdrift] added a sixth, placed here by the owner the same 
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
 [gwci]: v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
 [grantroot]: v0.127.0/a-shared-devservers-root-link-refuses-the-people-it-is-shared-with.md
+[wakevis]: v0.127.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
 
 ## Completed
+
+### v0.126.0
+
+Shipped 2026-11-08; see [release-v0.126.0](../release/release-v0.126.0.md). A no-rc release by the owner's word ("GA from here, if all green"): twelve `--no-ff` merges of reviewed tips from thirteen branches into the integration branch `v0126/int` over `main` at the v0.125.0 record `fa08475b3`, with the lead's five documents commits and one composition fix, under thirteen rows, twelve shipped; those rows are in [`done/`](done/). The thirteenth, the wake-visibility reading, moves to v0.127.0 with its procedure shipped.
+
+- [a-windows-tabs-sit-below-the-title-bar-on-macos](done/a-windows-tabs-sit-below-the-title-bar-on-macos.md) - A window's tabs sit below the title bar on macOS.
+- [a-windows-tabs-sit-below-the-title-bar-on-windows](done/a-windows-tabs-sit-below-the-title-bar-on-windows.md) - A window's tabs sit below the title bar on Windows.
+- [chan-close-reports-a-standalone-serve-closed-while-it-keeps-running](done/chan-close-reports-a-standalone-serve-closed-while-it-keeps-running.md) - chan close reports a standalone serve closed while it keeps running.
+- [chan-serve-help-names-cmd-p-as-team-work](done/chan-serve-help-names-cmd-p-as-team-work.md) - chan serve --help names Cmd+P as Team Work.
+- [configure-sh-points-the-admin-cli-at-identitys-public-port](done/configure-sh-points-the-admin-cli-at-identitys-public-port.md) - configure.sh points the admin CLI at identity's public port.
+- [the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url](done/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md) - The account page's devserver hint gives a tunnel command without its URL.
+- [the-computers-screen-forgets-its-badge-on-a-reload-and-does-not-mark-this-window](done/the-computers-screen-forgets-its-badge-on-a-reload-and-does-not-mark-this-window.md) - The Computers screen forgets its badge on a reload and does not mark this window.
+- [the-computers-screen-shows-every-address-and-token-while-the-screen-is-shared](done/the-computers-screen-shows-every-address-and-token-while-the-screen-is-shared.md) - The Computers screen shows every address and token while the screen is shared.
+- [the-gateway-setup-defaults-name-the-maintainers-deployment](done/the-gateway-setup-defaults-name-the-maintainers-deployment.md) - The gateway setup defaults name the maintainer's deployment.
+- [the-launcher-chord-does-nothing-over-a-reconnecting-window](done/the-launcher-chord-does-nothing-over-a-reconnecting-window.md) - The launcher chord does nothing over a reconnecting window.
+- [the-manual-and-design-docs-describe-behavior-chan-does-not-have](done/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md) - The manual and design docs describe behavior chan does not have.
+- [the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout](done/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md) - The Windows kernel suite reads the rustup targets outside the checkout.
 
 ### v0.125.0
 

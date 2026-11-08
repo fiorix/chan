@@ -1,6 +1,8 @@
 # The manual and design docs describe behavior chan does not have
 
-Status: raised on 2026-11-08 while writing the chan.app tutorials; accepted by the owner for v0.126.0; items 1 to 5 built with the manual's Chan in a browser and Host a gateway pages; items 6 to 10 built on `docs/design-and-comment-drift` as `05ead465b`, merged into the integration branch, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised on 2026-11-08 while writing the chan.app tutorials; accepted by the owner for v0.126.0; items 1 to 5 built with the manual's Chan in a browser and Host a gateway pages; items 6 to 10 built on `docs/design-and-comment-drift` as `05ead465b`, merged into the integration branch, awaiting the release.
 
 ## Owner ruling
 

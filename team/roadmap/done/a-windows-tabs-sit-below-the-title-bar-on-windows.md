@@ -1,6 +1,8 @@
 # A window's tabs sit below the title bar on Windows
 
-Status: raised by the owner on 2026-11-08 with the code on `feat/titlebar-tabs-windows` (`a97778380`), six commits on `feat/titlebar-tabs`; accepted for v0.126.0; built by the owner with four fixes on top, built and tested in the Windows 11 VM and accepted by the owner over VNC on 2026-11-08; merged into the integration branch as `fd44595ed`, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised by the owner on 2026-11-08 with the code on `feat/titlebar-tabs-windows` (`a97778380`), six commits on `feat/titlebar-tabs`; accepted for v0.126.0; built by the owner with four fixes on top, built and tested in the Windows 11 VM and accepted by the owner over VNC on 2026-11-08; merged into the integration branch as `fd44595ed`, awaiting the release.
 
 ## What is there now
 

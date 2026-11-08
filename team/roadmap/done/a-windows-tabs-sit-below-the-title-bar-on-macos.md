@@ -1,6 +1,8 @@
 # A window's tabs sit below the title bar on macOS
 
-Status: raised by the owner on 2026-11-08 with the code on `feat/titlebar-tabs` (`a9251bbdd`); accepted for v0.126.0; built by the owner and read on his Mac; merged into the integration branch through `feat/titlebar-tabs-windows` as `fd44595ed`, awaiting the release.
+Status: shipped in [v0.126.0](../../release/release-v0.126.0.md).
+
+Record before the release: raised by the owner on 2026-11-08 with the code on `feat/titlebar-tabs` (`a9251bbdd`); accepted for v0.126.0; built by the owner and read on his Mac; merged into the integration branch through `feat/titlebar-tabs-windows` as `fd44595ed`, awaiting the release.
 
 ## What is there now
 

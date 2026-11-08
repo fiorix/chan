@@ -1,6 +1,8 @@
 # The terminal tab assumes WKWebView fires no visibilitychange across a sleep
 
-Status: raised on 2026-11-07 from the v0.125.0 release's Mac reading of the display-sleep repaint; accepted by the owner for v0.126.0 at the v0.125.0 cut; the reading's procedure, probe and log query are written (Reading procedure, below) and wait on the owner's run; no code has moved.
+Status: carried to v0.127.0 at the v0.126.0 cut on 2026-11-08: the reading procedure, probe and log query shipped in [v0.126.0](../../release/release-v0.126.0.md) through the owner's `docs/wakevis-reading`; the owner's run of the reading and the fix are pending; no code has moved.
+
+Record before the release: raised on 2026-11-07 from the v0.125.0 release's Mac reading of the display-sleep repaint; accepted by the owner for v0.126.0 at the v0.125.0 cut; the reading's procedure, probe and log query are written (Reading procedure, below) and wait on the owner's run; no code has moved.
 
 ## What is there now
 
