@@ -14,13 +14,23 @@ interface ScreenState {
   flips: number;
 }
 
-export const screen = $state<ScreenState>({ current: "computers", flips: 0 });
+const STORAGE_KEY = "chan.launcher-screen.v1";
+
+function restoreScreen(): LauncherScreen {
+  try {
+    if (window.sessionStorage.getItem(STORAGE_KEY) === "gateways") return "gateways";
+  } catch { /* Storage may be unavailable. */ }
+  return "computers";
+}
+
+export const screen = $state<ScreenState>({ current: restoreScreen(), flips: 0 });
 
 export function showScreen(next: LauncherScreen): void {
   if (screen.current === next) return;
   screen.current = next;
   screen.flips += 1;
   setSelectMode(false);
+  try { window.sessionStorage.setItem(STORAGE_KEY, next); } catch { /* The flip still works. */ }
 }
 
 export function toggleScreen(): void {

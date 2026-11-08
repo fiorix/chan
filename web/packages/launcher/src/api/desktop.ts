@@ -8,6 +8,8 @@
 /// (`window.__TAURI__`, exposed by `withGlobalTauri: true`); the launcher has no
 /// `@tauri-apps/api` dependency, so there is nothing to import.
 
+import type { WindowRecord } from "./library";
+
 type UnlistenFn = () => void;
 
 interface TauriEvent<T> {
@@ -24,8 +26,16 @@ interface TauriCoreApi {
 
 type TauriWindow = Window &
   typeof globalThis & {
+    __CHAN_LAUNCHER_WINDOW__?: { windowId: string; libraryId: string | null };
     __TAURI__?: { event?: TauriEventApi; core?: TauriCoreApi; invoke?: TauriCoreApi["invoke"] };
   };
+
+/** The native panel's host, independent of focus and of the displayed card. */
+export function isLauncherHost(record: WindowRecord): boolean {
+  const host = (window as TauriWindow).__CHAN_LAUNCHER_WINDOW__;
+  return !!host && host.windowId === record.window_id &&
+    (host.libraryId === null ? record.control === true : host.libraryId === record.library_id);
+}
 
 /// True only when running inside chan-desktop's Tauri webview WITH the global
 /// event API available. The launcher needs the event bridge specifically, so

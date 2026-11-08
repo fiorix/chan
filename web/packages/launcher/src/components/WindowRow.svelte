@@ -36,6 +36,7 @@
   import { setWindowShown } from "../state/computerActions";
   import { actingFor, canActOnTenant } from "../state/leadership.svelte";
   import { MAX_WINDOW_LABEL_CHARS, type WindowRecord } from "../api/library";
+  import { isLauncherHost } from "../api/desktop";
 
   interface Props {
     w: WindowRecord;
@@ -43,6 +44,7 @@
     context?: string;
   }
   let { w, icon = false, context }: Props = $props();
+  const current = $derived(isLauncherHost(w));
   // A control terminal by either mark: the devserver's flag, or the tmux
   // connection's, which the library clears when the connection ends.
   const isControl = $derived(w.control === true || w.tmux?.control === true);
@@ -123,42 +125,45 @@
 
 {#snippet windowName()}
   <div class="row-main">
-    {#if editingLabel && !privacy.enabled}
-      <span class="label-editor">
-        <span>{rowLabel(w.kind, w.ordinal)} [</span>
-        <input
-          bind:this={labelInput}
-          bind:value={labelDraft}
-          maxlength={MAX_WINDOW_LABEL_CHARS}
-          aria-label={`Text for ${rowLabel(w.kind, w.ordinal)}`}
-          placeholder="label"
-          onblur={() => void commitLabelEdit()}
-          onkeydown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void commitLabelEdit();
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              cancelLabelEdit();
-            }
-          }} />
-        <span>]</span>
-      </span>
-    {:else if canEditWindowLabel(w) && !privacy.enabled}
-      <button
-        class="row-name editable-label"
-        type="button"
-        title="Add or edit window text"
-        onclick={() => void beginLabelEdit()}>{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</button>
-    {:else}
-      <span class="row-name">{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</span>
-    {/if}
+    <div class="row-heading">
+      {#if editingLabel && !privacy.enabled}
+        <span class="label-editor">
+          <span>{rowLabel(w.kind, w.ordinal)} [</span>
+          <input
+            bind:this={labelInput}
+            bind:value={labelDraft}
+            maxlength={MAX_WINDOW_LABEL_CHARS}
+            aria-label={`Text for ${rowLabel(w.kind, w.ordinal)}`}
+            placeholder="label"
+            onblur={() => void commitLabelEdit()}
+            onkeydown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void commitLabelEdit();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelLabelEdit();
+              }
+            }} />
+          <span>]</span>
+        </span>
+      {:else if canEditWindowLabel(w) && !privacy.enabled}
+        <button
+          class="row-name editable-label"
+          type="button"
+          title="Add or edit window text"
+          onclick={() => void beginLabelEdit()}>{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</button>
+      {:else}
+        <span class="row-name">{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</span>
+      {/if}
+      {#if current}<span class="current-window">This window</span>{/if}
+    </div>
     {#if context}<PrivateField field={`window:${w.window_id}:context`} label="computer and workspace"><span class="row-sub" title={context}>{context}</span></PrivateField>{/if}
   </div>
 {/snippet}
 
 {#if hasDesktopBridge}
-  <div class="row" data-deck-row tabindex="-1">
+  <div class="row" data-deck-row tabindex="-1" aria-current={current ? "true" : undefined}>
     {#if icon}
       <span class="row-glyph" class:control={isControl} aria-hidden="true">
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
@@ -270,6 +275,23 @@
 {/if}
 
 <style>
+  .row-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.45rem;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .current-window {
+    flex-shrink: 0;
+    padding: 0.05rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    color: var(--launcher-focus-color, var(--brand));
+    background: color-mix(in srgb, var(--launcher-focus-color, var(--brand)) 12%, transparent);
+  }
+
   .editable-label {
     display: inline;
     padding: 0;

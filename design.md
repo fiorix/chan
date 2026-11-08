@@ -176,6 +176,7 @@ chan-desktop is a Tauri shell. It owns windows, the launcher webview, the devser
 | Devserver token and enabled workspace set | the devserver's config under the chan home |
 | Desktop config: devservers, gateways, window placement, viewer privacy | chan-desktop, under the chan home |
 | Browser viewer privacy | localStorage per origin; individual reveals in sessionStorage per tab |
+| Launcher screen and badge positions | sessionStorage per browser tab or native launcher webview |
 | Accounts, tokens, grants, policy, audit | the gateway's profile service, in Postgres |
 
 Every app-level write uses the same atomic-write discipline as workspace content.

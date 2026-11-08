@@ -50,10 +50,35 @@ afterEach(async () => {
   if (app) await unmount(app);
   app = undefined;
   target?.remove();
+  Reflect.deleteProperty(window, "__CHAN_LAUNCHER_WINDOW__");
   vi.restoreAllMocks();
 });
 
 describe("All windows", () => {
+  it.each([
+    [{ windowId: "local-shown", libraryId: "local" }, "local-shown"],
+    [{ windowId: "remote-hidden", libraryId: "remote" }, "remote-hidden"],
+    [{ windowId: "pending", libraryId: null }, "pending"],
+  ])("marks the native host window for %j", (host, id) => {
+    Object.defineProperty(window, "__CHAN_LAUNCHER_WINDOW__", { value: host, configurable: true });
+    const rows = render();
+    expect(rows.filter((row) => row.querySelector(".current-window")).map((row) => row.dataset.windowId)).toEqual([id]);
+    expect(target.querySelector('[aria-current="true"] .current-window')?.textContent).toBe("This window");
+  });
+
+  it("does not mark a same-id window in another library", () => {
+    Object.defineProperty(window, "__CHAN_LAUNCHER_WINDOW__", {
+      value: { windowId: "local-shown", libraryId: "remote" }, configurable: true,
+    });
+    render();
+    expect(target.querySelector(".current-window")).toBeNull();
+  });
+
+  it("does not invent a host for a standalone browser launcher", () => {
+    render();
+    expect(target.querySelector(".current-window")).toBeNull();
+  });
+
   it("includes shown, hidden, disconnected and unassociated windows exactly once with machine context", () => {
     const rows = render();
     expect(rows.map((row) => row.dataset.windowId)).toEqual(windows.map((w) => w.window_id));

@@ -19,7 +19,7 @@ import {
   saveDevserver,
   stopWatching,
 } from "../state/library.svelte";
-import { decks, resetDeck } from "../state/deck.svelte";
+import { decks, resetDeck, showCard } from "../state/deck.svelte";
 import { setSelectMode } from "../state/selection.svelte";
 
 vi.mock("../api/backend", async () => {
@@ -312,6 +312,32 @@ describe("the Computers deck", () => {
     mountDeck();
     expect(front()).toBe("This machine, 2 of 4");
     expect(decks.computers.activeKey).toBe("local");
+  });
+
+  it("saves both mouse and keyboard turns for the next page load", () => {
+    mountDeck();
+    target!.querySelector<HTMLButtonElement>('button[aria-label="Next card"]')!.click();
+    flushSync();
+    expect(JSON.parse(sessionStorage.getItem("chan.launcher-deck.v1:computers")!)).toMatchObject({ activeKey: "local" });
+    press("ArrowLeft");
+    expect(JSON.parse(sessionStorage.getItem("chan.launcher-deck.v1:computers")!)).toMatchObject({ activeKey: "all-windows" });
+  });
+
+  it("keeps the restored machine selected while the registry is loading", () => {
+    const machines = library.devservers;
+    mountDeck();
+    press("ArrowRight");
+    press("ArrowRight");
+    const saved = decks.computers.activeKey!;
+    unmount(app!);
+    target!.remove();
+    library.devservers = [];
+    showCard("computers", saved);
+    mountDeck();
+    expect(decks.computers.activeKey).toBe(saved);
+    library.devservers = machines;
+    flushSync();
+    expect(front()).toBe("prod, 3 of 4");
   });
 });
 
