@@ -5809,28 +5809,15 @@ fn main() {
                                     workspace_path,
                                     remove,
                                     ..
-                                } => match close_workspace_from_handoff(
-                                    app,
-                                    state,
-                                    PathBuf::from(workspace_path),
-                                    remove,
-                                )
-                                .await
-                                {
-                                    Ok(
-                                        chan_server::WorkspaceLifecycleOutcome::Completed
-                                        | chan_server::WorkspaceLifecycleOutcome::NotFound,
-                                    ) => Response::Closed {
-                                        desktop_version: CHAN_VERSION.into(),
-                                    },
-                                    Ok(chan_server::WorkspaceLifecycleOutcome::Refused {
-                                        active_terminals,
-                                    }) => Response::CloseRefused {
-                                        error: "live_terminals".into(),
-                                        active_terminals,
-                                    },
-                                    Err(message) => Response::Error { message },
-                                },
+                                } => Response::from_close_outcome(
+                                    close_workspace_from_handoff(
+                                        app,
+                                        state,
+                                        PathBuf::from(workspace_path),
+                                        remove,
+                                    )
+                                    .await,
+                                ),
                                 Request::ListDevservers { .. } => Response::Devservers {
                                     desktop_version: CHAN_VERSION.into(),
                                     devservers: list_devservers_from_handoff(&state),

@@ -320,11 +320,18 @@ pub enum Response {
     /// devserver lifecycle from here.
     DevserverRegistered { desktop_version: String },
     /// The desktop tore down the workspace from a `CloseWorkspace` request
-    /// (stopped serving it, and unregistered it when `remove`). The CLI prints
-    /// a note and exits. A skew or absent desktop falls back to the per-pid
-    /// control socket. A still-releasing error on a forget exits 75 without
-    /// local unregister; other errors fall back.
+    /// (stopped serving it, and unregistered it when `remove`). The CLI
+    /// reports the close once the workspace's writer lock is free. A skew or
+    /// absent desktop falls back to the per-pid control socket. A
+    /// still-releasing error exits 75 without local unregister; other errors
+    /// fall back.
     Closed { desktop_version: String },
+    /// The desktop serves no workspace at the root a `CloseWorkspace` named,
+    /// and with `remove` holds no row for it. It is not a close: the CLI
+    /// goes on to the writer lock's holder over its control socket, as it
+    /// does with no desktop running, because another process (a standalone
+    /// `chan serve`) may hold the workspace.
+    NotServed { desktop_version: String },
     /// The desktop refused a `CloseWorkspace`, `CloseRemoteWorkspace`, or
     /// `ForgetRemoteWorkspace` request because unmount/remove would kill live
     /// terminal sessions. `error` is the devserver's own `live_terminals`
@@ -364,6 +371,31 @@ pub enum Response {
     /// The desktop minted the throwaway terminal window an `OpenTerminal`
     /// asked for; its window watcher opens it.
     TerminalOpened { desktop_version: String },
+}
+
+impl Response {
+    /// The desktop's answer to a `CloseWorkspace`, from its host's close or
+    /// removal of the named root. A root the host does not serve answers
+    /// `NotServed`, never `Closed`: the CLI reads `Closed` as the close done,
+    /// and a standalone `chan serve` holding that root would keep running.
+    pub fn from_close_outcome(
+        outcome: Result<chan_library::WorkspaceLifecycleOutcome, String>,
+    ) -> Self {
+        use chan_library::WorkspaceLifecycleOutcome;
+        match outcome {
+            Ok(WorkspaceLifecycleOutcome::Completed) => Response::Closed {
+                desktop_version: CHAN_VERSION.into(),
+            },
+            Ok(WorkspaceLifecycleOutcome::NotFound) => Response::NotServed {
+                desktop_version: CHAN_VERSION.into(),
+            },
+            Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => Response::CloseRefused {
+                error: "live_terminals".into(),
+                active_terminals,
+            },
+            Err(message) => Response::Error { message },
+        }
+    }
 }
 
 /// One devserver registry row as `chan devserver ls` renders it. A
@@ -977,6 +1009,9 @@ pub enum Outcome {
     /// The desktop refused close/remove because live terminal sessions would be
     /// killed.
     CloseRefused { active_terminals: usize },
+    /// The desktop does not serve the workspace a close named. The close
+    /// goes on to the writer lock's holder, as it does with no desktop.
+    NotServed,
 }
 
 #[cfg(unix)]
@@ -1181,6 +1216,7 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
         | Ok(Response::UpgradeChecked { .. })
         | Ok(Response::DevserverRegistered { .. })
         | Ok(Response::Closed { .. })
+        | Ok(Response::NotServed { .. })
         | Ok(Response::CloseRefused { .. })
         | Ok(Response::Devservers { .. })
         | Ok(Response::DevserverConnectStarted { .. })
@@ -1257,6 +1293,7 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
         | Ok(Response::UpgradeChecked { .. })
         | Ok(Response::DevserverRegistered { .. })
         | Ok(Response::Closed { .. })
+        | Ok(Response::NotServed { .. })
         | Ok(Response::CloseRefused { .. })
         | Ok(Response::Devservers { .. })
         | Ok(Response::DevserverConnectStarted { .. })
@@ -1278,9 +1315,10 @@ pub async fn try_handoff(_workspace_path: &std::path::Path) -> Outcome {
 /// Try to make a running same-user desktop tear down the workspace it serves at
 /// `workspace_path` -- the `chan close` / `chan workspace forget` handoff. Connects
 /// the well-known socket, sends a `CloseWorkspace` request, and maps the reply:
-/// `Closed` is `Outcome::HandedOff`, and a close refusal, version skew, or
-/// desktop error keeps its own `Outcome` variant. Any connect failure / stale
-/// socket / read error / malformed or unrelated reply maps to
+/// `Closed` is `Outcome::HandedOff`, `NotServed` is `Outcome::NotServed`, and a
+/// close refusal, version skew, or desktop error keeps its own `Outcome`
+/// variant. Any connect failure / stale socket / read error / malformed or
+/// unrelated reply maps to
 /// `Outcome::NoDesktop` so the CLI falls back to the per-pid control-socket
 /// teardown, the same path it takes when no desktop is running. Mirrors
 /// `try_handoff`'s framing + timeouts.
@@ -1366,15 +1404,16 @@ pub async fn try_close_workspace(_workspace_path: &std::path::Path, _remove: boo
 }
 
 /// Map a `CloseWorkspace` reply line to an [`Outcome`]. Shared by the unix +
-/// windows arms: only `Closed` is a success; a `CloseRefused` keeps its live
-/// terminal count as `Outcome::CloseRefused`, a skew falls back to
-/// `VersionSkew`, an `Error` to `DesktopError`, and any other reply /
-/// unparseable line to `NoDesktop` so the caller drops to the control-socket
-/// teardown rather than guessing.
+/// windows arms: only `Closed` is a success; `NotServed` is
+/// `Outcome::NotServed`, a `CloseRefused` keeps its live terminal count as
+/// `Outcome::CloseRefused`, a skew falls back to `VersionSkew`, an `Error` to
+/// `DesktopError`, and any other reply / unparseable line to `NoDesktop` so
+/// the caller drops to the control-socket teardown rather than guessing.
 #[cfg(any(unix, windows))]
 fn map_close_response(line: &str) -> Outcome {
     match serde_json::from_str::<Response>(line) {
         Ok(Response::Closed { .. }) => Outcome::HandedOff,
+        Ok(Response::NotServed { .. }) => Outcome::NotServed,
         Ok(Response::CloseRefused {
             active_terminals, ..
         }) => Outcome::CloseRefused { active_terminals },
@@ -1634,6 +1673,7 @@ fn map_devserver_response(line: &str) -> Outcome {
         | Ok(Response::UpgradeStarted { .. })
         | Ok(Response::UpgradeChecked { .. })
         | Ok(Response::Closed { .. })
+        | Ok(Response::NotServed { .. })
         | Ok(Response::CloseRefused { .. })
         | Ok(Response::Devservers { .. })
         | Ok(Response::DevserverConnectStarted { .. })
@@ -1793,6 +1833,7 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
         Ok(Response::Opened { .. })
         | Ok(Response::DevserverRegistered { .. })
         | Ok(Response::Closed { .. })
+        | Ok(Response::NotServed { .. })
         | Ok(Response::CloseRefused { .. })
         | Ok(Response::Devservers { .. })
         | Ok(Response::DevserverConnectStarted { .. })
@@ -2351,6 +2392,13 @@ mod tests {
         assert!(json.contains("\"status\":\"closed\""));
         assert_eq!(closed, serde_json::from_str::<Response>(&json).unwrap());
 
+        let not_served = Response::NotServed {
+            desktop_version: CHAN_VERSION.into(),
+        };
+        let json = serde_json::to_string(&not_served).unwrap();
+        assert!(json.contains("\"status\":\"not_served\""));
+        assert_eq!(not_served, serde_json::from_str::<Response>(&json).unwrap());
+
         let refused = Response::CloseRefused {
             error: "live_terminals".into(),
             active_terminals: 2,
@@ -2368,6 +2416,13 @@ mod tests {
         // drops to the per-pid control-socket teardown rather than guessing.
         let closed = format!("{{\"status\":\"closed\",\"desktop_version\":\"{CHAN_VERSION}\"}}");
         assert!(matches!(map_close_response(&closed), Outcome::HandedOff));
+
+        let not_served =
+            format!("{{\"status\":\"not_served\",\"desktop_version\":\"{CHAN_VERSION}\"}}");
+        assert!(matches!(
+            map_close_response(&not_served),
+            Outcome::NotServed
+        ));
 
         let refused =
             "{\"status\":\"close_refused\",\"error\":\"live_terminals\",\"active_terminals\":2}";
@@ -2399,6 +2454,41 @@ mod tests {
         );
         assert!(matches!(map_close_response(&opened), Outcome::NoDesktop));
         assert!(matches!(map_close_response("not json"), Outcome::NoDesktop));
+    }
+
+    /// What the desktop answers for each outcome of its host's close, read
+    /// back over the wire the way the CLI reads it. Only a completed close is
+    /// handed off; a root the host does not serve sends the CLI on to the
+    /// writer lock's holder.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_close_outcome_reaches_the_cli_as_what_it_was() {
+        use chan_library::WorkspaceLifecycleOutcome;
+        let read = |outcome| {
+            let line = serde_json::to_string(&Response::from_close_outcome(outcome)).unwrap();
+            map_close_response(&line)
+        };
+        assert!(matches!(
+            read(Ok(WorkspaceLifecycleOutcome::Completed)),
+            Outcome::HandedOff
+        ));
+        assert!(matches!(
+            read(Ok(WorkspaceLifecycleOutcome::NotFound)),
+            Outcome::NotServed
+        ));
+        assert!(matches!(
+            read(Ok(WorkspaceLifecycleOutcome::Refused {
+                active_terminals: 3
+            })),
+            Outcome::CloseRefused {
+                active_terminals: 3
+            }
+        ));
+        assert!(matches!(
+            read(Err("removing /srv/notes: workspace is still releasing; retry".into())),
+            Outcome::DesktopError { message }
+                if message == "removing /srv/notes: workspace is still releasing; retry"
+        ));
     }
 
     #[test]

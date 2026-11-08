@@ -97,6 +97,15 @@ impl Sandbox {
             .env("CHAN_NO_DEVSERVER_HANDOFF", "1");
         cmd
     }
+
+    /// A `chan` command that hands a close to the desktop on the sandbox's
+    /// handoff socket first, as the desktop's own `chan` does.
+    fn command_beside_a_desktop(&self) -> Command {
+        let mut cmd = self.command();
+        cmd.env_remove("CHAN_NO_DESKTOP_HANDOFF")
+            .env("CHAN_DESKTOP_HANDOFF", "1");
+        cmd
+    }
 }
 
 /// A spawned `chan serve` serve child + a background-drained stderr transcript (so
@@ -477,6 +486,8 @@ enum HolderAnswer {
     Closed,
     /// Answer an error and keep holding the workspace's writer lock.
     ErrorKeepingTheLock,
+    /// Answer that it closed and keep holding the workspace's writer lock.
+    ClosedKeepingTheLock,
 }
 
 /// Stand in for a process that holds `ws`: take its writer lock now, bind a
@@ -541,6 +552,12 @@ fn holder_binding_after(
             HolderAnswer::ErrorKeepingTheLock => (
                 chan_shell::ControlResponse::Error {
                     message: "unmounting: the holder failed".into(),
+                },
+                Some(lock),
+            ),
+            HolderAnswer::ClosedKeepingTheLock => (
+                chan_shell::ControlResponse::Ok {
+                    message: "unmounted".into(),
                 },
                 Some(lock),
             ),
@@ -620,6 +637,190 @@ fn close_answered_an_error_by_a_holder_that_keeps_the_lock_fails() {
         "{out:?}"
     );
     drop(kept);
+}
+
+/// A desktop stand-in on the sandbox's handoff socket: the real listener,
+/// answering every `CloseWorkspace` with what chan-desktop answers when its
+/// host's close of the named root ends in `outcome`, and keeping the requests
+/// it was sent. Its runtime lives as long as it does.
+struct FakeDesktop {
+    requests: Arc<Mutex<Vec<chan_server::handoff::Request>>>,
+    _listener: chan_server::handoff::ListenerHandle,
+    _runtime: tokio::runtime::Runtime,
+}
+
+impl FakeDesktop {
+    fn start(sandbox: &Sandbox, outcome: chan_server::WorkspaceLifecycleOutcome) -> Self {
+        use chan_server::handoff::{Request, Response};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the desktop's runtime");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let listener = {
+            let _entered = runtime.enter();
+            chan_server::handoff::start_listener(
+                sandbox.sockdir.path().join("chan-desktop.sock"),
+                move |request: Request| {
+                    let answer = match &request {
+                        Request::CloseWorkspace { .. } => Response::from_close_outcome(Ok(outcome)),
+                        _ => Response::Error {
+                            message: "unexpected request".into(),
+                        },
+                    };
+                    seen.lock().unwrap().push(request);
+                    async move { answer }
+                },
+            )
+            .expect("bind the desktop's handoff socket")
+        };
+        Self {
+            requests,
+            _listener: listener,
+            _runtime: runtime,
+        }
+    }
+
+    fn requests(&self) -> Vec<chan_server::handoff::Request> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// With a desktop running that does not serve the workspace, `chan close` of
+/// a standalone `chan serve` stops that serve: the desktop's answer for a
+/// root its host does not serve sends the close on to the writer lock's
+/// holder, as the close goes with no desktop running.
+#[test]
+fn close_beside_a_desktop_that_does_not_serve_the_workspace_stops_the_serve() {
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    let mut serve = Serve::spawn(&sandbox, &ws);
+    assert!(
+        serve.wait_ready(READY_BUDGET),
+        "serve never became ready:\n{}",
+        serve.stderr_dump()
+    );
+    let desktop = FakeDesktop::start(&sandbox, chan_server::WorkspaceLifecycleOutcome::NotFound);
+
+    let out = sandbox
+        .command_beside_a_desktop()
+        .arg("close")
+        .arg(&ws)
+        .output()
+        .expect("run chan close");
+
+    let requests = desktop.requests();
+    assert!(
+        matches!(
+            requests.as_slice(),
+            [chan_server::handoff::Request::CloseWorkspace { remove: false, .. }]
+        ),
+        "the close was not handed to the desktop: {requests:?}\n{out:?}"
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("closed:"),
+        "{out:?}"
+    );
+    assert!(
+        poll(EXIT_BUDGET, || serve.has_exited()),
+        "the standalone serve kept running after the close:\n{out:?}"
+    );
+}
+
+/// A holder that accepts the close and still holds the writer lock at the
+/// bound has not let the workspace go: `chan close` and `chan workspace
+/// forget` fail naming its pid without a `closed:` line, and the forget
+/// leaves the workspace registered.
+#[test]
+fn a_close_whose_holder_keeps_the_lock_past_the_bound_fails_naming_it() {
+    let verbs: [&[&str]; 2] = [&["close"], &["workspace", "forget"]];
+    for verb in verbs {
+        let sandbox = Sandbox::new();
+        let ws = sandbox.workspace();
+        register(&sandbox, &ws);
+        let holder = holder_binding_after(
+            &sandbox,
+            &ws,
+            Duration::ZERO,
+            HolderAnswer::ClosedKeepingTheLock,
+        );
+        let out = sandbox.command().args(verb).arg(&ws).output().unwrap();
+        let (request, kept) = holder.join().expect("the holder thread");
+        assert!(
+            matches!(&request, Some(chan_shell::ControlRequest::Close { .. })),
+            "{verb:?}: the holder was not asked to close: {request:?}\n{out:?}"
+        );
+        assert!(kept.is_some(), "{verb:?}: the holder let go of the lock");
+        assert!(!out.status.success(), "{verb:?}: {out:?}");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("closed:"),
+            "{verb:?}: {out:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!(
+                "pid {} still holds its writer lock",
+                std::process::id()
+            )),
+            "{verb:?}: {out:?}"
+        );
+        let lib = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+            .expect("open the sandbox registry");
+        assert!(
+            lib.workspace_paths_for(&ws).is_some(),
+            "{verb:?}: the workspace left the registry while its lock was held"
+        );
+        drop(kept);
+    }
+}
+
+/// A desktop's completed close does not answer for the writer lock: when
+/// another process still holds it at the bound, `chan close` fails naming
+/// that process instead of reporting the workspace closed.
+#[test]
+fn a_close_the_desktop_completed_while_another_process_keeps_the_lock_fails_naming_it() {
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    register(&sandbox, &ws);
+    let lock_dir = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .expect("open the sandbox registry")
+        .workspace_paths_for(&ws)
+        .expect("the workspace is registered")
+        .lock;
+    let lock = chan_workspace::lock::WorkspaceLock::acquire(&lock_dir, &ws)
+        .expect("hold the workspace's writer lock");
+    let desktop = FakeDesktop::start(&sandbox, chan_server::WorkspaceLifecycleOutcome::Completed);
+
+    let out = sandbox
+        .command_beside_a_desktop()
+        .arg("close")
+        .arg(&ws)
+        .output()
+        .expect("run chan close");
+
+    let requests = desktop.requests();
+    assert!(
+        matches!(
+            requests.as_slice(),
+            [chan_server::handoff::Request::CloseWorkspace { .. }]
+        ),
+        "the close was not handed to the desktop: {requests:?}\n{out:?}"
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("closed:"),
+        "{out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!(
+            "pid {} still holds its writer lock",
+            std::process::id()
+        )),
+        "{out:?}"
+    );
+    drop(lock);
 }
 
 /// Register two distinct rows, then point the first row's stored root at

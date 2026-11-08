@@ -153,9 +153,10 @@ pub(super) async fn maybe_handoff_to_desktop(
             );
             None
         }
-        chan_server::handoff::Outcome::CloseRefused { .. } => {
+        chan_server::handoff::Outcome::CloseRefused { .. }
+        | chan_server::handoff::Outcome::NotServed => {
             eprintln!(
-                "chan: chan-desktop returned a close refusal while opening the workspace; \
+                "chan: chan-desktop returned a close answer while opening the workspace; \
                  starting a standalone server."
             );
             None
@@ -227,8 +228,9 @@ async fn launch_desktop_and_handoff(root: &Path) -> Result<()> {
             chan_server::handoff::Outcome::DesktopError { message } => {
                 anyhow::bail!("chan-desktop could not open the workspace: {message}");
             }
-            chan_server::handoff::Outcome::CloseRefused { .. } => {
-                anyhow::bail!("chan-desktop returned a close refusal while opening the workspace");
+            chan_server::handoff::Outcome::CloseRefused { .. }
+            | chan_server::handoff::Outcome::NotServed => {
+                anyhow::bail!("chan-desktop returned a close answer while opening the workspace");
             }
         }
         if std::time::Instant::now() >= deadline {
