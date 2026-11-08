@@ -268,6 +268,10 @@ export function startWindowTabBar(): WindowTabBarStart {
   // off and on again ends in the last choice.
   let switches = 0;
   let target: boolean | null = null;
+  // Preference events heard so far: a read of the stored preference yields
+  // to one heard while it was in flight, which is the newer value.
+  let heard = 0;
+  let vocabulary: ReadonlySet<string> | null = null;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   const unlisten: Array<() => void> = [];
 
@@ -293,10 +297,11 @@ export function startWindowTabBar(): WindowTabBarStart {
     target = wanted;
     try {
       // Off still tells the desktop: it keeps the overlay across a reload of
-      // a page that had it on.
-      const chrome = normalizeTitlebarChrome(
-        await setTitlebarTabs(wanted, WINDOW_TAB_BAR_MIN_HEIGHT),
-      );
+      // a page that had it on. A page entering the mode reports the shortest
+      // band and `apply` settles it; one already in it reports the band it
+      // draws.
+      const band = wanted && engaged ? windowTabBar.height : WINDOW_TAB_BAR_MIN_HEIGHT;
+      const chrome = normalizeTitlebarChrome(await setTitlebarTabs(wanted, band));
       if (!latest()) return;
       if (wanted) await apply(chrome, latest);
       if (!latest()) return;
@@ -321,8 +326,30 @@ export function startWindowTabBar(): WindowTabBarStart {
     void switchTo(on);
   }
 
+  /// Read the desktop's stored preference into the page, unless a preference
+  /// event was heard since `seen`.
+  async function readPreference(seen: number): Promise<void> {
+    try {
+      const stored = await readTitlebarTabsPreference();
+      if (current() && heard === seen) windowTabBar.preferred = stored === true;
+    } catch (err) {
+      // A desktop build without the preference: the tabs stay in the panes.
+      console.warn("[chan] titlebar_tabs_preference failed", err);
+    }
+  }
+
+  function wantedNow(): boolean {
+    return windowTabBarWanted({
+      override,
+      desktop,
+      os,
+      vocabulary,
+      preferred: windowTabBar.preferred,
+    });
+  }
+
   async function engage(): Promise<void> {
-    const vocabulary = await hostVocabulary();
+    vocabulary = await hostVocabulary();
     if (!current()) return;
     // An app without every command this host needs is never asked for the
     // title bar, so a Windows window never loses its frame to an app that
@@ -335,12 +362,12 @@ export function startWindowTabBar(): WindowTabBarStart {
     // The subscription is in place before the read, so a change between the
     // two is not lost; an event that lands while the read is in flight is the
     // newer value, so the read yields to it.
-    let heard = false;
+    const seen = heard;
     const off = await onTauriEvent<{ on?: unknown } | null>(
       TITLEBAR_TABS_PREFERENCE_EVENT,
       (payload) => {
         if (!current()) return;
-        heard = true;
+        heard += 1;
         prefer(payload?.on === true);
       },
     );
@@ -365,24 +392,24 @@ export function startWindowTabBar(): WindowTabBarStart {
       return;
     }
     unlisten.push(off, offTitle);
-    try {
-      const stored = await readTitlebarTabsPreference();
-      if (!current()) return;
-      if (!heard) windowTabBar.preferred = stored === true;
-    } catch (err) {
-      // A desktop build without the preference: the tabs stay in the panes.
-      console.warn("[chan] titlebar_tabs_preference failed", err);
-      if (!current()) return;
-    }
-    await switchTo(
-      windowTabBarWanted({
-        override,
-        desktop,
-        os,
-        vocabulary,
-        preferred: windowTabBar.preferred,
-      }),
-    );
+    await readPreference(seen);
+    if (!current()) return;
+    await switchTo(wantedNow());
+  }
+
+  // A page the engine restores from its back-forward cache, as WebKit does on
+  // a step back in history, does not boot again, yet its window showed
+  // another page meanwhile: the desktop gave the window its normal title bar
+  // as that page loaded, and a preference change sent meanwhile reached that
+  // page instead. So a restored page reads the preference again and asks for
+  // the mode as its boot did.
+  function onPageShow(event: PageTransitionEvent): void {
+    if (!event.persisted || !current() || !windowTabBar.available) return;
+    const seen = heard;
+    void (async () => {
+      await readPreference(seen);
+      if (current()) await switchTo(wantedNow());
+    })();
   }
 
   async function refresh(): Promise<void> {
@@ -406,11 +433,13 @@ export function startWindowTabBar(): WindowTabBarStart {
   }
 
   window.addEventListener("resize", onResize);
+  window.addEventListener("pageshow", onPageShow);
   return {
     pending: engage(),
     stop() {
       if (current()) generation += 1;
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("pageshow", onPageShow);
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       resizeTimer = null;
       for (const off of unlisten.splice(0)) off();

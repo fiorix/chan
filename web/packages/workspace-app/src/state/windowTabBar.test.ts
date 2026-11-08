@@ -553,6 +553,82 @@ describe("the preference in chan-desktop", () => {
   });
 });
 
+describe("a page restored from the back-forward cache", () => {
+  /// A desktop whose title bar follows the page's last ask until `leave`, as
+  /// when another page loads in the window and gives it its normal title bar.
+  function asSwitchingDesktop(): { leave(): void; active(): boolean } {
+    let active = false;
+    asDesktop([TITLEBAR_TABS_COMMAND], (cmd, args) => {
+      if (cmd === "set_titlebar_tabs") active = (args as { enabled: boolean }).enabled;
+      return active ? chrome() : NO_TITLEBAR_CHROME;
+    });
+    return {
+      leave: () => {
+        active = false;
+      },
+      active: () => active,
+    };
+  }
+
+  /// The engine shows the page again, from its cache when `persisted`.
+  async function show(persisted: boolean): Promise<void> {
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  test("reads the preference and asks for the mode again with the band it draws", async () => {
+    stored = true;
+    const desktop = asSwitchingDesktop();
+    await start().pending;
+    expect(windowTabBar.height).toBe(32);
+    desktop.leave();
+    calls.length = 0;
+    await show(true);
+    expect(calls.map((c) => c.cmd)).toEqual(["titlebar_tabs_preference", "set_titlebar_tabs"]);
+    expect(switches(), "the desktop keeps the launcher panel below the band drawn").toEqual([
+      { enabled: true, bandHeight: 32 },
+    ]);
+    expect(desktop.active()).toBe(true);
+    expect(windowTabBar.on).toBe(true);
+    expect(windowTabBar.chrome).toEqual(chrome());
+    expect(windowTabBar.height).toBe(32);
+  });
+
+  test("takes a preference changed while the window showed another page", async () => {
+    stored = true;
+    const desktop = asSwitchingDesktop();
+    await start().pending;
+    desktop.leave();
+    stored = false;
+    calls.length = 0;
+    await show(true);
+    expect(switches()).toEqual([{ enabled: false, bandHeight: WINDOW_TAB_BAR_MIN_HEIGHT }]);
+    expect(windowTabBar.preferred).toBe(false);
+    expect(windowTabBar.on).toBe(false);
+    expect(windowTabBar.chrome).toEqual(NO_TITLEBAR_CHROME);
+  });
+
+  test("a first show, a stopped page or an app without the command asks nothing", async () => {
+    stored = true;
+    asSwitchingDesktop();
+    const run = start();
+    await run.pending;
+    calls.length = 0;
+    await show(false);
+    expect(calls).toEqual([]);
+    run.stop();
+    await show(true);
+    expect(calls).toEqual([]);
+
+    asDesktop([]);
+    resetHostVocabularyForTests();
+    await start().pending;
+    calls.length = 0;
+    await show(true);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("the geometry", () => {
   test("the band is the minimum without controls, else the row's or the controls' band, whichever is taller", () => {
     expect(windowTabBarHeight(NO_TITLEBAR_CHROME)).toBe(WINDOW_TAB_BAR_MIN_HEIGHT);
