@@ -1,6 +1,6 @@
 # The launcher chord does nothing over a reconnecting window
 
-Status: raised by the owner on 2026-11-08 with a screenshot and placed in v0.126.0; built on `fix/launcher-from-reconnecting-window` (`567312fbf`, `9c6d44c27`), awaiting review.
+Status: raised by the owner on 2026-11-08 with a screenshot and placed in v0.126.0; built on `fix/launcher-from-reconnecting-window` (`567312fbf`, `9c6d44c27`) and read on the owner's Mac the same day, awaiting review.
 
 ## What was seen
 
@@ -32,4 +32,4 @@ The same cancel holds Quit (Cmd+Q), Hide, Hide Others, Minimize and New Window b
 
 - Vitest on the base (`fa08475b3` sources of `App.svelte` and `DisconnectOverlay.svelte`, new tests): 15 of 62 failed, every pass-through case and three focus cases; all 62 pass on the fix.
 - Headless Chrome 126 with the real `key_bridge.js` as an init script, a stubbed invoke and a model of the menubar's resend (an uncancelled Cmd+P invokes `toggle_launcher_panel`), the server killed to raise the overlay. Base: Cmd+P cancelled, 0 toggles; the overlay focused Reconnect while the launcher was marked shown. Fix: Cmd+P not cancelled, 1 toggle; Cmd+K cancelled with no deck; Reconnect focused before and after a launcher round trip, Enter reconnects, Tab reaches Abandon; a drop while the launcher shows leaves focus alone until the launcher hides, then Reconnect. Linux: Ctrl+Shift+P toggled on both, plain Ctrl+P cancelled.
-- Not established: the native macOS run; the menubar step is modelled, not observed.
+- Read on the owner's Mac on 2026-11-08 with the branch's debug build (`git-18505c9ce8e3`), an isolated desktop and a throwaway devserver: with the devserver stopped and the window showing the reconnecting card, Cmd+P opened the Computers screen; the owner reported it works.
