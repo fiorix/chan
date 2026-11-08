@@ -1,6 +1,6 @@
 # The gateway setup defaults name the maintainer's deployment
 
-Status: raised on 2026-11-08 while writing the chan.app gateway tutorial; accepted by the owner for v0.126.0; not started.
+Status: raised on 2026-11-08 while writing the chan.app gateway tutorial; accepted by the owner for v0.126.0; built on `fix/gateway-setup-defaults` as `1c093349e`, merged into the integration branch, awaiting the release.
 
 ## What is there now
 

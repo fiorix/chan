@@ -39,13 +39,13 @@ The owner also brings his title bar work, built on his Mac. A chan-desktop windo
 | --- | --- | --- |
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | built | candidate |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
-| [chan close reports a running serve closed][closelie] | built | review |
+| [chan close reports a running serve closed][closelie] | built | candidate |
 | [chan serve --help names Cmd+P as Team Work][cmdphelp] | built | candidate |
 | [admin.env points at identity's public port][adminenv] | built | candidate |
-| [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
-| [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
-| [the manual and design docs contradict chan][docsdrift] | partly built | build |
-| [Cmd+P does nothing over a reconnecting window][rclaunch] | built | review |
+| [the gateway setup defaults name chan.app][gwdefaults] | built | candidate |
+| [the account page's tunnel hint has no URL][tunnelhint] | built | candidate |
+| [the manual and design docs contradict chan][docsdrift] | built | candidate |
+| [Cmd+P does nothing over a reconnecting window][rclaunch] | built | candidate |
 | [a window's tabs sit below the title bar on macOS][titlebarmac] | built | review |
 | [a window's tabs sit below the title bar on Windows][titlebarwin] | built | acceptance |
 

@@ -1,6 +1,6 @@
 # The account page's devserver hint gives a tunnel command without its URL
 
-Status: raised on 2026-11-08 while writing the chan.app gateway tutorial; accepted by the owner for v0.126.0; not started.
+Status: raised on 2026-11-08 while writing the chan.app gateway tutorial; accepted by the owner for v0.126.0; built on `fix/account-tunnel-hint` as `6bd39defa`, merged into the integration branch, awaiting the release.
 
 ## What is there now
 

@@ -1,6 +1,6 @@
 # The launcher chord does nothing over a reconnecting window
 
-Status: raised by the owner on 2026-11-08 with a screenshot and placed in v0.126.0; built on `fix/launcher-from-reconnecting-window` (`567312fbf`, `9c6d44c27`) and read on the owner's Mac the same day, awaiting review.
+Status: raised by the owner on 2026-11-08 with a screenshot and placed in v0.126.0; built on `fix/launcher-from-reconnecting-window` (`567312fbf`, `9c6d44c27`) and read on the owner's Mac the same day, reviewed and merged into the integration branch, awaiting the release.
 
 ## What was seen
 
