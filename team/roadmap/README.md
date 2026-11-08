@@ -25,6 +25,8 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 Opened 2026-11-07 at the v0.125.0 close with six items that release's readings and proofs found and the owner placed here at its cut, none of them built in it. The integration gate's red runs name a set of chan-server and chan-desktop tests whose wall-clock bounds a loaded host breaks ([timebound]). The reading of the desktop enrollment found a minted PAT that nothing revokes when the desktop refuses the redeem's answer or its token store fails ([patrevoke]). The enrollment proof ran without TLS because the desktop's and the peer agent's Rust clients trust the bundled roots alone and ignore a CA in the system store ([systemca]). The Windows kernel suite's first run refused a target the pinned toolchain had, because its preflight reads rustup outside the checkout ([winpreflight]). The Mac reading of the display-sleep repaint found WebKit logging a visibility transition at each wake that the terminal tab's comment says never reaches the page, and the owner sees a window back with its title bar alone for a second or two before the terminal paints ([wakevis]). The role-lock work found that no CI job runs the gateway's manifest, packaging isolation and database roles suites, which let the Kubernetes ConfigMap's copy of the reconcile script drift ([gwci]).
 
+On 2026-11-08 the owner added six items found while writing the chan.app tutorials. With Chan Desktop running, `chan close` of a standalone `chan serve` prints `closed:` while the server keeps running ([closelie]). `chan serve --help` still calls Cmd+P Team Work, though the desktop binds it to the Computers screen ([cmdphelp]). configure.sh's admin.env leaves the admin CLI on identity's public port, where no admin route answers ([adminenv]). The gateway setup defaults to the maintainer's domains, its docs disagree on where devservers dial in, and the sdme provisioner claims a default tunnel URL chan does not have ([gwdefaults]). The account page tells users to run a tunnel without its URL, with the token on the command line ([tunnelhint]). Ten statements in the manual and the design docs contradict the product ([docsdrift]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [time-bound tests go red on a loaded host][timebound] | not started | design |
@@ -33,6 +35,12 @@ Opened 2026-11-07 at the v0.125.0 close with six items that release's readings a
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | not started | build |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | not started | reading |
 | [no CI job runs the gateway packaging and roles suites][gwci] | not started | build |
+| [chan close reports a running serve closed][closelie] | not started | build |
+| [chan serve --help names Cmd+P as Team Work][cmdphelp] | not started | build |
+| [admin.env points at identity's public port][adminenv] | not started | build |
+| [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
+| [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
+| [the manual and design docs contradict chan][docsdrift] | not started | build |
 
 [timebound]: v0.126.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.126.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -40,6 +48,12 @@ Opened 2026-11-07 at the v0.125.0 close with six items that release's readings a
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
 [gwci]: v0.126.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
+[closelie]: v0.126.0/chan-close-reports-a-standalone-serve-closed-while-it-keeps-running.md
+[cmdphelp]: v0.126.0/chan-serve-help-names-cmd-p-as-team-work.md
+[adminenv]: v0.126.0/configure-sh-points-the-admin-cli-at-identitys-public-port.md
+[gwdefaults]: v0.126.0/the-gateway-setup-defaults-name-the-maintainers-deployment.md
+[tunnelhint]: v0.126.0/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md
+[docsdrift]: v0.126.0/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md
 
 ## Completed
 
