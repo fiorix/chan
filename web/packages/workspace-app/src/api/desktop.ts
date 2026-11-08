@@ -25,8 +25,18 @@ type UnlistenFn = () => void;
 /// workspace app has no `@tauri-apps/api` dependency, so events are reached
 /// through the global the same way invokes are.
 interface TauriEventApi {
-  listen<T>(event: string, handler: (e: { payload: T }) => void): Promise<UnlistenFn>;
+  listen<T>(
+    event: string,
+    handler: (e: { payload: T }) => void,
+    options?: { target: TauriEventTarget },
+  ): Promise<UnlistenFn>;
 }
+
+/// The window a listener hears events for. Tauri hands a listener registered
+/// without a target every event, including one the desktop sent to another
+/// window; a listener naming its own webview window hears only the events
+/// sent to it, and broadcasts.
+export type TauriEventTarget = { kind: "WebviewWindow"; label: string };
 
 type TauriWindow = Window &
   typeof globalThis & {
@@ -268,19 +278,31 @@ export async function readDroppedPaths(): Promise<string[]> {
   }
 }
 
+/// This page's own webview window as an event target, or null when the
+/// webview does not say its label.
+export function ownWebviewWindowTarget(): TauriEventTarget | null {
+  const label = tauriLabels().webviewLabel;
+  return label ? { kind: "WebviewWindow", label } : null;
+}
+
 /// Subscribe to an event chan-desktop emits to its windows, delivering each
-/// payload to `handler`. Resolves to an unlisten handle. Best-effort: a
-/// missing event bridge (a browser tab) or a refused `listen` (a window whose
-/// grant withholds it) degrades to a no-op, so a page that follows an event
-/// boots the same everywhere and simply never hears it.
+/// payload to `handler`. Without `target` the listener hears the event
+/// whichever window it was sent to; an event the desktop sends one window
+/// passes this page's own `target` (`ownWebviewWindowTarget`). Resolves to an
+/// unlisten handle. Best-effort: a missing event bridge (a browser tab) or a
+/// refused `listen` (a window whose grant withholds it) degrades to a no-op,
+/// so a page that follows an event boots the same everywhere and simply never
+/// hears it.
 export async function onTauriEvent<T>(
   event: string,
   handler: (payload: T) => void,
+  target?: TauriEventTarget,
 ): Promise<UnlistenFn> {
   const api = (window as TauriWindow).__TAURI__?.event;
   if (!api?.listen) return () => {};
   try {
-    return await api.listen<T>(event, (e) => handler(e.payload));
+    const deliver = (e: { payload: T }) => handler(e.payload);
+    return await (target ? api.listen<T>(event, deliver, { target }) : api.listen<T>(event, deliver));
   } catch (err) {
     console.warn(`onTauriEvent(${event}) failed:`, err);
     return () => {};

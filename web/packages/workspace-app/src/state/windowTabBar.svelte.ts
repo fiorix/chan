@@ -18,6 +18,7 @@
 import {
   isTauriDesktop,
   onTauriEvent,
+  ownWebviewWindowTarget,
   readTitlebarChrome,
   readTitlebarTabsPreference,
   setTitlebarTabs,
@@ -330,13 +331,21 @@ export function startWindowTabBar(): WindowTabBarStart {
         prefer(payload?.on === true);
       },
     );
-    const offTitle = await onTauriEvent<{ title?: unknown } | null>(
-      TITLEBAR_WINDOW_TITLE_EVENT,
-      (payload) => {
-        if (!current()) return;
-        windowTabBar.title = typeof payload?.title === "string" ? payload.title : "";
-      },
-    );
+    // The desktop sends the title to one window, and a listener without a
+    // target hears what is sent to every window, so this one names its own:
+    // a covered window never draws another window's title. A page that cannot
+    // read its own label takes no title at all.
+    const own = ownWebviewWindowTarget();
+    const offTitle = own
+      ? await onTauriEvent<{ title?: unknown } | null>(
+          TITLEBAR_WINDOW_TITLE_EVENT,
+          (payload) => {
+            if (!current()) return;
+            windowTabBar.title = typeof payload?.title === "string" ? payload.title : "";
+          },
+          own,
+        )
+      : () => {};
     if (!current()) {
       off();
       offTitle();

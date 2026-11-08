@@ -72,19 +72,28 @@ const chrome = (partial: Partial<typeof NO_TITLEBAR_CHROME> = {}) => ({
 let started: WindowTabBarStart | null = null;
 const calls: Array<{ cmd: string; args?: unknown }> = [];
 const listeners = new Map<string, (event: { payload: unknown }) => void>();
+/// The target each listener was registered with; absent for none.
+const targets = new Map<string, { kind: string; label: string }>();
+
+/// This page's webview window and another one of the desktop's.
+const SELF_LABEL = "local::w-self";
+const OTHER_LABEL = "local::w-other";
 /// The desktop's stored preference, which `titlebar_tabs_preference` answers;
 /// an error is a refusal.
 let stored: boolean | Error = false;
 
-/// A chan-desktop webview whose app advertises `commands`, answers the
-/// preference pair from `stored` and the title bar commands from `answer`.
+/// A chan-desktop webview labelled `label` (none when null) whose app
+/// advertises `commands`, answers the preference pair from `stored` and the
+/// title bar commands from `answer`.
 function asDesktop(
   commands: string[],
   answer: (cmd: string, args?: unknown) => unknown = () => chrome(),
+  label: string | null = SELF_LABEL,
 ): void {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {
+      ...(label ? { metadata: { currentWindow: { label }, currentWebview: { label } } } : {}),
       invoke: async (cmd: string, args?: unknown) => {
         calls.push({ cmd, args });
         if (cmd === "native_vocabulary") return { version: "1", build: "b", commands };
@@ -104,13 +113,32 @@ function asDesktop(
     configurable: true,
     value: {
       event: {
-        listen: async (name: string, handler: (event: { payload: unknown }) => void) => {
+        listen: async (
+          name: string,
+          handler: (event: { payload: unknown }) => void,
+          options?: { target?: { kind: string; label: string } },
+        ) => {
           listeners.set(name, handler);
-          return () => listeners.delete(name);
+          if (options?.target) targets.set(name, options.target);
+          return () => {
+            listeners.delete(name);
+            targets.delete(name);
+          };
         },
       },
     },
   });
+}
+
+/// The desktop sends `name` to the webview window `label` alone, and Tauri
+/// delivers it as tauri 2.12.4 does: a listener registered without a target
+/// hears it whichever window it went to (`event/listener.rs`,
+/// `match_any_or_filter`), a targeted one only when it names that window
+/// (`manager/mod.rs`, `emit_to`'s `filter_target`).
+function sendToWindow(label: string, name: string, payload: unknown): void {
+  const handler = listeners.get(name);
+  const target = targets.get(name);
+  if (handler && (target === undefined || target.label === label)) handler({ payload });
 }
 
 /// The desktop announces its preference to the window.
@@ -141,6 +169,7 @@ afterEach(() => {
   started = null;
   calls.length = 0;
   listeners.clear();
+  targets.clear();
   stored = false;
   delete (window as W).__TAURI_INTERNALS__;
   delete (window as W).__TAURI__;
@@ -498,6 +527,28 @@ describe("the preference in chan-desktop", () => {
     listeners.get(TITLEBAR_WINDOW_TITLE_EVENT)?.({ payload: { title: "Work Window 2 [deploy]" } });
     expect(windowTabBar.title).toBe("Work Window 2 [deploy]");
     listeners.get(TITLEBAR_WINDOW_TITLE_EVENT)?.({ payload: { title: 7 } });
+    expect(windowTabBar.title).toBe("");
+  });
+
+  test("a window takes the titles sent to it and none sent to another window", async () => {
+    asOS(WINDOWS_UA);
+    asDesktop(WINDOWS_COMMANDS, () => NO_TITLEBAR_CHROME);
+    await start().pending;
+    sendToWindow(OTHER_LABEL, TITLEBAR_WINDOW_TITLE_EVENT, { title: "Work Window 2" });
+    expect(windowTabBar.title, "another window's title").toBe("");
+    sendToWindow(SELF_LABEL, TITLEBAR_WINDOW_TITLE_EVENT, { title: "Terminal Window 1" });
+    expect(windowTabBar.title).toBe("Terminal Window 1");
+    sendToWindow(OTHER_LABEL, TITLEBAR_WINDOW_TITLE_EVENT, { title: "Work Window 2 [deploy]" });
+    expect(windowTabBar.title, "another window's rename").toBe("Terminal Window 1");
+  });
+
+  test("a page that cannot read its own label takes no title", async () => {
+    asOS(WINDOWS_UA);
+    asDesktop(WINDOWS_COMMANDS, () => NO_TITLEBAR_CHROME, null);
+    await start().pending;
+    expect(listeners.has(TITLEBAR_TABS_PREFERENCE_EVENT), "the preference is still heard").toBe(true);
+    sendToWindow(SELF_LABEL, TITLEBAR_WINDOW_TITLE_EVENT, { title: "Terminal Window 1" });
+    sendToWindow(OTHER_LABEL, TITLEBAR_WINDOW_TITLE_EVENT, { title: "Work Window 2" });
     expect(windowTabBar.title).toBe("");
   });
 });
