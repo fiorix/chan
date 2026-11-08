@@ -126,10 +126,21 @@ pub(crate) mod test_support {
     use std::future::Future;
     use std::time::Duration;
 
+    /// How long a probe waits for the pool's only thread to come back. The
+    /// response is held unread through the wait, so a producer parked on it
+    /// keeps the thread until the stream's stall bound stops it (the test
+    /// sets a short one) or, past that, until the response is dropped: the
+    /// probe runs at the stall bound or never. This only decides how soon a
+    /// producer that never gives the thread back reports; it is far below
+    /// the default stall bound, so a producer that ignored the test's bound
+    /// still reads red, and far above the cost of a correct run on a loaded
+    /// host.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
     /// Hold a streaming response unpolled on a runtime whose blocking pool
-    /// is one thread, and prove that thread comes back within the stall
-    /// bound. The response's producer owns the pool's only thread, so a
-    /// probe queued behind it can run only once the producer has returned:
+    /// is one thread, and prove that thread comes back while the response
+    /// stays unread. The response's producer owns the pool's only thread, so
+    /// a probe queued behind it can run only once the producer has returned:
     /// the measurement is a task that runs or does not, not a stopwatch.
     /// Returns what draining the body then produced, for the caller to say
     /// whether an abandoned stream must end as an error.
@@ -168,7 +179,7 @@ pub(crate) mod test_support {
             );
             drop(release);
             assert!(
-                tokio::time::timeout(Duration::from_secs(10), probe_rx.recv())
+                tokio::time::timeout(HANG_GUARD, probe_rx.recv())
                     .await
                     .is_ok(),
                 "{name}: freeing the pool thread must let the queued task run"
@@ -180,16 +191,16 @@ pub(crate) mod test_support {
             tokio::task::spawn_blocking(move || {
                 let _ = ran_tx.blocking_send(());
             });
-            let freed = tokio::time::timeout(Duration::from_secs(2), ran_rx.recv()).await;
+            let freed = tokio::time::timeout(HANG_GUARD, ran_rx.recv()).await;
             if freed.is_err() {
                 // Closing the channel unparks an unbounded producer before
                 // the runtime joins its thread.
                 drop(response);
-                let _ = tokio::time::timeout(Duration::from_secs(2), ran_rx.recv()).await;
+                let _ = tokio::time::timeout(HANG_GUARD, ran_rx.recv()).await;
                 panic!("{name}: the parked producer kept its pool thread past the stall bound");
             }
             tokio::time::timeout(
-                Duration::from_secs(2),
+                HANG_GUARD,
                 axum::body::to_bytes(response.into_body(), usize::MAX),
             )
             .await

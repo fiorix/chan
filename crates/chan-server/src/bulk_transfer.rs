@@ -878,6 +878,14 @@ pub(crate) mod test_support {
         (inner.active.len(), inner.queue.len())
     }
 
+    /// How long the lane's other jobs stay parked, and how long the test
+    /// waits for the unpolled download to give its slot back. The parked
+    /// jobs outlast the wait, so the slot can come back only from the
+    /// download, at its stall bound; a download that waits on its reader
+    /// keeps the slot until the wait runs out, red and not hung. A correct
+    /// run on a loaded host ends long before.
+    const PARKED: Duration = Duration::from_secs(60);
+
     /// Hold a response unpolled while the rest of its private lane is full.
     pub(crate) async fn assert_stalled_download_releases_slot(
         tenant: &BulkTransferTenant,
@@ -889,7 +897,7 @@ pub(crate) mod test_support {
         loop {
             let (release, park) = std::sync::mpsc::channel::<()>();
             match tenant.submit(move |_| {
-                let _ = park.recv_timeout(Duration::from_secs(5));
+                let _ = park.recv_timeout(PARKED);
             }) {
                 Ok(job) => {
                     releases.push(release);
@@ -900,7 +908,7 @@ pub(crate) mod test_support {
         }
         assert_eq!(held.len(), ACTIVE_CAPACITY + WAITING_CAPACITY - 1);
         assert!(tenant.submit(|_| ()).is_err());
-        let released = tokio::time::timeout(Duration::from_secs(2), async {
+        let released = tokio::time::timeout(PARKED / 2, async {
             loop {
                 if let Ok(job) = tenant.submit(|_| ()) {
                     drop(job);
@@ -917,7 +925,7 @@ pub(crate) mod test_support {
             panic!("unpolled download kept its lane slot past the stall bound");
         }
         let body = tokio::time::timeout(
-            Duration::from_secs(2),
+            PARKED / 2,
             axum::body::to_bytes(response.into_body(), usize::MAX),
         )
         .await

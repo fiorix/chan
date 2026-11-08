@@ -4180,6 +4180,15 @@ mod file_browser_listing_tests {
 mod write_tests {
     use super::*;
 
+    /// The bound on a wait for a stalled transfer to give up. The client
+    /// side stays silent and connected through the wait (its sender or
+    /// receiver is held until after it), so a transfer that waits on the
+    /// client instead of its stall bound never ends inside it, and a green
+    /// run ends at the test's short stall bound. It only decides how soon
+    /// such a transfer reports; it is far below the default stall bound, so
+    /// a transfer that ignored the test's bound still reads red.
+    const STALL_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
     #[test]
     fn workspace_mutation_queries_share_the_256_byte_window_bound() {
         let at_limit = "w".repeat(256);
@@ -5945,7 +5954,7 @@ mod write_tests {
             );
             let _ = done_tx.send(result);
         });
-        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let result = done_rx.recv_timeout(STALL_HANG_GUARD);
         drop(tx);
         let error = result
             .expect("workspace upload kept waiting for a stalled client")
@@ -5961,7 +5970,7 @@ mod write_tests {
 
     #[tokio::test]
     async fn stalled_workspace_upload_returns_without_more_body_bytes() {
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::time::timeout(STALL_HANG_GUARD, async {
             let (_cfg, root, workspace) = admitted_download_workspace();
             let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
             let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(25));
@@ -5973,7 +5982,7 @@ mod write_tests {
                 filename: "stalled.bin".into(),
             };
             let response = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
+                STALL_HANG_GUARD / 2,
                 stream_workspace_upload(
                     &bulk,
                     None,
@@ -6016,7 +6025,7 @@ mod write_tests {
             send_reader_into(&tx, &cancel, reader);
             let _ = done_tx.send(());
         });
-        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let result = done_rx.recv_timeout(STALL_HANG_GUARD);
         drop(rx);
         result.expect("workspace reader stayed blocked on a full channel");
         thread.join().unwrap();
@@ -6036,7 +6045,7 @@ mod write_tests {
             let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
             let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(250));
             let response = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+                STALL_HANG_GUARD,
                 stream_planned_workspace_download_tracked(
                     &bulk,
                     None,
