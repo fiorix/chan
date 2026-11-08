@@ -2195,6 +2195,36 @@ mod reindex_cancel_at_shutdown_tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// How long a hold of the cell lasts when the test does not let it go,
+    /// and how long a wait the test ends lasts at most. A green run ends
+    /// every such wait by the order of its events, long before this; a run
+    /// whose task makes an unbounded wait for the cell on the runtime's only
+    /// worker ends here, red and not hung. A wait shorter than this that then
+    /// goes on is not what these pins read.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
+    /// Hold `cell`'s write guard on a thread of its own until the returned
+    /// sender is used or dropped, or [`HANG_GUARD`] passes. Joining the
+    /// thread answers whether the test let the guard go: false when the hold
+    /// ran out by itself, which only an unbounded wait for the cell reaches.
+    fn hold_until_let_go(
+        cell: &Arc<RwLock<Option<WorkspaceCell>>>,
+    ) -> (mpsc::Sender<()>, std::thread::JoinHandle<bool>) {
+        let writer_cell = Arc::clone(cell);
+        let (ready, held) = mpsc::sync_channel(0);
+        let (release, released) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _guard = writer_cell.write().expect("workspace cell writer");
+            ready.send(()).expect("signal the held write guard");
+            !matches!(
+                released.recv_timeout(HANG_GUARD),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            )
+        });
+        held.recv().expect("the writer holds the workspace cell");
+        (release, writer)
+    }
+
     /// A cell over an empty workspace with a live indexer, and that indexer.
     fn bound_cell() -> (
         [tempfile::TempDir; 2],
@@ -2232,22 +2262,16 @@ mod reindex_cancel_at_shutdown_tests {
     /// import holds when the signal fires: it keeps no runtime worker while
     /// it waits, and cancels the reindex once the cell is let go.
     ///
-    /// The hold ends on its own after two seconds, so a task that waits for
-    /// the cell on the runtime's only worker ends this test red and not
-    /// hung; unrelated async work is given one second, well past any
-    /// scheduling delay and well inside the hold.
+    /// The order of events is the assertion: unrelated async work, a timer
+    /// behind the stop's task on the runtime's only worker, runs while the
+    /// cell is still held, and the test lets the hold go only after it has.
+    /// A task that makes an unbounded wait for the cell on that worker stops
+    /// the timer too, so the hold runs out by itself instead, and the test
+    /// reads that.
     #[tokio::test(flavor = "current_thread")]
     async fn the_stops_reindex_cancel_beside_a_held_cell_keeps_no_worker_and_cancels_once_let_go() {
         let (_dirs, cell, indexer) = bound_cell();
-        let writer_cell = Arc::clone(&cell);
-        let (ready, held) = mpsc::sync_channel(0);
-        let (release, released) = mpsc::channel::<()>();
-        let writer = std::thread::spawn(move || {
-            let _guard = writer_cell.write().expect("workspace cell writer");
-            ready.send(()).expect("signal the held write guard");
-            let _ = released.recv_timeout(Duration::from_secs(2));
-        });
-        held.recv().expect("the writer holds the workspace cell");
+        let (release, writer) = hold_until_let_go(&cell);
         let (shutdown, signal) = watch::channel(false);
         shutdown.send(true).expect("signal the stop");
 
@@ -2259,21 +2283,20 @@ mod reindex_cancel_at_shutdown_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let _ = fired.send(());
         });
-        let progress = tokio::time::timeout(Duration::from_secs(1), progress).await;
+        progress.await.expect("the timer task");
         let cancelled_while_held = indexer.cancel_requested();
-        // A hold that ended on its own has nobody left to tell.
         let _ = release.send(());
-        writer.join().expect("workspace cell writer");
+        let let_go_by_the_test = writer.join().expect("workspace cell writer");
 
         assert!(
-            matches!(progress, Ok(Ok(()))),
+            let_go_by_the_test,
             "the stop's wait for the workspace cell starved unrelated async progress"
         );
         assert!(
             !cancelled_while_held,
             "fixture: the reindex was cancelled while the cell was held"
         );
-        tokio::time::timeout(Duration::from_secs(10), stop)
+        tokio::time::timeout(HANG_GUARD, stop)
             .await
             .expect("the stop's task did not end once the cell was let go")
             .expect("the stop's task");
@@ -2287,8 +2310,10 @@ mod reindex_cancel_at_shutdown_tests {
     /// reset or a metadata import holds: none at once, and the workspace
     /// once the cell is let go.
     ///
-    /// The look runs on a thread of its own, so one that waits for the cell
-    /// ends this test red at its bound and not hung.
+    /// "At once" is an order of events: the look answers while the hold is
+    /// still in place, since the test lets go only once it has the answer.
+    /// The look runs on a thread of its own, so one that makes an unbounded
+    /// wait for the cell ends this test red at the hang guard and not hung.
     #[tokio::test]
     async fn the_hosts_look_at_a_held_cell_answers_none_at_once_and_the_workspace_once_let_go() {
         use chan_library::WorkspaceCellHandle;
@@ -2300,7 +2325,7 @@ mod reindex_cancel_at_shutdown_tests {
         let look = std::thread::spawn(move || {
             let _ = answered.send(looking.workspace().is_some());
         });
-        let beside_the_hold = answer.recv_timeout(Duration::from_secs(1));
+        let beside_the_hold = answer.recv_timeout(HANG_GUARD);
         drop(hold);
         look.join().expect("the look's thread");
 
@@ -2316,7 +2341,8 @@ mod reindex_cancel_at_shutdown_tests {
     }
 
     /// The host's reindex cancel beside a held cell returns at once and
-    /// reaches no indexer, and cancels once the cell is let go.
+    /// reaches no indexer, and cancels once the cell is let go. As with the
+    /// look, "at once" is that it returns while the hold is still in place.
     #[tokio::test]
     async fn the_hosts_reindex_cancel_beside_a_held_cell_returns_at_once_and_cancels_once_let_go() {
         use chan_library::WorkspaceCellHandle;
@@ -2329,7 +2355,7 @@ mod reindex_cancel_at_shutdown_tests {
             cancelling.cancel_reindex();
             let _ = returned.send(());
         });
-        let beside_the_hold = back.recv_timeout(Duration::from_secs(1));
+        let beside_the_hold = back.recv_timeout(HANG_GUARD);
         let cancelled_while_held = indexer.cancel_requested();
         drop(hold);
         cancel.join().expect("the cancel's thread");
@@ -2356,10 +2382,14 @@ mod reindex_cancel_at_shutdown_tests {
     /// tenant returns, and an open of the mounted root hands the mount back
     /// without its revalidation.
     ///
-    /// The reset is held past its admission by its test gate, which lets go
-    /// by itself after five seconds, so calls that wait for the cell on the
-    /// runtime's only worker end this test red and not hung; unrelated
-    /// async work is given one second.
+    /// The reset is held past its admission by its test gate, and the order
+    /// of events is the assertion: the calls answer, and unrelated async
+    /// work behind them on the runtime's only worker runs, while the gate
+    /// still holds, since the test lets it go only after both. Calls that
+    /// make an unbounded wait for the cell hold the gate until it runs out
+    /// by itself, which the test reads from its release, red and not hung;
+    /// calls that wait on something the held reset never signals end at the
+    /// hang guard, red as well.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn the_hosts_calls_into_a_tenant_whose_cell_a_reset_holds_keep_no_worker() {
@@ -2394,7 +2424,7 @@ mod reindex_cancel_at_shutdown_tests {
             .body(axum::body::Body::from(r#"{"mode":"workspace"}"#))
             .expect("the reset's request");
         let resetting = tokio::spawn(Arc::clone(&host).router().oneshot(reset));
-        tokio::time::timeout(Duration::from_secs(10), held)
+        tokio::time::timeout(HANG_GUARD, held)
             .await
             .expect("fixture: the reset never reached its hold")
             .expect("fixture: the reset's gate was dropped");
@@ -2419,26 +2449,28 @@ mod reindex_cancel_at_shutdown_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let _ = fired.send(());
         });
-        let progress = tokio::time::timeout(Duration::from_secs(1), progress).await;
-        let answers = tokio::time::timeout(Duration::from_secs(1), calls).await;
+        progress.await.expect("the timer task");
+        let answers = tokio::time::timeout(HANG_GUARD, calls)
+            .await
+            .expect("the host's calls did not answer beside a held cell")
+            .expect("the host's calls");
         let look_while_held = host.live_workspace(&stored).is_some();
-        // A gate that let go by itself has nobody left to tell.
-        let _ = release.send(());
-        let reset_status = tokio::time::timeout(Duration::from_secs(30), resetting)
+        // A gate that ran out by itself has dropped its receiver.
+        let let_go_by_the_test = release.send(()).is_ok();
+        assert!(
+            let_go_by_the_test,
+            "the host's calls or unrelated async progress waited for a held workspace cell: \
+             the reset's gate ran out by itself"
+        );
+        let reset_status = tokio::time::timeout(HANG_GUARD, resetting)
             .await
             .expect("the reset did not answer once its gate was released")
             .expect("the reset's task")
             .expect("the reset's response")
             .status();
 
-        assert!(
-            matches!(progress, Ok(Ok(()))),
-            "the host's wait for a held workspace cell starved unrelated async progress"
-        );
         assert_eq!(
-            answers
-                .expect("the host's calls did not return beside a held cell")
-                .expect("the host's calls"),
+            answers,
             (true, true),
             "beside a held cell: (the workspace read mounted, the open handed the mount back)"
         );
