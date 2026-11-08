@@ -115,12 +115,14 @@ fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspa
 }
 
 /// `chan close {path}`: tear down a running server holding `path`, releasing
-/// its writer lock. Best-effort -- "not currently served" (and an unreachable
-/// holder) is treated as success, since the goal is "this workspace is not
-/// served". A reachable host's still-releasing answer is a temporary failure.
-/// With `remove`, it then also forgets the workspace from the registry
-/// (`chan workspace forget`), unless the holder refused the teardown over live
-/// terminals or a discovered devserver cannot complete the removal.
+/// its writer lock. "Not currently served" is a success, since the goal is
+/// "this workspace is not served"; it reports closed only once the writer
+/// lock is free, and a lock still held is a failure naming its holder. A
+/// reachable host's still-releasing answer is a temporary failure. With
+/// `remove`, it then also forgets the workspace from the registry (`chan
+/// workspace forget`), unless the holder refused the teardown over live
+/// terminals, kept the lock, or a discovered devserver cannot complete the
+/// removal.
 async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Result<()> {
     let lib = library()?;
     let row = if remove {
@@ -149,11 +151,18 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
         }
         Ok(UnserveOutcome::DevserverFailure { reason }) => anyhow::bail!("{reason}"),
         Ok(UnserveOutcome::Unreachable { pid }) => {
-            let holder =
-                pid.map_or_else(|| "another process".to_string(), |pid| format!("pid {pid}"));
             anyhow::bail!(
-                "refusing to report {} closed: {holder} holds its writer lock and answered on no control socket",
-                path.display()
+                "refusing to report {} closed: {} holds its writer lock and answered on no control socket",
+                path.display(),
+                lock_holder_name(pid)
+            );
+        }
+        Ok(UnserveOutcome::StillHeld { pid }) => {
+            anyhow::bail!(
+                "refusing to report {} closed: {} still holds its writer lock {}s after the close was sent",
+                path.display(),
+                lock_holder_name(pid),
+                LOCK_HOLDER_BOUND.as_secs()
             );
         }
         // A failed teardown whose holder has let go of the workspace is still
@@ -190,6 +199,15 @@ enum UnserveOutcome {
     /// control socket of its recorded holder answering, or with no holder
     /// record to read: the workspace is held, and nothing was asked to let go.
     Unreachable { pid: Option<u32> },
+    /// A desktop or the lock's holder accepted the close, and the writer lock
+    /// was still held at [`LOCK_HOLDER_BOUND`]: the workspace is not closed.
+    /// Names the holder the lock's record gives, else the pid that was asked.
+    StillHeld { pid: Option<u32> },
+}
+
+/// How a close failure names the writer lock's holder.
+fn lock_holder_name(pid: Option<u32>) -> String {
+    pid.map_or_else(|| "another process".to_string(), |pid| format!("pid {pid}"))
 }
 
 /// How long a close waits for a held writer lock's holder to answer on a
@@ -330,10 +348,7 @@ async fn forget_on_library_devserver(
     )
     .await;
     match answer {
-        Ok(_) => {
-            wait_for_lock_release(lock_dir);
-            UnserveOutcome::Unserved
-        }
+        Ok(_) => released_or_still_held(lock_dir, None),
         Err(error) => {
             let message = error.to_string();
             if let Some(active_terminals) = parse_live_terminals_refusal(&message) {
@@ -379,10 +394,12 @@ fn answers_still_releasing(message: &str) -> bool {
 
 /// Shared by `chan close` and `chan workspace forget`. Tries the desktop
 /// handoff, then discovers the holder from the `writer.lock` record and asks
-/// it over its control socket to tear down. When a forget has a stored row
-/// but no reachable lock-record holder and a free writer lock, it asks the
-/// discovered devserver for that library. A successful close waits for the
-/// flock to release.
+/// it over its control socket to tear down. A desktop that does not serve the
+/// workspace sends the close on to that holder, as with no desktop running.
+/// When a forget has a stored row but no reachable lock-record holder and a
+/// free writer lock, it asks the discovered devserver for that library. A
+/// close is `Unserved` only once the writer lock is free; a lock still held
+/// at [`LOCK_HOLDER_BOUND`] after the close was accepted is `StillHeld`.
 ///
 /// With `remove`, a HOST (devserver / desktop) also UNREGISTERS the workspace
 /// from its library + overlay, so the removal is reflected in the host's own
@@ -418,40 +435,46 @@ async fn unserve_running(
     // runtime socket directory differs from the terminal's). Gated like the
     // open handoff: only the Desktop personality or the forced shim hands off,
     // never a plain standalone binary; `CHAN_NO_DESKTOP_HANDOFF` opts out.
-    // A still-releasing answer stops here; other desktop errors
-    // fall through to the control-socket and devserver paths below.
+    // A still-releasing answer stops here; a desktop that does not serve the
+    // workspace and other desktop errors fall through to the control-socket
+    // and devserver paths below.
     let want_desktop_handoff = (personality == Personality::Desktop
         || chan_server::handoff::handoff_forced())
         && !chan_server::handoff::handoff_opt_out()
         && !unresolved_forget_parent;
     if want_desktop_handoff {
+        use chan_server::handoff::Outcome;
         match chan_server::handoff::try_close_workspace(&requested, remove).await {
-            chan_server::handoff::Outcome::HandedOff => {
-                // The desktop released its flock during teardown; wait it out so a
+            Outcome::HandedOff => {
+                // The desktop releases its flock during teardown; wait it out so a
                 // `chan serve` racing right behind doesn't see a transient
-                // WorkspaceLocked. Only the locally-registered case resolves a lock
-                // dir to wait on.
-                if let Some(paths) = row
+                // WorkspaceLocked, and so a lock someone else holds is not
+                // reported closed. Only the locally-registered case resolves a
+                // lock dir to wait on.
+                let Some(paths) = row
                     .map(|row| lib.workspace_paths_for_row(row))
                     .or_else(|| lib.workspace_paths_for(path))
-                {
-                    wait_for_lock_release(&paths.lock);
-                }
-                return Ok(UnserveOutcome::Unserved);
+                else {
+                    return Ok(UnserveOutcome::Unserved);
+                };
+                return Ok(released_or_still_held(&paths.lock, None));
             }
-            chan_server::handoff::Outcome::CloseRefused { active_terminals } => {
+            Outcome::CloseRefused { active_terminals } => {
                 return Ok(UnserveOutcome::Refused { active_terminals });
             }
-            chan_server::handoff::Outcome::DesktopError { message }
-                if answers_still_releasing(&message) =>
-            {
+            Outcome::DesktopError { message } if answers_still_releasing(&message) => {
                 return Ok(if remove {
                     UnserveOutcome::RemovalStillReleasing { answer: message }
                 } else {
                     UnserveOutcome::CloseStillReleasing { answer: message }
                 });
             }
-            _ => {}
+            // No desktop closed this workspace, so whoever holds its writer
+            // lock, a standalone `chan serve` among them, is asked below.
+            Outcome::NotServed
+            | Outcome::NoDesktop
+            | Outcome::VersionSkew { .. }
+            | Outcome::DesktopError { .. } => {}
         }
     }
 
@@ -510,8 +533,21 @@ async fn unserve_running(
             return Err(e).with_context(|| format!("asking the server (pid {pid}) to tear down"));
         }
     }
-    wait_for_lock_release(&paths.lock);
-    Ok(UnserveOutcome::Unserved)
+    Ok(released_or_still_held(&paths.lock, Some(pid)))
+}
+
+/// The answer of a close that was accepted: `Unserved` once the writer lock at
+/// `lock_dir` is free within [`LOCK_HOLDER_BOUND`], else `StillHeld` naming
+/// the holder its record gives, or `asked` when there is no record.
+fn released_or_still_held(lock_dir: &Path, asked: Option<u32>) -> UnserveOutcome {
+    if wait_for_lock_release(lock_dir) {
+        return UnserveOutcome::Unserved;
+    }
+    UnserveOutcome::StillHeld {
+        pid: chan_workspace::lock::read_lock_record(lock_dir)
+            .map(|record| record.pid)
+            .or(asked),
+    }
 }
 
 /// Block (bounded by [`LOCK_HOLDER_BOUND`]) until the writer lock for

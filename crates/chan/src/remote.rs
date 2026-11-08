@@ -67,8 +67,8 @@ pub(super) async fn cmd_devserver_register(
         Outcome::DesktopError { message } => {
             anyhow::bail!("chan-desktop could not register the devserver: {message}")
         }
-        Outcome::CloseRefused { .. } => {
-            anyhow::bail!("chan-desktop returned a close refusal while registering a devserver")
+        Outcome::CloseRefused { .. } | Outcome::NotServed => {
+            anyhow::bail!("chan-desktop returned a close answer while registering a devserver")
         }
         // No desktop = nowhere to register. Unlike the path form, a URL never
         // falls back to a standalone serve (mirrors the window-op "needs the

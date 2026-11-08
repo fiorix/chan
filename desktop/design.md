@@ -60,7 +60,7 @@ On Windows the desktop also appends `%LOCALAPPDATA%\chan\bin` to the user `Path`
 
 The desktop binds a well-known per-user endpoint at boot, a Unix socket or a Windows named pipe, and answers the CLI over it; a bind failure is not fatal, the CLI then serves on its own. The requests are the reasons a terminal needs a running desktop:
 
-- `chan serve PATH` opens the workspace in the desktop instead of racing it for the writer lock, and `chan workspace forget` closes and unregisters it there.
+- `chan serve PATH` opens the workspace in the desktop instead of racing it for the writer lock, `chan close` closes it there, and `chan workspace forget` closes and unregisters it there. A root the desktop does not serve is answered as not served rather than closed, so the CLI goes on to whichever process holds the root's writer lock.
 - `chan upgrade` asks the desktop to drive its own updater.
 - The `chan devserver` verbs list, connect, disconnect and forget the desktop's devserver rows, and open a window on one.
 - `chan workspace serve|close|forget WS --on TARGET` act on a connected devserver's workspaces. `remote_workspace.rs` resolves `TARGET` to one registered row and `WS` to one of its workspaces, refusing over guessing, and a registered but disconnected row is refused with a pointer at `chan devserver connect`. Every remote operation rides the connection the desktop already holds, because dialing on the CLI's behalf would have to guess at the sign-in and trust prompts the launcher owns.

@@ -14,6 +14,11 @@ tear down, and waits for the flock to release. The holder decides the
 scope: a dedicated `chan serve` process exits, while a chan-desktop or
 `chan devserver` host unmounts just that tenant and keeps running.
 
+The desktop app's own `chan` asks the running chan-desktop first. A
+desktop that does not serve the workspace says so, and the close goes
+on to the lock's holder as it does with no desktop running, so a
+dedicated `chan serve` exits either way.
+
 Closing is idempotent. A workspace nothing is serving prints "(not
 served: PATH)" and succeeds, as does one whose recorded holder is gone
 or exposes no control socket. A holder that is reached but fails to
@@ -70,10 +75,11 @@ shuts down with its terminals. The --on arm carries the same refusal,
 coming from the remote devserver's own guard; it needs the chan desktop
 app running and the devserver connected.
 
-A close succeeds only once the workspace is let go or nothing holds
-it. When a live process holds the workspace's writer lock and answers
-on no control socket within five seconds, or answers the close with an
-error and keeps the lock, the command names that pid and exits nonzero.
+A close succeeds, and prints "closed:", only once the workspace's
+writer lock is free or nothing holds it. When a live process holds the
+lock and answers on no control socket within five seconds, answers the
+close with an error and keeps the lock, or still holds it five seconds
+after the close was sent, the command names that pid and exits nonzero.
 
 SEE ALSO:
 `chan serve` to serve it again, `chan ps` to see what is served, `chan
@@ -97,7 +103,9 @@ A holder that refuses teardown because live terminals would die also
 stops the registry removal: close the terminals first. So does a host
 that answers over its control socket or the desktop handoff that it is
 still releasing. The command prints that answer, forgets nothing and
-exits 75. A second run can ask the host again.
+exits 75. A second run can ask the host again. A writer lock still held
+five seconds after the close was sent stops it too: the command names
+the holder's pid, forgets nothing and exits 1.
 
 For a stored row with no reachable lock-record holder and a free writer
 lock, forget asks the one discovered devserver for this library even
