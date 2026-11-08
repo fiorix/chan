@@ -31,6 +31,8 @@ The same day, planning the chan.app WireGuard rollout, the owner found that v0.1
 
 Later the same day, from a ranking of the items by size, the owner moved every item of medium size or larger to v0.127.0 ("all M, L, and XL move to v0.127; the only M stayign in v126 is wakevis"): [timebound], [patrevoke], [systemca], [gwci] and [wgnode]. [wakevis] stays here, as do the small items.
 
+The same day the owner reported, with a screenshot, that Cmd+P does not open the Computers screen over a devserver window that is reconnecting ([rclaunch]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | not started | build |
@@ -41,6 +43,7 @@ Later the same day, from a ranking of the items by size, the owner moved every i
 | [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
 | [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
 | [the manual and design docs contradict chan][docsdrift] | partly built | build |
+| [Cmd+P does nothing over a reconnecting window][rclaunch] | built | review |
 
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
@@ -50,6 +53,7 @@ Later the same day, from a ranking of the items by size, the owner moved every i
 [gwdefaults]: v0.126.0/the-gateway-setup-defaults-name-the-maintainers-deployment.md
 [tunnelhint]: v0.126.0/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md
 [docsdrift]: v0.126.0/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md
+[rclaunch]: v0.126.0/the-launcher-chord-does-nothing-over-a-reconnecting-window.md
 
 ### v0.127.0
 
