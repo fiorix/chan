@@ -5,6 +5,7 @@
 
   import type { BubbleOverlayMode, Preferences, ThemeChoice } from "../../api/types";
   import { setThemeChoice } from "../../state/store.svelte";
+  import { setWindowTabBarPreference, windowTabBar } from "../../state/windowTabBar.svelte";
   import type { CommitFn } from "./commit";
   import SettingField from "./SettingField.svelte";
   import PillRadio from "./PillRadio.svelte";
@@ -21,6 +22,18 @@
     { value: "stack", label: "Inline" },
     { value: "tray", label: "Tray" },
   ] as const;
+
+  // Title bar tabs is chan-desktop's own setting, not a preference of the
+  // server this window shows: the desktop stores it and every window
+  // switches when it hears, so the row reports its own write.
+  let titlebarTabsRefusal = $state<string | null>(null);
+
+  async function toggleTitlebarTabs(on: boolean): Promise<void> {
+    const status = await commit((p) => p, () => setWindowTabBarPreference(on), {
+      ownStatus: true,
+    });
+    titlebarTabsRefusal = typeof status === "object" ? status.error : null;
+  }
 </script>
 
 <SettingField
@@ -69,14 +82,44 @@
   />
 </SettingField>
 
-<SettingField
-  label="Pane strip"
-  pref="pane_strip_auto_hide"
-  hint="Hide a pane's tab strip until the side it shows holds two or more tabs. New tabs still come from the shortcuts and the command launcher, and a tab dropped in the pane's centre lands there, as does a file outside an editor."
->
-  <PillToggle
-    label="Auto-hide"
-    checked={prefs.pane_strip_auto_hide ?? false}
-    ontoggle={(on) => commit((p) => ({ ...p, pane_strip_auto_hide: on }))}
-  />
-</SettingField>
+{#if windowTabBar.available}
+  <SettingField
+    label="Title bar tabs"
+    hint="Show the active pane's tabs in the window's title bar, beside a button that lists every pane and tab of the window; the other panes draw no tab strip. This is chan-desktop's own setting and applies live to every open window."
+  >
+    <PillToggle
+      label="In the title bar"
+      checked={windowTabBar.preferred}
+      ontoggle={(on) => void toggleTitlebarTabs(on)}
+    />
+    {#if titlebarTabsRefusal}
+      <p class="refusal" role="alert">Not saved: {titlebarTabsRefusal}</p>
+    {/if}
+  </SettingField>
+{/if}
+
+<!-- The tabs in the title bar take no room from a pane, so auto-hide
+     applies only while they stay in the panes. -->
+{#if !windowTabBar.on}
+  <SettingField
+    label="Pane strip"
+    pref="pane_strip_auto_hide"
+    hint="Hide a pane's tab strip until the side it shows holds two or more tabs. New tabs still come from the shortcuts and the command launcher, and a tab dropped in the pane's centre lands there, as does a file outside an editor."
+  >
+    <PillToggle
+      label="Auto-hide"
+      checked={prefs.pane_strip_auto_hide ?? false}
+      ontoggle={(on) => commit((p) => ({ ...p, pane_strip_auto_hide: on }))}
+    />
+  </SettingField>
+{/if}
+
+<style>
+  /* SettingField's refusal line, for the one row that reports its own. */
+  .refusal {
+    flex-basis: 100%;
+    margin: 4px 0 0;
+    color: var(--danger, #ef4444);
+    font-size: 12px;
+  }
+</style>

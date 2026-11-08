@@ -525,6 +525,55 @@ export async function setWindowFullscreen(on: boolean): Promise<void> {
   }
 }
 
+/// What chan-desktop reports about the title bar a window tab bar draws
+/// into. Every length is in CSS px of the calling page: the desktop converts
+/// through the webview zoom it tracks. `insetLeft` and `insetRight` are the
+/// edges the bar keeps free for the window controls, `controlsCenterY` is the
+/// controls' vertical centre measured from the top of the page, and all three
+/// are 0 while the overlay title bar is not in effect or the window is
+/// fullscreen. Field names are the desktop-side contract (serde camelCase).
+export type TitlebarChrome = {
+  active: boolean;
+  insetLeft: number;
+  insetRight: number;
+  controlsCenterY: number;
+  fullscreen: boolean;
+};
+
+/// Turn this window's overlay title bar on or off for the window tab bar,
+/// telling the desktop how tall the bar is (`bandHeight`, CSS px) so it can
+/// keep its own panels below it. Answers the chrome now in effect. The
+/// desktop never forces the overlay on a page: only this call turns it on.
+/// Throws off-desktop and on IPC/ACL refusal.
+export async function setTitlebarTabs(enabled: boolean, bandHeight: number): Promise<TitlebarChrome> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<TitlebarChrome>("set_titlebar_tabs", { enabled, bandHeight });
+}
+
+/// The title bar chrome now in effect for this window. There is no event for
+/// a change: fullscreen transitions and zoom both resize the page, so the
+/// caller asks again on `resize`. Throws off-desktop and on IPC/ACL refusal.
+export async function readTitlebarChrome(): Promise<TitlebarChrome> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<TitlebarChrome>("titlebar_chrome");
+}
+
+/// Whether chan-desktop's windows put their tabs in the title bar: the
+/// desktop's own preference, the same for every window whatever tenant it
+/// shows. Throws off-desktop and on IPC/ACL refusal.
+export async function readTitlebarTabsPreference(): Promise<boolean> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<boolean>("titlebar_tabs_preference");
+}
+
+/// Store the desktop's title bar tabs preference. The desktop answers the
+/// stored value and emits `titlebar-tabs-preference` (`{ on }`) to every
+/// window, this one included. Throws off-desktop and on IPC/ACL refusal.
+export async function writeTitlebarTabsPreference(on: boolean): Promise<boolean> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<boolean>("set_titlebar_tabs_preference", { on });
+}
+
 /// Open the platform's web inspector. On chan-desktop calls the
 /// `open_devtools` IPC. On web returns false so the caller can
 /// surface a hint pointing the user at the browser's built-in

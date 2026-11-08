@@ -42,9 +42,14 @@
   import { uploadRequestCount, uploadRequestState } from "../state/uploadRequest.svelte";
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
   import { selfParticipant, sessionState } from "../state/session.svelte";
+  import { windowTabBar } from "../state/windowTabBar.svelte";
 
   let collapsed = $state(false);
 
+  // Clear of the tab strips: the panes' own, or the window tab bar, which
+  // holds the active pane's strip at the top of the window and leaves the
+  // panes without one.
+  const top = $derived(windowTabBar.on ? windowTabBar.height + 10 : 48);
   // Keep the window-level pill attached to the workspace edge when the
   // right-side file browser is docked. The dock width is live while its
   // resize handle moves, so the pill follows the split instead of covering
@@ -210,7 +215,7 @@
 {/snippet}
 
 {#if anyVisible}
-  <div class="app-statusbar" class:collapsed style:right={`${rightInset}px`}>
+  <div class="app-statusbar" class:collapsed style:top={`${top}px`} style:right={`${rightInset}px`}>
     {#if !collapsed}
       <div class="row">
         {#if indexShown}
@@ -369,7 +374,8 @@
   .app-statusbar {
     position: fixed;
     /* Sits below the pane tab-strip (the tab pills + the top-right
-       hamburger button, ~33px tall) so the pill never covers it. */
+       hamburger button, ~33px tall) so the pill never covers it. The inline
+       top follows the window tab bar when the window draws one. */
     top: 48px;
     z-index: 28000;
     display: flex;

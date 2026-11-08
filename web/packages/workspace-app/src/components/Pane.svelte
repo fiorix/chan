@@ -145,6 +145,8 @@
   import { paneBodyDropZone, type PaneBodyDropZone } from "../state/paneDropZone";
   import { dispatchAllowsCommand } from "../state/commands";
   import { programSummary, programVisual } from "../state/programStatus";
+  import { windowTabBar } from "../state/windowTabBar.svelte";
+  import { portalTo } from "./portal";
 
   let { pane }: { pane: LeafNode } = $props();
 
@@ -630,6 +632,16 @@
     return Object.values(viewLayout.nodes).some((n) => n.kind === "split");
   });
   const isFocused = $derived(multiPane && viewLayout.activePaneId === pane.id);
+  // In the window tab bar mode no pane draws its strip in place. The active
+  // pane's strip element moves into the bar, keeping every handler here, and
+  // every other pane's strip is hidden, so a focus change never resizes a
+  // pane. The active pane is read from the layout the window shows, so a
+  // focus move staged in Hybrid Nav moves the strip with it.
+  const barSlot = $derived(windowTabBar.on ? windowTabBar.slot : null);
+  const stripInBar = $derived(barSlot !== null && viewLayout.activePaneId === pane.id);
+  // In the desktop's title bar the strip's empty stretch drags the window;
+  // Tauri's drag script reads the attribute on a direct press.
+  const barDragRegion = $derived(stripInBar && isTauriDesktop() ? "" : undefined);
   // Drag state: highlight the tab strip while another pane's tab is being
   // dragged over it. Keyed by pane id so we don't bleed state between
   // panes that share this Svelte 5 component instance.
@@ -1423,7 +1435,12 @@
     class="tabs"
     class:drop-active={dropActive}
     class:control-hidden={ui.terminalControl || tmuxPaneHere}
-    class:auto-hidden={stripAutoHidden}
+    class:auto-hidden={stripAutoHidden && !stripInBar}
+    class:bar-hidden={windowTabBar.on && !stripInBar}
+    class:in-bar={stripInBar}
+    class:bar-stale={stripInBar && paneMode.stale}
+    data-tauri-drag-region={barDragRegion}
+    {@attach portalTo(stripInBar ? barSlot : null)}
     role="tablist"
     ondragover={onDragOver}
     ondragleave={onDragLeave}
@@ -1688,8 +1705,9 @@
     {/each}
     <!-- Top-bar dead zone: the empty stretch between the last tab and
          the hamburger actions. A spacer only; a press, drag or
-         double-click there does nothing. -->
-    <div class="dead-zone" aria-hidden="true"></div>
+         double-click there does nothing, except in the desktop's window
+         tab bar, where it is the window's drag space. -->
+    <div class="dead-zone" aria-hidden="true" data-tauri-drag-region={barDragRegion}></div>
     <div class="actions">
       <button
         class="side-toggle"
@@ -2316,6 +2334,28 @@
      takes every drop the strip takes. */
   .tabs.auto-hidden {
     display: none;
+  }
+  /* In the window tab bar mode no pane draws its strip in place: the active
+     pane's strip lives in the bar and every other one is hidden. The
+     auto-hide preference does not apply in the bar, where the strip takes
+     no room from the pane. */
+  .tabs.bar-hidden {
+    display: none;
+  }
+  /* The bar paints the band, so the strip in it is clear and fills the
+     bar's slot; the bar centres the slot on the window controls. */
+  .tabs.in-bar {
+    flex: 1;
+    min-width: 0;
+    align-self: stretch;
+    background: transparent;
+    border-bottom: 0;
+    padding: 0 8px 0 2px;
+  }
+  /* A stale Hybrid Nav transaction takes no input; in place the pane's own
+     rule covers the strip. */
+  .tabs.in-bar.bar-stale {
+    pointer-events: none;
   }
   .tab[draggable="true"] { -webkit-user-drag: element; }
   /* Vertical bar between tabs that shows where a drop will land. */
