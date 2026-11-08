@@ -3,12 +3,18 @@
   // tree button and the slot the active pane's tab strip moves into (see
   // Pane.svelte). In chan-desktop's title bar its insets keep clear of the
   // window controls, its content row sits on their centre line, and its empty
-  // stretches drag the window. The band is opaque: terminal background
-  // opacity cuts its holes behind terminal panes only. While the window's
-  // Computers launcher is shown over the page, the band holds neither the
-  // tree button nor the strip: they belong to the covered window.
+  // stretches drag the window. Where the desktop asks for it (Windows, whose
+  // window has no frame in the mode) the right inset holds the window
+  // controls. The band is opaque: terminal background opacity cuts its holes
+  // behind terminal panes only. While the window's Computers launcher is
+  // shown over the page, the band holds neither the tree button nor the
+  // strip: they belong to the covered window.
 
-  import { isTauriDesktop } from "../api/desktop";
+  import {
+    isTauriDesktop,
+    titlebarWindowControl,
+    type TitlebarWindowAction,
+  } from "../api/desktop";
   import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/focusGuard";
   import {
     closePaneTree,
@@ -69,6 +75,30 @@
   const MINI_W = 22;
   const MINI_H = 14;
   const MINI_GAP = 1.5;
+
+  const maximizeLabel = $derived(chrome.maximized ? "Restore" : "Maximize");
+  // Each window control is a third of the right inset.
+  const controlWidth = $derived(`${chrome.insetRight / 3}px`);
+
+  function windowControl(action: TitlebarWindowAction): void {
+    titlebarWindowControl(action).catch((err) => {
+      console.warn(`[chan] titlebar_window_control ${action} failed`, err);
+    });
+  }
+
+  // A press on a window control keeps the focus where it is, as a native
+  // one does, and stops at the controls, so neither the bar nor the
+  // document, where Tauri's drag script listens, hears it. The listener is
+  // the element's own because Svelte's delegated handlers run only once a
+  // press has reached the app's root.
+  function holdPresses(node: HTMLElement): () => void {
+    const hold = (e: MouseEvent): void => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    node.addEventListener("mousedown", hold);
+    return () => node.removeEventListener("mousedown", hold);
+  }
 </script>
 
 <div
@@ -114,7 +144,68 @@
     {/if}
   </button>
   <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
-  <div class="inset" style:width={`${chrome.insetRight}px`} data-tauri-drag-region={drag}></div>
+  {#if chrome.drawControls}
+    <!-- The window's own controls, drawn in the look of Windows 11 caption
+         buttons: out of the tab order, never a drag region, each a third of
+         the inset and the bar's full height. -->
+    <div class="inset window-controls" style:width={`${chrome.insetRight}px`} {@attach holdPresses}>
+      <button
+        type="button"
+        class="window-control"
+        data-action="minimize"
+        tabindex="-1"
+        title="Minimize"
+        aria-label="Minimize"
+        style:width={controlWidth}
+        onclick={() => windowControl("minimize")}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M0 5.5h10" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="window-control"
+        data-action="toggleMaximize"
+        tabindex="-1"
+        title={maximizeLabel}
+        aria-label={maximizeLabel}
+        style:width={controlWidth}
+        onclick={() => windowControl("toggleMaximize")}
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          data-glyph={chrome.maximized ? "restore" : "maximize"}
+          aria-hidden="true"
+        >
+          {#if chrome.maximized}
+            <rect x="0.5" y="2.5" width="7" height="7" rx="1" />
+            <path d="M2.5 2.5v-1a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" />
+          {:else}
+            <rect x="0.5" y="0.5" width="9" height="9" rx="1" />
+          {/if}
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="window-control close"
+        data-action="close"
+        tabindex="-1"
+        title="Close"
+        aria-label="Close"
+        style:width={controlWidth}
+        onclick={() => windowControl("close")}
+      >
+        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
+        </svg>
+      </button>
+    </div>
+  {:else}
+    <div class="inset" style:width={`${chrome.insetRight}px`} data-tauri-drag-region={drag}></div>
+  {/if}
 </div>
 
 <style>
@@ -146,6 +237,46 @@
     align-self: stretch;
     display: flex;
     align-items: center;
+  }
+  /* Windows 11 caption buttons: square-cornered, clear at rest, a light
+     wash under the pointer and a lighter one with a dimmed glyph while
+     pressed; close turns red with a white glyph. */
+  .window-controls {
+    display: flex;
+    align-items: stretch;
+  }
+  .window-control {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text);
+    cursor: default;
+  }
+  .window-control svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1;
+  }
+  .window-control:hover {
+    background: var(--hover-bg);
+  }
+  .window-control:active {
+    background: color-mix(in srgb, var(--hover-bg) 70%, transparent);
+    color: var(--text-secondary);
+  }
+  .window-control.close:hover {
+    background: #c42b1c;
+    color: #fff;
+  }
+  .window-control.close:active {
+    background: color-mix(in srgb, #c42b1c 90%, transparent);
+    color: rgba(255, 255, 255, 0.7);
   }
   .covered {
     visibility: hidden;

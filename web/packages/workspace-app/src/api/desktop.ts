@@ -531,14 +531,24 @@ export async function setWindowFullscreen(on: boolean): Promise<void> {
 /// edges the bar keeps free for the window controls, `controlsCenterY` is the
 /// controls' vertical centre measured from the top of the page, and all three
 /// are 0 while the overlay title bar is not in effect or the window is
-/// fullscreen. Field names are the desktop-side contract (serde camelCase).
+/// fullscreen. `drawControls` says the page draws the window's minimize,
+/// maximize or restore, and close buttons in `insetRight` (Windows, where the
+/// window has no frame in the mode; macOS draws its own traffic lights), and
+/// `maximized` whether the window is maximized, which picks the maximize or
+/// restore button. Field names are the desktop-side contract (serde
+/// camelCase).
 export type TitlebarChrome = {
   active: boolean;
   insetLeft: number;
   insetRight: number;
   controlsCenterY: number;
   fullscreen: boolean;
+  drawControls: boolean;
+  maximized: boolean;
 };
+
+/// What a window control drawn by the page asks of its window.
+export type TitlebarWindowAction = "minimize" | "toggleMaximize" | "close";
 
 /// Turn this window's overlay title bar on or off for the window tab bar,
 /// telling the desktop how tall the bar is (`bandHeight`, CSS px) so it can
@@ -556,6 +566,15 @@ export async function setTitlebarTabs(enabled: boolean, bandHeight: number): Pro
 export async function readTitlebarChrome(): Promise<TitlebarChrome> {
   if (!isTauriDesktop()) throw new Error("not running under Tauri");
   return await tauriInvoke<TitlebarChrome>("titlebar_chrome");
+}
+
+/// Minimize, maximize or restore, or close the calling window, for the window
+/// controls the page draws while the chrome reports `drawControls`. `close`
+/// goes the way the native close button goes, confirm and all. Throws
+/// off-desktop and on IPC/ACL refusal.
+export async function titlebarWindowControl(action: TitlebarWindowAction): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("titlebar_window_control", { action });
 }
 
 /// Whether chan-desktop's windows put their tabs in the title bar: the

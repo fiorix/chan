@@ -1,14 +1,17 @@
 // The window tab bar: a band across the top of the window holding the pane
 // tree button and the active pane's tab strip, which no pane then draws in
-// place. In chan-desktop on macOS the band is the window's title bar, with
-// the window controls in its left inset.
+// place. In chan-desktop on macOS and Windows the band is the window's title
+// bar: on macOS the traffic lights sit in its left inset, and on Windows the
+// window has no frame and the bar draws the window controls in its right
+// inset.
 //
 // The page decides the mode and the desktop never forces it. A stored
 // override wins; without one the bar follows the desktop's own preference,
 // off by default, which Settings writes and which every window of the
-// desktop follows live, and it is drawn only in chan-desktop on macOS when
-// the installed app advertises the title bar command. In a browser a forced
-// bar is a plain top bar with no insets.
+// desktop follows live, and it is drawn only in chan-desktop on macOS or
+// Windows when the installed app advertises the commands that host needs. In
+// a browser, and wherever the title bar is out of reach, a forced bar is a
+// plain top bar with no insets.
 
 import {
   isTauriDesktop,
@@ -20,7 +23,7 @@ import {
   type TitlebarChrome,
 } from "../api/desktop";
 import { hostVocabulary } from "../api/nativeVocabulary";
-import { currentOS } from "./shortcuts";
+import { currentOS, type OS } from "./shortcuts";
 
 /// `"1"` forces the bar on in any host and `"0"` forces it off, whatever the
 /// desktop's preference; no value leaves the choice to the preference.
@@ -29,6 +32,28 @@ export const WINDOW_TAB_BAR_STORAGE_KEY = "chan.windowTabBar";
 /// The desktop command whose advertisement says the installed app can put
 /// a window's tabs in its title bar.
 export const TITLEBAR_TABS_COMMAND = "set_titlebar_tabs";
+
+/// The desktop command behind the window controls the bar draws on Windows;
+/// its advertisement says the installed app takes their presses.
+export const TITLEBAR_WINDOW_CONTROL_COMMAND = "titlebar_window_control";
+
+/// The commands the installed app must advertise before a window on `os` puts
+/// its tabs in the title bar, or null where it cannot. On Windows the window
+/// has no frame in the mode, so an app that cannot take the bar's window
+/// controls would leave it without minimize, maximize and close.
+export function titlebarTabsCommands(os: OS): readonly string[] | null {
+  if (os === "mac") return [TITLEBAR_TABS_COMMAND];
+  if (os === "windows") return [TITLEBAR_TABS_COMMAND, TITLEBAR_WINDOW_CONTROL_COMMAND];
+  return null;
+}
+
+/// Whether a chan-desktop window on `os` whose app advertises `vocabulary`
+/// (null when it cannot say) can put its tabs in the title bar.
+export function titlebarTabsSupported(os: OS, vocabulary: ReadonlySet<string> | null): boolean {
+  const commands = titlebarTabsCommands(os);
+  if (!commands || !vocabulary) return false;
+  return commands.every((command) => vocabulary.has(command));
+}
 
 /// The event chan-desktop emits to every window when its preference changes.
 /// Its payload is `{ on }`.
@@ -60,14 +85,17 @@ export const NO_TITLEBAR_CHROME: TitlebarChrome = {
   insetRight: 0,
   controlsCenterY: 0,
   fullscreen: false,
+  drawControls: false,
+  maximized: false,
 };
 
 /// `on` is the mode; `available` whether this window can put its tabs in the
-/// title bar (chan-desktop on macOS whose app advertises the command), which
-/// is when Settings offers the preference; `preferred` the desktop's
-/// preference; `chrome` what the desktop reports about the title bar (all
-/// zero off the desktop); `height` the bar's height in CSS px; `slot` the bar
-/// element the active pane's strip moves into, null while no bar is mounted.
+/// title bar (chan-desktop on macOS or Windows whose app advertises the
+/// commands that host needs), which is when Settings offers the preference;
+/// `preferred` the desktop's preference; `chrome` what the desktop reports
+/// about the title bar (all zero off the desktop); `height` the bar's height
+/// in CSS px; `slot` the bar element the active pane's strip moves into, null
+/// while no bar is mounted.
 export const windowTabBar = $state<{
   on: boolean;
   available: boolean;
@@ -95,24 +123,19 @@ export function readWindowTabBarOverride(): WindowTabBarOverride {
   return null;
 }
 
-/// Whether the page wants the bar. `vocabulary` is what the installed app
-/// advertises, null when it cannot say; `preferred` is the desktop's
-/// preference.
+/// Whether the page wants the bar. `os` is the host's, `vocabulary` what the
+/// installed app advertises, null when it cannot say; `preferred` is the
+/// desktop's preference.
 export function windowTabBarWanted(input: {
   override: WindowTabBarOverride;
   desktop: boolean;
-  mac: boolean;
+  os: OS;
   vocabulary: ReadonlySet<string> | null;
   preferred: boolean;
 }): boolean {
   if (input.override === "on") return true;
   if (input.override === "off") return false;
-  return (
-    input.preferred &&
-    input.desktop &&
-    input.mac &&
-    (input.vocabulary?.has(TITLEBAR_TABS_COMMAND) ?? false)
-  );
+  return input.preferred && input.desktop && titlebarTabsSupported(input.os, input.vocabulary);
 }
 
 /// The desktop's answer with every field present and finite, whatever an
@@ -127,6 +150,8 @@ export function normalizeTitlebarChrome(raw: unknown): TitlebarChrome {
     insetRight: length(value.insetRight),
     controlsCenterY: length(value.controlsCenterY),
     fullscreen: value.fullscreen === true,
+    drawControls: value.drawControls === true,
+    maximized: value.maximized === true,
   };
 }
 
@@ -186,7 +211,7 @@ export function startWindowTabBar(): WindowTabBarStart {
   const current = () => run === generation;
   const override = readWindowTabBarOverride();
   const desktop = isTauriDesktop();
-  const mac = currentOS() === "mac";
+  const os = currentOS();
 
   windowTabBar.chrome = NO_TITLEBAR_CHROME;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
@@ -194,9 +219,10 @@ export function startWindowTabBar(): WindowTabBarStart {
   windowTabBar.available = false;
   windowTabBar.preferred = false;
 
-  // Off the desktop there is no title bar to ask about, and on a desktop off
-  // macOS the commands change nothing, so only a forced bar is drawn there.
-  if (!desktop || (!mac && override !== "on")) {
+  // Off the desktop there is no title bar to ask about, and on Linux the
+  // desktop's title bar commands change nothing, so only a forced bar is
+  // drawn there, as a plain top bar.
+  if (!desktop || titlebarTabsCommands(os) === null) {
     return { pending: null, stop() {} };
   }
 
@@ -261,44 +287,45 @@ export function startWindowTabBar(): WindowTabBarStart {
   async function engage(): Promise<void> {
     const vocabulary = await hostVocabulary();
     if (!current()) return;
-    if (!vocabulary?.has(TITLEBAR_TABS_COMMAND)) {
+    // An app without every command this host needs is never asked for the
+    // title bar, so a Windows window never loses its frame to an app that
+    // cannot take the bar's window controls. A forced bar is a plain top bar.
+    if (!titlebarTabsSupported(os, vocabulary)) {
       windowTabBar.on = override === "on";
       return;
     }
-    if (mac) {
-      windowTabBar.available = true;
-      // The subscription is in place before the read, so a change between
-      // the two is not lost; an event that lands while the read is in flight
-      // is the newer value, so the read yields to it.
-      let heard = false;
-      const off = await onTauriEvent<{ on?: unknown } | null>(
-        TITLEBAR_TABS_PREFERENCE_EVENT,
-        (payload) => {
-          if (!current()) return;
-          heard = true;
-          prefer(payload?.on === true);
-        },
-      );
-      if (!current()) {
-        off();
-        return;
-      }
-      unlisten = off;
-      try {
-        const stored = await readTitlebarTabsPreference();
+    windowTabBar.available = true;
+    // The subscription is in place before the read, so a change between the
+    // two is not lost; an event that lands while the read is in flight is the
+    // newer value, so the read yields to it.
+    let heard = false;
+    const off = await onTauriEvent<{ on?: unknown } | null>(
+      TITLEBAR_TABS_PREFERENCE_EVENT,
+      (payload) => {
         if (!current()) return;
-        if (!heard) windowTabBar.preferred = stored === true;
-      } catch (err) {
-        // A desktop build without the preference: the tabs stay in the panes.
-        console.warn("[chan] titlebar_tabs_preference failed", err);
-        if (!current()) return;
-      }
+        heard = true;
+        prefer(payload?.on === true);
+      },
+    );
+    if (!current()) {
+      off();
+      return;
+    }
+    unlisten = off;
+    try {
+      const stored = await readTitlebarTabsPreference();
+      if (!current()) return;
+      if (!heard) windowTabBar.preferred = stored === true;
+    } catch (err) {
+      // A desktop build without the preference: the tabs stay in the panes.
+      console.warn("[chan] titlebar_tabs_preference failed", err);
+      if (!current()) return;
     }
     await switchTo(
       windowTabBarWanted({
         override,
         desktop,
-        mac,
+        os,
         vocabulary,
         preferred: windowTabBar.preferred,
       }),

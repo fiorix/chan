@@ -3,10 +3,11 @@
 // The window tab bar's mode: a stored "1" forces it on and "0" off in any
 // host, and without either it follows the desktop's preference, off by
 // default, in chan-desktop on macOS when the installed app advertises the
-// title bar command. In the desktop the page opts in with its band height,
-// switches live when the desktop announces a new preference, follows the
-// chrome on resize once the burst settles, and grows the band to centre its
-// row on the window controls.
+// title bar command and on Windows when it also advertises the window
+// control command the bar's caption buttons need. In the desktop the page
+// opts in with its band height, switches live when the desktop announces a
+// new preference, follows the chrome on resize once the burst settles, and
+// grows the band to centre its row on the window controls.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -15,6 +16,7 @@ import {
   NO_TITLEBAR_CHROME,
   TITLEBAR_TABS_COMMAND,
   TITLEBAR_TABS_PREFERENCE_EVENT,
+  TITLEBAR_WINDOW_CONTROL_COMMAND,
   WINDOW_TAB_BAR_MIN_HEIGHT,
   WINDOW_TAB_BAR_ROW_HEIGHT,
   WINDOW_TAB_BAR_STORAGE_KEY,
@@ -22,6 +24,7 @@ import {
   readWindowTabBarOverride,
   setWindowTabBarPreference,
   startWindowTabBar,
+  titlebarTabsSupported,
   windowTabBar,
   windowTabBarCenterPad,
   windowTabBarHeight,
@@ -34,6 +37,18 @@ type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown; __TAURI__
 
 const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
 const LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15";
+const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0.0.0";
+const WINDOWS_COMMANDS = [TITLEBAR_TABS_COMMAND, TITLEBAR_WINDOW_CONTROL_COMMAND];
+
+/// What a Windows desktop answers in the mode: no inset at the left, the
+/// three caption buttons' room at the right, and the page draws them.
+const windowsChrome = (partial: Partial<typeof NO_TITLEBAR_CHROME> = {}) => ({
+  ...NO_TITLEBAR_CHROME,
+  active: true,
+  insetRight: 138,
+  drawControls: true,
+  ...partial,
+});
 
 const chrome = (partial: Partial<typeof NO_TITLEBAR_CHROME> = {}) => ({
   ...NO_TITLEBAR_CHROME,
@@ -131,26 +146,44 @@ afterEach(() => {
 
 describe("the mode", () => {
   const vocabulary = new Set([TITLEBAR_TABS_COMMAND]);
+  const both = new Set(WINDOWS_COMMANDS);
 
   test("a stored override wins over every host and the preference", () => {
     for (const desktop of [false, true]) {
-      for (const mac of [false, true]) {
+      for (const os of ["mac", "windows", "linux"] as const) {
         for (const preferred of [false, true]) {
-          expect(windowTabBarWanted({ override: "on", desktop, mac, vocabulary: null, preferred })).toBe(true);
-          expect(windowTabBarWanted({ override: "off", desktop, mac, vocabulary, preferred })).toBe(false);
+          expect(windowTabBarWanted({ override: "on", desktop, os, vocabulary: null, preferred })).toBe(true);
+          expect(windowTabBarWanted({ override: "off", desktop, os, vocabulary: both, preferred })).toBe(false);
         }
       }
     }
   });
 
   test("without one it follows the preference, only in the desktop on macOS when the command is advertised", () => {
-    const host = { override: null, desktop: true, mac: true, vocabulary, preferred: true };
+    const host = { override: null, desktop: true, os: "mac", vocabulary, preferred: true } as const;
     expect(windowTabBarWanted(host)).toBe(true);
     expect(windowTabBarWanted({ ...host, preferred: false })).toBe(false);
     expect(windowTabBarWanted({ ...host, desktop: false })).toBe(false);
-    expect(windowTabBarWanted({ ...host, mac: false })).toBe(false);
+    expect(windowTabBarWanted({ ...host, os: "linux" })).toBe(false);
     expect(windowTabBarWanted({ ...host, vocabulary: new Set(["other"]) })).toBe(false);
     expect(windowTabBarWanted({ ...host, vocabulary: null })).toBe(false);
+  });
+
+  test("on Windows it also needs the window control command, and Linux is never a host", () => {
+    const host = { override: null, desktop: true, os: "windows", vocabulary: both, preferred: true } as const;
+    expect(windowTabBarWanted(host)).toBe(true);
+    expect(windowTabBarWanted({ ...host, preferred: false })).toBe(false);
+    expect(windowTabBarWanted({ ...host, desktop: false })).toBe(false);
+    expect(windowTabBarWanted({ ...host, vocabulary }), "an app that cannot take the window controls").toBe(false);
+    expect(windowTabBarWanted({ ...host, vocabulary: new Set([TITLEBAR_WINDOW_CONTROL_COMMAND]) })).toBe(false);
+    expect(windowTabBarWanted({ ...host, vocabulary: null })).toBe(false);
+    expect(windowTabBarWanted({ ...host, os: "linux" })).toBe(false);
+
+    expect(titlebarTabsSupported("mac", vocabulary)).toBe(true);
+    expect(titlebarTabsSupported("mac", both)).toBe(true);
+    expect(titlebarTabsSupported("windows", vocabulary)).toBe(false);
+    expect(titlebarTabsSupported("windows", both)).toBe(true);
+    expect(titlebarTabsSupported("linux", both)).toBe(false);
   });
 
   test("the override reads 1 and 0 and ignores anything else, or blocked storage", () => {
@@ -229,12 +262,78 @@ describe("the boot in chan-desktop", () => {
     expect(windowTabBar.preferred).toBe(false);
   });
 
-  test("off macOS, decides at once", () => {
+  test("on Linux, decides at once and asks nothing, a forced bar included", () => {
     asOS(LINUX_UA);
-    asDesktop([TITLEBAR_TABS_COMMAND]);
+    stored = true;
+    asDesktop(WINDOWS_COMMANDS);
     expect(start().pending).toBeNull();
     expect(windowTabBar.on).toBe(false);
+    expect(windowTabBar.available).toBe(false);
+
+    started?.stop();
+    localStorage.setItem(WINDOW_TAB_BAR_STORAGE_KEY, "1");
+    expect(start().pending).toBeNull();
+    expect(windowTabBar.on).toBe(true);
+    expect(windowTabBar.chrome).toEqual(NO_TITLEBAR_CHROME);
     expect(calls).toEqual([]);
+  });
+
+  test("on Windows with the preference on, opts in and takes the chrome with the window controls", async () => {
+    asOS(WINDOWS_UA);
+    stored = true;
+    asDesktop(WINDOWS_COMMANDS, () => windowsChrome());
+    await start().pending;
+    expect(windowTabBar.available, "Settings offers the preference").toBe(true);
+    expect(windowTabBar.on).toBe(true);
+    expect(windowTabBar.chrome).toEqual(windowsChrome());
+    expect(windowTabBar.height, "no controls to centre on").toBe(WINDOW_TAB_BAR_MIN_HEIGHT);
+    expect(switches()).toEqual([{ enabled: true, bandHeight: WINDOW_TAB_BAR_MIN_HEIGHT }]);
+  });
+
+  test("on Windows with the preference off, offers it and keeps the window frame", async () => {
+    asOS(WINDOWS_UA);
+    asDesktop(WINDOWS_COMMANDS, () => NO_TITLEBAR_CHROME);
+    await start().pending;
+    expect(windowTabBar.available).toBe(true);
+    expect(windowTabBar.on).toBe(false);
+    expect(switches()).toEqual([{ enabled: false, bandHeight: WINDOW_TAB_BAR_MIN_HEIGHT }]);
+  });
+
+  test("a Windows app without the window control command is never asked for the title bar", async () => {
+    asOS(WINDOWS_UA);
+    stored = true;
+    asDesktop([TITLEBAR_TABS_COMMAND], () => windowsChrome());
+    await start().pending;
+    expect(windowTabBar.available, "Settings offers nothing").toBe(false);
+    expect(windowTabBar.on, "the tabs stay in the panes").toBe(false);
+    expect(calls.map((c) => c.cmd)).toEqual(["native_vocabulary"]);
+
+    started?.stop();
+    localStorage.setItem(WINDOW_TAB_BAR_STORAGE_KEY, "1");
+    await start().pending;
+    expect(windowTabBar.on, "a forced bar is a plain top bar").toBe(true);
+    expect(windowTabBar.chrome).toEqual(NO_TITLEBAR_CHROME);
+    expect(switches(), "the window keeps its frame").toEqual([]);
+  });
+
+  test("on Windows a maximize or restore reaches the chrome through the resize it makes", async () => {
+    asOS(WINDOWS_UA);
+    stored = true;
+    let answer = windowsChrome();
+    asDesktop(WINDOWS_COMMANDS, () => answer);
+    await start().pending;
+    expect(windowTabBar.chrome.maximized).toBe(false);
+    vi.useFakeTimers();
+    answer = windowsChrome({ maximized: true });
+    window.dispatchEvent(new Event("resize"));
+    await vi.advanceTimersByTimeAsync(60);
+    expect(windowTabBar.chrome.maximized).toBe(true);
+
+    answer = windowsChrome({ insetRight: 0, drawControls: false, fullscreen: true });
+    window.dispatchEvent(new Event("resize"));
+    await vi.advanceTimersByTimeAsync(60);
+    expect(windowTabBar.chrome.drawControls, "fullscreen draws no controls").toBe(false);
+    expect(windowTabBar.chrome.insetRight).toBe(0);
   });
 
   test("a forced 0 turns the overlay title bar off", async () => {
@@ -415,6 +514,26 @@ describe("the geometry", () => {
     expect(normalizeTitlebarChrome({ active: true, insetLeft: "78", controlsCenterY: Number.NaN })).toEqual({
       ...NO_TITLEBAR_CHROME,
       active: true,
+    });
+  });
+
+  test("the window control flags are true only when the desktop says true", () => {
+    expect(NO_TITLEBAR_CHROME.drawControls).toBe(false);
+    expect(NO_TITLEBAR_CHROME.maximized).toBe(false);
+    expect(normalizeTitlebarChrome({ drawControls: true, maximized: true })).toMatchObject({
+      drawControls: true,
+      maximized: true,
+    });
+    for (const odd of [undefined, null, 1, "true", {}, false]) {
+      expect(normalizeTitlebarChrome({ drawControls: odd, maximized: odd })).toMatchObject({
+        drawControls: false,
+        maximized: false,
+      });
+    }
+    expect(normalizeTitlebarChrome({ active: true, insetRight: 138 }), "an app that predates the flags").toEqual({
+      ...NO_TITLEBAR_CHROME,
+      active: true,
+      insetRight: 138,
     });
   });
 

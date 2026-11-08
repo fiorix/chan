@@ -1,19 +1,28 @@
 // @vitest-environment jsdom
 //
 // Settings > Global in the window tab bar's terms: the title bar tabs row is
-// offered only where the window can put its tabs in the title bar, writes
-// chan-desktop's own preference rather than the server's, and shows a
-// refusal under itself; the pane strip auto-hide row leaves while the tabs
-// are in the title bar, where it has nothing to hide.
+// offered only where the window can put its tabs in the title bar, on macOS
+// and on Windows, writes chan-desktop's own preference rather than the
+// server's, and shows a refusal under itself; the pane strip auto-hide row
+// leaves while the tabs are in the title bar, where it has nothing to hide.
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { resetHostVocabularyForTests } from "../../api/nativeVocabulary";
 import { closeSettings, openSettings, settleSettings } from "../../__tests__/settings";
-import { windowTabBar } from "../../state/windowTabBar.svelte";
+import {
+  NO_TITLEBAR_CHROME,
+  startWindowTabBar,
+  TITLEBAR_TABS_COMMAND,
+  TITLEBAR_WINDOW_CONTROL_COMMAND,
+  windowTabBar,
+  type WindowTabBarStart,
+} from "../../state/windowTabBar.svelte";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
 
 const invokes: Array<{ cmd: string; args?: unknown }> = [];
+let started: WindowTabBarStart | null = null;
 
 function asDesktop(answer: (cmd: string, args?: unknown) => unknown): void {
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -35,17 +44,50 @@ function field(target: HTMLElement, label: string): HTMLElement | null {
 }
 
 afterEach(() => {
+  started?.stop();
+  started = null;
   closeSettings();
   invokes.length = 0;
   delete (window as W).__TAURI_INTERNALS__;
+  resetHostVocabularyForTests();
   windowTabBar.available = false;
   windowTabBar.preferred = false;
   windowTabBar.on = false;
+  windowTabBar.chrome = NO_TITLEBAR_CHROME;
+  vi.restoreAllMocks();
 });
+
+/// Boot the window tab bar in a chan-desktop on Windows whose app advertises
+/// `commands`, with the preference off, then open Settings.
+async function bootOnWindows(commands: string[]): Promise<HTMLElement> {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0.0.0",
+  );
+  asDesktop((cmd) => {
+    if (cmd === "native_vocabulary") return { version: "1", build: "b", commands };
+    if (cmd === "titlebar_tabs_preference") return false;
+    return NO_TITLEBAR_CHROME;
+  });
+  started = startWindowTabBar();
+  await started.pending;
+  return (await openSettings("Global")).target;
+}
 
 describe("Settings > Global > Title bar tabs", () => {
   test("a window that cannot put its tabs in the title bar offers no row and keeps auto-hide", async () => {
     const { target } = await openSettings("Global");
+    expect(field(target, "Title bar tabs")).toBeNull();
+    expect(field(target, "Pane strip")).not.toBeNull();
+  });
+
+  test("on Windows the row is offered once the app can take the bar's window controls", async () => {
+    const target = await bootOnWindows([TITLEBAR_TABS_COMMAND, TITLEBAR_WINDOW_CONTROL_COMMAND]);
+    expect(field(target, "Title bar tabs")).not.toBeNull();
+    expect(field(target, "Pane strip"), "the tabs are still in the panes").not.toBeNull();
+  });
+
+  test("on Windows an app without the window control command offers no row", async () => {
+    const target = await bootOnWindows([TITLEBAR_TABS_COMMAND]);
     expect(field(target, "Title bar tabs")).toBeNull();
     expect(field(target, "Pane strip")).not.toBeNull();
   });
