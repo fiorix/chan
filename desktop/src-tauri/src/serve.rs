@@ -574,8 +574,10 @@ pub struct ControlTerminal {
 /// Spawn a control terminal: a standalone terminal window whose PTY runs a
 /// devserver's connect script. The script brings the devserver up, possibly
 /// over an interactive ssh session whose prompts the user answers in the
-/// window. The label is stable per devserver so the connect flow can tuck
-/// the window away once connected and a later reopen finds the same window.
+/// window. The control terminal stays open while its script runs and hides
+/// after a successful connect only when the row's auto-hide option is set.
+/// Its label is stable per devserver, so hiding and a later reopen find the
+/// same window.
 pub async fn spawn_control_terminal_window(
     app: AppHandle,
     state: Arc<AppState>,

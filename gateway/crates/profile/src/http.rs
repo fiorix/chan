@@ -305,8 +305,9 @@ async fn create_user(
     }
     // Seed a deterministic placeholder handle from the freshly
     // generated row id. Same shape as the 0003 backfill so users
-    // upgraded across migrations look uniform. Caller (identity-
-    // service) renames it on first sign-in.
+    // upgraded across migrations look uniform. Sign-in leaves it
+    // unchanged; the user can rename it from the account page within
+    // the lifetime cap.
     let user = sqlx::query_as::<_, User>(&format!(
         "WITH new AS (SELECT gen_random_uuid() AS id) \
          INSERT INTO users (id, email, display_name, username, avatar_url) \
