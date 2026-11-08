@@ -34,9 +34,14 @@ export const TITLEBAR_TABS_COMMAND = "set_titlebar_tabs";
 /// Its payload is `{ on }`.
 export const TITLEBAR_TABS_PREFERENCE_EVENT = "titlebar-tabs-preference";
 
-/// The bar's height in CSS px when the window controls ask for no more: room
-/// for the strip's tab pills, side toggle and pane menu.
+/// The bar's height in CSS px where no window controls set it, in a browser:
+/// room for the strip's tab pills, side toggle and pane menu.
 export const WINDOW_TAB_BAR_MIN_HEIGHT = 38;
+
+/// The height in CSS px of the bar's content row: the strip's tab pills, side
+/// toggle and pane menu with a little room. Beside the window controls the
+/// band is no taller than this row or the controls' own band.
+export const WINDOW_TAB_BAR_ROW_HEIGHT = 28;
 
 /// How long the boot holds the layout restore for the desktop's answer. The
 /// invokes answer in milliseconds; the bound keeps a desktop that never
@@ -125,21 +130,25 @@ export function normalizeTitlebarChrome(raw: unknown): TitlebarChrome {
   };
 }
 
-/// The bar's height for `chrome`: tall enough that its content row, centred
-/// on the window controls, starts at the top of the page.
+/// The bar's height for `chrome`: the content row's, or the band the window
+/// controls take (twice their centre), whichever is taller, so no empty strip
+/// sits under the tabs. The controls keep their size in points while the page
+/// zoom scales CSS px, so a zoomed-in page's row outgrows their band.
 export function windowTabBarHeight(chrome: TitlebarChrome): number {
   const center = chrome.controlsCenterY;
   return center > 0
-    ? Math.max(WINDOW_TAB_BAR_MIN_HEIGHT, Math.ceil(center * 2))
+    ? Math.max(WINDOW_TAB_BAR_ROW_HEIGHT, Math.ceil(center * 2))
     : WINDOW_TAB_BAR_MIN_HEIGHT;
 }
 
 /// Space the bar keeps below its content row so the row's centre line, and
-/// with it the tab pills', is the window controls' centre line. Zero without
-/// controls, which centres the row in the bar.
+/// with it the tab pills', is the window controls' centre line. A row taller
+/// than the controls' band keeps none and fills the bar from its top. Zero
+/// without controls, which centres the row in the bar.
 export function windowTabBarCenterPad(chrome: TitlebarChrome, height: number): number {
   const center = chrome.controlsCenterY;
-  return center > 0 ? Math.max(0, height - center * 2) : 0;
+  if (center <= 0) return 0;
+  return Math.max(0, Math.min(height - center * 2, height - WINDOW_TAB_BAR_ROW_HEIGHT));
 }
 
 /// Attach to the bar element that hosts the active pane's strip.

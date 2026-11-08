@@ -162,14 +162,14 @@ describe("the bar", () => {
   });
 
   test("keeps its insets clear and centres its row on the window controls", async () => {
-    windowTabBar.chrome = { active: true, insetLeft: 78, insetRight: 0, controlsCenterY: 14, fullscreen: false };
-    windowTabBar.height = 38;
+    windowTabBar.chrome = { active: true, insetLeft: 78, insetRight: 0, controlsCenterY: 16, fullscreen: false };
+    windowTabBar.height = 34;
     const bar = await renderBar();
     const [left, right] = [...bar.querySelectorAll<HTMLElement>(".inset")];
     expect(left?.style.width).toBe("78px");
     expect(right?.style.width).toBe("0px");
-    expect(bar.style.height).toBe("38px");
-    expect(bar.style.paddingBottom, "the 28px row above the pad centres on y=14").toBe("10px");
+    expect(bar.style.height).toBe("34px");
+    expect(bar.style.paddingBottom, "the 32px row above the pad centres on y=16").toBe("2px");
 
     windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, fullscreen: true };
     await tick();

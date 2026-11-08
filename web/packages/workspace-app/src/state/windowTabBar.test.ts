@@ -16,6 +16,7 @@ import {
   TITLEBAR_TABS_COMMAND,
   TITLEBAR_TABS_PREFERENCE_EVENT,
   WINDOW_TAB_BAR_MIN_HEIGHT,
+  WINDOW_TAB_BAR_ROW_HEIGHT,
   WINDOW_TAB_BAR_STORAGE_KEY,
   normalizeTitlebarChrome,
   readWindowTabBarOverride,
@@ -201,7 +202,13 @@ describe("the boot in chan-desktop", () => {
     expect(windowTabBar.preferred).toBe(true);
     expect(windowTabBar.on).toBe(true);
     expect(windowTabBar.chrome).toEqual(chrome());
-    expect(switches()).toEqual([{ enabled: true, bandHeight: WINDOW_TAB_BAR_MIN_HEIGHT }]);
+    // The opt-in asks for the boot height, then settles the band on the
+    // controls: centred at 16, a 32 px band and no empty strip under the row.
+    expect(switches()).toEqual([
+      { enabled: true, bandHeight: WINDOW_TAB_BAR_MIN_HEIGHT },
+      { enabled: true, bandHeight: 32 },
+    ]);
+    expect(windowTabBar.height).toBe(32);
   });
 
   test("without the command advertised, stays off, offers nothing and asks nothing more", async () => {
@@ -336,7 +343,7 @@ describe("the preference in chan-desktop", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(windowTabBar.on).toBe(true);
-    expect(switches().at(-1)).toEqual({ enabled: true, bandHeight: WINDOW_TAB_BAR_MIN_HEIGHT });
+    expect(switches().at(-1)).toEqual({ enabled: true, bandHeight: 32 });
   });
 
   test("a stored override ignores the preference and its changes", async () => {
@@ -371,17 +378,36 @@ describe("the preference in chan-desktop", () => {
 });
 
 describe("the geometry", () => {
-  test("the band is the minimum without controls and twice their centre when that is taller", () => {
+  test("the band is the minimum without controls, else the row's or the controls' band, whichever is taller", () => {
     expect(windowTabBarHeight(NO_TITLEBAR_CHROME)).toBe(WINDOW_TAB_BAR_MIN_HEIGHT);
-    expect(windowTabBarHeight(chrome({ controlsCenterY: 14 }))).toBe(WINDOW_TAB_BAR_MIN_HEIGHT);
+    expect(windowTabBarHeight(chrome({ controlsCenterY: 14 })), "the macOS title bar at 100%").toBe(28);
+    expect(windowTabBarHeight(chrome({ controlsCenterY: 16 }))).toBe(32);
     expect(windowTabBarHeight(chrome({ controlsCenterY: 25.2 }))).toBe(51);
+    // At 150% the controls' 28pt band is 18.7 CSS px; the row sets the band.
+    expect(windowTabBarHeight(chrome({ controlsCenterY: 14 / 1.5 }))).toBe(WINDOW_TAB_BAR_ROW_HEIGHT);
+    expect(windowTabBarHeight(chrome({ controlsCenterY: 14 / 2 }))).toBe(WINDOW_TAB_BAR_ROW_HEIGHT);
   });
 
-  test("the pad below the row puts the row's centre on the controls' centre", () => {
+  test("the pad below the row puts the row's centre on the controls' centre and leaves no empty strip", () => {
     expect(windowTabBarCenterPad(NO_TITLEBAR_CHROME, 38)).toBe(0);
-    const pad = windowTabBarCenterPad(chrome({ controlsCenterY: 14 }), 38);
-    expect((38 - pad) / 2).toBe(14);
-    expect(windowTabBarCenterPad(chrome({ controlsCenterY: 26 }), 52)).toBe(0);
+    for (const center of [14, 16, 25.2, 26]) {
+      const c = chrome({ controlsCenterY: center });
+      const height = windowTabBarHeight(c);
+      const pad = windowTabBarCenterPad(c, height);
+      expect((height - pad) / 2, `the row centres on y=${center}`).toBeCloseTo(center, 0);
+      expect(pad, "under one px of rounding").toBeLessThan(1);
+    }
+    // A bar still at the boot height keeps the row on the controls' centre.
+    expect((38 - windowTabBarCenterPad(chrome({ controlsCenterY: 14 }), 38)) / 2).toBe(14);
+  });
+
+  test("a zoomed-in row fills the bar from its top with no pad", () => {
+    for (const zoom of [1.25, 1.5, 2]) {
+      const c = chrome({ controlsCenterY: 14 / zoom });
+      const height = windowTabBarHeight(c);
+      expect(height).toBe(WINDOW_TAB_BAR_ROW_HEIGHT);
+      expect(windowTabBarCenterPad(c, height)).toBe(0);
+    }
   });
 
   test("a partial or malformed answer reads as zero lengths", () => {
