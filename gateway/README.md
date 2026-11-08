@@ -91,6 +91,10 @@ cargo test
 
 Tests use real Postgres with per-test schema isolation. Identity tests mock the GitHub OAuth endpoints and profile-service via wiremock.
 
+Three packaging suites run outside cargo, from the repository root, and Gateway CI runs all three on every run. `python3 packaging/kube/test-manifests.py` checks the Kubernetes manifests against the packaged scripts, including the database-roles ConfigMap's embedded copies of the prepare and reconcile scripts, and needs PyYAML. `make gateway-packaging-isolation-test` runs the gateway postinsts in all 120 orders of the account-plane packages, the WireGuard agent's at every position, and the sdme provisioner refusals; it is Linux-only and needs only make, bash, git, openssl and python3.
+
+The third, `packaging/gateway/scripts/test-database-roles.sh`, runs the database role scripts against a real server and rewrites the cluster-wide `chan_gateway_identity` and `chan_gateway_profile` roles, so it never runs against a shared PostgreSQL. Its only local route is `make gateway-database-roles-test`: it boots the `chan-psql` rootfs (`packaging/gateway/scripts/dev/sdme/chan-psql.sdme`, built on first use) in a disposable sdme guest with a private network, runs the suite inside it against the working tree's scripts and migrations, and removes the guest. PostgreSQL is not installed on the host for this. Gateway CI runs the suite against a `postgres:16` service container, the major the Kubernetes manifests deploy.
+
 ## Releases
 
 The gateway ships on the monorepo's release line: the gateway crates are versioned in lockstep with the root (`chan`), and a `v*` tag triggers the repo-root `.github/workflows/release.yml`, whose `gateway-linux-packages` job builds six .deb packages (`chan-gateway-profile`, `chan-gateway-identity`, `chan-gateway-devserver-control`, `chan-gateway-devserver-proxy`, `chan-gateway-admin`, `chan-gateway-wireguard-agent`) for amd64 and arm64 and uploads them alongside the rest of the release.

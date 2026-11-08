@@ -695,6 +695,15 @@ gateway-packaging-isolation-test: gateway-version-pin-check ## Opt-in, not in pr
 	# and before cutting a release that carries such a change.
 	packaging/gateway/scripts/test-packaging-isolation.sh
 
+.PHONY: gateway-database-roles-test
+gateway-database-roles-test: ## Opt-in, not in pre-push: run the gateway database roles suite in a disposable sdme PostgreSQL guest, never against a host PostgreSQL.
+	# The only local route for packaging/gateway/scripts/test-database-roles.sh.
+	# The suite rewrites the cluster-wide gateway application roles, so the
+	# driver boots the chan-psql rootfs with a private network, runs the suite
+	# inside it against the working tree's scripts and migrations, and removes
+	# the guest. Gateway CI runs the same suite against a postgres:16 service.
+	SDME="$(SDME)" packaging/gateway/scripts/dev/sdme/database-roles-test.sh
+
 .PHONY: gateway-lint
 gateway-lint: gateway-version-pin-check gateway-spa ## Clippy all gateway targets without executing tests.
 	$(LINUX_ONLY)
