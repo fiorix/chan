@@ -32,6 +32,7 @@ const addDevserverGrant = vi.fn();
 vi.mock("../lib/api", async () => ({
   HttpError: (await import("@chan/web-shared/api")).HttpError,
   api: {
+    discovery: vi.fn(async () => ({ tunnel_url: "https://proxy.example.test/v1/tunnel" })),
     listTokens: () => listTokens(),
     revokeToken: (id: string) => revokeToken(id),
     createToken: vi.fn(),

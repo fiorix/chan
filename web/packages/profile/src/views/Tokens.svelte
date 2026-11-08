@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import TunnelHint from "../components/TunnelHint.svelte";
   import {
     api,
     HttpError,
@@ -156,8 +157,10 @@
     <button onclick={() => (showCreate = true)}>New token</button>
   </div>
   <p class="muted">
-    Tokens authenticate <code>chan devserver run --tunnel-token</code> and other
-    CLI clients. Treat them like passwords: a token grants the same
+    Tokens authenticate devservers and other CLI clients. Put a devserver's
+    token in <code>CHAN_TUNNEL_TOKEN</code>:
+    <TunnelHint />
+    Treat tokens like passwords: a token grants the same
     access as your account, scoped to your workspaces only.
   </p>
 
