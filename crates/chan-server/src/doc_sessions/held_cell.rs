@@ -13,8 +13,11 @@ use crate::state::WorkspaceCell;
 
 pub(crate) type Cell = Arc<RwLock<Option<WorkspaceCell>>>;
 
-/// How long a pin waits for what must happen.
-pub(crate) const MUST_HAPPEN: Duration = Duration::from_secs(10);
+/// How long a pin waits for what must happen. Nothing the pin does after
+/// the wait is what makes it happen, so a green run ends the wait by that
+/// event, long before this on a loaded host too, and a task that never does
+/// it ends the pin here, red and not hung.
+pub(crate) const MUST_HAPPEN: Duration = Duration::from_secs(60);
 
 /// A hold of the cell that outlasts the time after which a flusher told to
 /// stop says that the cell is still held.
@@ -26,8 +29,13 @@ pub(crate) const A_LONG_HOLD: Duration =
 /// thousand times in it.
 pub(crate) const A_HOLD_PAST_ANY_GRACE: Duration = Duration::from_secs(600);
 
-/// How long the probe of [`worker_stays_free`] may take to end.
-const PROBE_BOUND: Duration = Duration::from_secs(5);
+/// How long the probe of [`worker_stays_free`] may take to end. The cell
+/// stays held until the wait is over, so a task that makes an unbounded wait
+/// for it on the worker stops the probe for good and the probe ends at its
+/// last step or never: the bound only decides how soon a stopped probe
+/// reports, and a loaded host that stretches every step still ends far
+/// inside it.
+const PROBE_BOUND: Duration = Duration::from_secs(60);
 
 /// The probe needs its worker this many times, this far apart: six hundred
 /// milliseconds in all, longer than two ticks of a flusher.
