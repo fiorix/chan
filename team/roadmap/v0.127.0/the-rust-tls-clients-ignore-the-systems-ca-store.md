@@ -1,6 +1,6 @@
 # The Rust TLS clients ignore the system's CA store
 
-Status: raised on 2026-11-07 from the v0.125.0 release's enrollment proof; accepted by the owner for v0.126.0 at the v0.125.0 cut; not started.
+Status: raised on 2026-11-07 from the v0.125.0 release's enrollment proof; accepted by the owner for v0.126.0 at the v0.125.0 cut; moved to v0.127.0 by the owner on 2026-11-08; not started.
 
 ## What is there now
 

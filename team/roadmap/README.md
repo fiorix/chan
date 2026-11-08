@@ -29,35 +29,45 @@ On 2026-11-08 the owner added six items found while writing the chan.app tutoria
 
 The same day, planning the chan.app WireGuard rollout, the owner found that v0.125.0's one ingress per gateway would carry every enrolled desktop's traffic for every proxy node through one host, and decided that each node terminates its own WireGuard and the desktop runs one tunnel per node, replacing that release's decision ([wgnode]).
 
+Later the same day, from a ranking of the items by size, the owner moved every item of medium size or larger to v0.127.0 ("all M, L, and XL move to v0.127; the only M stayign in v126 is wakevis"): [timebound], [patrevoke], [systemca], [gwci] and [wgnode]. [wakevis] stays here, as do the small items.
+
 | Item | State | Next |
 | --- | --- | --- |
-| [time-bound tests go red on a loaded host][timebound] | not started | design |
-| [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
-| [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | not started | build |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | not started | reading |
-| [no CI job runs the gateway packaging and roles suites][gwci] | not started | build |
 | [chan close reports a running serve closed][closelie] | not started | build |
 | [chan serve --help names Cmd+P as Team Work][cmdphelp] | not started | build |
 | [admin.env points at identity's public port][adminenv] | not started | build |
 | [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
 | [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
 | [the manual and design docs contradict chan][docsdrift] | partly built | build |
-| [one WireGuard ingress per proxy node][wgnode] | not started | decision |
 
-[timebound]: v0.126.0/time-bound-tests-go-red-on-a-loaded-host.md
-[patrevoke]: v0.126.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
-[systemca]: v0.126.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
-[gwci]: v0.126.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
 [closelie]: v0.126.0/chan-close-reports-a-standalone-serve-closed-while-it-keeps-running.md
 [cmdphelp]: v0.126.0/chan-serve-help-names-cmd-p-as-team-work.md
 [adminenv]: v0.126.0/configure-sh-points-the-admin-cli-at-identitys-public-port.md
 [gwdefaults]: v0.126.0/the-gateway-setup-defaults-name-the-maintainers-deployment.md
 [tunnelhint]: v0.126.0/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md
 [docsdrift]: v0.126.0/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md
-[wgnode]: v0.126.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
+
+### v0.127.0
+
+Opened 2026-11-08 with the five items the owner moved from v0.126.0 the same day, each sized medium or larger; v0.126.0's text above records why each was raised. In size order: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]); the time-bound tests a loaded host breaks ([timebound]); the system CA store for the Rust TLS clients, read on three platforms ([systemca]); the PAT the redeem orphans, which shares the redeem's completion with [wgnode] ([patrevoke]); and the gateway packaging and roles suites in CI ([gwci]).
+
+| Item | State | Next |
+| --- | --- | --- |
+| [one WireGuard ingress per proxy node][wgnode] | not started | decision |
+| [time-bound tests go red on a loaded host][timebound] | not started | design |
+| [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
+| [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
+| [no CI job runs the gateway packaging and roles suites][gwci] | not started | build |
+
+[wgnode]: v0.127.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
+[timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
+[systemca]: v0.127.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
+[patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
+[gwci]: v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
 
 ## Completed
 

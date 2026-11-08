@@ -1,6 +1,6 @@
 # Time-bound tests go red on a loaded host
 
-Status: raised on 2026-11-07 from the v0.125.0 release's integration gate runs; accepted by the owner for v0.126.0 at the v0.125.0 cut; not started.
+Status: raised on 2026-11-07 from the v0.125.0 release's integration gate runs; accepted by the owner for v0.126.0 at the v0.125.0 cut; moved to v0.127.0 by the owner on 2026-11-08; not started.
 
 ## What is there now
 
