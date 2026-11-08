@@ -1697,11 +1697,17 @@ impl IdentityClient {
         let response = request.send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
-        let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-            serde_json::json!({
+        let value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) if status.is_success() && !bytes.is_empty() => {
+                return Err(anyhow!(
+                    "identity returned {status} with a non-JSON body; CHAN_ADMIN_IDENTITY_URL must name identity's internal listener"
+                ));
+            }
+            Err(_) => serde_json::json!({
                 "error": format!("identity returned {status} with a non-JSON body")
-            })
-        });
+            }),
+        };
         Ok((status, value))
     }
 
@@ -1930,11 +1936,17 @@ impl WorkspaceClient {
             .await?;
         let status = response.status();
         let bytes = response.bytes().await?;
-        let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-            serde_json::json!({
+        let value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) if status.is_success() && !bytes.is_empty() => {
+                return Err(anyhow!(
+                    "controller returned {status} with a non-JSON body; CHAN_ADMIN_WORKSPACE_URL must name devserver-control's admin listener"
+                ));
+            }
+            Err(_) => serde_json::json!({
                 "error": format!("controller returned {status} with a non-JSON body")
-            })
-        });
+            }),
+        };
         Ok((status, value))
     }
 
@@ -2827,6 +2839,178 @@ mod tests {
     fn identity_client_uses_an_explicit_url() {
         let client = build_identity_client(Some("http://127.0.0.1:17004"), "t").unwrap();
         assert_eq!(client.base.as_str(), "http://127.0.0.1:17004/");
+    }
+
+    async fn report_stub(
+        status: StatusCode,
+        content_type: &str,
+        body: &str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    request.push(stream.read_u8().await.unwrap());
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(request.len() < 8192);
+                }
+                stream.write_all(response.as_bytes()).await.unwrap();
+            })
+            .await
+            .expect("report request completes");
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn identity_report_rejects_non_json_success() {
+        let (url, server) = report_stub(StatusCode::OK, "text/html", "<html>account</html>").await;
+        let client = IdentityClient::new(url, "test-token".into()).unwrap();
+        let result = client.fleet().await;
+        server.await.unwrap();
+        let error = result.expect_err("an HTML success is an upstream error");
+        assert!(
+            error.to_string().contains("CHAN_ADMIN_IDENTITY_URL"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("internal listener"), "{error}");
+        assert_eq!(exit_code_for(&error), 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_report_rejects_non_json_success() {
+        let (url, server) = report_stub(StatusCode::OK, "text/html", "<html>account</html>").await;
+        let client = WorkspaceClient::new(url, "test-token".into()).unwrap();
+        let result = client
+            .report(Method::POST, "/admin/v1/sessions/revoke")
+            .await;
+        server.await.unwrap();
+        let error = result.expect_err("an HTML success is an upstream error");
+        assert!(
+            error.to_string().contains("CHAN_ADMIN_WORKSPACE_URL"),
+            "{error}"
+        );
+        assert_eq!(exit_code_for(&error), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_report_preserves_json_empty_success_and_error_statuses() {
+        for (status, content_type, body, exit_code) in [
+            (
+                StatusCode::OK,
+                "application/json",
+                r#"{"admissions_enabled":true}"#,
+                0,
+            ),
+            (StatusCode::NO_CONTENT, "application/json", "", 0),
+            (
+                StatusCode::BAD_GATEWAY,
+                "text/html",
+                "<html>bad gateway</html>",
+                1,
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "text/html",
+                "<html>bad request</html>",
+                2,
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                "text/html",
+                "<html>not found</html>",
+                3,
+            ),
+        ] {
+            let (url, server) = report_stub(status, content_type, body).await;
+            let client = IdentityClient::new(url, "test-token".into()).unwrap();
+            let result = client.fleet().await;
+            server.await.unwrap();
+            let (received, value) = result.unwrap();
+            assert_eq!(received, status);
+            if status == StatusCode::OK {
+                assert_eq!(value, serde_json::json!({"admissions_enabled": true}));
+            }
+            assert_eq!(
+                finish_report(received).map_or_else(|error| exit_code_for(&error), |()| 0),
+                exit_code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_report_preserves_json_empty_success_and_error_statuses() {
+        for (status, content_type, body, exit_code) in [
+            (StatusCode::OK, "application/json", r#"{"revoked":1}"#, 0),
+            (StatusCode::NO_CONTENT, "application/json", "", 0),
+            (
+                StatusCode::BAD_GATEWAY,
+                "text/html",
+                "<html>bad gateway</html>",
+                1,
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "text/html",
+                "<html>bad request</html>",
+                2,
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                "text/html",
+                "<html>not found</html>",
+                3,
+            ),
+        ] {
+            let (url, server) = report_stub(status, content_type, body).await;
+            let client = WorkspaceClient::new(url, "test-token".into()).unwrap();
+            let result = client
+                .report(Method::POST, "/admin/v1/sessions/revoke")
+                .await;
+            server.await.unwrap();
+            let (received, value) = result.unwrap();
+            assert_eq!(received, status);
+            if status == StatusCode::OK {
+                assert_eq!(value, serde_json::json!({"revoked": 1}));
+            }
+            assert_eq!(
+                finish_report(received).map_or_else(|error| exit_code_for(&error), |()| 0),
+                exit_code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_status_rejects_non_json_success_through_dispatch() {
+        let (url, server) = report_stub(StatusCode::OK, "text/html", "<html>account</html>").await;
+        let mut cli =
+            Cli::try_parse_from(["chan-gateway-admin", "--json", "fleet", "status"]).unwrap();
+        // Override clap's environment values so the stub is the only destination.
+        cli.profile_url = None;
+        cli.workspace_url = None;
+        cli.identity_url = Some(url);
+        cli.profile_token = None;
+        cli.operator_token = None;
+        cli.identity_token = Some("test-token".into());
+        let result = run(cli).await;
+        server.await.unwrap();
+        let error = result.expect_err("fleet status must fail on an HTML success");
+        assert!(
+            error.to_string().contains("CHAN_ADMIN_IDENTITY_URL"),
+            "{error}"
+        );
+        assert_eq!(exit_code_for(&error), 1);
     }
 
     #[tokio::test]
