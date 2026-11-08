@@ -1,7 +1,7 @@
 # chan-devserver: an Ubuntu rootfs that runs one chan devserver as a lingering
 # systemd --user service, publishing its mounted workspaces over the gateway
-# tunnel at {handle}--{disc}.{proxy}.proxy.chan.app. One container is one externally shared
-# trust domain: provisioning a second Unix user is refused, and the managed user
+# tunnel at {handle}--{disc}.{proxy}.proxy.{domain}. One container is one
+# externally shared trust domain: provisioning a second Unix user is refused, and the managed user
 # cannot be root/uid 0/gid 0, have supplemental groups, or retain the legacy
 # sudoers drop-in. First provision must create a fresh dedicated account; only
 # the root-owned owner marker permits that same account on a rerun. Unlike the sibling
@@ -16,10 +16,12 @@
 # Provision + run, once the container is up:
 #   sudo sdme create --name chan-ds -r chan-devserver --storage btrfs
 #   sudo sdme start chan-ds
-#   sudo sdme join chan-ds            # interactive: dialog prompts for the token
+#   # interactive: dialog prompts for the token and tunnel URL
+#   sudo sdme join chan-ds
 #   # or non-interactively:
 #   sudo sdme exec chan-ds -- chan-devserver-provision \
-#       --user alice --token chan_pat_XXX
+#       --user alice --token chan_pat_XXX \
+#       --tunnel-url https://proxy.example.com/v1/tunnel
 # chan-devserver-provision (baked below) creates the user, enables linger,
 # writes ~/.config/systemd/user/chan-devserver.service carrying the token, and
 # starts it. See that script's header for the full contract.
@@ -31,7 +33,7 @@ FROM ubuntu
 # https://chan.app/install.sh (into ~/.local/bin, honoring http(s)_proxy), so
 # there is no PPA and no root-owned binary to upgrade. The deps here:
 #   ca-certificates    curl needs it to reach install.sh + the tarball over HTTPS
-#   dialog             the interactive token prompt in chan-devserver-provision
+#   dialog             the interactive token and tunnel URL prompts
 #   curl               the install.sh fetch, plus token/health probes
 #   dbus-user-session  the per-user D-Bus session bus `systemctl --user` needs;
 #                      without it a lingering user's manager has no bus to reach

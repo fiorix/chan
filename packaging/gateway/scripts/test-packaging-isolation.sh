@@ -296,7 +296,7 @@ chmod +x "$WORK/bin/id" "$WORK/bin/getent" "$WORK/bin/install"
 valid_pat=chan_pat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
 if PATH="$WORK/bin:$PATH" "$WORK/provision.sh" \
-    --user root --token "$valid_pat" 2> "$WORK/root-refusal.err"; then
+    --user root --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel 2> "$WORK/root-refusal.err"; then
     die "sdme provisioner accepted root"
 fi
 grep -Fq 'root cannot own a chan devserver' "$WORK/root-refusal.err" \
@@ -304,7 +304,7 @@ grep -Fq 'root cannot own a chan devserver' "$WORK/root-refusal.err" \
 
 rm -f "$WORK/state/owner"
 if PATH="$WORK/bin:$PATH" "$WORK/provision.sh" \
-    --user existing --token "$valid_pat" 2> "$WORK/preexisting-refusal.err"; then
+    --user existing --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel 2> "$WORK/preexisting-refusal.err"; then
     die "sdme provisioner accepted a preexisting first-run account"
 fi
 grep -Fq "refusing preexisting user 'existing' on an unowned container" \
@@ -313,7 +313,7 @@ grep -Fq "refusing preexisting user 'existing' on an unowned container" \
 
 printf 'zeroalias\n' > "$WORK/state/owner"
 if MOCK_TARGET_UID=0 PATH="$WORK/bin:$PATH" "$WORK/provision.sh" \
-    --user zeroalias --token "$valid_pat" 2> "$WORK/uid-zero-refusal.err"; then
+    --user zeroalias --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel 2> "$WORK/uid-zero-refusal.err"; then
     die "sdme provisioner accepted a uid-0 alias"
 fi
 grep -Fq "user 'zeroalias' resolves to uid 0" "$WORK/uid-zero-refusal.err" \
@@ -321,7 +321,7 @@ grep -Fq "user 'zeroalias' resolves to uid 0" "$WORK/uid-zero-refusal.err" \
 
 printf 'grouped\n' > "$WORK/state/owner"
 if MOCK_TARGET_GROUPS='1001 27' PATH="$WORK/bin:$PATH" "$WORK/provision.sh" \
-    --user grouped --token "$valid_pat" 2> "$WORK/group-refusal.err"; then
+    --user grouped --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel 2> "$WORK/group-refusal.err"; then
     die "sdme provisioner accepted a supplemental group"
 fi
 grep -Fq "unsafe supplemental group id 27" "$WORK/group-refusal.err" \
@@ -334,13 +334,23 @@ sed '/^# Make the user.s interactive shells/i exit 0' \
     "$WORK/provision.sh" > "$WORK/provision-preflight.sh"
 chmod +x "$WORK/provision-preflight.sh"
 printf 'bob\n' > "$WORK/state/owner"
+if PATH="$WORK/bin:$PATH" env -u CHAN_TUNNEL_URL -u CHAN_TUNNEL_TOKEN \
+    "$WORK/provision-preflight.sh" --user bob --token "$valid_pat" < /dev/null \
+    > "$WORK/url-refusal.out" 2> "$WORK/url-refusal.err"; then
+    die "sdme provisioner accepted a token without a tunnel URL"
+fi
+grep -Fq -- '--tunnel-url' "$WORK/url-refusal.err" \
+    && grep -Fq CHAN_TUNNEL_URL "$WORK/url-refusal.err" \
+    || die "missing tunnel URL refusal returned the wrong error"
+printf 'PASS provisioner: missing tunnel URL refused before admission\n'
+
 PATH="$WORK/bin:$PATH" "$WORK/provision-preflight.sh" \
-    --user bob --token "$valid_pat" \
+    --user bob --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel \
     || die "sdme provisioner rejected its pinned account on rerun"
 
 printf 'alice\n' > "$WORK/state/owner"
 if PATH="$WORK/bin:$PATH" "$WORK/provision.sh" \
-    --user bob --token "$valid_pat" 2> "$WORK/owner-refusal.err"; then
+    --user bob --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel 2> "$WORK/owner-refusal.err"; then
     die "sdme provisioner accepted a second state owner"
 fi
 grep -Fq "container already belongs to trust-domain user 'alice'" \
@@ -350,7 +360,7 @@ rm -f "$WORK/state/owner"
 mkdir -p "$WORK/home/alice/.config/systemd/user"
 : > "$WORK/home/alice/.config/systemd/user/chan-devserver.service"
 if PATH="$WORK/bin:$PATH" "$WORK/provision.sh" \
-    --user bob --token "$valid_pat" 2> "$WORK/legacy-refusal.err"; then
+    --user bob --token "$valid_pat" --tunnel-url https://proxy.example.test/v1/tunnel 2> "$WORK/legacy-refusal.err"; then
     die "sdme provisioner accepted a second legacy managed user"
 fi
 grep -Fq "existing managed devserver belongs to 'alice'" \
