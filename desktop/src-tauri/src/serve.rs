@@ -1103,10 +1103,15 @@ fn build_workspace_window_with_completion(
             &label_owned,
             webview_url,
         ))
-        .title(display_title.clone())
+        .title(crate::privacy::window_title(
+            &state,
+            &label_owned,
+            &display_title,
+        ))
         .inner_size(1200.0, 800.0)
         .min_inner_size(640.0, 400.0)
         .resizable(true)
+        .initialization_script(crate::privacy::BRIDGE)
         .initialization_script(init_script.as_str())
         // The explicit `zoom_in` / `zoom_out` / `zoom_reset`
         // IPC commands fired from KEY_BRIDGE_JS
@@ -4748,19 +4753,19 @@ mod tests {
             .collect()
     }
 
-    /// Commands KEY_BRIDGE_JS fires from inside every desktop-opened
-    /// window. The chord bridge is an initialization script, so it runs on
-    /// tunnel origins too and its invokes face the same origin-aware ACL
-    /// as the SPA's. Parses the shipped script rather than this file,
+    /// Commands the keyboard and privacy initialization scripts fire from
+    /// every desktop-opened window. They run on tunnel origins too and their
+    /// invokes face the same origin-aware ACL as the SPA's. Parses the shipped script rather than this file,
     /// whose assertion strings mention the invoke pattern too.
-    fn key_bridge_invoke_commands(script: &str) -> Vec<String> {
-        let needle = "invokeIpc(e, '";
-        script
-            .match_indices(needle)
-            .map(|(idx, _)| {
-                let quoted = &script[idx + needle.len()..];
-                let end = quoted.find('\'').expect("invokeIpc literal closes");
-                quoted[..end].to_string()
+    fn initialization_invoke_commands(script: &str) -> Vec<String> {
+        ["invokeIpc(e, '", "core.invoke('"]
+            .into_iter()
+            .flat_map(|needle| {
+                script.match_indices(needle).map(move |(idx, _)| {
+                    let quoted = &script[idx + needle.len()..];
+                    let end = quoted.find('\'').expect("invoke literal closes");
+                    quoted[..end].to_string()
+                })
             })
             .collect()
     }
@@ -4999,7 +5004,8 @@ mod tests {
         let mut vocabulary: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         vocabulary.extend(tauri_invoke_commands(WORKSPACE_APP_DESKTOP_TS));
         vocabulary.extend(plugin_invoke_commands(WORKSPACE_APP_EXTERNAL_LINKS_TS));
-        vocabulary.extend(key_bridge_invoke_commands(KEY_BRIDGE_JS));
+        vocabulary.extend(initialization_invoke_commands(KEY_BRIDGE_JS));
+        vocabulary.extend(initialization_invoke_commands(crate::privacy::BRIDGE));
 
         // Parser honesty: the hard forms must have parsed (the generic and
         // multi-line native transfer calls, both plugin channels, a
@@ -5014,6 +5020,8 @@ mod tests {
             "plugin:window|set_fullscreen",
             "plugin:opener|open_url",
             "zoom_in",
+            "privacy_settings",
+            "set_privacy_settings",
         ] {
             assert!(
                 vocabulary.contains(expected),

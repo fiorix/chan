@@ -204,3 +204,7 @@
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation: none; }
 }
+
+.privacy-redacted { display: inline-block; width: 6em; color: transparent; background: var(--text); opacity: 0.45; border-radius: 4px; user-select: none; }
+.privacy-reveal { margin-left: 0.5rem; padding: 2px 5px; color: var(--text); border: 1px solid currentColor; border-radius: 4px; background: transparent; cursor: pointer; font: inherit; }
+.privacy-reveal:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }

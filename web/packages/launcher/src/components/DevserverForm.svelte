@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
   // The devserver form: add a devserver, or edit one when `editing` is set. One
   // form does Add (POST) and Save changes (PUT). The New/Edit dialog renders it
   // for an edit and for the command deck's New devserver, and the carousel's
@@ -97,6 +98,7 @@
   {/if}
   <label class="field">
     Name <span class="muted">(optional)</span>
+    <PrivateField field={`devserver:${target?.id ?? "new"}:name`} label="computer name">
     <input
       type="text"
       bind:value={name}
@@ -104,9 +106,11 @@
       autocomplete="off"
       disabled={readOnlyEdit}
       onkeydown={onFieldKey} />
+    </PrivateField>
   </label>
   <label class="field">
     Address
+    <PrivateField field={`devserver:${target?.id ?? "new"}:address`} label="computer address">
     <input
       type="text"
       class="mono"
@@ -116,9 +120,11 @@
       spellcheck="false"
       disabled={readOnlyEdit}
       onkeydown={onFieldKey} />
+    </PrivateField>
   </label>
   <label class="field">
     Connect script <span class="muted">(optional; runs in a control terminal)</span>
+    <PrivateField field={`devserver:${target?.id ?? "new"}:script`} label="connection script">
     <textarea
       rows="3"
       class="mono"
@@ -127,6 +133,7 @@
       autocomplete="off"
       spellcheck="false"
       disabled={readOnlyEdit}></textarea>
+    </PrivateField>
   </label>
   <label class="check-field">
     <input type="checkbox" bind:checked={autoHideControl} disabled={readOnlyEdit} />
@@ -140,7 +147,7 @@
   </div>
 
   {#if error}
-    <div class="error" role="alert">{error}</div>
+    <div class="error" role="alert"><PrivateField field="devserver-form:error" label="error details">{error}</PrivateField></div>
   {/if}
 
   <div class="form-footer">

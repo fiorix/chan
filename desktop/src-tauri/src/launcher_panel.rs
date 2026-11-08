@@ -63,10 +63,11 @@ pub(crate) const LAUNCHER_BRIDGE_JS: &str = include_str!("launcher_bridge.js");
 
 /// The events the launcher subscribes to (web-launcher App.svelte), forwarded
 /// from the app's event bus into every launcher.
-pub(crate) const FORWARDED_EVENTS: [&str; 6] = [
+pub(crate) const FORWARDED_EVENTS: [&str; 7] = [
     "devserver-control-attention",
     "devserver-control-restored",
     crate::DESKTOP_UPDATE_READY_EVENT,
+    crate::privacy::EVENT,
     "auth-error",
     "auth-changed",
     crate::gateway::LAUNCHER_NOTICE,
@@ -833,6 +834,7 @@ fn build_panel(
         .with_focused(false)
         .with_devtools(true)
         .with_initialization_script(LAUNCHER_IPC_JS)
+        .with_initialization_script(crate::privacy::BRIDGE)
         .with_initialization_script(LAUNCHER_BRIDGE_JS)
         .with_initialization_script(format!(
             "window.__chanLauncherSettled = false; window.__chanLauncherGpuAvailable = {};",
@@ -968,6 +970,7 @@ fn open_externally(app: &AppHandle, target: &str) {
 /// A command the launcher page's desktop module or key bridge may invoke.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LauncherCommand {
+    PrivacySettings,
     RequestAppQuit,
     RestartAfterUpdate,
     TogglePanel,
@@ -978,6 +981,7 @@ pub(crate) enum LauncherCommand {
 impl LauncherCommand {
     pub(crate) fn parse(cmd: &str) -> Option<Self> {
         match cmd {
+            "privacy_settings" => Some(Self::PrivacySettings),
             "request_app_quit" => Some(Self::RequestAppQuit),
             "restart_desktop_after_update" => Some(Self::RestartAfterUpdate),
             "toggle_launcher_panel" => Some(Self::TogglePanel),
@@ -1021,6 +1025,26 @@ fn handle_ipc(app: &AppHandle, host: &str, body: &str) {
         return;
     };
     let result = match LauncherCommand::parse(&message.cmd) {
+        Some(LauncherCommand::PrivacySettings) => {
+            let state = app.state::<std::sync::Arc<crate::AppState>>();
+            let result = crate::privacy::read(&state.store);
+            let (ok, value) = match result {
+                Ok(settings) => (true, serde_json::json!(settings)),
+                Err(error) => (false, serde_json::json!(error)),
+            };
+            let js = format!(
+                "window.__chanLauncherHost&&window.__chanLauncherHost.settle({},{ok},{value});",
+                message.id
+            );
+            LAUNCHERS.with(|launchers| {
+                if let Ok(launchers) = launchers.try_borrow() {
+                    if let Some(webview) = launchers.get(host) {
+                        let _ = webview.evaluate_script(&js);
+                    }
+                }
+            });
+            return;
+        }
         Some(LauncherCommand::RequestAppQuit) => {
             crate::request_quit(app);
             Ok(())
@@ -1320,6 +1344,7 @@ mod tests {
                 name.split_once('"').map(|(name, _)| name.to_string())
             })
             .collect();
+        listened.extend(invoked(crate::privacy::BRIDGE, "listen('", '\''));
         listened.sort();
         let mut forwarded: Vec<String> = FORWARDED_EVENTS.iter().map(|e| e.to_string()).collect();
         forwarded.sort();

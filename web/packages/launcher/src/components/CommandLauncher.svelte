@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { privateText } from "@chan/web-shared/privacy";
   import { shortcutLetter } from "@chan/web-shared/keyboard";
   // Computers provider for the shared command deck. The shared component owns
   // interaction and motion; this adapter owns only live library targets and the
@@ -106,11 +107,11 @@
   const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
 
   function workspaceName(workspace: WorkspaceEntry): string {
-    return workspace.label || rootName(workspace.path) || workspace.path;
+    return privateText(workspace.label || rootName(workspace.path) || workspace.path, "Workspace");
   }
 
   function devserverName(devserver: DevserverEntry): string {
-    return devserver.label || `${devserver.host}:${devserver.port}`;
+    return privateText(devserver.label || `${devserver.host}:${devserver.port}`, "Computer");
   }
 
   function machineNameForLibrary(libraryId: string): string {
@@ -125,13 +126,13 @@
     if (!window.tmux) return machineNameForLibrary(window.library_id);
     const connection = window.tmux.connection;
     const entry = library.tmuxConnections.find((row) => row.connection === connection) ?? null;
-    return tmuxWindowMachine(entry, tmuxHost(entry, library.devservers, localLibraryId));
+    return privateText(tmuxWindowMachine(entry, tmuxHost(entry, library.devservers, localLibraryId)), "tmux computer");
   }
 
   function machineNameForWorkspace(workspace: WorkspaceEntry): string {
     if (!workspace.devserver_id) return "This machine";
     const devserver = library.devservers.find((row) => row.id === workspace.devserver_id);
-    if (!devserver) return workspace.devserver_id;
+    if (!devserver) return privateText(workspace.devserver_id, "Computer");
     return devserver.library_id
       ? machineNameForLibrary(devserver.library_id)
       : devserverName(devserver);
@@ -149,7 +150,7 @@
   function windowContext(window: WindowRecord): string {
     const workspace = workspaceForWindow(window);
     if (window.kind === "workspace") {
-      return workspace ? workspaceName(workspace) : rootName(window.workspace_path ?? "") || "Workspace";
+      return workspace ? workspaceName(workspace) : privateText(rootName(window.workspace_path ?? ""), "Workspace") || "Workspace";
     }
     return window.control ? "Control terminal" : "Terminal";
   }
@@ -172,7 +173,7 @@
 
   function informedCloseConfirmation(window: WindowRecord, count: unknown): DeckConfirm {
     return {
-      title: `Close ${windowRowLabel(window)}?`,
+      title: `Close ${privateText(windowRowLabel(window), "Window")}?`,
       message: closeMessage(count),
       actionLabel: "Close",
       danger: true,
@@ -251,9 +252,9 @@
     const state = window.hidden ? "Hidden" : "Open";
     return {
       id: `computers:window:${windowKey(window)}`,
-      title: windowRowLabel(window),
+      title: privateText(windowRowLabel(window), "Window"),
       breadcrumb: `Computers › Windows › ${machine} › ${state}`,
-      searchText: [windowRowLabel(window), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind, state, "window"].join(" "),
+      searchText: [privateText(windowRowLabel(window), "Window"), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind, state, "window"].join(" "),
       scope: "computers",
       icon: window.kind === "terminal" ? SquareTerminal : AppWindow,
       kind: "branch",
@@ -268,8 +269,8 @@
     return {
       id: `computers:${command}:${window.library_id}:${window.window_id}`,
       title: verb,
-      breadcrumb: `Computers › Windows › ${windowRowLabel(window)} › ${machine}`,
-      searchText: [verb, windowRowLabel(window), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind].join(" "),
+      breadcrumb: `Computers › Windows › ${privateText(windowRowLabel(window), "Window")} › ${machine}`,
+      searchText: [verb, privateText(windowRowLabel(window), "Window"), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind].join(" "),
       scope: "computers",
       icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : command === "open" ? AppWindow : X,
       awaitResult: true,
@@ -589,7 +590,7 @@
     if (!mode) return "Computers";
     if (windowMode) {
       const window = orderedWindows.find((candidate) => windowKey(candidate) === windowMode);
-      if (window) return windowRowLabel(window);
+      if (window) return privateText(windowRowLabel(window), "Window");
     }
     return rootEntries.find((entry) => entry.next?.[0] === mode)?.title ?? "Computers";
   });
@@ -738,7 +739,7 @@
       <div class="deck-failed" role="alert">
         <p class="deck-failed-title">The command deck could not be drawn.</p>
         <p class="deck-failed-detail">
-          {error instanceof Error ? error.message : String(error)}
+          {privateText(error instanceof Error ? error.message : String(error), "Command failed")}
         </p>
         <div class="deck-failed-actions">
           <button onclick={() => reset()}>Try again</button>

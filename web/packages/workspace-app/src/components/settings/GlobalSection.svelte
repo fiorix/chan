@@ -1,11 +1,12 @@
 <script lang="ts">
   // Global settings: the knobs that belong to no single surface. App
   // theme reuses `setThemeChoice` so the chrome re-skins the instant it
-  // is picked; the rest write single fields through the parent's commit.
+  // is picked. Privacy belongs to the viewer; other preferences use commit.
 
   import type { BubbleOverlayMode, Preferences, ThemeChoice } from "../../api/types";
   import { setThemeChoice } from "../../state/store.svelte";
   import type { CommitFn } from "./commit";
+  import { privacy, setPrivacy, retryPrivacy } from "@chan/web-shared/privacy";
   import SettingField from "./SettingField.svelte";
   import PillRadio from "./PillRadio.svelte";
   import PillToggle from "./PillToggle.svelte";
@@ -22,6 +23,16 @@
     { value: "tray", label: "Tray" },
   ] as const;
 </script>
+
+<SettingField
+  label="Privacy mode"
+  hint="Hide computer and gateway names, addresses, connection scripts and tokens while recording or sharing your screen. Reveal individual fields with their eye button. Shared across Chan desktop windows, or browser tabs at the same address. Screen recording is not detected automatically."
+>
+  <PillToggle label="Privacy mode on" checked={privacy.enabled} disabled={!privacy.ready || privacy.saving} ontoggle={(enabled) => void setPrivacy({ enabled })} />
+  <PillToggle label="Also enable terminal secret masking" checked={privacy.mask_terminal_secrets} disabled={!privacy.ready || privacy.saving} ontoggle={(mask_terminal_secrets) => void setPrivacy({ mask_terminal_secrets })} />
+  {#if privacy.error}<p role="alert">{privacy.error}</p>{/if}
+  {#if !privacy.ready}<button type="button" onclick={retryPrivacy}>Retry privacy settings</button>{/if}
+</SettingField>
 
 <SettingField
   label="Theme"

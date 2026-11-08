@@ -174,10 +174,13 @@ chan-desktop is a Tauri shell. It owns windows, the launcher webview, the devser
 | Window records, terminal sessions, scrollback, tmux connections, client sessions | chan-library, in memory, with window records persisted |
 | Workspace bearer tokens, server and editor preferences, extension declarations | chan-server, under the chan home, secrets at mode 0600 |
 | Devserver token and enabled workspace set | the devserver's config under the chan home |
-| Desktop config: devservers, gateways, window placement | chan-desktop, under the chan home |
+| Desktop config: devservers, gateways, window placement, viewer privacy | chan-desktop, under the chan home |
+| Browser viewer privacy | localStorage per origin; individual reveals in sessionStorage per tab |
 | Accounts, tokens, grants, policy, audit | the gateway's profile service, in Postgres |
 
 Every app-level write uses the same atomic-write discipline as workspace content.
+
+Privacy mode is a viewing-client policy, controlled in Settings > Global. Desktop windows share the desktop's persisted policy across local and remote origins; browser tabs share it only within one origin. It conceals connection details in the Computers UI and connection/retry screens, with explicit per-field reveals, and can opt into the existing terminal secret masker. It does not modify the serving tenant's preferences or detect recording automatically. The bridge and presentation contract are described in [desktop/design.md](desktop/design.md#privacy-mode).
 
 ## Invariants
 

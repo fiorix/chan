@@ -14,6 +14,7 @@ mod launcher_panel;
 mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
+mod privacy;
 mod registry;
 mod remote_workspace;
 mod revtunnel;
@@ -145,6 +146,7 @@ pub struct AppState {
     /// {N}" scheme applies only when there's no override). Session-scoped: not
     /// persisted across an app restart, like the display numbers.
     pub window_title_overrides: Mutex<HashMap<String, String>>,
+    pub(crate) privacy_titles: Mutex<HashMap<String, String>>,
     /// Windows hidden ("buried") by the OS close button, in bury order (most
     /// recent last). Watcher-managed windows close their native surface but keep
     /// their library record; a control terminal stays hidden in place. The
@@ -307,6 +309,7 @@ impl AppState {
             live_window_zooms: Mutex::new(HashMap::new()),
             window_numbers: Mutex::new(HashMap::new()),
             window_title_overrides: Mutex::new(HashMap::new()),
+            privacy_titles: Mutex::new(HashMap::new()),
             buried_windows: Mutex::new(Vec::new()),
             silent_hides: Mutex::new(std::collections::HashSet::new()),
             devservers: Arc::new(devserver::DevserverConns::default()),
@@ -549,6 +552,7 @@ impl AppState {
     /// window-destroy handler. A no-op for an unknown label.
     pub fn release_window_number(&self, label: &str) {
         self.window_numbers.lock().unwrap().remove(label);
+        self.privacy_titles.lock().unwrap().remove(label);
     }
 
     /// The custom OS-title override for `label`, if any (read by
@@ -5364,6 +5368,8 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // The vocabulary + build-identity advertisement a remotely-served
         // page queries before treating a refusal as a version statement.
         native_vocabulary,
+        privacy::privacy_settings,
+        privacy::set_privacy_settings,
         // The launcher toggle chord from a window's key bridge.
         launcher_panel::toggle_launcher_panel,
         launcher_panel::set_launcher_focus_color,
@@ -6523,6 +6529,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
         }
         let state = app.state::<Arc<AppState>>();
         let buried = state.buried_snapshot();
+        let privacy_enabled = privacy::enabled(&state);
         // Sections are assembled as data first, then applied to every
         // submenu at the end -- MenuItems can't be shared across menus, so
         // each menubar gets freshly built ones.
@@ -6647,7 +6654,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
                 }
                 let id_prefix = section.id_prefix;
                 for (label, title) in &section.rows {
-                    match MenuItemBuilder::with_id(format!("{id_prefix}{label}"), title)
+                    match MenuItemBuilder::with_id(format!("{id_prefix}{label}"), if privacy_enabled { "Chan (privacy mode)" } else { title })
                         .build(&app)
                     {
                         Ok(item) => {

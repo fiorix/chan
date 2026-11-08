@@ -19,6 +19,7 @@
 // failure here is silent.
 
 import { windowDisplayName, type WindowKind } from "@chan/web-shared/window-label";
+import { privacy } from "@chan/web-shared/privacy";
 import { sessionWindowId } from "../api/client";
 import { isTauriDesktop } from "../api/desktop";
 import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
@@ -32,9 +33,11 @@ interface WindowNaming {
 
 let naming: WindowNaming | null = null;
 
-function render(): void {
-  if (!naming || typeof document === "undefined") return;
-  document.title = windowDisplayName(naming);
+export function refreshWindowTitle(): void {
+  if (typeof document === "undefined") return;
+  if (privacy.enabled) document.title = "Chan (privacy mode)";
+  else if (naming) document.title = windowDisplayName(naming);
+  else document.title = "Chan";
 }
 
 /**
@@ -56,7 +59,7 @@ export async function initWindowTitle(): Promise<void> {
       label: me.label ?? "",
       control: me.control,
     };
-    render();
+    refreshWindowTitle();
   } catch {
     // No capability, no library, or no live presence yet. The static title
     // stands; there is nothing for the user to act on.
@@ -67,7 +70,7 @@ export async function initWindowTitle(): Promise<void> {
 export function applyWindowLabel(label: string): void {
   if (!naming) return;
   naming.label = label;
-  render();
+  refreshWindowTitle();
 }
 
 /** Test reset. */

@@ -15,6 +15,7 @@
 </script>
 
 <script lang="ts">
+  import PrivateField from "./PrivateField.svelte";
   import { tick } from "svelte";
   import { canTakeFocus } from "../modalFocus";
   import type {
@@ -676,8 +677,8 @@
             {#if operation.kind === "confirm"}
               <div class="deck-operation-icon">?</div>
               <div class="deck-operation-copy">
-                <strong>{operation.title}</strong>
-                <span>{operation.message}</span>
+                <strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong>
+                <span><PrivateField field={`command:${operation.itemId}:message`} label="action message">{operation.message}</PrivateField></span>
               </div>
               <div class="deck-decisions">
                 <button class:chosen={operation.selected === "cancel"} type="button" onclick={operationBack}>Cancel</button>
@@ -693,22 +694,22 @@
               </div>
             {:else if operation.kind === "preparing"}
               <span class="deck-spinner" aria-hidden="true"></span>
-              <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Checking...</span></div>
+              <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span>Checking...</span></div>
               <div class="deck-decisions">
                 <button type="button" onclick={releaseOperation}>Dismiss</button>
               </div>
             {:else if operation.kind === "pending"}
               <span class="deck-spinner" aria-hidden="true"></span>
-              <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Working…</span></div>
+              <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span>Working…</span></div>
               <div class="deck-decisions">
                 <button type="button" onclick={releaseOperation}>Dismiss</button>
               </div>
             {:else if operation.kind === "success"}
               <div class="deck-operation-icon success">✓</div>
-              <div class="deck-operation-copy"><strong>{operation.title}</strong><span>Done</span></div>
+              <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span>Done</span></div>
             {:else}
               <div class="deck-operation-icon error">!</div>
-              <div class="deck-operation-copy"><strong>{operation.title}</strong><span>{operation.message}</span></div>
+              <div class="deck-operation-copy"><strong><PrivateField field={`command:${operation.itemId}:title`} label="action details">{operation.title}</PrivateField></strong><span><PrivateField field={`command:${operation.itemId}:message`} label="action message">{operation.message}</PrivateField></span></div>
               <div class="deck-decisions">
                 <button class:chosen={operation.selected === "back"} type="button" onclick={operationBack}>Back</button>
                 <button

@@ -90,6 +90,46 @@ const els = {
   disconnect: document.getElementById('disconnect'),
 };
 
+const privateFields = new Map();
+let privateSequence = 0;
+let privateReveals = {};
+try { privateReveals = JSON.parse(sessionStorage.getItem('chan.connecting.reveals.v1') || '{}'); } catch (_) { /* Page-local reveals still work. */ }
+function privacyEnabled() { return window.__CHAN_PRIVACY__?.state.enabled ?? false; }
+function paintPrivate(node, value, key) {
+  privateFields.set(node, { value, key });
+  renderPrivate(node, value, key);
+}
+function renderPrivate(node, value, key) {
+  const bridge = window.__CHAN_PRIVACY__;
+  const revision = bridge?.state.revision ?? 0;
+  const concealed = privacyEnabled() && (!bridge?.ready || privateReveals[key] !== revision);
+  node.removeAttribute('title');
+  node.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = concealed ? 'Hidden' : value;
+  if (concealed) { text.className = 'privacy-redacted'; text.setAttribute('aria-label', 'Connection details hidden'); }
+  node.appendChild(text);
+  if (!privacyEnabled()) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'privacy-reveal';
+  button.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>' + (concealed ? '' : '<path d="m3 3 18 18"/>') + '</svg>';
+  button.setAttribute('aria-label', (concealed ? 'Reveal' : 'Hide') + ' connection details');
+  button.setAttribute('aria-pressed', String(!concealed));
+  button.title = (concealed ? 'Reveal' : 'Hide') + ' connection details';
+  button.disabled = !bridge?.ready;
+  button.onclick = () => {
+    privateReveals[key] = concealed ? revision : -1;
+    try { sessionStorage.setItem('chan.connecting.reveals.v1', JSON.stringify(privateReveals)); } catch (_) { /* Page-local reveals still work. */ }
+    renderPrivate(node, value, key);
+  };
+  node.appendChild(button);
+}
+window.addEventListener('chan:privacy-change', () => {
+  applyTarget();
+  for (const [node, field] of privateFields) renderPrivate(node, field.value, field.key);
+});
+
 wireActions();
 
 let attempt = 0;
@@ -128,12 +168,14 @@ function applyTheme() {
 }
 
 // Render the target into the header. The url line shows the display URL
-// verbatim (the contract's `url` is the user-facing string to print);
-// the full navigate target rides in the title attribute for hover.
+// while revealed. The navigation URL can contain a bearer token and never
+// belongs in a hover tooltip.
 function applyTarget() {
-  els.title.textContent = label ? `Connecting to ${label}` : 'Connecting to workspace';
-  els.url.textContent = displayUrl || '(no URL)';
-  els.url.setAttribute('title', targetUrl || displayUrl || '');
+  const shownLabel = privacyEnabled() ? '' : label;
+  els.title.textContent = els.body.classList.contains('is-gaveup') ? (shownLabel ? `Can't reach ${shownLabel}` : "Still can't connect")
+    : els.body.classList.contains('is-connected') ? (shownLabel ? `Connected to ${shownLabel}` : 'Connected')
+    : shownLabel ? `Connecting to ${shownLabel}` : 'Connecting to workspace';
+  paintPrivate(els.url, displayUrl || '(no URL)', 'address');
 }
 
 function startElapsedTimer() {
@@ -193,9 +235,8 @@ function showGaveUp() {
   stopped = true;
   stopElapsedTimer();
   els.body.classList.add('is-gaveup');
-  els.title.textContent = label ? `Can't reach ${label}` : "Still can't connect";
-  els.foot.textContent =
-    `Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu. ${displayUrl} hasn't responded after ${attempt} attempts: ${lastReason}`;
+  applyTarget();
+  paintPrivate(els.foot, `Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu. ${displayUrl} hasn't responded after ${attempt} attempts: ${lastReason}`, "failure");
   els.actions.hidden = false;
   els.retry.focus();
   // The title and the foot sit outside the live region, so this row is
@@ -208,7 +249,8 @@ function showGaveUp() {
 function hideGaveUp() {
   els.body.classList.remove('is-gaveup');
   els.actions.hidden = true;
-  els.title.textContent = label ? `Connecting to ${label}` : 'Connecting to workspace';
+  applyTarget();
+  privateFields.delete(els.foot);
   els.foot.textContent = 'This window keeps retrying until it connects or you close it.';
 }
 
@@ -263,7 +305,8 @@ async function onConnected() {
   stopped = true;
   stopElapsedTimer();
   els.body.classList.add('is-connected');
-  els.title.textContent = label ? `Connected to ${label}` : 'Connected';
+  applyTarget();
+  privateFields.delete(els.foot);
   els.foot.textContent = 'Opening workspace...';
   await delay(450);
   if (invoke) {
@@ -297,7 +340,7 @@ function addRow(kind, when, msg) {
   time.textContent = fmtClock(when);
   const text = document.createElement('span');
   text.className = 'log-msg';
-  text.textContent = msg;
+  paintPrivate(text, msg, `attempt:${privateSequence++}`);
   row.appendChild(time);
   row.appendChild(text);
   els.log.appendChild(row);
@@ -308,7 +351,7 @@ function addRow(kind, when, msg) {
 function setRow(row, kind, msg) {
   row.className = `log-row ${kind}`;
   const text = row.querySelector('.log-msg');
-  if (text) text.textContent = msg;
+  if (text) paintPrivate(text, msg, privateFields.get(text)?.key ?? `attempt:${privateSequence++}`);
   els.log.scrollTop = els.log.scrollHeight;
 }
 

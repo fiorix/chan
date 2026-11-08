@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { applyWindowLabel, initWindowTitle, __resetWindowTitle } from "./windowTitle";
+import { applyWindowLabel, initWindowTitle, refreshWindowTitle, __resetWindowTitle } from "./windowTitle";
+import { privacy } from "@chan/web-shared/privacy";
 import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
 import type { ScopedLibraryWindow, ScopedLibrarySnapshot } from "../api/libraryCommand";
 
@@ -43,6 +44,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __resetWindowTitle();
+  privacy.enabled = false;
 });
 
 describe("browser tab title", () => {
@@ -110,6 +112,18 @@ describe("browser tab title", () => {
 });
 
 describe("live caption updates", () => {
+  test("privacy conceals captions live and restores the latest caption", async () => {
+    loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "private.example" })]));
+    privacy.enabled = true;
+    await initWindowTitle();
+    expect(document.title).toBe("Chan (privacy mode)");
+    applyWindowLabel("another.private.example");
+    expect(document.title).toBe("Chan (privacy mode)");
+    privacy.enabled = false;
+    refreshWindowTitle();
+    expect(document.title).toBe("Window 3 [another.private.example]");
+  });
+
   test("retitles when the leader sets a caption", async () => {
     loadSnapshot.mockResolvedValue(snapshot([scopedWindow()]));
     await initWindowTitle();

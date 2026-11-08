@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
+  import { privacy, privateText } from "@chan/web-shared/privacy";
   // The machine-first library tree: LOCAL, each registered devserver and each
   // tmux control-mode connection as an equal top-level machine, each owning
   // its windows. A machine block is a header
@@ -245,7 +247,7 @@
   const deckCards = $derived.by((): DeckCard[] => {
     const cards: DeckCard[] = [{ key: "all-windows", label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
       key: machineKey(node),
-      label: machineName(node),
+      label: privateText(machineName(node), node.kind === "local" ? "This machine" : "Computer"),
       kind: "machine" as const,
       node,
     }))];
@@ -334,12 +336,12 @@
         <span class="row-name">
           {displayName(ws)}
           {#if ws.error}
-            <span class="row-error" class:degraded={degraded(ws)} title={ws.error}>
+            <span class="row-error" class:degraded={degraded(ws)} title={privateText(ws.error, "Workspace unavailable")}>
               <CircleAlert size={14} />
             </span>
           {/if}
         </span>
-        <span class="row-sub" title={ws.path}>{ws.path}</span>
+        <PrivateField field={`workspace:${ws.workspace_id}:path`} label="workspace path"><span class="row-sub" title={ws.path}>{ws.path}</span></PrivateField>
       </div>
       {#if hasWindows}
         {@render windowCount(node.count)}
@@ -349,7 +351,7 @@
           class="pill"
           class:on={ws.on && !degraded(ws)}
           class:degraded={degraded(ws)}
-          title={degraded(ws) ? ws.error : undefined}
+          title={degraded(ws) ? privateText(ws.error, "Workspace unavailable") : undefined}
           aria-disabled="true">
           {lockUnknown(ws)
             ? "Unknown"
@@ -480,7 +482,7 @@
     {:else if machineIsEmpty(node) && node.devserver !== null && connected(node.devserver) && !readOnly}
       <p class="empty-hint">
         No workspaces on this devserver yet. Add one with the buttons above, or run
-        <code>chan workspace serve /path/on/that/machine --on {node.devserver.label || hostOf(node.devserver.url)}</code>
+        <code>chan workspace serve /path/on/that/machine --on {privateText(node.devserver.label || hostOf(node.devserver.url), "COMPUTER")}</code>
         in a terminal here.
       </p>
     {/if}
@@ -499,14 +501,14 @@
       class:live={connected(ds) && !connectionLost(ds) && !dsSpinning(ds)}
       class:working={dsSpinning(ds)}
       class:lost={connectionLost(ds)}
-      title={machineStatusTitle(ds)}>
+      title={privateText(machineStatusTitle(ds), "Connection status")}>
       {#if hasOsIcon(ds.os)}
         <OsIcon os={ds.os} prettyName={ds.pretty_name} size={16} />
       {:else}
         <Globe size={16} />
       {/if}
     </span>
-    <span class="row-name">{devserverName(ds)}</span>
+    <PrivateField field={`devserver:${ds.id}:name`} label="computer name"><span class="row-name">{devserverName(ds)}</span></PrivateField>
     {#if ds.has_token}<span class="chip">🔒 token</span>{/if}
   </span>
   <span class="ds-addr-row">
@@ -514,9 +516,9 @@
     {#if ds.gateway_id}
       <!-- A gateway roster row has no user-entered address: the desktop mints
            per-connect entry URLs. The owning gateway replaces the address. -->
-      <span class="row-sub" title={ds.gateway_url}>via {owningGatewayName(ds)}</span>
+      <PrivateField field={`devserver:${ds.id}:gateway`} label="gateway"><span class="row-sub" title={ds.gateway_url}>via {owningGatewayName(ds)}</span></PrivateField>
     {:else}
-      <span class="row-sub" title={endpoint(ds)}>{endpoint(ds)}</span>
+      <PrivateField field={`devserver:${ds.id}:address`} label="computer address"><span class="row-sub" title={endpoint(ds)}>{endpoint(ds)}</span></PrivateField>
       {#if withPencil}<Pencil size={12} class="addr-pencil" />{/if}
     {/if}
   </span>
@@ -571,7 +573,7 @@
       {@render machineContent(node)}
     {:else if node.kind === "tmux"}
       {@const entry = node.tmux}
-      {@const title = machineName(node)}
+      {@const title = privateText(machineName(node), "tmux computer")}
       <!-- A tmux control-mode connection. The glyph reads live, since the card
            exists only while the connection does; the identity block names
            where tmux runs over its session and version, with a mark for the
@@ -597,14 +599,14 @@
           <span class="ds-name-row">
             <span class="row-name">{title}</span>
             {#if entry && entry.errors.length}
-              <span class="row-error" title={entry.errors.join("\n")}>
+              <span class="row-error" title={privateText(entry.errors.join("\n"), "Connection error")}>
                 <CircleAlert size={14} />
               </span>
             {/if}
           </span>
           {#if entry}
             <span class="ds-addr-row">
-              <span class="row-sub">{entry.session ? `session ${entry.session.name} · ` : ""}tmux {entry.version}</span>
+              <span class="row-sub">{entry.session ? `session ${privateText(entry.session.name)} · ` : ""}tmux {entry.version}</span>
             </span>
           {/if}
         </div>
@@ -641,22 +643,25 @@
             class="row-check"
             type="checkbox"
             checked={isSelected("devserver", ds.id)}
-            aria-label={`Select ${devserverName(ds)}`}
+            aria-label={`Select ${privateText(devserverName(ds), "computer")}`}
             onchange={() => toggleSelected("devserver", ds.id)} />
         {/if}
-        {#if readOnly || ds.gateway_id}
+        {#if readOnly || ds.gateway_id || privacy.enabled}
           <!-- Gateway roster rows are registry-read-only: managed on the
                Gateways screen (select/remove the GATEWAY, not the row), so the
                identity block stays static -- no edit form, no checkbox. The
                connect/disconnect controls below stay: they operate the live
                connection, not the registry. -->
-          <div class="ds-id">{@render dsIdentity(ds, false)}</div>
+          <div class="ds-id">
+            {@render dsIdentity(ds, false)}
+            {#if privacy.enabled && !readOnly && !ds.gateway_id}<button class="icon-btn" type="button" title="Edit config" aria-label="Edit computer config" onclick={() => openEditDevserver(ds)}><Pencil size={14} /></button>{/if}
+          </div>
         {:else}
           <button
             class="ds-id editable"
             type="button"
             title="Edit config"
-            aria-label={`Edit config for ${devserverName(ds)}`}
+            aria-label={`Edit config for ${privateText(devserverName(ds), "computer")}`}
             onclick={() => openEditDevserver(ds)}>
             {@render dsIdentity(ds, true)}
           </button>
@@ -669,7 +674,7 @@
               type="button"
               title="New terminal (t)"
               data-deck-key="t"
-              aria-label={`New terminal on ${devserverName(ds)}`}
+              aria-label={`New terminal on ${privateText(devserverName(ds), "computer")}`}
               onclick={() => run(newTerminal(ds))}>
               <SquareTerminal size={16} />
             </button>
@@ -680,7 +685,7 @@
                 class="icon-btn danger"
                 type="button"
                 title="Revoke native access. Quit Chan Desktop to purge the runtime ACL."
-                aria-label={`Revoke native access for ${devserverName(ds)}`}
+                aria-label={`Revoke native access for ${privateText(devserverName(ds), "computer")}`}
                 onclick={() => run(revokeDevserverNativeTrust(ds.id))}>
                 <ShieldOff size={16} />
               </button>
@@ -693,7 +698,7 @@
                 disabled
                 title="Working…"
                 data-deck-key="o"
-                aria-label={`Working on ${devserverName(ds)}`}>
+                aria-label={`Working on ${privateText(devserverName(ds), "computer")}`}>
                 <LoaderCircle class="spin" size={16} />
               </button>
             {:else if connected(ds) || ds.status === "unreachable"}
@@ -709,7 +714,7 @@
                 type="button"
                 title={connectionLost(ds) ? "Disconnect lost connection (o)" : "Disconnect (o)"}
                 data-deck-key="o"
-                aria-label={`Disconnect ${devserverName(ds)}`}
+                aria-label={`Disconnect ${privateText(devserverName(ds), "computer")}`}
                 onclick={() => run(disconnectDevserver(ds.id))}>
                 <Unplug size={16} />
               </button>
@@ -733,10 +738,10 @@
                     : "Connect (o)"}
                 data-deck-key="o"
                 aria-label={controlOpen
-                  ? `Close the control terminal to reconnect ${devserverName(ds)}`
+                  ? `Close the control terminal to reconnect ${privateText(devserverName(ds), "computer")}`
                   : ds.pending_signin
-                    ? `Re-open sign-in in your browser for ${devserverName(ds)}`
-                    : `Connect ${devserverName(ds)}`}
+                    ? `Re-open sign-in in your browser for ${privateText(devserverName(ds), "computer")}`
+                    : `Connect ${privateText(devserverName(ds), "computer")}`}
                 onclick={() => run(connectComputer(ds))}>
                 <Plug size={16} />
               </button>

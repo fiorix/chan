@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { privacy } from "@chan/web-shared/privacy";
   import { clientDetached } from "../api/clientSession";
   import { tick, untrack } from "svelte";
   import {
@@ -358,6 +359,10 @@
   // bit is session-scoped per tab.
   let secretMasker: TerminalSecretMasker | GhosttySecretMasker | null = null;
   let secretMaskingEnabled = $state(false);
+  let secretMaskingFailed = $state(false);
+  const privacyMasking = $derived(privacy.enabled && privacy.mask_terminal_secrets);
+  const effectiveSecretMasking = $derived(!secretMaskingFailed && (secretMaskingEnabled || privacyMasking));
+  $effect(() => { secretMasker?.setEnabled(effectiveSecretMasking); });
   // Last cols value the masker scanned at; the resize handler rescans only
   // when cols actually changed.
   let resizeScanCols = 0;
@@ -1393,6 +1398,7 @@
     // menu label stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
       secretMaskingEnabled = false;
+      secretMaskingFailed = true;
       setTransientStatus("Secret masking stopped working in this terminal");
     };
     if (backend === "xterm") {
@@ -1400,7 +1406,7 @@
         term as Terminal,
         secretMaskSuffixes,
         terminalSecretMaskColor(),
-        secretMaskingEnabled,
+        effectiveSecretMasking,
         onSecretMaskingFailure,
       );
       // Hold Shift to force a native selection while a TUI holds mouse
@@ -1432,7 +1438,7 @@
         term as GhosttyTerminal,
         secretMaskSuffixes,
         terminalSecretMaskColor(),
-        secretMaskingEnabled,
+        effectiveSecretMasking,
         onSecretMaskingFailure,
       );
       if (!focused) {
@@ -2665,8 +2671,13 @@
 
   function toggleSecretMasking(): void {
     closeTabMenu();
+    if (privacyMasking && !secretMaskingFailed) {
+      setTransientStatus("Secret masking is enabled by Privacy mode");
+      return;
+    }
+    secretMaskingFailed = false;
     secretMaskingEnabled = !secretMaskingEnabled;
-    secretMasker?.setEnabled(secretMaskingEnabled);
+    secretMasker?.setEnabled(effectiveSecretMasking);
     setTransientStatus(
       `Secret masking ${secretMaskingEnabled ? "enabled" : "disabled"} for this terminal`,
     );
@@ -3041,7 +3052,7 @@
               <EyeOff size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">
-              Secret masking: {secretMaskingEnabled ? "on" : "off"}
+              Secret masking: {effectiveSecretMasking ? "on" : "off"}
             </span>
             <span class="mbtn-chord"></span>
           </button>

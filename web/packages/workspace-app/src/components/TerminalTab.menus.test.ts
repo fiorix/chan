@@ -17,6 +17,7 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
+import { privacy } from "@chan/web-shared/privacy";
 import TerminalTab from "./TerminalTab.svelte";
 import type { TerminalPreferences, TerminalRosterEntry } from "../api/types";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -48,6 +49,8 @@ const tauri = window as unknown as { __TAURI_INTERNALS__?: { invoke: () => Promi
 
 afterEach(() => {
   resetTerminals();
+  privacy.enabled = false;
+  privacy.mask_terminal_secrets = false;
   __testSetStandalonePreferences(null);
   ui.terminalControl = startControl;
   xterm.textareaFocus = false;
@@ -298,4 +301,19 @@ describe("the menus' roles", () => {
     expect(buttons.length).toBeGreaterThan(0);
     expect(buttons.filter((b) => b.getAttribute("role") !== "menuitem").map((b) => b.textContent?.trim())).toEqual([]);
   });
+});
+
+test("the optional privacy override changes a running terminal and restores its choice", async () => {
+  const { target } = await attached({ secret_masking: false });
+  await openBodyMenu(target);
+  expect(maskingLabel()).toBe("Secret masking: off");
+  privacy.enabled = true;
+  await tick();
+  expect(maskingLabel()).toBe("Secret masking: off");
+  privacy.mask_terminal_secrets = true;
+  await tick();
+  expect(maskingLabel()).toBe("Secret masking: on");
+  privacy.enabled = false;
+  await tick();
+  expect(maskingLabel()).toBe("Secret masking: off");
 });

@@ -822,11 +822,12 @@ impl TauriNativeSurface {
             }
             // Already correct -- the build path composed it. Record that so the
             // next reconcile skips this round trip.
-            if window.title().is_ok_and(|current| current == desired) {
+            let visible_title = crate::privacy::window_title(&state, &label, &desired);
+            if window.title().is_ok_and(|current| current == visible_title) {
                 applied_titles.lock().unwrap().insert(label, desired);
                 return;
             }
-            if let Err(e) = window.set_title(&desired) {
+            if let Err(e) = window.set_title(&visible_title) {
                 tracing::warn!(window = %label, error = %e, "window watcher: retitling failed");
                 return;
             }
