@@ -142,6 +142,11 @@ assert_pair() {
         printf 'not ok - creating call omits %s %s\n' "$1" "$2" >&2; exit 1;
     }
 }
+assert_no_disk() {
+    if grep -Fxq -- --disk "$state/create-args"; then
+        printf 'not ok - creating call carries a disk cap\n' >&2; exit 1
+    fi
+}
 assert_exact_set() {
     printf '%s\n' "$@" >"$work/expected-set-args"
     cmp -s "$work/expected-set-args" "$state/set-args" || {
@@ -163,7 +168,7 @@ run_driver() {
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" SDME="$bin/sdme --config $work/sdme.conf" \
         REBUILD_CONTAINER=0 REBUILD_ROOTFS=0 \
         "SDME_BUILD_${key}_CPUS=1.5" "SDME_BUILD_${key}_MEMORY=1536M" \
-        "SDME_BUILD_${key}_DISK=13G" "SDME_BUILD_${key}_JOBS=2" \
+        SDME_BUILD_DISK=13G "SDME_BUILD_${key}_DISK=13G" "SDME_BUILD_${key}_JOBS=2" \
         "SDME_BUILD_${key}_TIMEOUT=7" "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
 
@@ -174,8 +179,8 @@ run_default_driver() {
     mkdir -p "$state"
     [ "$existing" != existing ] || printf '%s\n' "$container" >"$state/container"
     status=0
-    env -u DISTRO -u LIMA_INSTANCE -u SDME_BUILD_DISK -u "SDME_BUILD_${key}_CPUS" -u "SDME_BUILD_${key}_MEMORY" \
-        -u "SDME_BUILD_${key}_DISK" -u "SDME_BUILD_${key}_JOBS" \
+    env -u DISTRO -u LIMA_INSTANCE -u "SDME_BUILD_${key}_CPUS" -u "SDME_BUILD_${key}_MEMORY" \
+        -u "SDME_BUILD_${key}_JOBS" \
         -u "SDME_BUILD_${key}_TIMEOUT" STUB_STATE="$state" \
         STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
@@ -188,7 +193,7 @@ run_one_limit() {
     mkdir -p "$state"
     printf '%s\n' "$container" >"$state/container"
     status=0
-    env -u DISTRO -u LIMA_INSTANCE -u SDME_BUILD_DISK -u "SDME_BUILD_${key}_MEMORY" -u "SDME_BUILD_${key}_DISK" \
+    env -u DISTRO -u LIMA_INSTANCE -u "SDME_BUILD_${key}_MEMORY" \
         -u "SDME_BUILD_${key}_JOBS" -u "SDME_BUILD_${key}_TIMEOUT" \
         STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
@@ -210,23 +215,19 @@ for listed_rootfs in "${rootfs_names[@]}"; do
         "SDME_BUILD_${key}_TIMEOUT=" "STUB_ROOTFS_LIST_AT=$listing_number" "STUB_LONG_ROOTFS_LIST=$listed_rootfs"
     assert_status 0 "$status" "running guest with one limit and a long $listed_rootfs listing succeeds"
     [ ! -e "$state/create-args" ] || { printf 'not ok - long rootfs listing recreated a running guest\n' >&2; exit 1; }
-    if [ "$kind" = desktop ]; then
-        assert_exact_set --disk 44G --cpus 1.5
-    else
-        assert_exact_set --cpus 1.5
-    fi
+    assert_exact_set --cpus 1.5
 done
 
 run_driver absent OUT_DIR="$work/out"
 assert_status 0 "$status" 'configured build succeeds'
 assert_pair --cpus 1.5
 assert_pair --memory 1536M
-assert_pair --disk 13G
+assert_no_disk
 [ ! -e "$state/set-args" ] || { printf 'not ok - absent guest was set\n' >&2; exit 1; }
 assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'Cargo job cap is on the build exec'
 assert_line timeout "$state/build-args" 'build exec has an in-guest timeout'
 assert_line 7s "$state/build-args" 'build exec uses the configured timeout'
-assert_line "limits: $key cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7" "$state/driver.log" 'configured limits are logged at creation'
+assert_line "limits: $key cpus=1.5 memory=1536M jobs=2 timeout=7" "$state/driver.log" 'configured limits are logged at creation'
 if grep -Eq '\$\{|\$\$' "$state/build-args"; then
     printf 'not ok - inline guest script contains expansion syntax sdme rewrites\n' >&2
     exit 1
@@ -239,12 +240,8 @@ fi
 run_driver existing OUT_DIR="$work/configured-reuse-out"
 assert_status 0 "$status" 'configured running guest succeeds'
 [ ! -e "$state/create-args" ] || { printf 'not ok - configured running guest was recreated\n' >&2; exit 1; }
-assert_line "limits: $key cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7" "$state/driver.log" 'configured reuse limits are logged'
-if [ "$kind" = desktop ]; then
-    assert_exact_set --disk 13G --cpus 1.5 --memory 1536M
-else
-    assert_exact_set --cpus 1.5 --memory 1536M --disk 13G
-fi
+assert_line "limits: $key cpus=1.5 memory=1536M jobs=2 timeout=7" "$state/driver.log" 'configured reuse limits are logged'
+assert_exact_set --cpus 1.5 --memory 1536M
 
 run_default_driver
 assert_status 0 "$status" 'default build succeeds'
@@ -253,33 +250,15 @@ assert_pair --cpus 2
 assert_pair --memory "$default_memory"
 assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'default Cargo job cap reaches the build'
 assert_line "${default_timeout}s" "$state/build-args" 'default timeout reaches the build'
-if [ "$kind" = desktop ]; then
-    assert_pair --disk 44G
-    assert_line "limits: $key cpus=2 memory=$default_memory disk=44G jobs=2 timeout=$default_timeout" "$state/driver.log" 'default desktop limits are logged'
-    expected_gaps=0
-else
-    if grep -Fxq -- --disk "$state/create-args"; then
-        printf 'not ok - default gateway build carries a disk cap\n' >&2
-        exit 1
-    fi
-    assert_line "limits: $key cpus=2 memory=$default_memory disk=absent jobs=2 timeout=$default_timeout" "$state/driver.log" 'default gateway limits are logged'
-    expected_gaps=1
-fi
-[ "$(grep -c 'has no measured default' "$state/driver.log" || true)" -eq "$expected_gaps" ] || { printf 'not ok - default gap count\n' >&2; exit 1; }
+assert_no_disk
+assert_line "limits: $key cpus=2 memory=$default_memory jobs=2 timeout=$default_timeout" "$state/driver.log" 'default limits are logged'
+[ "$(grep -c 'has no measured default' "$state/driver.log" || true)" -eq 0 ] || { printf 'not ok - default gap count\n' >&2; exit 1; }
 
 run_one_limit "SDME_BUILD_${key}_MEMORY=" "SDME_BUILD_${key}_JOBS=" "SDME_BUILD_${key}_TIMEOUT="
 assert_status 0 "$status" 'running guest with one limit succeeds'
 [ ! -e "$state/create-args" ] || { printf 'not ok - running guest was recreated for one limit\n' >&2; exit 1; }
-if [ "$kind" = desktop ]; then
-    assert_line "limits: $key cpus=1.5 memory=absent disk=44G jobs=absent timeout=absent" "$state/driver.log" 'single-limit reuse limits are logged'
-else
-    assert_line "limits: $key cpus=1.5 memory=absent disk=absent jobs=absent timeout=absent" "$state/driver.log" 'single-limit reuse limits are logged'
-fi
-if [ "$kind" = desktop ]; then
-    assert_exact_set --disk 44G --cpus 1.5
-else
-    assert_exact_set --cpus 1.5
-fi
+assert_line "limits: $key cpus=1.5 memory=absent jobs=absent timeout=absent" "$state/driver.log" 'single-limit reuse limits are logged'
+assert_exact_set --cpus 1.5
 
 run_one_limit "SDME_BUILD_${key}_MEMORY=" "SDME_BUILD_${key}_JOBS=" \
     "SDME_BUILD_${key}_TIMEOUT=" STUB_SET_FAIL=1
@@ -292,27 +271,19 @@ assert_line "error: could not set limits on kept container $container; REBUILD_C
 run_default_driver existing
 assert_status 0 "$status" 'default running guest succeeds'
 [ ! -e "$state/create-args" ] || { printf 'not ok - default running guest was recreated\n' >&2; exit 1; }
-if [ "$kind" = desktop ]; then
-    assert_exact_set --disk 44G --cpus 2 --memory "$default_memory"
-    run_default_driver existing SDME_BUILD_DISK=48G
-    assert_status 0 "$status" 'desktop policy disk change succeeds'
-    [ ! -e "$state/create-args" ] || { printf 'not ok - desktop policy disk change recreated guest\n' >&2; exit 1; }
-    assert_exact_set --disk 48G --cpus 2 --memory "$default_memory"
-else
-    assert_exact_set --cpus 2 --memory "$default_memory"
-    run_default_driver existing "SDME_BUILD_${key}_CPUS=" "SDME_BUILD_${key}_MEMORY=" \
-        "SDME_BUILD_${key}_JOBS=" "SDME_BUILD_${key}_TIMEOUT="
-    assert_status 0 "$status" 'cleared running guest succeeds'
-    [ ! -e "$state/set-args" ] || { printf 'not ok - cleared gateway guest was set\n' >&2; exit 1; }
-    assert_line "==> no cpu, memory or disk limit configured for this run; any limit already on kept container $container remains in force; REBUILD_CONTAINER=1 recreates it without them" "$state/driver.log" 'unconfigured reuse names retained limits and remedy'
-    run_default_driver existing "SDME_BUILD_${key}_CPUS=" "SDME_BUILD_${key}_MEMORY=" \
-        "SDME_BUILD_${key}_JOBS=2" "SDME_BUILD_${key}_TIMEOUT=7"
-    assert_status 0 "$status" 'jobs and timeout only reuse succeeds'
-    [ ! -e "$state/set-args" ] || { printf 'not ok - jobs and timeout only reuse set guest limits\n' >&2; exit 1; }
-    assert_line "limits: $key cpus=absent memory=absent disk=absent jobs=2 timeout=7" "$state/driver.log" 'jobs and timeout only reuse limits are logged'
-    assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'jobs and timeout only reuse caps Cargo'
-    assert_line 7s "$state/build-args" 'jobs and timeout only reuse bounds the build'
-fi
+assert_exact_set --cpus 2 --memory "$default_memory"
+run_default_driver existing "SDME_BUILD_${key}_CPUS=" "SDME_BUILD_${key}_MEMORY=" \
+    "SDME_BUILD_${key}_JOBS=" "SDME_BUILD_${key}_TIMEOUT="
+assert_status 0 "$status" 'cleared running guest succeeds'
+[ ! -e "$state/set-args" ] || { printf 'not ok - cleared guest was set\n' >&2; exit 1; }
+assert_line "==> no cpu or memory limit configured for this run; any limit already on kept container $container remains in force; REBUILD_CONTAINER=1 recreates it without them" "$state/driver.log" 'unconfigured reuse names retained limits and remedy'
+run_default_driver existing "SDME_BUILD_${key}_CPUS=" "SDME_BUILD_${key}_MEMORY=" \
+    "SDME_BUILD_${key}_JOBS=2" "SDME_BUILD_${key}_TIMEOUT=7"
+assert_status 0 "$status" 'jobs and timeout only reuse succeeds'
+[ ! -e "$state/set-args" ] || { printf 'not ok - jobs and timeout only reuse set guest limits\n' >&2; exit 1; }
+assert_line "limits: $key cpus=absent memory=absent jobs=2 timeout=7" "$state/driver.log" 'jobs and timeout only reuse limits are logged'
+assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'jobs and timeout only reuse caps Cargo'
+assert_line 7s "$state/build-args" 'jobs and timeout only reuse bounds the build'
 
 run_driver absent STUB_BUILD_EXIT=124 OUT_DIR="$work/timeout-out"
 assert_status 124 "$status" 'timed-out build fails'

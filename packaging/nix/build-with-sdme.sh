@@ -198,7 +198,7 @@ printf "%s\n" "$status" >/out/status
 chown "$HOST_UID:$HOST_GID" /out/status /out/build.log 2>/dev/null || true
 exit 0'
 
-echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS disk=$SDME_BUILD_LIMIT_DISK out=$OUT" >&2
+echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS out=$OUT" >&2
 echo ">> source: base-revision=$SOURCE_REVISION content=tracked-working-tree snapshot=$SOURCE_SNAPSHOT" >&2
 CONTAINER_STARTED=1
 set +e
@@ -208,7 +208,7 @@ guest_env=(HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" NIX_PACKAGE="$NIX_PACKAGE"
 [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(NIX_BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
 sdme_build_log_limits NIX
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$NIX_SDME_ROOTFS" -t 180 \
-    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
+    --storage btrfs ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$OUT:/out" \
     -- /usr/bin/env "${guest_env[@]}" /bin/bash -c "$GUEST_RUN" \
     2>&1 | tee "$LOG_FILE"

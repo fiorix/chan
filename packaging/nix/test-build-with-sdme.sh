@@ -84,8 +84,8 @@ run_driver() {
     rm -rf "$STATE/run" "$TEST_OUT"
     mkdir -p "$STATE/run"
     set +e
-    env -u SDME_BUILD_DISK -u SDME_BUILD_NIX_CPUS -u SDME_BUILD_NIX_MEMORY \
-        -u SDME_BUILD_NIX_DISK -u SDME_BUILD_NIX_JOBS -u SDME_BUILD_NIX_TIMEOUT \
+    env -u SDME_BUILD_NIX_CPUS -u SDME_BUILD_NIX_MEMORY \
+        -u SDME_BUILD_NIX_JOBS -u SDME_BUILD_NIX_TIMEOUT \
         PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" \
         STUB_STATE="$STATE/run" STUB_TEST_REPO="$TEST_REPO" \
         NIX_PACKAGE="$package" OUT="$TEST_OUT" "$@" \
@@ -367,13 +367,13 @@ run_driver all NIX_BUILD_JOBS=97 NIX_BUILD_TIMEOUT=97
 assert_status 0 "$RUN_STATUS" "the default all-package check succeeds"
 assert_grep '^-r$' "$STATE/run/new-args" "sdme new uses explicit -r"
 assert_arg_pair --storage btrfs "$STATE/run/new-args" "sdme new selects btrfs storage"
-assert_arg_pair --disk 44G "$STATE/run/new-args" "sdme new applies the build disk cap"
+assert_not_grep '^--disk$' "$STATE/run/new-args" "sdme new carries no disk cap"
 assert_grep "^HOST_UID=$(id -u)$" "$STATE/run/new-args" "the host uid is handed to the guest"
 assert_grep "^HOST_GID=$(id -g)$" "$STATE/run/new-args" "the host gid is handed to the guest"
 assert_grep '^NIX_PACKAGE=all$' "$STATE/run/new-args" "the package choice is handed to the guest"
 assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp$' "$STATE/run/new-args" "the guest temporary path is handed to the guest"
 assert_grep '^NIX_BUILD_DIR=/var/tmp/chan-nix-build$' "$STATE/run/new-args" "the Nix build path is handed to the guest"
-assert_grep '^limits: NIX cpus=2 memory=11G disk=44G jobs=2 timeout=3600$' "$STATE/run/driver.log" "the default set is logged"
+assert_grep '^limits: NIX cpus=2 memory=11G jobs=2 timeout=3600$' "$STATE/run/driver.log" "the default set is logged"
 assert_status 0 "$(grep -c 'has no measured default' "$STATE/run/driver.log" || true)" "the default Nix run has no gap"
 assert_arg_pair --cpus 2 "$STATE/run/new-args" "the default CPU cap reaches sdme"
 assert_arg_pair --memory 11G "$STATE/run/new-args" "the default memory cap reaches sdme"
@@ -419,19 +419,19 @@ assert_grep 'guest OS: ubuntu 26.04' "$TEST_OUT/build.log" "combined guest outpu
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the PID-scoped container is removed on success"
 
 run_driver all SDME_BUILD_NIX_CPUS=1.5 SDME_BUILD_NIX_MEMORY=1536M \
-    SDME_BUILD_NIX_DISK=13G SDME_BUILD_NIX_JOBS=2 SDME_BUILD_NIX_TIMEOUT=7
+    SDME_BUILD_DISK=13G SDME_BUILD_NIX_DISK=13G SDME_BUILD_NIX_JOBS=2 SDME_BUILD_NIX_TIMEOUT=7
 assert_status 0 "$RUN_STATUS" "configured Nix build succeeds"
 assert_arg_pair --cpus 1.5 "$STATE/run/new-args" "new receives the CPU cap"
 assert_arg_pair --memory 1536M "$STATE/run/new-args" "new receives the memory cap"
-assert_arg_pair --disk 13G "$STATE/run/new-args" "new receives the disk cap"
-assert_grep '^limits: NIX cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7$' "$STATE/run/driver.log" "the creating call logs the configured set"
+assert_not_grep '^--disk$' "$STATE/run/new-args" "disk variables add no disk cap"
+assert_grep '^limits: NIX cpus=1.5 memory=1536M jobs=2 timeout=7$' "$STATE/run/driver.log" "the creating call logs the configured set"
 assert_grep '^max-jobs = 1$' "$STATE/run/etc-nix/nix.conf" "Nix runs one builder at a time"
 assert_grep '^cores = 2$' "$STATE/run/etc-nix/nix.conf" "Nix passes the job count to the builder"
 assert_grep '^(-s TERM -k 30s 7s make nix-check)' "$STATE/run/timeout" "the in-guest make build is bounded"
 assert_not_grep '\$\{|\$\$' "$STATE/run/guest-script" "inline guest script has no sdme-rewritten expansion"
 
 run_driver chan SDME_BUILD_NIX_CPUS=1.5 SDME_BUILD_NIX_MEMORY=1536M \
-    SDME_BUILD_NIX_DISK=13G SDME_BUILD_NIX_JOBS=2 SDME_BUILD_NIX_TIMEOUT=7
+    SDME_BUILD_NIX_JOBS=2 SDME_BUILD_NIX_TIMEOUT=7
 assert_status 0 "$RUN_STATUS" "configured chan-only build succeeds"
 assert_grep '7s nix build --no-link --print-out-paths' "$STATE/run/timeout" "the in-guest nix build is bounded"
 
@@ -581,8 +581,8 @@ assert_grep "could not remove sdme container 'chan-nix-check-[0-9]+' \(status 23
 rm -rf "$STATE/run" "$TEST_OUT"
 mkdir -p "$STATE/run"
 set +e
-setsid env -u SDME_BUILD_DISK -u SDME_BUILD_NIX_CPUS -u SDME_BUILD_NIX_MEMORY \
-    -u SDME_BUILD_NIX_DISK -u SDME_BUILD_NIX_JOBS -u SDME_BUILD_NIX_TIMEOUT \
+setsid env -u SDME_BUILD_NIX_CPUS -u SDME_BUILD_NIX_MEMORY \
+    -u SDME_BUILD_NIX_JOBS -u SDME_BUILD_NIX_TIMEOUT \
     PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" STUB_BIN="$BIN" \
     STUB_STATE="$STATE/run" STUB_TEST_REPO="$TEST_REPO" STUB_SLEEP=1 \
     NIX_PACKAGE=all OUT="$TEST_OUT" \

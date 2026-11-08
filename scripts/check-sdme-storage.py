@@ -36,17 +36,12 @@ BUILD_DRIVER_FILES = {
     "packaging/nix/build-with-sdme.sh",
     "packaging/sdme/build-chan-desktop.sh",
 }
-CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {"scripts/e2e/README.md"}
-# Guests removed after every run carry no disk cap: it saves nothing, and sdme
-# refuses --disk on a host whose btrfs already has quotas enabled by something
-# else, which would stop the run before it starts.
-UNCAPPED_COMMAND_FILES = {
-    "packaging/gateway/scripts/dev/sdme/database-roles-test.sh",
-    "scripts/windows-cross-check.sh",
-}
-# These builders have no measured disk default yet. Their policy array carries
-# --disk once a value lands; require the array now, then require the literal
-# disk cap for each only after its measured default is recorded.
+# Only the one-CPU test series keeps a disk cap: its instrument reads the cap
+# back from the guest it measures. Every other guest is removed after its run
+# or kept only as a build cache, so a cap saves nothing, and sdme refuses --disk
+# on a host whose btrfs already has quotas enabled by something else.
+CAPPED_COMMAND_FILES = {"scripts/e2e/README.md"}
+# The kept gateway builders take their limits from the same policy array.
 GATEWAY_DRIVER_FILES = {
     "packaging/gateway/scripts/dev/sdme/build-gateway.sh",
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh",
@@ -114,11 +109,11 @@ def main() -> int:
                 )
             if relative in CAPPED_COMMAND_FILES and "--disk" not in line:
                 failures.append(
-                    f"{relative}:{line_number}: chan build container omits --disk"
+                    f"{relative}:{line_number}: one-CPU series container omits --disk"
                 )
-            if relative in UNCAPPED_COMMAND_FILES and "--disk" in line:
+            if relative not in CAPPED_COMMAND_FILES and "--disk" in line:
                 failures.append(
-                    f"{relative}:{line_number}: disposable guest carries --disk"
+                    f"{relative}:{line_number}: sdme container carries --disk"
                 )
             if relative in POLICY_DRIVER_FILES and POLICY_FLAGS not in line:
                 failures.append(
@@ -152,8 +147,7 @@ def main() -> int:
     print(
         "sdme-storage contract: PASS "
         f"({len(EXPECTED_COMMAND_FILES)} container-creating sites use btrfs; "
-        f"{len(CAPPED_COMMAND_FILES)} build containers are capped; "
-        f"{len(UNCAPPED_COMMAND_FILES)} disposable guests are not; "
+        f"{len(EXPECTED_COMMAND_FILES - CAPPED_COMMAND_FILES)} carry no disk cap; "
         f"{len(POLICY_DRIVER_FILES)} build drivers carry policy limit flags; "
         f"{sum(map(len, DOCUMENTED_COMMANDS.values()))} documented examples use btrfs)"
     )

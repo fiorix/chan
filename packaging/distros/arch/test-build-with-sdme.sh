@@ -68,6 +68,11 @@ assert_pair() {
         printf 'not ok - new omits %s %s\n' "$1" "$2" >&2; exit 1;
     }
 }
+assert_no_disk() {
+    if grep -Fxq -- --disk "$state/new-args"; then
+        printf 'not ok - new carries a disk cap\n' >&2; exit 1
+    fi
+}
 assert_arg() {
     grep -Fxq -- "$1" "$state/guest-args" || { printf 'not ok - guest omits %s\n' "$1" >&2; exit 1; }
 }
@@ -77,7 +82,8 @@ run_driver() {
     status=0
     env STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         SDME="$bin/sdme --config $work/sdme.conf" OUT="$work/out" \
-        SDME_BUILD_AUR_CPUS=1.5 SDME_BUILD_AUR_MEMORY=1536M SDME_BUILD_AUR_DISK=13G \
+        SDME_BUILD_AUR_CPUS=1.5 SDME_BUILD_AUR_MEMORY=1536M \
+        SDME_BUILD_DISK=13G SDME_BUILD_AUR_DISK=13G \
         SDME_BUILD_AUR_JOBS=2 SDME_BUILD_AUR_TIMEOUT=7 "$@" \
         "$repo/packaging/distros/arch/build-with-sdme.sh" >"$state/driver.log" 2>&1 || status=$?
 }
@@ -86,8 +92,8 @@ run_default_driver() {
     rm -rf "$state"
     mkdir -p "$state"
     status=0
-    env -u SDME_BUILD_DISK -u SDME_BUILD_AUR_CPUS -u SDME_BUILD_AUR_MEMORY \
-        -u SDME_BUILD_AUR_DISK -u SDME_BUILD_AUR_JOBS -u SDME_BUILD_AUR_TIMEOUT \
+    env -u SDME_BUILD_AUR_CPUS -u SDME_BUILD_AUR_MEMORY \
+        -u SDME_BUILD_AUR_JOBS -u SDME_BUILD_AUR_TIMEOUT \
         STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         SDME="$bin/sdme --config $work/sdme.conf" OUT="$work/default-out" \
         "$repo/packaging/distros/arch/build-with-sdme.sh" >"$state/driver.log" 2>&1 || status=$?
@@ -97,22 +103,22 @@ run_driver
 assert_status 0 "$status" 'configured AUR build succeeds'
 assert_pair --cpus 1.5
 assert_pair --memory 1536M
-assert_pair --disk 13G
+assert_no_disk
 assert_arg CARGO_BUILD_JOBS=2
 assert_arg AUR_BUILD_TIMEOUT=7
 assert_arg bash
 assert_arg /src/packaging/distros/arch/build-in-container.sh
 grep -Fxq -- -f "$state/removed" || { printf 'not ok - AUR guest is not removed\n' >&2; exit 1; }
-grep -Fxq 'limits: AUR cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7' "$state/driver.log" || { printf 'not ok - configured limits are not logged\n' >&2; exit 1; }
+grep -Fxq 'limits: AUR cpus=1.5 memory=1536M jobs=2 timeout=7' "$state/driver.log" || { printf 'not ok - configured limits are not logged\n' >&2; exit 1; }
 
 run_default_driver
 assert_status 0 "$status" 'default AUR build succeeds'
 assert_pair --cpus 2
 assert_pair --memory 16G
-assert_pair --disk 44G
+assert_no_disk
 assert_arg CARGO_BUILD_JOBS=2
 assert_arg AUR_BUILD_TIMEOUT=9000
-grep -Fxq 'limits: AUR cpus=2 memory=16G disk=44G jobs=2 timeout=9000' "$state/driver.log" || { printf 'not ok - default limits are not logged\n' >&2; exit 1; }
+grep -Fxq 'limits: AUR cpus=2 memory=16G jobs=2 timeout=9000' "$state/driver.log" || { printf 'not ok - default limits are not logged\n' >&2; exit 1; }
 if grep -Fq 'has no measured default' "$state/driver.log"; then
     printf 'not ok - default AUR build reports a gap\n' >&2
     exit 1

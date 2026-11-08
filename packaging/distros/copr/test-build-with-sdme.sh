@@ -275,8 +275,8 @@ run_driver() {
     : >"$STUB_STATE/chown.log"
     LOG="$WORK/$name.log"
     OUT_DIR="$WORK/out-$out"
-    env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
-        -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+    env -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+        -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
         SDME="$WORK/bin/sdme" OUT="$OUT_DIR" "$@" \
         "$COPR_DIR/build-with-sdme.sh" >"$LOG" 2>&1
     return $?
@@ -290,8 +290,7 @@ assert_grep "PASS el10 chan-desktop" "$LOG" "el10 chan-desktop reported PASS"
 assert_status 3 "$(wc -l <"$STUB_STATE/started")" "three targets ran"
 assert_status 3 "$(grep -c '^--storage$' "$STUB_STATE/new-args")" "every target passes an explicit storage backend"
 assert_status 3 "$(grep -c '^btrfs$' "$STUB_STATE/new-args")" "every target selects btrfs storage"
-assert_status 3 "$(grep -c '^--disk$' "$STUB_STATE/new-args")" "every target passes a disk cap"
-assert_status 3 "$(grep -c '^44G$' "$STUB_STATE/new-args")" "every target applies the build disk cap"
+assert_status 0 "$(grep -c '^--disk$' "$STUB_STATE/new-args" || true)" "no target passes a disk cap"
 assert_status 2 "$(grep -cFx 'PKG=chan' "$STUB_STATE/new-args")" "the chan targets hand their package to the guest"
 assert_status 1 "$(grep -cFx 'PKG=chan-desktop' "$STUB_STATE/new-args")" "the desktop target hands its package to the guest"
 assert_status 1 "$(grep -cFx 'EL_RELEASE=9' "$STUB_STATE/new-args")" "the el9 target hands its release to the guest"
@@ -299,7 +298,7 @@ assert_status 2 "$(grep -cFx 'EL_RELEASE=10' "$STUB_STATE/new-args")" "the el10 
 assert_status 3 "$(grep -cFx "HOST_UID=$(id -u)" "$STUB_STATE/new-args")" "every target hands the host uid to the guest"
 assert_status 3 "$(grep -cFx "HOST_GID=$(id -g)" "$STUB_STATE/new-args")" "every target hands the host gid to the guest"
 assert_status 0 "$(grep -c 'has no measured default' "$LOG" || true)" "default COPR has no gap"
-assert_status 3 "$(grep -c '^limits: COPR cpus=2 memory=10G disk=44G jobs=2 timeout=5400$' "$LOG")" "every creating call logs the default set"
+assert_status 3 "$(grep -c '^limits: COPR cpus=2 memory=10G jobs=2 timeout=5400$' "$LOG")" "every creating call logs the default set"
 assert_status 3 "$(awk 'last == "--cpus" && $0 == "2" { n++ } { last = $0 } END { print n + 0 }' "$STUB_STATE/new-args")" "every target receives the default CPU cap"
 assert_status 3 "$(awk 'last == "--memory" && $0 == "10G" { n++ } { last = $0 } END { print n + 0 }' "$STUB_STATE/new-args")" "every target receives the default memory cap"
 assert_status 3 "$(grep -cx '^2$' "$STUB_STATE/cargo-jobs")" "every target receives the default Cargo job cap"
@@ -317,13 +316,13 @@ assert_status 3 "$(wc -l <"$STUB_STATE/chown.log")" "every target's wrapper reac
 
 echo "== configured limits and policy isolation"
 run_driver limits limits PKG=chan COPR_RELEASE=9 SDME_BUILD_COPR_CPUS=1.5 \
-    SDME_BUILD_COPR_MEMORY=1536M SDME_BUILD_COPR_DISK=13G \
+    SDME_BUILD_COPR_MEMORY=1536M SDME_BUILD_DISK=13G SDME_BUILD_COPR_DISK=13G \
     SDME_BUILD_COPR_JOBS=2 SDME_BUILD_COPR_TIMEOUT=7
 assert_status 0 $? "configured COPR target succeeds"
 assert_arg_pair --cpus 1.5 "$STUB_STATE/new-args" "the creating call carries the CPU cap"
 assert_arg_pair --memory 1536M "$STUB_STATE/new-args" "the creating call carries the memory cap"
-assert_arg_pair --disk 13G "$STUB_STATE/new-args" "the creating call carries the disk cap"
-assert_grep 'limits: COPR cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7' "$LOG" "the creating call logs the configured set"
+assert_status 0 "$(grep -c '^--disk$' "$STUB_STATE/new-args" || true)" "disk variables add no disk cap"
+assert_grep 'limits: COPR cpus=1.5 memory=1536M jobs=2 timeout=7' "$LOG" "the creating call logs the configured set"
 assert_grep '2' "$STUB_STATE/cargo-jobs" "the builder receives the Cargo job cap"
 assert_grep '-s TERM -k 30s 7s /bin/bash' "$STUB_STATE/timeout" "the guest build is bounded"
 assert_grep "-R $(id -u):$(id -g)" "$STUB_STATE/chown.log" "the wrapper hands output back after the bounded call"
@@ -407,8 +406,8 @@ echo "== interrupt"
 # background job ignore SIGINT, which is what a terminal run looks like.
 rm -f "$STUB_STATE/started"
 set -m
-env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
-    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+env -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
     SDME="$WORK/bin/sdme" OUT="$WORK/out-int" PKG=chan COPR_RELEASE=all \
     STUB_SLEEP=2 "$COPR_DIR/build-with-sdme.sh" >"$WORK/int.log" 2>&1 &
 int_pid=$!
@@ -433,8 +432,8 @@ assert_grep "was interrupted" "$LOG" "the interrupted sdme is named"
 # to the driver alone, while it is held in the SRPM phase.
 rm -f "$STUB_STATE/started" "$STUB_STATE/srpm-holding" "$STUB_STATE/srpm-release"
 set -m
-env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
-    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+env -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
     SDME="$WORK/bin/sdme" OUT="$WORK/out-int3" PKG=chan COPR_RELEASE=all \
     STUB_SRPM_HOLD=1 "$COPR_DIR/build-with-sdme.sh" >"$WORK/int3.log" 2>&1 &
 int3_pid=$!
@@ -475,8 +474,8 @@ STALE="$WORK/out-stale/el9/$(uname -m)/chan"
 mkdir -p "$STALE"
 : >"$STALE/status"
 chmod 500 "$STALE"
-env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
-    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+env -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
     SDME="$WORK/bin/sdme" OUT="$WORK/out-stale" PKG=chan COPR_RELEASE=all \
     "$COPR_DIR/build-with-sdme.sh" >"$WORK/stale.log" 2>&1
 assert_status 1 $? "an unclearable result directory fails its target"
@@ -492,8 +491,8 @@ LOCKED="$WORK/out-locked/el9/$(uname -m)/chan"
 mkdir -p "$LOCKED"
 : >"$LOCKED/build.log"
 chmod 400 "$LOCKED/build.log"
-env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
-    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+env -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
     SDME="$WORK/bin/sdme" OUT="$WORK/out-locked" PKG=chan COPR_RELEASE=9 \
     "$COPR_DIR/build-with-sdme.sh" >"$WORK/locked.log" 2>&1
 assert_status 1 $? "an unwritable result log fails its target"

@@ -278,7 +278,7 @@ for target in "${MATRIX[@]}"; do
     [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
     sdme_build_log_limits COPR
     "${SDME_CMD[@]}" new --name "$container" -r "$rootfs" -t 180 \
-        --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
+        --storage btrfs ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
         -b "$SOURCE_SNAPSHOT:/src:ro" \
         -b "$REPO/target/distros/srpm:/srpm:ro" \
         -b "$result_dir:/out" \

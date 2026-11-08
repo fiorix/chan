@@ -47,9 +47,8 @@ series_config_args=()
 # For another pool, set both arrays to the same file:
 # sdme_config_args=(--config /absolute/path/to/sdme.conf)
 # series_config_args=(--sdme-config /absolute/path/to/sdme.conf)
-source packaging/sdme-build-policy.sh
 sudo sdme create --name chan-one-cpu -r chan-ann-ubuntu \
-  "${sdme_config_args[@]}" --storage btrfs --disk "$SDME_BUILD_DISK" --cpus 1 \
+  "${sdme_config_args[@]}" --storage btrfs --disk 44G --cpus 1 \
   --bind "$rig_tree:/work/chan:ro" \
   --bind "$git_dir:$git_dir:ro" --started
 sudo sdme "${sdme_config_args[@]}" exec chan-one-cpu -- env HOME=/root \

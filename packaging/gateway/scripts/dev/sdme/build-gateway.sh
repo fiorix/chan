@@ -114,7 +114,7 @@ else
         fi
     else
         sdme_build_log_limits GATEWAY
-        echo "==> no cpu, memory or disk limit configured for this run; any limit already on kept container $CONTAINER remains in force; REBUILD_CONTAINER=1 recreates it without them"
+        echo "==> no cpu or memory limit configured for this run; any limit already on kept container $CONTAINER remains in force; REBUILD_CONTAINER=1 recreates it without them"
     fi
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi

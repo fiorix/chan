@@ -94,7 +94,7 @@ trap 'exit 143' TERM
 # mount; mktemp creates its root accessible only to the host's invoking user.
 chmod 0755 "$SOURCE_SNAPSHOT"
 
-echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS' disk=$SDME_BUILD_LIMIT_DISK revision=$revision" >&2
+echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS' revision=$revision" >&2
 # Pass the build environment to the joined command itself. sdme's `--env`
 # configures the container service, but the auto-join command does not inherit
 # those values.
@@ -105,6 +105,6 @@ guest_env=(SRC=/src OUT=/out VERSION="$version" HOST_UID="$(id -u)" HOST_GID="$(
 CONTAINER_ATTEMPTED=1
 sdme_build_log_limits AUR
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$AUR_ROOTFS" -t 120 \
-    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
+    --storage btrfs ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$SOURCE_DIR:/local:ro" -b "$OUT:/out" \
     -- env "${guest_env[@]}" bash /src/packaging/distros/arch/build-in-container.sh
