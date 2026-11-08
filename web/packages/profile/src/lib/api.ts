@@ -124,10 +124,9 @@ export const api = {
   tokenAudit: (id: string) =>
     request<AuditEntry[]>(`/api/tokens/${id}/audit`),
 
-  // NOTE: whole-devserver "open" (root) + the /s/{owner} share-link are
-  // intentionally absent. This surface covers sharing management only; the
-  // per-tenant share link /s/{owner}/{workspace} exists server-side for a
-  // known workspace.
+  // The Devservers view builds whole-devserver Open and Copy my link URLs
+  // from the owner's username and the devserver disc, without an API call.
+  // Identity serves the /s/{owner}?d=<disc> root to the owner only.
 
   listDevserverGrants: (devserverId: string) =>
     request<DevserverGrant[]>(`/api/devservers/${encodeURIComponent(devserverId)}/grants`),

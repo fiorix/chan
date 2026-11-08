@@ -163,9 +163,10 @@
       `/s/${encodeURIComponent(username)}?d=${discOf(devserverId)}`;
   }
 
-  // Copy an absolute `?d=`-qualified open link for one devserver.
-  // The link runs the same access check server-side, so it is safe to
-  // hand to a grantee (they land only if a grant admits them).
+  // Copy an absolute `?d=`-qualified root link for this owner's devserver.
+  // Identity opens the whole devserver for its owner only and gives anyone
+  // else, including a grantee, the same not-found as an unknown handle.
+  // People this devserver is shared with open it from Chan Desktop.
   let copied = $state<string | null>(null);
   async function copyDevserverLink(devserverId: string) {
     const username = meStore.me?.user.username;
@@ -304,8 +305,9 @@
                     type="button"
                     class="ghost"
                     onclick={() => copyDevserverLink(d.id)}
+                    title="Copy my link to this devserver (only I can open it)"
                   >
-                    {copied === d.id ? "Copied" : "Copy link"}
+                    {copied === d.id ? "Copied" : "Copy my link"}
                   </button>
                 {/if}
                 <button
