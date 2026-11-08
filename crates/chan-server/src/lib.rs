@@ -53,6 +53,7 @@ mod indexer;
 #[cfg(unix)]
 mod local_socket;
 mod mcp_bridge;
+pub mod metrics;
 mod preferences;
 #[cfg(test)]
 mod refusal_check;
@@ -1334,6 +1335,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             post(crate::routes::standalone_drafts::api_standalone_promote_draft),
         )
         .route("/api/build-info", get(api_build_info))
+        .route("/api/metrics", get(crate::routes::metrics::api_metrics))
         .route("/api/health", get(api_health))
         // Global preferences: Settings opens the shared configuration surface,
         // which reads and writes the `terminal` sub-config here. Both handlers
@@ -1794,7 +1796,7 @@ pub async fn serve(
         }
     }
 
-    let app = artifacts.app.clone();
+    let app = metrics::with_metrics(artifacts.app.clone());
     let last_activity = artifacts.last_activity.clone();
     let workspace_cell = artifacts.workspace_cell.clone();
 
@@ -2067,6 +2069,7 @@ fn router_with_extensions(
         .route("/api/report/dir", get(api_report_dir))
         .route("/api/config", get(api_get_config))
         .route("/api/build-info", get(api_build_info))
+        .route("/api/metrics", get(crate::routes::metrics::api_metrics))
         .route("/api/extensions", get(api_extensions))
         // Session blob keyed by window id (?w=<id>). The frontend
         // sends the window id as a query string (path-segment encode

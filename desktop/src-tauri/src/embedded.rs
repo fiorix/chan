@@ -211,7 +211,7 @@ impl EmbeddedServer {
         let listener = tokio::net::TcpListener::from_std(listener)
             .map_err(|e| format!("adopting embedded listener: {e}"))?;
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let app = host.clone().router();
+        let app = chan_server::metrics::with_metrics(host.clone().router());
         tauri::async_runtime::spawn(async move {
             let result = serve_router(listener, app, async move {
                 let _ = shutdown_rx.changed().await;
@@ -304,7 +304,7 @@ impl EmbeddedServer {
         let listener = tokio::net::TcpListener::from_std(listener)
             .map_err(|e| format!("adopting the terminal host listener: {e}"))?;
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let app = host.clone().router();
+        let app = chan_server::metrics::with_metrics(host.clone().router());
         tauri::async_runtime::spawn(async move {
             let result = serve_router(listener, app, async move {
                 let _ = shutdown_rx.changed().await;
@@ -1070,7 +1070,7 @@ async fn serve_router(
     app: Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
-    axum::serve(listener, app)
+    axum::serve(chan_server::metrics::MeteredListener(listener), app)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))

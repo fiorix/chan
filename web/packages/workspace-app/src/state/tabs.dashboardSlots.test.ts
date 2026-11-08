@@ -1,13 +1,4 @@
 // @vitest-environment jsdom
-//
-// The Dashboard carousel's slot table and walks, read and called directly.
-// The table names the slots in display order, Workspace, Search and About,
-// the slot count follows it, and the Search slide the indexing pill opens on
-// is the slot labelled Search. The walks answer from a tab or from the
-// switched-off set alone, as the carousel holds it: a slot is shown unless
-// switched off, the first shown slot is where a cursor lands, and a step
-// forward or back skips a switched-off slot, wraps at the ends and stays put
-// when no other slot is on.
 
 import { describe, expect, test } from "vitest";
 import {
@@ -16,6 +7,7 @@ import {
   DASHBOARD_SEARCH_SLIDE,
   DASHBOARD_SLOT_COUNT,
   DASHBOARD_SLOT_LABELS,
+  DASHBOARD_SLOT_ORDER,
   dashboardSlotEnabled,
   firstEnabledSlot,
   nextEnabledSlot,
@@ -24,8 +16,9 @@ import {
 } from "./tabs.svelte";
 
 describe("the dashboard slot table", () => {
-  test("names Workspace, Search and About in display order", () => {
-    expect(DASHBOARD_SLOT_LABELS).toEqual(["Workspace", "Search", "About"]);
+  test("keeps persisted ids stable while displaying Metrics first", () => {
+    expect(DASHBOARD_SLOT_LABELS).toEqual(["Workspace", "Search", "About", "Metrics"]);
+    expect(DASHBOARD_SLOT_ORDER.map((i) => DASHBOARD_SLOT_LABELS[i])).toEqual(["Metrics", "Workspace", "Search", "About"]);
   });
 
   test("counts one slot per label", () => {
@@ -47,25 +40,27 @@ describe("the dashboard slot walks", () => {
   });
 
   test("land on the first slot still on", () => {
-    expect(firstEnabledSlot({})).toBe(0);
-    expect(firstEnabledSlot({ disabledSlots: [0] })).toBe(1);
-    expect(firstEnabledSlot({ disabledSlots: [0, 1] })).toBe(2);
+    expect(firstEnabledSlot({})).toBe(3);
+    expect(firstEnabledSlot({ disabledSlots: [3, 0] })).toBe(1);
+    expect(firstEnabledSlot({ disabledSlots: [3, 0, 1] })).toBe(2);
   });
 
   test("step forward one slot, past a switched-off one, and wrap at the end", () => {
     expect(nextEnabledSlot({}, 1)).toBe(2);
     expect(nextEnabledSlot({ disabledSlots: [1] }, 0)).toBe(2);
-    expect(nextEnabledSlot({ disabledSlots: [1] }, 2)).toBe(0);
+    expect(nextEnabledSlot({ disabledSlots: [1] }, 2)).toBe(3);
+    expect(nextEnabledSlot({}, 3)).toBe(0);
   });
 
   test("step back one slot, past a switched-off one, and wrap at the start", () => {
     expect(prevEnabledSlot({}, 1)).toBe(0);
     expect(prevEnabledSlot({ disabledSlots: [1] }, 2)).toBe(0);
-    expect(prevEnabledSlot({ disabledSlots: [1] }, 0)).toBe(2);
+    expect(prevEnabledSlot({ disabledSlots: [1] }, 0)).toBe(3);
+    expect(prevEnabledSlot({}, 3)).toBe(2);
   });
 
   test("stay put when no other slot is on", () => {
-    const onlySearch = { disabledSlots: [0, 2] };
+    const onlySearch = { disabledSlots: [0, 2, 3] };
 
     expect(nextEnabledSlot(onlySearch, 1)).toBe(1);
     expect(prevEnabledSlot(onlySearch, 1)).toBe(1);
@@ -74,10 +69,10 @@ describe("the dashboard slot walks", () => {
 
 
 describe("restored dashboard slots", () => {
-  test.each([3, 99])("replaces out-of-range slide %i with the first enabled slot", async (slide) => {
+  test.each([4, 99])("replaces out-of-range slide %i with the first enabled slot", async (slide) => {
     await restoreLayout({ k: "l", t: [{ k: "d", cs: slide, ds: [0] }] });
     const tab = activePane().tabs[0];
     if (tab?.kind !== "dashboard") throw new Error("expected dashboard tab");
-    expect(tab.carouselSlide).toBe(1);
+    expect(tab.carouselSlide).toBe(3);
   });
 });

@@ -35,6 +35,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await unmountApp();
+  ui.terminalOnly = false;
+  vi.restoreAllMocks();
 });
 
 async function openMenu(): Promise<HTMLElement> {
@@ -54,6 +56,36 @@ function row(menu: HTMLElement, label: string): HTMLButtonElement {
 }
 
 describe("the pane's hamburger menu", () => {
+  test.each([false, true])("New dashboard opens a tab with terminal-only mode %s", async (terminalOnly) => {
+    ui.terminalOnly = terminalOnly;
+    const menu = await openMenu();
+    expect(rows(menu)).toContain("New dashboard");
+    row(menu, "New dashboard").click();
+    await settle();
+    const pane = layout.nodes["pane-test"] as LeafNode;
+    expect(pane.tabs).toMatchObject([{ kind: "dashboard", carouselSlide: 3 }]);
+    expect(pane.activeTabId).toBe(pane.tabs[0]!.id);
+  });
+
+  test("the command launcher offers and opens Dashboard in a terminal-only window", async () => {
+    ui.terminalOnly = true;
+    document.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "k", code: "KeyK", ctrlKey: true, altKey: true, bubbles: true, cancelable: true,
+    }));
+    await settle();
+    const input = document.querySelector<HTMLInputElement>(".deck-input");
+    expect(input).not.toBeNull();
+    input!.value = "New dashboard";
+    input!.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    await settle();
+    const command = [...document.querySelectorAll<HTMLButtonElement>(".deck-result")]
+      .find((button) => button.querySelector(".deck-result-title")?.textContent === "New dashboard");
+    expect(command).toBeDefined();
+    command!.click();
+    await settle();
+    expect((layout.nodes["pane-test"] as LeafNode).tabs).toMatchObject([{ kind: "dashboard", carouselSlide: 3 }]);
+  });
+
   test("opens with Commands, Hybrid Nav and Search workspace, then the Apps rows", async () => {
     const labels = rows(await openMenu());
 

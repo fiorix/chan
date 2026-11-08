@@ -50,6 +50,8 @@ pub(super) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(super) enum Command {
+    /// Show the running server's process, transfer and transport metrics
+    Metrics(crate::metrics::MetricsArgs),
     /// Serve a workspace (same as `chan workspace serve`)
     #[command(long_about = SERVE_LONG_ABOUT, visible_alias = "open")]
     #[command(after_long_help = &*SERVE_AFTER_HELP)]
@@ -195,6 +197,7 @@ pub(super) enum Command {
     /// chan-workspace's gates instead of touching the workspace directly.
     /// Not for end-user invocation.
     #[command(name = "__mcp", hide = true)]
+    #[command(alias = "m")]
     Mcp {
         /// Workspace root to expose. Must already be registered.
         path: PathBuf,

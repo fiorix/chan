@@ -495,7 +495,7 @@
       });
     }
     // Match the focus-colour menu's checkmark to the library colour this
-    // window opened with: if `?pane=` is one of the four preset hexes, select
+    // window opened with: if `?pane=` is one of the named preset hexes, select
     // that preset so `focusColorForWindow()` agrees with the colour shown. A
     // custom or absent colour leaves the menu at its default.
     seedInitialFocusColor(setWindowFocusColor);
@@ -2262,6 +2262,7 @@
   .app[data-focus-color="orange"] { --pane-active-focus: #f97316; }
   .app[data-focus-color="green"] { --pane-active-focus: #22c55e; }
   .app[data-focus-color="pink"] { --pane-active-focus: #ff5fb7; }
+  .app[data-focus-color="grey"] { --pane-active-focus: #808080; }
   /* The window tab bar is fixed over the top of the window; the inline top
      padding starts the panes and the docked file browsers below it. */
   .app.window-tab-bar {

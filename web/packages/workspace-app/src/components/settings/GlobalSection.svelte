@@ -70,9 +70,9 @@
 </SettingField>
 
 <SettingField
-  label="Empty-pane carousel"
+  label="Dashboard carousel"
   pref="empty_pane_carousel_cycling"
-  hint="Auto-rotate the welcome carousel shown in an empty single pane."
+  hint="Auto-rotate the Dashboard tab's slides."
 >
   <PillToggle
     label="Auto-rotate"

@@ -30,14 +30,15 @@ async function renderCarousel(props: Record<string, any> = {}) {
 }
 
 describe("EmptyPaneCarousel", () => {
-  test("renders the Workspace slide by default with three dots", async () => {
+  test("renders Metrics first with four dots", async () => {
     // Slide 0 hosts WorkspaceInfoBody. Slide 1 is the indexing
     // (Search) graph; slide 2 is the About widget (version +
     // attributions + donation QR + project links).
     const target = await renderCarousel();
 
-    expect(target.querySelectorAll(".dot-btn").length).toBe(3);
-    expect(target.querySelector(".slide-workspace")).not.toBeNull();
+    expect(target.querySelectorAll(".dot-btn").length).toBe(4);
+    expect(target.querySelector(".metrics-slide")).not.toBeNull();
+    expect(target.querySelector(".slide-workspace")).toBeNull();
     expect(target.querySelector(".slide-about")).toBeNull();
     expect(target.querySelector(".slide-indexing")).toBeNull();
     // Shortcuts / metadata slide bodies are not part of the
@@ -66,12 +67,12 @@ describe("EmptyPaneCarousel", () => {
     });
 
     const dots = [...target.querySelectorAll<HTMLButtonElement>(".dot-btn")];
-    expect(dots.length).toBe(3);
+    expect(dots.length).toBe(4);
 
     dots[1]?.click();
     dots[2]?.click();
     dots[0]?.click();
-    expect(calls).toEqual([1, 2, 0]);
+    expect(calls).toEqual([0, 1, 3]);
   });
 
   test("lets a right-click fall through to the pane around it", async () => {

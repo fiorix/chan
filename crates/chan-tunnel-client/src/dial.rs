@@ -122,6 +122,8 @@ pub async fn dial_with_tls(
         ));
     }
 
+    let stream = chan_metrics::MeteredIo::new(stream, &chan_metrics::NETWORK);
+
     // Drive h2 frames in the background; the connection future has
     // a different type per branch (rustls TlsStream vs the raw stream),
     // so each arm spawns its own driver and returns only the SendRequest.

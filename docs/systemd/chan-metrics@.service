@@ -1,0 +1,10 @@
+[Unit]
+Description=chan metrics Varlink connection
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/chan metrics --varlink
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+NoNewPrivileges=yes

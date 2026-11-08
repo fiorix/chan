@@ -252,6 +252,7 @@ const HAMBURGER_LABELS = [
   "orange",
   "green",
   "pink",
+  "grey",
   "Close pane",
 ];
 
@@ -319,7 +320,7 @@ describe("Pane right-click menus", () => {
     }
   });
 
-  test("terminal-only hamburger keeps New terminal as the sole spawn row", async () => {
+  test("terminal-only hamburger offers Dashboard and Terminal spawn rows", async () => {
     // ui is module-global $state: restore in finally so the workspace-order
     // tests above stay on the default surface.
     ui.terminalOnly = true;
@@ -335,16 +336,17 @@ describe("Pane right-click menus", () => {
       target.querySelector<HTMLButtonElement>(".hamburger-trigger")?.click();
       await tick();
 
-      // Order mirrors the workspace menu with the app-spawn block reduced to
-      // the one command a terminal-only window can run.
+      // Keep the workspace menu's order for the available apps.
       expect(menuLabels()).toEqual([
         "Commands",
         "Hybrid Nav",
+        "New dashboard",
         "New terminal",
         "blue",
         "orange",
         "green",
         "pink",
+        "grey",
         "Close pane",
       ]);
 
@@ -356,7 +358,7 @@ describe("Pane right-click menus", () => {
       const between = items
         .slice(sepIdx[0]! + 1, sepIdx[1]!)
         .map((li) => li.querySelector(".menu-row-label")?.textContent?.trim());
-      expect(between).toEqual(["New terminal"]);
+      expect(between).toEqual(["New dashboard", "New terminal"]);
       const chord = items[sepIdx[0]! + 1]?.querySelector(".menu-row-chord");
       expect(chord).not.toBeNull();
     } finally {

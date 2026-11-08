@@ -115,6 +115,13 @@ static SPINE: &[Section] = &[
         path: &["ps"],
     },
     Section {
+        slug: "metrics",
+        aliases: &[],
+        title: "Inspect server process metrics and stream live readings",
+        root: Root::Chan,
+        path: &["metrics"],
+    },
+    Section {
         slug: "cs",
         aliases: &["env", "mcp", "detect"],
         title: "The cs surface: the environment contract and MCP",

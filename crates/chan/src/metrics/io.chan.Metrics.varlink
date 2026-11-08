@@ -1,0 +1,40 @@
+# Read the running chan server's cached metrics. Never starts the devserver.
+interface io.chan.Metrics
+
+# One logical core is 100%; rates are absent until two samples exist.
+type Process (
+  uptimeSeconds: int, cpuTimeMs: int, cpuPercent: ?float,
+  residentBytes: int, ioScope: string, readBytes: int, writtenBytes: int,
+  readBytesPerSecond: ?float, writtenBytesPerSecond: ?float
+)
+# Payload counters belong to distinct layers and must not be summed.
+type Traffic (
+  active: int, opened: int, receivedBytes: int, sentBytes: int,
+  receivedBytesPerSecond: ?float, sentBytesPerSecond: ?float
+)
+# Finished counts worker jobs, including jobs returning an application error.
+type Transfers (
+  queued: int, running: int, workerCapacity: int, queueCapacity: int,
+  finished: int, cancelled: int, stalled: int, panicked: int, refused: int
+)
+type Sample (
+  sequence: int, elapsedMs: int, sampledAtMs: int, collectionMicros: int,
+  process: ?Process, network: Traffic, http2: Traffic, yamux: Traffic,
+  reverseConnections: Traffic, transferPayload: Traffic, transfers: Transfers,
+  gatewayTunnels: int, tunnelDialFailures: int, reverseListeners: int,
+  yamuxWaiting: int, yamuxServing: int, yamuxServiceCapacity: int, yamuxStreamLimit: int
+)
+type Identity (instanceId: string, version: string, build: string, pid: int, hostname: ?string)
+# Totals retain their original timestamp when a later scan fails.
+type Storage (
+  path: string, logicalBytes: ?int, allocatedBytes: ?int, files: ?int,
+  sampledAtMs: ?int, scanMillis: ?int, error: ?string
+)
+type View (
+  schemaVersion: int, identity: Identity, latest: ?Sample,
+  history: []Sample, storage: Storage
+)
+# With more=true, emits once per second; slow clients never block collection.
+# since selects history sequences strictly greater than the supplied value.
+method Get(history: ?bool, since: ?int) -> (metrics: View)
+error Unavailable()

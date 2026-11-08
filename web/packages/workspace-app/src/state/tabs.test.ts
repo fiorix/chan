@@ -1659,6 +1659,16 @@ describe("pane state", () => {
     expect(focusColorForWindow()).toBe("orange");
   });
 
+  test("grey focus colour survives layout serialization", async () => {
+    resetLayout([terminalTab()]);
+    setWindowFocusColor("grey");
+    const snapshot = serializeLayout();
+    expect(snapshot).toMatchObject({ wc: "y" });
+    setWindowFocusColor("blue");
+    await restoreLayout(snapshot!);
+    expect(focusColorForWindow()).toBe("grey");
+  });
+
   test("drops legacy per-pane focus color on restore", async () => {
     resetLayout([terminalTab()]);
 
@@ -2085,13 +2095,29 @@ describe("pane state", () => {
   });
 
   test("Dashboard tab with carouselSlide=0 omits the cs field in the hash", () => {
-    // Default-slide tabs keep the hash compact; the field only
-    // emits when the user has moved off the About slide.
+    // Preserve the original omitted-field meaning for existing layouts.
     resetLayout([]);
     openDashboardInActivePane();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "dashboard") throw new Error("expected dashboard tab");
+    tab.carouselSlide = 0;
     const snapshot = serializeLayout();
     const json = JSON.stringify(snapshot);
     expect(json).not.toMatch(/"cs":/);
+  });
+
+  test("a new Dashboard persists Metrics explicitly and restores it", async () => {
+    resetLayout([]);
+    openDashboardInActivePane();
+    const tab = activePane().tabs[0];
+    if (tab?.kind !== "dashboard") throw new Error("expected dashboard tab");
+    expect(tab.carouselSlide).toBe(3);
+    const snapshot = serializeLayout();
+    expect(JSON.stringify(snapshot)).toContain('"cs":3');
+    await restoreLayout(snapshot!);
+    const restored = activePane().tabs[0];
+    if (restored?.kind !== "dashboard") throw new Error("expected dashboard tab");
+    expect(restored.carouselSlide).toBe(3);
   });
 
   test("two BrowserTab records carry independent inspectorWidth", () => {

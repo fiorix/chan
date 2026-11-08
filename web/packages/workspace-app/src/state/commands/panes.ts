@@ -37,4 +37,5 @@ registerCommands([
   focusColor("orange"),
   focusColor("green"),
   focusColor("pink"),
+  focusColor("grey"),
 ]);

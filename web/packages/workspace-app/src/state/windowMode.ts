@@ -7,7 +7,7 @@
 
 /// Commands that remain valid in a window holding terminals and nothing
 /// else. Everything outside this set needs a workspace or at least a
-/// filesystem (editor / graph / file browser / dashboard / rich-prompt /
+/// filesystem (editor / graph / file browser / rich-prompt /
 /// drafts / search), so it is dropped before the dispatch switch when
 /// `ui.terminalOnly` is set. A window that has a filesystem is gated by the
 /// catalog's requirement table instead; this set also classifies the
@@ -21,6 +21,7 @@ export const TERMINAL_ONLY_COMMANDS: ReadonlySet<string> = new Set<string>([
   "app.pane.mode",
   "app.pane.flip",
   "app.terminal.toggle",
+  "app.dashboard.open",
   "app.terminal.broadcastToggle",
   "app.pane.next",
   "app.pane.prev",

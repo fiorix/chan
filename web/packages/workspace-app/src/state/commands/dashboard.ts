@@ -41,7 +41,7 @@ function slideCommand(
     id,
     title,
     category: "Dashboard",
-    requirement: "workspace",
+    requirement: slot < 2 ? "workspace" : "any",
     keywords,
     available: (ctx) => onSurface(ctx, "dashboard"),
     run: onDashboard((tab) => {
@@ -54,11 +54,12 @@ function slideCommand(
 }
 
 registerCommands([
+  slideCommand("app.dashboard.slide.metrics", "Go to Metrics", 3, ["process", "cpu", "memory", "stats"]),
   {
     id: "app.dashboard.surfaceTheme.light",
     title: "Dashboard theme: light",
     category: "Dashboard",
-    requirement: "workspace",
+    requirement: "any",
     keywords: ["theme", "light", "appearance"],
     available: (ctx) => onSurface(ctx, "dashboard"),
     run: () => setHybridSurfaceTheme("dashboard", "light"),
@@ -67,7 +68,7 @@ registerCommands([
     id: "app.dashboard.surfaceTheme.dark",
     title: "Dashboard theme: dark",
     category: "Dashboard",
-    requirement: "workspace",
+    requirement: "any",
     keywords: ["theme", "dark", "appearance"],
     available: (ctx) => onSurface(ctx, "dashboard"),
     run: () => setHybridSurfaceTheme("dashboard", "dark"),
@@ -76,7 +77,7 @@ registerCommands([
     id: "app.dashboard.nextSlide",
     title: "Next slide",
     category: "Dashboard",
-    requirement: "workspace",
+    requirement: "any",
     keywords: ["slide", "carousel", "next", "forward"],
     available: (ctx) => onSurface(ctx, "dashboard"),
     run: onDashboard((tab) => {
@@ -88,7 +89,7 @@ registerCommands([
     id: "app.dashboard.prevSlide",
     title: "Previous slide",
     category: "Dashboard",
-    requirement: "workspace",
+    requirement: "any",
     keywords: ["slide", "carousel", "previous", "back"],
     available: (ctx) => onSurface(ctx, "dashboard"),
     run: onDashboard((tab) => {

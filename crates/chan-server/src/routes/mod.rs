@@ -33,6 +33,7 @@ mod inspector;
 mod library;
 mod mentions;
 mod metadata;
+pub(crate) mod metrics;
 mod open;
 mod preferences;
 mod preflight;

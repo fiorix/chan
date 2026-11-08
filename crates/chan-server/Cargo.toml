@@ -36,6 +36,8 @@ accelerate = ["chan-workspace/accelerate"]
 cuda = ["chan-workspace/cuda"]
 
 [dependencies]
+sysinfo = { workspace = true }
+chan-metrics = { workspace = true }
 chan-workspace = { workspace = true, default-features = false }
 chan-library = { workspace = true }
 tar = { workspace = true }

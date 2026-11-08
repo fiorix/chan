@@ -117,9 +117,10 @@ async fn graceful_serve_with_grace(
     let mut signal_rx = signal_tx.subscribe();
 
     let mut graceful_rx = signal_rx.clone();
-    let server_future = axum::serve(listener, app).with_graceful_shutdown(async move {
-        let _ = graceful_rx.changed().await;
-    });
+    let server_future = axum::serve(crate::metrics::MeteredListener(listener), app)
+        .with_graceful_shutdown(async move {
+            let _ = graceful_rx.changed().await;
+        });
 
     tokio::select! {
         res = server_future => res,

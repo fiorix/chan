@@ -40,6 +40,57 @@ pub const RETRY_AFTER_SECS: u64 = 1;
 /// interactive work needs.
 pub const MAX_BLOCKING_THREADS: usize = 32;
 
+static METRIC_QUEUED: chan_metrics::Counter = chan_metrics::Counter::new();
+static METRIC_RUNNING: chan_metrics::Counter = chan_metrics::Counter::new();
+static METRIC_FINISHED: chan_metrics::Total = chan_metrics::Total::new();
+static METRIC_CANCELLED: chan_metrics::Total = chan_metrics::Total::new();
+static METRIC_STALLED: chan_metrics::Total = chan_metrics::Total::new();
+static METRIC_PANICKED: chan_metrics::Total = chan_metrics::Total::new();
+static METRIC_REFUSED: chan_metrics::Total = chan_metrics::Total::new();
+
+pub(crate) fn metrics() -> crate::metrics::Transfers {
+    crate::metrics::Transfers {
+        queued: METRIC_QUEUED.snapshot().active,
+        running: METRIC_RUNNING.snapshot().active,
+        worker_capacity: ACTIVE_CAPACITY,
+        queue_capacity: WAITING_CAPACITY,
+        finished: METRIC_FINISHED.get(),
+        cancelled: METRIC_CANCELLED.get(),
+        stalled: METRIC_STALLED.get(),
+        panicked: METRIC_PANICKED.get(),
+        refused: METRIC_REFUSED.get(),
+    }
+}
+
+struct JobMetrics {
+    cancel: Arc<AtomicU8>,
+    queued: Option<chan_metrics::Guard<'static>>,
+    running: Option<chan_metrics::Guard<'static>>,
+    panicked: bool,
+}
+
+impl JobMetrics {
+    fn start(&mut self) {
+        self.queued = None;
+        self.running = Some(METRIC_RUNNING.enter());
+    }
+}
+
+impl Drop for JobMetrics {
+    fn drop(&mut self) {
+        if self.panicked {
+            METRIC_PANICKED.increment();
+        } else {
+            match self.cancel.load(Ordering::SeqCst) {
+                STALLED => METRIC_STALLED.increment(),
+                CANCELLED | CLIENT_CANCELLED => METRIC_CANCELLED.increment(),
+                _ if self.running.is_some() => METRIC_FINISHED.increment(),
+                _ => METRIC_CANCELLED.increment(),
+            }
+        }
+    }
+}
+
 /// Opaque per-tenant identity. Deliberately carries no workspace path, window
 /// id, or user-facing name: it exists so one tenant's queue positions can be
 /// computed without any tenant learning that another exists.
@@ -259,6 +310,7 @@ enum WorkDispatch<'a> {
 type WorkFn = Box<dyn FnOnce(WorkDispatch<'_>) -> BulkCompletion + Send + 'static>;
 
 struct QueuedJob {
+    metrics: JobMetrics,
     id: u64,
     tenant: TenantId,
     cancel: Arc<AtomicU8>,
@@ -452,6 +504,7 @@ impl BulkTransferTenant {
         if inner.shutdown
             || inner.active.len() + inner.queue.len() >= ACTIVE_CAPACITY + WAITING_CAPACITY
         {
+            METRIC_REFUSED.increment();
             return Err(BulkFull);
         }
 
@@ -484,6 +537,12 @@ impl BulkTransferTenant {
         });
 
         inner.queue.push_back(QueuedJob {
+            metrics: JobMetrics {
+                cancel: cancel.clone(),
+                queued: Some(METRIC_QUEUED.enter()),
+                running: None,
+                panicked: false,
+            },
             id,
             tenant: self.tenant,
             cancel: cancel.clone(),
@@ -696,7 +755,7 @@ impl Drop for BulkTransferLane {
 
 fn worker_main(shared: Arc<SharedLane>) {
     loop {
-        let job = {
+        let mut job = {
             let mut inner = shared.lock();
             loop {
                 if inner.shutdown {
@@ -717,12 +776,14 @@ fn worker_main(shared: Arc<SharedLane>) {
 
         shared.announce_change();
 
+        job.metrics.start();
         let id = job.id;
         let signal = BulkCancel(job.cancel.clone(), job.stall_timeout);
         let work = job.work;
         // First boundary: a panicking transfer must not take the worker with
         // it, or one bad job would permanently halve the lane.
         let completion = catch_unwind(AssertUnwindSafe(move || work(WorkDispatch::Run(&signal))));
+        job.metrics.panicked = completion.is_err();
 
         // Release the slot and wake a waiting worker BEFORE delivering, so a
         // slow or panicking delivery cannot hold capacity that queued work is

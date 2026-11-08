@@ -14,9 +14,9 @@
 // with a draft store behind that it creates drafts too.
 
 import { describe, it, expect } from "vitest";
-import { allCommands, dispatchAllowsCommand, requirementAllows } from "../commands";
+import { allCommands, availableCommands, dispatchAllowsCommand, requirementAllows } from "../commands";
 import { capsForMode, type WindowMode } from "../windowCaps";
-import { TERMINAL_ONLY_COMMANDS } from "../windowMode";
+import { TERMINAL_ONLY_COMMANDS, windowModeAllowsCommand } from "../windowMode";
 
 import "./install";
 
@@ -67,6 +67,23 @@ function idsForMode(
 }
 
 describe("command requirement table", () => {
+  it.each(SHAPES)("offers and dispatches New dashboard in $name windows", (shape) => {
+    const caps = capsForMode(shape.mode, shape.tenantFiles, shape.tenantDrafts);
+    const mode = { terminalOnly: !caps.files, terminalControl: shape.mode === "control" };
+    const context = {
+      ...mode, caps, activeSurface: "terminal" as const, activeSide: "a" as const,
+      activeTabId: "terminal-1", activeExtensionId: null,
+    };
+    expect(availableCommands(context).some((c) => c.id === "app.dashboard.open")).toBe(true);
+    expect(windowModeAllowsCommand("app.dashboard.open", mode)).toBe(true);
+    expect(dispatchAllowsCommand("app.dashboard.open", caps)).toBe(true);
+    const dashboard = availableCommands({ ...context, activeSurface: "dashboard" });
+    expect(dashboard.some((c) => c.id === "app.dashboard.slide.metrics")).toBe(true);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slide.about")).toBe(true);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slide.workspace")).toBe(caps.workspace);
+    expect(dashboard.some((c) => c.id === "app.dashboard.slide.indexing")).toBe(caps.workspace);
+  });
+
   it("declares one of the five requirement values on every command", () => {
     const catalog = allCommands();
     expect(catalog.length).toBeGreaterThan(0);

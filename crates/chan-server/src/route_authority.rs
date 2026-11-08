@@ -169,6 +169,7 @@ pub(crate) static WORKSPACE_TENANT: RouteTable = &[
     (Get, "/api/report/dir", NonOwner),
     (Get, "/api/config", NonOwner),
     (Get, "/api/build-info", NonOwner),
+    (Get, "/api/metrics", NonOwner),
     (Get, "/api/extensions", NonOwner),
     (Get, "/api/session", NonOwner),
     (Put, "/api/session", NonOwner),
@@ -275,6 +276,7 @@ pub(crate) static TERMINAL_TENANT: RouteTable = &[
     (Post, "/api/drafts/discard", NonOwner),
     (Post, "/api/drafts/promote", NonOwner),
     (Get, "/api/build-info", NonOwner),
+    (Get, "/api/metrics", NonOwner),
     (Get, "/api/health", NonOwner),
     (Get, "/api/config", NonOwner),
     (Patch, "/api/config", NonOwner),
@@ -298,6 +300,7 @@ pub(crate) static TERMINAL_TENANT: RouteTable = &[
 /// trigger; a grantee reaches every other route the owner does.
 pub(crate) static LAUNCHER: RouteTable = &[
     (Get, "/api/library/windows", NonOwner),
+    (Get, "/api/metrics", NonOwner),
     (Post, "/api/library/windows", NonOwner),
     (Get, "/api/library/windows/watch", NonOwner),
     (Delete, "/api/library/windows/{window_id}", NonOwner),

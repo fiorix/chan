@@ -146,6 +146,7 @@
   import { terminalLayer } from "../state/terminalDock.svelte";
   import { paneBodyDropZone, type PaneBodyDropZone } from "../state/paneDropZone";
   import { dispatchAllowsCommand } from "../state/commands";
+  import { windowModeAllowsCommand } from "../state/windowMode";
   import { programSummary, programVisual } from "../state/programStatus";
   import { windowTabBar } from "../state/windowTabBar.svelte";
   import { portalTo } from "./portal";
@@ -282,7 +283,7 @@
     ),
   );
 
-  const paneFocusColors: FocusColor[] = ["blue", "orange", "green", "pink"];
+  const paneFocusColors: FocusColor[] = ["blue", "orange", "green", "pink", "grey"];
 
   /// Resolve a command's chord for the pane chrome menus, override-aware
   /// (user assignment first, then the built-in), empty when unbound.
@@ -597,7 +598,7 @@
   /// re-measures itself on rAF, so this only decides the initial above/below
   /// flip -- but a stale value makes it visibly jump, so count the profile
   /// rows that render under "New terminal".
-  const PANE_MENU_BASE_HEIGHT = 535;
+  const PANE_MENU_BASE_HEIGHT = 565;
   const MENU_ROW_HEIGHT = 30;
   function paneMenuHeight(): number {
     const rows = shellProfiles().length;
@@ -620,6 +621,9 @@
     { id: "app.terminal.teamWork", title: "New team", icon: Users },
     { id: "app.terminal.toggle", title: "New terminal", icon: Terminal },
   ];
+  const availableAppRows = $derived(appRows.filter((row) =>
+    windowModeAllowsCommand(row.id, ui) && dispatchAllowsCommand(row.id, windowCaps),
+  ));
 
   function runAppRow(id: string): void {
     closePaneHamburgerMenu();
@@ -1835,41 +1839,21 @@
             </button>
           </li>
         {/if}
-        {#if !ui.terminalOnly}
-          <!-- Each window renders only the spawn rows its capabilities can
-               dispatch, off the same requirement table runCommand consults:
-               everything in a workspace window, the file family plus the
-               terminal in a standalone window whose tenant serves a
-               filesystem. A terminals-only window drops to the single
-               hardcoded row below, since its allow-list is the narrow one. -->
-          <li class="sep" role="separator"></li>
-          {#each appRows.filter((row) => dispatchAllowsCommand(row.id, windowCaps)) as row (row.id)}
-            {@const Icon = row.icon}
-            <li>
-              <button role="menuitem" onclick={() => runAppRow(row.id)}>
-                <Icon size={16} strokeWidth={1.75} aria-hidden="true" />
-                <span class="menu-row-label">{row.title}</span>
-                <span class="menu-row-chord">{chordLabel(row.id)}</span>
-              </button>
-            </li>
-            {#if row.id === "app.terminal.toggle"}
-              {@render terminalProfileRows()}
-            {/if}
-          {/each}
-        {:else}
-          <!-- The one spawn command a terminal-only window CAN run (the
-               window-mode gate allows app.terminal.toggle), as a hardcoded
-               row rather than an appRows entry. -->
-          <li class="sep" role="separator"></li>
+        <!-- Spawn rows follow the same mode and capability gates as commands. -->
+        <li class="sep" role="separator"></li>
+        {#each availableAppRows as row (row.id)}
+          {@const Icon = row.icon}
           <li>
-            <button role="menuitem" onclick={() => runAppRow("app.terminal.toggle")}>
-              <Terminal size={16} strokeWidth={1.75} aria-hidden="true" />
-              <span class="menu-row-label">New terminal</span>
-              <span class="menu-row-chord">{chordLabel("app.terminal.toggle")}</span>
+            <button role="menuitem" onclick={() => runAppRow(row.id)}>
+              <Icon size={16} strokeWidth={1.75} aria-hidden="true" />
+              <span class="menu-row-label">{row.title}</span>
+              <span class="menu-row-chord">{chordLabel(row.id)}</span>
             </button>
           </li>
-          {@render terminalProfileRows()}
-        {/if}
+          {#if row.id === "app.terminal.toggle"}
+            {@render terminalProfileRows()}
+          {/if}
+        {/each}
         <li class="sep" role="separator"></li>
         <li class="menu-label">
           <Palette size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -2239,6 +2223,7 @@
   .pane[data-focus-color="orange"] { --pane-active-focus: #f97316; }
   .pane[data-focus-color="green"] { --pane-active-focus: #22c55e; }
   .pane[data-focus-color="pink"] { --pane-active-focus: #ff5fb7; }
+  .pane[data-focus-color="grey"] { --pane-active-focus: #808080; }
   .pane.pane-mode-stale {
     pointer-events: none;
   }
@@ -2784,6 +2769,7 @@
   :global(.hamburger-menu .color-dot.orange) { background: #f97316; }
   :global(.hamburger-menu .color-dot.green) { background: #22c55e; }
   :global(.hamburger-menu .color-dot.pink) { background: #ff5fb7; }
+  :global(.hamburger-menu .color-dot.grey) { background: #808080; }
   .editor-wrap {
     position: relative;
     flex: 1;

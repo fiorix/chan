@@ -1,10 +1,5 @@
 <script lang="ts">
-  // Dashboard tab body. The rotating carousel lives only INSIDE
-  // this tab (the welcome surface is the static chan mark + animation via
-  // EmptyPaneWelcome.svelte). The full carousel widget (rotation +
-  // play/pause + pagination + 3 slides: Workspace / Search /
-  // About) renders here.
-  //
+  // The dashboard stays mounted while hidden, preserving its selected slide.
   import { Check, RefreshCw, Settings2 } from "@lucide/svelte";
   import { reloadWindow } from "../api/desktop";
   import { chordFor } from "../state/shortcuts";
@@ -14,6 +9,8 @@
   } from "../state/store.svelte";
   import {
     DASHBOARD_SLOT_LABELS,
+    DASHBOARD_SLOT_ORDER,
+    dashboardSlotAvailable,
     type DashboardTab,
     dashboardSlotEnabled,
     firstEnabledSlot,
@@ -120,7 +117,7 @@
          checkbox row for each carousel slide (at least one stays on,
          enforced in toggleDashboardSlot); unchecked slots drop out of
          auto-rotation and the dots. A separator, then Flip and Reload. -->
-    {#each DASHBOARD_SLOT_LABELS as label, i}
+    {#each DASHBOARD_SLOT_ORDER.filter(dashboardSlotAvailable) as i}
       <li>
         <button
           role="menuitemcheckbox"
@@ -132,7 +129,7 @@
           {:else}
             <span class="slot-check-spacer" aria-hidden="true"></span>
           {/if}
-          <span class="menu-row-label">{label}</span>
+          <span class="menu-row-label">{DASHBOARD_SLOT_LABELS[i]}</span>
           <span class="menu-row-chord"></span>
         </button>
       </li>
