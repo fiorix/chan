@@ -46,6 +46,7 @@
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ImportContactsModal from "./components/ImportContactsModal.svelte";
   import Workspace from "./components/Workspace.svelte";
+  import PaneTreeOverlay from "./components/PaneTreeOverlay.svelte";
   import {
     applyInitialTheme,
     bootstrap,
@@ -1874,6 +1875,8 @@
 <WorkspaceWarningsModal />
 <SearchPanel />
 <CommandLauncher />
+<!-- Every pane of this window, its sides and their tabs. -->
+<PaneTreeOverlay />
 <SettingsOverlay />
 <ImportContactsModal
   open={importContactsPanel.open}

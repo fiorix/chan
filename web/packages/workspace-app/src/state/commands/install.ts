@@ -16,3 +16,4 @@ import "./terminal";
 import "./dashboard";
 import "./graph";
 import "./panes";
+import "./paneTree";

@@ -238,6 +238,21 @@ export const SHORTCUTS: readonly Shortcut[] = [
     group: "Panes",
     escapeTerminal: true,
   },
+  // The pane tree: every pane, side and tab of the window, filtered as the
+  // user types. Cmd+Shift+A on macOS and Ctrl+Shift+A elsewhere, the chord
+  // Chrome gives its tab search on each OS, so the reflex carries over. The
+  // page claims it before the browser does, and the Ctrl form sits with the
+  // Ctrl+Shift chords terminal emulators keep for themselves, so it escapes
+  // a focused shell. Dispatched by PaneTreeOverlay's own window listener, not
+  // the App keymap.
+  {
+    id: "app.pane.tree",
+    label: "Show panes and tabs",
+    web: "Mod+Shift+A",
+    native: "Mod+Shift+A",
+    group: "Panes",
+    escapeTerminal: true,
+  },
   // The explicit "close this window" action. Native chord: Cmd+Shift+W on
   // macOS, Ctrl+Alt+W on Linux / Windows (via `osChord`; Ctrl+Shift+W is
   // tab close there). There is no in-page web chord:
