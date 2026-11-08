@@ -214,10 +214,15 @@ assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
     'IDENTITY_URL=http://127.0.0.1:7004'
 refute_pattern "an internal identity client still targets the public listener" \
-    '^IDENTITY_URL=.*:7000/?$' \
+    '^(IDENTITY_URL|CHAN_ADMIN_IDENTITY_URL)=.*:7000/?$' \
     "$REPO"/gateway/crates/*/packaging/*.env \
     "$REPO/packaging/gateway/scripts/configure.sh" \
     "$REPO/packaging/gateway/scripts/dev/setup.sh"
+
+configure_env_body /etc/chan-gateway/admin.env | grep -Fqx 'CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004' \
+    || die "configure.sh does not write the internal CHAN_ADMIN_IDENTITY_URL into admin.env"
+assert_contains "$REPO/gateway/crates/admin/packaging/admin.env" \
+    "CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004"
 
 for scoped_env in \
     DEVSERVER_OPERATOR_ADMIN_TOKENS \

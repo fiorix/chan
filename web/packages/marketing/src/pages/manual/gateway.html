@@ -204,7 +204,6 @@ sudo nginx -t &amp;&amp; sudo systemctl reload nginx</b></code>
   <p>A new gateway lets nobody sign in: the <code>oauth_login</code> flag is off for every account until the operator grants it, and so is <code>share_workspaces</code>, which shows the Devservers tab. Grant both to your own email, the one your GitHub account uses. As root, load the admin credentials that the setup script wrote:</p>
   <div class="command-copy multiline" data-copy-block>
     <code><span>#</span><b data-copy-value>set -a; . /etc/chan-gateway/admin.env; set +a
-export CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004
 chan-gateway-admin user create --email you@example.com
 chan-gateway-admin flag grant oauth_login you@example.com
 chan-gateway-admin flag grant share_workspaces you@example.com</b></code>
