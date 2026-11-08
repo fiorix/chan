@@ -438,9 +438,9 @@ jobs:
 
   gateway-linux-packages:
     name: gateway packages (${{ matrix.target }})
-    # The gateway is a separate nested workspace and ships only the
-    # five server-side .deb packages, on linux amd64/arm64. Built on
-    # native runners per arch (no cross toolchain) like the CLI job.
+    # The gateway is a separate nested workspace and ships six .deb
+    # packages on linux amd64/arm64: five services and the admin CLI.
+    # Built on native runners per arch (no cross toolchain) like the CLI job.
     # Artifact name uses the release-* prefix so publish-release picks
     # it up via its existing download pattern + files glob.
     needs: context

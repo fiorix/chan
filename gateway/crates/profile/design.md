@@ -149,7 +149,7 @@ The service-tier update accepts only display name and avatar. Email is the ident
 
 ### Deterministic placeholder usernames and a lifetime rename cap
 
-A new user gets `u` plus the first twelve hex digits of its row id, so never-renamed accounts are trivially identifiable and cannot collide with real handles. Renames are capped at four for life. The compare-and-swap update and the no-op "rename to the current value" case run in one statement, and a follow-up select distinguishes "user not found" from "cap reached" only when the statement touched no row, which closes the window a concurrent rename could otherwise exploit. identity renames on first sign-in.
+A new user gets `u` plus the first twelve hex digits of its row id, so never-renamed accounts are trivially identifiable and cannot collide with real handles. The user can rename the placeholder from the account page; sign-in leaves it unchanged. Renames are capped at four for life. The compare-and-swap update and the no-op "rename to the current value" case run in one statement, and a follow-up select distinguishes "user not found" from "cap reached" only when the statement touched no row, which closes the window a concurrent rename could otherwise exploit.
 
 ### Devservers are first-class rows
 
