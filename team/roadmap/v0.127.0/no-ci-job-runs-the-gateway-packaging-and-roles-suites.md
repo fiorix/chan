@@ -1,6 +1,6 @@
 # No CI job runs the gateway packaging and roles suites
 
-Status: raised on 2026-11-07 from the v0.125.0 release's gateway role-policy work; accepted by the owner for v0.126.0 at the v0.125.0 cut; moved to v0.127.0 by the owner on 2026-11-08; not started.
+Status: raised on 2026-11-07 from the v0.125.0 release's gateway role-policy work; accepted by the owner for v0.126.0 at the v0.125.0 cut; moved to v0.127.0 by the owner on 2026-11-08; built on `ci/gateway-packaging-and-roles-suites` (`1ac2c320d`) and merged into the integration branch as `0a92d114e`. Acceptance 2 met on the build host; acceptance 1 is shown locally only and its workflow run is parked with the owner; acceptance 3's CI half waits on the first Gateway CI run at a pushed integration tip.
 
 ## What is there now
 
