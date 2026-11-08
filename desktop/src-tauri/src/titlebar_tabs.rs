@@ -78,6 +78,19 @@ struct PreferencePayload {
     on: bool,
 }
 
+/// The event a frameless window's page receives with the window's title
+/// while its Computers launcher shows, with a [`TitlePayload`]. A window with
+/// no frame has no title of its own to show, so the page draws it in the band.
+#[cfg(any(windows, test))]
+pub(crate) const TITLE_EVENT: &str = "titlebar-window-title";
+
+/// The title event's payload.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct TitlePayload {
+    title: String,
+}
+
 /// The tallest band a page may ask for, in CSS px. A band holds one row of
 /// tabs; the bound keeps a bad value from pushing the launcher panel off the
 /// window.
@@ -531,8 +544,44 @@ pub(crate) fn launcher_visibility_changed<R: tauri::Runtime>(window: &WebviewWin
             appkit::set_title_shown(window, shown);
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    send_title_under_launcher(window);
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = window;
+}
+
+/// The window's title changed. On Windows a window in the mode whose
+/// launcher shows has its page draw the title, so the page hears the new one;
+/// on macOS AppKit draws the title and follows the change itself.
+pub(crate) fn title_changed<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    #[cfg(windows)]
+    send_title_under_launcher(window);
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// Tell the page of a frameless window in the mode its title while the
+/// window's launcher shows. The page draws it only while the launcher covers
+/// it, so nothing is sent otherwise.
+#[cfg(any(windows, test))]
+fn send_title_under_launcher<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    let label = window.label();
+    let in_mode = window
+        .try_state::<Arc<AppState>>()
+        .is_some_and(|state| state.titlebar_windows.is_active(label));
+    if in_mode && crate::launcher_panel::panel_is_visible(label) {
+        send_title(window);
+    }
+}
+
+/// Send the window's own page its title.
+#[cfg(any(windows, test))]
+fn send_title<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    let title = window.title().unwrap_or_default();
+    let target = tauri::EventTarget::webview_window(window.label());
+    if let Err(e) = window.emit_to(target, TITLE_EVENT, TitlePayload { title }) {
+        tracing::warn!(window = window.label(), error = %e, "sending the window title failed");
+    }
 }
 
 /// A page load starts in `window`: a page from another origin than the one
@@ -1089,6 +1138,90 @@ mod tests {
             *seen.lock().unwrap(),
             vec![r#"{"on":true}"#.to_string(), r#"{"on":false}"#.to_string()],
             "the payload is the page's contract"
+        );
+    }
+
+    /// A mock app holding the desktop's state, with one window titled `title`.
+    fn titled_window(
+        title: &str,
+    ) -> (
+        tauri::App<tauri::test::MockRuntime>,
+        tauri::WebviewWindow<tauri::test::MockRuntime>,
+        tempfile::TempDir,
+    ) {
+        use tauri::Manager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(AppState::with_store(store)));
+        let window = tauri::WebviewWindowBuilder::new(
+            &app,
+            "lib-0a1b::w-1",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title(title)
+        .build()
+        .expect("mock webview window");
+        (app, window, dir)
+    }
+
+    fn heard_titles(app: &tauri::App<tauri::test::MockRuntime>) -> Arc<Mutex<Vec<String>>> {
+        use tauri::Listener;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        app.listen_any(TITLE_EVENT, move |event| {
+            sink.lock().unwrap().push(event.payload().to_string());
+        });
+        seen
+    }
+
+    #[test]
+    fn the_title_event_carries_the_windows_own_title() {
+        let (app, window, _dir) = titled_window("Work Window 2");
+        let seen = heard_titles(&app);
+        send_title(&window);
+        let expected = serde_json::json!({ "title": window.title().unwrap() }).to_string();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![expected],
+            "the payload is the page's contract"
+        );
+    }
+
+    #[test]
+    fn a_window_out_of_the_mode_is_sent_no_title() {
+        let (app, window, _dir) = titled_window("Work Window 2");
+        let seen = heard_titles(&app);
+        send_title_under_launcher(&window);
+        title_changed(&window);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    /// The watcher's retitle is the one place a window's title changes after
+    /// it is built, so the page under the launcher hears every rename.
+    #[test]
+    fn every_retitle_reaches_the_title_bar() {
+        const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
+        let wiring = production(WIRING_RS);
+        let (_, after) = wiring
+            .split_once("window.set_title(&desired)")
+            .expect("the watcher retitles windows");
+        let hook = after
+            .find("crate::titlebar_tabs::title_changed(&window);")
+            .expect("the retitle tells the title bar");
+        let next = after.find("applied_titles").unwrap_or(usize::MAX);
+        assert!(
+            hook < next,
+            "the title bar hears the rename once it is applied"
+        );
+        assert_eq!(
+            WIRING_RS.matches(".set_title(").count(),
+            1,
+            "no other retitle"
         );
     }
 

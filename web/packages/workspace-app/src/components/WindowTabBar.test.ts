@@ -43,6 +43,7 @@ afterEach(async () => {
   windowTabBar.chrome = NO_TITLEBAR_CHROME;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   windowTabBar.slot = null;
+  windowTabBar.title = "";
   delete (window as W).__TAURI_INTERNALS__;
   document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
   document.body.innerHTML = "";
@@ -127,6 +128,34 @@ describe("under the Computers launcher", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await tick();
   }
+
+  test("a window whose controls the bar draws shows its title at the left, clear of the controls, only while covered", async () => {
+    windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetRight: 138, drawControls: true };
+    windowTabBar.title = "Work Window 2";
+    const bar = await renderBar();
+    expect(bar.querySelector(".window-title"), "no title over the tabs").toBeNull();
+
+    await marked(true);
+    const title = bar.querySelector<HTMLElement>(".window-title");
+    expect(title?.textContent?.trim()).toBe("Work Window 2");
+    expect(title?.style.right).toBe("146px");
+    expect(title?.hasAttribute("data-tauri-drag-region")).toBe(false);
+
+    windowTabBar.title = "Work Window 2 [deploy]";
+    await tick();
+    expect(bar.querySelector(".window-title")?.textContent?.trim(), "a rename shows").toBe("Work Window 2 [deploy]");
+
+    await marked(false);
+    expect(bar.querySelector(".window-title")).toBeNull();
+  });
+
+  test("a window with native controls leaves its title to the desktop", async () => {
+    windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetLeft: 78, controlsCenterY: 14 };
+    windowTabBar.title = "Work Window 2";
+    const bar = await renderBar();
+    await marked(true);
+    expect(bar.querySelector(".window-title")).toBeNull();
+  });
 
   test("hides the tree button and the strip in place, closes the tree, and shows them again after", async () => {
     const bar = await renderBar();

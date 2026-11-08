@@ -17,6 +17,7 @@ import {
   TITLEBAR_TABS_COMMAND,
   TITLEBAR_TABS_PREFERENCE_EVENT,
   TITLEBAR_WINDOW_CONTROL_COMMAND,
+  TITLEBAR_WINDOW_TITLE_EVENT,
   WINDOW_TAB_BAR_MIN_HEIGHT,
   WINDOW_TAB_BAR_ROW_HEIGHT,
   WINDOW_TAB_BAR_STORAGE_KEY,
@@ -138,6 +139,7 @@ afterEach(() => {
   windowTabBar.on = false;
   windowTabBar.available = false;
   windowTabBar.preferred = false;
+  windowTabBar.title = "";
   windowTabBar.chrome = NO_TITLEBAR_CHROME;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   vi.useRealTimers();
@@ -471,8 +473,20 @@ describe("the preference in chan-desktop", () => {
     const run = start();
     await run.pending;
     expect(listeners.has(TITLEBAR_TABS_PREFERENCE_EVENT)).toBe(true);
+    expect(listeners.has(TITLEBAR_WINDOW_TITLE_EVENT)).toBe(true);
     run.stop();
     expect(listeners.has(TITLEBAR_TABS_PREFERENCE_EVENT)).toBe(false);
+    expect(listeners.has(TITLEBAR_WINDOW_TITLE_EVENT)).toBe(false);
+  });
+
+  test("the window title the desktop sends is kept for the bar, and anything else reads empty", async () => {
+    asDesktop([TITLEBAR_TABS_COMMAND], () => NO_TITLEBAR_CHROME);
+    await start().pending;
+    expect(windowTabBar.title).toBe("");
+    listeners.get(TITLEBAR_WINDOW_TITLE_EVENT)?.({ payload: { title: "Work Window 2 [deploy]" } });
+    expect(windowTabBar.title).toBe("Work Window 2 [deploy]");
+    listeners.get(TITLEBAR_WINDOW_TITLE_EVENT)?.({ payload: { title: 7 } });
+    expect(windowTabBar.title).toBe("");
   });
 });
 

@@ -59,6 +59,11 @@ export function titlebarTabsSupported(os: OS, vocabulary: ReadonlySet<string> | 
 /// Its payload is `{ on }`.
 export const TITLEBAR_TABS_PREFERENCE_EVENT = "titlebar-tabs-preference";
 
+/// The event chan-desktop sends a frameless window's page with the window's
+/// title while the window's Computers launcher shows, and again on a rename.
+/// Its payload is `{ title }`.
+export const TITLEBAR_WINDOW_TITLE_EVENT = "titlebar-window-title";
+
 /// The bar's height in CSS px where no window controls set it, in a browser:
 /// room for the strip's tab pills, side toggle and pane menu.
 export const WINDOW_TAB_BAR_MIN_HEIGHT = 38;
@@ -95,7 +100,9 @@ export const NO_TITLEBAR_CHROME: TitlebarChrome = {
 /// `preferred` the desktop's preference; `chrome` what the desktop reports
 /// about the title bar (all zero off the desktop); `height` the bar's height
 /// in CSS px; `slot` the bar element the active pane's strip moves into, null
-/// while no bar is mounted.
+/// while no bar is mounted; `title` the window's title the desktop last sent,
+/// which the bar draws while the Computers launcher covers a window whose
+/// controls it draws, empty until then.
 export const windowTabBar = $state<{
   on: boolean;
   available: boolean;
@@ -103,6 +110,7 @@ export const windowTabBar = $state<{
   chrome: TitlebarChrome;
   height: number;
   slot: HTMLElement | null;
+  title: string;
 }>({
   on: false,
   available: false,
@@ -110,6 +118,7 @@ export const windowTabBar = $state<{
   chrome: NO_TITLEBAR_CHROME,
   height: WINDOW_TAB_BAR_MIN_HEIGHT,
   slot: null,
+  title: "",
 });
 
 export function readWindowTabBarOverride(): WindowTabBarOverride {
@@ -218,6 +227,7 @@ export function startWindowTabBar(): WindowTabBarStart {
   windowTabBar.on = override === "on";
   windowTabBar.available = false;
   windowTabBar.preferred = false;
+  windowTabBar.title = "";
 
   // Off the desktop there is no title bar to ask about, and on Linux the
   // desktop's title bar commands change nothing, so only a forced bar is
@@ -232,7 +242,7 @@ export function startWindowTabBar(): WindowTabBarStart {
   let switches = 0;
   let target: boolean | null = null;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-  let unlisten: (() => void) | null = null;
+  const unlisten: Array<() => void> = [];
 
   function resetChrome(): void {
     windowTabBar.chrome = NO_TITLEBAR_CHROME;
@@ -307,11 +317,19 @@ export function startWindowTabBar(): WindowTabBarStart {
         prefer(payload?.on === true);
       },
     );
+    const offTitle = await onTauriEvent<{ title?: unknown } | null>(
+      TITLEBAR_WINDOW_TITLE_EVENT,
+      (payload) => {
+        if (!current()) return;
+        windowTabBar.title = typeof payload?.title === "string" ? payload.title : "";
+      },
+    );
     if (!current()) {
       off();
+      offTitle();
       return;
     }
-    unlisten = off;
+    unlisten.push(off, offTitle);
     try {
       const stored = await readTitlebarTabsPreference();
       if (!current()) return;
@@ -360,8 +378,7 @@ export function startWindowTabBar(): WindowTabBarStart {
       window.removeEventListener("resize", onResize);
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       resizeTimer = null;
-      unlisten?.();
-      unlisten = null;
+      for (const off of unlisten.splice(0)) off();
     },
   };
 }

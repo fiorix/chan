@@ -144,6 +144,15 @@
     {/if}
   </button>
   <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
+  {#if covered && chrome.drawControls && windowTabBar.title}
+    <!-- A frameless window has no title of its own, so while the launcher
+         covers the page the band names the window at its left, as Windows
+         places a title, clear of the window controls. It takes no press, so
+         the band stays the drag space. -->
+    <div class="window-title" style:right={`${chrome.insetRight + 8}px`} aria-hidden="true">
+      <span>{windowTabBar.title}</span>
+    </div>
+  {/if}
   {#if chrome.drawControls}
     <!-- The window's own controls, drawn in the look of Windows 11 caption
          buttons: out of the tab order, never a drag region, each a third of
@@ -280,6 +289,25 @@
   }
   .covered {
     visibility: hidden;
+  }
+  .window-title {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    padding-left: 12px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--text);
+    pointer-events: none;
+  }
+  .window-title span {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
   .tree-button {
     position: relative;
