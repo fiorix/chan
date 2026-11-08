@@ -167,6 +167,7 @@
   import { pruneEditorBuffers } from "./state/editorBuffer";
   import { pruneTerminalSnapshots } from "./terminal/snapshotCache";
   import { isTauriDesktop, reloadWindow } from "./api/desktop";
+  import { isMenubarWindowChord } from "./state/menubarChords";
   import { activeTransferCount } from "./state/transfers.svelte";
   import {
     currentOS,
@@ -826,6 +827,15 @@
       // the macOS window-switch chord, so the user can leave a disconnected
       // window for another (mac-relevant only; a harmless no-op elsewhere).
       if (e.code === "Backquote") return;
+      // chan-desktop's macOS menubar acts on the window or the app for these
+      // (Toggle Launcher, New Window, Hide, Minimize, Quit), and WKWebView
+      // hands the menubar only a key the page did not cancel. Keep the
+      // default so the Computers launcher opens over a reconnecting window;
+      // stop the key here so nothing in the app acts on it.
+      if (isMenubarWindowChord(e, isTauriDesktop() && currentOS() === "mac")) {
+        e.stopPropagation();
+        return;
+      }
       if (!e.ctrlKey && !e.metaKey && !e.altKey && (
         coverOwnsTextEntry(e.target) ||
         ((e.key === "Enter" || e.key === " ") && coverOwnsButton(e.target))
