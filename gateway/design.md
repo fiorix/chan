@@ -13,12 +13,12 @@ The gateway splits into an account and control plane and a proxy data plane:
 - **identity** answers the public browser origin `gw.{domain}`: OAuth sign-in, the account SPA, PAT lifecycle, the desktop API (authorize, roster, entry) and the share-landing routes. A separate internal listener serves PAT validation to the proxies and the scoped admin trees; it is never published.
 - **profile** is internal only and is the only crate that touches the sharing tables. It owns users, OAuth identities, devservers and grants, durable per-user and fleet policy, feature flags and the auth audit, all in Postgres.
 - **devserver-control** is a singleton, database-free control plane: the dynamic proxy directory, signed-lease admission, the aggregate tunnel and tenant-session inventory, and command routing. No tenant data crosses it.
-- **devserver-proxy** nodes are the data plane. Each node terminates outbound devserver tunnels on an h2c listener behind its TLS edge and serves gated tenant traffic on one public listener that dispatches the node apex and the tenant wildcard on the raw `Host` header. A proxy holds no database and no signing keys.
+- **devserver-proxy** nodes are the data plane. Each node terminates outbound devserver tunnels on an h2c listener behind its TLS edge and serves gated tenant traffic on one public listener that dispatches the configured tunnel-origin host (`proxy.{domain}`) and the node's tenant wildcard (`*.{proxy}.proxy.{domain}`) on the raw `Host` header. A proxy holds no database and no signing keys.
 - **wireguard-agent** runs on a proxy host that terminates kernel WireGuard in front of its devserver-proxy. It reads the host's active peers from identity's internal listener and applies them to one interface with `wg`, adding and removing only the peers it added itself. It holds no database, no listener and no signing keys.
 - **Postgres** backs identity and profile only.
 - **admin** is the operator CLI. It holds no state and calls the scoped admin trees of profile, identity and devserver-control.
 
-Every service listener binds loopback by default. A cleartext non-loopback bind requires an explicit assertion (`CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`) that an authenticated, encrypted overlay carries the traffic; a bearer authenticates a caller but does not make cleartext private. TLS edges front exactly two surfaces: the identity public origin and each proxy node (its tunnel apex and its tenant wildcard). Database migrations are a dedicated step (`CHAN_GATEWAY_MIGRATIONS=only`, run with the owner credential); every runtime service boots with `=external` and never applies DDL.
+Every service listener binds loopback by default. A cleartext non-loopback bind requires an explicit assertion (`CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`) that an authenticated, encrypted overlay carries the traffic; a bearer authenticates a caller but does not make cleartext private. TLS edges front exactly two surfaces: the identity public origin and each proxy node (the namespace tunnel ingress and its own tenant wildcard). Database migrations are a dedicated step (`CHAN_GATEWAY_MIGRATIONS=only`, run with the owner credential); every runtime service boots with `=external` and never applies DDL.
 
 ```mermaid
 flowchart TB
@@ -36,7 +36,7 @@ flowchart TB
     end
 
     subgraph fleet["Gateway: proxy data plane"]
-        EDGE2["node TLS edge:<br/>{proxy}.proxy.{domain} + *.{proxy}.proxy.{domain}"]
+        EDGE2["node TLS edge:<br/>proxy.{domain} + *.{proxy}.proxy.{domain}"]
         P1["devserver-proxy p1"]
         PN["devserver-proxy pN"]
         WGA["wireguard-agent<br/>kernel WireGuard peers"]
@@ -98,7 +98,7 @@ sequenceDiagram
 
 The ordered gates:
 
-1. **Tunnel dial.** The devserver opens TLS with ALPN h2 to the node's tunnel apex and sends one stream, `POST /v1/tunnel`, with the PAT as bearer.
+1. **Tunnel dial.** The devserver opens TLS with ALPN h2 to the configured tunnel ingress, `proxy.{domain}`, and sends one stream, `POST /v1/tunnel`, with the PAT as bearer.
 2. **PAT validation.** Before any success, the proxy asks identity's internal listener, throttled per token fingerprint. Identity checks the token digest and the durable policy (fleet admissions, per-user enabled flag, suspension), then returns the owner, the devserver id, the scopes and a short-lived Ed25519 admission lease. The lease binds owner, devserver id, registration id and proxy id and carries the signed per-owner connected-devserver limit.
 3. **Admission.** The proxy admits nothing unless its control session is at `FleetReady`. devserver-control re-verifies the lease signature and binding, then decides `Admit`, `AtCapacity`, `Stale` or `ControlWarming`. The capacity rule is the smaller of the controller's deployment ceiling and the signed per-user limit. Refusals reach the client as `HelloAck::Refused` with a machine-readable code.
 4. **Registration and readiness.** On `Admit` the client sees `HelloAck::Ok` with its tenant prefix, the registration enters the proxy registry keyed by `(owner, devserver id)`, and the tunnel becomes a yamux transport. The proxy publishes the row to devserver-control, so the fleet view and the entry path agree on liveness.

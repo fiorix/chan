@@ -20,18 +20,19 @@
 #   chan-devserver-provision [--user NAME] [--token chan_pat_...] [--tunnel-url URL]
 #
 # Flags win over env; when stdin is a terminal, `dialog` prompts for the token
-# if it is still unset (reach this via `sdme join`). Non-interactively (e.g.
-# `sdme exec`), every required value must arrive by flag or env, or the script
-# errors instead of hanging.
+# and tunnel URL if either is unset (reach this via `sdme join`). Without a
+# terminal (e.g. `sdme exec`), every required value must arrive by flag or env,
+# or the script errors instead of hanging.
 #
 #   --user NAME        Linux user to own the service   (env CHAN_DEVSERVER_USER,
 #                      default: devserver)
-#   --token TOKEN      chan_pat_* PAT from gw.chan.app  (env CHAN_TUNNEL_TOKEN)
-#   --tunnel-url URL   override the gateway endpoint     (env CHAN_TUNNEL_URL;
-#                      default: chan's built-in https://proxy.chan.app/v1/tunnel)
+#   --token TOKEN      chan_pat_* PAT from your gateway, gw.{domain}
+#                      (env CHAN_TUNNEL_TOKEN)
+#   --tunnel-url URL   required gateway endpoint (env CHAN_TUNNEL_URL;
+#                      no default)
 #
 # The published host is resolved backend-side from the token, so it is keyed by
-# the token owner's handle -- {handle}--{disc}.{proxy}.proxy.chan.app --
+# the token owner's handle -- {handle}--{disc}.{proxy}.proxy.{domain} --
 # independent of --user.
 
 set -euo pipefail
@@ -75,10 +76,17 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (it creates a user and enables linger)"
 
-# dialog fills the token if it is still unset, but only with a real terminal.
+# Unset credentials and endpoint can be prompted only with a real terminal.
 if [ -z "$TOKEN" ] && [ -t 0 ] && command -v dialog >/dev/null 2>&1; then
   TOKEN="$(dialog --stdout --insecure --passwordbox \
-    "chan_pat_ tunnel token for user '$USER_NAME' (from gw.chan.app):" 8 64)" \
+    "chan_pat_ tunnel token for user '$USER_NAME' (from your gateway):" 8 64)" \
+    || die "cancelled"
+  clear 2>/dev/null || true
+fi
+
+if [ -z "$TUNNEL_URL" ] && [ -t 0 ] && command -v dialog >/dev/null 2>&1; then
+  TUNNEL_URL="$(dialog --stdout --inputbox \
+    "Tunnel URL from your gateway (e.g. https://proxy.example.com/v1/tunnel):" 8 72)" \
     || die "cancelled"
   clear 2>/dev/null || true
 fi
@@ -90,6 +98,8 @@ fi
 [[ "$USER_NAME" != root ]] || die "root cannot own a chan devserver"
 [[ "$TOKEN" =~ ^chan_pat_[A-Za-z0-9_-]{43}$ ]] \
   || die "token does not have the chan_pat_ base64url shape"
+
+[ -n "$TUNNEL_URL" ] || die "no --tunnel-url / CHAN_TUNNEL_URL (and no terminal for a dialog prompt)"
 
 # A grant reaches an interactive shell as this user. Pin the container to that
 # one trust domain before creating anything the new user could influence.
@@ -222,19 +232,9 @@ install -d -o "$USER_NAME" -g "$USER_NAME" -m 755 \
   "$HOME_DIR/.config" "$HOME_DIR/.config/systemd"
 install -d -o "$USER_NAME" -g "$USER_NAME" -m 700 "$UNIT_DIR"
 
-# The endpoint rides the environment as well as the ExecStart flag, matching
-# what chan's own unit renderer writes: the flag is what this service dials,
-# the variable is what the terminals it spawns inherit, so `chan devserver`
-# verbs typed inside the workspace resolve the same gateway instead of asking
-# for an endpoint. Absent an endpoint neither appears, so the line carries its
-# own trailing newline and expands to nothing at all.
-EXEC="$CHAN_BIN devserver run"
-TUNNEL_URL_ENV=""
-if [ -n "$TUNNEL_URL" ]; then
-  EXEC="$EXEC --tunnel-url=$TUNNEL_URL"
-  TUNNEL_URL_ENV="Environment=\"CHAN_TUNNEL_URL=$TUNNEL_URL\"
-"
-fi
+# The required endpoint rides both the dial flag and the environment, so
+# terminals inherit the gateway for their devserver lifecycle commands.
+EXEC="$CHAN_BIN devserver run --tunnel-url=$TUNNEL_URL"
 
 ( umask 077; cat > "$UNIT" <<EOF
 [Unit]
@@ -247,7 +247,8 @@ NotifyAccess=main
 FileDescriptorStoreMax=1024
 KillMode=process
 Environment="CHAN_TUNNEL_TOKEN=$TOKEN"
-${TUNNEL_URL_ENV}ExecStart=$EXEC
+Environment="CHAN_TUNNEL_URL=$TUNNEL_URL"
+ExecStart=$EXEC
 TimeoutStartSec=10min
 Restart=on-failure
 WatchdogSec=30
@@ -272,5 +273,5 @@ printf '  unit:  %s\n' "$UNIT"
 printf '  check: su - %s      # interactive login shell has the session env, then:\n' "$USER_NAME"
 printf '           systemctl --user status chan-devserver\n'
 printf '           journalctl --user -u chan-devserver -f\n'
-printf '\nMounted workspaces publish at https://<handle>--<disc>.<proxy>.proxy.chan.app/<workspace>/\n'
-printf '(<handle> is resolved from the token, not the Linux user name).\n'
+printf '\nMounted workspaces publish at https://{handle}--{disc}.{proxy}.proxy.{domain}/{workspace}/\n'
+printf '({handle} is resolved from the token, not the Linux user name).\n'

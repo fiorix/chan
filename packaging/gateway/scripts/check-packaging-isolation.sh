@@ -55,6 +55,14 @@ require_fixed() {
     esac
 }
 
+# Setup examples must not configure an operator's host for another deployment.
+refute_pattern "gateway setup names a maintainer deployment" \
+    '(gw|proxy)\.chan\.app' \
+    "$REPO/packaging/gateway/scripts/configure.sh" \
+    "$REPO/packaging/gateway/packaging/domain.env" \
+    "$REPO/packaging/sdme/chan-devserver-provision.sh" \
+    "$REPO/packaging/sdme/chan-devserver.sdme"
+
 services=(profile identity devserver-control devserver-proxy wireguard-agent)
 for service in "${services[@]}"; do
     user="chan-gateway-$service"
