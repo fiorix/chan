@@ -390,6 +390,14 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    /// The bound on a test body and on each wait in it for a release the
+    /// test does not cause itself. A green run ends every such wait by the
+    /// order of its events, long before this; the client that could hold
+    /// the workspace stays connected throughout, so a session that keeps
+    /// the workspace keeps it until this runs out, red and not hung. How
+    /// long the release takes on a loaded host is not measured.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
     fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
         let dir = tempfile::tempdir()?;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -482,7 +490,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
@@ -557,8 +565,11 @@ mod tests {
             // owner holds the workspace (the tasks `build_app` started wind
             // down on this runtime, and one can take a reference after the
             // route's count), and a client retries that answer. The gate
-            // stays installed until an attempt reaches the close.
-            const SWAP_RETRIES: usize = 3;
+            // stays installed until an attempt reaches the close. How many
+            // busy answers come first is how long those tasks take to wind
+            // down, which a loaded host stretches; only a swap that never
+            // reaches its close, busy for half the hang guard, is red.
+            let retrying_until = tokio::time::Instant::now() + HANG_GUARD / 2;
             let mut retries = 0;
             let swapping = loop {
                 let mut swapping = tokio::spawn(app.clone().oneshot(request()));
@@ -571,7 +582,8 @@ mod tests {
                     answer = &mut swapping => {
                         let status = answer.unwrap().unwrap().status();
                         assert!(
-                            status == StatusCode::CONFLICT && retries < SWAP_RETRIES,
+                            status == StatusCode::CONFLICT
+                                && tokio::time::Instant::now() < retrying_until,
                             "the swap answered {status} before its session close after {retries} retries"
                         );
                         retries += 1;
@@ -628,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_idle_initialized_session_does_not_pin_the_workspace_cell() {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
@@ -655,7 +667,9 @@ mod tests {
             read.read_line(&mut reply).await.unwrap();
             assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
             drop(cell.lock().unwrap().take());
-            tokio::time::timeout(Duration::from_secs(1), async {
+            // The client stays connected and idle until after this wait, so
+            // a session that pins the workspace pins it past the guard.
+            tokio::time::timeout(HANG_GUARD / 2, async {
                 while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
                     tokio::task::yield_now().await;
                 }
@@ -667,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_unmount_releases_a_silent_clients_workspace() {
-        tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
@@ -682,7 +696,10 @@ mod tests {
                 .unwrap();
             handle.accepted.acquire().await.unwrap().forget();
             drop(handle);
-            let released = tokio::time::timeout(Duration::from_secs(1), async {
+            // The silent client stays connected until the test ends, so a
+            // session the unmount does not stop keeps the workspace past
+            // the guard.
+            let released = tokio::time::timeout(HANG_GUARD / 2, async {
                 while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
                     tokio::task::yield_now().await;
                 }
@@ -704,7 +721,7 @@ mod tests {
     // entry and drops its workspace.
     #[tokio::test]
     async fn mcp_unmount_stops_a_running_tool_body_inside_its_walk() {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
@@ -747,7 +764,9 @@ mod tests {
                 .unwrap();
             let cancel = hold.entered().await;
             drop(handle);
-            tokio::time::timeout(Duration::from_secs(1), async {
+            // The body stays held inside its walk until the token is seen,
+            // so the cancel has to reach it while it runs.
+            tokio::time::timeout(HANG_GUARD / 3, async {
                 while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     tokio::task::yield_now().await;
                 }
@@ -762,7 +781,7 @@ mod tests {
                 "the stopped body kept its workspace"
             );
             drop(workspace);
-            tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::timeout(HANG_GUARD / 3, async {
                 while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
                     tokio::task::yield_now().await;
                 }
@@ -824,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_unmount_closes_hosted_sessions_before_waiting_for_the_flock() {
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
@@ -835,6 +854,14 @@ mod tests {
                 library,
                 Arc::new(SocketObservingBuilder(sockets)),
             ));
+            // A close whose teardown is still held at its budget answers
+            // that the workspace is still releasing, which is how a close
+            // that waits on the MCP client's flock reads here: that client
+            // stays connected through the close. The budget is set past any
+            // teardown's cost on a loaded host, so only that wait reaches it.
+            // The ordering in the name is read as "completes inside the
+            // release budget with the client connected".
+            host.test_set_shutdown_release_budget(HANG_GUARD / 4);
             let serve = chan_library::ServeConfig {
                 addr: ([127, 0, 0, 1], 0).into(),
                 prefix: "/workspace".into(),
@@ -878,22 +905,16 @@ mod tests {
                     assert!(reply.get("result").is_some(), "{reply}");
                 }
                 drop(workspace);
-                // Allow loaded watcher backends time to stop, while staying
-                // below the five-second workspace-release fallback window.
                 let close_started = std::time::Instant::now();
-                let closed = tokio::time::timeout(
-                    Duration::from_secs(4),
-                    host.close_workspace_for_root(root.path(), false),
-                )
-                .await;
+                let closed = host.close_workspace_for_root(root.path(), false).await;
                 eprintln!(
                     "mcp_hosted_close initialized={initialized} elapsed_us={}",
                     close_started.elapsed().as_micros()
                 );
-                assert!(closed
-                    .expect("close waited for an MCP client's flock")
-                    .unwrap()
-                    .completed());
+                assert!(
+                    matches!(&closed, Ok(outcome) if outcome.completed()),
+                    "close waited for an MCP client's flock past its release budget: {closed:?}"
+                );
                 assert_eq!(weak.strong_count(), 0);
                 assert!(chan_workspace::lock::is_free(&lock_dir));
                 host.open_registered_workspace(root.path(), serve.clone())
