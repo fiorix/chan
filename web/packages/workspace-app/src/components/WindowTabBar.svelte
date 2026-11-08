@@ -8,10 +8,13 @@
   // controls. The band is opaque: terminal background opacity cuts its holes
   // behind terminal panes only. While the window's Computers launcher is
   // shown over the page, the band holds neither the tree button nor the
-  // strip: they belong to the covered window.
+  // strip: they belong to the covered window. On Windows it holds the
+  // launcher menubar's menus there instead, since the frameless window wears
+  // no menubar, and the window's title after them.
 
   import {
     isTauriDesktop,
+    titlebarMenuPopup,
     titlebarWindowControl,
     type TitlebarWindowAction,
   } from "../api/desktop";
@@ -69,6 +72,45 @@
   $effect(() => {
     if (covered) closePaneTree();
   });
+
+  // What the covered band holds: the menus the desktop lists, which only a
+  // window wearing no menubar gets, and the title of a frameless window.
+  const menus = $derived(covered ? chrome.menus : []);
+  const titleShown = $derived(covered && chrome.drawControls && windowTabBar.title !== "");
+
+  // The menu whose popup is up. The desktop answers once the menu has
+  // closed, so its button stays pressed until then and another press waits.
+  let openMenu = $state<string | null>(null);
+
+  function popUpMenu(id: string, button: HTMLElement): void {
+    if (openMenu !== null) return;
+    openMenu = id;
+    const at = button.getBoundingClientRect();
+    titlebarMenuPopup(id, at.left, at.bottom)
+      .catch((err) => {
+        console.warn(`[chan] titlebar_menu_popup ${id} failed`, err);
+      })
+      .finally(() => {
+        if (openMenu === id) openMenu = null;
+      });
+  }
+
+  // A menu opens on the press, as a Windows menubar's does, under its
+  // button. Like a window control's, the press keeps the page's focus where
+  // it is and goes no further than the button, so it neither drags the
+  // window nor reaches the bar. The launcher holds the keyboard, and the
+  // desktop hands it back to the launcher before the menu opens.
+  function opensMenu(id: string): (node: HTMLElement) => () => void {
+    return (node) => {
+      const press = (e: MouseEvent): void => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.button === 0) popUpMenu(id, node);
+      };
+      node.addEventListener("mousedown", press);
+      return () => node.removeEventListener("mousedown", press);
+    };
+  }
 
   // The miniature's drawing box in SVG units, and the gap kept between two
   // panes so each reads as its own tile.
@@ -144,13 +186,37 @@
     {/if}
   </button>
   <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
-  {#if covered && chrome.drawControls && windowTabBar.title}
-    <!-- A frameless window has no title of its own, so while the launcher
-         covers the page the band names the window at its left, as Windows
-         places a title, clear of the window controls. It takes no press, so
+  {#if menus.length > 0 || titleShown}
+    <!-- While the launcher covers the page the band belongs to the window.
+         A frameless window has no menubar and no title of its own, so the
+         band draws the launcher menubar's menus at its left, then names the
+         window, as Windows places a title, all clear of the window controls.
+         Only the menu buttons take a press, and none drags, so the rest of
          the band stays the drag space. -->
-    <div class="window-title" style:right={`${chrome.insetRight + 8}px`} aria-hidden="true">
-      <span>{windowTabBar.title}</span>
+    <div class="covered-band" style:right={`${chrome.insetRight + 8}px`}>
+      {#if menus.length > 0}
+        <div class="window-menus">
+          {#each menus as menu (menu.id)}
+            <button
+              type="button"
+              class="window-menu"
+              class:open={openMenu === menu.id}
+              data-menu={menu.id}
+              tabindex="-1"
+              aria-haspopup="menu"
+              aria-expanded={openMenu === menu.id}
+              {@attach opensMenu(menu.id)}
+            >
+              {menu.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if titleShown}
+        <div class="window-title" aria-hidden="true">
+          <span>{windowTabBar.title}</span>
+        </div>
+      {/if}
     </div>
   {/if}
   {#if chrome.drawControls}
@@ -290,18 +356,55 @@
   .covered {
     visibility: hidden;
   }
-  .window-title {
+  .covered-band {
     position: absolute;
     top: 0;
     bottom: 0;
     left: 0;
     display: flex;
     align-items: center;
+    min-width: 0;
+    pointer-events: none;
+  }
+  /* Windows 11 menubar items: text buttons, clear at rest, a wash under the
+     pointer and a lighter one while pressed or while their menu is open. */
+  .window-menus {
+    flex: none;
+    display: flex;
+    align-items: center;
+    padding-left: 4px;
+  }
+  .window-menu {
+    flex: none;
+    height: 28px;
+    margin: 0;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 28px;
+    white-space: nowrap;
+    cursor: default;
+    pointer-events: auto;
+  }
+  .window-menu:hover {
+    background: var(--hover-bg);
+  }
+  .window-menu:active,
+  .window-menu.open {
+    background: color-mix(in srgb, var(--hover-bg) 70%, transparent);
+  }
+  .window-title {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
     padding-left: 12px;
     min-width: 0;
     font-size: 12px;
     color: var(--text);
-    pointer-events: none;
   }
   .window-title span {
     min-width: 0;

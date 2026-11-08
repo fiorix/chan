@@ -535,8 +535,11 @@ export async function setWindowFullscreen(on: boolean): Promise<void> {
 /// maximize or restore, and close buttons in `insetRight` (Windows, where the
 /// window has no frame in the mode; macOS draws its own traffic lights), and
 /// `maximized` whether the window is maximized, which picks the maximize or
-/// restore button. Field names are the desktop-side contract (serde
-/// camelCase).
+/// restore button. `menus` lists, in order, the menus the bar draws at its
+/// left while the window's Computers launcher covers the page: the launcher
+/// menubar's File, Edit and View on Windows in the mode, where the window
+/// wears no menubar, and none elsewhere. Field names are the desktop-side
+/// contract (serde camelCase).
 export type TitlebarChrome = {
   active: boolean;
   insetLeft: number;
@@ -545,6 +548,14 @@ export type TitlebarChrome = {
   fullscreen: boolean;
   drawControls: boolean;
   maximized: boolean;
+  menus: TitlebarMenu[];
+};
+
+/// A menu the window tab bar draws in place of a menubar: the id the desktop
+/// pops it up by and the title the bar shows.
+export type TitlebarMenu = {
+  id: string;
+  label: string;
 };
 
 /// What a window control drawn by the page asks of its window.
@@ -575,6 +586,16 @@ export async function readTitlebarChrome(): Promise<TitlebarChrome> {
 export async function titlebarWindowControl(action: TitlebarWindowAction): Promise<void> {
   if (!isTauriDesktop()) throw new Error("not running under Tauri");
   await tauriInvoke("titlebar_window_control", { action });
+}
+
+/// Pop up the title bar menu `menu`, an id the chrome's `menus` lists, with
+/// its top-left corner at `x`, `y` in this page's CSS px. The menu is the
+/// launcher menubar's own, so a pick in it does what the menubar item does.
+/// Settles once the menu has closed. Throws off-desktop and on IPC/ACL
+/// refusal.
+export async function titlebarMenuPopup(menu: string, x: number, y: number): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("titlebar_menu_popup", { menu, x, y });
 }
 
 /// Whether chan-desktop's windows put their tabs in the title bar: the

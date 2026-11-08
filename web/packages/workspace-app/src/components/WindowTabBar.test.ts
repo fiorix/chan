@@ -8,7 +8,10 @@
 // space. Where the desktop asks for it the right inset holds the window's
 // minimize, maximize or restore, and close buttons, which drive the window
 // and never drag it. While the window's Computers launcher covers the page,
-// the band shows neither the tree button nor the strip.
+// the band shows neither the tree button nor the strip, and where the
+// desktop lists menus (Windows, whose frameless window wears no menubar) it
+// draws them at its left, each popping up the desktop's menu under it, with
+// the window's title after them.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -138,8 +141,9 @@ describe("under the Computers launcher", () => {
     await marked(true);
     const title = bar.querySelector<HTMLElement>(".window-title");
     expect(title?.textContent?.trim()).toBe("Work Window 2");
-    expect(title?.style.right).toBe("146px");
+    expect(bar.querySelector<HTMLElement>(".covered-band")?.style.right).toBe("146px");
     expect(title?.hasAttribute("data-tauri-drag-region")).toBe(false);
+    expect(bar.querySelector(".window-menu"), "a desktop that lists no menus").toBeNull();
 
     windowTabBar.title = "Work Window 2 [deploy]";
     await tick();
@@ -155,6 +159,170 @@ describe("under the Computers launcher", () => {
     const bar = await renderBar();
     await marked(true);
     expect(bar.querySelector(".window-title")).toBeNull();
+  });
+
+  describe("the menus a window without a menubar draws", () => {
+    const MENUS = [
+      { id: "chan-file-submenu", label: "File" },
+      { id: "chan-edit-submenu", label: "Edit" },
+      { id: "chan-view-submenu", label: "View" },
+    ];
+    /// What a Windows desktop reports in the mode.
+    const WINDOWS_CHROME = { ...NO_TITLEBAR_CHROME, active: true, insetRight: 138, drawControls: true, menus: MENUS };
+
+    const invokes: Array<{ cmd: string; args?: unknown }> = [];
+    let settle: Array<(error?: Error) => void> = [];
+
+    /// A chan-desktop webview whose popups stay up until the test settles
+    /// them, as the desktop answers only once the menu has closed.
+    function asDesktop(): void {
+      invokes.length = 0;
+      settle = [];
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        configurable: true,
+        value: {
+          invoke: (cmd: string, args?: unknown) => {
+            invokes.push({ cmd, args });
+            return new Promise((resolve, reject) => {
+              settle.push((error) => (error ? reject(error) : resolve(null)));
+            });
+          },
+        },
+      });
+    }
+
+    function menuButtons(bar: HTMLElement): HTMLButtonElement[] {
+      return [...bar.querySelectorAll<HTMLButtonElement>(".window-menu")];
+    }
+
+    function press(target: Element, button = 0): MouseEvent {
+      const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button, detail: 1 });
+      target.dispatchEvent(event);
+      return event;
+    }
+
+    /// Place `button` in the page as the bar would lay it out.
+    function at(button: HTMLElement, left: number, bottom: number): void {
+      vi.spyOn(button, "getBoundingClientRect").mockReturnValue(
+        new DOMRect(left, bottom - 28, 40, 28),
+      );
+    }
+
+    test("are drawn only while covered, in the desktop's order and words", async () => {
+      windowTabBar.chrome = WINDOWS_CHROME;
+      const bar = await renderBar();
+      expect(menuButtons(bar), "the tabs own the band").toEqual([]);
+
+      await marked(true);
+      expect(menuButtons(bar).map((b) => b.textContent?.trim())).toEqual(["File", "Edit", "View"]);
+      expect(menuButtons(bar).map((b) => b.dataset.menu)).toEqual(MENUS.map((m) => m.id));
+      for (const button of menuButtons(bar)) {
+        expect(button.tabIndex, "the launcher holds the keyboard").toBe(-1);
+        expect(button.getAttribute("aria-haspopup")).toBe("menu");
+        expect(button.getAttribute("aria-expanded")).toBe("false");
+      }
+
+      windowTabBar.chrome = { ...WINDOWS_CHROME, menus: [{ id: "chan-edit-submenu", label: "Bearbeiten" }] };
+      flushSync();
+      expect(menuButtons(bar).map((b) => b.textContent?.trim()), "the labels are the desktop's").toEqual([
+        "Bearbeiten",
+      ]);
+
+      windowTabBar.chrome = { ...WINDOWS_CHROME, menus: [] };
+      flushSync();
+      expect(menuButtons(bar), "a window wearing a menubar lists none").toEqual([]);
+
+      windowTabBar.chrome = WINDOWS_CHROME;
+      await marked(false);
+      expect(menuButtons(bar)).toEqual([]);
+    });
+
+    test("come before the window's title, all clear of the window controls", async () => {
+      windowTabBar.chrome = WINDOWS_CHROME;
+      windowTabBar.title = "Work Window 2";
+      const bar = await renderBar();
+      await marked(true);
+      const band = bar.querySelector<HTMLElement>(".covered-band")!;
+      expect(band.style.right).toBe("146px");
+      const title = band.querySelector<HTMLElement>(".window-title")!;
+      expect(title.textContent?.trim()).toBe("Work Window 2");
+      for (const button of menuButtons(bar)) {
+        expect(button.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      }
+      expect(band.querySelector(".window-controls"), "the controls are not in the band").toBeNull();
+    });
+
+    test("a press pops the desktop's menu up under its button, held pressed until the menu closes", async () => {
+      asDesktop();
+      windowTabBar.chrome = WINDOWS_CHROME;
+      const bar = await renderBar();
+      await marked(true);
+      const [file, edit] = menuButtons(bar);
+      at(edit!, 52, 34);
+      at(file!, 10, 34);
+
+      press(edit!);
+      await vi.waitFor(() => expect(invokes).toHaveLength(1));
+      expect(invokes[0]).toEqual({ cmd: "titlebar_menu_popup", args: { menu: "chan-edit-submenu", x: 52, y: 34 } });
+      flushSync();
+      expect(edit!.classList.contains("open")).toBe(true);
+      expect(edit!.getAttribute("aria-expanded")).toBe("true");
+
+      press(file!);
+      await tick();
+      expect(invokes, "one menu at a time").toHaveLength(1);
+
+      settle[0]!();
+      await vi.waitFor(() => expect(edit!.classList.contains("open")).toBe(false));
+      expect(edit!.getAttribute("aria-expanded")).toBe("false");
+
+      press(file!);
+      await vi.waitFor(() => expect(invokes).toHaveLength(2));
+      expect(invokes[1]).toEqual({ cmd: "titlebar_menu_popup", args: { menu: "chan-file-submenu", x: 10, y: 34 } });
+    });
+
+    test("a refused popup is logged and lets the button go", async () => {
+      asDesktop();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      windowTabBar.chrome = WINDOWS_CHROME;
+      const bar = await renderBar();
+      await marked(true);
+      const view = menuButtons(bar)[2]!;
+      press(view);
+      await vi.waitFor(() => expect(settle).toHaveLength(1));
+      settle[0]!(new Error("Command titlebar_menu_popup not allowed by ACL"));
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      expect(String(warn.mock.calls[0]?.[1])).toContain("not allowed by ACL");
+      await vi.waitFor(() => expect(view.classList.contains("open")).toBe(false));
+    });
+
+    test("never drag the window, keep the focus, and open on the primary button only", async () => {
+      asDesktop();
+      windowTabBar.chrome = WINDOWS_CHROME;
+      windowTabBar.title = "Work Window 2";
+      const bar = await renderBar();
+      await marked(true);
+      expect(bar.getAttribute("data-tauri-drag-region"), "the band still drags").toBe("");
+      const band = bar.querySelector<HTMLElement>(".covered-band")!;
+      expect(band.hasAttribute("data-tauri-drag-region")).toBe(false);
+      expect(band.querySelector("[data-tauri-drag-region]")).toBeNull();
+
+      const seen: string[] = [];
+      const record = (e: Event) => seen.push(e.type);
+      bar.addEventListener("mousedown", record);
+      document.addEventListener("mousedown", record);
+      try {
+        for (const button of menuButtons(bar)) {
+          expect(press(button, 2).defaultPrevented, "the press keeps the focus where it is").toBe(true);
+        }
+      } finally {
+        bar.removeEventListener("mousedown", record);
+        document.removeEventListener("mousedown", record);
+      }
+      expect(seen, "neither the bar nor the document's drag handler hears it").toEqual([]);
+      await tick();
+      expect(invokes, "a secondary press opens nothing").toEqual([]);
+    });
   });
 
   test("hides the tree button and the strip in place, closes the tree, and shows them again after", async () => {

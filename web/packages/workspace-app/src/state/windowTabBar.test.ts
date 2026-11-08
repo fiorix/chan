@@ -7,7 +7,8 @@
 // control command the bar's caption buttons need. In the desktop the page
 // opts in with its band height, switches live when the desktop announces a
 // new preference, follows the chrome on resize once the burst settles, and
-// grows the band to centre its row on the window controls.
+// grows the band to centre its row on the window controls. On Windows the
+// chrome also lists the menus the bar draws under the Computers launcher.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -41,13 +42,22 @@ const LINUX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15";
 const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0.0.0";
 const WINDOWS_COMMANDS = [TITLEBAR_TABS_COMMAND, TITLEBAR_WINDOW_CONTROL_COMMAND];
 
+/// The launcher menubar's menus a Windows desktop lists in the mode.
+const WINDOWS_MENUS = [
+  { id: "chan-file-submenu", label: "File" },
+  { id: "chan-edit-submenu", label: "Edit" },
+  { id: "chan-view-submenu", label: "View" },
+];
+
 /// What a Windows desktop answers in the mode: no inset at the left, the
-/// three caption buttons' room at the right, and the page draws them.
+/// three caption buttons' room at the right, and the page draws them, and
+/// the menus it draws under the Computers launcher.
 const windowsChrome = (partial: Partial<typeof NO_TITLEBAR_CHROME> = {}) => ({
   ...NO_TITLEBAR_CHROME,
   active: true,
   insetRight: 138,
   drawControls: true,
+  menus: WINDOWS_MENUS,
   ...partial,
 });
 
@@ -325,6 +335,7 @@ describe("the boot in chan-desktop", () => {
     asDesktop(WINDOWS_COMMANDS, () => answer);
     await start().pending;
     expect(windowTabBar.chrome.maximized).toBe(false);
+    expect(windowTabBar.chrome.menus, "the desktop's menus reach the bar").toEqual(WINDOWS_MENUS);
     vi.useFakeTimers();
     answer = windowsChrome({ maximized: true });
     window.dispatchEvent(new Event("resize"));
@@ -336,6 +347,7 @@ describe("the boot in chan-desktop", () => {
     await vi.advanceTimersByTimeAsync(60);
     expect(windowTabBar.chrome.drawControls, "fullscreen draws no controls").toBe(false);
     expect(windowTabBar.chrome.insetRight).toBe(0);
+    expect(windowTabBar.chrome.menus, "a fullscreen window wears no menubar either").toEqual(WINDOWS_MENUS);
   });
 
   test("a forced 0 turns the overlay title bar off", async () => {
@@ -549,6 +561,33 @@ describe("the geometry", () => {
       active: true,
       insetRight: 138,
     });
+  });
+
+  test("the menus are the desktop's, in its order, and only well-formed ones", () => {
+    expect(NO_TITLEBAR_CHROME.menus).toEqual([]);
+    expect(normalizeTitlebarChrome({ active: true, menus: WINDOWS_MENUS }).menus).toEqual(WINDOWS_MENUS);
+    expect(
+      normalizeTitlebarChrome({
+        menus: [
+          null,
+          7,
+          "File",
+          { id: "chan-file-submenu" },
+          { label: "Edit" },
+          { id: "", label: "Edit" },
+          { id: "chan-edit-submenu", label: "" },
+          { id: "chan-edit-submenu", label: 3 },
+          { id: "chan-view-submenu", label: "View", accelerator: "Alt+V" },
+        ],
+      }).menus,
+    ).toEqual([{ id: "chan-view-submenu", label: "View" }]);
+    for (const odd of [undefined, null, "File", {}, 1, true]) {
+      expect(normalizeTitlebarChrome({ menus: odd }).menus).toEqual([]);
+    }
+    expect(
+      normalizeTitlebarChrome({ active: true, insetRight: 138, drawControls: true }).menus,
+      "an app that predates the menus offers none",
+    ).toEqual([]);
   });
 
   test("the boot wait is bounded", async () => {

@@ -11,7 +11,9 @@
 // desktop follows live, and it is drawn only in chan-desktop on macOS or
 // Windows when the installed app advertises the commands that host needs. In
 // a browser, and wherever the title bar is out of reach, a forced bar is a
-// plain top bar with no insets.
+// plain top bar with no insets. On Windows a window in the mode wears no
+// menubar, so while the Computers launcher covers the page the bar draws the
+// menus the desktop's chrome lists.
 
 import {
   isTauriDesktop,
@@ -21,6 +23,7 @@ import {
   setTitlebarTabs,
   writeTitlebarTabsPreference,
   type TitlebarChrome,
+  type TitlebarMenu,
 } from "../api/desktop";
 import { hostVocabulary } from "../api/nativeVocabulary";
 import { currentOS, type OS } from "./shortcuts";
@@ -92,6 +95,7 @@ export const NO_TITLEBAR_CHROME: TitlebarChrome = {
   fullscreen: false,
   drawControls: false,
   maximized: false,
+  menus: [],
 };
 
 /// `on` is the mode; `available` whether this window can put its tabs in the
@@ -148,11 +152,19 @@ export function windowTabBarWanted(input: {
 }
 
 /// The desktop's answer with every field present and finite, whatever an
-/// app of another version sent.
+/// app of another version sent. A menu without a non-empty id and label is
+/// dropped, and an app that lists none offers none.
 export function normalizeTitlebarChrome(raw: unknown): TitlebarChrome {
   const value = (raw ?? {}) as Partial<Record<keyof TitlebarChrome, unknown>>;
   const length = (n: unknown): number =>
     typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0;
+  const text = (s: unknown): s is string => typeof s === "string" && s !== "";
+  const menus: TitlebarMenu[] = Array.isArray(value.menus)
+    ? value.menus.flatMap((entry: unknown) => {
+        const menu = (entry ?? {}) as { id?: unknown; label?: unknown };
+        return text(menu.id) && text(menu.label) ? [{ id: menu.id, label: menu.label }] : [];
+      })
+    : [];
   return {
     active: value.active === true,
     insetLeft: length(value.insetLeft),
@@ -161,6 +173,7 @@ export function normalizeTitlebarChrome(raw: unknown): TitlebarChrome {
     fullscreen: value.fullscreen === true,
     drawControls: value.drawControls === true,
     maximized: value.maximized === true,
+    menus,
   };
 }
 
