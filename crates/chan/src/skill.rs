@@ -1008,6 +1008,73 @@ mod tests {
         assert!(!page.contains("Workspace windows only."));
     }
 
+    #[test]
+    fn help_names_the_launcher_and_team_work_entries() {
+        fn normalized(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        fn sentences(text: &str) -> impl Iterator<Item = &str> {
+            text.split(". ")
+        }
+
+        fn names_cmd_p(sentence: &str) -> bool {
+            sentence.match_indices("Cmd+P").any(|(index, _)| {
+                sentence[index + "Cmd+P".len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_ascii_alphabetic())
+            })
+        }
+
+        let mut problems = Vec::new();
+        for_each_help(|name, text| {
+            let text = normalized(text);
+            for sentence in sentences(&text) {
+                if names_cmd_p(sentence) && sentence.contains("Team Work") {
+                    problems.push(format!(
+                        "{name}: Cmd+P shares a sentence with the team name: {sentence}"
+                    ));
+                }
+            }
+            if text.contains("Mod+. p") {
+                problems.push(format!("{name}: names unbound Mod+. p"));
+            }
+        });
+
+        let serve = render_topic("serve").unwrap();
+        let serve_text = normalized(&serve);
+        if !sentences(&serve_text).any(|sentence| {
+            names_cmd_p(sentence)
+                && sentence.contains("Ctrl+Shift+P")
+                && sentence.contains("Computers")
+        }) {
+            problems.push("chan serve: no sentence names Cmd+P, Ctrl+Shift+P and Computers".into());
+        }
+        let launcher_paragraph = serve
+            .split("\n\n")
+            .find(|paragraph| paragraph.contains("Cmd+K"))
+            .expect("serve help has a Cmd+K launcher paragraph");
+        if !sentences(&normalized(launcher_paragraph))
+            .any(|sentence| sentence.contains("Team Work") && sentence.contains("New team"))
+        {
+            problems.push(
+                "chan serve: Cmd+K paragraph does not name Team Work and New team in one sentence"
+                    .into(),
+            );
+        }
+
+        let team = normalized(&render_topic("cs-terminal-team").unwrap());
+        if !team.contains("New team") {
+            problems.push("cs terminal team: does not name New team".into());
+        }
+        if team.contains("Cmd+P") {
+            problems.push("cs terminal team: names Cmd+P".into());
+        }
+
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
     /// clap emits help verbatim (the workspace pins clap without
     /// `wrap_help`), so an over-long line is an over-long line in the
     /// user's terminal. ASCII-only and no em dash come from

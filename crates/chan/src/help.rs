@@ -747,7 +747,10 @@ refused with that pointer rather than read as a relative directory.
 /// window is up. Kept next to the chord table it introduces.
 const SERVE_LAUNCHER: &str = r#"Inside the window, everything chan can do is one chord away. The command
 launcher is Cmd+K on the macOS desktop app and Ctrl+Alt+K everywhere
-else (web, Linux, Windows). Cmd+P is Team Work, not the launcher.
+else (web, Linux, Windows). On the desktop app, Cmd+P
+(Ctrl+Shift+P on Windows and Linux) is View > Toggle Launcher, the
+Computers screen. Team Work has no chord of its own: New team in the
+command launcher or a pane's menu opens it in a workspace window.
 
 In a workspace or terminal window the contextual list is empty until you
 type. Typing filters and ranks commands from the focused tab, pane, window,
