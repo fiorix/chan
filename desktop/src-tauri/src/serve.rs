@@ -1154,10 +1154,15 @@ fn build_workspace_window_with_completion(
         .disable_drag_drop_handler()
         // A page that hosts its tab bar in the title bar holds that mode for
         // its own origin only: a load from another origin gets the normal
-        // title bar back as it starts (`titlebar_tabs.rs`).
-        .on_page_load(|window, payload| {
-            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+        // title bar back as it starts, and a page of the same origin that does
+        // not ask for the mode again soon after it has loaded gets it back
+        // then (`titlebar_tabs.rs`).
+        .on_page_load(|window, payload| match payload.event() {
+            tauri::webview::PageLoadEvent::Started => {
                 crate::titlebar_tabs::page_load_started(&window, payload.url());
+            }
+            tauri::webview::PageLoadEvent::Finished => {
+                crate::titlebar_tabs::page_load_finished(&window);
             }
         });
         // Build hidden when restored geometry will be applied, so the window

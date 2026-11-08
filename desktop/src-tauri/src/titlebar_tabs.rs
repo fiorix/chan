@@ -6,10 +6,12 @@
 //! controls take and whether the page draws them itself, and the page asks
 //! again with [`titlebar_chrome`] whenever its viewport resizes, which a
 //! fullscreen transition, a maximize, a restore and a zoom change all do. The
-//! desktop never turns the mode on by itself, and a page load from another
-//! origin than the page that turned it on turns it off, so a page that does
-//! not know this contract is never laid out under the window controls. On the
-//! GTK desktops both commands answer an inactive chrome and change nothing.
+//! desktop never turns the mode on by itself. A page load from another origin
+//! than the page that turned it on turns it off, and so does a page of that
+//! origin that does not ask for it again soon after it has loaded, so a page
+//! that does not know this contract is never left under the window controls.
+//! On the GTK desktops both commands answer an inactive chrome and change
+//! nothing.
 //!
 //! On macOS the title bar turns transparent, the window's content view runs
 //! under it (the full-size content view), and the title text hides; the
@@ -221,6 +223,9 @@ struct Record {
     /// macOS, where it holds for the window's life. `None` on Windows, where it
     /// follows the window's DPI and is measured when read.
     title_bar_height: Option<f64>,
+    /// The same-origin load that brought the current page while that page has
+    /// not asked for the mode since; `None` once it has, and before any load.
+    awaiting: Option<u64>,
 }
 
 impl TitlebarWindows {
@@ -276,16 +281,43 @@ impl TitlebarWindows {
     }
 
     /// A page load starts in `label`: the window leaves the mode unless the
-    /// page comes from the origin that turned it on. `true` when it left, so
-    /// its title bar is due its normal look.
+    /// page comes from the origin that turned it on, and a page from there
+    /// keeps it only until [`Self::drop_unasked`] finds it has not asked
+    /// again. `true` when it left, so its title bar is due its normal look.
     fn drop_for_load(&self, label: &str, loading: &url::Origin) -> bool {
         let mut windows = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        match windows.get(label) {
-            Some(record) if !keeps_mode(&record.origin, loading) => {
+        match windows.get_mut(label) {
+            Some(record) if keeps_mode(&record.origin, loading) => {
+                let load = LOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                record.awaiting = Some(load);
+                false
+            }
+            Some(_) => {
                 windows.remove(label);
                 true
             }
-            _ => false,
+            None => false,
+        }
+    }
+
+    /// The same-origin load whose page has not asked for the mode since, if
+    /// `label` has one.
+    fn awaiting_ask(&self, label: &str) -> Option<u64> {
+        let windows = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        windows.get(label).and_then(|record| record.awaiting)
+    }
+
+    /// The bound after `load` finished has passed: the window leaves the mode
+    /// when the page that load brought has still not asked for it. `true`
+    /// when it left. A page that asked replaced the record, and a later load
+    /// renumbered it, so neither leaves here.
+    fn drop_unasked(&self, label: &str, load: u64) -> bool {
+        let mut windows = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if windows.get(label).and_then(|record| record.awaiting) == Some(load) {
+            windows.remove(label);
+            true
+        } else {
+            false
         }
     }
 }
@@ -296,6 +328,18 @@ pub(crate) fn in_mode(window: &WebviewWindow) -> bool {
         .try_state::<Arc<AppState>>()
         .is_some_and(|state| state.titlebar_windows.is_active(window.label()))
 }
+
+/// How long after a same-origin load finishes the window waits for the page
+/// to ask for the mode again before it gets its normal title bar back. The
+/// workspace app asks as it boots, a few IPC calls after it mounts, so the
+/// bound only covers a busy machine.
+#[cfg(any(target_os = "macos", windows))]
+const REASK_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Numbers same-origin loads, so the check after one load never acts on the
+/// next.
+#[cfg(any(target_os = "macos", windows, test))]
+static LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Whether a page loading from `loading` keeps the mode a page from `enabled`
 /// turned on: only a page of the same scheme, host and port does. An opaque
@@ -778,6 +822,46 @@ pub(crate) fn page_load_started(window: &WebviewWindow, url: &tauri::Url) {
     let _ = (window, url);
 }
 
+/// A page load finished in `window`. A page of the origin that turned the
+/// mode on keeps it only by asking again, which the workspace app does as it
+/// boots: a page that has not asked `REASK_BOUND` after its load finished
+/// is not the app (an API answer, a proxy's or the webview's error page), and
+/// the window gets its normal title bar back, as for a page of another
+/// origin. The check runs on the main thread, where the ask switches the
+/// mode, so the two never cross.
+pub(crate) fn page_load_finished(window: &WebviewWindow) {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        let Some(state) = window.try_state::<Arc<AppState>>() else {
+            return;
+        };
+        let Some(load) = state.titlebar_windows.awaiting_ask(window.label()) else {
+            return;
+        };
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(REASK_BOUND).await;
+            let host = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                let Some(state) = host.try_state::<Arc<AppState>>() else {
+                    return;
+                };
+                if !state.titlebar_windows.drop_unasked(host.label(), load) {
+                    return;
+                }
+                tracing::debug!(
+                    window = host.label(),
+                    "the loaded page did not ask for the title bar; it returns to normal"
+                );
+                set_overlay(&host, false);
+                crate::launcher_panel::title_bar_switched(&host);
+            });
+        });
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = window;
+}
+
 /// The page zoom of `window` changed: a launcher panel below the band follows
 /// the band's new height in points.
 pub(crate) fn zoom_changed(window: &WebviewWindow) {
@@ -829,6 +913,7 @@ fn switch(
                     origin,
                     band_height,
                     title_bar_height,
+                    awaiting: None,
                 },
             );
             set_overlay(window, true);
@@ -1253,6 +1338,7 @@ mod tests {
             origin: origin(page),
             band_height,
             title_bar_height,
+            awaiting: None,
         }
     }
 
@@ -1766,6 +1852,67 @@ mod tests {
         assert!(!windows.drop_for_load("local::w-2", &elsewhere));
     }
 
+    /// A page of the origin that turned the mode on keeps it across its load
+    /// only by asking again: one that has not asked by the check after its
+    /// load leaves the mode, and one that has keeps it.
+    #[test]
+    fn a_same_origin_page_keeps_the_mode_only_by_asking_again() {
+        let windows = TitlebarWindows::default();
+        let page = "http://127.0.0.1:4090/api/w-1/index.html";
+        let label = "local::w-1";
+
+        // An API answer of the same origin is not the app and never asks.
+        windows.enable(label, record(page, 38.0, None));
+        let health = origin("http://127.0.0.1:4090/api/health");
+        assert!(!windows.drop_for_load(label, &health));
+        assert!(
+            windows.is_active(label),
+            "the mode holds while the page loads"
+        );
+        let load = windows
+            .awaiting_ask(label)
+            .expect("the load awaits the page's ask");
+        assert!(windows.drop_unasked(label, load));
+        assert!(!windows.is_active(label));
+        assert!(!windows.drop_unasked(label, load), "it leaves once");
+
+        // The app asks again as it boots, before the check.
+        windows.enable(label, record(page, 38.0, None));
+        assert!(!windows.drop_for_load(label, &origin(page)));
+        let load = windows.awaiting_ask(label).expect("a reload awaits too");
+        windows.enable(label, record(page, 38.0, None));
+        assert_eq!(windows.awaiting_ask(label), None, "the ask settles it");
+        assert!(!windows.drop_unasked(label, load));
+        assert!(windows.is_active(label));
+
+        // A window never in the mode awaits nothing.
+        assert_eq!(windows.awaiting_ask("local::w-2"), None);
+        assert!(!windows.drop_unasked("local::w-2", load));
+    }
+
+    /// The check after a load acts on that load only: a page that asked and
+    /// then loaded again is judged by the later load's check.
+    #[test]
+    fn a_later_load_supersedes_an_earlier_loads_check() {
+        let windows = TitlebarWindows::default();
+        let page = "http://127.0.0.1:4090/";
+        let label = "local::w-1";
+        windows.enable(label, record(page, 38.0, None));
+        assert!(!windows.drop_for_load(label, &origin(page)));
+        let first = windows.awaiting_ask(label).expect("the first load awaits");
+        windows.enable(label, record(page, 38.0, None));
+        assert!(!windows.drop_for_load(label, &origin(page)));
+        let second = windows.awaiting_ask(label).expect("the second load awaits");
+        assert_ne!(first, second);
+        assert!(
+            !windows.drop_unasked(label, first),
+            "the first load's check is stale"
+        );
+        assert!(windows.is_active(label));
+        assert!(windows.drop_unasked(label, second));
+        assert!(!windows.is_active(label));
+    }
+
     #[test]
     fn records_are_per_window_and_go_with_the_window() {
         let windows = TitlebarWindows::default();
@@ -1934,6 +2081,8 @@ mod tests {
             .1;
         assert!(hook.contains("PageLoadEvent::Started"));
         assert!(hook.contains("crate::titlebar_tabs::page_load_started("));
+        assert!(hook.contains("PageLoadEvent::Finished"));
+        assert!(hook.contains("crate::titlebar_tabs::page_load_finished("));
 
         let launcher = production(LAUNCHER_RS);
         let bounds = function(launcher, "\nfn content_bounds(");
@@ -2005,6 +2154,14 @@ mod tests {
         let loaded = function(module, "\npub(crate) fn page_load_started(");
         assert!(loaded.contains("window.run_on_main_thread(move ||"));
         assert!(loaded.contains("crate::launcher_panel::title_bar_switched(&host)"));
+        let finished = function(module, "\npub(crate) fn page_load_finished(");
+        let check = finished
+            .split_once("window.run_on_main_thread(move ||")
+            .expect("the check after the bound runs on the main thread")
+            .1;
+        assert!(check.contains("drop_unasked(host.label(), load)"));
+        assert!(check.contains("set_overlay(&host, false);"));
+        assert!(check.contains("crate::launcher_panel::title_bar_switched(&host)"));
         let switch = function(module, "\nfn switch(");
         assert_eq!(
             switch
