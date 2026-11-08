@@ -69,9 +69,9 @@
 # On this host: ssh, scp, python3, sha256sum, xxd, timeout, and the two
 # Windows binaries: either WG_CONNECT_EXE and CHAN_EXE name built ones, or
 # the tree builds them with `cargo zigbuild --target x86_64-pc-windows-gnu`
-# (cargo-zigbuild, zig and the rustup target installed, and the web bundles
-# chan.exe embeds built by `make web`). Exits 2 when a prerequisite is
-# missing rather than passing.
+# (cargo-zigbuild, zig and the rustup target installed for the toolchain
+# pinned by rust-toolchain.toml, and the web bundles chan.exe embeds built
+# by `make web`). Exits 2 when a prerequisite is missing rather than passing.
 #
 # Everything runs under a throwaway work dir on this host, a per-run
 # directory under the client's TEMP and a per-run work dir on the peer. The
@@ -148,8 +148,11 @@ NEED_CHAN=""
 if runs devserver || runs devserver-wrong-key; then NEED_CHAN=1; fi
 zigbuild_ready() {
     command -v zig >/dev/null 2>&1 || refuse "zig is not installed (needed to cross-build the Windows binaries; or name them with WG_CONNECT_EXE and CHAN_EXE)"
-    cargo zigbuild --help >/dev/null 2>&1 || refuse "cargo-zigbuild is not installed (cargo install cargo-zigbuild)"
-    rustup target list --installed 2>/dev/null | grep -Fxq "$WINDOWS_TARGET" || refuse "the $WINDOWS_TARGET target is not installed (rustup target add $WINDOWS_TARGET)"
+    # rustup picks the toolchain by directory, and the cross-builds run in REPO.
+    (cd "$REPO" && cargo zigbuild --help >/dev/null 2>&1) || refuse "cargo-zigbuild is not installed (cargo install cargo-zigbuild)"
+    local installed
+    installed="$(cd "$REPO" && rustup target list --installed 2>/dev/null)" || refuse "the $WINDOWS_TARGET target is not installed (rustup target add $WINDOWS_TARGET)"
+    grep -Fxq "$WINDOWS_TARGET" <<<"$installed" || refuse "the $WINDOWS_TARGET target is not installed (rustup target add $WINDOWS_TARGET)"
 }
 if [ -z "${WG_CONNECT_EXE:-}" ]; then
     zigbuild_ready
