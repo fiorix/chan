@@ -1276,7 +1276,8 @@ existing {dir}/config.toml and spawns the same team again. `--script` on
 either prints the whole bootstrap as a runnable shell script instead of
 mutating anything; its fixed `sleep 3` is an approximation because the
 script cannot observe server-owned PTY state. This is the CLI equivalent
-of the Cmd+P Team Work dialog.
+of the Team Work dialog that New team opens from the command launcher or
+a pane's menu.
 
 The config carries team_name, host_name, host_handle, tab_group and 1
 to 9 [[members]], exactly one of them is_lead. Each member has a handle
