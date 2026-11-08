@@ -6130,8 +6130,10 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // View ▸ Toggle Launcher, Cmd+P. The one global menubar routes it
         // by the focused window (`launcher_panel::toggle_for_focused`): an
         // SPA window shows or hides its launcher, and with nothing to host
-        // it a standalone terminal opens. The accelerator pre-empts the
-        // webview, so no page sees Cmd+P.
+        // it a standalone terminal opens. A window's own webview gets Cmd+P
+        // first: WKWebView hands a Command chord to the menubar only when the
+        // page left its default, so the workspace app never cancels Cmd+P,
+        // not even behind a full-window cover (its state/menubarChords.ts).
         let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
             .accelerator("CmdOrCtrl+P")
             .build(app)?;
@@ -6190,9 +6192,11 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // close_window) carrying Cmd+W, routed by `handle_close_window`: a
         // focused workspace webview closes the active TAB (dispatching the same
         // `app.tab.close` the KEY_BRIDGE_JS KeyW case fires), while the launcher
-        // (`main`) and other plain windows close natively. The accelerator
-        // pre-empts the webview on macOS, so the KEY_BRIDGE_JS KeyW case is
-        // harmlessly shadowed here (same arrangement as New Terminal's Cmd+T).
+        // (`main`) and other plain windows close natively. In a workspace
+        // webview the KEY_BRIDGE_JS KeyW case claims Cmd+W before the menubar
+        // sees it, since WKWebView offers a Command chord to the page first;
+        // this item serves the menu click and the windows no bridge runs in
+        // (same arrangement as New Terminal's Cmd+T).
         let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
             .accelerator("CmdOrCtrl+W")
             .build(app)?;
@@ -7401,10 +7405,10 @@ fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
 /// A window showing its launcher hides it first, so the terminal opens in
 /// sight rather than on the page behind the launcher.
 ///
-/// The single always-enabled menu accelerator pre-empts the webview, so
-/// the KEY_BRIDGE_JS `KeyT` -> `app.terminal.toggle` case is harmlessly
-/// shadowed in the desktop; this routing reproduces the same dispatch for
-/// SPA windows.
+/// WKWebView offers a Command chord to the page before the menubar, so in a
+/// focused SPA window the KEY_BRIDGE_JS `KeyT` -> `app.terminal.toggle` case
+/// claims Cmd+T first; this routing reproduces the same dispatch for a click
+/// on the item.
 #[cfg(target_os = "macos")]
 fn handle_new_terminal(app: &tauri::AppHandle) {
     let focused_spa = app
