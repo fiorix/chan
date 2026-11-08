@@ -1,10 +1,10 @@
-//! devserver-proxy: public-facing service at p{n}.proxy.{domain} (apex) and
-//! *.p{n}.proxy.{domain} (wildcard).
+//! devserver-proxy: public-facing service at the configured tunnel origin's
+//! host, proxy.{domain}, and the node's wildcard, *.{proxy}.proxy.{domain}.
 //!
 //! Two TCP listeners share the process, fronted by distinct public HTTP and
 //! tunnel-ingress listeners:
 //!
-//!   * `bind_addr` (p{n}.proxy.{domain} apex + *.p{n}.proxy.{domain} wildcard):
+//!   * `bind_addr` (proxy.{domain} apex + *.{proxy}.proxy.{domain} wildcard):
 //!     axum HTTP. The wildcard host carries the tenant reverse-proxy
 //!     surface; the apex carries `/healthz` and `/readyz` only.
 //!     A single router dispatches on the `Host` header. devserver-proxy
@@ -12,7 +12,7 @@
 //!     credentials are exchanged through a fixed body-only POST, then the
 //!     browser uses a host-only opaque `__Host-devserver_gate` cookie.
 //!
-//!   * `tunnel_bind_addr` (p{n}.proxy.{domain} apex, behind nginx
+//!   * `tunnel_bind_addr` (proxy.{domain} tunnel ingress, behind nginx
 //!     `grpc_pass` on `/v1/tunnel`): h2c handshake for chan-tunnel
 //!     clients. Embeds `chan_tunnel_server` as a library and shares
 //!     the same in-process `Registry` with the public side.

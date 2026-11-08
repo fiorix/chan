@@ -48,12 +48,12 @@ chan-gateway-admin tunnel ps</code></pre>{{copyButton}}</div>
 
   <section class="guide-section" id="setup" aria-labelledby="gateway-setup-title">
     <div class="guide-section-heading"><p class="section-label">03 / SETUP</p><h2 id="gateway-setup-title">Bring your domain.</h2><p>Start with one proxy node, <code>p1</code>. These example names show the DNS and TLS boundaries.</p></div>
-    <dl class="domain-map"><div><dt><code>gw.example.com</code></dt><dd>Sign-in, accounts, and desktop discovery.</dd></div><div><dt><code>p1.proxy.example.com</code></dt><dd>Proxy node and outbound tunnel ingress.</dd></div><div><dt><code>*.p1.proxy.example.com</code></dt><dd>A separate origin for each devserver.</dd></div></dl>
+    <dl class="domain-map"><div><dt><code>gw.example.com</code></dt><dd>Sign-in, accounts, and desktop discovery.</dd></div><div><dt><code>proxy.example.com</code></dt><dd>Outbound tunnel ingress and proxy health.</dd></div><div><dt><code>*.p1.proxy.example.com</code></dt><dd>A separate origin for each devserver.</dd></div></dl>
     <ol class="setup-steps">
       <li><span>01</span><div><h3>Deploy the services and database.</h3><p>Run identity, profile, devserver-control, devserver-proxy, and Postgres. Configure distinct service credentials and signing keys. Apply the database schema jobs before starting runtime services. Use the <a href="https://github.com/fiorix/chan/tree/main/packaging/kube#apply-to-a-real-cluster">deployment guide and manifests</a>.</p></div></li>
       <li><span>02</span><div><h3>Connect DNS, TLS, and OAuth.</h3><p>Point the names above to your TLS edge and configure a sign-in provider. Route account requests to identity, tenant HTTP/WebSockets to the proxy, and <code>/v1/tunnel</code> to its HTTP/2 ingress. Keep internal listeners on loopback or an authenticated, encrypted private network.</p></div></li>
       <li><span>03</span><div><h3>Provision tools and publish the devserver.</h3><p>Enrol users and grant the sign-in and devserver feature flags, which default to off. Install Chan and your team's tools on each managed host. Create a PAT with the <code>tunnel</code> scope in your gateway and supply it as <code>CHAN_TUNNEL_TOKEN</code> on the devserver. Then run:</p><div class="guide-code" data-copy-block><pre><code data-copy-value>chan devserver run \
-  --tunnel-url https://p1.proxy.example.com/v1/tunnel \
+  --tunnel-url https://proxy.example.com/v1/tunnel \
   --tunnel-devserver-name build-host</code></pre>{{copyButton}}</div><p>Each devserver uses its own token. The token identifies that devserver's registration.</p></div></li>
       <li><span>04</span><div><h3>Add your gateway to Chan.</h3><p>In Computers, press <code>g</code> to open Gateways. Choose <strong>Add gateway</strong>, enter <code>https://gw.example.com</code>, connect, and sign in. Return to Computers to open owned and shared devservers.</p></div></li>
     </ol>

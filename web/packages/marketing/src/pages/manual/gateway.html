@@ -7,7 +7,7 @@
   <ul>
     <li><strong>identity</strong>, at <code>gw.example.com</code>: sign-in with GitHub, Google, or GitLab, the account page, access tokens, sharing, and the desktop's sign-in.</li>
     <li><strong>profile</strong>: accounts, devservers, shares, and policy, in Postgres. Internal only.</li>
-    <li><strong>devserver-proxy</strong>, at <code>p1.proxy.example.com</code>: receives the devservers' tunnels and serves each devserver at its own origin, such as <code>alice--3f9c2a7b1e04.p1.proxy.example.com</code>.</li>
+    <li><strong>devserver-proxy</strong>: receives the devservers' tunnels at <code>proxy.example.com</code> and serves each devserver at its own origin under the node's wildcard, such as <code>alice--3f9c2a7b1e04.p1.proxy.example.com</code>.</li>
     <li><strong>devserver-control</strong>: admits devservers and tracks the proxy fleet. Internal only.</li>
     <li><strong>chan-gateway-admin</strong>: the operator's command line.</li>
   </ul>
@@ -25,7 +25,7 @@
   <p>Create three DNS records pointing at the server:</p>
   <ul>
     <li><code>gw.example.com</code>: sign-in, accounts, and desktop discovery.</li>
-    <li><code>p1.proxy.example.com</code>: the proxy node, where devservers dial in.</li>
+    <li><code>proxy.example.com</code>: tunnel ingress, where devservers dial in, and proxy health.</li>
     <li><code>*.p1.proxy.example.com</code>: one origin per devserver. A <code>*.example.com</code> record does not cover these names.</li>
   </ul>
   <p>All services listen on the server's loopback address without TLS; a web server in front of them terminates TLS. The wildcard name needs a certificate from a DNS challenge, so install certbot with the plugin for your DNS provider. With Cloudflare, for example:</p>
@@ -33,7 +33,7 @@
     <code><span>$</span><b data-copy-value>sudo apt install nginx postgresql git certbot python3-certbot-dns-cloudflare
 sudo certbot certonly --dns-cloudflare \
   --dns-cloudflare-credentials /root/cloudflare.ini \
-  -d gw.example.com -d p1.proxy.example.com -d '*.p1.proxy.example.com'</b></code>
+  -d gw.example.com -d proxy.example.com -d '*.p1.proxy.example.com'</b></code>
     {{copyButton}}
   </div>
   <p>The certificate lands in <code>/etc/letsencrypt/live/gw.example.com/</code>, and certbot renews it on its own.</p>
@@ -90,14 +90,14 @@ sudo chan/packaging/gateway/scripts/configure.sh</b></code>
         <tr><td>Postgres user, password, database</td><td><code>chan</code>, the password you chose, <code>chan_gateway</code></td></tr>
         <tr><td>Gateway public origin</td><td><code>https://gw.example.com</code></td></tr>
         <tr><td>Proxy namespace origin</td><td><code>https://proxy.example.com</code></td></tr>
-        <tr><td>Tunnel ingress origin</td><td><code>https://p1.proxy.example.com</code>, not the default</td></tr>
+        <tr><td>Tunnel ingress origin</td><td>the default, <code>https://proxy.example.com</code></td></tr>
         <tr><td>This proxy node id</td><td><code>p1</code></td></tr>
         <tr><td>This proxy node origin</td><td>the default, <code>https://p1.proxy.example.com</code></td></tr>
         <tr><td>GitHub OAuth client ID and secret</td><td>from the previous step; press Enter to skip the others</td></tr>
       </tbody>
     </table>
   </div>
-  <p>The defaults in brackets name the maintainer's deployment; replace every one of them. The tunnel ingress answer is where devservers dial in, so it must be the proxy node's name from your DNS.</p>
+  <p>The gateway public origin and proxy namespace origin require explicit answers, each an <code>http://</code> or <code>https://</code> origin with a host and optional port, without a path or trailing slash. The tunnel ingress defaults to the namespace origin. Its host needs a DNS record and certificate, with the TLS edge routing <code>/v1/tunnel</code> to port 7100 as h2c and <code>/</code> to port 7002 for health and readiness. The node origin defaults to the chosen node id, <code>p1</code> here, under the namespace; its wildcard needs DNS, a certificate, and an edge route to port 7002 for devserver pages and WebSockets.</p>
   <p>Prepare the database schema, then start the services:</p>
   <div class="command-copy multiline" data-copy-block>
     <code><span>$</span><b data-copy-value>sudo systemctl restart chan-gateway-migrate
@@ -105,9 +105,9 @@ sudo systemctl enable --now chan-gateway-profile chan-gateway-identity \
   chan-gateway-devserver-control chan-gateway-devserver-proxy</b></code>
     {{copyButton}}
   </div>
-  <p>The schema unit runs once and must succeed before identity and profile start. Run it again after each upgrade, even when nothing changed. Follow the services with <code>journalctl -u 'chan-gateway-*' -f</code>. The proxy starts admitting devservers about 30 seconds after the controller comes up; check it with its node name as the host:</p>
+  <p>The schema unit runs once and must succeed before identity and profile start. Run it again after each upgrade, even when nothing changed. Follow the services with <code>journalctl -u 'chan-gateway-*' -f</code>. The proxy starts admitting devservers about 30 seconds after the controller comes up; check it with the tunnel ingress name as the host:</p>
   <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>curl -H 'Host: p1.proxy.example.com' http://127.0.0.1:7002/readyz</b></code>
+    <code><span>$</span><b data-copy-value>curl -H 'Host: proxy.example.com' http://127.0.0.1:7002/readyz</b></code>
     {{copyButton}}
   </div>
 </section>
@@ -124,7 +124,7 @@ sudo systemctl enable --now chan-gateway-profile chan-gateway-identity \
 
 server {
     listen 80;
-    server_name gw.example.com p1.proxy.example.com *.p1.proxy.example.com;
+    server_name gw.example.com proxy.example.com *.p1.proxy.example.com;
     return 301 https://$host$request_uri;
 }
 
@@ -143,10 +143,10 @@ server {
     }
 }
 
-# The proxy node: devserver tunnels and the node itself.
+# Tunnel ingress and proxy health/readiness.
 server {
     listen 443 ssl http2;
-    server_name p1.proxy.example.com;
+    server_name proxy.example.com;
     ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
     client_max_body_size 0;
@@ -223,7 +223,7 @@ chan-gateway-admin flag grant share_workspaces you@example.com</b></code>
   <div class="command-copy multiline" data-copy-block>
     <code><span>$</span><b data-copy-value>export CHAN_TUNNEL_TOKEN=chan_pat_...
 chan devserver start --port 8787 \
-  --tunnel-url https://p1.proxy.example.com/v1/tunnel \
+  --tunnel-url https://proxy.example.com/v1/tunnel \
   --tunnel-devserver-name build-host</b></code>
     {{copyButton}}
   </div>
@@ -287,6 +287,7 @@ chan devserver start --port 8787 \
     <li><code>chan-gateway-admin user block alice@example.com --reason "..."</code>: revoke every token and refuse new sign-ins.</li>
     <li><code>chan-gateway-admin fleet pause --drain</code>: cut every session and tunnel at once, then <code>fleet resume</code>.</li>
   </ul>
+  <p>With more proxy nodes, point <code>proxy.example.com</code> at each node through DNS or a TCP pass-through balancer, keeping the same tunnel URL for every devserver. A balancer that terminates TLS carries every tunnel byte. Each node still needs DNS and a certificate for its own tenant wildcard, such as <code>*.p2.proxy.example.com</code>.</p>
   <p>Add <code>--json</code> to any command for scripts. To publish more machines, give each one its own token and run the same <code>chan devserver start</code> on it: build hosts, GPU boxes, or a VM per person, each with your team's tools installed.</p>
   <p class="minor">The <a href="/gateway/">gateway guide</a> shows the architecture and the WireGuard option. <a href="https://github.com/fiorix/chan/blob/main/gateway/README.md">gateway/README.md</a> covers every service, the admin CLI, and Kubernetes deployment, and <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway/design.md</a> the design.</p>
 </section>

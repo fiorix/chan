@@ -1,6 +1,6 @@
 # devserver-proxy
 
-Public-facing service at `{proxy}.proxy.{domain}` (node apex) and `*.{proxy}.proxy.{domain}` (wildcard). Reverse-proxies HTTP and WebSocket traffic into a user's running `chan devserver` instances. Embeds `chan-tunnel-server` to terminate registrations from those instances on a separate h2c listener; every registration is admitted by devserver-control before the client sees `HelloAck::Ok`. No SPA, no database; browser sessions and entry replay state are bounded in-memory state.
+Public-facing service at the configured tunnel origin's host, `proxy.{domain}`, and the node's tenant wildcard, `*.{proxy}.proxy.{domain}`. Reverse-proxies HTTP and WebSocket traffic into a user's running `chan devserver` instances. Embeds `chan-tunnel-server` to terminate registrations from those instances on a separate h2c listener; every registration is admitted by devserver-control before the client sees `HelloAck::Ok`. No SPA, no database; browser sessions and entry replay state are bounded in-memory state.
 
 ## Role in the system
 
@@ -28,8 +28,8 @@ export DASHBOARD_URL=http://127.0.0.1:7000/workspaces
 export DEVSERVER_CONTROL_URL=http://127.0.0.1:7101
 export DEVSERVER_PROXY_TOKEN=dev-proxy-token
 export DEVSERVER_PROXY_ID=p1
-export DEVSERVER_PROXY_BASE_URL=https://p1.devserver.localtest.me:7002
-export DEVSERVER_TUNNEL_ORIGIN=https://p1.devserver.localtest.me:7100
+export DEVSERVER_PROXY_BASE_URL=https://p1.proxy.localtest.me:7002
+export DEVSERVER_TUNNEL_ORIGIN=https://proxy.localtest.me:7100
 cargo run -p devserver-proxy
 ```
 
@@ -76,7 +76,7 @@ The packaged env file and the dev-run example point `IDENTITY_URL` at identity's
 
 ## Routes
 
-- Apex (`{proxy}.proxy.{domain}`): `POST /v1/tunnel` (raw h2c, on the tunnel listener), `/healthz` and `/readyz`. Readiness is true only once the controller session reaches `FleetReady`; until then new tunnel admissions are refused with the `control_unavailable` code. Per-user devserver capacity is a fleet-wide decision the controller makes at admission and surfaces as `too_many_workspaces`. The aggregate `/admin/v1/*` tree lives on devserver-control, not on the proxy.
+- Tunnel apex (`proxy.{domain}`, the host of `DEVSERVER_TUNNEL_ORIGIN`): `POST /v1/tunnel` (raw h2c, on the tunnel listener), `/healthz` and `/readyz`. Readiness is true only once the controller session reaches `FleetReady`; until then new tunnel admissions are refused with the `control_unavailable` code. Per-user devserver capacity is a fleet-wide decision the controller makes at admission and surfaces as `too_many_workspaces`. The aggregate `/admin/v1/*` tree lives on devserver-control, not on the proxy.
 - Wildcard (`{owner}--{disc}.{proxy}.proxy.{domain}`, addressing one devserver by a prefix of its id): the per-devserver reverse proxy. `POST /_chan/entry` exchanges a body credential; ordinary paths require the opaque `__Host-devserver_gate` cookie and unsafe methods the `X-Chan-CSRF` mirror. On pass the full `/{workspace}/...` path is forwarded into the tunnel unchanged and the devserver routes the tenant. `/api/devserver/*` (the local-only management API) is not-found here.
 
 Each opaque tenant session has a separate random admin UUID plus creation and expiry; the proxy publishes only that redacted record over the control protocol. Controller revocations support exact subject/owner/devserver, subject, admin UUID, owner and all sessions, and acknowledgement waits for matching HTTP and WebSocket transports to drain.

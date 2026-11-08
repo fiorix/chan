@@ -28,20 +28,20 @@ pub const TRANSFER_ROUTE_TIMEOUT: std::time::Duration =
 /// Runtime config sourced from environment variables.
 #[derive(Clone)]
 pub struct Config {
-    /// Public listener (node apex + node wildcard, e.g.
-    /// `p1.proxy.chan.app` + `*.p1.proxy.chan.app`). Behind nginx + TLS.
+    /// Public listener (tunnel-origin host + node wildcard, e.g.
+    /// `proxy.example.com` + `*.p1.proxy.example.com`). Behind nginx + TLS.
     pub bind_addr: SocketAddr,
     /// Tunnel listener (apex `/v1/tunnel`). h2c behind nginx
     /// `grpc_pass`; `chan devserver` instances dial the tunnel ingress
-    /// (e.g. `https://proxy.chan.app/v1/tunnel`) over h2/TLS, terminated
+    /// (e.g. `https://proxy.example.com/v1/tunnel`) over h2/TLS, terminated
     /// at nginx and forwarded here cleartext.
     pub tunnel_bind_addr: SocketAddr,
-    /// Apex hostname (e.g. `p1.proxy.chan.app`). Used to distinguish
-    /// the health/readiness surface from the wildcard reverse-proxy
+    /// Hostname of `DEVSERVER_TUNNEL_ORIGIN` (e.g. `proxy.example.com`).
+    /// Distinguishes health/readiness from the wildcard reverse-proxy
     /// surface in the Host-keyed router.
     pub apex_host: String,
     /// Wildcard suffix including the leading dot (e.g.
-    /// `.p1.proxy.chan.app`). The proxy router parses `{user}` out of
+    /// `.p1.proxy.example.com`). The proxy router parses `{user}` out of
     /// every Host that ends with this suffix.
     pub wildcard_suffix: String,
     /// Base URL of identity-service. devserver-proxy sends PAT validation and
@@ -54,9 +54,9 @@ pub struct Config {
     /// `/internal/v1/tokens/validate`. Sourced from
     /// `IDENTITY_INTERNAL_TOKEN`; required, no fallback.
     pub identity_auth_token: String,
-    /// Absolute URL the wildcard root (`{user}--{disc}.p1.proxy.chan.app/`)
+    /// Absolute URL the wildcard root (`{user}--{disc}.p1.proxy.example.com/`)
     /// 302s to: the gateway dashboard on the identity origin
-    /// (e.g. `https://gw.chan.app/workspaces`; dev sets
+    /// (e.g. `https://gw.example.com/workspaces`; dev sets
     /// `http://id.localtest.me:17000/workspaces`). Required
     /// (`DASHBOARD_URL`), no derived default.
     pub dashboard_url: String,
