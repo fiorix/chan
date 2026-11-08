@@ -29,8 +29,7 @@ trap cleanup EXIT
 FIXTURE="$TMP/repo"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/packaging"
 cp "$WINDOWS_CROSS_DRIVER" "$FIXTURE/scripts/windows-cross-check.sh"
-cp "$REPO/packaging/snapshot-tracked-tree.sh" "$REPO/packaging/sdme-build-policy.sh" \
-    "$FIXTURE/packaging/"
+cp "$REPO/packaging/snapshot-tracked-tree.sh" "$FIXTURE/packaging/"
 printf '[workspace]\nmembers = []\n' >"$FIXTURE/Cargo.toml"
 printf '[toolchain]\nchannel = "9.99.0"\nprofile = "minimal"\ncomponents = ["rustfmt", "clippy"]\n' >"$FIXTURE/rust-toolchain.toml"
 git -C "$FIXTURE" init -q
@@ -216,10 +215,10 @@ run_case() {
     shift 3
     mkdir -p "$TMP/$label"
     if env -u WINDOWS_CROSS_CPUS -u WINDOWS_CROSS_MEMORY -u WINDOWS_CROSS_JOBS \
-        -u WINDOWS_CROSS_TIMEOUT -u SDME_BUILD_DISK \
+        -u WINDOWS_CROSS_TIMEOUT \
         FAKE_DIR="$TMP/$label" FAKE_MODE="$mode" FAKE_GUEST_ENV="$FAKE_GUEST_ENV" \
         SDME="$FAKE_SDME" \
-        SDME_BUILD_DISK=13G WINDOWS_CROSS_ROOTFS=fixture-ubuntu \
+        WINDOWS_CROSS_ROOTFS=fixture-ubuntu \
         CARGO_TARGET_DIR="$TMP/$label/status" \
         "$@" "$FIXTURE/scripts/windows-cross-check.sh" \
         >"$TMP/$label/log" 2>&1; then
@@ -282,7 +281,7 @@ for label in ("mixed_case", "success", "payload", "payload_sdme", "active_bare",
     assert removed == ([] if label == "transport_absent" else ["rm", "-f", name]), (label, removed)
     assert value("-r") == "fixture-ubuntu"
     assert value("--storage") == "btrfs"
-    assert value("--disk") == "13G"
+    assert "--disk" not in args, (label, args)
     assert value("--cpus") == ("3" if label == "override" else "2")
     assert value("--memory") == ("5G" if label == "override" else "6G")
     binds = [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-b"]

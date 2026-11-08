@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Compile and lint the release CLI for Windows GNU in a disposable sdme
-# container. The host needs sdme, an imported Ubuntu rootfs and a capped btrfs
-# pool; the guest installs Rust and MinGW without changing the host toolchain.
+# container. The host needs sdme and an imported Ubuntu rootfs; the guest
+# installs Rust and MinGW without changing the host toolchain. The guest has
+# CPU and memory caps but no disk cap: it is removed after the run, and sdme
+# refuses --disk on a host whose btrfs already has quotas enabled by something
+# else.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=packaging/sdme-build-policy.sh
-. "$REPO/packaging/sdme-build-policy.sh"
 SDME="${SDME:-sudo sdme}"
 WINDOWS_CROSS_ROOTFS="${WINDOWS_CROSS_ROOTFS:-ubuntu}"
 WINDOWS_CROSS_CPUS="${WINDOWS_CROSS_CPUS:-2}"
@@ -224,13 +225,12 @@ runuser -u ubuntu -- /usr/bin/env HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu \
     RAYON_NUM_THREADS="$WINDOWS_CROSS_JOBS" STATUS_FILE="$STATUS_FILE" \
     /bin/bash -c "$1"'
 
-echo ">> Windows GNU cross-check: rootfs=$WINDOWS_CROSS_ROOTFS cpus=$WINDOWS_CROSS_CPUS memory=$WINDOWS_CROSS_MEMORY disk=$SDME_BUILD_DISK jobs=$WINDOWS_CROSS_JOBS timeout=${WINDOWS_CROSS_TIMEOUT}s status=$STATUS_DIR" >&2
+echo ">> Windows GNU cross-check: rootfs=$WINDOWS_CROSS_ROOTFS cpus=$WINDOWS_CROSS_CPUS memory=$WINDOWS_CROSS_MEMORY jobs=$WINDOWS_CROSS_JOBS timeout=${WINDOWS_CROSS_TIMEOUT}s status=$STATUS_DIR" >&2
 echo ">> source: revision=$SOURCE_REVISION clean-tracked-snapshot=$SOURCE_SNAPSHOT" >&2
 CONTAINER_ATTEMPTED=1
 sdme_status=0
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$WINDOWS_CROSS_ROOTFS" -t 180 \
-    --storage btrfs --disk "$SDME_BUILD_DISK" \
-    --cpus "$WINDOWS_CROSS_CPUS" --memory "$WINDOWS_CROSS_MEMORY" \
+    --storage btrfs --cpus "$WINDOWS_CROSS_CPUS" --memory "$WINDOWS_CROSS_MEMORY" \
     -b "$SOURCE_SNAPSHOT:/source:ro" -b "$STATUS_DIR:/status" \
     -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
     WINDOWS_CROSS_JOBS="$WINDOWS_CROSS_JOBS" STATUS_FILE="/status/$STATUS_NAME" \

@@ -35,14 +35,15 @@ BUILD_DRIVER_FILES = {
     "packaging/distros/copr/build-with-sdme.sh",
     "packaging/nix/build-with-sdme.sh",
     "packaging/sdme/build-chan-desktop.sh",
+}
+CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {"scripts/e2e/README.md"}
+# Guests removed after every run carry no disk cap: it saves nothing, and sdme
+# refuses --disk on a host whose btrfs already has quotas enabled by something
+# else, which would stop the run before it starts.
+UNCAPPED_COMMAND_FILES = {
+    "packaging/gateway/scripts/dev/sdme/database-roles-test.sh",
     "scripts/windows-cross-check.sh",
 }
-# The capped set also holds test guests, not only build drivers.
-CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {
-    "packaging/gateway/scripts/dev/sdme/database-roles-test.sh",
-    "scripts/e2e/README.md",
-}
-POLICY_DRIVER_FILES = BUILD_DRIVER_FILES - {"scripts/windows-cross-check.sh"}
 # These builders have no measured disk default yet. Their policy array carries
 # --disk once a value lands; require the array now, then require the literal
 # disk cap for each only after its measured default is recorded.
@@ -50,7 +51,7 @@ GATEWAY_DRIVER_FILES = {
     "packaging/gateway/scripts/dev/sdme/build-gateway.sh",
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh",
 }
-POLICY_DRIVER_FILES |= GATEWAY_DRIVER_FILES
+POLICY_DRIVER_FILES = BUILD_DRIVER_FILES | GATEWAY_DRIVER_FILES
 POLICY_FLAGS = '"${SDME_BUILD_LIMIT_ARGS[@]}"'
 DOCUMENTED_COMMANDS = {
     "packaging/sdme/chan-devserver.sdme": (
@@ -115,6 +116,10 @@ def main() -> int:
                 failures.append(
                     f"{relative}:{line_number}: chan build container omits --disk"
                 )
+            if relative in UNCAPPED_COMMAND_FILES and "--disk" in line:
+                failures.append(
+                    f"{relative}:{line_number}: disposable guest carries --disk"
+                )
             if relative in POLICY_DRIVER_FILES and POLICY_FLAGS not in line:
                 failures.append(
                     f"{relative}:{line_number}: chan build container omits policy limit flags"
@@ -148,6 +153,7 @@ def main() -> int:
         "sdme-storage contract: PASS "
         f"({len(EXPECTED_COMMAND_FILES)} container-creating sites use btrfs; "
         f"{len(CAPPED_COMMAND_FILES)} build containers are capped; "
+        f"{len(UNCAPPED_COMMAND_FILES)} disposable guests are not; "
         f"{len(POLICY_DRIVER_FILES)} build drivers carry policy limit flags; "
         f"{sum(map(len, DOCUMENTED_COMMANDS.values()))} documented examples use btrfs)"
     )

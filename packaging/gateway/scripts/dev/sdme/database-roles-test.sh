@@ -79,10 +79,12 @@ if listed "$CONTAINER" <<<"$container_list"; then
 fi
 
 # The cluster and the suite's database stay under a few tens of megabytes, so
-# the caps leave wide headroom while keeping a runaway guest off the host.
+# the memory cap leaves wide headroom while keeping a runaway guest off the
+# host. No disk cap: the guest is removed after the run, and sdme refuses
+# --disk on a host whose btrfs already has quotas enabled by something else.
 printf '==> creating guest %s from rootfs %s\n' "$CONTAINER" "$ROOTFS"
 "${SDME_CMD[@]}" create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
-    --disk 1G --memory 1G --private-network \
+    --memory 1G --private-network \
     -b "$REPO/packaging/gateway/scripts:$GUEST/scripts:ro" \
     -b "$REPO/gateway/migrations:$GUEST/migrations:ro"
 # Marked as ours before the boot, so an interrupt during it still reaches the
