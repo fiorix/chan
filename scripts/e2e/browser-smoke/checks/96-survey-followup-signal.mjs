@@ -36,7 +36,7 @@ async function settle(page) {
 }
 
 async function clickTab(page, label) {
-  const tabs = await page.$$(".tabs > .tab");
+  const tabs = await page.$$(".tabs .tab-row > .tab");
   for (const tab of tabs) {
     const text = await tab.$eval(".path", (path) => path.textContent?.trim() ?? "");
     if (text === label) {
@@ -125,7 +125,7 @@ export default {
       await page.waitForFunction(
         (name) => {
           const activeTab =
-            document.querySelector(".tabs > .tab.active .path")?.textContent?.trim() ?? "";
+            document.querySelector(".tabs .tab-row > .tab.active .path")?.textContent?.trim() ?? "";
           const host = document.querySelector(".terminal-tab.active .terminal-host");
           return activeTab === name && host?.contains(document.activeElement) === true;
         },
@@ -192,7 +192,7 @@ export default {
       await clickTab(page, AWAY_TAB);
       await page.waitForFunction(
         (name) =>
-          document.querySelector(".tabs > .tab.active .path")?.textContent?.trim() === name &&
+          document.querySelector(".tabs .tab-row > .tab.active .path")?.textContent?.trim() === name &&
           document.querySelector(".survey-card") === null,
         { timeout: 5_000 },
         AWAY_TAB,

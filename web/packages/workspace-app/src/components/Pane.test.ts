@@ -1517,7 +1517,7 @@ describe("Pane staged editor chips", () => {
     await tick();
 
     const labels = [
-      ...target.querySelectorAll<HTMLElement>(".tabs > .tab .path"),
+      ...target.querySelectorAll<HTMLElement>(".tabs .tab-row > .tab .path"),
     ].map((element) => element.textContent?.trim());
     expect(labels).toEqual([
       "Real terminal",

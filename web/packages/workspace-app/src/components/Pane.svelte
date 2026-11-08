@@ -66,6 +66,8 @@
     Bug,
     ChartNoAxesColumn,
     Check,
+    ChevronLeft,
+    ChevronRight,
     CircleAlert,
     CircleCheck,
     CircleQuestionMark,
@@ -138,7 +140,7 @@
   import { persistedPath, revivedPath } from "../api/fileIdentity";
   import { ApiError } from "../api/errors";
   import { applyNamedFocusColor } from "../state/paneColor";
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { applyPageWidthToElement, pageWidth } from "../state/pageWidth.svelte";
   import { windowCaps } from "../state/windowCaps";
   import { terminalLayer } from "../state/terminalDock.svelte";
@@ -147,6 +149,7 @@
   import { programSummary, programVisual } from "../state/programStatus";
   import { windowTabBar } from "../state/windowTabBar.svelte";
   import { portalTo } from "./portal";
+  import { TabStripScroll } from "./tabStripScroll.svelte";
 
   let { pane }: { pane: LeafNode } = $props();
 
@@ -642,6 +645,31 @@
   // In the desktop's title bar the strip's empty stretch drags the window;
   // Tauri's drag script reads the attribute on a direct press.
   const barDragRegion = $derived(stripInBar && isTauriDesktop() ? "" : undefined);
+  // Only the strip's tabs scroll; see tabStripScroll.svelte.ts. A new active
+  // tab, a flip and a move into or out of the bar bring the active tab into
+  // view.
+  const stripScroll = new TabStripScroll();
+  $effect(() => {
+    void visibleActiveTabId;
+    void visibleSide;
+    void stripInBar;
+    untrack(() => stripScroll.reveal());
+  });
+
+  /// A drag held over a scroll button scrolls the tabs. The drop there lands
+  /// past the last tab, as anywhere else off the tabs, so the strip shows no
+  /// drop bar meanwhile.
+  function onScrollButtonDrag(e: DragEvent, direction: -1 | 1): void {
+    if (tmuxPaneHere || !isAcceptedDrag(e)) return;
+    dropIndicator = -1;
+    stripScroll.startDragScroll(direction);
+  }
+
+  function onScrollButtonDragLeave(e: DragEvent): void {
+    const related = e.relatedTarget as Node | null;
+    if (related && (e.currentTarget as Node).contains(related)) return;
+    stripScroll.stopDragScroll();
+  }
   // Drag state: highlight the tab strip while another pane's tab is being
   // dragged over it. Keyed by pane id so we don't bleed state between
   // panes that share this Svelte 5 component instance.
@@ -1395,6 +1423,43 @@
   {/if}
 {/snippet}
 
+<!--
+  A scroll button of the tab strip, one on each side of the tabs while they
+  overflow. It stays out of the Tab order and a press on it leaves focus where
+  it is. At its end it reads as disabled through aria-disabled and stays a
+  live target, since engines differ on which mouse and drag events a
+  `disabled` button swallows: a drag paused over it still reaches the strip,
+  which takes the drop past the last tab.
+-->
+{#snippet scrollButton(direction: -1 | 1)}
+  {@const label = direction < 0 ? "Scroll tabs left" : "Scroll tabs right"}
+  {@const enabled = direction < 0 ? stripScroll.back : stripScroll.forward}
+  <button
+    type="button"
+    class="tab-scroll-button"
+    class:left={direction < 0}
+    class:right={direction > 0}
+    tabindex="-1"
+    title={label}
+    aria-label={label}
+    aria-disabled={!enabled}
+    {@attach stripScroll.button}
+    onmousedown={(e) => e.preventDefault()}
+    onclick={() => {
+      if (enabled) stripScroll.page(direction);
+    }}
+    ondragenter={(e) => onScrollButtonDrag(e, direction)}
+    ondragover={(e) => onScrollButtonDrag(e, direction)}
+    ondragleave={onScrollButtonDragLeave}
+  >
+    {#if direction < 0}
+      <ChevronLeft size={16} strokeWidth={2} aria-hidden="true" />
+    {:else}
+      <ChevronRight size={16} strokeWidth={2} aria-hidden="true" />
+    {/if}
+  </button>
+{/snippet}
+
 <svelte:window onkeydown={onKeyDown} />
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -1461,6 +1526,14 @@
       openPaneContextAt(e);
     }}
   >
+    {#if stripScroll.overflow}
+      {@render scrollButton(-1)}
+    {/if}
+    <!-- The tabs' own viewport: only it scrolls, so the actions after it
+         stay at the strip's end. In the desktop's title bar the space
+         between tabs drags the window, as the strip's own does. -->
+    <div class="tab-scroll" data-tauri-drag-region={barDragRegion} {@attach stripScroll.attach}>
+    <div class="tab-row" data-tauri-drag-region={barDragRegion}>
     {#each visibleTabs as t, i (t.id)}
       {@const label = tabLabelInPane(t, visibleTabs, browserCtxFor(t))}
       {@const visual = t.kind === "terminal" ? programVisual(t.programStatus) : null}
@@ -1703,10 +1776,16 @@
         >×</button>
       </div>
     {/each}
+    </div>
+    </div>
+    {#if stripScroll.overflow}
+      {@render scrollButton(1)}
+    {/if}
     <!-- Top-bar dead zone: the empty stretch between the last tab and
          the hamburger actions. A spacer only; a press, drag or
          double-click there does nothing, except in the desktop's window
-         tab bar, where it is the window's drag space. -->
+         tab bar, where it is the window's drag space. It keeps a minimum
+         width while the tabs overflow, so the strip always has one. -->
     <div class="dead-zone" aria-hidden="true" data-tauri-drag-region={barDragRegion}></div>
     <div class="actions">
       <button
@@ -2306,17 +2385,68 @@
   }
   /* iTerm-style strip: a dark bar with no per-tab dividers. The
      active tab is a rounded pill sitting on the bar rather than a
-     beveled cap that "merges" with the editor below. */
+     beveled cap that "merges" with the editor below. The strip itself
+     never scrolls; its tabs scroll in .tab-scroll, and the padding of the
+     row there makes up the rest of the strip's left inset. */
   .tabs {
     display: flex;
     align-items: center;
     gap: 2px;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
-    padding: 4px 6px;
-    overflow-x: auto;
+    padding: 4px 6px 4px 2px;
     flex-shrink: 0;
     transition: box-shadow 0.1s;
+  }
+  /* The tabs' viewport takes the room the strip has left after its actions
+     and the dead zone's minimum. Its block padding, taken back by its
+     margin, and its row's inline padding keep an active tab's ring and a
+     hovered tab's lift inside the clip. No scrollbar: the scroll buttons,
+     a wheel and a trackpad move the tabs. */
+  .tab-scroll {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 0;
+    margin: -4px 0;
+    scrollbar-width: none;
+  }
+  .tab-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  .tab-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    width: max-content;
+    padding: 0 4px;
+  }
+  /* Sized and drawn as the pane menu's trigger beside it. */
+  .tab-scroll-button {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: none;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .tab-scroll-button:hover {
+    border-color: var(--btn-border);
+  }
+  .tab-scroll-button[aria-disabled="true"] {
+    color: var(--text-secondary);
+    opacity: 0.45;
+    cursor: default;
+  }
+  .tab-scroll-button[aria-disabled="true"]:hover {
+    border-color: transparent;
   }
   .tabs.drop-active {
     box-shadow: inset 0 0 0 2px var(--pane-highlight-color, var(--pane-active-focus));
@@ -2350,7 +2480,10 @@
     align-self: stretch;
     background: transparent;
     border-bottom: 0;
-    padding: 0 8px 0 2px;
+    padding: 0 8px 0 0;
+  }
+  .tabs.in-bar .tab-row {
+    padding-left: 2px;
   }
   /* A stale Hybrid Nav transaction takes no input; in place the pane's own
      rule covers the strip. */
@@ -2622,11 +2755,16 @@
   }
   /* Dead zone on the top bar: the stretch between the last tab and
      the hamburger. flex: 1 fills any remaining horizontal space and
-     pushes the actions to the end of the strip. */
+     pushes the actions to the end of the strip. Its minimum is what the
+     tabs leave when they overflow: room to right-click for the pane menu
+     and, in the desktop's title bar, to drag the window. */
   .dead-zone {
     flex: 1;
-    min-width: 12px;
+    min-width: 24px;
     align-self: stretch;
+  }
+  .tabs.in-bar .dead-zone {
+    min-width: 40px;
   }
   :global(.hamburger-menu .menu-label) {
     display: flex;

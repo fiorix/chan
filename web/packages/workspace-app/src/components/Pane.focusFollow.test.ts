@@ -147,7 +147,7 @@ function focusedEditor(): string {
 }
 
 function stripTab(target: HTMLElement, index: number): HTMLElement {
-  const tab = target.querySelectorAll<HTMLElement>(".tabs > .tab")[index];
+  const tab = target.querySelectorAll<HTMLElement>(".tabs .tab-row > .tab")[index];
   if (!tab) throw new Error(`no tab ${index} in the strip`);
   return tab;
 }
