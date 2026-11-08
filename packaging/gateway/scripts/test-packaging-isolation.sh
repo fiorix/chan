@@ -98,6 +98,67 @@ mkdir -p "$destination"
 EOF
 chmod +x "$WORK"/postinst-bin/*
 
+# Refusals run before database preparation or any env-file write. The copy
+# cannot find prepare-database-roles.sh even if a prompt accepts bad input.
+sed -e '/^if \[\[ \$EUID -ne 0 \]\]; then/,/^fi$/d' \
+    -e "s|/etc/chan-gateway|$WORK/configure-root/etc/chan-gateway|g" \
+    "$REPO/packaging/gateway/scripts/configure.sh" > "$WORK/configure.sh"
+
+configure_refusal() {
+    local name=$1 answers=$2 message=$3
+    if printf '%s' "$answers" | PATH="$WORK/postinst-bin:$PATH" bash "$WORK/configure.sh" \
+        > "$WORK/configure.out" 2> "$WORK/configure.err"; then
+        printf 'FAIL configure: %s was accepted\n' "$name" >&2
+        return 1
+    fi
+    if ! grep -Fq "$message" "$WORK/configure.err"; then
+        printf 'FAIL configure: %s returned the wrong error (expected %s)\n' "$name" "$message" >&2
+        return 1
+    fi
+    if [[ -e "$WORK/configure-root/etc/chan-gateway" ]]; then
+        printf 'FAIL configure: %s wrote configuration before refusing\n' "$name" >&2
+        return 1
+    fi
+    printf 'PASS configure: %s refused before writes\n' "$name"
+}
+
+configure_failures=0
+pg_answers=$'chan\nfixture-password\nchan_gateway\n'
+for invalid_origin in '' 'https://gw.example.com/x' 'https://gw.example.com/' \
+    'https://gw.example.com?q=1' 'https://gw.example.com#fragment' \
+    'https://user@gw.example.com' 'ftp://gw.example.com' 'https://' \
+    'https://bad host.example.com' 'https://gw.example.com:99999' \
+    'https://gw.example.com?' 'https://gw.example.com#' 'https://[:::1]'; do
+    configure_refusal "gateway origin [$invalid_origin]" "$pg_answers$invalid_origin"$'\n' \
+        'Gateway public origin' || configure_failures=$((configure_failures + 1))
+done
+for invalid_origin in '' 'https://proxy.example.com/x'; do
+    configure_refusal "proxy namespace [$invalid_origin]" \
+        "$pg_answers"$'https://gw.example.com\n'"$invalid_origin"$'\n' \
+        'Proxy namespace origin' || configure_failures=$((configure_failures + 1))
+done
+configure_refusal 'tunnel origin path' \
+    "$pg_answers"$'https://gw.example.com\nhttps://proxy.example.com\nhttps://proxy.example.com/x\n' \
+    'Tunnel ingress origin' || configure_failures=$((configure_failures + 1))
+configure_refusal 'node origin path' \
+    "$pg_answers"$'https://gw.example.com\nhttps://proxy.example.com\n\np1\nhttps://p1.proxy.example.com/x\n' \
+    'This proxy node origin' || configure_failures=$((configure_failures + 1))
+[[ $configure_failures -eq 0 ]] || die "$configure_failures configure origin refusals failed"
+
+# Stop valid runs at the end of origin collection, before OAuth or secrets.
+sed '/^PROXY_BASE_URL_TEMPLATE=/a\
+printf "%s|%s|%s|%s\\n" "$ID_URL" "$PROXY_ORIGIN" "$TUNNEL_ORIGIN" "$PROXY_BASE_URL"\
+exit 0' "$WORK/configure.sh" > "$WORK/configure-origins.sh"
+for scheme in https http; do
+    origin_answers="$pg_answers$scheme://gw.example.test:8443"$'\n'"$scheme://proxy.example.test:8443"$'\n\np1\n\n'
+    printf '%s' "$origin_answers" | PATH="$WORK/postinst-bin:$PATH" bash "$WORK/configure-origins.sh" \
+        > "$WORK/configure.out" 2> "$WORK/configure.err" \
+        || die "configure rejected valid $scheme origins"
+    grep -Fqx "$scheme://gw.example.test:8443|$scheme://proxy.example.test:8443|$scheme://proxy.example.test:8443|$scheme://p1.proxy.example.test:8443" \
+        "$WORK/configure.out" || die "configure derived the wrong $scheme origins"
+done
+printf 'PASS configure: explicit origins and derived defaults preserve scheme and port\n'
+
 assert_mode() {
     local expected=$1 path=$2
     find "$path" -prune -perm "$expected" | grep -q . \

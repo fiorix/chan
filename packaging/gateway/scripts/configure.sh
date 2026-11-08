@@ -7,7 +7,7 @@
 #   sudo ./configure.sh
 #
 # Prompts for the values that aren't safely defaultable (Postgres
-# password, base domain, OAuth credentials). Generates the shared
+# password, public origins, OAuth credentials). Generates the shared
 # secrets (PROFILE_AUTH_TOKEN, IDENTITY_INTERNAL_TOKEN,
 # admission/entry keypairs, the proxy credential, the WireGuard agent's
 # bearer, and distinct profile, identity, controller-operator, and
@@ -54,19 +54,56 @@ read -rsp "Postgres password for ${PG_USER}: " PG_PASS; echo
 read -rp "Postgres database [chan_gateway]: " PG_DB
 PG_DB=${PG_DB:-chan_gateway}
 
-read -rp "Gateway public origin [https://gw.chan.app]: " ID_URL
-ID_URL=${ID_URL:-https://gw.chan.app}
-read -rp "Proxy namespace origin [https://proxy.chan.app]: " PROXY_ORIGIN
-PROXY_ORIGIN=${PROXY_ORIGIN:-https://proxy.chan.app}
-read -rp "Tunnel ingress origin [$PROXY_ORIGIN]: " TUNNEL_ORIGIN
+# Origins are concatenated into callback, dashboard and node URLs. Reject
+# extra URL components before preparing database roles or writing files.
+require_origin() {
+    local name=$1 value=$2
+    [[ -n "$value" ]] || { echo "error: $name is required" >&2; exit 1; }
+    if ! python3 - "$value" <<'PYTHON'
+import re
+import sys
+from urllib.parse import urlsplit
+
+label = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+host = rf"(?:{label}(?:\.{label})*\.?|\[[0-9A-Fa-f:.]+\])"
+value = sys.argv[1]
+if not re.fullmatch(rf"https?://{host}(?::[0-9]+)?", value):
+    sys.exit(1)
+try:
+    urlsplit(value).port
+except ValueError:
+    sys.exit(1)
+PYTHON
+    then
+        echo "error: $name must be an http(s) origin with a host and optional port, without credentials, path, trailing slash, query or fragment" >&2
+        exit 1
+    fi
+}
+
+origin_host() {
+    python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$1"
+}
+
+read -rp "Gateway public origin (e.g. https://gw.example.com): " ID_URL || true
+require_origin "Gateway public origin" "$ID_URL"
+read -rp "Proxy namespace origin (e.g. https://proxy.example.com): " PROXY_ORIGIN || true
+require_origin "Proxy namespace origin" "$PROXY_ORIGIN"
+echo "The tunnel ingress host needs a DNS record and certificate. Its TLS edge"
+echo "routes /v1/tunnel to 127.0.0.1:7100 as h2c (nginx grpc_pass), and / to"
+echo "127.0.0.1:7002, where /healthz and /readyz answer only for that host."
+read -rp "Tunnel ingress origin [$PROXY_ORIGIN]: " TUNNEL_ORIGIN || true
 TUNNEL_ORIGIN=${TUNNEL_ORIGIN:-$PROXY_ORIGIN}
+require_origin "Tunnel ingress origin" "$TUNNEL_ORIGIN"
 read -rp "This proxy node id [p1]: " PROXY_ID
 PROXY_ID=${PROXY_ID:-p1}
 # The node origin must match the controller's template expansion for the
 # id, so the default prepends it to the namespace host.
 PROXY_BASE_URL_DEFAULT="${PROXY_ORIGIN%%://*}://${PROXY_ID}.${PROXY_ORIGIN#*://}"
-read -rp "This proxy node origin [$PROXY_BASE_URL_DEFAULT]: " PROXY_BASE_URL
+echo "The node origin's wildcard needs a DNS record, a wildcard certificate,"
+echo "and a TLS edge route to 127.0.0.1:7002 for tenant HTTP and WebSockets."
+read -rp "This proxy node origin [$PROXY_BASE_URL_DEFAULT]: " PROXY_BASE_URL || true
 PROXY_BASE_URL=${PROXY_BASE_URL:-$PROXY_BASE_URL_DEFAULT}
+require_origin "This proxy node origin" "$PROXY_BASE_URL"
 PROXY_BASE_URL_TEMPLATE="${PROXY_ORIGIN%%://*}://{proxy_id}.${PROXY_ORIGIN#*://}"
 if [[ $AGENT_INSTALLED == true ]]; then
     read -rp "Kernel WireGuard interface for the agent [wg0]: " WG_INTERFACE
@@ -343,6 +380,11 @@ echo "Done. Verify each enabled OAuth app's Authorization callback URL is:"
 [[ -n "$GH_ID"   ]] && echo "    ${ID_URL}/auth/github/callback"
 [[ -n "$GOOG_ID" ]] && echo "    ${ID_URL}/auth/google/callback"
 [[ -n "$GL_ID"   ]] && echo "    ${ID_URL}/auth/gitlab/callback"
+echo
+echo "DNS records and certificate names for these origins:"
+echo "    $(origin_host "$ID_URL") (identity public origin)"
+echo "    $(origin_host "$TUNNEL_ORIGIN") (tunnel ingress and proxy health)"
+echo "    *.$(origin_host "$PROXY_BASE_URL") (this node's tenant wildcard)"
 echo
 echo "Then stop database clients, run the owner-only migration/reconcile unit,"
 echo "and enable + start the services:"
