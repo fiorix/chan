@@ -65,6 +65,7 @@ export type AuditEntry = {
 };
 
 export type ProvidersResponse = { providers: string[] };
+export type GatewayDiscovery = { tunnel_url: string };
 
 export type DevserverGrant = {
   id: string;
@@ -98,6 +99,7 @@ export type IncomingShare = {
 };
 
 export const api = {
+  discovery: () => request<GatewayDiscovery>("/.well-known/chan-gateway"),
   providers: () => request<ProvidersResponse>("/api/providers"),
   me: () => request<Me>("/api/me"),
   logout: () => request<void>("/api/logout", { method: "POST" }),

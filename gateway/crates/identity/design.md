@@ -16,7 +16,7 @@ Two routers on two listeners. The public listener carries the session layer at i
 
 1. `/auth/*`: the pre-session OAuth flow. It stashes the CSRF state and PKCE verifier in the anonymous session; the callback consumes them and either upgrades the session to authenticated or fails.
 2. `/api/*`: the session-gated JSON API for the embedded SPA: `me`, profile management, PAT lifecycle, owned and incoming devservers, and sharing grants.
-3. Public discovery and the desktop surface: `/.well-known/chan-gateway`, the `/desktop/authorize` consent flow, the PAT-gated roster and entry routes.
+3. Public discovery and the desktop surface: `/.well-known/chan-gateway`, the `/desktop/authorize` consent flow, the PAT-gated roster and entry routes. The account SPA reads discovery's `tunnel_url` for its devserver setup hints.
 4. `/s/{owner}` and `/s/{owner}/{workspace}`: the share landings that mint the browser entry credential.
 5. `/internal/v1/*` and `/admin/v1/*` on the internal listener: PAT validation for the proxies, OAuth-session `whoami` for the account caller, active WireGuard peers for the node agent, and the operator and account-composite admin trees, each behind its own bearer.
 

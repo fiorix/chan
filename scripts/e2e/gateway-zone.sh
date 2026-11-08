@@ -147,7 +147,7 @@ MAX_DEVSERVERS=2
 # Scenario dispatch: "all" (default) = core suite + every registered
 # scenario; "core" = the inline suite only; a registered name = stack
 # bring-up + that scenario only. Lanes append their scenario name here.
-SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane extension"
+SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane extension tunnelhint"
 SCENARIO="${1:-all}"
 RUN_CORE=1
 case "$SCENARIO" in all | core) ;; *) RUN_CORE=0 ;; esac
@@ -1388,6 +1388,176 @@ fi # RUN_CORE
 # running stack and must leave the stack usable (clean up what it
 # stops/starts).
 # ---------------------------------------------------------------
+
+# Read the account page's command and use its discovered URL for a real tunnel.
+scenario_tunnelhint() {
+    [ -x "$CHROME_BIN" ] || assert_fail "tunnelhint: headless Chrome not found (set E2E_CHROME_BIN)"
+
+    tunnelhint_stop() {
+        local name="$1" pid
+        [ -f "$WORK/pids/$name.pid" ] || return 0
+        pid="$(cat "$WORK/pids/$name.pid")" || return 1
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" || return 1
+            for _ in $(seq 25); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.2
+            done
+            kill -0 "$pid" 2>/dev/null && return 1
+        fi
+        wait "$pid" 2>/dev/null || true
+        rm -f "$WORK/pids/$name.pid"
+    }
+
+    # Other scenarios can change the OAuth fixture; restore it on completion.
+    local stub_before stub_email stub_subject restore_stub=0
+    stub_before="$(curl --noproxy '*' -fsS "http://127.0.0.1:$OAUTH_PORT/user")" ||
+        assert_fail "tunnelhint: cannot read the OAuth fixture"
+    stub_email="$(printf %s "$stub_before" | json_get email)"
+    stub_subject="$(printf %s "$stub_before" | json_get id)"
+    [ -n "$stub_email" ] && [ -n "$stub_subject" ] ||
+        assert_fail "tunnelhint: OAuth fixture has no identity"
+    if [ "$stub_email" != "$ALICE_EMAIL" ] || [ "$stub_subject" != 424242 ]; then
+        tunnelhint_stop stub-oauth || assert_fail "tunnelhint: OAuth fixture did not stop"
+        spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$ALICE_EMAIL"
+        wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 ||
+            assert_fail "tunnelhint: Alice's OAuth fixture did not start"
+        restore_stub=1
+    fi
+
+    local share_override
+    share_override="$(sql "$E2E_DATABASE_URL" "SET search_path TO $E2E_SCHEMA;
+        SELECT enabled FROM feature_flag_overrides
+        WHERE flag_key = 'share_workspaces' AND user_id = '$ALICE_ID';")" ||
+        assert_fail "tunnelhint: cannot read the sharing flag"
+    case "$share_override" in ''|true|false) ;; *) assert_fail "tunnelhint: invalid sharing flag" ;; esac
+    sql "$E2E_DATABASE_URL" "SET search_path TO $E2E_SCHEMA;
+        INSERT INTO feature_flag_overrides (flag_key, user_id, enabled)
+        VALUES ('share_workspaces', '$ALICE_ID', true)
+        ON CONFLICT (flag_key, user_id) DO UPDATE SET enabled = true;" ||
+        assert_fail "tunnelhint: cannot enable the Devservers tab"
+
+    local hint_pat hint_ds
+    mint_into "$ALICE_EMAIL" account-page-command hint_pat hint_ds ||
+        assert_fail "tunnelhint: tunnel PAT mint failed"
+    curl --noproxy '*' --cacert "$TLS_DIR/ca.crt" -fsS \
+        "https://$ID_HOST/.well-known/chan-gateway" > "$WORK/tunnelhint-discovery.json" ||
+        assert_fail "tunnelhint: gateway discovery failed"
+    cp "$REPO/scripts/e2e/gateway-zone-browser.mjs" "$WORK/" ||
+        assert_fail "tunnelhint: cannot copy the browser driver"
+    CHROME_BIN="$CHROME_BIN" ID_ORIGIN="https://$ID_HOST" HINT=1 \
+        node "$WORK/gateway-zone-browser.mjs" > "$WORK/tunnelhint-browser.json" 2> "$LOGS/tunnelhint-browser.log" ||
+        assert_fail "tunnelhint: browser failed (see logs/tunnelhint-browser.log)"
+
+    # Extract an argument only after matching the complete rendered command;
+    # page text is never evaluated as shell code.
+    if ! node --input-type=module - "$WORK/tunnelhint-browser.json" "$WORK/tunnelhint-discovery.json" \
+        > "$WORK/tunnelhint-url.txt" 2> "$LOGS/tunnelhint-command.log" <<'JS'
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const [hintsPath, discoveryPath] = process.argv.slice(2);
+const hints = JSON.parse(readFileSync(hintsPath, "utf8"));
+const { tunnel_url: url } = JSON.parse(readFileSync(discoveryPath, "utf8"));
+assert.equal(typeof url, "string");
+assert.ok(url.length > 0, "discovery has a tunnel URL");
+const prefix = "export CHAN_TUNNEL_TOKEN=<token>\nchan devserver start --tunnel-url ";
+assert.equal(hints.command, prefix + url, "Devservers command uses discovery's URL");
+assert.equal(hints.tokens_command, prefix + url, "Tokens command uses discovery's URL");
+for (const text of [hints.devservers_intro, hints.tokens_hint]) {
+    assert.ok(text.includes("CHAN_TUNNEL_TOKEN"), "token uses the environment");
+    assert.ok(text.includes("chan devserver run"), "foreground form is explained");
+    assert.ok(!text.includes("--tunnel-token"), "no token flag is suggested");
+}
+assert.ok(Array.isArray(hints.offline_hints) && hints.offline_hints.length > 0, "minted devserver is offline");
+assert.ok(hints.offline_hints.some((hint) => hint.includes("account-page-command")), "the minted devserver has an offline hint");
+for (const hint of hints.offline_hints) {
+    assert.ok(hint.includes("command above") && !hint.includes("--tunnel-token"), "offline row points at the command");
+}
+assert.equal(hints.discovery_requests, 1, "both views reuse one discovery request");
+process.stdout.write(hints.command.slice(prefix.length));
+JS
+    then
+        assert_fail "tunnelhint: rendered commands do not match discovery (see logs/tunnelhint-command.log)"
+    fi
+    assert_pass "tunnelhint: both views use discovery's URL and an environment token; offline rows point above"
+
+    # Alice already has two live devservers. Also stop the core's rejected
+    # third client so its reconnect loop cannot steal the freed slot.
+    local resume_c=0
+    if [ -f "$WORK/pids/ds-c.pid" ] && kill -0 "$(cat "$WORK/pids/ds-c.pid")" 2>/dev/null; then
+        resume_c=1
+        tunnelhint_stop ds-c || assert_fail "tunnelhint: cap-probe devserver did not stop"
+    fi
+    [ -n "$(tunnel_field "$DS_B" proxy_id)" ] ||
+        assert_fail "tunnelhint: devserver B is not registered before the slot is freed"
+    tunnelhint_stop ds-b || assert_fail "tunnelhint: devserver B did not stop"
+    wait_tunnels 1 75 || assert_fail "tunnelhint: Alice's spare slot did not become available"
+
+    # A malformed or failed registry read must not look like a removed row.
+    tunnelhint_node() {
+        admin_read /admin/v1/tunnels | node -e '
+            const assert = require("node:assert/strict");
+            let data = "";
+            process.stdin.on("data", (chunk) => { data += chunk; }).on("end", () => {
+                const rows = JSON.parse(data);
+                assert.ok(Array.isArray(rows));
+                const row = rows.find((value) => value.devserver_id === process.argv[1]);
+                if (row) {
+                    assert.equal(typeof row.proxy_id, "string");
+                    assert.ok(row.proxy_id.length > 0);
+                }
+                process.stdout.write(row ? row.proxy_id : "");
+            });
+        ' "$hint_ds"
+    }
+
+    local copied_url node_id='' remaining registered=0 stopped=0
+    copied_url="$(cat "$WORK/tunnelhint-url.txt")" || assert_fail "tunnelhint: copied URL is missing"
+    spawn_devserver hint 0 "$hint_pat" "$copied_url" 1
+    for _ in $(seq 150); do
+        if node_id="$(tunnelhint_node)" && [ -n "$node_id" ]; then
+            registered=1
+            break
+        fi
+        sleep 0.4
+    done
+    [ "$registered" = 1 ] || assert_fail "tunnelhint: the page's foreground command never registered"
+    assert_pass "tunnelhint: the page's foreground command registered through the discovered tunnel URL"
+
+    tunnelhint_stop ds-hint || assert_fail "tunnelhint: copied-command devserver did not stop"
+    for _ in $(seq 75); do
+        if remaining="$(tunnelhint_node)" && [ -z "$remaining" ]; then
+            stopped=1
+            break
+        fi
+        sleep 0.4
+    done
+    [ "$stopped" = 1 ] || assert_fail "tunnelhint: copied-command registration did not disappear"
+    spawn_devserver b "${DS_PORTS[1]}" "$PAT_B" "$(node_tunnel_url p2)"
+    wait_tunnels 2 150 && [ -n "$(tunnel_field "$DS_B" proxy_id)" ] ||
+        assert_fail "tunnelhint: devserver B did not return"
+    if [ "$resume_c" = 1 ]; then
+        spawn_devserver c "${DS_PORTS[2]}" "$PAT_C" "$SHIM_TUNNEL_URL"
+    fi
+
+    if [ -z "$share_override" ]; then
+        sql "$E2E_DATABASE_URL" "SET search_path TO $E2E_SCHEMA;
+            DELETE FROM feature_flag_overrides WHERE flag_key = 'share_workspaces' AND user_id = '$ALICE_ID';" ||
+            assert_fail "tunnelhint: cannot remove the temporary sharing override"
+    else
+        sql "$E2E_DATABASE_URL" "SET search_path TO $E2E_SCHEMA;
+            UPDATE feature_flag_overrides SET enabled = $share_override
+            WHERE flag_key = 'share_workspaces' AND user_id = '$ALICE_ID';" ||
+            assert_fail "tunnelhint: cannot restore the sharing override"
+    fi
+    if [ "$restore_stub" = 1 ]; then
+        tunnelhint_stop stub-oauth || assert_fail "tunnelhint: Alice's OAuth fixture did not stop"
+        spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$stub_email" "$stub_subject"
+        wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 ||
+            assert_fail "tunnelhint: previous OAuth fixture did not return"
+    fi
+    assert_pass "tunnelhint: copied-command devserver stopped and the existing fixtures were restored"
+}
 
 # Scenario: devserver registry sweeper (profile-service). Proves the
 # mark/delete cycle against the real stack: a stale never-dialed row

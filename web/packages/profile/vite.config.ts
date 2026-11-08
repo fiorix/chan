@@ -6,7 +6,7 @@
 // lives at web/packages/profile under the ./web npm-workspaces root, so the
 // embed-output path is three levels up; the rust-embed input path is frozen,
 // so the source layout can move while the output path does not. Backend
-// serves /auth/*, /api/*,
+// serves /auth/*, /api/*, /.well-known/* and
 // /healthz; everything else falls back to the SPA, so we keep asset URLs
 // relative.
 
@@ -38,6 +38,7 @@ export default defineConfig({
       "/api": "http://127.0.0.1:7000",
       "/auth": "http://127.0.0.1:7000",
       "/healthz": "http://127.0.0.1:7000",
+      "/.well-known": "http://127.0.0.1:7000",
     },
   },
   build: {
