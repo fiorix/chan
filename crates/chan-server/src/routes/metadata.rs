@@ -283,7 +283,10 @@ fn perform_metadata_import_with(
     let workspace_strong = cell.workspace.clone();
     drop(cell);
 
-    let deadline = Instant::now() + IMPORT_DRAIN_DEADLINE;
+    let drain_bound = IMPORT_DRAIN_DEADLINE;
+    #[cfg(all(test, unix))]
+    let drain_bound = test_wait_bound(&workspace_strong.paths().lock, drain_bound, |b| b.drain);
+    let deadline = Instant::now() + drain_bound;
     while Arc::strong_count(&workspace_strong) > 1 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -331,6 +334,52 @@ fn perform_metadata_import_with(
 
 /// How often a route looks again for the workspace it let go.
 const RELEASE_POLL: Duration = Duration::from_millis(2);
+
+/// The bounds of a reset's or an import's four waits for one workspace, as
+/// a test sets them: the wait for in-flight clones to drain, for the
+/// workspace's last owner, for its writer lock, and for a reopen refused
+/// over that lock. A test that waits one of them out keeps it at the route's
+/// bound and lengthens the others past any host's cost, so its outcome
+/// reads which wait ran out, never how fast the host ran the others.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TestWaitBounds {
+    pub(super) drain: Duration,
+    pub(super) owners: Duration,
+    pub(super) lock: Duration,
+    pub(super) reopen: Duration,
+}
+
+#[cfg(all(test, unix))]
+static TEST_WAIT_BOUNDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestWaitBounds>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Set the bounds of the waits a reset or an import makes for the workspace
+/// whose writer lock is `lock_dir`.
+#[cfg(all(test, unix))]
+pub(super) fn set_test_wait_bounds(lock_dir: &Path, bounds: TestWaitBounds) {
+    assert!(TEST_WAIT_BOUNDS
+        .lock()
+        .unwrap()
+        .insert(lock_dir.to_path_buf(), bounds)
+        .is_none());
+}
+
+/// The bound a test set, with `pick`, for one wait over `lock_dir`, or the
+/// route's own `bound` when it set none.
+#[cfg(all(test, unix))]
+pub(super) fn test_wait_bound(
+    lock_dir: &Path,
+    bound: Duration,
+    pick: impl FnOnce(&TestWaitBounds) -> Duration,
+) -> Duration {
+    TEST_WAIT_BOUNDS
+        .lock()
+        .unwrap()
+        .get(lock_dir)
+        .map_or(bound, pick)
+}
 
 #[cfg(all(test, unix))]
 type TestHook = Box<dyn FnOnce() + Send>;
@@ -391,7 +440,13 @@ pub(super) fn held_past_release(
     lock_dir: &Path,
     bound: Duration,
 ) -> Release {
-    let owners_deadline = Instant::now() + bound;
+    let (owners_bound, lock_bound) = (bound, bound);
+    #[cfg(all(test, unix))]
+    let (owners_bound, lock_bound) = (
+        test_wait_bound(lock_dir, owners_bound, |b| b.owners),
+        test_wait_bound(lock_dir, lock_bound, |b| b.lock),
+    );
+    let owners_deadline = Instant::now() + owners_bound;
     while released.strong_count() > 0 {
         if Instant::now() >= owners_deadline {
             // An owner that lets go between the count and this upgrade leaves
@@ -403,7 +458,7 @@ pub(super) fn held_past_release(
         }
         std::thread::sleep(RELEASE_POLL);
     }
-    let lock_deadline = Instant::now() + bound;
+    let lock_deadline = Instant::now() + lock_bound;
     while !chan_workspace::lock::is_free(lock_dir) {
         #[cfg(all(test, unix))]
         if let Some(hook) = TEST_LOCK_WAIT_HOOKS.lock().unwrap().remove(lock_dir) {
@@ -476,6 +531,8 @@ pub(super) fn reopen_released(
     #[cfg_attr(not(all(test, unix)), allow(unused_variables))] lock_dir: &Path,
     mut open: impl FnMut() -> chan_workspace::Result<Arc<Workspace>>,
 ) -> chan_workspace::Result<Reopened> {
+    #[cfg(all(test, unix))]
+    let bound = test_wait_bound(lock_dir, bound, |b| b.reopen);
     let deadline = Instant::now() + bound;
     let mut recovered_from = None;
     loop {
@@ -514,6 +571,14 @@ struct TestSessionCloseGate {
     entered: tokio::sync::oneshot::Sender<()>,
     release: std::sync::mpsc::Receiver<()>,
 }
+
+/// How long a session-close test gate holds when its test does not let it
+/// go. Every test lets its gate go once it has seen what the gate holds, so
+/// a green run never waits this out; it ends a run whose test is stuck
+/// behind the route, red and not hung. A test reads that the gate ran out
+/// by itself from its release sender, whose receiver is gone by then.
+#[cfg(all(test, unix))]
+const TEST_SESSION_CLOSE_GATE_GUARD: Duration = Duration::from_secs(60);
 
 #[cfg(all(test, unix))]
 static TEST_SESSION_CLOSE_GATES: std::sync::LazyLock<
@@ -612,7 +677,7 @@ pub(super) fn close_workspace_sessions(
         if let Some(gate) = gate {
             gate.entered.send(()).unwrap();
             gate.release
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(TEST_SESSION_CLOSE_GATE_GUARD)
                 .expect("session-close test gate was not released");
         }
     }
