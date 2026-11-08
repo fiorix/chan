@@ -698,11 +698,23 @@ mod alias_probe {
     /// that thread instead of starting another.
     pub(super) fn fresh_canonicals(roots: &[PathBuf], budget: Duration) -> Vec<Option<PathBuf>> {
         let probes: Vec<Option<Arc<Probe>>> = roots.iter().map(|root| start(root)).collect();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let waiting_from = Instant::now();
         let deadline = Instant::now() + budget;
-        probes
+        let fresh: Vec<Option<PathBuf>> = probes
             .iter()
             .map(|probe| probe.as_ref().and_then(|probe| probe.wait_until(deadline)))
-            .collect()
+            .collect();
+        #[cfg(any(test, feature = "test-hooks"))]
+        paths::root_stall::lookup_gave_up(
+            roots
+                .iter()
+                .zip(&fresh)
+                .filter(|(_, answer)| answer.is_none())
+                .map(|(root, _)| root.as_path()),
+            waiting_from.elapsed(),
+        );
+        fresh
     }
 
     /// The probe in flight for `root`, or a new one on a thread of its own;

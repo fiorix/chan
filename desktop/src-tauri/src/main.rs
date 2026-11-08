@@ -10975,6 +10975,15 @@ mod tests {
         /// `chan workspace forget` of one workspace is answered while another
         /// registered root hangs, and asks that root nothing: the removal
         /// finds the registry row by the path it stores.
+        ///
+        /// Asking the hung root nothing is what keeps the forget inside the
+        /// CLI's reply budget however long that root hangs: none of the
+        /// forget's time is the hung root's. A registry lookup of the hung
+        /// root starts a probe that enters the stall, so asking it nothing
+        /// also means no lookup waited on it. The rest of the forget's time is
+        /// the healthy root's teardown and the registry writes, which a loaded
+        /// host stretches, so the bound below only decides how soon a forget
+        /// that does wait on the hung root reports.
         #[test]
         fn forgetting_a_workspace_answers_while_another_root_hangs() {
             let (runtime, desktop) = HungRootDesktop::new();
@@ -10986,7 +10995,7 @@ mod tests {
             let other = desktop.other.clone();
             let outcome = stall.finishes_beside(
                 "forgetting another workspace",
-                cli_reply_bound(),
+                HEALTHY_ROOT_BOUND,
                 move || {
                     handle.block_on(close_workspace_from_handoff(app_handle, state, other, true))
                 },
@@ -11547,9 +11556,43 @@ mod tests {
                 );
             }
 
+            /// How many lookups each stall has recorded so far.
+            fn lookup_marks(stalls: &[root_stall::RootStall]) -> Vec<usize> {
+                stalls
+                    .iter()
+                    .map(|stall| stall.lookup_waits().len())
+                    .collect()
+            }
+
+            /// The registry lookups that gave up on any of `stalls` since
+            /// `marks`, one entry per lookup however many of the stalls it
+            /// gave up on, with the time each waited.
+            fn lookups_since(
+                stalls: &[root_stall::RootStall],
+                marks: &[usize],
+            ) -> Vec<(u64, std::time::Duration)> {
+                let mut lookups: Vec<(u64, std::time::Duration)> = stalls
+                    .iter()
+                    .zip(marks)
+                    .flat_map(|(stall, mark)| stall.lookup_waits().into_iter().skip(*mark))
+                    .collect();
+                lookups.sort_by_key(|(lookup, _)| *lookup);
+                lookups.dedup_by_key(|(lookup, _)| *lookup);
+                lookups
+            }
+
             /// A handoff forget of the moved root makes at most one bounded
             /// registry lookup beside a stalled row, then removes the selected
             /// row and its managed state.
+            ///
+            /// The budget is read off what the forget's lookups waited on the
+            /// stalled rows, the only waits a hung root adds to its answer:
+            /// each lookup that gave up on them records the time it waited,
+            /// from the clock, and that time must fit the CLI's wait. The
+            /// forget's own work and registry writes are not the hung roots'
+            /// and stretch with a loaded host, so the wall-clock bound only
+            /// decides how soon a forget that waits on a hung root without a
+            /// bound reports.
             #[test]
             fn a_relinked_forget_answers_in_the_handoff_reply_budget() {
                 let held = HeldRestore::new();
@@ -11571,21 +11614,77 @@ mod tests {
                 let state = Arc::clone(&held.state);
                 let runtime = held.runtime.handle().clone();
                 let path = held.relinked_now.clone();
-                let (outcome, elapsed) = held.stalls.first().expect("hung root").finishes_beside(
-                    "forgetting the relinked root",
-                    cli_reply_bound(),
-                    move || {
-                        let started = std::time::Instant::now();
-                        let outcome =
-                            runtime.block_on(close_workspace_from_handoff(app, state, path, true));
-                        (outcome, started.elapsed())
-                    },
+                // The control: a forget of the plain row beside the same held
+                // restore, which names the root its row stores and so makes no
+                // lookup. Its time is what a forget's own work costs on this
+                // host in this run.
+                let control_marks = lookup_marks(&held.stalls);
+                let (control, control_took) = {
+                    let app = held.app.handle().clone();
+                    let state = Arc::clone(&held.state);
+                    let runtime = held.runtime.handle().clone();
+                    let plain = PathBuf::from(&held.plain);
+                    let started = std::time::Instant::now();
+                    let outcome = held.stalls[0].finishes_beside(
+                        "forgetting the plain root",
+                        HEALTHY_ROOT_BOUND,
+                        move || {
+                            runtime.block_on(close_workspace_from_handoff(app, state, plain, true))
+                        },
+                    );
+                    (outcome, started.elapsed())
+                };
+                assert_eq!(
+                    control,
+                    Ok(chan_server::WorkspaceLifecycleOutcome::Completed),
+                    "fixture: the control forget"
                 );
+                let control_work = control_took.saturating_sub(
+                    lookups_since(&held.stalls, &control_marks)
+                        .iter()
+                        .map(|(_, waited)| *waited)
+                        .sum(),
+                );
+                let marks = lookup_marks(&held.stalls);
+                let started = std::time::Instant::now();
+                let outcome = held.stalls.first().expect("hung root").finishes_beside(
+                    "forgetting the relinked root",
+                    HEALTHY_ROOT_BOUND,
+                    move || runtime.block_on(close_workspace_from_handoff(app, state, path, true)),
+                );
+                let took = started.elapsed();
                 assert_eq!(
                     outcome,
                     Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
                 );
-                assert!(elapsed < cli_reply_bound(), "handoff took {elapsed:?}");
+                let lookups = lookups_since(&held.stalls, &marks);
+                assert!(
+                    !lookups.is_empty(),
+                    "fixture: the forget's lookup never waited on a stalled row"
+                );
+                assert_eq!(
+                    lookups.len(),
+                    1,
+                    "the forget made {} registry lookups that gave up beside a stalled row: {lookups:?}",
+                    lookups.len()
+                );
+                let waited: std::time::Duration = lookups.iter().map(|(_, waited)| *waited).sum();
+                assert!(
+                    waited < cli_reply_bound(),
+                    "the forget's lookup waited {waited:?} on the stalled rows, past the reply budget of {:?}",
+                    cli_reply_bound()
+                );
+                // The rest of the forget's time is its own work, which the
+                // control measured on this host; a wait the stalled rows cost
+                // it that no lookup recorded shows up here.
+                let work = took.saturating_sub(waited);
+                eprintln!(
+                    "relinked forget: took {took:?}, lookup waited {waited:?}, work {work:?}; control work {control_work:?}"
+                );
+                assert!(
+                    work <= control_work * 4 + std::time::Duration::from_millis(500),
+                    "the forget spent {work:?} outside its lookup's wait, past four times the control forget's {control_work:?} and half a second"
+                );
                 assert!(
                     held.embedded()
                         .library()

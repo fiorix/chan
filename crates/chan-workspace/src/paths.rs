@@ -563,6 +563,9 @@ pub mod root_stall {
         /// held before it and keeps holding the ones after.
         epoch: u64,
         entered: Vec<String>,
+        /// Registry lookups that gave up waiting for this root to answer:
+        /// each one's id and how long it waited.
+        lookup_waits: Vec<(u64, Duration)>,
     }
 
     static STALLS: OnceLock<Mutex<HashMap<PathBuf, Arc<Gate>>>> = OnceLock::new();
@@ -731,6 +734,22 @@ pub mod root_stall {
                 .clone()
         }
 
+        /// The registry lookups that gave up on the root, in the order they
+        /// did: each one's id, shared by every stall that lookup gave up on,
+        /// and how long it waited, from the moment before its waits to its
+        /// return. A lookup joins a probe already in flight rather than
+        /// starting its own, so [`RootStall::entered`] counts the probes and
+        /// this the waits; the time is what the lookup waited, read off the
+        /// clock, not its budget.
+        pub fn lookup_waits(&self) -> Vec<(u64, Duration)> {
+            self.gate
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .lookup_waits
+                .clone()
+        }
+
         /// Run `operation` on a thread of its own and return its output;
         /// panic naming `what` and the calls this stall holds when it has
         /// not finished within `bound`.
@@ -830,6 +849,46 @@ pub mod root_stall {
         if named {
             let _open = step.open();
             stall_point(path);
+        }
+    }
+
+    /// Record one registry lookup that gave up on the roots in `unanswered`
+    /// after waiting `waited`: once against each stall that holds one of
+    /// them, under one id, so a test can tell one lookup that met several
+    /// stalled roots from several lookups.
+    pub(crate) fn lookup_gave_up<'a>(
+        unanswered: impl IntoIterator<Item = &'a Path>,
+        waited: Duration,
+    ) {
+        static NEXT_LOOKUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let Some(map) = STALLS.get() else {
+            return;
+        };
+        let mut gates: Vec<Arc<Gate>> = Vec::new();
+        {
+            let map = map.lock().unwrap_or_else(PoisonError::into_inner);
+            for root in unanswered {
+                let held = map
+                    .iter()
+                    .find(|(stalled, _)| root.starts_with(stalled))
+                    .map(|(_, gate)| gate);
+                if let Some(gate) = held {
+                    if !gates.iter().any(|seen| Arc::ptr_eq(seen, gate)) {
+                        gates.push(Arc::clone(gate));
+                    }
+                }
+            }
+        }
+        if gates.is_empty() {
+            return;
+        }
+        let lookup = NEXT_LOOKUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for gate in gates {
+            gate.state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .lookup_waits
+                .push((lookup, waited));
         }
     }
 
