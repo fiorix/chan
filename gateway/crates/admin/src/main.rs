@@ -2,10 +2,11 @@
 //!
 //! Talks to profile-service's `/v1/admin/*` tree (plus the non-admin
 //! routes used for cross-service reads), devserver-control's
-//! `/admin/v1/*` tree (tunnel and proxy ps / kill / watch), and
-//! identity-service's `/admin/v1/tokens` (PAT mint). Each destination
-//! has an independent bearer; the CLI never reuses one service's
-//! credential against another service.
+//! `/admin/v1/*` tree (tenant sessions, tunnels and proxies), and
+//! identity-service's internal `/admin/v1/*` tree (token mint, OAuth
+//! sessions, policy, access and delete composites, fleet admission).
+//! Each destination has an independent bearer; the CLI never reuses
+//! one service's credential against another service.
 //!
 //! Output is shell-friendly: human-readable tables on a TTY,
 //! `--json` everywhere for piping into jq. Exit codes:
@@ -47,8 +48,9 @@ struct Cli {
     #[arg(long, global = true, env = "CHAN_ADMIN_WORKSPACE_URL")]
     workspace_url: Option<String>,
 
-    /// HTTP URL of identity-service (used by `token create`).
-    /// Defaults to CHAN_ADMIN_IDENTITY_URL or http://127.0.0.1:7000.
+    /// HTTP URL of identity-service's internal admin listener (token mint,
+    /// OAuth sessions, policy, access and delete composites, fleet admission).
+    /// Defaults to CHAN_ADMIN_IDENTITY_URL or http://127.0.0.1:7004.
     #[arg(long, global = true, env = "CHAN_ADMIN_IDENTITY_URL")]
     identity_url: Option<String>,
 
@@ -722,7 +724,7 @@ fn build_workspace_client(url: Option<&str>, token: &str) -> anyhow::Result<Work
 fn build_identity_client(url: Option<&str>, token: &str) -> anyhow::Result<IdentityClient> {
     let url = url
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "http://127.0.0.1:7000".to_string());
+        .unwrap_or_else(|| "http://127.0.0.1:7004".to_string());
     validate_admin_url("CHAN_ADMIN_IDENTITY_URL", &url)?;
     IdentityClient::new(url, token.to_string()).context("build identity admin client")
 }
@@ -1641,7 +1643,7 @@ async fn read_body(res: reqwest::Response) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Identity admin client (PAT mint)
+// Identity internal admin client (tokens, sessions, policy, access/delete, fleet)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -2814,6 +2816,18 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_client_defaults_to_the_internal_listener() {
+        let client = build_identity_client(None, "t").unwrap();
+        assert_eq!(client.base.as_str(), "http://127.0.0.1:7004/");
+    }
+
+    #[test]
+    fn identity_client_uses_an_explicit_url() {
+        let client = build_identity_client(Some("http://127.0.0.1:17004"), "t").unwrap();
+        assert_eq!(client.base.as_str(), "http://127.0.0.1:17004/");
+    }
 
     #[tokio::test]
     async fn email_resolution_finds_an_exact_match_beyond_the_first_page() {
