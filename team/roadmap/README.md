@@ -34,7 +34,7 @@ Later the same day, from a ranking of the items by size, the owner moved every i
 | Item | State | Next |
 | --- | --- | --- |
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | not started | build |
-| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | not started | reading |
+| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 | [chan close reports a running serve closed][closelie] | not started | build |
 | [chan serve --help names Cmd+P as Team Work][cmdphelp] | not started | build |
 | [admin.env points at identity's public port][adminenv] | not started | build |
