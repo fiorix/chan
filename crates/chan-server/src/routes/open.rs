@@ -389,10 +389,16 @@ mod tests {
         const CHILD: &str = "CHAN_TEST_HOSTED_OPEN_CHILD";
         const TEST: &str = "routes::open::tests::hosted_open_routes_through_the_built_tenant";
         if std::env::var_os(CHILD).is_none() {
+            // A hang guard on the child, which starts this test binary afresh
+            // and builds a tenant in it: on a loaded host that start alone
+            // can take a minute, and nothing in the child waits on a bound of
+            // its own, so a green child ends long before this and only a
+            // child that never ends reaches it.
+            const CHILD_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(300);
             // Builder configuration and shell discovery use process-wide caches.
             let home = TempDir::new().unwrap();
             let output = tokio::time::timeout(
-                std::time::Duration::from_secs(60),
+                CHILD_HANG_GUARD,
                 tokio::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--exact",
