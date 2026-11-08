@@ -115,6 +115,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "set_titlebar_tabs_preference",
     "terminal_background_opacity",
     "titlebar_chrome",
+    "titlebar_menu_popup",
     "titlebar_tabs_preference",
     "titlebar_window_control",
     "toggle_launcher_panel",

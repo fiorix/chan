@@ -5404,14 +5404,17 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // A page's tab bar in the title bar, on macOS and Windows: the page
         // opts in and reads the room the window controls take; on the GTK
         // desktops both answer inactive. On Windows the page draws the window
-        // controls and acts through titlebar_window_control. The desktop's
-        // preference says whether pages opt in, and changes reach every
-        // window as the titlebar_tabs::PREFERENCE_EVENT event.
+        // controls and acts through titlebar_window_control, and under the
+        // Computers launcher draws the launcher's menus and pops each up
+        // through titlebar_menu_popup. The desktop's preference says whether
+        // pages opt in, and changes reach every window as the
+        // titlebar_tabs::PREFERENCE_EVENT event.
         titlebar_tabs::set_titlebar_tabs,
         titlebar_tabs::titlebar_chrome,
         titlebar_tabs::titlebar_tabs_preference,
         titlebar_tabs::set_titlebar_tabs_preference,
         titlebar_tabs::titlebar_window_control,
+        titlebar_tabs::titlebar_menu_popup,
     ]
 }
 
@@ -6304,15 +6307,23 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Route every menubar item click / accelerator. Menu events carry only
-/// the item id -- never the source window -- so the dynamic Window-menu
-/// rows encode their window's label in the id (the `buried:` / `open:`
-/// namespaces); routing by `is_focused` is reserved for items
-/// that genuinely mean "the focused window" (and for macOS, whose single
-/// global menubar has no owning window). Off macOS only the launcher has
-/// a menubar, so the static items below fire from it alone.
+/// Route every menubar item click / accelerator. tauri hands every menu
+/// event to this one app-wide listener, a click in a popped-up menu as
+/// much as one in a menubar, so an item does the same wherever it shows.
 fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
-    let id = event.id().as_ref();
+    run_menu_item(app, event.id().as_ref());
+}
+
+/// Run the menu item `id` as a click on it or its accelerator does. Menu
+/// events carry only the item id -- never the source window -- so the
+/// dynamic Window-menu rows encode their window's label in the id (the
+/// `buried:` / `open:` namespaces); routing by `is_focused` is reserved for
+/// items that genuinely mean "the focused window" (and for macOS, whose
+/// single global menubar has no owning window). Off macOS the static items
+/// below fire from the launcher's menubar, from the menus a Windows title
+/// bar draws in its place (`titlebar_tabs::titlebar_menu_popup`), and from
+/// the launcher key bridge's chords there (launcher_panel.rs).
+pub(crate) fn run_menu_item(app: &tauri::AppHandle, id: &str) {
     // Dynamic Window-menu entries (buried windows) carry their
     // window label in the id; route by prefix before the static
     // match.
@@ -6345,8 +6356,8 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "app-new-terminal" => {
             // macOS's single global menubar routes New Terminal by the
-            // focused window's kind. Off-mac the item lives only on the
-            // launcher's menubar, is labelled New Standalone Terminal,
+            // focused window's kind. Off-mac the item lives only in the
+            // launcher's File menu, is labelled New Standalone Terminal,
             // and always means a standalone window.
             #[cfg(target_os = "macos")]
             handle_new_terminal(app);
@@ -6388,7 +6399,47 @@ const OPEN_MENU_HEADER_ID: &str = "open-header";
 /// the only off-mac bar -- uses this id for its Window submenu, so the
 /// dynamic-tail rebuild can find it by one key.
 #[cfg(not(target_os = "macos"))]
-const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
+const LINUX_WINDOW_SUBMENU_ID: &str = LauncherMenu::Window.id();
+
+/// A top-level menu of the launcher menubar (off macOS), by the stable id
+/// its submenu carries. On Windows a window whose title bar holds its page's
+/// tab bar wears no menubar, and the bar draws the menus
+/// `titlebar_tabs.rs` names, popping each up by this id, so the menubar and
+/// the bar show one definition ([`launcher_submenu`]).
+#[cfg(any(not(target_os = "macos"), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LauncherMenu {
+    File,
+    Edit,
+    View,
+    Window,
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+impl LauncherMenu {
+    /// The menubar's menus, in their order.
+    pub(crate) const ALL: [Self; 4] = [Self::File, Self::Edit, Self::View, Self::Window];
+
+    /// The id of the menu's submenu.
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::File => "chan-file-submenu",
+            Self::Edit => "chan-edit-submenu",
+            Self::View => "chan-view-submenu",
+            Self::Window => "chan-window-submenu",
+        }
+    }
+
+    /// The menu's title in the menubar.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::View => "View",
+            Self::Window => "Window",
+        }
+    }
+}
 
 /// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
@@ -6400,7 +6451,9 @@ const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 /// its own page is menu-less and gets its chords from KEY_BRIDGE_JS, which
 /// is why this bar keeps the Ctrl+Shift+T claim (the launcher webview
 /// loads no key bridge, so only a native accelerator can serve the chord
-/// there).
+/// there). On Windows a window whose title bar holds its page's tab bar
+/// wears no bar; there the page draws File, Edit and View and the
+/// launcher's own bridge carries the chords (launcher_panel.rs).
 ///
 /// "About Chan" opens a version dialog that also offers a manual update
 /// check - the only manual self-update entry point off macOS (the
@@ -6415,73 +6468,83 @@ const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 /// items muda does implement on GTK.
 #[cfg(not(target_os = "macos"))]
 fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    use tauri::menu::{MenuBuilder, SubmenuBuilder};
-    // File ▸ New Standalone Terminal always opens a fresh standalone
-    // terminal window (workspace windows reach their pane-terminal
-    // toggle through KEY_BRIDGE_JS instead).
-    let new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Standalone Terminal")
-        .accelerator("CmdOrCtrl+Shift+T")
-        .build(app)?;
-    let about = MenuItemBuilder::with_id("chan-about", "About Chan").build(app)?;
-    let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
-        .accelerator("CmdOrCtrl+Q")
-        .build(app)?;
-    // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
-    // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
-    // tab close there). The same handler as macOS's Cmd+W item
-    // routes it: the SPA's window close in SPA windows, the close
-    // button's hide on the connecting screen, native close
-    // elsewhere. On the launcher that means the launcher's own
-    // hide-on-close. SPA windows claim the same chord inside
-    // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
-    let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
-        .accelerator("CmdOrCtrl+Alt+W")
-        .build(app)?;
-    let file = SubmenuBuilder::new(app, "File")
-        .item(&new_terminal)
-        .item(&close_window)
-        .separator()
-        .item(&about)
-        .separator()
-        .item(&quit)
-        .build()?;
-    let edit = SubmenuBuilder::new(app, "Edit")
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
-    // View ▸ Toggle Launcher, Ctrl+Shift+P: the bar shows only with the
-    // launcher, so from the bar the item hides it (plain Ctrl+P stays a
-    // readline chord in a focused shell, which is why KEY_BRIDGE_JS claims
-    // the same Ctrl+Shift+P form to show it).
-    let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
-        .accelerator("CmdOrCtrl+Shift+P")
-        .build(app)?;
-    let view = SubmenuBuilder::new(app, "View")
-        .item(&toggle_launcher)
-        .build()?;
-    // New Window opens another window of the FOCUSED window's connection
-    // (open_new_window_for_focused_workspace): a standalone terminal with
-    // nothing focused. `CmdOrCtrl+Shift+N` (not plain
-    // Cmd+N) so the SPA's New Draft handler can claim Cmd+N without the
-    // menu accelerator intercepting first.
-    let new_window = MenuItemBuilder::with_id("app-new-window", "New Window")
-        .accelerator("CmdOrCtrl+Shift+N")
-        .build(app)?;
-    // Open the FOCUSED workspace window's contents in the system browser.
-    let open_in_browser =
-        MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
-    let window = SubmenuBuilder::with_id(app, LINUX_WINDOW_SUBMENU_ID, "Window")
-        .item(&new_window)
-        .item(&open_in_browser)
-        .build()?;
-    MenuBuilder::new(app)
-        .item(&file)
-        .item(&edit)
-        .item(&view)
-        .item(&window)
-        .build()
+    let mut menu = tauri::menu::MenuBuilder::new(app);
+    for which in LauncherMenu::ALL {
+        menu = menu.item(&launcher_submenu(app, which)?);
+    }
+    menu.build()
+}
+
+/// One menu of the launcher menubar, with its items: what the menubar
+/// shows and what a window tab bar pops up in its place. Each item's id is
+/// what `handle_menu_event` routes on, wherever the item is clicked.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn launcher_submenu(
+    app: &tauri::AppHandle,
+    which: LauncherMenu,
+) -> tauri::Result<Submenu<tauri::Wry>> {
+    let submenu = tauri::menu::SubmenuBuilder::with_id(app, which.id(), which.label());
+    match which {
+        LauncherMenu::File => {
+            // File > New Standalone Terminal always opens a fresh standalone
+            // terminal window (workspace windows reach their pane-terminal
+            // toggle through KEY_BRIDGE_JS instead).
+            let new_terminal =
+                MenuItemBuilder::with_id("app-new-terminal", "New Standalone Terminal")
+                    .accelerator("CmdOrCtrl+Shift+T")
+                    .build(app)?;
+            let about = MenuItemBuilder::with_id("chan-about", "About Chan").build(app)?;
+            let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
+                .accelerator("CmdOrCtrl+Q")
+                .build(app)?;
+            // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
+            // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
+            // tab close there). The same handler as macOS's Cmd+W item
+            // routes it: the SPA's window close in SPA windows, the close
+            // button's hide on the connecting screen, native close
+            // elsewhere. On the launcher that means the launcher's own
+            // hide-on-close. SPA windows claim the same chord inside
+            // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
+            let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
+                .accelerator("CmdOrCtrl+Alt+W")
+                .build(app)?;
+            submenu
+                .item(&new_terminal)
+                .item(&close_window)
+                .separator()
+                .item(&about)
+                .separator()
+                .item(&quit)
+                .build()
+        }
+        LauncherMenu::Edit => submenu.cut().copy().paste().select_all().build(),
+        LauncherMenu::View => {
+            // View > Toggle Launcher, Ctrl+Shift+P: the bar shows only with
+            // the launcher, so from the bar the item hides it (plain Ctrl+P
+            // stays a readline chord in a focused shell, which is why
+            // KEY_BRIDGE_JS claims the same Ctrl+Shift+P form to show it).
+            let toggle_launcher =
+                MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
+                    .accelerator("CmdOrCtrl+Shift+P")
+                    .build(app)?;
+            submenu.item(&toggle_launcher).build()
+        }
+        LauncherMenu::Window => {
+            // New Window opens another window of the FOCUSED window's
+            // connection (open_new_window_for_focused_workspace): a
+            // standalone terminal with nothing focused. `CmdOrCtrl+Shift+N`
+            // (not plain Cmd+N) so the SPA's New Draft handler can claim
+            // Cmd+N without the menu accelerator intercepting first.
+            let new_window = MenuItemBuilder::with_id("app-new-window", "New Window")
+                .accelerator("CmdOrCtrl+Shift+N")
+                .build(app)?;
+            // Open the FOCUSED workspace window's contents in the system
+            // browser.
+            let open_in_browser =
+                MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
+            submenu.item(&new_window).item(&open_in_browser).build()
+        }
+    }
 }
 
 /// The live Window submenu(s) the dynamic tail is stamped onto. macOS
@@ -7560,6 +7623,60 @@ mod tests {
             .find(end)
             .unwrap_or_else(|| panic!("pin end bound {end:?} must follow start bound {start:?}"));
         &after[..stop]
+    }
+
+    /// The launcher menubar's four menus, in order, each under a stable id of
+    /// its own, which a window tab bar pops a menu up by.
+    #[test]
+    fn the_launcher_menus_have_stable_distinct_ids() {
+        assert_eq!(
+            LauncherMenu::ALL.map(LauncherMenu::label),
+            ["File", "Edit", "View", "Window"]
+        );
+        let ids: std::collections::HashSet<&str> = LauncherMenu::ALL
+            .into_iter()
+            .map(LauncherMenu::id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            LauncherMenu::ALL.len(),
+            "no two menus share an id"
+        );
+        // The id the Window menu's dynamic tail is found by.
+        assert_eq!(LauncherMenu::Window.id(), "chan-window-submenu");
+    }
+
+    /// One definition: the menubar is assembled from the per-menu builder,
+    /// each submenu carries its menu's id and label, and every menu event,
+    /// a popped-up menu's as much as the menubar's, runs the item it names.
+    #[test]
+    fn the_launcher_menubar_and_its_popups_share_one_definition() {
+        let src = include_str!("main.rs");
+        let (production, _) = src
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let build = source_region(
+            production,
+            "\nfn build_launcher_menu(",
+            "\npub(crate) fn launcher_submenu(",
+        );
+        assert!(build.contains("for which in LauncherMenu::ALL {"));
+        assert!(build.contains("menu = menu.item(&launcher_submenu(app, which)?);"));
+        let submenu = source_region(
+            production,
+            "\npub(crate) fn launcher_submenu(",
+            "\n/// The live Window submenu(s) the dynamic tail is stamped onto.",
+        );
+        assert!(submenu.contains("SubmenuBuilder::with_id(app, which.id(), which.label())"));
+        assert!(
+            production.contains("const LINUX_WINDOW_SUBMENU_ID: &str = LauncherMenu::Window.id();")
+        );
+        let handler = source_region(
+            production,
+            "\nfn handle_menu_event(",
+            "\npub(crate) fn run_menu_item(",
+        );
+        assert!(handler.contains("run_menu_item(app, event.id().as_ref());"));
     }
 
     /// The ceiling is a construction property, so it is pinned at the

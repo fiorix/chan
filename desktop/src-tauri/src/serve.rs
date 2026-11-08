@@ -5042,12 +5042,12 @@ mod tests {
 
     /// A page's tab bar in the title bar reaches every window class that
     /// shows the workspace app: the title bar commands, the preference pair,
-    /// the window controls a page draws on Windows, and the two window
-    /// commands Tauri's drag-region script invokes from the page on a
-    /// mousedown in the bar's drag space (`start_dragging`) and on a double
-    /// click there (`internal_toggle_maximize`). The script is Tauri's own
-    /// initialization script, so no SPA source names those invokes and the
-    /// vocabulary walk below cannot see them.
+    /// the window controls and the launcher's menus a page draws on Windows,
+    /// and the two window commands Tauri's drag-region script invokes from
+    /// the page on a mousedown in the bar's drag space (`start_dragging`) and
+    /// on a double click there (`internal_toggle_maximize`). The script is
+    /// Tauri's own initialization script, so no SPA source names those
+    /// invokes and the vocabulary walk below cannot see them.
     #[test]
     fn title_bar_tabs_reach_every_spa_window_class() {
         for (class, label, origin) in ORIGIN_CLASSES {
@@ -5058,6 +5058,7 @@ mod tests {
                 "titlebar_tabs_preference",
                 "set_titlebar_tabs_preference",
                 "titlebar_window_control",
+                "titlebar_menu_popup",
             ] {
                 assert!(
                     app_commands.contains(command),
@@ -5083,6 +5084,7 @@ mod tests {
             effective_grants(crate::terminal_mode::WINDOW_LABEL, "http://127.0.0.1:4090");
         assert!(app_commands.contains("set_titlebar_tabs"));
         assert!(app_commands.contains("titlebar_window_control"));
+        assert!(app_commands.contains("titlebar_menu_popup"));
         assert!(plugin_permissions.contains("core:window:allow-start-dragging"));
     }
 

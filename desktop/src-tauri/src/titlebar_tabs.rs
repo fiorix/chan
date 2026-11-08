@@ -52,6 +52,15 @@
 //! page hides its tab bar's contents and, on macOS, the title bar shows the
 //! window's title again ([`launcher_visibility_changed`]).
 //!
+//! A frameless window has no room for a menubar, so on Windows the launcher's
+//! menubar stays off a window in the mode, and the page draws the launcher
+//! menubar's File, Edit and View in the bar while the launcher shows: the
+//! chrome lists them ([`TitlebarChrome::menus`]) and a press on one pops the
+//! menubar's own submenu up under it ([`titlebar_menu_popup`]), whose items
+//! reach the menubar's handler with the menubar's ids. The launcher's key
+//! bridge carries the chords those items' accelerators would
+//! (`launcher_panel.rs`).
+//!
 //! Whether a page asks is the user's choice, the `titlebar_tabs` field of the
 //! desktop's own config, off by default. It covers every window the desktop
 //! builds, whatever tenant the window shows, so a devserver's preferences play
@@ -111,10 +120,52 @@ const CAPTION_BUTTON_WIDTH: f64 = 46.0;
 #[cfg(any(windows, test))]
 const CAPTION_BUTTONS: f64 = 3.0;
 
+/// A menu the bar draws in place of a menubar: the id the page pops it up by
+/// and the title it shows. Field names are the page-side contract.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub(crate) struct TitlebarMenu {
+    id: &'static str,
+    label: &'static str,
+}
+
+/// The launcher menubar's menus a Windows window in the mode draws in its bar
+/// while the Computers launcher shows, in the menubar's order: every one but
+/// Window, whose open and hidden windows the Computers screen itself lists.
+#[cfg(any(windows, test))]
+const TITLEBAR_MENUS: [crate::LauncherMenu; 3] = [
+    crate::LauncherMenu::File,
+    crate::LauncherMenu::Edit,
+    crate::LauncherMenu::View,
+];
+
+/// [`TITLEBAR_MENUS`] as the chrome lists them.
+#[cfg(any(windows, test))]
+static TITLEBAR_MENU_ENTRIES: [TitlebarMenu; TITLEBAR_MENUS.len()] = {
+    let mut entries = [TitlebarMenu { id: "", label: "" }; TITLEBAR_MENUS.len()];
+    let mut i = 0;
+    while i < TITLEBAR_MENUS.len() {
+        entries[i] = TitlebarMenu {
+            id: TITLEBAR_MENUS[i].id(),
+            label: TITLEBAR_MENUS[i].label(),
+        };
+        i += 1;
+    }
+    entries
+};
+
+/// The title bar menu a page names by `id`; `None` for any other id, the
+/// Window menu's included.
+#[cfg(any(windows, test))]
+fn titlebar_menu(id: &str) -> Option<crate::LauncherMenu> {
+    TITLEBAR_MENUS.into_iter().find(|menu| menu.id() == id)
+}
+
 /// What both commands answer: the window's title bar mode, the room the page
-/// must leave for the window controls, and whether it draws them. Lengths are
-/// CSS px of the calling page, converted from points (macOS) or DIP (Windows)
-/// through the page zoom. Field names are the page-side contract.
+/// must leave for the window controls, whether it draws them, and the menus it
+/// draws under the Computers launcher. Lengths are CSS px of the calling page,
+/// converted from points (macOS) or DIP (Windows) through the page zoom.
+/// Field names are the page-side contract.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TitlebarChrome {
@@ -138,6 +189,12 @@ pub(crate) struct TitlebarChrome {
     pub(crate) draw_controls: bool,
     /// The window is maximized, so the page's maximize button restores.
     pub(crate) maximized: bool,
+    /// The menus the page draws at the bar's left while the window's
+    /// Computers launcher covers it, in order: on Windows in the mode, where
+    /// the window wears no menubar, the launcher menubar's File, Edit and
+    /// View (`TITLEBAR_MENUS`); empty everywhere else. The page pops one up
+    /// with [`titlebar_menu_popup`].
+    pub(crate) menus: &'static [TitlebarMenu],
 }
 
 /// The windows whose title bar hosts their page's tab bar, by native label.
@@ -353,12 +410,15 @@ fn chrome_for(
         fullscreen,
         draw_controls: false,
         maximized,
+        menus: &[],
     }
 }
 
 /// The chrome a window whose page draws the window controls answers, from its
 /// mode and state and the page zoom: the three buttons at the right of the
 /// bar in the mode, and none in fullscreen, where the window has no controls.
+/// The launcher's menus are the bar's in the mode, fullscreen or not, since a
+/// window in the mode wears no menubar either way.
 #[cfg(any(windows, test))]
 fn drawn_controls_chrome(
     active: bool,
@@ -380,6 +440,7 @@ fn drawn_controls_chrome(
         fullscreen,
         draw_controls,
         maximized,
+        menus: if active { &TITLEBAR_MENU_ENTRIES } else { &[] },
     }
 }
 
@@ -475,6 +536,97 @@ pub(crate) fn titlebar_window_control(
         WindowControl::Close => window.close(),
     };
     done.map_err(|e| format!("{action:?} on {}: {e}", window.label()))
+}
+
+/// Pop up one of the menus the bar draws in place of the launcher menubar:
+/// `menu` is an id the chrome's `menus` lists, and `x`, `y` the point in the
+/// calling page's CSS px where the menu's top-left corner goes, under its
+/// button. The menu is the launcher menubar's own submenu
+/// (`crate::launcher_submenu`), so a click in it runs the menubar's handler
+/// for the same item id (`handle_menu_event`). Answers once the menu has
+/// closed, so the page holds its button pressed until then. Only a window in
+/// the mode on Windows whose launcher shows draws menus; any other caller is
+/// refused.
+#[tauri::command]
+pub(crate) async fn titlebar_menu_popup(
+    app: AppHandle,
+    window: WebviewWindow,
+    menu: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let which =
+            titlebar_menu(&menu).ok_or_else(|| format!("{menu:?} is not a title bar menu"))?;
+        let (x, y) = checked_point(x, y)?;
+        let host = app.clone();
+        crate::window_ops::on_main(&app, move || popup_menu(&host, &window, which, x, y)).await?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, window, x, y);
+        Err(format!(
+            "no title bar menu {menu:?} here: the bar draws menus on Windows only"
+        ))
+    }
+}
+
+/// Pop `which` up under the bar of `window`, a window in the mode whose
+/// launcher shows. Main thread, where tauri runs the popup at once
+/// (`run_item_main_thread!` in tauri's `menu/mod.rs`, and
+/// tauri-runtime-wry's `send_user_message` on the main thread); muda's
+/// `show_context_menu` (`platform_impl/windows/mod.rs`) calls
+/// `TrackPopupMenu` with `TPM_RETURNCMD`, which returns once the menu has
+/// closed, and muda then sends the chosen item's `MenuEvent`, which tauri
+/// hands every app-wide menu listener (`app.rs`, `EventLoopMessage::MenuEvent`).
+#[cfg(windows)]
+fn popup_menu(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    which: crate::LauncherMenu,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let label = window.label();
+    if !in_mode(window) || !crate::launcher_panel::panel_is_visible(label) {
+        return Err(format!(
+            "{label} draws no title bar menus: its launcher is not shown under a title bar in the mode"
+        ));
+    }
+    let submenu = crate::launcher_submenu(app, which)
+        .map_err(|e| format!("building the {} menu: {e}", which.label()))?;
+    // The press on the bar handed the page's webview the keyboard. The
+    // launcher takes it back before the menu opens, so the Edit items'
+    // keystrokes reach the launcher and never the covered page, and the
+    // keyboard stays with the launcher once the menu closes.
+    crate::launcher_panel::reclaim_keyboard(label);
+    window
+        .popup_menu_at(&submenu, menu_position(x, y, page_zoom(window)))
+        .map_err(|e| format!("showing the {} menu on {label}: {e}", which.label()))
+}
+
+/// Where a menu popped up under the bar opens, in logical points (DIP) from
+/// the window's client area, whose origin is the page's: the page's CSS px
+/// times its zoom. muda converts it through the window's DPI and
+/// `ClientToScreen`.
+#[cfg(any(windows, test))]
+fn menu_position(x: f64, y: f64, zoom: f64) -> tauri::LogicalPosition<f64> {
+    let zoom = usable_factor(zoom);
+    tauri::LogicalPosition::new(x * zoom, y * zoom)
+}
+
+/// Check the point a page asks a menu to open at, in CSS px: finite, and
+/// neither left of nor above the page.
+#[cfg(any(windows, test))]
+fn checked_point(x: f64, y: f64) -> Result<(f64, f64), String> {
+    if x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0 {
+        Ok((x, y))
+    } else {
+        Err(format!(
+            "the menu point must be finite, non-negative CSS px, got ({x}, {y})"
+        ))
+    }
 }
 
 /// The stored preference.
@@ -1226,7 +1378,7 @@ mod tests {
     }
 
     /// The field names are the page's contract: `api/desktop.ts` reads these
-    /// seven keys and nothing else.
+    /// eight keys and nothing else, and each menu's `id` and `label`.
     #[test]
     fn the_chrome_serializes_the_contract_fields() {
         let chrome = TitlebarChrome {
@@ -1237,6 +1389,7 @@ mod tests {
             fullscreen: false,
             draw_controls: true,
             maximized: true,
+            menus: &TITLEBAR_MENU_ENTRIES,
         };
         let value = serde_json::to_value(chrome).expect("chrome serializes");
         let mut keys: Vec<&str> = value
@@ -1255,12 +1408,21 @@ mod tests {
                 "fullscreen",
                 "insetLeft",
                 "insetRight",
-                "maximized"
+                "maximized",
+                "menus"
             ]
         );
         assert_eq!(value["insetRight"], 138.0);
         assert_eq!(value["drawControls"], true);
         assert_eq!(value["maximized"], true);
+        assert_eq!(
+            value["menus"],
+            serde_json::json!([
+                { "id": "chan-file-submenu", "label": "File" },
+                { "id": "chan-edit-submenu", "label": "Edit" },
+                { "id": "chan-view-submenu", "label": "View" },
+            ])
+        );
         let inactive = serde_json::to_value(TitlebarChrome::default()).expect("serializes");
         assert_eq!(
             inactive,
@@ -1272,6 +1434,7 @@ mod tests {
                 "fullscreen": false,
                 "drawControls": false,
                 "maximized": false,
+                "menus": [],
             })
         );
     }
@@ -1293,7 +1456,9 @@ mod tests {
                 fullscreen: false,
                 draw_controls: false,
                 maximized: false,
-            }
+                menus: &[],
+            },
+            "the global menubar holds the menus on macOS"
         );
         // A zoomed-in page has fewer, larger CSS px over the same points.
         let at_125 = chrome_for(true, false, false, controls, 1.25);
@@ -1358,6 +1523,7 @@ mod tests {
                 fullscreen: false,
                 draw_controls: true,
                 maximized: false,
+                menus: &TITLEBAR_MENU_ENTRIES,
             }
         );
         // A zoomed-in page has fewer, larger CSS px over the same DIP.
@@ -1375,6 +1541,8 @@ mod tests {
         assert!(maximized.draw_controls && maximized.maximized);
     }
 
+    /// A fullscreen window in the mode keeps the launcher's menus: it wears no
+    /// menubar there either.
     #[test]
     fn fullscreen_and_inactive_windows_draw_no_controls() {
         assert_eq!(
@@ -1382,6 +1550,7 @@ mod tests {
             TitlebarChrome {
                 active: true,
                 fullscreen: true,
+                menus: &TITLEBAR_MENU_ENTRIES,
                 ..TitlebarChrome::default()
             }
         );
@@ -1414,6 +1583,78 @@ mod tests {
                 138.0
             );
             assert_eq!(band_points(36.0, zoom), 36.0);
+        }
+    }
+
+    /// The bar draws the launcher menubar's menus but Window, in the
+    /// menubar's order, under their own ids and labels, and pops up exactly
+    /// those.
+    #[test]
+    fn the_bar_draws_every_launcher_menu_but_window() {
+        assert_eq!(
+            TITLEBAR_MENUS,
+            [
+                crate::LauncherMenu::File,
+                crate::LauncherMenu::Edit,
+                crate::LauncherMenu::View
+            ]
+        );
+        for (menu, entry) in TITLEBAR_MENUS.iter().zip(TITLEBAR_MENU_ENTRIES.iter()) {
+            assert_eq!(
+                *entry,
+                TitlebarMenu {
+                    id: menu.id(),
+                    label: menu.label(),
+                }
+            );
+            assert_eq!(titlebar_menu(menu.id()), Some(*menu));
+        }
+        assert_eq!(
+            titlebar_menu(crate::LauncherMenu::Window.id()),
+            None,
+            "the Computers screen lists the windows"
+        );
+        for other in ["", "File", "chan-file", "app-new-terminal", "chan-quit"] {
+            assert_eq!(titlebar_menu(other), None, "{other:?}");
+        }
+    }
+
+    /// The page names the point under a menu button in its CSS px; the menu
+    /// opens there in the window's points, through the page zoom.
+    #[test]
+    fn a_menu_opens_under_its_button_in_points() {
+        assert_eq!(
+            menu_position(12.0, 38.0, 1.0),
+            tauri::LogicalPosition::new(12.0, 38.0)
+        );
+        // A zoomed-in page has fewer, larger CSS px over the same points.
+        assert_eq!(
+            menu_position(12.0, 38.0, 1.25),
+            tauri::LogicalPosition::new(15.0, 47.5)
+        );
+        assert_eq!(
+            menu_position(12.0, 38.0, 0.5),
+            tauri::LogicalPosition::new(6.0, 19.0)
+        );
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                menu_position(12.0, 38.0, zoom),
+                tauri::LogicalPosition::new(12.0, 38.0)
+            );
+        }
+    }
+
+    #[test]
+    fn the_menu_point_is_checked() {
+        assert_eq!(checked_point(0.0, 0.0), Ok((0.0, 0.0)));
+        assert_eq!(checked_point(52.5, 38.0), Ok((52.5, 38.0)));
+        for (x, y) in [
+            (-1.0, 38.0),
+            (12.0, -0.5),
+            (f64::NAN, 38.0),
+            (12.0, f64::INFINITY),
+        ] {
+            assert!(checked_point(x, y).is_err(), "({x}, {y}) must be refused");
         }
     }
 
@@ -1751,6 +1992,34 @@ mod tests {
             2,
             "both directions re-fit the launcher"
         );
+    }
+
+    /// A title bar menu is the launcher menubar's own submenu, popped up on
+    /// the main thread over a window in the mode whose launcher shows, after
+    /// the launcher has the keyboard back; muda then hands the chosen item to
+    /// the app-wide menu handler with the menubar's id. Pinned in the source
+    /// because the popup needs a live Windows window.
+    #[test]
+    fn a_title_bar_menu_is_the_menubars_own_popped_up_over_the_launcher() {
+        const SELF_RS: &str = include_str!("titlebar_tabs.rs");
+        let module = production(SELF_RS);
+        let command = function(module, "\npub(crate) async fn titlebar_menu_popup(");
+        assert!(command.contains("titlebar_menu(&menu)"));
+        assert!(command.contains("checked_point(x, y)?"));
+        assert!(command.contains(
+            "crate::window_ops::on_main(&app, move || popup_menu(&host, &window, which, x, y))"
+        ));
+        let popup = function(module, "\nfn popup_menu(");
+        assert!(popup
+            .contains("if !in_mode(window) || !crate::launcher_panel::panel_is_visible(label)"));
+        assert!(popup.contains("crate::launcher_submenu(app, which)"));
+        let reclaim = popup
+            .find("crate::launcher_panel::reclaim_keyboard(label);")
+            .expect("the launcher takes the keyboard back");
+        let shown = popup
+            .find(".popup_menu_at(&submenu, menu_position(x, y, page_zoom(window)))")
+            .expect("the submenu pops up at the page's point");
+        assert!(reclaim < shown, "before the menu opens");
     }
 
     /// The page's close button closes as the native close button and Alt+F4

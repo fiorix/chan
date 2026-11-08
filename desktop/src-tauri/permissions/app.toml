@@ -35,6 +35,7 @@ permissions = [
   "allow-titlebar-tabs-preference",
   "allow-set-titlebar-tabs-preference",
   "allow-titlebar-window-control",
+  "allow-titlebar-menu-popup",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -77,6 +78,7 @@ permissions = [
   "allow-titlebar-tabs-preference",
   "allow-set-titlebar-tabs-preference",
   "allow-titlebar-window-control",
+  "allow-titlebar-menu-popup",
 ]
 
 # IN both sets: every window kind shows terminal tabs, which paint with the
@@ -128,6 +130,15 @@ commands.allow = ["set_titlebar_tabs_preference"]
 identifier = "allow-titlebar-window-control"
 description = "Enables the titlebar_window_control command (the calling window's minimize, maximize or restore, and close, from window controls its page draws)."
 commands.allow = ["titlebar_window_control"]
+
+# IN both sets: the menus a frameless title bar draws on Windows while the
+# window's Computers launcher shows are the launcher menubar's own, popped up
+# over the INVOKING window only; a click in one runs what the menubar item
+# runs, and the command refuses any window not in that state.
+[[permission]]
+identifier = "allow-titlebar-menu-popup"
+description = "Enables the titlebar_menu_popup command (the launcher menubar's File, Edit and View, popped up from the calling window's title bar menus)."
+commands.allow = ["titlebar_menu_popup"]
 
 [[permission]]
 identifier = "allow-set-launcher-focus-color"

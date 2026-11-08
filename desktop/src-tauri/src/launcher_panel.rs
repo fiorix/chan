@@ -19,6 +19,14 @@
 //! answers exactly the commands in `LauncherCommand` and forwards exactly the
 //! events in `FORWARDED_EVENTS`.
 //!
+//! Off macOS a window wears the launcher menubar while its launcher shows,
+//! except on Windows a window whose title bar holds its page's tab bar
+//! (`titlebar_tabs.rs`), which has no room for one. There the page's bar
+//! draws the menubar's menus, and the launcher's key bridge carries the
+//! chords the menubar's accelerators would (`MENU_CHORD_ITEMS`): the desktop
+//! tells the bridge so (`sync_menu_chords`) and runs each chord's item as a
+//! click on it does.
+//!
 //! The toggle animates each page in its own webview (launcher_transition.js)
 //! with a shared start time: the host slides right as the launcher enters
 //! from the left; hiding reverses both cards. While a launcher shows, its
@@ -58,8 +66,21 @@ pub(crate) const LAUNCHER_IPC_JS: &str = include_str!("launcher_ipc.js");
 
 /// The launcher's key bridge: zoom, reload, and the Ctrl+Shift+P toggle. On macOS
 /// the menubar's Cmd+P accelerator pre-empts the page, so the bridge claims
-/// only the Ctrl+Shift form.
+/// only the Ctrl+Shift form. Where its window wears no menubar it also claims
+/// the chords of [`MENU_CHORD_ITEMS`].
 pub(crate) const LAUNCHER_BRIDGE_JS: &str = include_str!("launcher_bridge.js");
+
+/// The launcher menubar items whose chords the key bridge carries where the
+/// window wears no menubar, by menu item id: New Standalone Terminal
+/// (Ctrl+Shift+T), Close Window (Ctrl+Alt+W) and Quit (Ctrl+Q), the chords
+/// only the menubar serves on the Computers screen. The bridge invokes the id
+/// and the desktop runs the item (`crate::run_menu_item`).
+pub(crate) const MENU_CHORD_ITEMS: [&str; 3] =
+    ["app-new-terminal", "app-close-window", "chan-quit"];
+
+/// The global the key bridge reads to claim [`MENU_CHORD_ITEMS`]' chords.
+#[cfg(any(windows, test))]
+const MENU_CHORDS_GLOBAL: &str = "window.__chanLauncherMenuChords";
 
 /// The events the launcher subscribes to (web-launcher App.svelte), forwarded
 /// from the app's event bus into every launcher.
@@ -576,10 +597,13 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
 /// `WM_NCCALCSIZE` itself with a client area over the whole frame, never
 /// leaving the menubar the room `DefWindowProc` would, so an attached bar
 /// would not show. The launcher keeps its own key bridge for the toggle,
-/// reload and zoom, and the page's bar stays in view above it with the window
-/// controls. Main thread.
+/// reload and zoom and there takes the menubar's chords too
+/// (`sync_menu_chords`), and the page's bar stays in view above it with the
+/// window controls and the menubar's menus. Main thread.
 #[cfg(not(target_os = "macos"))]
 fn sync_launcher_menu(app: &AppHandle, host: &WebviewWindow) {
+    #[cfg(windows)]
+    sync_menu_chords(host);
     let wears = panel_is_visible(host.label()) && !crate::titlebar_tabs::in_mode(host);
     if wears == host.menu().is_some() {
         return;
@@ -597,6 +621,42 @@ fn sync_launcher_menu(app: &AppHandle, host: &WebviewWindow) {
         let _ = host.remove_menu();
     }
     crate::rebuild_window_menu(app);
+}
+
+/// Whether the launcher's key bridge carries the menubar's chords
+/// ([`MENU_CHORD_ITEMS`]) for its host: only on Windows, for a host whose
+/// title bar holds its page's tab bar, which wears no menubar while its
+/// launcher shows. Everywhere else the menubar's own accelerators serve them,
+/// so the bridge leaves them alone and the desktop refuses them.
+fn bridge_serves_menu_chords(windows: bool, in_mode: bool) -> bool {
+    windows && in_mode
+}
+
+/// [`bridge_serves_menu_chords`] for `host`, read when called.
+fn serves_menu_chords(host: &WebviewWindow) -> bool {
+    bridge_serves_menu_chords(cfg!(windows), crate::titlebar_tabs::in_mode(host))
+}
+
+/// The script that tells a launcher page whether its key bridge claims the
+/// menubar's chords.
+#[cfg(any(windows, test))]
+fn menu_chords_js(serves: bool) -> String {
+    format!("{MENU_CHORDS_GLOBAL} = {serves};")
+}
+
+/// Tell `host`'s launcher whether its key bridge claims the menubar's chords,
+/// on every menubar decision and on every launcher page load, since a reload
+/// clears the page's globals. Main thread.
+#[cfg(windows)]
+fn sync_menu_chords(host: &WebviewWindow) {
+    let js = menu_chords_js(serves_menu_chords(host));
+    LAUNCHERS.with(|launchers| {
+        if let Ok(launchers) = launchers.try_borrow() {
+            if let Some(webview) = launchers.get(host.label()) {
+                let _ = webview.evaluate_script(&js);
+            }
+        }
+    });
 }
 
 /// Hide a host's launcher and hand the keyboard back to the host's own
@@ -777,8 +837,9 @@ pub(crate) fn title_bar_switched(host: &WebviewWindow) {
 /// Give a host's shown launcher the keyboard again. A focus change in the
 /// host page makes the host's own webview the window's first responder and
 /// leaves the launcher deaf until the next toggle; the window regaining
-/// focus and a host page load are the moments to take it back. Main thread.
-fn reclaim_keyboard(host: &str) {
+/// focus and a host page load are the moments to take it back, and so is a
+/// title bar menu about to open over it (`titlebar_tabs.rs`). Main thread.
+pub(crate) fn reclaim_keyboard(host: &str) {
     if !panel_is_visible(host) {
         return;
     }
@@ -923,6 +984,17 @@ fn build_panel(
                         eval_launcher(&app, &host, "launcherShown", 0).await;
                     });
                 }
+                // A load clears the page's globals, the chord flag with them.
+                #[cfg(windows)]
+                {
+                    let app = app_for_load.clone();
+                    let host = host_for_load.clone();
+                    let _ = app_for_load.run_on_main_thread(move || {
+                        if let Some(window) = app.get_webview_window(&host) {
+                            sync_menu_chords(&window);
+                        }
+                    });
+                }
                 // The migration summary waits for the first launcher page:
                 // its notice has no replay. It is one-shot by construction.
                 let state = Arc::clone(&app_for_load.state::<Arc<AppState>>());
@@ -1020,6 +1092,8 @@ pub(crate) enum LauncherCommand {
     TogglePanel,
     Reload,
     Zoom(ZoomAction),
+    /// A launcher menubar item, by id, from its chord in the key bridge.
+    MenuItem(&'static str),
 }
 
 impl LauncherCommand {
@@ -1032,7 +1106,10 @@ impl LauncherCommand {
             "zoom_in" => Some(Self::Zoom(ZoomAction::In)),
             "zoom_out" => Some(Self::Zoom(ZoomAction::Out)),
             "zoom_reset" => Some(Self::Zoom(ZoomAction::Reset)),
-            _ => None,
+            _ => MENU_CHORD_ITEMS
+                .into_iter()
+                .find(|item| *item == cmd)
+                .map(Self::MenuItem),
         }
     }
 }
@@ -1088,6 +1165,20 @@ fn handle_ipc(app: &AppHandle, host: &str, body: &str) {
                 .map_err(|e| e.to_string())
         }),
         Some(LauncherCommand::Zoom(action)) => zoom_panel(host, action),
+        // A chord the menubar's accelerator serves wherever the window wears
+        // one; only a window without runs the item for the bridge, so a chord
+        // never runs twice.
+        Some(LauncherCommand::MenuItem(id)) => {
+            if app
+                .get_webview_window(host)
+                .is_some_and(|window| serves_menu_chords(&window))
+            {
+                crate::run_menu_item(app, id);
+                Ok(())
+            } else {
+                Err(format!("the menubar carries {id} for {host}"))
+            }
+        }
         None => Err(format!("{} is not available in the launcher", message.cmd)),
     };
     let (ok, value) = match result {
@@ -1292,7 +1383,7 @@ mod tests {
         let hook = body("\nfn build_panel(");
         assert!(hook
             .contains("WindowEvent::Focused(true) => reclaim_keyboard(host_for_events.label())"));
-        let reclaim = body("\nfn reclaim_keyboard(");
+        let reclaim = body("\npub(crate) fn reclaim_keyboard(");
         assert!(reclaim.contains("if !panel_is_visible(host)"));
         assert!(reclaim.contains("webview.focus()"));
         let loaded = body("\npub(crate) fn host_page_loaded(");
@@ -1372,6 +1463,140 @@ mod tests {
         }
         assert_eq!(LauncherCommand::parse("open_devtools"), None);
         assert_eq!(LauncherCommand::parse("probe_url"), None);
+    }
+
+    /// The bridge carries the launcher menubar's own chords by the ids of
+    /// the items they run, each only while the desktop says the window wears
+    /// no menubar.
+    #[test]
+    fn the_bridge_carries_the_menubar_chords_by_item_id() {
+        let named = invoked(LAUNCHER_BRIDGE_JS, "return '", '\'');
+        assert_eq!(
+            named, MENU_CHORD_ITEMS,
+            "the bridge's chords name these items"
+        );
+        for id in MENU_CHORD_ITEMS {
+            assert_eq!(
+                LauncherCommand::parse(id),
+                Some(LauncherCommand::MenuItem(id))
+            );
+        }
+        assert_eq!(LauncherCommand::parse("app-new-window"), None);
+        assert_eq!(LauncherCommand::parse("view-toggle-launcher"), None);
+        assert!(LAUNCHER_BRIDGE_JS
+            .contains("if (window.__chanLauncherMenuChords !== true) return null;"));
+        assert_eq!(MENU_CHORDS_GLOBAL, "window.__chanLauncherMenuChords");
+        assert_eq!(
+            menu_chords_js(true),
+            "window.__chanLauncherMenuChords = true;"
+        );
+        assert_eq!(
+            menu_chords_js(false),
+            "window.__chanLauncherMenuChords = false;"
+        );
+    }
+
+    /// Each chord is the accelerator of the menubar item it runs.
+    #[test]
+    fn each_bridge_chord_is_its_menubar_items_accelerator() {
+        const MAIN: &str = include_str!("main.rs");
+        let (_, submenu) = MAIN
+            .split_once("\npub(crate) fn launcher_submenu(")
+            .expect("the launcher menubar's builder");
+        let submenu = submenu
+            .split_once("\n}\n")
+            .expect("it ends at a column-0 brace")
+            .0;
+        for (id, accelerator, chord) in [
+            (
+                "app-new-terminal",
+                "CmdOrCtrl+Shift+T",
+                "if (key === 't' && e.shiftKey && !e.altKey) return 'app-new-terminal';",
+            ),
+            (
+                "app-close-window",
+                "CmdOrCtrl+Alt+W",
+                "if (key === 'w' && e.altKey && !e.shiftKey) return 'app-close-window';",
+            ),
+            (
+                "chan-quit",
+                "CmdOrCtrl+Q",
+                "if (key === 'q' && !e.shiftKey && !e.altKey) return 'chan-quit';",
+            ),
+        ] {
+            let (_, item) = submenu
+                .split_once(&format!("MenuItemBuilder::with_id(\"{id}\""))
+                .unwrap_or_else(|| panic!("the menubar has {id}"));
+            let item = item.split_once(".build(app)").expect("the item is built").0;
+            assert!(
+                item.contains(&format!(".accelerator(\"{accelerator}\")")),
+                "{id} is {accelerator} in the menubar"
+            );
+            assert!(
+                LAUNCHER_BRIDGE_JS.contains(chord),
+                "{id} is {accelerator} in the bridge"
+            );
+        }
+        assert!(
+            LAUNCHER_BRIDGE_JS.contains("if (!e.ctrlKey || e.metaKey || e.repeat) return null;")
+        );
+    }
+
+    /// Only a Windows window in the mode, which wears no menubar while its
+    /// launcher shows, has its chords served by the bridge; everywhere else
+    /// the menubar's accelerators serve them and a bridge invoke is refused,
+    /// so no chord runs twice.
+    #[test]
+    fn only_a_window_without_a_menubar_has_the_bridge_serve_its_chords() {
+        assert!(bridge_serves_menu_chords(true, true));
+        assert!(!bridge_serves_menu_chords(true, false));
+        assert!(!bridge_serves_menu_chords(false, true));
+        assert!(!bridge_serves_menu_chords(false, false));
+    }
+
+    /// The bridge hears the desktop's decision on every menubar decision and
+    /// after every launcher page load, and the desktop checks it again
+    /// before it runs an item. Pinned in the source because each needs a
+    /// live Windows window.
+    #[test]
+    fn the_chord_decision_reaches_the_bridge_and_gates_the_item() {
+        const SOURCE: &str = include_str!("launcher_panel.rs");
+        let (production, _) = SOURCE
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let body = |head: &str| {
+            let (_, rest) = production.split_once(head).expect("the function exists");
+            rest.split_once("\n}\n")
+                .expect("it ends at a column-0 brace")
+                .0
+        };
+        let menu = body("\nfn sync_launcher_menu(");
+        let told = menu
+            .find("sync_menu_chords(host);")
+            .expect("the menubar decision tells the bridge");
+        let decided = menu
+            .find("if wears == host.menu().is_some()")
+            .expect("before the early return");
+        assert!(told < decided);
+        let sync = body("\nfn sync_menu_chords(");
+        assert!(sync.contains("menu_chords_js(serves_menu_chords(host))"));
+        let build = body("\nfn build_panel(");
+        let loaded = build
+            .split_once("wry::PageLoadEvent::Finished")
+            .expect("the page load hook")
+            .1;
+        assert!(loaded.contains("sync_menu_chords(&window);"));
+        let ipc = body("\nfn handle_ipc(");
+        let (_, item) = ipc
+            .split_once("Some(LauncherCommand::MenuItem(id)) =>")
+            .expect("the IPC answers a menubar item");
+        let gate = item
+            .find("serves_menu_chords(&window)")
+            .expect("the item runs only where the bridge serves it");
+        let run = item
+            .find("crate::run_menu_item(app, id);")
+            .expect("as the menubar runs it");
+        assert!(gate < run);
     }
 
     #[test]
