@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
+  import { privacy, privateText } from "@chan/web-shared/privacy";
   // One window/terminal row in the machine tree (control terminals, standalone
   // terminals, and the windows nested in a workspace card). The row adapts to the
   // surface's capabilities:
@@ -55,6 +57,7 @@
   let labelInput: HTMLInputElement | undefined = $state();
 
   async function beginLabelEdit(): Promise<void> {
+    if (privacy.enabled) return;
     labelDraft = w.label ?? "";
     editingLabel = true;
     await tick();
@@ -120,7 +123,7 @@
 
 {#snippet windowName()}
   <div class="row-main">
-    {#if editingLabel}
+    {#if editingLabel && !privacy.enabled}
       <span class="label-editor">
         <span>{rowLabel(w.kind, w.ordinal)} [</span>
         <input
@@ -141,16 +144,16 @@
           }} />
         <span>]</span>
       </span>
-    {:else if canEditWindowLabel(w)}
+    {:else if canEditWindowLabel(w) && !privacy.enabled}
       <button
         class="row-name editable-label"
         type="button"
         title="Add or edit window text"
-        onclick={() => void beginLabelEdit()}>{windowRowLabel(w)}</button>
+        onclick={() => void beginLabelEdit()}>{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</button>
     {:else}
-      <span class="row-name">{windowRowLabel(w)}</span>
+      <span class="row-name">{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</span>
     {/if}
-    {#if context}<span class="row-sub" title={context}>{context}</span>{/if}
+    {#if context}<PrivateField field={`window:${w.window_id}:context`} label="computer and workspace"><span class="row-sub" title={context}>{context}</span></PrivateField>{/if}
   </div>
 {/snippet}
 

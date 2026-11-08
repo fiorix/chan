@@ -4,6 +4,8 @@ The launcher is the Computers screen: the SPA that lists this machine, every dev
 
 ## What the launcher is
 
+The viewer's privacy mode conceals machine and gateway fields, connection forms, diagnostic notices and secondary labels through `@chan/web-shared/privacy` and `PrivateField`. Its eye buttons reveal individual fields; concealed values and their tooltips are not rendered. Preferences come from the desktop bridge or browser origin storage, rather than the library API. The [privacy contract](../../../desktop/design.md#privacy-mode) defines persistence, live updates and reload behavior.
+
 The launcher is an HTTP client of the serving library and nothing more: it never opens native windows, never dials a devserver and never parses an opaque window or workspace id. Every type in `src/api/library.ts` mirrors a struct the library serializes, and the field names are the wire, pinned by the server's byte tests. It renders four registries, workspaces, windows, devservers and gateways, and a feed: the window set over a watch WebSocket, pushed on every change together with the live tmux control-mode connections and the per-tenant leaders. It reads its bearer from `?t=` in its own URL and presents it as a header on fetch and as a query on the watch socket, since a browser WebSocket cannot set headers. The bundle uses a relative asset base so it resolves under any mount, and it carries none of the workspace app's editor, terminal or graph weight.
 
 ```mermaid

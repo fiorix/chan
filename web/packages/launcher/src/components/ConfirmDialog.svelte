@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
+  import { privateText } from "@chan/web-shared/privacy";
   // The generic confirm dialog. Renders the in-SPA Modal (never a native
   // window.confirm -- WKWebView blocks those) with the request's message and a
   // Confirm / Cancel pair. Confirm runs the stored action then closes; Cancel
@@ -8,8 +10,8 @@
   import { confirm, resolveConfirm, cancelConfirm } from "../state/confirm.svelte";
 </script>
 
-<Modal title={confirm.title} onclose={cancelConfirm} returnFocus={confirm.opener}>
-  <p class="message">{confirm.message}</p>
+<Modal title={privateText(confirm.title, "Confirm action")} onclose={cancelConfirm} returnFocus={confirm.opener}>
+  <p class="message"><PrivateField field="confirmation:message" label="confirmation details">{confirm.message}</PrivateField></p>
   <div class="dialog-footer">
     <button class="btn" type="button" disabled={confirm.busy} onclick={cancelConfirm}>Cancel</button>
     <button class="btn primary" type="button" disabled={confirm.busy} onclick={resolveConfirm}>

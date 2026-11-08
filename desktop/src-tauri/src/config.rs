@@ -370,6 +370,9 @@ pub enum GeometryMatch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Privacy follows the viewing desktop across all connected libraries.
+    #[serde(default)]
+    pub privacy: crate::privacy::PrivacySettings,
     /// Client session name presented by native windows; empty keeps automatic naming.
     #[serde(default)]
     pub client_session_name: String,

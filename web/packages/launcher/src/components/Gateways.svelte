@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
+  import { privateText } from "@chan/web-shared/privacy";
   // The Gateways screen: one machine-styled badge per configured gateway --
   // the ArrowRightLeft glyph, the label over the URL, the status dot, the
   // rename pencil, and the connect/disconnect control with a spinning cancel
@@ -55,7 +57,7 @@
   const deckCards = $derived.by((): DeckCard[] => {
     const cards: DeckCard[] = [...library.gateways]
       .sort((a, b) => gatewayName(a).localeCompare(gatewayName(b)))
-      .map((gw) => ({ key: gw.id, label: gatewayName(gw), kind: "gateway", gw }));
+      .map((gw) => ({ key: gw.id, label: privateText(gatewayName(gw), "Gateway"), kind: "gateway", gw }));
     cards.push({ key: "add-gateway", label: "Add gateway", kind: "add" });
     return cards;
   });
@@ -116,13 +118,13 @@
           class="row-check"
           type="checkbox"
           checked={isSelected("gateway", gw.id)}
-          aria-label={`Select ${gatewayName(gw)}`}
+          aria-label={`Select ${privateText(gatewayName(gw), "gateway")}`}
           onchange={() => toggleSelected("gateway", gw.id)} />
       {/if}
       <div class="gw-id">
         <span class="gw-name-row">
           <span class="gw-glyph"><ArrowRightLeft size={16} /></span>
-          <span class="gw-name">{gatewayName(gw)}</span>
+          <PrivateField field={`gateway:${gw.id}:name`} label="gateway name"><span class="gw-name">{gatewayName(gw)}</span></PrivateField>
           {#if lost(gw)}<span class="status-dot lost" title="Connection lost"></span>
           {:else if connected(gw)}<span class="status-dot live" title="Connected"></span>{/if}
           {#if connected(gw)}
@@ -133,19 +135,19 @@
         </span>
         <span class="gw-addr-row">
           <span class="gw-glyph"></span>
-          <span class="gw-url" title={gw.url}>{gw.url}</span>
+          <PrivateField field={`gateway:${gw.id}:url`} label="gateway address"><span class="gw-url" title={gw.url}>{gw.url}</span></PrivateField>
         </span>
         {#if gw.wireguard_public_key}
           <span class="gw-addr-row gw-wg-key">
             <span class="gw-glyph"></span>
             <span class="chip">WireGuard key</span>
-            <span class="gw-url gw-wg-key-prefix" title={gw.wireguard_public_key}
-              >{gw.wireguard_public_key.slice(0, 8)}</span>
+            <PrivateField field={`gateway:${gw.id}:key`} label="WireGuard public key"><span class="gw-url gw-wg-key-prefix" title={gw.wireguard_public_key}
+              >{gw.wireguard_public_key.slice(0, 8)}</span></PrivateField>
             <button
               class="icon-btn gw-wg-copy"
               type="button"
               title="Copy the WireGuard public key"
-              aria-label={`Copy the WireGuard public key of ${gatewayName(gw)}`}
+              aria-label={`Copy the WireGuard public key of ${privateText(gatewayName(gw), "gateway")}`}
               onclick={() => run(copyPublicKey(gw.wireguard_public_key!))}>
               <Copy size={12} />
             </button>
@@ -159,9 +161,9 @@
             <span class="gw-glyph"></span>
             <span class="chip">WireGuard</span>
             {#if gw.wireguard_status}
-              <span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span>
+              <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
             {/if}
-            <span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span>
+            <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
           </span>
         {/if}
       </div>
@@ -173,7 +175,7 @@
             class="icon-btn"
             type="button"
             title="Rename"
-            aria-label={`Rename gateway ${gatewayName(gw)}`}
+            aria-label={`Rename gateway ${privateText(gatewayName(gw), "gateway")}`}
             onclick={() => openEditGateway(gw)}>
             <Pencil size={16} />
           </button>
@@ -194,10 +196,10 @@
                 : connected(gw) ? "Disconnect (o)" : "Connect (o)"}
             data-deck-key="o"
             aria-label={spinning(gw)
-              ? `Cancel connection to ${gatewayName(gw)}`
+              ? `Cancel connection to ${privateText(gatewayName(gw), "gateway")}`
               : connected(gw) || lost(gw)
-                ? `Disconnect gateway ${gatewayName(gw)}`
-                : `Connect gateway ${gatewayName(gw)}`}
+                ? `Disconnect gateway ${privateText(gatewayName(gw), "gateway")}`
+                : `Connect gateway ${privateText(gatewayName(gw), "gateway")}`}
             onkeydown={onControlKeydown}
             onblur={clearHeldEnter}
             onclick={(event) => {
@@ -232,7 +234,7 @@
       <p class="card-prompt gateway-prompt">Connecting…</p>
     {:else if lost(gw)}
       <p class="card-prompt gateway-prompt">
-        Connection lost{gw.last_error ? `: ${gw.last_error}` : "."} Retrying; the last-known
+        Connection lost{#if gw.last_error}: <PrivateField field={`gateway:${gw.id}:error`} label="error details">{gw.last_error}</PrivateField>{:else}.{/if} Retrying; the last-known
         devservers stay listed.
       </p>
     {:else if connected(gw)}
@@ -243,7 +245,7 @@
       </p>
     {:else}
       <p class="card-prompt gateway-prompt">
-        Not connected{gw.last_error ? ` (${gw.last_error})` : "."}
+        Not connected{#if gw.last_error}{" ("}<PrivateField field={`gateway:${gw.id}:error`} label="error details">{gw.last_error}</PrivateField>){:else}.{/if}
       </p>
     {/if}
   </section>

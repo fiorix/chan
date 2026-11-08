@@ -26,6 +26,8 @@ permissions = [
   "allow-create-library-window",
   "allow-focus-library-window",
   "allow-native-vocabulary",
+  "allow-privacy-settings",
+  "allow-set-privacy-settings",
   "allow-toggle-launcher-panel",
   "allow-set-launcher-focus-color",
   "allow-terminal-background-opacity",
@@ -63,6 +65,8 @@ permissions = [
   "allow-create-library-window",
   "allow-focus-library-window",
   "allow-native-vocabulary",
+  "allow-privacy-settings",
+  "allow-set-privacy-settings",
   "allow-toggle-launcher-panel",
   "allow-set-launcher-focus-color",
   "allow-terminal-background-opacity",
@@ -279,3 +283,13 @@ commands.allow = ["finish_generated_download"]
 identifier = "allow-cancel-generated-download"
 description = "Cancels and cleans an SPA-generated download."
 commands.allow = ["cancel_generated_download"]
+
+[[permission]]
+identifier = "allow-privacy-settings"
+description = "Read the viewing desktop privacy settings."
+commands.allow = ["privacy_settings"]
+
+[[permission]]
+identifier = "allow-set-privacy-settings"
+description = "Change privacy settings for the viewing desktop."
+commands.allow = ["set_privacy_settings"]

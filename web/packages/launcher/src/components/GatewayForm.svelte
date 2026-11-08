@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
   // The gateway form: add a gateway, or edit one when `editing` is set. Add
   // just adds (no probe -- the first Connect discovers and signs in). Edit
   // changes the label and the WireGuard file only: the URL is the gateway's
@@ -186,6 +187,7 @@
   {/if}
   <label class="field">
     Gateway URL
+    <PrivateField field={`gateway:${target?.id ?? savedId ?? "new"}:url`} label="gateway URL">
     <input
       type="text"
       class="mono"
@@ -195,18 +197,22 @@
       spellcheck="false"
       disabled={target != null || savedId != null}
       onkeydown={onFieldKey} />
+    </PrivateField>
   </label>
   <label class="field">
     Name <span class="muted">(optional)</span>
+    <PrivateField field={`gateway:${target?.id ?? savedId ?? "new"}:name`} label="gateway name">
     <input
       type="text"
       bind:value={name}
       placeholder="Defaults to the URL host"
       autocomplete="off"
       onkeydown={onFieldKey} />
+    </PrivateField>
   </label>
   <label class="field">
     WireGuard file <span class="muted">(optional)</span>
+    <PrivateField field={`gateway:${target?.id ?? savedId ?? "new"}:wireguard`} label="WireGuard path">
     <input
       type="text"
       class="mono"
@@ -215,6 +221,7 @@
       autocomplete="off"
       spellcheck="false"
       onkeydown={onFieldKey} />
+    </PrivateField>
     <span class="field-hint">
       A wg-quick peer file, readable only by you (<code>chmod 600</code>). The gateway is then
       reached through an in-process WireGuard tunnel; the file takes effect as soon as it is
@@ -228,13 +235,13 @@
       {#if publicKey}
         WireGuard public key
         <div class="key-row">
-          <input
+          <PrivateField field={`gateway:${target?.id ?? savedId}:key`} label="WireGuard public key"><input
             type="text"
             class="mono"
             readonly
             value={publicKey}
             aria-label="WireGuard public key"
-            onfocus={(e) => e.currentTarget.select()} />
+            onfocus={(e) => e.currentTarget.select()} /></PrivateField>
           <button class="btn" type="button" onclick={copyKey}>{copied ? "Copied" : "Copy"}</button>
         </div>
       {/if}
@@ -250,7 +257,7 @@
   {/if}
 
   {#if error}
-    <div class="error" role="alert">{error}</div>
+    <div class="error" role="alert"><PrivateField field="gateway-form:error" label="error details">{error}</PrivateField></div>
   {/if}
 
   <div class="form-footer">

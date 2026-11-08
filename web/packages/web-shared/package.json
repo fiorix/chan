@@ -20,6 +20,8 @@
     "./window-page": "./src/window-page.ts",
     "./window-holder": "./src/window-holder.ts",
     "./window-label": "./src/window-label.ts",
-    "./relative-time": "./src/relative-time.ts"
+    "./relative-time": "./src/relative-time.ts",
+    "./privacy": "./src/privacy.svelte.ts",
+    "./PrivateField.svelte": "./src/components/PrivateField.svelte"
   }
 }

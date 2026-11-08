@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
   // Full-app overlay surfaced when the watcher channel drops. The
   // watcher is the only push channel between the server and the UI;
   // without it, file changes from outside the editor stop
@@ -160,9 +161,10 @@
     // overlay is status-only), focus stays on the overlay.
     if (e.key !== "Tab") return;
     e.preventDefault();
-    if (!reconnectBtn && !abandonBtn) return;
-    const onReconnect = document.activeElement === reconnectBtn;
-    (onReconnect ? abandonBtn : reconnectBtn)?.focus();
+    const controls = Array.from(overlayEl?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    if (!controls.length) return;
+    const current = controls.indexOf(document.activeElement as HTMLButtonElement);
+    controls[(current + (e.shiftKey ? controls.length - 1 : 1)) % controls.length]?.focus();
   }
 
   // "closed" is never emitted by the transport (it pushes connecting /
@@ -224,7 +226,7 @@
       <div class="title">{message}</div>
       <div class="meta" aria-live="polite">{meta}</div>
       {#if recoveryError}
-        <div class="error" role="alert">{recoveryError}</div>
+        <div class="error" role="alert"><PrivateField field="reconnect:error" label="reconnection error">{recoveryError}</PrivateField></div>
       {/if}
       {#if canRecover}
         <div class="actions">

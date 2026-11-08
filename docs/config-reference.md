@@ -314,6 +314,9 @@ Source: `desktop/src-tauri/src/config.rs`. `CHAN_HOME` moves it with the rest of
 | `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window close and quit | OS window geometry per window label (below), newest first, capped |
 | `local_color` | `Option<String>` | unset | the launcher's local colour route | the local library's pane highlight, hex `#rrggbb`; unset is the default accent |
 | `launcher_theme` | `Option<String>` | unset | the launcher's theme route | `dark`, `light`, or follow the OS when absent |
+| `privacy.enabled` | `bool` | `false` | Settings > Global > Privacy mode on | conceal computer/gateway connection details across desktop windows, with individual reveals |
+| `privacy.mask_terminal_secrets` | `bool` | `false` | Settings > Global > Also enable terminal secret masking | enable the existing terminal masker while privacy is on; keep each terminal's previous setting afterwards |
+| `privacy.revision` | `u64` | `0` | maintained by the desktop | order live updates and invalidate field reveals when privacy settings change |
 
 A `devservers[]` entry is the local connection recipe only:
 

@@ -94,7 +94,7 @@
     watchSystemTheme,
   } from "./state/store.svelte";
   import { windowModeAllowsCommand } from "./state/windowMode";
-  import { initWindowTitle } from "./state/windowTitle";
+  import { initWindowTitle, refreshWindowTitle } from "./state/windowTitle";
   import {
     activeFileTab,
     activePane,
@@ -224,6 +224,8 @@
   // in-mode binding. The flag lives in App.svelte because Hybrid Nav is
   // global (one transaction per Cmd+. press), no per-pane scoping needed.
   let paneModeHelpVisible = $state(false);
+
+  $effect(refreshWindowTitle);
 
   $effect(() => {
     // Touch enough of the layout to trip reactivity on common

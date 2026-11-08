@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
+  import { privateText } from "@chan/web-shared/privacy";
   // Corner notice cards (the workspace-app bubble shell): fixed bottom-right,
   // newest at the bottom, each with a source chip, title, age, a clamped
   // message that expands on click, and a Dismiss. Renders the notices ring;
@@ -22,9 +24,9 @@
         role={n.kind === "error" ? "alert" : "status"}>
         <div class="nb-head">
           {#if sourceChip(n)}
-            <span class="nb-source">{sourceChip(n)}</span>
+            <span class="nb-source">{privateText(sourceChip(n), n.source.type)}</span>
           {/if}
-          <span class="nb-title">{n.title}</span>
+          <span class="nb-title">{privateText(n.title, "Notice")}</span>
           <time class="nb-age" datetime={new Date(n.at).toISOString()} title={exactStamp(n.at)}>{relativeAge(n.at, notices.now)}</time>
           <button
             class="nb-close"
@@ -33,22 +35,21 @@
             title="Dismiss"
             onclick={() => dismissNotice(n.id)}>×</button>
         </div>
-        <button
-          class="nb-body"
-          type="button"
-          aria-expanded={notices.expandedId === n.id}
-          onclick={() => toggleExpanded(n.id)}>
-          <span class="nb-message" class:expanded={notices.expandedId === n.id}>{n.message}</span>
-          {#if notices.expandedId === n.id}
-            <span class="nb-stamp">{exactStamp(n.at)}</span>
-          {/if}
-        </button>
+        <div class="nb-body-frame">
+          <PrivateField field={`notice:${n.id}`} label="notice details">
+            <button class="nb-body" type="button" aria-expanded={notices.expandedId === n.id} onclick={() => toggleExpanded(n.id)}>
+              <span class="nb-message" class:expanded={notices.expandedId === n.id}>{n.message}</span>
+              {#if notices.expandedId === n.id}<span class="nb-stamp">{exactStamp(n.at)}</span>{/if}
+            </button>
+          </PrivateField>
+        </div>
       </div>
     {/each}
   </div>
 {/if}
 
 <style>
+  .nb-body-frame { padding: 0.2rem; }
   .notice-stack {
     position: fixed;
     bottom: 2rem;
