@@ -7,8 +7,8 @@ export interface MetricSample {
   sequence: number; elapsedMs: number; sampledAtMs: number; collectionMicros: number;
   process: {
     uptimeSeconds: number; cpuTimeMs: number; cpuPercent: number | null;
-    residentBytes: number; ioScope: "storage_io" | "process_io";
-    readBytes: number; writtenBytes: number;
+    residentBytes: number; ioScope: "storage_io" | "process_io" | "unavailable";
+    readBytes: number | null; writtenBytes: number | null;
     readBytesPerSecond: number | null; writtenBytesPerSecond: number | null;
   } | null;
   network: MetricTraffic; http2: MetricTraffic; yamux: MetricTraffic;

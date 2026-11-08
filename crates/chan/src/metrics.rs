@@ -197,9 +197,15 @@ fn render(view: &View) -> String {
         out.push_str(&format!(
             "{} read {} ({})  write {} ({})\n",
             process.io_scope,
-            bytes(process.read_bytes),
+            process
+                .read_bytes
+                .map(bytes)
+                .unwrap_or_else(|| "n/a".into()),
             per_second(process.read_bytes_per_second),
-            bytes(process.written_bytes),
+            process
+                .written_bytes
+                .map(bytes)
+                .unwrap_or_else(|| "n/a".into()),
             per_second(process.written_bytes_per_second)
         ));
     } else {
@@ -256,6 +262,34 @@ fn render(view: &View) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_io_stays_unavailable_in_terminal_output() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = chan_server::metrics::Runtime::start(home.path().into()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut view = loop {
+            let view = runtime.view(false, None);
+            if view
+                .latest
+                .as_ref()
+                .and_then(|sample| sample.process.as_ref())
+                .is_some()
+            {
+                break view;
+            }
+            assert!(std::time::Instant::now() < deadline, "no process sample");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let process = view.latest.as_mut().unwrap().process.as_mut().unwrap();
+        process.io_scope = "unavailable".into();
+        process.read_bytes = None;
+        process.written_bytes = None;
+        process.read_bytes_per_second = None;
+        process.written_bytes_per_second = None;
+        assert!(render(&view).contains("unavailable read n/a (n/a)  write n/a (n/a)"));
+    }
+
     #[test]
     fn explicit_targets_do_not_inherit_local_credentials_and_strip_launch_secrets() {
         let (url, token) = explicit_target("https://example.test/work?t=secret#x", None).unwrap();

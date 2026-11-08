@@ -41,9 +41,10 @@ pub struct Process {
     pub cpu_percent: Option<f64>,
     pub resident_bytes: u64,
     /// Windows reports all process I/O; Linux/macOS report storage I/O.
+    /// FreeBSD byte counters are unavailable.
     pub io_scope: String,
-    pub read_bytes: u64,
-    pub written_bytes: u64,
+    pub read_bytes: Option<u64>,
+    pub written_bytes: Option<u64>,
     pub read_bytes_per_second: Option<f64>,
     pub written_bytes_per_second: Option<f64>,
 }
@@ -290,7 +291,12 @@ impl Sampler {
             .filter(|ms| *ms > 0);
         let process = self.system.process(pid).map(|p| {
             let previous = self.previous.as_ref().and_then(|p| p.process.as_ref());
-            let io = p.disk_usage();
+            // sysinfo exposes FreeBSD ru_inblock/ru_oublock operations as
+            // bytes. Their operation sizes are unknown, so no byte rate can
+            // be derived from them.
+            let io = (!cfg!(target_os = "freebsd")).then(|| p.disk_usage());
+            let read_bytes = io.as_ref().map(|io| io.total_read_bytes);
+            let written_bytes = io.as_ref().map(|io| io.total_written_bytes);
             Process {
                 uptime_seconds: p.run_time(),
                 cpu_time_ms: p.accumulated_cpu_time(),
@@ -301,24 +307,21 @@ impl Sampler {
                 )
                 .map(|v| v / 10.0),
                 resident_bytes: p.memory(),
-                io_scope: if cfg!(windows) {
+                io_scope: if io.is_none() {
+                    "unavailable"
+                } else if cfg!(windows) {
                     "process_io"
                 } else {
                     "storage_io"
                 }
                 .into(),
-                read_bytes: io.total_read_bytes,
-                written_bytes: io.total_written_bytes,
-                read_bytes_per_second: rate(
-                    io.total_read_bytes,
-                    previous.map(|p| p.read_bytes),
-                    interval,
-                ),
-                written_bytes_per_second: rate(
-                    io.total_written_bytes,
-                    previous.map(|p| p.written_bytes),
-                    interval,
-                ),
+                read_bytes,
+                written_bytes,
+                read_bytes_per_second: read_bytes
+                    .and_then(|bytes| rate(bytes, previous.and_then(|p| p.read_bytes), interval)),
+                written_bytes_per_second: written_bytes.and_then(|bytes| {
+                    rate(bytes, previous.and_then(|p| p.written_bytes), interval)
+                }),
             }
         });
         let prev = self.previous.as_ref();
@@ -436,7 +439,18 @@ mod tests {
         let view = runtime.view(true, Some(1));
         assert!(view.history.iter().all(|s| s.sequence > 1));
         assert_eq!(view.identity.pid, std::process::id());
-        assert!(view.latest.unwrap().process.unwrap().resident_bytes > 0);
+        let process = view.latest.unwrap().process.unwrap();
+        assert!(process.resident_bytes > 0);
+        if cfg!(target_os = "freebsd") {
+            assert_eq!(process.io_scope, "unavailable");
+            assert_eq!(process.read_bytes, None);
+            assert_eq!(process.written_bytes, None);
+            assert_eq!(process.read_bytes_per_second, None);
+            assert_eq!(process.written_bytes_per_second, None);
+        } else {
+            assert!(process.read_bytes.is_some());
+            assert!(process.written_bytes.is_some());
+        }
         drop(runtime);
         assert!(stop.is_stopped());
     }

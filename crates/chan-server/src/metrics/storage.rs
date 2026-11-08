@@ -38,6 +38,7 @@ pub(super) fn scan(root: &Path, stop: &Stop) -> std::io::Result<Storage> {
     let root_path = std::fs::canonicalize(root)?;
     let mut pending = vec![(root_path, 0)];
     let mut bytes = 0u64;
+    #[cfg(unix)]
     let mut allocated = 0u64;
     let mut files = 0u64;
     let mut visited = 0;
@@ -85,7 +86,10 @@ pub(super) fn scan(root: &Path, stop: &Stop) -> std::io::Result<Storage> {
     Ok(Storage {
         path: root.display().to_string(),
         logical_bytes: Some(bytes),
-        allocated_bytes: cfg!(unix).then_some(allocated),
+        #[cfg(unix)]
+        allocated_bytes: Some(allocated),
+        #[cfg(not(unix))]
+        allocated_bytes: None,
         files: Some(files),
         sampled_at_ms: Some(now_ms()),
         scan_millis: Some(started.elapsed().as_millis() as u64),

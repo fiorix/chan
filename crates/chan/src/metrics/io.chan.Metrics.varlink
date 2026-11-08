@@ -4,7 +4,7 @@ interface io.chan.Metrics
 # One logical core is 100%; rates are absent until two samples exist.
 type Process (
   uptimeSeconds: int, cpuTimeMs: int, cpuPercent: ?float,
-  residentBytes: int, ioScope: string, readBytes: int, writtenBytes: int,
+  residentBytes: int, ioScope: string, readBytes: ?int, writtenBytes: ?int,
   readBytesPerSecond: ?float, writtenBytesPerSecond: ?float
 )
 # Payload counters belong to distinct layers and must not be summed.

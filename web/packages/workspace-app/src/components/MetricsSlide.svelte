@@ -47,7 +47,7 @@
       <article><h3>Network <strong>{rate(sample.network.receivedBytesPerSecond)}</strong></h3>
         <MetricChart label="Service transport receive bytes per second" values={series((s) => s.network.receivedBytesPerSecond)} /><p>RX · TX {rate(sample.network.sentBytesPerSecond)}</p></article>
       <article><h3>I/O read <strong>{rate(process?.readBytesPerSecond)}</strong></h3>
-        <MetricChart label="Process I/O read bytes per second" values={series((s) => s.process?.readBytesPerSecond ?? null)} /><p>{bytes(process?.readBytes)} total · {process?.ioScope === "process_io" ? "all process I/O" : "storage I/O"}</p></article>
+        <MetricChart label="Process I/O read bytes per second" values={series((s) => s.process?.readBytesPerSecond ?? null)} /><p>{bytes(process?.readBytes)} total · {process?.ioScope === "unavailable" ? "Unavailable on this platform" : process?.ioScope === "process_io" ? "all process I/O" : "storage I/O"}</p></article>
       <article><h3>I/O write <strong>{rate(process?.writtenBytesPerSecond)}</strong></h3>
         <MetricChart label="Process I/O write bytes per second" values={series((s) => s.process?.writtenBytesPerSecond ?? null)} /><p>{bytes(process?.writtenBytes)} total</p></article>
       <article><h3>File transfers <strong>{sample.transfers.running} running</strong></h3>
