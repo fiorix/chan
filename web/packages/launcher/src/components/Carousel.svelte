@@ -20,7 +20,7 @@
   import { confirm } from "../state/confirm.svelte";
   import { activeCommandLauncherDraft } from "../state/commandLauncher.svelte";
   import { ChevronLeft, ChevronRight } from "@lucide/svelte";
-  import { decks, type DeckName } from "../state/deck.svelte";
+  import { decks, showCard, type DeckName } from "../state/deck.svelte";
   import {
     HIDE_BEYOND_DEG,
     cardWidth,
@@ -74,8 +74,7 @@
     if (count === 0) return;
     const next = position + delta;
     const index = mod(next, count);
-    deck.turn = layout.fullRing ? next : index;
-    deck.activeKey = items[index].key;
+    showCard(deckName, items[index].key, { turn: layout.fullRing ? next : index });
   }
 
   function activate(index: number): void {

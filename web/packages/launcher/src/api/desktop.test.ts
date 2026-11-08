@@ -7,15 +7,30 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   hasTauriEvents,
+  isLauncherHost,
   onTauriEvent,
   requestDesktopQuit,
   restartDesktopAfterUpdate,
 } from "./desktop";
+import type { WindowRecord } from "./library";
 
 type W = Window & typeof globalThis & { __TAURI__?: unknown };
 
 afterEach(() => {
   delete (window as W).__TAURI__;
+  Reflect.deleteProperty(window, "__CHAN_LAUNCHER_WINDOW__");
+});
+
+describe("isLauncherHost", () => {
+  it("keeps a control terminal marked after its pending library identity changes", () => {
+    Object.defineProperty(window, "__CHAN_LAUNCHER_WINDOW__", {
+      value: { windowId: "control-terminal-ds-1", libraryId: null }, configurable: true,
+    });
+    const control = { window_id: "control-terminal-ds-1", library_id: "ds-1", control: true } as WindowRecord;
+    expect(isLauncherHost(control)).toBe(true);
+    expect(isLauncherHost({ ...control, library_id: "lib-remote" })).toBe(true);
+    expect(isLauncherHost({ ...control, control: false })).toBe(false);
+  });
 });
 
 describe("hasTauriEvents", () => {

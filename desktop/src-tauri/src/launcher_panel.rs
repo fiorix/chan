@@ -796,6 +796,28 @@ async fn ensure_panel(app: &AppHandle, host: &WebviewWindow) -> Result<(), Strin
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherHost<'a> {
+    window_id: &'a str,
+    library_id: Option<&'a str>,
+}
+
+fn launcher_host(label: &str) -> LauncherHost<'_> {
+    match label.split_once("::") {
+        Some((library, window)) => LauncherHost {
+            window_id: window,
+            library_id: Some(library),
+        },
+        // Control terminals use their native label as their registry id. Their
+        // library changes from the pending devserver id when connection succeeds.
+        None => LauncherHost {
+            window_id: label,
+            library_id: None,
+        },
+    }
+}
+
 /// Build a host's launcher hidden, on the main thread. `false` when the host
 /// already has one.
 fn build_panel(
@@ -837,8 +859,9 @@ fn build_panel(
         .with_initialization_script(crate::privacy::BRIDGE)
         .with_initialization_script(LAUNCHER_BRIDGE_JS)
         .with_initialization_script(format!(
-            "window.__chanLauncherSettled = false; window.__chanLauncherGpuAvailable = {};",
-            crate::linux_gui_stack::gpu_available()
+            "window.__chanLauncherSettled = false; window.__chanLauncherGpuAvailable = {}; window.__CHAN_LAUNCHER_WINDOW__ = {};",
+            crate::linux_gui_stack::gpu_available(),
+            serde_json::to_string(&launcher_host(&label)).map_err(|e| e.to_string())?
         ))
         .with_ipc_handler(move |request: wry::http::Request<String>| {
             // Only the launcher page itself may speak for the launcher.
@@ -1097,6 +1120,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn launcher_host_identifies_registry_windows_across_libraries() {
+        for (label, library, window) in [
+            ("local::w-1", Some("local"), "w-1"),
+            ("lib-ab12::w-1", Some("lib-ab12"), "w-1"),
+            ("control-terminal-ds-1", None, "control-terminal-ds-1"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(launcher_host(label)).unwrap(),
+                serde_json::json!({ "windowId": window, "libraryId": library })
+            );
+        }
+    }
 
     #[test]
     fn every_spa_window_hosts_a_launcher() {
