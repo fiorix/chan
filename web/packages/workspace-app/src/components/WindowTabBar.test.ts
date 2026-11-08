@@ -5,7 +5,8 @@
 // and toggles the pane tree; the bar offers its slot for the active pane's
 // strip, keeps its insets clear for the window controls, centres its row on
 // them, and on the desktop marks its empty stretches as the window's drag
-// space.
+// space. While the window's Computers launcher covers the page, the band
+// shows neither the tree button nor the strip.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -18,7 +19,8 @@ vi.mock("../state/paneTree.svelte", async (importOriginal) => ({
 }));
 
 import WindowTabBar from "./WindowTabBar.svelte";
-import { closePaneTree, PANE_TREE_ANCHOR_ATTR, paneTree } from "../state/paneTree.svelte";
+import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
+import { closePaneTree, PANE_TREE_ANCHOR_ATTR, paneTree, openPaneTree } from "../state/paneTree.svelte";
 import { layout, setActivePane } from "../state/tabs.svelte";
 import {
   NO_TITLEBAR_CHROME,
@@ -40,6 +42,7 @@ afterEach(async () => {
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   windowTabBar.slot = null;
   delete (window as W).__TAURI_INTERNALS__;
+  document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
   document.body.innerHTML = "";
   resetLayout();
 });
@@ -110,6 +113,42 @@ describe("the tree button", () => {
     bar = await renderBar();
     expect(bar.querySelector(".badge")?.getAttribute("data-status")).toBe("blocked");
     expect(bar.querySelector(".tree-button")?.getAttribute("aria-label")).toContain("blocked");
+  });
+});
+
+describe("under the Computers launcher", () => {
+  /// The desktop's mark lands as a mutation, which the bar reads after it.
+  async function marked(on: boolean): Promise<void> {
+    if (on) document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    else document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+  }
+
+  test("hides the tree button and the strip in place, closes the tree, and shows them again after", async () => {
+    const bar = await renderBar();
+    const button = bar.querySelector<HTMLElement>(".tree-button")!;
+    const slot = bar.querySelector<HTMLElement>(".slot")!;
+    openPaneTree();
+    await tick();
+    expect(paneTree.open).toBe(true);
+
+    await marked(true);
+    expect(button.classList.contains("covered")).toBe(true);
+    expect(slot.classList.contains("covered")).toBe(true);
+    expect(paneTree.open, "an open tree closes").toBe(false);
+    expect(windowTabBar.slot, "the strip keeps its slot").toBe(slot);
+
+    await marked(false);
+    expect(button.classList.contains("covered")).toBe(false);
+    expect(slot.classList.contains("covered")).toBe(false);
+  });
+
+  test("a bar mounted under a shown launcher starts hidden", async () => {
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    const bar = await renderBar();
+    expect(bar.querySelector(".tree-button")?.classList.contains("covered")).toBe(true);
+    expect(bar.querySelector(".slot")?.classList.contains("covered")).toBe(true);
   });
 });
 

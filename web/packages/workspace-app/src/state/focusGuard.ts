@@ -5,12 +5,16 @@
 
 import { surveyFor, type SurveySlot } from "./survey.svelte";
 
-/// chan-desktop marks the page's root while the window's Computers launcher
-/// is shown over it (launcher_transition.js hostCovered). The launcher is a
-/// second webview holding the keyboard; a focus change in this page would
-/// move the window's first responder back here and leave the launcher deaf.
+/// The attribute chan-desktop sets on the page's root while the window's
+/// Computers launcher is shown over it (launcher_transition.js hostCovered).
+export const LAUNCHER_SHOWN_ATTR = "data-launcher-shown";
+
+/// Whether the window's Computers launcher is shown over this page. The
+/// launcher is a second webview holding the keyboard; a focus change in this
+/// page would move the window's first responder back here and leave the
+/// launcher deaf.
 export function launcherShownOverWindow(): boolean {
-  return document.documentElement.hasAttribute("data-launcher-shown");
+  return document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR);
 }
 
 /// Whether a refocus of the terminal in `slot` is refused: a survey is modal

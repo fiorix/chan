@@ -25,7 +25,9 @@
 //! record: the hide-time geometry capture stores the height a normal title bar
 //! would leave (`serve::capture_window_geometry`), the launcher panel sits below
 //! the band (`launcher_panel::content_bounds`), and window destruction drops it
-//! (`serve::on_destroyed`).
+//! (`serve::on_destroyed`). While the window's Computers launcher shows, the
+//! page hides its tab bar's contents and the title bar shows the window's title
+//! again ([`launcher_visibility_changed`]).
 //!
 //! Whether a page asks is the user's choice, the `titlebar_tabs` field of the
 //! desktop's own config, off by default. It covers every window the desktop
@@ -359,6 +361,26 @@ pub(crate) fn set_titlebar_tabs_preference(
     Ok(on)
 }
 
+/// The window's Computers launcher was shown or hidden. The page hides its tab
+/// bar's contents while the launcher covers it (it reads the launcher's
+/// `data-launcher-shown` mark on its root), so a window in the mode shows its
+/// title in the title bar for as long as the launcher does, in AppKit's own
+/// place and look, and follows every retitle. Main thread.
+pub(crate) fn launcher_visibility_changed<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(state) = window.try_state::<Arc<AppState>>() else {
+            return;
+        };
+        if state.titlebar_windows.is_active(window.label()) {
+            let shown = crate::launcher_panel::panel_is_visible(window.label());
+            appkit::set_title_shown(window, shown);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 /// A page load starts in `window`: a page from another origin than the one
 /// that turned the mode on gets the normal title bar back before it lays out.
 /// A reload of the same origin keeps the mode, so the page's bar does not
@@ -446,6 +468,11 @@ fn switch(
                 },
             );
             appkit::set_overlay(window, true);
+            // A window entering the mode under its shown launcher keeps its
+            // title until the launcher hides.
+            if crate::launcher_panel::panel_is_visible(label) {
+                appkit::set_title_shown(window, true);
+            }
             crate::launcher_panel::sync_for_host(window);
         } else if state.titlebar_windows.disable(label) {
             appkit::set_overlay(window, false);
@@ -546,8 +573,8 @@ mod appkit {
     }
 
     /// Run `f` with the window's NSWindow, on the main thread only.
-    fn with_ns_window<T>(
-        window: &WebviewWindow,
+    fn with_ns_window<R: tauri::Runtime, T>(
+        window: &WebviewWindow<R>,
         f: impl FnOnce(&AnyObject) -> Option<T>,
     ) -> Option<T> {
         objc2::MainThreadMarker::new()?;
@@ -637,6 +664,18 @@ mod appkit {
             .ok()?;
         // On the main thread Tauri runs the closure before returning.
         rx.try_recv().ok().flatten()
+    }
+
+    /// Show or hide the window's title, which AppKit draws centred in the
+    /// title bar, over the page in the mode.
+    pub(super) fn set_title_shown<R: tauri::Runtime>(window: &WebviewWindow<R>, shown: bool) {
+        with_ns_window(window, |ns_window| {
+            let visibility = if shown { TITLE_VISIBLE } else { TITLE_HIDDEN };
+            // SAFETY: `setTitleVisibility:` is an NSWindow method taking an
+            // NSWindowTitleVisibility, an NSInteger.
+            let _: () = unsafe { msg_send![ns_window, setTitleVisibility: visibility] };
+            Some(())
+        });
     }
 
     /// Give the window's title bar to its page's tab bar (`on`), or its
@@ -1043,6 +1082,47 @@ mod tests {
         assert!(bounds.contains("crate::titlebar_tabs::launcher_top_inset(host)"));
         let park = function(launcher, "\nfn park(");
         assert!(park.contains("crate::titlebar_tabs::launcher_top_inset(host)"));
+    }
+
+    /// Every change of the launcher's visible set reaches the title bar, so a
+    /// window in the mode shows its title exactly while its launcher shows.
+    #[test]
+    fn every_launcher_show_and_hide_reaches_the_title() {
+        const LAUNCHER_RS: &str = include_str!("launcher_panel.rs");
+        let launcher = production(LAUNCHER_RS);
+        for (name, after) in [
+            (
+                "\nfn show_now(",
+                "set(&VISIBLE).lock().unwrap().insert(label);",
+            ),
+            (
+                "\nfn hide_now(",
+                "set(&VISIBLE).lock().unwrap().remove(host);",
+            ),
+            (
+                "\npub(crate) fn close_for_host<",
+                "let was_visible = set(&VISIBLE).lock().unwrap().remove(host);",
+            ),
+        ] {
+            let body = function(launcher, name);
+            let (_, rest) = body
+                .split_once(after)
+                .unwrap_or_else(|| panic!("{name} changes the visible set"));
+            assert!(
+                rest.contains("crate::titlebar_tabs::launcher_visibility_changed("),
+                "{name} tells the title bar after the visible set changes"
+            );
+        }
+        assert_eq!(
+            LAUNCHER_RS
+                .matches("set(&VISIBLE).lock().unwrap().insert(")
+                .count()
+                + LAUNCHER_RS
+                    .matches("set(&VISIBLE).lock().unwrap().remove(")
+                    .count(),
+            3,
+            "no other path changes the visible set"
+        );
     }
 
     /// The switch and every measurement run on the main thread, which AppKit

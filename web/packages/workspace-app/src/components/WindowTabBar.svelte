@@ -4,10 +4,14 @@
   // Pane.svelte). In chan-desktop's title bar its insets keep clear of the
   // window controls, its content row sits on their centre line, and its empty
   // stretches drag the window. The band is opaque: terminal background
-  // opacity cuts its holes behind terminal panes only.
+  // opacity cuts its holes behind terminal panes only. While the window's
+  // Computers launcher is shown over the page, the band holds neither the
+  // tree button nor the strip: they belong to the covered window.
 
   import { isTauriDesktop } from "../api/desktop";
+  import { LAUNCHER_SHOWN_ATTR, launcherShownOverWindow } from "../state/focusGuard";
   import {
+    closePaneTree,
     hiddenTabStatus,
     PANE_TREE_ANCHOR_ATTR,
     PANE_TREE_COMMAND_ID,
@@ -39,6 +43,27 @@
   // The overlay hangs its dropdown under the element carrying this.
   const anchor = { [PANE_TREE_ANCHOR_ATTR]: "" };
 
+  // The desktop marks the page's root while the window's Computers launcher
+  // is shown over it, from before the launcher slides in until after it has
+  // slid away. The tree and the strip are hidden in place, so the strip keeps
+  // its size and the band stays the window's drag space; an open tree closes.
+  let covered = $state(launcherShownOverWindow());
+  $effect(() => {
+    const read = () => {
+      covered = launcherShownOverWindow();
+    };
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: [LAUNCHER_SHOWN_ATTR],
+    });
+    read();
+    return () => observer.disconnect();
+  });
+  $effect(() => {
+    if (covered) closePaneTree();
+  });
+
   // The miniature's drawing box in SVG units, and the gap kept between two
   // panes so each reads as its own tile.
   const MINI_W = 22;
@@ -57,6 +82,7 @@
     type="button"
     class="tree-button"
     class:open={paneTree.open}
+    class:covered
     onclick={togglePaneTree}
     {...anchor}
     title={chord ? `${label} (${chord})` : label}
@@ -87,7 +113,7 @@
       <span class="badge" data-status={status} aria-hidden="true"></span>
     {/if}
   </button>
-  <div class="slot" data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
+  <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
   <div class="inset" style:width={`${chrome.insetRight}px`} data-tauri-drag-region={drag}></div>
 </div>
 
@@ -120,6 +146,9 @@
     align-self: stretch;
     display: flex;
     align-items: center;
+  }
+  .covered {
+    visibility: hidden;
   }
   .tree-button {
     position: relative;

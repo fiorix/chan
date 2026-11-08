@@ -262,6 +262,7 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
                 // after the window is shown again.
                 let _ = window.eval(stage_js("hostUncovered", 0));
                 restore_host(&window);
+                crate::titlebar_tabs::launcher_visibility_changed(&window);
             }
         }
         LAUNCHERS.with(|launchers| {
@@ -561,6 +562,7 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
         return false;
     }
     set(&VISIBLE).lock().unwrap().insert(label);
+    crate::titlebar_tabs::launcher_visibility_changed(host);
     // Off macOS the launcher carries the only menubar, so the host wears it
     // while its launcher shows.
     #[cfg(not(target_os = "macos"))]
@@ -584,6 +586,9 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
 /// webview. Main thread.
 fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
     set(&VISIBLE).lock().unwrap().remove(host);
+    if let Some(host_window) = host_window {
+        crate::titlebar_tabs::launcher_visibility_changed(host_window);
+    }
     // hide_async uncovered the host before this; a host page load that
     // finished in between re-marked it (host_page_loaded), so uncover again
     // now that the launcher no longer reads as shown.
@@ -1193,22 +1198,25 @@ mod tests {
     #[test]
     fn the_covered_marker_is_the_one_the_terminal_reads() {
         // The host page's terminal skips its resume refocus on this root
-        // attribute, read through the page's focus guard; both sides spell
-        // it from the script's one constant.
+        // attribute, and the window tab bar hides its contents on it, both
+        // through the page's focus guard; both sides spell it from one
+        // constant each.
         const FOCUS_GUARD: &str =
             include_str!("../../../web/packages/workspace-app/src/state/focusGuard.ts");
         const TERMINAL_TAB: &str =
             include_str!("../../../web/packages/workspace-app/src/components/TerminalTab.svelte");
+        const WINDOW_TAB_BAR: &str =
+            include_str!("../../../web/packages/workspace-app/src/components/WindowTabBar.svelte");
         assert!(TRANSITION_JS.contains("const COVERED = 'data-launcher-shown';"));
         assert!(TRANSITION_JS
             .contains("hostCovered() { document.documentElement.setAttribute(COVERED, ''); }"));
         assert!(TRANSITION_JS
             .contains("hostUncovered() { document.documentElement.removeAttribute(COVERED); }"));
-        assert!(
-            FOCUS_GUARD.contains("document.documentElement.hasAttribute(\"data-launcher-shown\")")
-        );
+        assert!(FOCUS_GUARD.contains("export const LAUNCHER_SHOWN_ATTR = \"data-launcher-shown\";"));
+        assert!(FOCUS_GUARD.contains("document.documentElement.hasAttribute(LAUNCHER_SHOWN_ATTR)"));
         assert!(TERMINAL_TAB.contains("from \"../state/focusGuard\";"));
         assert!(TERMINAL_TAB.contains("if (launcherShownOverWindow()) return;"));
+        assert!(WINDOW_TAB_BAR.contains("attributeFilter: [LAUNCHER_SHOWN_ATTR]"));
     }
 
     #[test]
