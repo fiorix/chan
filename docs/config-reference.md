@@ -314,7 +314,7 @@ Source: `desktop/src-tauri/src/config.rs`. `CHAN_HOME` moves it with the rest of
 | `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window close and quit | OS window geometry per window label (below), newest first, capped |
 | `local_color` | `Option<String>` | unset | the launcher's local colour route | the local library's pane highlight, hex `#rrggbb`; unset is the default accent |
 | `launcher_theme` | `Option<String>` | unset | the launcher's theme route | `dark`, `light`, or follow the OS when absent |
-| `titlebar_tabs` | `bool` | `false` | Settings → Global → title bar tabs, shown in chan-desktop on macOS and Windows | every window puts its active pane's tabs in the title bar, beside a button that lists the window's panes and tabs; the other panes draw no strip and the pane strip auto-hide row leaves Settings while it is on; applies live to every open window |
+| `titlebar_tabs` | `bool` | `true` | Settings → Global → title bar tabs, shown in chan-desktop on macOS and Windows | every window puts its active pane's tabs in the title bar, beside a button that lists the window's panes and tabs; the other panes draw no strip and the pane strip auto-hide row leaves Settings while it is on; applies live to every open window; a config without the key reads on, so only a stored `false` keeps the normal title bar |
 
 A `devservers[]` entry is the local connection recipe only:
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // The window tab bar's mode: a stored "1" forces it on and "0" off in any
-// host, and without either it follows the desktop's preference, off by
+// host, and without either it follows the desktop's preference, on by
 // default, in chan-desktop on macOS when the installed app advertises the
 // title bar command and on Windows when it also advertises the window
 // control command the bar's caption buttons need. In the desktop the page
@@ -258,7 +258,7 @@ describe("the boot in a browser", () => {
 });
 
 describe("the boot in chan-desktop", () => {
-  test("on macOS with the preference off, the default, offers it and keeps the title bar", async () => {
+  test("on macOS with the preference stored off, offers it and keeps the title bar", async () => {
     asDesktop([TITLEBAR_TABS_COMMAND], () => NO_TITLEBAR_CHROME);
     await start().pending;
     expect(windowTabBar.available, "Settings offers the preference").toBe(true);

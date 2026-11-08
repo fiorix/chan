@@ -7,7 +7,7 @@
 //
 // The page decides the mode and the desktop never forces it. A stored
 // override wins; without one the bar follows the desktop's own preference,
-// off by default, which Settings writes and which every window of the
+// on by default, which Settings writes and which every window of the
 // desktop follows live, and it is drawn only in chan-desktop on macOS or
 // Windows when the installed app advertises the commands that host needs. In
 // a browser, and wherever the title bar is out of reach, a forced bar is a

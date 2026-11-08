@@ -64,7 +64,9 @@
 //! (`launcher_panel.rs`).
 //!
 //! Whether a page asks is the user's choice, the `titlebar_tabs` field of the
-//! desktop's own config, off by default. It covers every window the desktop
+//! desktop's own config: on by default, so a fresh install and a config that
+//! predates the field put the tabs in the title bar, and only a stored
+//! `false` keeps the normal one. It covers every window the desktop
 //! builds, whatever tenant the window shows, so a devserver's preferences play
 //! no part. A page reads it with [`titlebar_tabs_preference`], Settings writes
 //! it with [`set_titlebar_tabs_preference`], and every window hears the change
@@ -1352,30 +1354,41 @@ mod tests {
     }
 
     #[test]
-    fn the_preference_defaults_off_and_persists() {
+    fn the_preference_defaults_on_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let store = Mutex::new(ConfigStore::at_path(path.clone()));
         assert!(
-            !read_preference(&store).unwrap(),
-            "off until the user turns it on"
+            read_preference(&store).unwrap(),
+            "on until the user turns it off"
         );
-        write_preference(&store, false).unwrap();
-        assert!(!path.exists(), "an unchanged value writes nothing");
         write_preference(&store, true).unwrap();
-        assert!(read_preference(&store).unwrap());
-        let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["titlebar_tabs"], true, "stored under its config key");
+        assert!(!path.exists(), "an unchanged value writes nothing");
         write_preference(&store, false).unwrap();
         assert!(!read_preference(&store).unwrap());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["titlebar_tabs"], false, "stored under its config key");
+        write_preference(&store, true).unwrap();
+        assert!(read_preference(&store).unwrap());
     }
 
     #[test]
-    fn a_config_without_the_preference_reads_off() {
+    fn a_config_without_the_preference_reads_on() {
+        // An upgrade from a desktop that predates the field turns the mode on.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"launcher_theme":"dark"}"#).unwrap();
+        let store = Mutex::new(ConfigStore::at_path(path));
+        assert!(read_preference(&store).unwrap());
+    }
+
+    #[test]
+    fn a_stored_off_stays_off() {
+        // A user who turned the mode off before the default changed keeps it off.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"titlebar_tabs":false}"#).unwrap();
         let store = Mutex::new(ConfigStore::at_path(path));
         assert!(!read_preference(&store).unwrap());
     }
