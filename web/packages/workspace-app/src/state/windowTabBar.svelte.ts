@@ -82,6 +82,12 @@ export const WINDOW_TAB_BAR_ROW_HEIGHT = 28;
 /// answers from holding the window's boot.
 export const WINDOW_TAB_BAR_BOOT_WAIT_MS = 400;
 
+/// The stacking order of the window controls the bar draws on Windows: above
+/// every full-window overlay the page shows (the highest, the missing-token
+/// and preflight pages, sit at 40000), so no overlay takes a frameless
+/// window's minimize, maximize and close away.
+export const WINDOW_CONTROLS_Z_INDEX = 45000;
+
 /// Fullscreen transitions and zoom changes arrive as a burst of resizes; the
 /// chrome is asked for once the burst settles.
 const RESIZE_DEBOUNCE_MS = 50;
@@ -197,6 +203,13 @@ export function windowTabBarCenterPad(chrome: TitlebarChrome, height: number): n
   const center = chrome.controlsCenterY;
   if (center <= 0) return 0;
   return Math.max(0, Math.min(height - center * 2, height - WINDOW_TAB_BAR_ROW_HEIGHT));
+}
+
+/// The band at the top of the window that the window controls hold above
+/// every overlay, in CSS px: the bar's height while it draws them, 0
+/// otherwise. A full-window overlay keeps its own chrome below it.
+export function windowControlsBand(): number {
+  return windowTabBar.on && windowTabBar.chrome.drawControls ? windowTabBar.height : 0;
 }
 
 /// Attach to the bar element that hosts the active pane's strip.

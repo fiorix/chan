@@ -414,48 +414,75 @@ describe("the window controls", () => {
     });
   }
 
-  function controls(bar: HTMLElement): HTMLButtonElement[] {
-    return [...bar.querySelectorAll<HTMLButtonElement>(".window-control")];
+  /// The window controls' layer, which the bar draws after itself.
+  function layer(): HTMLElement | null {
+    return document.querySelector<HTMLElement>(".window-controls");
+  }
+
+  function controls(): HTMLButtonElement[] {
+    return [...document.querySelectorAll<HTMLButtonElement>(".window-control")];
   }
 
   test("are drawn only when the desktop asks for them, and the right inset stays an empty spacer otherwise", async () => {
     windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetLeft: 78, controlsCenterY: 14 };
     const bar = await renderBar();
-    expect(controls(bar), "macOS draws its own").toEqual([]);
+    expect(controls(), "macOS draws its own").toEqual([]);
     const right = [...bar.querySelectorAll<HTMLElement>(".inset")].at(-1)!;
     expect(right.children).toHaveLength(0);
 
     windowTabBar.chrome = WINDOWS_CHROME;
     flushSync();
-    expect(controls(bar)).toHaveLength(3);
+    expect(controls()).toHaveLength(3);
 
     windowTabBar.chrome = { ...WINDOWS_CHROME, insetRight: 0, drawControls: false, fullscreen: true };
     flushSync();
-    expect(controls(bar), "fullscreen draws none").toEqual([]);
+    expect(controls(), "fullscreen draws none").toEqual([]);
     expect([...bar.querySelectorAll<HTMLElement>(".inset")].at(-1)?.style.width).toBe("0px");
   });
 
   test("fill the right inset as three equal buttons: minimize, maximize, close", async () => {
     windowTabBar.chrome = WINDOWS_CHROME;
-    const bar = await renderBar();
-    const inset = bar.querySelector<HTMLElement>(".inset.window-controls")!;
-    expect(inset, "the inset is the bar's last part").toBe(bar.lastElementChild);
+    await renderBar();
+    const inset = layer()!;
     expect(inset.style.width).toBe("138px");
-    expect([...inset.children]).toEqual(controls(bar));
-    expect(controls(bar).map((b) => b.dataset.action)).toEqual(["minimize", "toggleMaximize", "close"]);
-    expect(controls(bar).map((b) => b.getAttribute("aria-label"))).toEqual(["Minimize", "Maximize", "Close"]);
-    expect(controls(bar).map((b) => b.title)).toEqual(["Minimize", "Maximize", "Close"]);
-    for (const button of controls(bar)) {
+    expect([...inset.children]).toEqual(controls());
+    expect(controls().map((b) => b.dataset.action)).toEqual(["minimize", "toggleMaximize", "close"]);
+    expect(controls().map((b) => b.getAttribute("aria-label"))).toEqual(["Minimize", "Maximize", "Close"]);
+    expect(controls().map((b) => b.title)).toEqual(["Minimize", "Maximize", "Close"]);
+    for (const button of controls()) {
       expect(button.style.width, "each takes an equal share").toBe("46px");
       expect(button.querySelector("svg"), "an inline glyph").not.toBeNull();
       expect(button.tabIndex, "out of the tab order").toBe(-1);
     }
   });
 
-  test("the middle button maximizes or restores as the window is", async () => {
+  test("sit in a layer of their own above every overlay, the bar keeping their room clear", async () => {
+    asDesktop();
     windowTabBar.chrome = WINDOWS_CHROME;
     const bar = await renderBar();
-    const middle = () => controls(bar)[1]!;
+    expect(bar.getAttribute("data-tauri-drag-region"), "the bar drags the window").toBe("");
+    const controlsLayer = layer()!;
+    expect(bar.contains(controlsLayer), "outside the bar's stacking context").toBe(false);
+    // The highest full-window overlays, the missing-token and preflight pages,
+    // stack at 40000.
+    expect(Number(controlsLayer.style.zIndex)).toBeGreaterThan(40000);
+    expect(controlsLayer.style.width).toBe("138px");
+    expect(controlsLayer.style.height, "the bar's full height").toBe(`${windowTabBar.height}px`);
+    const room = bar.lastElementChild as HTMLElement;
+    expect(room.classList.contains("inset"), "the bar ends in the controls' room").toBe(true);
+    expect(room.style.width).toBe("138px");
+    expect(room.children).toHaveLength(0);
+    expect(room.hasAttribute("data-tauri-drag-region"), "nothing under the controls drags").toBe(false);
+
+    windowTabBar.chrome = { ...WINDOWS_CHROME, insetRight: 0, drawControls: false, fullscreen: true };
+    flushSync();
+    expect(layer(), "no controls, no layer").toBeNull();
+  });
+
+  test("the middle button maximizes or restores as the window is", async () => {
+    windowTabBar.chrome = WINDOWS_CHROME;
+    await renderBar();
+    const middle = () => controls()[1]!;
     expect(middle().getAttribute("aria-label")).toBe("Maximize");
     expect(middle().title).toBe("Maximize");
     expect(middle().querySelector("svg")?.getAttribute("data-glyph")).toBe("maximize");
@@ -470,8 +497,8 @@ describe("the window controls", () => {
   test("each button asks the desktop for its own action", async () => {
     asDesktop();
     windowTabBar.chrome = WINDOWS_CHROME;
-    const bar = await renderBar();
-    for (const button of controls(bar)) button.click();
+    await renderBar();
+    for (const button of controls()) button.click();
     await vi.waitFor(() => expect(invokes).toHaveLength(3));
     expect(invokes).toEqual([
       { cmd: "titlebar_window_control", args: { action: "minimize" } },
@@ -486,8 +513,8 @@ describe("the window controls", () => {
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     windowTabBar.chrome = WINDOWS_CHROME;
-    const bar = await renderBar();
-    controls(bar)[2]!.click();
+    await renderBar();
+    controls()[2]!.click();
     await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
     expect(String(warn.mock.calls[0]?.[1])).toContain("not allowed by ACL");
   });
@@ -497,7 +524,7 @@ describe("the window controls", () => {
     windowTabBar.chrome = WINDOWS_CHROME;
     const bar = await renderBar();
     expect(bar.getAttribute("data-tauri-drag-region"), "the bar still drags").toBe("");
-    const inset = bar.querySelector<HTMLElement>(".window-controls")!;
+    const inset = layer()!;
     expect(inset.hasAttribute("data-tauri-drag-region")).toBe(false);
     expect(inset.querySelector("[data-tauri-drag-region]")).toBeNull();
 
@@ -506,7 +533,7 @@ describe("the window controls", () => {
     bar.addEventListener("mousedown", record);
     document.addEventListener("mousedown", record);
     try {
-      for (const button of controls(bar)) {
+      for (const button of controls()) {
         const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, detail: 1 });
         button.querySelector("svg")!.dispatchEvent(press);
         expect(press.defaultPrevented, "the press keeps the focus where it is").toBe(true);

@@ -4,8 +4,8 @@
   // Pane.svelte). In chan-desktop's title bar its insets keep clear of the
   // window controls, its content row sits on their centre line, and its empty
   // stretches drag the window. Where the desktop asks for it (Windows, whose
-  // window has no frame in the mode) the right inset holds the window
-  // controls. The band is opaque: terminal background opacity cuts its holes
+  // window has no frame in the mode) the window controls sit over the right
+  // inset, in a layer of their own above every overlay. The band is opaque: terminal background opacity cuts its holes
   // behind terminal panes only. While the window's Computers launcher is
   // shown over the page, the band holds neither the tree button nor the
   // strip: they belong to the covered window. On Windows it holds the
@@ -31,6 +31,7 @@
   import { chordFor } from "../state/shortcuts";
   import { activeLayout } from "../state/tabs.svelte";
   import {
+    WINDOW_CONTROLS_Z_INDEX,
     windowTabBar,
     windowTabBarCenterPad,
     windowTabBarSlot,
@@ -219,69 +220,83 @@
       {/if}
     </div>
   {/if}
-  {#if chrome.drawControls}
-    <!-- The window's own controls, drawn in the look of Windows 11 caption
-         buttons: out of the tab order, never a drag region, each a third of
-         the inset and the bar's full height. -->
-    <div class="inset window-controls" style:width={`${chrome.insetRight}px`} {@attach holdPresses}>
-      <button
-        type="button"
-        class="window-control"
-        data-action="minimize"
-        tabindex="-1"
-        title="Minimize"
-        aria-label="Minimize"
-        style:width={controlWidth}
-        onclick={() => windowControl("minimize")}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0 5.5h10" />
-        </svg>
-      </button>
-      <button
-        type="button"
-        class="window-control"
-        data-action="toggleMaximize"
-        tabindex="-1"
-        title={maximizeLabel}
-        aria-label={maximizeLabel}
-        style:width={controlWidth}
-        onclick={() => windowControl("toggleMaximize")}
-      >
-        <svg
-          width="10"
-          height="10"
-          viewBox="0 0 10 10"
-          data-glyph={chrome.maximized ? "restore" : "maximize"}
-          aria-hidden="true"
-        >
-          {#if chrome.maximized}
-            <rect x="0.5" y="2.5" width="7" height="7" rx="1" />
-            <path d="M2.5 2.5v-1a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" />
-          {:else}
-            <rect x="0.5" y="0.5" width="9" height="9" rx="1" />
-          {/if}
-        </svg>
-      </button>
-      <button
-        type="button"
-        class="window-control close"
-        data-action="close"
-        tabindex="-1"
-        title="Close"
-        aria-label="Close"
-        style:width={controlWidth}
-        onclick={() => windowControl("close")}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
-        </svg>
-      </button>
-    </div>
-  {:else}
-    <div class="inset" style:width={`${chrome.insetRight}px`} data-tauri-drag-region={drag}></div>
-  {/if}
+  <!-- The window controls' room. Where the page draws them they sit in a
+       layer of their own after the bar, so this stays clear and drags
+       nothing; otherwise it keeps the native controls' room and drags. -->
+  <div
+    class="inset"
+    style:width={`${chrome.insetRight}px`}
+    data-tauri-drag-region={chrome.drawControls ? undefined : drag}
+  ></div>
 </div>
+{#if chrome.drawControls}
+  <!-- The window's own controls, drawn in the look of Windows 11 caption
+       buttons: out of the tab order, never a drag region, each a third of
+       the inset and the bar's full height. They are a layer of their own,
+       outside the bar's stacking context and above every overlay, as a
+       native window keeps its caption buttons above its content. -->
+  <div
+    class="window-controls"
+    style:width={`${chrome.insetRight}px`}
+    style:height={`${windowTabBar.height}px`}
+    style:z-index={WINDOW_CONTROLS_Z_INDEX}
+    {@attach holdPresses}
+  >
+    <button
+      type="button"
+      class="window-control"
+      data-action="minimize"
+      tabindex="-1"
+      title="Minimize"
+      aria-label="Minimize"
+      style:width={controlWidth}
+      onclick={() => windowControl("minimize")}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+        <path d="M0 5.5h10" />
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="window-control"
+      data-action="toggleMaximize"
+      tabindex="-1"
+      title={maximizeLabel}
+      aria-label={maximizeLabel}
+      style:width={controlWidth}
+      onclick={() => windowControl("toggleMaximize")}
+    >
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 10 10"
+        data-glyph={chrome.maximized ? "restore" : "maximize"}
+        aria-hidden="true"
+      >
+        {#if chrome.maximized}
+          <rect x="0.5" y="2.5" width="7" height="7" rx="1" />
+          <path d="M2.5 2.5v-1a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1" />
+        {:else}
+          <rect x="0.5" y="0.5" width="9" height="9" rx="1" />
+        {/if}
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="window-control close"
+      data-action="close"
+      tabindex="-1"
+      title="Close"
+      aria-label="Close"
+      style:width={controlWidth}
+      onclick={() => windowControl("close")}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+        <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
+      </svg>
+    </button>
+  </div>
+{/if}
 
 <style>
   /* Fixed over the top of the window; the app below starts under it. Above
@@ -317,8 +332,13 @@
      wash under the pointer and a lighter one with a dimmed glyph while
      pressed; close turns red with a white glyph. */
   .window-controls {
+    position: fixed;
+    top: 0;
+    right: 0;
     display: flex;
     align-items: stretch;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .window-control {
     flex: none;
