@@ -152,14 +152,22 @@ Each admin destination has its own credential; rotate them independently:
 - identity-service: `IDENTITY_ADMIN_TOKEN=<random>`
 - devserver-control: `DEVSERVER_OPERATOR_ADMIN_TOKENS=<random>`
 
-Do not reuse one bearer across services. `chan-gateway-admin` reads the matching scoped variable for each destination:
+Do not reuse one bearer across services. `configure.sh` writes all three URLs and their scoped credentials to the root-only `/etc/chan-gateway/admin.env`. As root, load that file before running the admin CLI:
+
+```sh
+set -a
+. /etc/chan-gateway/admin.env
+set +a
+```
+
+For other layouts, export the matching scoped variables and point each URL at its internal service address:
 
 ```sh
 export CHAN_ADMIN_PROFILE_TOKEN=<PROFILE_ADMIN_TOKEN>
 export CHAN_ADMIN_IDENTITY_TOKEN=<IDENTITY_ADMIN_TOKEN>
 export CHAN_ADMIN_OPERATOR_TOKEN=<one DEVSERVER_OPERATOR_ADMIN_TOKENS value>
 export CHAN_ADMIN_PROFILE_URL=http://127.0.0.1:7001    # optional, default
-export CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004   # optional, internal listener
+export CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004   # packaged default, internal listener
 export CHAN_ADMIN_WORKSPACE_URL=http://127.0.0.1:7003  # optional, default
 ```
 

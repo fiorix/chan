@@ -34,10 +34,10 @@ sudo apt install ./chan-gateway-admin_*.deb
 | `CHAN_ADMIN_IDENTITY_TOKEN` | none                    | identity-service admin bearer    |
 | `CHAN_ADMIN_OPERATOR_TOKEN` | none                    | devserver-control operator bearer|
 | `CHAN_ADMIN_PROFILE_URL`    | `http://127.0.0.1:7001` | profile-service                  |
-| `CHAN_ADMIN_IDENTITY_URL`   | `http://127.0.0.1:7000` | identity-service                 |
+| `CHAN_ADMIN_IDENTITY_URL`   | `http://127.0.0.1:7004` | identity internal admin listener |
 | `CHAN_ADMIN_WORKSPACE_URL`  | `http://127.0.0.1:7003` | devserver-control                |
 
-A packaged deployment points `CHAN_ADMIN_IDENTITY_URL` at identity's internal listener (`7004`), where the admin tree lives. Each bearer is scoped to one service and has a matching `--profile-token`, `--identity-token` or `--operator-token` flag; `--token` is an alias for `--operator-token` only. Every command requires the bearer of each service it touches; a missing or empty token fails closed before any request leaves the CLI.
+The URL defaults match the packaged listeners. `CHAN_ADMIN_IDENTITY_URL` names identity's internal listener (`7004`), where the admin tree lives; other layouts must override it with their internal address. Each bearer is scoped to one service and has a matching `--profile-token`, `--identity-token` or `--operator-token` flag; `--token` is an alias for `--operator-token` only. Every command requires the bearer of each service it touches; a missing or empty token fails closed before any request leaves the CLI.
 
 ## Commands
 
