@@ -21,6 +21,7 @@ EXPECTED_COMMAND_FILES = {
     "packaging/distros/arch/build-with-sdme.sh",
     "packaging/distros/copr/build-with-sdme.sh",
     "packaging/gateway/scripts/dev/sdme/build-gateway.sh",
+    "packaging/gateway/scripts/dev/sdme/database-roles-test.sh",
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh",
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/run.sh",
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/zone-isolation-probe.sh",
@@ -36,7 +37,11 @@ BUILD_DRIVER_FILES = {
     "packaging/sdme/build-chan-desktop.sh",
     "scripts/windows-cross-check.sh",
 }
-CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {"scripts/e2e/README.md"}
+# The capped set also holds test guests, not only build drivers.
+CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {
+    "packaging/gateway/scripts/dev/sdme/database-roles-test.sh",
+    "scripts/e2e/README.md",
+}
 POLICY_DRIVER_FILES = BUILD_DRIVER_FILES - {"scripts/windows-cross-check.sh"}
 # These builders have no measured disk default yet. Their policy array carries
 # --disk once a value lands; require the array now, then require the literal
