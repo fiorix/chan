@@ -50,10 +50,10 @@ A second branch of his agent's followed the same day: a reload of the Computers 
 | [the account page's tunnel hint has no URL][tunnelhint] | built | candidate |
 | [the manual and design docs contradict chan][docsdrift] | built | candidate |
 | [Cmd+P does nothing over a reconnecting window][rclaunch] | built | candidate |
-| [a window's tabs sit below the title bar on macOS][titlebarmac] | built | review |
-| [a window's tabs sit below the title bar on Windows][titlebarwin] | built | acceptance |
-| [the Computers screen shows every address and token while the screen is shared][privacy] | built | review |
-| [the Computers screen forgets its badge on a reload and does not mark this window][visualstate] | built | review |
+| [a window's tabs sit below the title bar on macOS][titlebarmac] | built | candidate |
+| [a window's tabs sit below the title bar on Windows][titlebarwin] | built | candidate |
+| [the Computers screen shows every address and token while the screen is shared][privacy] | built | candidate |
+| [the Computers screen forgets its badge on a reload and does not mark this window][visualstate] | built | candidate |
 
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md

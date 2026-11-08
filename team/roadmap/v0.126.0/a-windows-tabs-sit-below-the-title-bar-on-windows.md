@@ -1,6 +1,6 @@
 # A window's tabs sit below the title bar on Windows
 
-Status: raised by the owner on 2026-11-08 with the code on `feat/titlebar-tabs-windows` (`a97778380`), six commits on `feat/titlebar-tabs`; accepted for v0.126.0; built by the owner, under the lead's review, built and tested in the Windows VM before the owner's acceptance over VNC.
+Status: raised by the owner on 2026-11-08 with the code on `feat/titlebar-tabs-windows` (`a97778380`), six commits on `feat/titlebar-tabs`; accepted for v0.126.0; built by the owner with four fixes on top, built and tested in the Windows 11 VM and accepted by the owner over VNC on 2026-11-08; merged into the integration branch as `fd44595ed`, awaiting the release.
 
 ## What is there now
 
@@ -8,7 +8,7 @@ A chan-desktop window on Windows is a decorated window: the system draws its tit
 
 ## Desired contract
 
-1. On Windows, Settings > Global > Title bar tabs (the companion row's preference, off by default, live in every window) is offered where the installed app advertises both `set_titlebar_tabs` and `titlebar_window_control`. A page served to an app without both never asks, so no window loses its frame to an app that cannot drive its controls.
+1. On Windows, Settings > Global > Title bar tabs (the companion row's preference, on by default, live in every window) is offered where the installed app advertises both `set_titlebar_tabs` and `titlebar_window_control`. A page served to an app without both never asks, so no window loses its frame to an app that cannot drive its controls.
 2. On, the window turns frameless and its page draws the window tab bar in the band the title bar held: the pane map button and the active pane's strip, as on macOS, and at the right minimize, maximize or restore, and close, three buttons of 46 DIP each (the caption button width Windows 11 draws) at the bar's full height, in the Windows 11 look, close turning red under the pointer, out of the tab order. The band is 32 DIP at 100 percent, the height Windows 11 gives its title bar and caption buttons, and the tab row's height when a page zoom makes the row the taller, so no empty strip sits under the tabs. The window keeps the system's shadow, border and rounded corners; it resizes from every edge, the top included; it snaps when dragged to a screen edge and with the Win+arrow chords; minimize and maximize animate; a maximized window fills its monitor's work area and leaves the taskbar in view. Turning the mode on or off does not move the window or change its size.
 3. Minimize and maximize act as the system's buttons do, and the maximize button shows restore while the window is maximized, following a maximize or restore made any other way. Close is the close request the system's button and Alt+F4 make, so chan's Hide, Close and Cancel prompt and the rest of the close handling run. A press on a control keeps the keyboard where it is and never drags the window. The bar's empty stretch and the gaps between tabs drag the window, and a double-click there maximizes or restores it.
 4. The buttons keep their 46 DIP through a page zoom and a change of display scale; a window in the mode keeps its size across hide and restore, maximized included; fullscreen draws no controls, and leaving it brings them back.
