@@ -6,7 +6,7 @@ name: Gateway CI
 # pre-push gate, gateway fmt, clippy, rustdoc, database-free tests,
 # build and profile SPA checks included, but only this workflow runs
 # the gateway's Postgres-backed integration tests (against a Postgres
-# service) and builds the gateway containers.
+# service), the packaging contract tests and the container builds.
 #
 # The path filter is the gateway's build input set, not gateway/ alone.
 # gateway/Cargo.toml consumes crates/chan-tunnel-{client,proto,server}
@@ -19,6 +19,8 @@ name: Gateway CI
 # which is why the two lists are identical. The rest are the shared
 # inputs: the Makefile recipes, the toolchain pin, the web lock and the
 # profile SPA the identity binary embeds, and the gateway Docker files.
+# The packaging job's inputs come last: the gateway packaging scripts, the
+# Kubernetes manifests, and the sdme provisioner the isolation test drives.
 # ci.yml ignores gateway/** and nothing else, so a gateway-only change
 # runs this gate alone and a change under crates/chan-tunnel-* runs
 # both, each for its own workspace.
@@ -40,6 +42,9 @@ on:
       - 'packaging/docker/build.sh'
       - 'packaging/docker/gateway.Dockerfile'
       - 'packaging/docker/gateway.Dockerfile.dockerignore'
+      - 'packaging/gateway/**'
+      - 'packaging/kube/**'
+      - 'packaging/sdme/chan-devserver-provision.sh'
       - '.github/workflows/gateway-ci.yml'
   pull_request:
     paths:
@@ -56,6 +61,9 @@ on:
       - 'packaging/docker/build.sh'
       - 'packaging/docker/gateway.Dockerfile'
       - 'packaging/docker/gateway.Dockerfile.dockerignore'
+      - 'packaging/gateway/**'
+      - 'packaging/kube/**'
+      - 'packaging/sdme/chan-devserver-provision.sh'
       - '.github/workflows/gateway-ci.yml'
   workflow_dispatch:
 
@@ -152,6 +160,91 @@ jobs:
       - name: test
         working-directory: chan/gateway
         run: cargo test --locked
+
+  packaging:
+    name: gateway packaging (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # The roles suite rewrites the cluster-wide gateway application roles,
+    # so it runs in its own job, against a server no other test touches.
+    # postgres:16 is the major the gateway packaging deploys:
+    # packaging/kube/postgres.yaml runs it, and the prepare and reconcile
+    # Jobs run the role scripts from the same image. The suite's role
+    # connections are fixed at 127.0.0.1:5432, so the service publishes
+    # that port.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chan
+          POSTGRES_PASSWORD: chan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chan"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: chan
+
+      # Installed rather than assumed, so a runner image without them fails
+      # here rather than as a test failure: PyYAML for the manifest test, the
+      # PostgreSQL client for the roles suite.
+      - name: install test dependencies
+        id: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml postgresql-client
+          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+          psql --version
+
+      # The three tests are independent, so each runs even when another one
+      # failed: one red must not hide the next.
+
+      # Includes the database-roles ConfigMap's embedded copies of the
+      # prepare and reconcile scripts, compared with the packaged ones.
+      - name: manifest test
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        working-directory: chan
+        run: python3 packaging/kube/test-manifests.py
+
+      - name: packaging isolation test
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        working-directory: chan
+        run: make gateway-packaging-isolation-test
+
+      # The suite refuses to run without the destructive flag or against any
+      # database but chan_gateway_role_test; the job satisfies both. A FAIL
+      # line fails the step even when the suite exits 0, and so does a run
+      # that stops before the suite's final PASS line.
+      - name: database roles test
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        working-directory: chan
+        env:
+          DATABASE_URL: postgres://chan:chan@127.0.0.1:5432/chan_gateway_role_test
+          MIGRATIONS_DIR: gateway/migrations
+          CHAN_GATEWAY_DATABASE_TEST_ALLOW_DESTRUCTIVE: 'yes'
+        run: |
+          set -o pipefail
+          psql postgres://chan:chan@127.0.0.1:5432/postgres --no-password -X \
+            -v ON_ERROR_STOP=1 -c 'CREATE DATABASE chan_gateway_role_test'
+          log="$RUNNER_TEMP/database-roles.log"
+          status=0
+          packaging/gateway/scripts/test-database-roles.sh 2>&1 | tee "$log" || status=$?
+          if grep -q '^FAIL' "$log"; then
+            echo "::error::the database roles suite printed a FAIL line"
+            status=1
+          fi
+          if ! grep -qxF 'PASS: exact database-role prepare/reconcile contract' "$log"; then
+            echo "::error::the database roles suite did not reach its final PASS line"
+            status=1
+          fi
+          exit "$status"
 
   containers:
     name: gateway containers
