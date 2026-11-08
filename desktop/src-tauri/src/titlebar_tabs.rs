@@ -120,6 +120,13 @@ const CAPTION_BUTTON_WIDTH: f64 = 46.0;
 #[cfg(any(windows, test))]
 const CAPTION_BUTTONS: f64 = 3.0;
 
+/// The height of the band the window controls take, in DIP, the height of the
+/// caption buttons and title bar Windows 11 draws. The page sizes its band to
+/// this or to its own tab row, whichever is taller, so the band is a native
+/// title bar's height at 100% and holds no empty strip at any page zoom.
+#[cfg(any(windows, test))]
+const CAPTION_BAND_HEIGHT: f64 = 32.0;
+
 /// A menu the bar draws in place of a menubar: the id the page pops it up by
 /// and the title it shows. Field names are the page-side contract.
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
@@ -427,16 +434,20 @@ fn drawn_controls_chrome(
     zoom: f64,
 ) -> TitlebarChrome {
     let draw_controls = active && !fullscreen;
-    let inset_right = if draw_controls {
-        CAPTION_BUTTONS * CAPTION_BUTTON_WIDTH / usable_factor(zoom)
+    let (inset_right, controls_center_y) = if draw_controls {
+        let factor = usable_factor(zoom);
+        (
+            CAPTION_BUTTONS * CAPTION_BUTTON_WIDTH / factor,
+            CAPTION_BAND_HEIGHT / 2.0 / factor,
+        )
     } else {
-        0.0
+        (0.0, 0.0)
     };
     TitlebarChrome {
         active,
         inset_left: 0.0,
         inset_right,
-        controls_center_y: 0.0,
+        controls_center_y,
         fullscreen,
         draw_controls,
         maximized,
@@ -1508,8 +1519,8 @@ mod tests {
         );
     }
 
-    /// Windows: the page draws three 46 DIP buttons at the right, sized in
-    /// its own CSS px, and centres them itself.
+    /// Windows: the page draws three 46 DIP buttons at the right in a 32 DIP
+    /// band, both sized in its own CSS px.
     #[test]
     fn a_page_that_draws_the_controls_keeps_three_caption_buttons_at_the_right() {
         let at_100 = drawn_controls_chrome(true, false, false, 1.0);
@@ -1519,7 +1530,7 @@ mod tests {
                 active: true,
                 inset_left: 0.0,
                 inset_right: 138.0,
-                controls_center_y: 0.0,
+                controls_center_y: 16.0,
                 fullscreen: false,
                 draw_controls: true,
                 maximized: false,
@@ -1534,6 +1545,16 @@ mod tests {
         assert_eq!(
             drawn_controls_chrome(true, false, false, 0.5).inset_right,
             276.0
+        );
+        // The controls' band keeps 32 DIP, so its centre moves up in a
+        // zoomed-in page's CSS px and the page's taller row sets the band.
+        assert_eq!(
+            drawn_controls_chrome(true, false, false, 1.25).controls_center_y,
+            12.8
+        );
+        assert_eq!(
+            drawn_controls_chrome(true, false, false, 0.5).controls_center_y,
+            32.0
         );
         // Maximized: the same buttons, and the page shows restore.
         let maximized = drawn_controls_chrome(true, false, true, 1.0);

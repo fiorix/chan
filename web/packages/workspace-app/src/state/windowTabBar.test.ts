@@ -526,6 +526,21 @@ describe("the geometry", () => {
     expect((38 - windowTabBarCenterPad(chrome({ controlsCenterY: 14 }), 38)) / 2).toBe(14);
   });
 
+  test("on Windows the drawn controls' 32 DIP band sets a native title bar's height and no more", () => {
+    const windows = (zoom: number) =>
+      chrome({ insetLeft: 0, insetRight: 138 / zoom, controlsCenterY: 16 / zoom, drawControls: true });
+    expect(windowTabBarHeight(windows(1))).toBe(32);
+    expect(windowTabBarCenterPad(windows(1), 32)).toBe(0);
+    for (const zoom of [1.25, 1.5, 2]) {
+      const c = windows(zoom);
+      expect(windowTabBarHeight(c), `at ${zoom * 100}%`).toBe(WINDOW_TAB_BAR_ROW_HEIGHT);
+      expect(windowTabBarCenterPad(c, WINDOW_TAB_BAR_ROW_HEIGHT)).toBe(0);
+    }
+    // Zoomed out, the controls' band is the taller and the row centres on it.
+    expect(windowTabBarHeight(windows(0.8))).toBe(40);
+    expect(windowTabBarCenterPad(windows(0.8), 40)).toBe(0);
+  });
+
   test("a zoomed-in row fills the bar from its top with no pad", () => {
     for (const zoom of [1.25, 1.5, 2]) {
       const c = chrome({ controlsCenterY: 14 / zoom });
