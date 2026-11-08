@@ -146,6 +146,122 @@ describe("recovering a devserver-backed desktop window", () => {
   });
 });
 
+// chan-desktop shows the Computers launcher over a window as a second webview
+// that holds the window's keyboard, marking the page's root while it shows
+// (launcher_transition.js hostCovered); the page's window blurs, and focuses
+// again when the launcher hides. A focus() in the page while the launcher
+// shows would take the keyboard back from it.
+function showLauncher(): void {
+  document.documentElement.setAttribute("data-launcher-shown", "");
+  window.dispatchEvent(new Event("blur"));
+}
+
+function hideLauncher(): void {
+  document.documentElement.removeAttribute("data-launcher-shown");
+  window.dispatchEvent(new Event("focus"));
+}
+
+describe("the Computers launcher over a reconnecting window", () => {
+  afterEach(() => {
+    document.documentElement.removeAttribute("data-launcher-shown");
+  });
+
+  test("a launcher shown and hidden over the card leaves it focused and working", async () => {
+    desktopWindow("dev-1");
+    const target = await dropConnection();
+    expect(document.activeElement).toBe(button(target, "Reconnect"));
+
+    showLauncher();
+    await tick();
+    hideLauncher();
+    await tick();
+
+    expect(document.activeElement).toBe(button(target, "Reconnect"));
+    button(target, "Reconnect").click();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("reconnect_devserver_for_window", undefined));
+  });
+
+  test("the action the user moved to keeps focus across the launcher", async () => {
+    desktopWindow("dev-1");
+    const target = await dropConnection();
+    button(target, "Reconnect").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(button(target, "Abandon"));
+
+    showLauncher();
+    hideLauncher();
+    await tick();
+
+    expect(document.activeElement).toBe(button(target, "Abandon"));
+  });
+
+  test("a drop while the launcher shows leaves it the keyboard, and the card takes it on hide", async () => {
+    desktopWindow("dev-1");
+    showLauncher();
+    const target = await dropConnection();
+    await tick();
+
+    expect(document.activeElement).not.toBe(button(target, "Reconnect"));
+
+    hideLauncher();
+    await tick();
+
+    expect(document.activeElement).toBe(button(target, "Reconnect"));
+  });
+
+  test("a recovery that settles while the launcher shows leaves it the keyboard", async () => {
+    desktopWindow("dev-1");
+    let finish!: () => void;
+    invoke.mockImplementation(() => new Promise<undefined>((resolve) => (finish = () => resolve(undefined))));
+    const target = await dropConnection();
+    button(target, "Reconnect").click();
+    await tick();
+    // A browser drops focus from a button as it becomes disabled; jsdom keeps
+    // it, so focus goes to a stray element instead.
+    const stray = document.createElement("textarea");
+    document.body.append(stray);
+    stray.focus();
+
+    showLauncher();
+    finish();
+    await vi.waitFor(() => expect(button(target, "Reconnect")?.disabled).toBe(false));
+    await tick();
+    expect(document.activeElement).not.toBe(button(target, "Reconnect"));
+
+    hideLauncher();
+    await tick();
+    expect(document.activeElement).toBe(button(target, "Reconnect"));
+  });
+
+  test("focus that left for the page behind returns to the card when the window focuses", async () => {
+    desktopWindow("dev-1");
+    const target = await dropConnection();
+    const behind = document.createElement("textarea");
+    document.body.append(behind);
+    behind.focus();
+
+    window.dispatchEvent(new Event("focus"));
+    await tick();
+
+    expect(document.activeElement).toBe(button(target, "Reconnect"));
+  });
+
+  test("a cover over the card keeps its own focus when the window focuses", async () => {
+    desktopWindow("dev-1");
+    await dropConnection();
+    const lock = document.createElement("div");
+    lock.setAttribute("data-cover", "screensaver");
+    const pin = document.createElement("input");
+    lock.append(pin);
+    document.body.append(lock);
+    pin.focus();
+
+    window.dispatchEvent(new Event("focus"));
+    await tick();
+
+    expect(document.activeElement).toBe(pin);
+  });
+});
+
 describe("the desktop's recovery calls", () => {
   test("refuse outside the desktop", async () => {
     await expect(reconnectDevserverForWindow()).rejects.toThrow("not running under Tauri");

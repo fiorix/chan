@@ -11,7 +11,7 @@
   // channel returns. A devserver-backed desktop window also offers a
   // single Abandon action to give up on a stuck remote connection.
 
-  import { setCoverBlocking, ui } from "../state/store.svelte";
+  import { COVER_ROOT_ATTR, setCoverBlocking, ui } from "../state/store.svelte";
   import { windowLibraryId } from "../api/client";
   import {
     isTauriDesktop,
@@ -19,6 +19,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
+  import { launcherShownOverWindow } from "../state/focusGuard";
   import { onDestroy, tick } from "svelte";
 
   // Recovery actions (Reconnect / Abandon) are offered only on a devserver-backed
@@ -47,7 +48,7 @@
       pendingAction = null;
       await tick();
       // Disabling the active button can drop native focus onto the body.
-      if (visible) (action === "reconnect" ? reconnectBtn : abandonBtn)?.focus();
+      if (visible) focusCard(action === "reconnect" ? reconnectBtn : abandonBtn);
     }
   }
 
@@ -127,12 +128,31 @@
   /// can't observe. Park focus on the primary Reconnect button when
   /// it's offered (else Abandon, else the overlay). Paired with the
   /// keydown trap below, Tab can't leak focus back to the background.
+  ///
+  /// chan-desktop can show the Computers launcher over this window while the
+  /// overlay is up, and the launcher holds the window's keyboard: a focus()
+  /// here would make this page the first responder again and leave the
+  /// launcher deaf. So the card takes focus only while no launcher is shown,
+  /// and the page's window focus event, which fires when the launcher hides
+  /// or the window comes back, returns focus to the card if it left every
+  /// cover in the meantime. A cover over this one, such as the screen lock,
+  /// keeps its own focus.
   $effect(() => {
     if (!visible) return;
     const active = document.activeElement as HTMLElement | null;
     active?.blur();
-    queueMicrotask(() => (reconnectBtn ?? abandonBtn ?? overlayEl)?.focus());
+    queueMicrotask(() => focusCard());
+    const onWindowFocus = (): void => {
+      if (!document.activeElement?.closest(`[${COVER_ROOT_ATTR}]`)) focusCard();
+    };
+    window.addEventListener("focus", onWindowFocus);
+    return () => window.removeEventListener("focus", onWindowFocus);
   });
+
+  function focusCard(preferred: HTMLElement | null = null): void {
+    if (launcherShownOverWindow()) return;
+    (preferred ?? reconnectBtn ?? abandonBtn ?? overlayEl)?.focus();
+  }
 
   function trapTab(e: KeyboardEvent): void {
     // Keep focus on the dialog: Tab/Shift+Tab cycles between the recovery
