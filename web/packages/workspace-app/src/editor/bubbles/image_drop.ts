@@ -11,6 +11,7 @@
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { StateEffect, type Extension } from "@codemirror/state";
 import { api } from "../../api/client";
+import { isTauriDesktop, readClipboardImage } from "../../api/desktop";
 import { NO_DOCUMENT_MESSAGE } from "../../api/errors";
 import { notify } from "../../state/notify.svelte";
 import { convertHeicForUpload, isHeicFile } from "./heic";
@@ -114,10 +115,10 @@ export function imageDropHandlers(opts: ImageDropOptions): Extension {
       return true;
     },
     paste(event, view) {
-      const items = event.clipboardData?.items;
-      if (!items) return false;
+      const clipboard = event.clipboardData;
+      if (!clipboard) return false;
       const images: File[] = [];
-      for (const item of Array.from(items)) {
+      for (const item of Array.from(clipboard.items ?? [])) {
         if (item.kind !== "file") continue;
         if (item.type.startsWith("image/")) {
           const f = item.getAsFile();
@@ -130,13 +131,38 @@ export function imageDropHandlers(opts: ImageDropOptions): Extension {
         const f = item.getAsFile();
         if (f && isHeicFile(f)) images.push(f);
       }
-      if (images.length === 0) return false;
+      // WKWebView can advertise Files while exposing neither items nor files.
+      // Only recover that shape natively; text and accessible files keep their
+      // normal paste behavior, without a second read of the OS clipboard.
+      const types = Array.from(clipboard.types ?? []);
+      const nativePaste = images.length === 0
+        && types.includes("Files")
+        && !types.some((type) => type.startsWith("text/"))
+        && !clipboard.items?.length
+        && !clipboard.files?.length
+        && isTauriDesktop();
+      if (images.length === 0 && !nativePaste) return false;
       event.preventDefault();
       const pos = pasteInsertPos(view);
-      uploadAndInsertAll(view, images, pos, resolveInsertCtx(opts));
+      uploadAndInsertAll(view, nativePaste ? readNativePasteImages : images, pos, resolveInsertCtx(opts));
       return true;
     },
   });
+}
+
+async function readNativePasteImages(): Promise<File[]> {
+  try {
+    const bytes = await readClipboardImage();
+    if (!bytes?.length) {
+      notify("No image found on the clipboard");
+      return [];
+    }
+    return [new File([new Uint8Array(bytes)], "pasted-image.png", { type: "image/png" })];
+  } catch (err) {
+    console.error("[chan] clipboard image read failed", err);
+    notify("Could not read image from the clipboard");
+    return [];
+  }
 }
 
 /// Where a pasted image should land. A paste carries no coordinates,
@@ -236,6 +262,7 @@ function posFromEvent(view: EditorView, event: DragEvent): number {
 
 const uploadPositions = ViewPlugin.fromClass(class {
   readonly pending = new Set<{ pos: number }>();
+  destroyed = false;
 
   update(update: ViewUpdate): void {
     if (!update.docChanged) return;
@@ -243,11 +270,15 @@ const uploadPositions = ViewPlugin.fromClass(class {
       cursor.pos = update.changes.mapPos(cursor.pos, 1);
     }
   }
+
+  destroy(): void {
+    this.destroyed = true;
+  }
 });
 
 function uploadAndInsertAll(
   view: EditorView,
-  files: File[],
+  files: File[] | (() => Promise<File[]>),
   pos: number,
   ctx: InsertCtx,
 ): void {
@@ -262,13 +293,18 @@ function uploadAndInsertAll(
   if (!view.plugin(uploadPositions)) {
     view.dispatch({ effects: StateEffect.appendConfig.of(uploadPositions) });
   }
-  const pending = view.plugin(uploadPositions)!.pending;
+  const tracker = view.plugin(uploadPositions)!;
+  const pending = tracker.pending;
   const cursor = { pos };
   pending.add(cursor);
   // Upload sequentially; each insert and intervening edit maps the next position.
   void (async () => {
     try {
-      for (const original of files) {
+      // Resolve native clipboard bytes only after capturing the destination
+      // and installing the anchor, so edits during the read map it too.
+      const images = typeof files === "function" ? await files() : files;
+      for (const original of images) {
+        if (tracker.destroyed) break;
         if (original.size > MAX_UPLOAD_BYTES) {
           notify(`Image ${original.name} exceeds the 50 MiB upload limit; skipped`);
           continue;
@@ -287,6 +323,7 @@ function uploadAndInsertAll(
           notify(`HEIC conversion failed for ${original.name}; skipped`);
           continue;
         }
+        if (tracker.destroyed) break;
         let res: { path: string };
         try {
           res = await api.uploadAttachment(file, ctx.uploadDir);
@@ -295,6 +332,7 @@ function uploadAndInsertAll(
           notify(`Image upload failed for ${original.name}; skipped`);
           continue;
         }
+        if (tracker.destroyed) break;
         invalidateImageCatalog();
         const onListLine = listLineAt(view.state, cursor.pos) !== null;
         const { text: insert, caret } = buildImageInsert(res.path, {
