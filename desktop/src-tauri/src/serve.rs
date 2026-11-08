@@ -891,10 +891,27 @@ fn mark_transparent_window(url: &mut tauri::Url) {
 /// title bar container an opaque layer in the window background colour,
 /// behind the title bar's own material, traffic lights and title, which keep
 /// their layout and dragging; the content stays below the title bar. The
-/// colour is resolved once, for the appearance in effect when the window is
-/// built. Main thread only, like every AppKit call; a no-op elsewhere.
+/// colour is resolved for the appearance in effect when the window is built,
+/// and again when a window's title bar returns from hosting its page's tab
+/// bar. Main thread only, like every AppKit call; a no-op elsewhere.
 #[cfg(target_os = "macos")]
-fn keep_title_bar_opaque(window: &tauri::WebviewWindow) {
+pub(crate) fn keep_title_bar_opaque(window: &tauri::WebviewWindow) {
+    paint_title_bar_backdrop(window, true);
+}
+
+/// Take away the layer [`keep_title_bar_opaque`] gives the title bar, while
+/// the window's page draws its own tab bar under a transparent title bar
+/// (`titlebar_tabs.rs`): the layer sits above the page in that band and would
+/// cover the bar. Main thread only; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_title_bar_backdrop(window: &tauri::WebviewWindow) {
+    paint_title_bar_backdrop(window, false);
+}
+
+/// Paint the title bar container's layer in the window background colour, or
+/// clear it. Main thread only.
+#[cfg(target_os = "macos")]
+fn paint_title_bar_backdrop(window: &tauri::WebviewWindow, opaque: bool) {
     use objc2::encode::{Encoding, RefEncode};
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
@@ -948,11 +965,15 @@ fn keep_title_bar_opaque(window: &tauri::WebviewWindow) {
         let Some(layer) = layer.as_ref() else {
             return;
         };
-        let color: *mut AnyObject = msg_send![color_class, windowBackgroundColor];
-        let Some(color) = color.as_ref() else {
-            return;
+        let cg_color: *const CGColor = if opaque {
+            let color: *mut AnyObject = msg_send![color_class, windowBackgroundColor];
+            let Some(color) = color.as_ref() else {
+                return;
+            };
+            msg_send![color, CGColor]
+        } else {
+            std::ptr::null()
         };
-        let cg_color: *const CGColor = msg_send![color, CGColor];
         let _: () = msg_send![layer, setBackgroundColor: cg_color];
     }
 }
@@ -1130,7 +1151,15 @@ fn build_workspace_window_with_completion(
         // path-print reads the drag pasteboard via
         // `read_dropped_paths` (dropped_paths.rs) instead of
         // native drag events.
-        .disable_drag_drop_handler();
+        .disable_drag_drop_handler()
+        // A page that hosts its tab bar in the title bar holds that mode for
+        // its own origin only: a load from another origin gets the normal
+        // title bar back as it starts (`titlebar_tabs.rs`).
+        .on_page_load(|window, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                crate::titlebar_tabs::page_load_started(&window, payload.url());
+            }
+        });
         // Build hidden when restored geometry will be applied, so the window
         // never flashes at the default size/position before it is repositioned.
         let builder = if geometry_plan.builds_hidden() {
@@ -1367,8 +1396,9 @@ fn on_close_requested(
 /// Single cleanup point for EVERY destroy path: the
 /// real-close branch in `on_close_requested`, the SPA cascade destroy,
 /// workspace teardown, and app exit. Frees the display number,
-/// drops the zoom entry, and clears a buried registry entry only when no
-/// watcher burial or pending hide keeps it in the hidden windows.
+/// drops the zoom entry and the title bar mode, and clears a buried registry
+/// entry only when no watcher burial or pending hide keeps it in the hidden
+/// windows.
 fn on_destroyed(app: &AppHandle, label: &str) {
     // The window's launcher, if it built one, goes with it.
     crate::launcher_panel::forget_host(app, label);
@@ -1385,6 +1415,7 @@ fn on_destroyed(app: &AppHandle, label: &str) {
         embedded.window_titles().remove(label);
     }
     state.live_window_zooms.lock().unwrap().remove(label);
+    state.titlebar_windows.forget(label);
     let _cleanup = crate::download::drop_generated_downloads_for_window(label);
     // Keep a watcher-buried window or a pending devserver hide in the
     // reopen menu after the native surface is destroyed. Only a teardown
@@ -1970,10 +2001,21 @@ pub(crate) fn capture_window_geometry(app: &AppHandle<impl Runtime>, label: &str
     // still restores at the right size (see `apply_geometry_plan`).
     let lpos = pos.to_logical::<f64>(scale);
     let lsize = size.to_logical::<f64>(scale);
+    // A rebuilt window starts with a normal title bar and restores this size
+    // as its content size, while the content of a window whose title bar
+    // hosts its page's tab bar runs under the title bar. Storing that taller
+    // size would grow the window by the title bar on every hide and rebuild,
+    // so the height is stored as the normal title bar would leave it.
+    let state = app.state::<Arc<AppState>>();
+    let height = crate::titlebar_tabs::normal_inner_height(
+        lsize.height,
+        state.titlebar_windows.title_bar_height(label),
+        window.is_fullscreen().unwrap_or(false),
+    );
     let px = lpos.x.round() as i32;
     let py = lpos.y.round() as i32;
     let pw = lsize.width.round() as u32;
-    let ph = lsize.height.round() as u32;
+    let ph = height.round() as u32;
     let mons = current_monitors(app);
     let monitor_sig = config::monitor_signature(&mons);
     let on_monitor = window
@@ -1993,7 +2035,7 @@ pub(crate) fn capture_window_geometry(app: &AppHandle<impl Runtime>, label: &str
         monitors = ?mons,
         "WINGEO capture",
     );
-    app.state::<Arc<AppState>>().push_window_geometry(
+    state.push_window_geometry(
         label,
         WindowGeometry {
             monitor_sig,
@@ -4773,6 +4815,12 @@ mod tests {
     fn plugin_permission_candidates(invoke: &str) -> Option<&'static [&'static str]> {
         match invoke {
             "plugin:window|set_fullscreen" => Some(&["core:window:allow-set-fullscreen"]),
+            // The two invokes Tauri's drag-region script makes, should the
+            // page call them itself for its title bar drag space.
+            "plugin:window|start_dragging" => Some(&["core:window:allow-start-dragging"]),
+            "plugin:window|internal_toggle_maximize" => {
+                Some(&["core:window:allow-internal-toggle-maximize"])
+            }
             // opener:default alone does not name open_url; every capability
             // in this tree that means to grant it carries the explicit
             // allow-open-url, so that is the identifier the walk requires.
@@ -4989,6 +5037,50 @@ mod tests {
             advertised, granted,
             "GATEWAY_WINDOW_COMMANDS must match the recomputed gateway-window grant",
         );
+    }
+
+    /// A page's tab bar in the title bar reaches every window class that
+    /// shows the workspace app: the title bar commands and the preference
+    /// pair, and the two window
+    /// commands Tauri's drag-region script invokes from the page on a
+    /// mousedown in the bar's drag space (`start_dragging`) and on a double
+    /// click there (`internal_toggle_maximize`). The script is Tauri's own
+    /// initialization script, so no SPA source names those invokes and the
+    /// vocabulary walk below cannot see them.
+    #[test]
+    fn title_bar_tabs_reach_every_spa_window_class() {
+        for (class, label, origin) in ORIGIN_CLASSES {
+            let (app_commands, plugin_permissions) = effective_grants(label, origin);
+            for command in [
+                "set_titlebar_tabs",
+                "titlebar_chrome",
+                "titlebar_tabs_preference",
+                "set_titlebar_tabs_preference",
+            ] {
+                assert!(
+                    app_commands.contains(command),
+                    "{class}: `{command}` must be granted"
+                );
+            }
+            for invoke in [
+                "plugin:window|start_dragging",
+                "plugin:window|internal_toggle_maximize",
+            ] {
+                let candidates = plugin_permission_candidates(invoke)
+                    .unwrap_or_else(|| panic!("{invoke} has a permission mapping"));
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|permission| plugin_permissions.contains(*permission)),
+                    "{class}: `{invoke}` must be granted"
+                );
+            }
+        }
+        // The terminal-mode window shows the workspace app too.
+        let (app_commands, plugin_permissions) =
+            effective_grants(crate::terminal_mode::WINDOW_LABEL, "http://127.0.0.1:4090");
+        assert!(app_commands.contains("set_titlebar_tabs"));
+        assert!(plugin_permissions.contains("core:window:allow-start-dragging"));
     }
 
     /// The real regression proof for item-1-class breakage: for every

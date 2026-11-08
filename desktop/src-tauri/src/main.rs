@@ -21,6 +21,7 @@ mod runtime_capability;
 mod serve;
 mod terminal_mode;
 mod terminal_opacity;
+mod titlebar_tabs;
 // Reads the updater plugin's offered update, and FreeBSD builds without
 // the plugin (see Cargo.toml), so the module goes with it.
 #[cfg(not(target_os = "freebsd"))]
@@ -129,6 +130,9 @@ pub struct AppState {
     /// level without spawning a JS eval round-trip to read the
     /// current. Missing entries read as 1.0 (the chan-desktop default).
     pub live_window_zooms: Mutex<HashMap<String, f64>>,
+    /// The windows whose title bar hosts their page's tab bar, keyed by
+    /// window label (`titlebar_tabs.rs`). Dropped on window destroy.
+    pub(crate) titlebar_windows: titlebar_tabs::TitlebarWindows,
     /// Per-live-window display number, keyed by window label, with the
     /// base title it was assigned under. Drives the `"{title} Window
     /// {N}"` suffix so the OS Window menu disambiguates windows that
@@ -305,6 +309,7 @@ impl AppState {
             embedded: OnceLock::new(),
             local_watcher_view: OnceLock::new(),
             live_window_zooms: Mutex::new(HashMap::new()),
+            titlebar_windows: titlebar_tabs::TitlebarWindows::default(),
             window_numbers: Mutex::new(HashMap::new()),
             window_title_overrides: Mutex::new(HashMap::new()),
             buried_windows: Mutex::new(Vec::new()),
@@ -4943,6 +4948,7 @@ fn apply_zoom(window: &tauri::WebviewWindow, state: &AppState, next: f64) -> Res
         .lock()
         .unwrap()
         .insert(window.label().to_string(), clamped);
+    titlebar_tabs::zoom_changed(window);
     Ok(())
 }
 
@@ -5395,6 +5401,14 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // as the terminal_opacity::EVENT event.
         terminal_opacity::terminal_background_opacity,
         terminal_opacity::set_terminal_background_opacity,
+        // A page's tab bar in the macOS title bar: the page opts in and reads
+        // the room the window controls take; elsewhere both answer inactive.
+        // The desktop's preference says whether pages opt in, and changes
+        // reach every window as the titlebar_tabs::PREFERENCE_EVENT event.
+        titlebar_tabs::set_titlebar_tabs,
+        titlebar_tabs::titlebar_chrome,
+        titlebar_tabs::titlebar_tabs_preference,
+        titlebar_tabs::set_titlebar_tabs_preference,
     ]
 }
 

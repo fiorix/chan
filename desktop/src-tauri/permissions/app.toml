@@ -30,6 +30,10 @@ permissions = [
   "allow-set-launcher-focus-color",
   "allow-terminal-background-opacity",
   "allow-set-terminal-background-opacity",
+  "allow-set-titlebar-tabs",
+  "allow-titlebar-chrome",
+  "allow-titlebar-tabs-preference",
+  "allow-set-titlebar-tabs-preference",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -67,6 +71,10 @@ permissions = [
   "allow-set-launcher-focus-color",
   "allow-terminal-background-opacity",
   "allow-set-terminal-background-opacity",
+  "allow-set-titlebar-tabs",
+  "allow-titlebar-chrome",
+  "allow-titlebar-tabs-preference",
+  "allow-set-titlebar-tabs-preference",
 ]
 
 # IN both sets: every window kind shows terminal tabs, which paint with the
@@ -82,6 +90,33 @@ commands.allow = ["terminal_background_opacity"]
 identifier = "allow-set-terminal-background-opacity"
 description = "Enables the set_terminal_background_opacity command (the Settings slider's write of the desktop's terminal background opacity)."
 commands.allow = ["set_terminal_background_opacity"]
+
+# IN both sets: every window kind that shows the workspace app can host its
+# tab bar in the title bar, and both commands act on the INVOKING window only,
+# changing its title bar style and reading its window controls, nothing else.
+[[permission]]
+identifier = "allow-set-titlebar-tabs"
+description = "Enables the set_titlebar_tabs command (the calling window's title bar hosts its page's tab bar, or returns to normal)."
+commands.allow = ["set_titlebar_tabs"]
+
+[[permission]]
+identifier = "allow-titlebar-chrome"
+description = "Enables the titlebar_chrome command (the calling window's title bar mode and the room its window controls take)."
+commands.allow = ["titlebar_chrome"]
+
+# IN both sets, like the terminal background opacity pair: the preference is
+# the desktop's own, read from and written to its config, never the window's
+# tenant, and the write changes nothing but which windows draw tabs in their
+# title bar.
+[[permission]]
+identifier = "allow-titlebar-tabs-preference"
+description = "Enables the titlebar_tabs_preference command (the desktop's choice to put a window's tabs in its title bar)."
+commands.allow = ["titlebar_tabs_preference"]
+
+[[permission]]
+identifier = "allow-set-titlebar-tabs-preference"
+description = "Enables the set_titlebar_tabs_preference command (the Settings toggle's write of the desktop's title bar tabs preference)."
+commands.allow = ["set_titlebar_tabs_preference"]
 
 [[permission]]
 identifier = "allow-set-launcher-focus-color"

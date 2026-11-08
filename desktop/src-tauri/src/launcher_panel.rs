@@ -628,33 +628,44 @@ fn restore_host<R: tauri::Runtime>(host: &WebviewWindow<R>) {
     let _ = webview.set_focus();
 }
 
-/// The host's content area as a wry rect at the content view's origin, in
-/// logical points.
+/// The host's content area as a wry rect, in logical points: from the content
+/// view's origin, or from below the band of a window whose title bar hosts
+/// its page's tab bar (`titlebar_tabs.rs`). There the content view runs under
+/// the title bar, and the launcher keeps the bar and the traffic lights in
+/// view as it keeps a normal title bar.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn content_bounds(host: &WebviewWindow) -> Option<wry::Rect> {
     let size = host.inner_size().ok()?;
     let scale = host.scale_factor().ok()?;
-    Some(content_rect(size, scale))
+    #[cfg(target_os = "macos")]
+    let top = crate::titlebar_tabs::launcher_top_inset(host);
+    #[cfg(not(target_os = "macos"))]
+    let top = 0.0;
+    Some(content_rect(size, scale, top))
 }
 
+/// The content area below `top` points.
 #[cfg(any(not(any(target_os = "linux", target_os = "freebsd")), test))]
-fn content_rect(size: tauri::PhysicalSize<u32>, scale: f64) -> wry::Rect {
+fn content_rect(size: tauri::PhysicalSize<u32>, scale: f64, top: f64) -> wry::Rect {
     let logical = size.to_logical::<f64>(scale);
+    let top = top.clamp(0.0, logical.height);
     wry::Rect {
-        position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-        size: wry::dpi::LogicalSize::new(logical.width, logical.height).into(),
+        position: wry::dpi::LogicalPosition::new(0.0, top).into(),
+        size: wry::dpi::LogicalSize::new(logical.width, logical.height - top).into(),
     }
 }
 
-/// The content area's size, placed wholly left of it: the frame a hidden
-/// launcher keeps, so no point of the content area is over it whatever size
-/// the window takes later, and the launcher page keeps its layout size.
+/// The content area below `top` points, placed wholly left of it: the frame a
+/// hidden launcher keeps, so no point of the content area is over it whatever
+/// size the window takes later, and the launcher page keeps its layout size.
 #[cfg(any(target_os = "macos", test))]
-fn parked_rect(size: tauri::PhysicalSize<u32>, scale: f64) -> wry::Rect {
+fn parked_rect(size: tauri::PhysicalSize<u32>, scale: f64, top: f64) -> wry::Rect {
+    let shown = content_rect(size, scale, top);
     let logical = size.to_logical::<f64>(scale);
     wry::Rect {
-        position: wry::dpi::LogicalPosition::new(-logical.width, 0.0).into(),
-        size: wry::dpi::LogicalSize::new(logical.width, logical.height).into(),
+        position: wry::dpi::LogicalPosition::new(-logical.width, top.clamp(0.0, logical.height))
+            .into(),
+        size: shown.size,
     }
 }
 
@@ -673,11 +684,12 @@ fn fit(host: &WebviewWindow, webview: &wry::WebView) {
 /// until the window is rebuilt. `fit` brings it back on show.
 #[cfg(target_os = "macos")]
 fn park(host: &WebviewWindow, webview: &wry::WebView) {
+    let top = crate::titlebar_tabs::launcher_top_inset(host);
     let Some(bounds) = host
         .inner_size()
         .ok()
         .zip(host.scale_factor().ok())
-        .map(|(size, scale)| parked_rect(size, scale))
+        .map(|(size, scale)| parked_rect(size, scale, top))
     else {
         return;
     };
@@ -708,8 +720,10 @@ fn swap_gtk<R: tauri::Runtime>(
 }
 
 /// Re-fit a host's launcher to the host's content area; on macOS a hidden
-/// one stays parked off it.
-fn sync_for_host(host: &WebviewWindow) {
+/// one stays parked off it. Main thread. Besides the host's resize events,
+/// the title bar switch calls it, since the content view changes size inside
+/// a window frame that does not.
+pub(crate) fn sync_for_host(host: &WebviewWindow) {
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
@@ -1090,29 +1104,46 @@ mod tests {
 
     #[test]
     fn content_rect_is_in_points_on_every_scale() {
-        let rect = content_rect(tauri::PhysicalSize::new(2400, 1600), 2.0);
+        let rect = content_rect(tauri::PhysicalSize::new(2400, 1600), 2.0, 0.0);
         assert_eq!(rect.size, wry::dpi::LogicalSize::new(1200.0, 800.0).into());
         assert_eq!(
             rect.position,
             wry::dpi::LogicalPosition::new(0.0, 0.0).into()
         );
-        let rect = content_rect(tauri::PhysicalSize::new(1280, 720), 1.0);
+        let rect = content_rect(tauri::PhysicalSize::new(1280, 720), 1.0, 0.0);
         assert_eq!(rect.size, wry::dpi::LogicalSize::new(1280.0, 720.0).into());
+    }
+
+    /// A window whose title bar hosts its page's tab bar keeps that band in
+    /// view: the launcher starts below it and fills the rest.
+    #[test]
+    fn the_launcher_sits_below_a_title_bar_band() {
+        let rect = content_rect(tauri::PhysicalSize::new(2400, 1600), 2.0, 38.0);
+        assert_eq!(
+            rect.position,
+            wry::dpi::LogicalPosition::new(0.0, 38.0).into()
+        );
+        assert_eq!(rect.size, wry::dpi::LogicalSize::new(1200.0, 762.0).into());
+        // A band taller than the window leaves an empty launcher, never a
+        // negative one.
+        let rect = content_rect(tauri::PhysicalSize::new(400, 300), 1.0, 500.0);
+        assert_eq!(rect.size, wry::dpi::LogicalSize::new(400.0, 0.0).into());
     }
 
     #[test]
     fn a_parked_launcher_keeps_its_size_and_never_overlaps_the_content() {
-        for (size, scale) in [
-            (tauri::PhysicalSize::new(2400, 1600), 2.0),
-            (tauri::PhysicalSize::new(1280, 720), 1.0),
+        for (size, scale, top) in [
+            (tauri::PhysicalSize::new(2400, 1600), 2.0, 0.0),
+            (tauri::PhysicalSize::new(1280, 720), 1.0, 0.0),
+            (tauri::PhysicalSize::new(2400, 1600), 2.0, 38.0),
         ] {
-            let content = content_rect(size, scale);
-            let parked = parked_rect(size, scale);
+            let content = content_rect(size, scale, top);
+            let parked = parked_rect(size, scale, top);
             assert_eq!(parked.size, content.size);
             let logical = size.to_logical::<f64>(scale);
             assert_eq!(
                 parked.position,
-                wry::dpi::LogicalPosition::new(-logical.width, 0.0).into()
+                wry::dpi::LogicalPosition::new(-logical.width, top).into()
             );
             // Its right edge is the content's left edge, so a window of any
             // later width still has no point over it.

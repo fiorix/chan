@@ -111,7 +111,11 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "request_close_window",
     "set_launcher_focus_color",
     "set_terminal_background_opacity",
+    "set_titlebar_tabs",
+    "set_titlebar_tabs_preference",
     "terminal_background_opacity",
+    "titlebar_chrome",
+    "titlebar_tabs_preference",
     "toggle_launcher_panel",
     "upload_files_native",
     "write_clipboard_html",
@@ -125,8 +129,9 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
 /// The capability JSON minted for one authenticated exact origin: the
 /// gateway-window permission set, native transfer permissions, the event
 /// listen pair (a page follows the desktop's terminal background opacity
-/// through an event), fullscreen, webview zoom, and opener, `lib-*` windows
-/// only, and one `remote.urls` entry. The gateway-window set is
+/// through an event), fullscreen, window dragging and the maximize toggle
+/// (the drag space of a tab bar in the title bar), webview zoom, and opener,
+/// `lib-*` windows only, and one `remote.urls` entry. The gateway-window set is
 /// workspace-window without `allow-probe-url`, because the connecting screen
 /// is a local app page and a remote gateway origin must not receive the
 /// reachability oracle.
@@ -154,6 +159,8 @@ pub fn exact_origin_capability_json(exact_origin: &str) -> Result<String, String
             "core:event:allow-unlisten",
             "core:webview:allow-set-webview-zoom",
             "core:window:allow-set-fullscreen",
+            "core:window:allow-start-dragging",
+            "core:window:allow-internal-toggle-maximize",
             "opener:default",
             "opener:allow-open-url",
         ],
