@@ -64,6 +64,9 @@ fn refresh_titles(app: &tauri::AppHandle) -> Result<(), String> {
                 } else {
                     &title
                 });
+                // A frameless window in the title bar mode draws its title
+                // itself while its launcher shows (`titlebar_tabs.rs`).
+                crate::titlebar_tabs::title_changed(&window);
             }
         }
         crate::rebuild_window_menu(&handle);

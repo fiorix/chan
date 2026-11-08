@@ -1472,14 +1472,15 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    /// The watcher's retitle is the one place a window's title changes after
-    /// it is built, so the page under the launcher hears every rename.
+    /// The watcher's retitle is where a window's title changes after it is
+    /// built (privacy mode's refresh re-applies the visible form of the same
+    /// titles, below), so the page under the launcher hears every rename.
     #[test]
     fn every_retitle_reaches_the_title_bar() {
         const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
         let wiring = production(WIRING_RS);
         let (_, after) = wiring
-            .split_once("window.set_title(&desired)")
+            .split_once(".set_title(")
             .expect("the watcher retitles windows");
         let hook = after
             .find("crate::titlebar_tabs::title_changed(&window);")
@@ -1494,6 +1495,27 @@ mod tests {
             1,
             "no other retitle"
         );
+    }
+
+    /// Privacy mode re-applies every window's visible title when it turns on
+    /// or off, outside the watcher, so that retitle tells the title bar too.
+    #[test]
+    fn the_privacy_refresh_reaches_the_title_bar() {
+        const PRIVACY_RS: &str = include_str!("privacy.rs");
+        let privacy = production(PRIVACY_RS);
+        assert_eq!(
+            privacy.matches(".set_title(").count(),
+            1,
+            "one retitle in privacy mode"
+        );
+        let (_, after) = privacy
+            .split_once(".set_title(")
+            .expect("privacy mode retitles windows");
+        let hook = after
+            .find("crate::titlebar_tabs::title_changed(&window);")
+            .expect("the privacy retitle tells the title bar");
+        let next = after.find("rebuild_window_menu").unwrap_or(usize::MAX);
+        assert!(hook < next, "told for the window just retitled");
     }
 
     /// The field names are the page's contract: `api/desktop.ts` reads these
