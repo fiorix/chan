@@ -1,0 +1,293 @@
+<section class="manual-block" id="overview">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#overview">Your devservers, on your domain</a></h2>
+  </div>
+  <p>A devserver added with a connect script is reached through a tunnel you open yourself. A <strong>chan gateway</strong> turns that around: the devserver dials out to the gateway with a personal access token, and the gateway publishes it at an address of its own, behind sign-in, for you and the people you share it with, from any browser or from Chan Desktop. The devserver's machine needs no inbound port, no DNS name, and no certificate.</p>
+  <p>The gateway is software you run yourself; chan is not an online service. It is a few small services and a Postgres database:</p>
+  <ul>
+    <li><strong>identity</strong>, at <code>gw.example.com</code>: sign-in with GitHub, Google, or GitLab, the account page, access tokens, sharing, and the desktop's sign-in.</li>
+    <li><strong>profile</strong>: accounts, devservers, shares, and policy, in Postgres. Internal only.</li>
+    <li><strong>devserver-proxy</strong>, at <code>p1.proxy.example.com</code>: receives the devservers' tunnels and serves each devserver at its own origin, such as <code>alice--3f9c2a7b1e04.p1.proxy.example.com</code>.</li>
+    <li><strong>devserver-control</strong>: admits devservers and tracks the proxy fleet. Internal only.</li>
+    <li><strong>chan-gateway-admin</strong>: the operator's command line.</li>
+  </ul>
+  <p>This page sets all of it up on one Ubuntu 24.04 server, publish a devserver through it, open it from a browser and from Chan Desktop, and share it with another account. You need the server, with ports 80 and 443 open, and a domain whose DNS you control. <code>example.com</code> stands for that domain throughout.</p>
+  <aside class="doc-note">
+    <strong>What about gw.chan.app?</strong>
+    <p>It is the maintainer's own deployment of the same code: experimental, with sign-in off by default. It is not a hosted product and you cannot sign up there. Run your own.</p>
+  </aside>
+</section>
+
+<section class="manual-block" id="dns">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#dns">DNS and a certificate</a></h2>
+  </div>
+  <p>Create three DNS records pointing at the server:</p>
+  <ul>
+    <li><code>gw.example.com</code>: sign-in, accounts, and desktop discovery.</li>
+    <li><code>p1.proxy.example.com</code>: the proxy node, where devservers dial in.</li>
+    <li><code>*.p1.proxy.example.com</code>: one origin per devserver. A <code>*.example.com</code> record does not cover these names.</li>
+  </ul>
+  <p>All services listen on the server's loopback address without TLS; a web server in front of them terminates TLS. The wildcard name needs a certificate from a DNS challenge, so install certbot with the plugin for your DNS provider. With Cloudflare, for example:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo apt install nginx postgresql git certbot python3-certbot-dns-cloudflare
+sudo certbot certonly --dns-cloudflare \
+  --dns-cloudflare-credentials /root/cloudflare.ini \
+  -d gw.example.com -d p1.proxy.example.com -d '*.p1.proxy.example.com'</b></code>
+    {{copyButton}}
+  </div>
+  <p>The certificate lands in <code>/etc/letsencrypt/live/gw.example.com/</code>, and certbot renews it on its own.</p>
+</section>
+
+<section class="manual-block" id="oauth">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#oauth">A sign-in provider</a></h2>
+  </div>
+  <p>The gateway signs people in with GitHub, Google, or GitLab, and needs at least one. For GitHub, open <a href="https://github.com/settings/developers">Developer settings</a>, choose <strong>New OAuth App</strong>, and set:</p>
+  <ul>
+    <li>Homepage URL: <code>https://gw.example.com</code></li>
+    <li>Authorization callback URL: <code>https://gw.example.com/auth/github/callback</code></li>
+  </ul>
+  <p>Keep the client ID and a client secret for the next steps. For Google or GitLab, the callback ends in <code>/auth/google/callback</code> or <code>/auth/gitlab/callback</code>.</p>
+</section>
+
+<section class="manual-block" id="install">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#install">Database and packages</a></h2>
+  </div>
+  <p>Create the database and an owner role for it. The setup script below uses the owner to create a separate, restricted role for each service, which takes a superuser:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo -u postgres createuser --superuser --pwprompt chan
+sudo -u postgres createdb --owner=chan --template=template0 --locale=C.UTF-8 chan_gateway</b></code>
+    {{copyButton}}
+  </div>
+  <p>Download the gateway packages for this release, from the <a href="/install/#server">install page</a> or with the GitHub CLI, and install the five services. Use <code>arm64</code> in place of <code>amd64</code> on an ARM server:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>gh release download v{{version}} --repo fiorix/chan --pattern 'chan-gateway-*_amd64.deb'
+sudo apt install ./chan-gateway-profile_*.deb ./chan-gateway-identity_*.deb \
+  ./chan-gateway-devserver-control_*.deb ./chan-gateway-devserver-proxy_*.deb \
+  ./chan-gateway-admin_*.deb</b></code>
+    {{copyButton}}
+  </div>
+  <p>Each service gets its own system user and a systemd unit, installed but not started. All gateway services must run the same release.</p>
+</section>
+
+<section class="manual-block" id="configure">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#configure">Configure the services</a></h2>
+  </div>
+  <p>The repository's setup script generates every service credential and signing key, and writes the configuration under <code>/etc/chan-gateway/</code>. Run it from a checkout of the same release:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>git clone --depth 1 --branch v{{version}} https://github.com/fiorix/chan
+sudo chan/packaging/gateway/scripts/configure.sh</b></code>
+    {{copyButton}}
+  </div>
+  <p>Answer its questions like this:</p>
+  <div class="manual-table-wrap">
+    <table class="manual-table">
+      <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        <tr><td>Postgres user, password, database</td><td><code>chan</code>, the password you chose, <code>chan_gateway</code></td></tr>
+        <tr><td>Gateway public origin</td><td><code>https://gw.example.com</code></td></tr>
+        <tr><td>Proxy namespace origin</td><td><code>https://proxy.example.com</code></td></tr>
+        <tr><td>Tunnel ingress origin</td><td><code>https://p1.proxy.example.com</code>, not the default</td></tr>
+        <tr><td>This proxy node id</td><td><code>p1</code></td></tr>
+        <tr><td>This proxy node origin</td><td>the default, <code>https://p1.proxy.example.com</code></td></tr>
+        <tr><td>GitHub OAuth client ID and secret</td><td>from the previous step; press Enter to skip the others</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The defaults in brackets name the maintainer's deployment; replace every one of them. The tunnel ingress answer is where devservers dial in, so it must be the proxy node's name from your DNS.</p>
+  <p>Prepare the database schema, then start the services:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo systemctl restart chan-gateway-migrate
+sudo systemctl enable --now chan-gateway-profile chan-gateway-identity \
+  chan-gateway-devserver-control chan-gateway-devserver-proxy</b></code>
+    {{copyButton}}
+  </div>
+  <p>The schema unit runs once and must succeed before identity and profile start. Run it again after each upgrade, even when nothing changed. Follow the services with <code>journalctl -u 'chan-gateway-*' -f</code>. The proxy starts admitting devservers about 30 seconds after the controller comes up; check it with its node name as the host:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>curl -H 'Host: p1.proxy.example.com' http://127.0.0.1:7002/readyz</b></code>
+    {{copyButton}}
+  </div>
+</section>
+
+<section class="manual-block" id="edge">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#edge">The TLS edge</a></h2>
+  </div>
+  <p>nginx terminates TLS and routes three things: account requests to identity on port 7000, devserver pages and WebSockets to the proxy on port 7002, and the devservers' tunnels, which are long-lived HTTP/2 streams, to the proxy's tunnel listener on port 7100. Save this as <code>/etc/nginx/sites-available/chan-gateway</code>, with your domain in place of <code>example.com</code>:</p>
+<pre><code>map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name gw.example.com p1.proxy.example.com *.p1.proxy.example.com;
+    return 301 https://$host$request_uri;
+}
+
+# Sign-in, accounts, and desktop discovery.
+server {
+    listen 443 ssl http2;
+    server_name gw.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:7000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# The proxy node: devserver tunnels and the node itself.
+server {
+    listen 443 ssl http2;
+    server_name p1.proxy.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
+    client_max_body_size 0;
+
+    # A tunnel is one request that lasts as long as the devserver.
+    location /v1/tunnel {
+        grpc_pass grpc://127.0.0.1:7100;
+        client_body_timeout 1h;
+        grpc_read_timeout 1h;
+        grpc_send_timeout 1h;
+        grpc_socket_keepalive on;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:7002;
+        proxy_set_header Host $host;
+    }
+}
+
+# One origin per devserver: pages, terminals, and file transfers.
+server {
+    listen 443 ssl http2;
+    server_name *.p1.proxy.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gw.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gw.example.com/privkey.pem;
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://127.0.0.1:7002;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+}</code></pre>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo ln -s /etc/nginx/sites-available/chan-gateway /etc/nginx/sites-enabled/
+sudo nginx -t &amp;&amp; sudo systemctl reload nginx</b></code>
+    {{copyButton}}
+  </div>
+  <aside class="doc-note warning">
+    <strong>What must stay private</strong>
+    <p>The proxy routes on the <code>Host</code> header, so the edge must pass it through unchanged. Publish only ports 7000, 7002, and 7100 through the edge, as above. Never expose identity's internal port 7004, profile's 7001, or the controller's 7003 and 7101: they carry the services' own credentials.</p>
+  </aside>
+</section>
+
+<section class="manual-block" id="enrol">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#enrol">Let yourself in</a></h2>
+  </div>
+  <p>A new gateway lets nobody sign in: the <code>oauth_login</code> flag is off for every account until the operator grants it, and so is <code>share_workspaces</code>, which shows the Devservers tab. Grant both to your own email, the one your GitHub account uses. As root, load the admin credentials that the setup script wrote:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>#</span><b data-copy-value>set -a; . /etc/chan-gateway/admin.env; set +a
+export CHAN_ADMIN_IDENTITY_URL=http://127.0.0.1:7004
+chan-gateway-admin user create --email you@example.com
+chan-gateway-admin flag grant oauth_login you@example.com
+chan-gateway-admin flag grant share_workspaces you@example.com</b></code>
+    {{copyButton}}
+  </div>
+  <p>Now open <code>https://gw.example.com</code> and sign in with GitHub. The account page has three tabs: <strong>Profile</strong>, <strong>Tokens</strong>, and <strong>Devservers</strong>.</p>
+  <p>Your username starts as a placeholder, and it is part of every devserver address. Change it in the Profile tab now, before you share anything: renames are limited to four, and each one disconnects your devservers.</p>
+  <p class="minor">To let anyone with an account at your sign-in provider in, without granting each person: <code>chan-gateway-admin flag create oauth_login --default-on</code>.</p>
+</section>
+
+<section class="manual-block" id="publish">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#publish">Publish a devserver</a></h2>
+  </div>
+  <p>Each devserver dials in with a token of its own. In the <strong>Tokens</strong> tab, choose <strong>New token</strong>, label it <code>build-host</code>, pick an expiry, and copy the token: it is shown only once. A token is the devserver's identity at the gateway: a new token makes a new devserver, with a new address.</p>
+  <p>On the devserver's machine, a Linux host with chan installed as in <a href="/manual/devserver/#install-server">Install on the host</a>, start the devserver with the token in its environment:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>export CHAN_TUNNEL_TOKEN=chan_pat_...
+chan devserver start --port 8787 \
+  --tunnel-url https://p1.proxy.example.com/v1/tunnel \
+  --tunnel-devserver-name build-host</b></code>
+    {{copyButton}}
+  </div>
+  <ul>
+    <li>The systemd service keeps the token and the URL, so later <code>start</code>, <code>restart</code>, and <code>join</code> reuse them.</li>
+    <li><code>--port 8787</code> keeps the devserver's local listener on its usual port, so Chan Desktop can still connect over ssh as in <a href="/manual/devserver/#connect">Connect from the main window</a>. Without it, a tunneled devserver picks a free port.</li>
+    <li>Pass the token in the environment, not as <code>--tunnel-token</code>: a flag is visible to every user in the process list.</li>
+    <li>On macOS, the launchd service cannot carry a tunnel: use <code>chan devserver run</code> with the same flags, or <code>--service=chan</code>.</li>
+  </ul>
+  <p>The devserver's log confirms the connection, with your username:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>journalctl --user -u chan-devserver -f</b></code>
+    {{copyButton}}
+  </div>
+  <pre class="sample-output"><code>chan devserver: tunnel connected as user alice</code></pre>
+  <p>On the gateway, <code>chan-gateway-admin tunnel ps</code> lists it too. If the tunnel drops, the devserver dials again by itself.</p>
+</section>
+
+<section class="manual-block" id="browser">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#browser">Open it from a browser</a></h2>
+  </div>
+  <p>On <code>https://gw.example.com</code>, the <strong>Devservers</strong> tab lists <code>build-host</code> under <strong>My devservers</strong>, online. Click <strong>Open</strong>. The browser lands on the devserver's own origin, <code>https://alice--3f9c2a7b1e04.p1.proxy.example.com/</code>, on the same Computers screen described in <a href="/manual/browser/#computers">Chan in a browser</a>. There is no token in the URL this time: your gateway sign-in is the key. Everything there works here, from any computer with a browser.</p>
+</section>
+
+<section class="manual-block" id="desktop">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#desktop">Connect Chan Desktop</a></h2>
+  </div>
+  <ol>
+    <li>Open the Computers screen and press <code>g</code>, or click its title, to flip to <strong>Gateways</strong>.</li>
+    <li>Turn to the <strong>Add gateway</strong> card, enter <code>https://gw.example.com</code> and, optionally, a name.</li>
+    <li>Connect it with its on/off control, or <code>o</code>. Your browser opens on the gateway's sign-in and asks you to approve the desktop. One sign-in covers the whole account.</li>
+    <li>Press <code>g</code> to flip back to Computers. <code>build-host</code> is there, marked as reached via your gateway. Connect it like any devserver; its windows open as native windows.</li>
+  </ol>
+  <p>No connect script and no control terminal are involved: the gateway carries the connection. Tools that need your desktop, such as <code>cs tunnel</code>, work through it too.</p>
+</section>
+
+<section class="manual-block" id="share">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#share">Share it</a></h2>
+  </div>
+  <p>Sharing gives another account the whole devserver: its terminals, files, and workspaces. That is the same as a shell account on the machine, so share only with people you would give one.</p>
+  <ol>
+    <li>Let the other person in: <code>chan-gateway-admin flag grant oauth_login friend@example.com</code>.</li>
+    <li>In <strong>Devservers</strong>, click <strong>Share</strong> on <code>build-host</code>, enter their email, and click <strong>Add</strong>. The share reads <em>pending sign-in</em> until they sign in with that verified email, then <em>active</em>.</li>
+    <li>They add your gateway to their Chan Desktop, as above. Your devserver is listed on their Computers screen; the first time they open it, Chan Desktop asks them to grant it native access.</li>
+  </ol>
+  <p>To take access away, click <strong>Revoke</strong> on the share. Their sessions on that devserver end.</p>
+</section>
+
+<section class="manual-block" id="operate">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#operate">Run the gateway</a></h2>
+  </div>
+  <p><code>chan-gateway-admin</code> is the operator's view of the whole gateway. With the admin environment loaded as above:</p>
+  <ul>
+    <li><code>chan-gateway-admin overview --since 24h</code>: accounts, devservers, and sign-ins at a glance.</li>
+    <li><code>chan-gateway-admin tunnel ps</code> and <code>proxy ps</code>: live devservers and proxy nodes.</li>
+    <li><code>chan-gateway-admin policy set alice --enabled --max-connected-devservers 3</code>: limit one account.</li>
+    <li><code>chan-gateway-admin user block alice@example.com --reason "..."</code>: revoke every token and refuse new sign-ins.</li>
+    <li><code>chan-gateway-admin fleet pause --drain</code>: cut every session and tunnel at once, then <code>fleet resume</code>.</li>
+  </ul>
+  <p>Add <code>--json</code> to any command for scripts. To publish more machines, give each one its own token and run the same <code>chan devserver start</code> on it: build hosts, GPU boxes, or a VM per person, each with your team's tools installed.</p>
+  <p class="minor">The <a href="/gateway/">gateway guide</a> shows the architecture and the WireGuard option. <a href="https://github.com/fiorix/chan/blob/main/gateway/README.md">gateway/README.md</a> covers every service, the admin CLI, and Kubernetes deployment, and <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway/design.md</a> the design.</p>
+</section>

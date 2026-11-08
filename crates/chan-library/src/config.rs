@@ -290,7 +290,7 @@ pub struct TerminalTmuxConfig {
     pub enabled: bool,
     /// Foreground program names that enter control mode without the
     /// question, beside `tmux` itself, which always does: for `ssh` or
-    /// `mosh` users who run a remote `tmux -CC` as a habit. A name is the
+    /// Eternal Terminal (`et`) users who run a remote `tmux -CC` as a habit. A name is the
     /// process name the OS reports for the PTY's foreground job.
     /// Deserialization drops entries outside `[A-Za-z0-9._-]+` or longer
     /// than 64 bytes with a warning, dedupes repeats, and caps the list at

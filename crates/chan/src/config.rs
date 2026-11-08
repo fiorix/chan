@@ -696,7 +696,7 @@ fn parse_config_scalar(spec: ConfigKeySpec, raw: &str) -> Result<serde_json::Val
         ConfigValueKind::ProgramList(max) => {
             let entries: Vec<String> = serde_json::from_str(raw).with_context(|| {
                 format!(
-                    "{}: expected a JSON string array, for example [\"ssh\",\"mosh-client\"]",
+                    "{}: expected a JSON string array, for example [\"ssh\",\"et\",\"mosh-client\"]",
                     spec.key
                 )
             })?;

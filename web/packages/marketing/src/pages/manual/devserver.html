@@ -3,7 +3,7 @@
     <h2><a class="heading-anchor" href="#devserver">Chan Devserver</a></h2>
   </div>
   <p>The devserver runs <code>chan</code> on another machine for remote development. It can also run locally with a separate <code>CHAN_HOME</code> to isolate its state. Chan Desktop connects to the devserver as the client shell; sessions, window layouts, and terminals all live on the devserver.</p>
-  <p>For visual connection examples, see the <a href="/devserver/#connect">ssh and Eternal Terminal guide</a>. For managed access on your own domain, see the <a href="/gateway/">gateway guide</a>.</p>
+  <p>For visual connection examples, see the <a href="/devserver/#connect">ssh and Eternal Terminal guide</a>. For managed access on your own domain, see the <a href="/gateway/">gateway guide</a> and <a href="/manual/gateway/">Host a gateway</a>. To use a devserver from a browser instead of Chan Desktop, see <a href="/manual/browser/#devserver">Chan in a browser</a>.</p>
   <p>Pick where to run it:</p>
   <ul>
     <li>On macOS: a lima-vm, or a remote machine via ssh.</li>
@@ -33,7 +33,8 @@
     <li>On Linux it uses systemd: a user-scoped service that survives logout once linger is on (chan enables it, or asks you to run <code>sudo loginctl enable-linger</code>).</li>
     <li>On macOS it uses launchd: the service runs while you are logged in.</li>
     <li>On Windows it uses chan's own daemon mode, which works on all platforms.</li>
-    <li>You can override the choice with <code>--service=[auto,none,chan,systemd,launchd]</code>. The actions are <code>start</code>, <code>stop</code>, <code>status</code>, <code>restart</code>, and <code>join</code>; <code>--service</code> goes after the action.</li>
+    <li>You can override the choice with <code>--service=[auto,none,chan,systemd,launchd]</code>. The actions are <code>start</code>, <code>stop</code>, <code>status</code>, <code>restart</code>, <code>join</code>, and <code>rotate-token</code>; <code>--service</code> goes after the action.</li>
+    <li><code>chan devserver rotate-token</code> mints a new token and prints it with the new URL, for a token you suspect has leaked. A running devserver drops the old token at once, so reopen any browser tab that used the old URL. Tokens also rotate by themselves at the first start after they turn 30 days old.</li>
     <li><code>chan devserver run</code> runs in the foreground.</li>
     <li><code>chan devserver ls</code>, <code>connect</code>, <code>disconnect</code>, and <code>forget</code> manage the desktop's connections to remote devservers. A connected devserver's workspaces are managed from a terminal on your desktop too: <code>chan workspace serve /path --on NAME</code>, <code>chan close /path --on NAME</code>, and <code>chan workspace forget /path --on NAME</code>, where NAME is the devserver's label or URL as <code>chan devserver ls</code> shows it and the path is on that machine.</li>
   </ul>
@@ -70,6 +71,25 @@
     <iframe class="launcher-demo-embed" src="/manual/demo/devserver/" title="Interactive Add devserver demo" loading="lazy"></iframe>
     <figcaption>The Add devserver card, turned over to its form. This is a live mock too: fill it in, add, and connect.</figcaption>
   </figure>
+  <h3 id="control-terminal"><a class="heading-anchor" href="#control-terminal">The control terminal</a></h3>
+  <p>Connecting opens a window titled <code>Control Terminal - NAME</code> that runs the connect script in a real terminal on your desktop, through your login shell. If ssh asks to accept a host key or for a password, answer it there. On the remote side, <code>join</code> prints the devserver's address and token:</p>
+  <pre class="sample-output"><code>chan devserver: listening on http://127.0.0.1:8787/?t=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u
+CHAN_DEVSERVER_TOKEN=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u</code></pre>
+  <p>Chan Desktop reads the token from the control terminal, so you never copy it, and a rotated token is picked up on the next connect. Then it reaches the devserver through the tunnel and the card turns connected. A devserver's first start opens one terminal window, which appears as a native window titled with the remote host's name.</p>
+  <p>The control terminal stays open while the script runs: it <em>is</em> the connection. With <strong>Auto-hide control terminal on success</strong> ticked it hides itself once the connection is up; show it again from its row, <strong>Control terminal</strong>, the first one on the devserver's card.</p>
+  <aside class="doc-note warning">
+    <strong>Closing the control terminal disconnects</strong>
+    <p>Closing it while connected asks <strong>Hide</strong> or <strong>Close</strong>. Hide keeps the connection; Close ends the script, and with it the connection and the devserver's windows on your desktop. Everything keeps running on the devserver.</p>
+  </aside>
+  <h3 id="disconnect"><a class="heading-anchor" href="#disconnect">Disconnect and dropped connections</a></h3>
+  <p><strong>Disconnect</strong> (<code>o</code> on the card) ends the connect script and closes the devserver's windows on your desktop. Everything on the devserver keeps running: terminals, programs, workspaces, and window layouts. Connect again and every shown window reopens where it was. Chan Desktop does not connect devservers by itself when it starts.</p>
+  <p>When something goes wrong, the control terminal is where to look:</p>
+  <ul>
+    <li><strong>The tunnel is interrupted</strong> while the script still runs: the devserver's windows show <code>reconnecting to the chan server</code> and keep trying. <strong>Reconnect</strong> runs the connect script again; <strong>Abandon</strong> disconnects.</li>
+    <li><strong>The script exits with an error</strong>, for example when ssh loses the connection: the devserver's windows close, and the control terminal stays open with the script's last words and <code>process exited (255); press Ctrl+D to close this tab</code>. Its row on the card flashes for attention. Read why, close it, and connect again.</li>
+  </ul>
+  <p>An ssh tunnel dies with the network, when you close the laptop lid or change Wi-Fi. <a href="https://eternalterminal.dev/">Eternal Terminal</a> reconnects across those interruptions: its <code>et --tunnel 9901:8787 --command '~/.local/bin/chan devserver join --port 8787' user@host</code> is the same forward as ssh's <code>-L</code>. The <a href="/devserver/#connect">connection guide</a> has both scripts side by side.</p>
+  <p>The same actions work from a terminal on your desktop: <code>chan devserver ls</code>, <code>chan devserver connect NAME</code>, and <code>chan devserver disconnect NAME</code>.</p>
   <h3 id="gateways"><a class="heading-anchor" href="#gateways">Connect through a gateway</a></h3>
   <p>A gateway is a set of services you host yourself; it is not an online service. It reaches your devservers, and devservers shared with you, through its tunnel instead of a connect script. Press <code>g</code> on the Computers screen, or click its title, to flip to the <strong>Gateways</strong> screen, then:</p>
   <ol>
@@ -87,7 +107,7 @@
     {{copyButton}}
   </div>
   <p>The tunnel URL's destination must be inside the peer's <code>AllowedIPs</code>. An <code>http://</code> ingress inside WireGuard is also accepted: WireGuard pins the peer's key and encrypts the connection. The gateway token is still required.</p>
-  <p>On the desktop, add or edit a gateway in the launcher and set <strong>WireGuard file</strong> to its local wg-quick file. Use an absolute path or one starting with <code>~/</code>. The file is validated when you save; adding, changing or clearing it takes effect after restarting Chan Desktop.</p>
+  <p>On the desktop, add or edit a gateway in the launcher and set <strong>WireGuard file</strong> to its local wg-quick file. Use an absolute path or one starting with <code>~/</code>. The file is validated when you save and takes effect as soon as it is saved: changing the path starts the new tunnel, and clearing it ends the old one. To re-read a file edited in place, clear the field, save, and set it again.</p>
   <p>Both clients read the same wg-quick subset:</p>
   <ul>
     <li>One <code>[Interface]</code>: required <code>PrivateKey</code> and <code>Address</code>, optional <code>MTU</code>.</li>

@@ -20,6 +20,16 @@
     "description": "Set up a devserver and connect to its terminals and workspaces from the Computers window."
   },
   {
+    "slug": "browser",
+    "title": "Chan in a browser",
+    "description": "Serve a workspace or a devserver from the chan binary alone and use it from any browser, no desktop needed."
+  },
+  {
+    "slug": "gateway",
+    "title": "Host a gateway",
+    "description": "Run your own gateway on one server and publish devservers behind sign-in, for you and the people you share them with."
+  },
+  {
     "slug": "terminal",
     "title": "Terminal & teams",
     "description": "Use terminal commands, rich prompts, drafts, program status, and agent teams."

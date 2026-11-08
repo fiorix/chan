@@ -104,7 +104,7 @@ async function main() {
 }
 
 async function checkManual(port) {
-  const sections = ["", "install", "navigation", "devserver", "terminal", "editor", "files", "graph", "dashboard", "search", "collaboration", "extensions", "settings", "screensavers"];
+  const sections = ["", "install", "navigation", "devserver", "browser", "gateway", "terminal", "editor", "files", "graph", "dashboard", "search", "collaboration", "extensions", "settings", "screensavers"];
   const routes = sections.map((slug) => `/manual/${slug ? `${slug}/` : ""}`);
   const documents = new Map();
   try {
