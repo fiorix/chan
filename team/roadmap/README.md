@@ -33,17 +33,21 @@ Later the same day, from a ranking of the items by size, the owner moved every i
 
 The same day the owner reported, with a screenshot, that Cmd+P does not open the Computers screen over a devserver window that is reconnecting ([rclaunch]).
 
+The owner also brings his title bar work, built on his Mac. A chan-desktop window spends the title bar's row and one tab strip per pane on chrome, so on macOS the active pane's tabs move into the title bar, with a pane tree and a strip that scrolls only its tabs ([titlebarmac]), and on Windows the window goes frameless and draws the window controls and the launcher menus in that bar ([titlebarwin]).
+
 | Item | State | Next |
 | --- | --- | --- |
-| [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | not started | build |
+| [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | built | candidate |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 | [chan close reports a running serve closed][closelie] | built | review |
-| [chan serve --help names Cmd+P as Team Work][cmdphelp] | not started | build |
-| [admin.env points at identity's public port][adminenv] | not started | build |
+| [chan serve --help names Cmd+P as Team Work][cmdphelp] | built | candidate |
+| [admin.env points at identity's public port][adminenv] | built | candidate |
 | [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
 | [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
 | [the manual and design docs contradict chan][docsdrift] | partly built | build |
 | [Cmd+P does nothing over a reconnecting window][rclaunch] | built | review |
+| [a window's tabs sit below the title bar on macOS][titlebarmac] | built | review |
+| [a window's tabs sit below the title bar on Windows][titlebarwin] | built | acceptance |
 
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
@@ -54,10 +58,14 @@ The same day the owner reported, with a screenshot, that Cmd+P does not open the
 [tunnelhint]: v0.126.0/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md
 [docsdrift]: v0.126.0/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md
 [rclaunch]: v0.126.0/the-launcher-chord-does-nothing-over-a-reconnecting-window.md
+[titlebarmac]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-macos.md
+[titlebarwin]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-windows.md
 
 ### v0.127.0
 
 Opened 2026-11-08 with the five items the owner moved from v0.126.0 the same day, each sized medium or larger; v0.126.0's text above records why each was raised. In size order: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]); the time-bound tests a loaded host breaks ([timebound]); the system CA store for the Rust TLS clients, read on three platforms ([systemca]); the PAT the redeem orphans, which shares the redeem's completion with [wgnode] ([patrevoke]); and the gateway packaging and roles suites in CI ([gwci]).
+
+The reading behind [docsdrift] added a sixth, placed here by the owner the same day: identity serves a shared devserver's root link to its owner alone, so the account page's Copy link refuses the people the devserver is shared with, though the per-workspace landing and the desktop admit them ([grantroot]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -66,12 +74,14 @@ Opened 2026-11-08 with the five items the owner moved from v0.126.0 the same day
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
 | [no CI job runs the gateway packaging and roles suites][gwci] | not started | build |
+| [a shared devserver's root link refuses its grantees][grantroot] | not started | build |
 
 [wgnode]: v0.127.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [systemca]: v0.127.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
 [gwci]: v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
+[grantroot]: v0.127.0/a-shared-devservers-root-link-refuses-the-people-it-is-shared-with.md
 
 ## Completed
 
