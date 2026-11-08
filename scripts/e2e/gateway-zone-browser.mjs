@@ -1,11 +1,12 @@
 // Headless-Chrome half of the gateway-zone e2e: sign in through the
 // stubbed OAuth, walk the account-mode desktop-authorize consent, and
-// hand the loopback callback URL back to the harness.
+// hand the loopback callback URL or account setup hints back to the harness.
 //
 // Env: CHROME_BIN, ID_ORIGIN (https://id.localtest.me:PORT), and either
 //   - AUTH_PATH (/desktop/authorize?...), LOOPBACK_PORT, and REDIRECT_URI
 //     for the full consent + PKCE flow, or
-//   - LOGIN_ONLY=1 to just sign in via /auth/github and print the URL.
+//   - LOGIN_ONLY=1 to just sign in via /auth/github and print the URL, or
+//   - HINT=1 to read the Devservers and Tokens setup hints after sign-in.
 //
 // In consent mode the script binds a tiny loopback listener on
 // LOOPBACK_PORT so the consent handoff page's meta refresh has somewhere
@@ -15,6 +16,8 @@
 // Prints one JSON object on stdout:
 //   consent mode: { radios: [...], consent_text: "...", callback_url: "..." }
 //   login mode:   { login_url: "..." }
+//   hint mode:    { command, devservers_intro, offline_hints, tokens_hint,
+//                   tokens_command, discovery_requests }
 // radios reports any input[name="devserver"] on the consent page so
 // the harness can assert the consent renders no picker. Exits nonzero on
 // navigation/shape failures; content assertions stay in the harness.
@@ -28,15 +31,17 @@ const {
     LOOPBACK_PORT,
     REDIRECT_URI,
     LOGIN_ONLY,
+    HINT,
 } = process.env;
 if (!CHROME_BIN || !ID_ORIGIN) {
     console.error("missing CHROME_BIN / ID_ORIGIN");
     process.exit(2);
 }
-const loginOnly = LOGIN_ONLY === "1" || LOGIN_ONLY === "true";
+const hintMode = HINT === "1" || HINT === "true";
+const loginOnly = hintMode || LOGIN_ONLY === "1" || LOGIN_ONLY === "true";
 if (!loginOnly && (!AUTH_PATH || !LOOPBACK_PORT || !REDIRECT_URI)) {
     console.error(
-        "missing AUTH_PATH / LOOPBACK_PORT / REDIRECT_URI (or set LOGIN_ONLY=1)",
+        "missing AUTH_PATH / LOOPBACK_PORT / REDIRECT_URI (or set LOGIN_ONLY=1 / HINT=1)",
     );
     process.exit(2);
 }
@@ -85,12 +90,54 @@ try {
     });
 
     const page = await browser.newPage();
+    let discoveryRequests = 0;
+    const pageErrors = [];
+    if (hintMode) {
+        page.on("request", (request) => {
+            if (new URL(request.url()).pathname === "/.well-known/chan-gateway") {
+                discoveryRequests += 1;
+            }
+        });
+        page.on("pageerror", (error) => { pageErrors.push(error.message); });
+    }
 
     if (loginOnly) {
         await page.goto(`${ID_ORIGIN}/auth/github`, { waitUntil: "networkidle2" });
         if (new URL(page.url()).origin !== ID_ORIGIN) {
             console.error(`expected the identity origin after login, got ${page.url()}`);
             process.exitCode = 3;
+        } else if (hintMode) {
+            await page.goto(`${ID_ORIGIN}/#workspaces`, { waitUntil: "networkidle2" });
+            await page.waitForSelector(".devservers .block > p");
+            await page.waitForFunction(() =>
+                [...document.querySelectorAll(".devservers .card.offline .label")]
+                    .some((label) => label.textContent.trim() === "account-page-command"),
+            );
+            await page.waitForNetworkIdle({ idleTime: 200 });
+            const devservers = await page.$eval(".devservers", (element) => {
+                const intro = element.querySelector(".block > p");
+                return {
+                    devservers_intro: intro.textContent,
+                    command: intro.querySelector(".tunnel-command")?.textContent ?? intro.textContent,
+                    offline_hints: [...element.querySelectorAll(".card.offline .meta")]
+                        .map((row) => row.textContent),
+                };
+            });
+            await page.goto(`${ID_ORIGIN}/#tokens`, { waitUntil: "networkidle2" });
+            await page.waitForSelector(".page > p.muted");
+            await page.waitForNetworkIdle({ idleTime: 200 });
+            const tokens = await page.$eval(".page > p.muted", (element) => ({
+                tokens_hint: element.textContent,
+                tokens_command: element.querySelector(".tunnel-command")?.textContent ?? element.textContent,
+            }));
+            if (pageErrors.length) {
+                throw new Error(`account page errors: ${pageErrors.join("; ")}`);
+            }
+            console.log(JSON.stringify({
+                ...devservers,
+                ...tokens,
+                discovery_requests: discoveryRequests,
+            }));
         } else {
             console.log(JSON.stringify({ login_url: page.url() }));
         }
