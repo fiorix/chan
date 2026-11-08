@@ -35,6 +35,8 @@ The same day the owner reported, with a screenshot, that Cmd+P does not open the
 
 The owner also brings his title bar work, built on his Mac. A chan-desktop window spends the title bar's row and one tab strip per pane on chrome, so on macOS the active pane's tabs move into the title bar, with a pane tree and a strip that scrolls only its tabs ([titlebarmac]), and on Windows the window goes frameless and draws the window controls and the launcher menus in that bar ([titlebarwin]).
 
+The owner also brings a privacy mode, built by his agent and read on his Mac: recording or sharing a chan window showed every computer's name and address, the connect scripts, the gateway URLs and keys and the connection errors, and nothing concealed them ([privacy]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | built | candidate |
@@ -48,6 +50,7 @@ The owner also brings his title bar work, built on his Mac. A chan-desktop windo
 | [Cmd+P does nothing over a reconnecting window][rclaunch] | built | candidate |
 | [a window's tabs sit below the title bar on macOS][titlebarmac] | built | review |
 | [a window's tabs sit below the title bar on Windows][titlebarwin] | built | acceptance |
+| [the Computers screen shows every address and token while the screen is shared][privacy] | built | review |
 
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
@@ -60,6 +63,7 @@ The owner also brings his title bar work, built on his Mac. A chan-desktop windo
 [rclaunch]: v0.126.0/the-launcher-chord-does-nothing-over-a-reconnecting-window.md
 [titlebarmac]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-macos.md
 [titlebarwin]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-windows.md
+[privacy]: v0.126.0/the-computers-screen-shows-every-address-and-token-while-the-screen-is-shared.md
 
 ### v0.127.0
 
