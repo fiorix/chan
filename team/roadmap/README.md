@@ -40,7 +40,7 @@ On 2026-11-08 the owner added six items found while writing the chan.app tutoria
 | [admin.env points at identity's public port][adminenv] | not started | build |
 | [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
 | [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
-| [the manual and design docs contradict chan][docsdrift] | not started | build |
+| [the manual and design docs contradict chan][docsdrift] | partly built | build |
 
 [timebound]: v0.126.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.126.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md

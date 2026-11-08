@@ -1,6 +1,10 @@
 # The manual and design docs describe behavior chan does not have
 
-Status: raised on 2026-11-08 while writing the chan.app tutorials; accepted by the owner for v0.126.0; not started.
+Status: raised on 2026-11-08 while writing the chan.app tutorials; accepted by the owner for v0.126.0; items 1 to 5 built with the manual's Chan in a browser and Host a gateway pages; items 6 to 10 not started.
+
+## Owner ruling
+
+On 2026-11-08 the owner settled item 3 without a run over mosh: "we dont need to test mosh, just ssh and et in the docs is fine.. i use et at work with chan, works just like ssh and fine". The manual's tmux section, the config reference and the trust setting's doc comment (`crates/chan-library/src/config.rs:293`) name ssh and Eternal Terminal's `et` instead of mosh; tests that use mosh only as an arbitrary program name stay. By the owner's word the same day, the trust setting's error example lists `["ssh","et","mosh-client"]`. The same day the owner folded items 1, 2, 4 and 5 into the manual change that replaced the tutorials with the Chan in a browser and Host a gateway pages.
 
 ## What is there now
 
@@ -20,7 +24,7 @@ Reading the code behind each tutorial step found these statements that the produ
 ## Desired contract
 
 1. Each statement above matches the product, by changing its text.
-2. Item 3 is settled by a run of `tmux -CC` over mosh: mosh stays in the manual, the config reference and the error text only if the run attaches.
+2. Item 3 is settled by the owner ruling: mosh leaves the docs, and ssh and `et` are named.
 3. Item 7 is settled by an owner decision on whether a grantee can use a whole-devserver link; a decision that changes code becomes a row of its own, and this item changes the comment and the button's wording to match.
 
 ## Boundaries
@@ -30,5 +34,5 @@ Reading the code behind each tutorial step found these statements that the produ
 ## Acceptance
 
 1. Each numbered statement read against the code at the tip, with the reading recorded in this item when it closes.
-2. The mosh run recorded beside item 3's change.
+2. No mosh mention left in the manual or the config reference.
 3. `npm run check` in `web/packages/marketing` and `make workflow-check` green.
