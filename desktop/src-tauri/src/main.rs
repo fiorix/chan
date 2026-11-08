@@ -5401,14 +5401,17 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // as the terminal_opacity::EVENT event.
         terminal_opacity::terminal_background_opacity,
         terminal_opacity::set_terminal_background_opacity,
-        // A page's tab bar in the macOS title bar: the page opts in and reads
-        // the room the window controls take; elsewhere both answer inactive.
-        // The desktop's preference says whether pages opt in, and changes
-        // reach every window as the titlebar_tabs::PREFERENCE_EVENT event.
+        // A page's tab bar in the title bar, on macOS and Windows: the page
+        // opts in and reads the room the window controls take; on the GTK
+        // desktops both answer inactive. On Windows the page draws the window
+        // controls and acts through titlebar_window_control. The desktop's
+        // preference says whether pages opt in, and changes reach every
+        // window as the titlebar_tabs::PREFERENCE_EVENT event.
         titlebar_tabs::set_titlebar_tabs,
         titlebar_tabs::titlebar_chrome,
         titlebar_tabs::titlebar_tabs_preference,
         titlebar_tabs::set_titlebar_tabs_preference,
+        titlebar_tabs::titlebar_window_control,
     ]
 }
 

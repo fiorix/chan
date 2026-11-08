@@ -563,10 +563,28 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
     }
     set(&VISIBLE).lock().unwrap().insert(label);
     crate::titlebar_tabs::launcher_visibility_changed(host);
-    // Off macOS the launcher carries the only menubar, so the host wears it
-    // while its launcher shows.
     #[cfg(not(target_os = "macos"))]
-    {
+    sync_launcher_menu(app, host);
+    #[cfg(target_os = "macos")]
+    let _ = app;
+    true
+}
+
+/// Off macOS the launcher carries the only menubar, so the host wears it
+/// while its launcher shows, unless the host's title bar holds its page's tab
+/// bar (`titlebar_tabs.rs`). That window is frameless: tao answers its
+/// `WM_NCCALCSIZE` itself with a client area over the whole frame, never
+/// leaving the menubar the room `DefWindowProc` would, so an attached bar
+/// would not show. The launcher keeps its own key bridge for the toggle,
+/// reload and zoom, and the page's bar stays in view above it with the window
+/// controls. Main thread.
+#[cfg(not(target_os = "macos"))]
+fn sync_launcher_menu(app: &AppHandle, host: &WebviewWindow) {
+    let wears = panel_is_visible(host.label()) && !crate::titlebar_tabs::in_mode(host);
+    if wears == host.menu().is_some() {
+        return;
+    }
+    if wears {
         match crate::build_launcher_menu(app) {
             Ok(menu) => {
                 if let Err(e) = host.set_menu(menu) {
@@ -575,11 +593,10 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) -> bool {
             }
             Err(e) => tracing::warn!(error = %e, "building the launcher menu failed"),
         }
-        crate::rebuild_window_menu(app);
+    } else {
+        let _ = host.remove_menu();
     }
-    #[cfg(target_os = "macos")]
-    let _ = app;
-    true
+    crate::rebuild_window_menu(app);
 }
 
 /// Hide a host's launcher and hand the keyboard back to the host's own
@@ -634,17 +651,17 @@ fn restore_host<R: tauri::Runtime>(host: &WebviewWindow<R>) {
 }
 
 /// The host's content area as a wry rect, in logical points: from the content
-/// view's origin, or from below the band of a window whose title bar hosts
-/// its page's tab bar (`titlebar_tabs.rs`). There the content view runs under
-/// the title bar, and the launcher keeps the bar and the traffic lights in
-/// view as it keeps a normal title bar.
+/// area's origin, or from below the band of a window whose title bar hosts
+/// its page's tab bar (`titlebar_tabs.rs`). There the content runs under the
+/// title bar, and the launcher keeps the bar and the window controls in view
+/// as it keeps a normal title bar.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn content_bounds(host: &WebviewWindow) -> Option<wry::Rect> {
     let size = host.inner_size().ok()?;
     let scale = host.scale_factor().ok()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let top = crate::titlebar_tabs::launcher_top_inset(host);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let top = 0.0;
     Some(content_rect(size, scale, top))
 }
@@ -726,8 +743,8 @@ fn swap_gtk<R: tauri::Runtime>(
 
 /// Re-fit a host's launcher to the host's content area; on macOS a hidden
 /// one stays parked off it. Main thread. Besides the host's resize events,
-/// the title bar switch calls it, since the content view changes size inside
-/// a window frame that does not.
+/// the title bar switch (`title_bar_switched`) and a page zoom change call
+/// it for a window whose launcher sits below its page's band.
 pub(crate) fn sync_for_host(host: &WebviewWindow) {
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     LAUNCHERS.with(|launchers| {
@@ -744,6 +761,17 @@ pub(crate) fn sync_for_host(host: &WebviewWindow) {
     });
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let _ = host;
+}
+
+/// The host's title bar switched to or from hosting its page's tab bar
+/// (`titlebar_tabs.rs`): the launcher re-fits, since the content area changes
+/// size inside a window frame that does not, and on Windows a shown
+/// launcher's menubar goes or comes back with the frame. Main thread.
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn title_bar_switched(host: &WebviewWindow) {
+    sync_for_host(host);
+    #[cfg(windows)]
+    sync_launcher_menu(host.app_handle(), host);
 }
 
 /// Give a host's shown launcher the keyboard again. A focus change in the

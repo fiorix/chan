@@ -116,6 +116,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "terminal_background_opacity",
     "titlebar_chrome",
     "titlebar_tabs_preference",
+    "titlebar_window_control",
     "toggle_launcher_panel",
     "upload_files_native",
     "write_clipboard_html",

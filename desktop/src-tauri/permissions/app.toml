@@ -34,6 +34,7 @@ permissions = [
   "allow-titlebar-chrome",
   "allow-titlebar-tabs-preference",
   "allow-set-titlebar-tabs-preference",
+  "allow-titlebar-window-control",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -75,6 +76,7 @@ permissions = [
   "allow-titlebar-chrome",
   "allow-titlebar-tabs-preference",
   "allow-set-titlebar-tabs-preference",
+  "allow-titlebar-window-control",
 ]
 
 # IN both sets: every window kind shows terminal tabs, which paint with the
@@ -117,6 +119,15 @@ commands.allow = ["titlebar_tabs_preference"]
 identifier = "allow-set-titlebar-tabs-preference"
 description = "Enables the set_titlebar_tabs_preference command (the Settings toggle's write of the desktop's title bar tabs preference)."
 commands.allow = ["set_titlebar_tabs_preference"]
+
+# IN both sets: a page that draws its tab bar in a frameless title bar draws
+# the window controls too, and the command acts on the INVOKING window only,
+# as its own minimize, maximize and close buttons would; close is a close
+# request that the desktop's close handling can hold or turn into a hide.
+[[permission]]
+identifier = "allow-titlebar-window-control"
+description = "Enables the titlebar_window_control command (the calling window's minimize, maximize or restore, and close, from window controls its page draws)."
+commands.allow = ["titlebar_window_control"]
 
 [[permission]]
 identifier = "allow-set-launcher-focus-color"

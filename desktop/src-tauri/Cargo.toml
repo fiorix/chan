@@ -111,7 +111,11 @@ url = { workspace = true }
 #   handles to CONOUT$/CONIN$, or every println! is discarded (see main.rs
 #   `attach_parent_console_for_cli`). CreateFileW pulls in Security for the
 #   SECURITY_ATTRIBUTES type in its signature even though we pass null.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security"] }
+# - Graphics_Gdi + System_LibraryLoader: a window whose title bar hosts its
+#   page's tab bar measures its frame (ClientToScreen) against the frame a
+#   decorated window would have (AdjustWindowRectExForDpi, looked up at run
+#   time), so a hide and restore keeps its size (titlebar_tabs.rs).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }
 
 # The desktop self-updater. FreeBSD has no signed updater feed, and the
 # plugin's AppImage code compiles on every BSD while declaring the crates it

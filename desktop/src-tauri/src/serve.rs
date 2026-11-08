@@ -2007,9 +2007,10 @@ pub(crate) fn capture_window_geometry(app: &AppHandle<impl Runtime>, label: &str
     // size would grow the window by the title bar on every hide and rebuild,
     // so the height is stored as the normal title bar would leave it.
     let state = app.state::<Arc<AppState>>();
+    let overlap = crate::titlebar_tabs::title_bar_overlap(&window, &state.titlebar_windows);
     let height = crate::titlebar_tabs::normal_inner_height(
         lsize.height,
-        state.titlebar_windows.title_bar_height(label),
+        overlap,
         window.is_fullscreen().unwrap_or(false),
     );
     let px = lpos.x.round() as i32;
@@ -5040,8 +5041,8 @@ mod tests {
     }
 
     /// A page's tab bar in the title bar reaches every window class that
-    /// shows the workspace app: the title bar commands and the preference
-    /// pair, and the two window
+    /// shows the workspace app: the title bar commands, the preference pair,
+    /// the window controls a page draws on Windows, and the two window
     /// commands Tauri's drag-region script invokes from the page on a
     /// mousedown in the bar's drag space (`start_dragging`) and on a double
     /// click there (`internal_toggle_maximize`). The script is Tauri's own
@@ -5056,6 +5057,7 @@ mod tests {
                 "titlebar_chrome",
                 "titlebar_tabs_preference",
                 "set_titlebar_tabs_preference",
+                "titlebar_window_control",
             ] {
                 assert!(
                     app_commands.contains(command),
@@ -5080,6 +5082,7 @@ mod tests {
         let (app_commands, plugin_permissions) =
             effective_grants(crate::terminal_mode::WINDOW_LABEL, "http://127.0.0.1:4090");
         assert!(app_commands.contains("set_titlebar_tabs"));
+        assert!(app_commands.contains("titlebar_window_control"));
         assert!(plugin_permissions.contains("core:window:allow-start-dragging"));
     }
 

@@ -411,9 +411,9 @@ pub struct Config {
     /// (their host installs no store).
     #[serde(default)]
     pub launcher_theme: Option<String>,
-    /// Whether a window's page puts its tab bar in the title bar, on macOS
-    /// (`titlebar_tabs.rs`). Off by default; Settings writes it, and it
-    /// applies to every window the desktop builds, whatever tenant it shows.
+    /// Whether a window's page puts its tab bar in the title bar, on macOS and
+    /// Windows (`titlebar_tabs.rs`). Off by default; Settings writes it, and
+    /// it applies to every window the desktop builds, whatever tenant it shows.
     #[serde(default)]
     pub titlebar_tabs: bool,
 }
