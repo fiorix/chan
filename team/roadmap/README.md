@@ -27,6 +27,8 @@ Opened 2026-11-07 at the v0.125.0 close with six items that release's readings a
 
 On 2026-11-08 the owner added six items found while writing the chan.app tutorials. With Chan Desktop running, `chan close` of a standalone `chan serve` prints `closed:` while the server keeps running ([closelie]). `chan serve --help` still calls Cmd+P Team Work, though the desktop binds it to the Computers screen ([cmdphelp]). configure.sh's admin.env leaves the admin CLI on identity's public port, where no admin route answers ([adminenv]). The gateway setup defaults to the maintainer's domains, its docs disagree on where devservers dial in, and the sdme provisioner claims a default tunnel URL chan does not have ([gwdefaults]). The account page tells users to run a tunnel without its URL, with the token on the command line ([tunnelhint]). Ten statements in the manual and the design docs contradict the product ([docsdrift]).
 
+The same day, planning the chan.app WireGuard rollout, the owner found that v0.125.0's one ingress per gateway would carry every enrolled desktop's traffic for every proxy node through one host, and decided that each node terminates its own WireGuard and the desktop runs one tunnel per node, replacing that release's decision ([wgnode]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [time-bound tests go red on a loaded host][timebound] | not started | design |
@@ -41,6 +43,7 @@ On 2026-11-08 the owner added six items found while writing the chan.app tutoria
 | [the gateway setup defaults name chan.app][gwdefaults] | not started | decision |
 | [the account page's tunnel hint has no URL][tunnelhint] | not started | build |
 | [the manual and design docs contradict chan][docsdrift] | partly built | build |
+| [one WireGuard ingress per proxy node][wgnode] | not started | decision |
 
 [timebound]: v0.126.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.126.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -54,6 +57,7 @@ On 2026-11-08 the owner added six items found while writing the chan.app tutoria
 [gwdefaults]: v0.126.0/the-gateway-setup-defaults-name-the-maintainers-deployment.md
 [tunnelhint]: v0.126.0/the-account-pages-devserver-hint-gives-a-tunnel-command-without-its-url.md
 [docsdrift]: v0.126.0/the-manual-and-design-docs-describe-behavior-chan-does-not-have.md
+[wgnode]: v0.126.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 
 ## Completed
 
