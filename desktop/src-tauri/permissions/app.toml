@@ -32,6 +32,12 @@ permissions = [
   "allow-set-launcher-focus-color",
   "allow-terminal-background-opacity",
   "allow-set-terminal-background-opacity",
+  "allow-set-titlebar-tabs",
+  "allow-titlebar-chrome",
+  "allow-titlebar-tabs-preference",
+  "allow-set-titlebar-tabs-preference",
+  "allow-titlebar-window-control",
+  "allow-titlebar-menu-popup",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -71,6 +77,12 @@ permissions = [
   "allow-set-launcher-focus-color",
   "allow-terminal-background-opacity",
   "allow-set-terminal-background-opacity",
+  "allow-set-titlebar-tabs",
+  "allow-titlebar-chrome",
+  "allow-titlebar-tabs-preference",
+  "allow-set-titlebar-tabs-preference",
+  "allow-titlebar-window-control",
+  "allow-titlebar-menu-popup",
 ]
 
 # IN both sets: every window kind shows terminal tabs, which paint with the
@@ -86,6 +98,51 @@ commands.allow = ["terminal_background_opacity"]
 identifier = "allow-set-terminal-background-opacity"
 description = "Enables the set_terminal_background_opacity command (the Settings slider's write of the desktop's terminal background opacity)."
 commands.allow = ["set_terminal_background_opacity"]
+
+# IN both sets: every window kind that shows the workspace app can host its
+# tab bar in the title bar, and both commands act on the INVOKING window only,
+# changing its title bar style and reading its window controls, nothing else.
+[[permission]]
+identifier = "allow-set-titlebar-tabs"
+description = "Enables the set_titlebar_tabs command (the calling window's title bar hosts its page's tab bar, or returns to normal)."
+commands.allow = ["set_titlebar_tabs"]
+
+[[permission]]
+identifier = "allow-titlebar-chrome"
+description = "Enables the titlebar_chrome command (the calling window's title bar mode and the room its window controls take)."
+commands.allow = ["titlebar_chrome"]
+
+# IN both sets, like the terminal background opacity pair: the preference is
+# the desktop's own, read from and written to its config, never the window's
+# tenant, and the write changes nothing but which windows draw tabs in their
+# title bar.
+[[permission]]
+identifier = "allow-titlebar-tabs-preference"
+description = "Enables the titlebar_tabs_preference command (the desktop's choice to put a window's tabs in its title bar)."
+commands.allow = ["titlebar_tabs_preference"]
+
+[[permission]]
+identifier = "allow-set-titlebar-tabs-preference"
+description = "Enables the set_titlebar_tabs_preference command (the Settings toggle's write of the desktop's title bar tabs preference)."
+commands.allow = ["set_titlebar_tabs_preference"]
+
+# IN both sets: a page that draws its tab bar in a frameless title bar draws
+# the window controls too, and the command acts on the INVOKING window only,
+# as its own minimize, maximize and close buttons would; close is a close
+# request that the desktop's close handling can hold or turn into a hide.
+[[permission]]
+identifier = "allow-titlebar-window-control"
+description = "Enables the titlebar_window_control command (the calling window's minimize, maximize or restore, and close, from window controls its page draws)."
+commands.allow = ["titlebar_window_control"]
+
+# IN both sets: the menus a frameless title bar draws on Windows while the
+# window's Computers launcher shows are the launcher menubar's own, popped up
+# over the INVOKING window only; a click in one runs what the menubar item
+# runs, and the command refuses any window not in that state.
+[[permission]]
+identifier = "allow-titlebar-menu-popup"
+description = "Enables the titlebar_menu_popup command (the launcher menubar's File, Edit and View, popped up from the calling window's title bar menus)."
+commands.allow = ["titlebar_menu_popup"]
 
 [[permission]]
 identifier = "allow-set-launcher-focus-color"

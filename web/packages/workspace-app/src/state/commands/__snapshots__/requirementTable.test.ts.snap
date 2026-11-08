@@ -87,6 +87,7 @@ app.pane.next any
 app.pane.prev any
 app.pane.splitDown any
 app.pane.splitRight any
+app.pane.tree any
 app.reports.disable workspace
 app.reports.enable workspace
 app.screensaver.disable workspace
@@ -152,6 +153,7 @@ app.pane.next any
 app.pane.prev any
 app.pane.splitDown any
 app.pane.splitRight any
+app.pane.tree any
 app.settings.open any
 app.tab.close any
 app.tab.next any
@@ -232,6 +234,7 @@ app.pane.next any
 app.pane.prev any
 app.pane.splitDown any
 app.pane.splitRight any
+app.pane.tree any
 app.settings.open any
 app.slides.present files
 app.slides.preview files
@@ -318,6 +321,7 @@ app.pane.next any
 app.pane.prev any
 app.pane.splitDown any
 app.pane.splitRight any
+app.pane.tree any
 app.settings.open any
 app.slides.new drafts
 app.slides.present files
@@ -365,6 +369,7 @@ app.pane.next any
 app.pane.prev any
 app.pane.splitDown any
 app.pane.splitRight any
+app.pane.tree any
 app.settings.open any
 app.tab.close any
 app.tab.next any

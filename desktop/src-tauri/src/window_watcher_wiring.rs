@@ -831,6 +831,7 @@ impl TauriNativeSurface {
                 tracing::warn!(window = %label, error = %e, "window watcher: retitling failed");
                 return;
             }
+            crate::titlebar_tabs::title_changed(&window);
             applied_titles
                 .lock()
                 .unwrap()

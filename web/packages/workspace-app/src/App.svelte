@@ -46,6 +46,13 @@
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ImportContactsModal from "./components/ImportContactsModal.svelte";
   import Workspace from "./components/Workspace.svelte";
+  import WindowTabBar from "./components/WindowTabBar.svelte";
+  import PaneTreeOverlay from "./components/PaneTreeOverlay.svelte";
+  import {
+    startWindowTabBar,
+    windowTabBar,
+    windowTabBarSettled,
+  } from "./state/windowTabBar.svelte";
   import {
     applyInitialTheme,
     bootstrap,
@@ -386,6 +393,10 @@
     return installSeeThroughBackdrop(workspaceBackdrop);
   });
 
+  // The window tab bar is fixed over the top of the window, so the app
+  // starts below it.
+  const windowTabBarInset = $derived(windowTabBar.on ? `${windowTabBar.height}px` : undefined);
+
   // Single-writer bridge from per-tab read mode to the window-level
   // readMode flag (which workspaces the bottom pill's grey state and
   // the idle tracker's read-mode timing window). Computing this in
@@ -447,6 +458,10 @@
     // Follow chan-desktop's terminal background opacity for the life of the
     // page. A no-op in a browser tab, where the terminals stay opaque.
     void startDesktopTerminalOpacity();
+    // Decide the window tab bar mode and, in chan-desktop, opt in or out of
+    // the overlay title bar; the bootstrap below waits for it.
+    const windowTabBarStart = startWindowTabBar();
+    stopTrackers.push(windowTabBarStart.stop);
     // Live per-library focus-colour broadcast. Subscribe ONCE PER
     // WINDOW (the var is per-document; <Pane> is per leaf node, so per-pane would
     // open redundant sockets) to this library's colour watch and recolour
@@ -505,6 +520,9 @@
     // Hook pagehide BEFORE bootstrap so a fast reload during the
     // initial load still flushes any in-flight session changes.
     installSessionFlushHook();
+    // The bar's mode and the desktop's title bar settle before the layout
+    // restores, so the first terminal fits once, to the size it keeps.
+    if (windowTabBarStart.pending) await windowTabBarSettled(windowTabBarStart.pending);
     await bootstrap();
     if (windowCaps.workspace) await loadExtensions();
     // The docked FB default lives in chan-server's
@@ -1851,7 +1869,13 @@
   });
 </script>
 
-<div class="app" class:pane-mode={paneMode.active} data-focus-color={focusColorForWindow()}>
+<div class="app" class:pane-mode={paneMode.active} class:window-tab-bar={windowTabBar.on} style:padding-top={windowTabBarInset} data-focus-color={focusColorForWindow()}>
+  <!-- The window tab bar holds the active pane's tab strip in place of every
+       pane's own; fixed over the top of the window, inside the app so the
+       strip it hosts reads the window's focus colour from here. -->
+  {#if windowTabBar.on}
+    <WindowTabBar />
+  {/if}
   <!-- The docked file browsers render wherever there is a filesystem to
        list: a workspace window's workspace, or a standalone window whose
        tenant serves one. Without either there is no /api/fs, and the pane
@@ -1886,6 +1910,8 @@
 <WorkspaceWarningsModal />
 <SearchPanel />
 <CommandLauncher />
+<!-- Every pane of this window, its sides and their tabs. -->
+<PaneTreeOverlay />
 <SettingsOverlay />
 <ImportContactsModal
   open={importContactsPanel.open}
@@ -2248,6 +2274,11 @@
   .app[data-focus-color="orange"] { --pane-active-focus: #f97316; }
   .app[data-focus-color="green"] { --pane-active-focus: #22c55e; }
   .app[data-focus-color="pink"] { --pane-active-focus: #ff5fb7; }
+  /* The window tab bar is fixed over the top of the window; the inline top
+     padding starts the panes and the docked file browsers below it. */
+  .app.window-tab-bar {
+    box-sizing: border-box;
+  }
   .app.pane-mode :global(.pane) {
     position: relative;
     transition: box-shadow 90ms ease;

@@ -26,7 +26,7 @@ function paneSelector(paneId) {
 }
 
 function tabSelector(paneId) {
-  return `${paneSelector(paneId)} > .pane-card > .pane-card-inner > .pane-card-face > .tabs > [role="tab"]`;
+  return `${paneSelector(paneId)} > .pane-card > .pane-card-inner > .pane-card-face > .tabs .tab-row > [role="tab"]`;
 }
 
 async function settle(page) {
@@ -44,7 +44,7 @@ async function paneState(page, paneId) {
     if (!toggle) throw new Error("target pane has no side toggle");
     const tabs = [
       ...pane.querySelectorAll(
-        ":scope > .pane-card > .pane-card-inner > .pane-card-face > .tabs > [role='tab']",
+        ":scope > .pane-card > .pane-card-inner > .pane-card-face > .tabs .tab-row > [role='tab']",
       ),
     ];
     const activeIndex = tabs.findIndex(
@@ -75,7 +75,7 @@ async function waitForTabCount(page, paneId, count) {
   await page.waitForFunction(
     (id, wanted) =>
       document.querySelectorAll(
-        `.pane[data-pane-id="${id}"] > .pane-card > .pane-card-inner > .pane-card-face > .tabs > [role="tab"]`,
+        `.pane[data-pane-id="${id}"] > .pane-card > .pane-card-inner > .pane-card-face > .tabs .tab-row > [role="tab"]`,
       ).length === wanted,
     { timeout: 10_000 },
     paneId,

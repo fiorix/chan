@@ -25,8 +25,18 @@ type UnlistenFn = () => void;
 /// workspace app has no `@tauri-apps/api` dependency, so events are reached
 /// through the global the same way invokes are.
 interface TauriEventApi {
-  listen<T>(event: string, handler: (e: { payload: T }) => void): Promise<UnlistenFn>;
+  listen<T>(
+    event: string,
+    handler: (e: { payload: T }) => void,
+    options?: { target: TauriEventTarget },
+  ): Promise<UnlistenFn>;
 }
+
+/// The window a listener hears events for. Tauri hands a listener registered
+/// without a target every event, including one the desktop sent to another
+/// window; a listener naming its own webview window hears only the events
+/// sent to it, and broadcasts.
+export type TauriEventTarget = { kind: "WebviewWindow"; label: string };
 
 type TauriWindow = Window &
   typeof globalThis & {
@@ -268,19 +278,31 @@ export async function readDroppedPaths(): Promise<string[]> {
   }
 }
 
+/// This page's own webview window as an event target, or null when the
+/// webview does not say its label.
+export function ownWebviewWindowTarget(): TauriEventTarget | null {
+  const label = tauriLabels().webviewLabel;
+  return label ? { kind: "WebviewWindow", label } : null;
+}
+
 /// Subscribe to an event chan-desktop emits to its windows, delivering each
-/// payload to `handler`. Resolves to an unlisten handle. Best-effort: a
-/// missing event bridge (a browser tab) or a refused `listen` (a window whose
-/// grant withholds it) degrades to a no-op, so a page that follows an event
-/// boots the same everywhere and simply never hears it.
+/// payload to `handler`. Without `target` the listener hears the event
+/// whichever window it was sent to; an event the desktop sends one window
+/// passes this page's own `target` (`ownWebviewWindowTarget`). Resolves to an
+/// unlisten handle. Best-effort: a missing event bridge (a browser tab) or a
+/// refused `listen` (a window whose grant withholds it) degrades to a no-op,
+/// so a page that follows an event boots the same everywhere and simply never
+/// hears it.
 export async function onTauriEvent<T>(
   event: string,
   handler: (payload: T) => void,
+  target?: TauriEventTarget,
 ): Promise<UnlistenFn> {
   const api = (window as TauriWindow).__TAURI__?.event;
   if (!api?.listen) return () => {};
   try {
-    return await api.listen<T>(event, (e) => handler(e.payload));
+    const deliver = (e: { payload: T }) => handler(e.payload);
+    return await (target ? api.listen<T>(event, deliver, { target }) : api.listen<T>(event, deliver));
   } catch (err) {
     console.warn(`onTauriEvent(${event}) failed:`, err);
     return () => {};
@@ -523,6 +545,95 @@ export async function setWindowFullscreen(on: boolean): Promise<void> {
   } catch (err) {
     console.warn("setWindowFullscreen: set_fullscreen IPC failed", err);
   }
+}
+
+/// What chan-desktop reports about the title bar a window tab bar draws
+/// into. Every length is in CSS px of the calling page: the desktop converts
+/// through the webview zoom it tracks. `insetLeft` and `insetRight` are the
+/// edges the bar keeps free for the window controls, `controlsCenterY` is the
+/// controls' vertical centre measured from the top of the page, and all three
+/// are 0 while the overlay title bar is not in effect or the window is
+/// fullscreen. `drawControls` says the page draws the window's minimize,
+/// maximize or restore, and close buttons in `insetRight` (Windows, where the
+/// window has no frame in the mode; macOS draws its own traffic lights), and
+/// `maximized` whether the window is maximized, which picks the maximize or
+/// restore button. `menus` lists, in order, the menus the bar draws at its
+/// left while the window's Computers launcher covers the page: the launcher
+/// menubar's File, Edit and View on Windows in the mode, where the window
+/// wears no menubar, and none elsewhere. Field names are the desktop-side
+/// contract (serde camelCase).
+export type TitlebarChrome = {
+  active: boolean;
+  insetLeft: number;
+  insetRight: number;
+  controlsCenterY: number;
+  fullscreen: boolean;
+  drawControls: boolean;
+  maximized: boolean;
+  menus: TitlebarMenu[];
+};
+
+/// A menu the window tab bar draws in place of a menubar: the id the desktop
+/// pops it up by and the title the bar shows.
+export type TitlebarMenu = {
+  id: string;
+  label: string;
+};
+
+/// What a window control drawn by the page asks of its window.
+export type TitlebarWindowAction = "minimize" | "toggleMaximize" | "close";
+
+/// Turn this window's overlay title bar on or off for the window tab bar,
+/// telling the desktop how tall the bar is (`bandHeight`, CSS px) so it can
+/// keep its own panels below it. Answers the chrome now in effect. The
+/// desktop never forces the overlay on a page: only this call turns it on.
+/// Throws off-desktop and on IPC/ACL refusal.
+export async function setTitlebarTabs(enabled: boolean, bandHeight: number): Promise<TitlebarChrome> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<TitlebarChrome>("set_titlebar_tabs", { enabled, bandHeight });
+}
+
+/// The title bar chrome now in effect for this window. There is no event for
+/// a change: fullscreen transitions and zoom both resize the page, so the
+/// caller asks again on `resize`. Throws off-desktop and on IPC/ACL refusal.
+export async function readTitlebarChrome(): Promise<TitlebarChrome> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<TitlebarChrome>("titlebar_chrome");
+}
+
+/// Minimize, maximize or restore, or close the calling window, for the window
+/// controls the page draws while the chrome reports `drawControls`. `close`
+/// goes the way the native close button goes, confirm and all. Throws
+/// off-desktop and on IPC/ACL refusal.
+export async function titlebarWindowControl(action: TitlebarWindowAction): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("titlebar_window_control", { action });
+}
+
+/// Pop up the title bar menu `menu`, an id the chrome's `menus` lists, with
+/// its top-left corner at `x`, `y` in this page's CSS px. The menu is the
+/// launcher menubar's own, so a pick in it does what the menubar item does.
+/// Settles once the menu has closed. Throws off-desktop and on IPC/ACL
+/// refusal.
+export async function titlebarMenuPopup(menu: string, x: number, y: number): Promise<void> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  await tauriInvoke("titlebar_menu_popup", { menu, x, y });
+}
+
+/// Whether chan-desktop's windows put their tabs in the title bar: the
+/// desktop's own preference, the same for every window whatever tenant it
+/// shows. Throws off-desktop and on IPC/ACL refusal.
+export async function readTitlebarTabsPreference(): Promise<boolean> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<boolean>("titlebar_tabs_preference");
+}
+
+/// Store the desktop's title bar tabs preference. The desktop answers the
+/// stored value and emits `titlebar-tabs-preference` (`{ on }`) to every
+/// window, this one included. Throws off-desktop and on IPC/ACL refusal.
+export async function writeTitlebarTabsPreference(on: boolean): Promise<boolean> {
+  if (!isTauriDesktop()) throw new Error("not running under Tauri");
+  return await tauriInvoke<boolean>("set_titlebar_tabs_preference", { on });
 }
 
 /// Open the platform's web inspector. On chan-desktop calls the

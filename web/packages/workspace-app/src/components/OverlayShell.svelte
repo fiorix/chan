@@ -26,6 +26,7 @@
   import type { Snippet } from "svelte";
   import { overlayDepth, type OverlayId } from "../state/store.svelte";
   import { overlayMaximized } from "../state/pageWidth.svelte";
+  import { windowControlsBand } from "../state/windowTabBar.svelte";
   // Each wrapped overlay renders its own maximize/restore + close
   // chrome inside its header (left and right edges respectively),
   // so this shell only provides the backdrop, the panel container,
@@ -101,6 +102,15 @@
         : "min(1200px, calc(100vw - 48px))"),
   );
 
+  // A Windows title bar that draws the window controls keeps them above
+  // every overlay, so a full-height panel starts below the band, or its own
+  // header's close button would sit under the window's. Elsewhere the
+  // stylesheet's gutter stands.
+  const bandGutter = $derived.by(() => {
+    const band = windowControlsBand();
+    return align === "stretch" && band > 0 ? `${band + 8}px` : undefined;
+  });
+
   function onContextMenu(e: MouseEvent): void {
     if (!onBackdropContextMenu) return;
     e.preventDefault();
@@ -117,6 +127,7 @@
     class:top={align === "top"}
     class:center={align === "center"}
     style="z-index: {zIndex};"
+    style:padding-top={bandGutter}
     onclick={onClose}
     oncontextmenu={onContextMenu}
   >

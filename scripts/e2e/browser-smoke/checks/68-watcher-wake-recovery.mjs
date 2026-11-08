@@ -236,7 +236,7 @@ export default {
         });
         terminalNames.push(name);
         const counts = async () => {
-          const tabs = await page.$$eval(".tabs > .tab .path", (nodes) => nodes.map((node) => node.textContent?.trim() ?? ""));
+          const tabs = await page.$$eval(".tabs .tab-row > .tab .path", (nodes) => nodes.map((node) => node.textContent?.trim() ?? ""));
           const { stdout } = await ctx.exec(ctx.chanBin, ["shell", "terminal", "list", "--json"], {
             cwd: ctx.workspaceDir,
             env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: WINDOW_ID },

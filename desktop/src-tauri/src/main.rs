@@ -22,6 +22,7 @@ mod runtime_capability;
 mod serve;
 mod terminal_mode;
 mod terminal_opacity;
+mod titlebar_tabs;
 // Reads the updater plugin's offered update, and FreeBSD builds without
 // the plugin (see Cargo.toml), so the module goes with it.
 #[cfg(not(target_os = "freebsd"))]
@@ -130,6 +131,9 @@ pub struct AppState {
     /// level without spawning a JS eval round-trip to read the
     /// current. Missing entries read as 1.0 (the chan-desktop default).
     pub live_window_zooms: Mutex<HashMap<String, f64>>,
+    /// The windows whose title bar hosts their page's tab bar, keyed by
+    /// window label (`titlebar_tabs.rs`). Dropped on window destroy.
+    pub(crate) titlebar_windows: titlebar_tabs::TitlebarWindows,
     /// Per-live-window display number, keyed by window label, with the
     /// base title it was assigned under. Drives the `"{title} Window
     /// {N}"` suffix so the OS Window menu disambiguates windows that
@@ -307,6 +311,7 @@ impl AppState {
             embedded: OnceLock::new(),
             local_watcher_view: OnceLock::new(),
             live_window_zooms: Mutex::new(HashMap::new()),
+            titlebar_windows: titlebar_tabs::TitlebarWindows::default(),
             window_numbers: Mutex::new(HashMap::new()),
             window_title_overrides: Mutex::new(HashMap::new()),
             privacy_titles: Mutex::new(HashMap::new()),
@@ -4949,6 +4954,7 @@ fn apply_zoom(window: &tauri::WebviewWindow, state: &AppState, next: f64) -> Res
         .lock()
         .unwrap()
         .insert(window.label().to_string(), clamped);
+    titlebar_tabs::zoom_changed(window);
     Ok(())
 }
 
@@ -5403,6 +5409,20 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // as the terminal_opacity::EVENT event.
         terminal_opacity::terminal_background_opacity,
         terminal_opacity::set_terminal_background_opacity,
+        // A page's tab bar in the title bar, on macOS and Windows: the page
+        // opts in and reads the room the window controls take; on the GTK
+        // desktops both answer inactive. On Windows the page draws the window
+        // controls and acts through titlebar_window_control, and under the
+        // Computers launcher draws the launcher's menus and pops each up
+        // through titlebar_menu_popup. The desktop's preference says whether
+        // pages opt in, and changes reach every window as the
+        // titlebar_tabs::PREFERENCE_EVENT event.
+        titlebar_tabs::set_titlebar_tabs,
+        titlebar_tabs::titlebar_chrome,
+        titlebar_tabs::titlebar_tabs_preference,
+        titlebar_tabs::set_titlebar_tabs_preference,
+        titlebar_tabs::titlebar_window_control,
+        titlebar_tabs::titlebar_menu_popup,
     ]
 }
 
@@ -6123,7 +6143,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     let menu = {
         // View ▸ Toggle Launcher, Cmd+P. The one global menubar routes it
-        // by the focused window (`launcher_panel::toggle_for_focused`): an
+        // by the focused window (`launcher_panel::toggle_for_menu`): an
         // SPA window shows or hides its launcher, and with nothing to host
         // it a standalone terminal opens. A window's own webview gets Cmd+P
         // first: WKWebView hands a Command chord to the menubar only when the
@@ -6286,15 +6306,62 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Route every menubar item click / accelerator. Menu events carry only
-/// the item id -- never the source window -- so the dynamic Window-menu
-/// rows encode their window's label in the id (the `buried:` / `open:`
-/// namespaces); routing by `is_focused` is reserved for items
-/// that genuinely mean "the focused window" (and for macOS, whose single
-/// global menubar has no owning window). Off macOS only the launcher has
-/// a menubar, so the static items below fire from it alone.
+/// The window a title bar menu is popped up for
+/// (`titlebar_tabs::titlebar_menu_popup`), held for the menu event its pick
+/// sends: the event carries only the item id, and in that window the launcher
+/// holds the keyboard, so no window reports the focus. Set before the menu
+/// opens; muda queues the pick's event before the popup returns, and the
+/// popup then queues a clear behind it, so the next menu event takes the
+/// window and a dismissed menu leaves none behind. Main thread.
+static MENU_POPUP_HOST: Mutex<Option<String>> = Mutex::new(None);
+
+/// Name the window a title bar menu is popped up for, or clear it. Only
+/// Windows draws title bar menus.
+#[cfg(any(windows, test))]
+pub(crate) fn set_menu_popup_host(host: Option<String>) {
+    *MENU_POPUP_HOST.lock().unwrap_or_else(|e| e.into_inner()) = host;
+}
+
+/// The window the menu event being handled was popped up for, if any.
+fn take_menu_popup_host() -> Option<String> {
+    MENU_POPUP_HOST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
+/// Route every menubar item click / accelerator. tauri hands every menu
+/// event to this one app-wide listener, a click in a popped-up menu as
+/// much as one in a menubar, so an item does the same wherever it shows.
 fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
-    let id = event.id().as_ref();
+    let host = take_menu_popup_host();
+    run_menu_item(app, event.id().as_ref(), host.as_deref());
+}
+
+/// The window a menu item that acts on one window acts on: the window it was
+/// invoked for, when its route knows one (a title bar menu, the launcher's
+/// chord), else the focused window.
+pub(crate) fn menu_window<'a>(
+    invoked_for: Option<&'a str>,
+    focused: Option<&'a str>,
+) -> Option<&'a str> {
+    invoked_for.or(focused)
+}
+
+/// Run the menu item `id` as a click on it or its accelerator does. Menu
+/// events carry only the item id -- never the source window -- so the
+/// dynamic Window-menu rows encode their window's label in the id (the
+/// `buried:` / `open:` namespaces); routing by `is_focused` is reserved for
+/// items that genuinely mean "the focused window" (and for macOS, whose
+/// single global menubar has no owning window). Off macOS the static items
+/// below fire from the launcher's menubar, from the menus a Windows title
+/// bar draws in its place (`titlebar_tabs::titlebar_menu_popup`), and from
+/// the launcher key bridge's chords there (launcher_panel.rs). Those two
+/// routes pass the window they act for as `invoked_for`, since the launcher
+/// holds the keyboard there and no window reports the focus; the items that
+/// act on one window (Toggle Launcher, Close Window) act on it, and on the
+/// focused window when it is `None`, as from a menubar.
+pub(crate) fn run_menu_item(app: &tauri::AppHandle, id: &str, invoked_for: Option<&str>) {
     // Dynamic Window-menu entries (buried windows) carry their
     // window label in the id; route by prefix before the static
     // match.
@@ -6313,7 +6380,7 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     }
     match id {
         "view-toggle-launcher" => {
-            launcher_panel::toggle_for_focused(app);
+            launcher_panel::toggle_for_menu(app, invoked_for);
         }
         "app-new-window" => {
             if let Err(e) = open_new_window_for_focused_workspace(app) {
@@ -6327,8 +6394,8 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         "app-new-terminal" => {
             // macOS's single global menubar routes New Terminal by the
-            // focused window's kind. Off-mac the item lives only on the
-            // launcher's menubar, is labelled New Standalone Terminal,
+            // focused window's kind. Off-mac the item lives only in the
+            // launcher's File menu, is labelled New Standalone Terminal,
             // and always means a standalone window.
             #[cfg(target_os = "macos")]
             handle_new_terminal(app);
@@ -6336,7 +6403,7 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             spawn_terminal_window(app);
         }
         "app-close-window" => {
-            handle_close_window(app);
+            handle_close_window(app, invoked_for);
         }
         "chan-about" => {
             if let Err(e) = open_about_window(app) {
@@ -6370,7 +6437,47 @@ const OPEN_MENU_HEADER_ID: &str = "open-header";
 /// the only off-mac bar -- uses this id for its Window submenu, so the
 /// dynamic-tail rebuild can find it by one key.
 #[cfg(not(target_os = "macos"))]
-const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
+const LINUX_WINDOW_SUBMENU_ID: &str = LauncherMenu::Window.id();
+
+/// A top-level menu of the launcher menubar (off macOS), by the stable id
+/// its submenu carries. On Windows a window whose title bar holds its page's
+/// tab bar wears no menubar, and the bar draws the menus
+/// `titlebar_tabs.rs` names, popping each up by this id, so the menubar and
+/// the bar show one definition ([`launcher_submenu`]).
+#[cfg(any(not(target_os = "macos"), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LauncherMenu {
+    File,
+    Edit,
+    View,
+    Window,
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+impl LauncherMenu {
+    /// The menubar's menus, in their order.
+    pub(crate) const ALL: [Self; 4] = [Self::File, Self::Edit, Self::View, Self::Window];
+
+    /// The id of the menu's submenu.
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::File => "chan-file-submenu",
+            Self::Edit => "chan-edit-submenu",
+            Self::View => "chan-view-submenu",
+            Self::Window => "chan-window-submenu",
+        }
+    }
+
+    /// The menu's title in the menubar.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::View => "View",
+            Self::Window => "Window",
+        }
+    }
+}
 
 /// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
@@ -6382,7 +6489,9 @@ const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 /// its own page is menu-less and gets its chords from KEY_BRIDGE_JS, which
 /// is why this bar keeps the Ctrl+Shift+T claim (the launcher webview
 /// loads no key bridge, so only a native accelerator can serve the chord
-/// there).
+/// there). On Windows a window whose title bar holds its page's tab bar
+/// wears no bar; there the page draws File, Edit and View and the
+/// launcher's own bridge carries the chords (launcher_panel.rs).
 ///
 /// "About Chan" opens a version dialog that also offers a manual update
 /// check - the only manual self-update entry point off macOS (the
@@ -6397,73 +6506,83 @@ const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 /// items muda does implement on GTK.
 #[cfg(not(target_os = "macos"))]
 fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    use tauri::menu::{MenuBuilder, SubmenuBuilder};
-    // File ▸ New Standalone Terminal always opens a fresh standalone
-    // terminal window (workspace windows reach their pane-terminal
-    // toggle through KEY_BRIDGE_JS instead).
-    let new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Standalone Terminal")
-        .accelerator("CmdOrCtrl+Shift+T")
-        .build(app)?;
-    let about = MenuItemBuilder::with_id("chan-about", "About Chan").build(app)?;
-    let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
-        .accelerator("CmdOrCtrl+Q")
-        .build(app)?;
-    // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
-    // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
-    // tab close there). The same handler as macOS's Cmd+W item
-    // routes it: the SPA's window close in SPA windows, the close
-    // button's hide on the connecting screen, native close
-    // elsewhere. On the launcher that means the launcher's own
-    // hide-on-close. SPA windows claim the same chord inside
-    // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
-    let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
-        .accelerator("CmdOrCtrl+Alt+W")
-        .build(app)?;
-    let file = SubmenuBuilder::new(app, "File")
-        .item(&new_terminal)
-        .item(&close_window)
-        .separator()
-        .item(&about)
-        .separator()
-        .item(&quit)
-        .build()?;
-    let edit = SubmenuBuilder::new(app, "Edit")
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
-    // View ▸ Toggle Launcher, Ctrl+Shift+P: the bar shows only with the
-    // launcher, so from the bar the item hides it (plain Ctrl+P stays a
-    // readline chord in a focused shell, which is why KEY_BRIDGE_JS claims
-    // the same Ctrl+Shift+P form to show it).
-    let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
-        .accelerator("CmdOrCtrl+Shift+P")
-        .build(app)?;
-    let view = SubmenuBuilder::new(app, "View")
-        .item(&toggle_launcher)
-        .build()?;
-    // New Window opens another window of the FOCUSED window's connection
-    // (open_new_window_for_focused_workspace): a standalone terminal with
-    // nothing focused. `CmdOrCtrl+Shift+N` (not plain
-    // Cmd+N) so the SPA's New Draft handler can claim Cmd+N without the
-    // menu accelerator intercepting first.
-    let new_window = MenuItemBuilder::with_id("app-new-window", "New Window")
-        .accelerator("CmdOrCtrl+Shift+N")
-        .build(app)?;
-    // Open the FOCUSED workspace window's contents in the system browser.
-    let open_in_browser =
-        MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
-    let window = SubmenuBuilder::with_id(app, LINUX_WINDOW_SUBMENU_ID, "Window")
-        .item(&new_window)
-        .item(&open_in_browser)
-        .build()?;
-    MenuBuilder::new(app)
-        .item(&file)
-        .item(&edit)
-        .item(&view)
-        .item(&window)
-        .build()
+    let mut menu = tauri::menu::MenuBuilder::new(app);
+    for which in LauncherMenu::ALL {
+        menu = menu.item(&launcher_submenu(app, which)?);
+    }
+    menu.build()
+}
+
+/// One menu of the launcher menubar, with its items: what the menubar
+/// shows and what a window tab bar pops up in its place. Each item's id is
+/// what `handle_menu_event` routes on, wherever the item is clicked.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn launcher_submenu(
+    app: &tauri::AppHandle,
+    which: LauncherMenu,
+) -> tauri::Result<Submenu<tauri::Wry>> {
+    let submenu = tauri::menu::SubmenuBuilder::with_id(app, which.id(), which.label());
+    match which {
+        LauncherMenu::File => {
+            // File > New Standalone Terminal always opens a fresh standalone
+            // terminal window (workspace windows reach their pane-terminal
+            // toggle through KEY_BRIDGE_JS instead).
+            let new_terminal =
+                MenuItemBuilder::with_id("app-new-terminal", "New Standalone Terminal")
+                    .accelerator("CmdOrCtrl+Shift+T")
+                    .build(app)?;
+            let about = MenuItemBuilder::with_id("chan-about", "About Chan").build(app)?;
+            let quit = MenuItemBuilder::with_id("chan-quit", "Quit")
+                .accelerator("CmdOrCtrl+Q")
+                .build(app)?;
+            // Close Window on Linux/Windows rides Ctrl+Alt+W (plain
+            // Ctrl+W stays a terminal readline chord, and Ctrl+Shift+W is
+            // tab close there). The same handler as macOS's Cmd+W item
+            // routes it: the SPA's window close in SPA windows, the close
+            // button's hide on the connecting screen, native close
+            // elsewhere. On the launcher that means the launcher's own
+            // hide-on-close. SPA windows claim the same chord inside
+            // KEY_BRIDGE_JS, mirroring the macOS menu/bridge shadow pair.
+            let close_window = MenuItemBuilder::with_id("app-close-window", "Close Window")
+                .accelerator("CmdOrCtrl+Alt+W")
+                .build(app)?;
+            submenu
+                .item(&new_terminal)
+                .item(&close_window)
+                .separator()
+                .item(&about)
+                .separator()
+                .item(&quit)
+                .build()
+        }
+        LauncherMenu::Edit => submenu.cut().copy().paste().select_all().build(),
+        LauncherMenu::View => {
+            // View > Toggle Launcher, Ctrl+Shift+P: the bar shows only with
+            // the launcher, so from the bar the item hides it (plain Ctrl+P
+            // stays a readline chord in a focused shell, which is why
+            // KEY_BRIDGE_JS claims the same Ctrl+Shift+P form to show it).
+            let toggle_launcher =
+                MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
+                    .accelerator("CmdOrCtrl+Shift+P")
+                    .build(app)?;
+            submenu.item(&toggle_launcher).build()
+        }
+        LauncherMenu::Window => {
+            // New Window opens another window of the FOCUSED window's
+            // connection (open_new_window_for_focused_workspace): a
+            // standalone terminal with nothing focused. `CmdOrCtrl+Shift+N`
+            // (not plain Cmd+N) so the SPA's New Draft handler can claim
+            // Cmd+N without the menu accelerator intercepting first.
+            let new_window = MenuItemBuilder::with_id("app-new-window", "New Window")
+                .accelerator("CmdOrCtrl+Shift+N")
+                .build(app)?;
+            // Open the FOCUSED workspace window's contents in the system
+            // browser.
+            let open_in_browser =
+                MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
+            submenu.item(&new_window).item(&open_in_browser).build()
+        }
+    }
 }
 
 /// The live Window submenu(s) the dynamic tail is stamped onto. macOS
@@ -7435,12 +7554,17 @@ fn handle_new_terminal(app: &tauri::AppHandle) {
 /// - Any other focused window (the About window) is closed natively.
 ///
 /// A window showing its launcher hides the launcher instead: the chord
-/// closes what is in front, and the page behind it is not in sight.
-fn handle_close_window(app: &tauri::AppHandle) {
-    let Some(window) = app
+/// closes what is in front, and the page behind it is not in sight. A title
+/// bar menu and the launcher's chord name their window (`invoked_for`); a
+/// menubar acts on the focused window.
+fn handle_close_window(app: &tauri::AppHandle, invoked_for: Option<&str>) {
+    let focused = app
         .webview_windows()
-        .into_values()
-        .find(|w| w.is_focused().unwrap_or(false))
+        .into_iter()
+        .find(|(_, w)| w.is_focused().unwrap_or(false))
+        .map(|(label, _)| label);
+    let Some(window) = menu_window(invoked_for, focused.as_deref())
+        .and_then(|label| app.get_webview_window(label))
     else {
         return;
     };
@@ -7543,6 +7667,114 @@ mod tests {
             .find(end)
             .unwrap_or_else(|| panic!("pin end bound {end:?} must follow start bound {start:?}"));
         &after[..stop]
+    }
+
+    /// The launcher menubar's four menus, in order, each under a stable id of
+    /// its own, which a window tab bar pops a menu up by.
+    #[test]
+    fn the_launcher_menus_have_stable_distinct_ids() {
+        assert_eq!(
+            LauncherMenu::ALL.map(LauncherMenu::label),
+            ["File", "Edit", "View", "Window"]
+        );
+        let ids: std::collections::HashSet<&str> = LauncherMenu::ALL
+            .into_iter()
+            .map(LauncherMenu::id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            LauncherMenu::ALL.len(),
+            "no two menus share an id"
+        );
+        // The id the Window menu's dynamic tail is found by.
+        assert_eq!(LauncherMenu::Window.id(), "chan-window-submenu");
+    }
+
+    /// One definition: the menubar is assembled from the per-menu builder,
+    /// each submenu carries its menu's id and label, and every menu event,
+    /// a popped-up menu's as much as the menubar's, runs the item it names.
+    #[test]
+    fn the_launcher_menubar_and_its_popups_share_one_definition() {
+        let src = include_str!("main.rs");
+        let (production, _) = src
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let build = source_region(
+            production,
+            "\nfn build_launcher_menu(",
+            "\npub(crate) fn launcher_submenu(",
+        );
+        assert!(build.contains("for which in LauncherMenu::ALL {"));
+        assert!(build.contains("menu = menu.item(&launcher_submenu(app, which)?);"));
+        let submenu = source_region(
+            production,
+            "\npub(crate) fn launcher_submenu(",
+            "\n/// The live Window submenu(s) the dynamic tail is stamped onto.",
+        );
+        assert!(submenu.contains("SubmenuBuilder::with_id(app, which.id(), which.label())"));
+        assert!(
+            production.contains("const LINUX_WINDOW_SUBMENU_ID: &str = LauncherMenu::Window.id();")
+        );
+        let handler = source_region(
+            production,
+            "\nfn handle_menu_event(",
+            "\npub(crate) fn run_menu_item(",
+        );
+        assert!(handler.contains("let host = take_menu_popup_host();"));
+        assert!(handler.contains("run_menu_item(app, event.id().as_ref(), host.as_deref());"));
+        // The items that act on one window take the window their route
+        // names, and only then the focused one.
+        let item = source_region(
+            production,
+            "\npub(crate) fn run_menu_item(",
+            "\n/// Window-menu item id namespace for buried-window entries",
+        );
+        assert!(item.contains("launcher_panel::toggle_for_menu(app, invoked_for);"));
+        assert!(item.contains("handle_close_window(app, invoked_for);"));
+        let close = source_region(
+            production,
+            "\nfn handle_close_window(",
+            "\n/// Close `window` by its kind",
+        );
+        let target = close
+            .find("menu_window(invoked_for, focused.as_deref())")
+            .expect("Close Window picks its window through menu_window");
+        let hide = close
+            .find("launcher_panel::hide(app, window.label());")
+            .expect("and hides that window's launcher");
+        assert!(target < hide);
+    }
+
+    /// An item that acts on one window acts on the window its route names
+    /// (a title bar menu's, the launcher chord's), where the launcher holds
+    /// the keyboard and no window reports the focus; only without one does it
+    /// take the focused window, as a menubar click or accelerator does.
+    #[test]
+    fn a_menu_item_acts_on_the_window_it_was_invoked_for() {
+        assert_eq!(
+            menu_window(Some("local::w-1"), None),
+            Some("local::w-1"),
+            "no window reports the focus while the launcher holds the keyboard"
+        );
+        assert_eq!(
+            menu_window(Some("local::w-1"), Some("local::w-2")),
+            Some("local::w-1")
+        );
+        assert_eq!(menu_window(None, Some("local::w-2")), Some("local::w-2"));
+        assert_eq!(menu_window(None, None), None);
+    }
+
+    /// The window a title bar menu was popped up for reaches the one menu
+    /// event that follows, and the clear queued behind a dismissed menu
+    /// leaves nothing for a later event.
+    #[test]
+    fn the_popup_window_reaches_the_next_menu_event_only() {
+        set_menu_popup_host(Some("local::w-1".to_string()));
+        assert_eq!(take_menu_popup_host().as_deref(), Some("local::w-1"));
+        assert_eq!(take_menu_popup_host(), None, "one event takes it");
+        set_menu_popup_host(Some("local::w-1".to_string()));
+        set_menu_popup_host(None);
+        assert_eq!(take_menu_popup_host(), None, "a dismissed menu's clear");
     }
 
     /// The ceiling is a construction property, so it is pinned at the
@@ -9836,7 +10068,7 @@ mod tests {
         // no visible window opens a terminal, and a boot that restores
         // nothing opens one too.
         assert!(production.contains("\"view-toggle-launcher\" => {"));
-        assert!(production.contains("launcher_panel::toggle_for_focused(app);"));
+        assert!(production.contains("launcher_panel::toggle_for_menu(app, invoked_for);"));
         assert!(production.contains(concat!("accelerator(\"CmdOrCtrl", "+P\")")));
         assert!(production.contains("has_visible_windows: false,"));
         assert!(production.contains("async fn ensure_boot_window(state: Arc<AppState>)"));

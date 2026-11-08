@@ -430,7 +430,12 @@ describe("KEY_BRIDGE_JS matches a layout's key to the US key naming the same sym
 });
 
 /// Run the launcher panel's bridge on a fresh host and press one key.
-function pressReloadBridge(init: KeyInit, userAgent = MAC_UA, withBridge = true): {
+function pressReloadBridge(
+  init: KeyInit,
+  userAgent = MAC_UA,
+  withBridge = true,
+  menuChords = false,
+): {
   reloads: number;
   toggles: number;
   ipc: string[];
@@ -457,7 +462,10 @@ function pressReloadBridge(init: KeyInit, userAgent = MAC_UA, withBridge = true)
     location: { reload: () => (reloads += 1) },
   };
   if (!withBridge) Reflect.deleteProperty(host, "__TAURI__");
+  // chan-desktop's word that the window wears no menubar while its launcher
+  // shows, set after the bridge runs, as the desktop evaluates it.
   new Function("window", "navigator", RELOAD_BRIDGE)(host, { userAgent });
+  if (menuChords) Object.assign(host, { __chanLauncherMenuChords: true });
   const event = keydown(init);
   for (const fn of listeners) fn(event);
   return { reloads, toggles, ipc, prevented: event.defaultPrevented };
@@ -547,6 +555,79 @@ describe("the launcher bridge's toggle follows the layout's P", () => {
     expect(outcome.toggles).toBe(toggles);
     expect(outcome.reloads).toBe(0);
     expect(outcome.prevented).toBe(toggles > 0);
+  });
+});
+
+// Where the window wears no menubar while its launcher shows (Windows, with
+// the tabs in the title bar), the desktop sets __chanLauncherMenuChords and
+// the bridge carries the three chords only that menubar serves on the
+// Computers screen, each naming the menu item it runs. Everywhere else the
+// menubar's accelerators serve them and the bridge leaves them alone.
+describe("the launcher bridge carries the menubar's chords where the window wears none", () => {
+  test.each<[string, KeyInit, string]>([
+    ["Ctrl+Shift+T", { key: "T", code: "KeyT", ctrlKey: true, shiftKey: true }, "app-new-terminal"],
+    ["Dvorak T on KeyK, Ctrl+Shift", { key: "T", code: "KeyK", ctrlKey: true, shiftKey: true }, "app-new-terminal"],
+    ["Ctrl+Alt+W", { key: "w", code: "KeyW", ctrlKey: true, altKey: true }, "app-close-window"],
+    [
+      "Ctrl+Alt+W through an AltGr that types nothing",
+      { key: "w", code: "KeyW", ctrlKey: true, altKey: true, altGraph: true },
+      "app-close-window",
+    ],
+    ["Ctrl+Q", { key: "q", code: "KeyQ", ctrlKey: true }, "chan-quit"],
+    ["Caps Lock Ctrl+Q", { key: "Q", code: "KeyQ", ctrlKey: true }, "chan-quit"],
+  ])("%s runs its menu item", (_name, init, item) => {
+    const outcome = pressReloadBridge(init, WINDOWS_UA, true, true);
+    expect(outcome.ipc).toEqual([item]);
+    expect(outcome.prevented).toBe(true);
+    expect(outcome.reloads + outcome.toggles).toBe(0);
+  });
+
+  test.each<[string, KeyInit]>([
+    ["Ctrl+T", { key: "t", code: "KeyT", ctrlKey: true }],
+    ["Ctrl+Alt+Shift+T", { key: "T", code: "KeyT", ctrlKey: true, altKey: true, shiftKey: true }],
+    ["Ctrl+W", { key: "w", code: "KeyW", ctrlKey: true }],
+    ["Ctrl+Shift+W", { key: "W", code: "KeyW", ctrlKey: true, shiftKey: true }],
+    ["Ctrl+Shift+Q", { key: "Q", code: "KeyQ", ctrlKey: true, shiftKey: true }],
+    ["Ctrl+Alt+Q", { key: "q", code: "KeyQ", ctrlKey: true, altKey: true }],
+    ["Cmd+Q", { key: "q", code: "KeyQ", metaKey: true }],
+    ["Cmd+Ctrl+Q", { key: "q", code: "KeyQ", metaKey: true, ctrlKey: true }],
+    ["AltGr+W typing a letter", { key: "\u0142", code: "KeyW", ctrlKey: true, altKey: true, altGraph: true }],
+    ["Colemak F on KeyT, Ctrl+Shift", { key: "F", code: "KeyT", ctrlKey: true, shiftKey: true }],
+    ["a held Ctrl+Q", { key: "q", code: "KeyQ", ctrlKey: true, repeat: true }],
+    ["a composing Ctrl+Q", { key: "q", code: "KeyQ", ctrlKey: true, isComposing: true }],
+    ["Q alone", { key: "q", code: "KeyQ" }],
+  ])("%s is no menu chord", (_name, init) => {
+    const outcome = pressReloadBridge(init, WINDOWS_UA, true, true);
+    expect(outcome.ipc).toEqual([]);
+    expect(outcome.prevented).toBe(false);
+  });
+
+  test.each([
+    ["macOS", MAC_UA],
+    ["Linux", LINUX_UA],
+    ["Windows", WINDOWS_UA],
+  ])("a window wearing its menubar leaves the chords to it on %s", (_platform, userAgent) => {
+    for (const init of [
+      { key: "T", code: "KeyT", ctrlKey: true, shiftKey: true },
+      { key: "w", code: "KeyW", ctrlKey: true, altKey: true },
+      { key: "q", code: "KeyQ", ctrlKey: true },
+    ]) {
+      const outcome = pressReloadBridge(init, userAgent);
+      expect(outcome.ipc).toEqual([]);
+      expect(outcome.prevented).toBe(false);
+    }
+  });
+
+  test("the bridge's own chords stay as they are", () => {
+    const toggle = pressReloadBridge(
+      { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true },
+      WINDOWS_UA,
+      true,
+      true,
+    );
+    expect(toggle.toggles).toBe(1);
+    const reload = pressReloadBridge({ key: "r", code: "KeyR", ctrlKey: true }, WINDOWS_UA, true, true);
+    expect(reload.reloads).toBe(1);
   });
 });
 

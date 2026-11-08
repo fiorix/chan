@@ -272,6 +272,13 @@ fn gateway_enabled_default() -> bool {
     true
 }
 
+/// The title bar tabs preference of a config without the field: on, so a fresh
+/// install and an upgrade from a desktop that predates it both put a window's
+/// tabs in its title bar where the host offers that (`titlebar_tabs.rs`).
+fn titlebar_tabs_default() -> bool {
+    true
+}
+
 /// Plain monitor descriptor, decoupled from Tauri so the geometry math stays
 /// unit-testable without a window system (this module links no Tauri). `serve`
 /// maps each `tauri::Monitor` to one of these: the full bounds + `scale` form
@@ -368,7 +375,7 @@ pub enum GeometryMatch {
     Fallback(WindowGeometry),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Privacy follows the viewing desktop across all connected libraries.
     #[serde(default)]
@@ -414,6 +421,22 @@ pub struct Config {
     /// (their host installs no store).
     #[serde(default)]
     pub launcher_theme: Option<String>,
+    /// Whether a window's page puts its tab bar in the title bar, on macOS and
+    /// Windows (`titlebar_tabs.rs`). On by default, so a fresh install and a
+    /// config that predates the field both put the tabs there and only a
+    /// stored `false` keeps the normal title bar; Settings writes it, and it
+    /// applies to every window the desktop builds, whatever tenant it shows.
+    #[serde(default = "titlebar_tabs_default")]
+    pub titlebar_tabs: bool,
+}
+
+/// A desktop without a `config.json` runs with the empty object's config, so a
+/// missing file and a file that predates a field agree on every default by
+/// construction.
+impl Default for Config {
+    fn default() -> Self {
+        serde_json::from_str("{}").expect("an empty object deserializes as a Config")
+    }
 }
 
 impl Config {
@@ -2598,6 +2621,24 @@ mod tests {
         let raw = r#"{ "devservers": [] }"#;
         let cfg: Config = serde_json::from_str(raw).expect("load without gateways");
         assert!(cfg.gateways.is_empty());
+    }
+
+    #[test]
+    fn a_missing_config_is_the_empty_objects_config() {
+        // The default stands in for a missing config.json and must agree with
+        // a file that predates a field: both read every serde default.
+        let fresh = Config::default();
+        assert!(fresh.titlebar_tabs, "the title bar tabs are on by default");
+        let empty: Config = serde_json::from_str("{}").expect("an empty object is a config");
+        assert_eq!(
+            serde_json::to_value(&fresh).unwrap(),
+            serde_json::to_value(&empty).unwrap()
+        );
+        let off: Config = serde_json::from_str(r#"{"titlebar_tabs":false}"#).unwrap();
+        assert!(
+            !off.titlebar_tabs,
+            "a stored false keeps the normal title bar"
+        );
     }
 
     #[test]

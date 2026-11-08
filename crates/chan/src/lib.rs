@@ -133,6 +133,7 @@ const KEYBINDINGS_TABLE: &str = "  App
   Next pane                                    Alt+]
   Split right                                  Ctrl+Alt+/
   Split bottom                                 Ctrl+Alt+?
+  Show panes and tabs                          Cmd+Shift+A
 
   Tabs
   ----
