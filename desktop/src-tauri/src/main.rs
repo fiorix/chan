@@ -1998,11 +1998,13 @@ fn spawn_control_terminal_exit_watcher(
 
 /// Connect to a configured devserver: run its connect script in a control
 /// terminal (when one is set), acquire its bearer token, confirm it answers,
-/// record the connection, open a standalone terminal on it, then tuck the
-/// control terminal away. A stored write-only token from the devserver Address
-/// wins after the script starts, so a tunnel script can be just `ssh -N`. With
-/// no stored token, scripted connects scrape `CHAN_DEVSERVER_TOKEN=...` from
-/// the control terminal; no-script local connects read
+/// record the connection and mirror its windows. The desktop opens no devserver
+/// terminal on connect. The control terminal stays open while its script runs
+/// and hides on success only when the row's auto-hide option is set. A stored
+/// write-only token from the devserver Address wins after the script starts,
+/// so a tunnel script can be just `ssh -N`. Without a stored token, scripted
+/// connects scrape `CHAN_DEVSERVER_TOKEN=...` from the control terminal;
+/// no-script local connects read
 /// `~/.chan/devserver/config.json`. Once connected the launcher polls the
 /// devserver's workspace list.
 ///

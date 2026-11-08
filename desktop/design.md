@@ -187,7 +187,7 @@ chan-desktop is a terminal emulator for the xdg-terminal-exec contract: `chan-de
 
 ## Devserver connections
 
-A devserver row stores an address, an optional label, an optional connect script and an optional token. Connecting runs the script in a control terminal, a standalone terminal window whose PTY runs the script so an interactive ssh session can prompt the user there. The token comes from one of three places: a token stored on the row wins once the script is running, so a tunnel script can be just `ssh -N`; otherwise a scripted connect scrapes the `CHAN_DEVSERVER_TOKEN=` line the devserver's `join` prints into the control terminal; a local devserver with neither reads the live token and port from its own config under the chan home. The desktop then probes the devserver's info route, records the connection, opens a standalone terminal on the devserver, tucks the control terminal away, and from then on polls the devserver's workspace list for the launcher and follows its window feed for native windows.
+A devserver row stores an address, an optional label, an optional connect script and an optional token. Connecting runs the script in a control terminal, a standalone terminal window whose PTY runs the script so an interactive ssh session can prompt the user there. The token comes from one of three places: a token stored on the row wins once the script is running, so a tunnel script can be just `ssh -N`; otherwise a scripted connect scrapes the `CHAN_DEVSERVER_TOKEN=` line the devserver's `join` prints into the control terminal; a local devserver with neither reads the live token and port from its own config under the chan home. The desktop then probes the devserver's info route, records the connection, polls its workspace list for the launcher and follows its window feed for native windows. The desktop opens no terminal on connect; the devserver's library opens one on its first-ever open and does not recreate it after it is closed. The control terminal stays open while its script runs: a clean exit within the connect grace reaps it, a later clean exit disconnects the devserver, and a failed exit keeps it at "process exited" for inspection. The desktop hides the control terminal on connect only when the row's **Auto-hide control terminal on success** option is set.
 
 ```mermaid
 sequenceDiagram
@@ -204,7 +204,9 @@ sequenceDiagram
   D->>S: window list, then the watch socket
   S-->>D: window records
   D->>D: open lib-* windows through the connecting page
-  D->>C: tuck the control terminal away
+  opt auto-hide control terminal on success
+    D->>C: hide the control terminal
+  end
 ```
 
 *A devserver connect: the script brings the tunnel up in a control terminal, the desktop acquires a token, confirms the devserver answers, and mirrors its window records as native windows.*
