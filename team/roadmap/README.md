@@ -37,6 +37,8 @@ The owner also brings his title bar work, built on his Mac. A chan-desktop windo
 
 The owner also brings a privacy mode, built by his agent and read on his Mac: recording or sharing a chan window showed every computer's name and address, the connect scripts, the gateway URLs and keys and the connection errors, and nothing concealed them ([privacy]).
 
+A second branch of his agent's followed the same day: a reload of the Computers screen returned to its first card and the Computers deck, and no row said which window the launcher was shown in ([visualstate]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [the Windows kernel suite's preflight reads rustup outside the checkout][winpreflight] | built | candidate |
@@ -51,6 +53,7 @@ The owner also brings a privacy mode, built by his agent and read on his Mac: re
 | [a window's tabs sit below the title bar on macOS][titlebarmac] | built | review |
 | [a window's tabs sit below the title bar on Windows][titlebarwin] | built | acceptance |
 | [the Computers screen shows every address and token while the screen is shared][privacy] | built | review |
+| [the Computers screen forgets its badge on a reload and does not mark this window][visualstate] | built | review |
 
 [winpreflight]: v0.126.0/the-windows-kernel-suite-reads-the-rustup-targets-outside-the-checkout.md
 [wakevis]: v0.126.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
@@ -64,6 +67,7 @@ The owner also brings a privacy mode, built by his agent and read on his Mac: re
 [titlebarmac]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-macos.md
 [titlebarwin]: v0.126.0/a-windows-tabs-sit-below-the-title-bar-on-windows.md
 [privacy]: v0.126.0/the-computers-screen-shows-every-address-and-token-while-the-screen-is-shared.md
+[visualstate]: v0.126.0/the-computers-screen-forgets-its-badge-on-a-reload-and-does-not-mark-this-window.md
 
 ### v0.127.0
 
