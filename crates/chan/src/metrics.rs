@@ -1,5 +1,7 @@
 //! CLI diagnostics and the socket-activated Varlink adapter.
 
+#[cfg(any(target_os = "linux", test))]
+mod listener;
 #[cfg(unix)]
 mod varlink;
 
@@ -58,18 +60,7 @@ impl Client {
         // restart, port change or token rotation.
         let (url, token) = match &self.args.url {
             Some(raw) => explicit_target(raw, self.args.token.as_deref())?,
-            None => {
-                // Both port and bearer belong to this CHAN_HOME. A systemd
-                // unit can describe another home or an inactive older server.
-                let port = chan_server::persisted_devserver_port()
-                    .context("no local devserver port; start a devserver or use --url")?;
-                let token = chan_server::persisted_devserver_token()
-                    .context("no local devserver token; start a devserver or use --url")?;
-                (
-                    metrics_url(reqwest::Url::parse(&format!("http://127.0.0.1:{port}/"))?),
-                    Some(token),
-                )
-            }
+            None => local_target()?,
         };
         let mut request = self
             .http
@@ -95,6 +86,35 @@ impl Client {
         );
         Ok(view)
     }
+}
+
+/// The local devserver's metrics URL and bearer. The address is the one the
+/// devserver unit pins, else the persisted port on loopback; the bearer is
+/// the devserver's own.
+fn local_target() -> Result<(reqwest::Url, Option<String>)> {
+    let addr = crate::devserver::persisted::local_devserver_dial_addr()
+        .context("no local devserver port; start a devserver or use --url")?;
+    // A wildcard bind is reached on loopback.
+    let addr = match addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+        }
+        _ => addr,
+    };
+    let token = chan_server::persisted_devserver_token()
+        .context("no local devserver token; start a devserver or use --url")?;
+    // The persisted port outlives the devserver, so before the bearer goes
+    // out, Linux checks the listener there is this user's. macOS, FreeBSD
+    // and Windows name socket owners only through binary sysctl records or
+    // per-process handle walks, none of them a small and sound check, so
+    // there the bearer goes to the port unverified.
+    #[cfg(target_os = "linux")]
+    listener::ensure_caller_listens(addr)?;
+    let url = reqwest::Url::parse(&format!("http://{addr}/"))?;
+    Ok((metrics_url(url), Some(token)))
 }
 
 /// The metrics route for a server URL as chan prints it: a launcher or
@@ -365,5 +385,56 @@ mod tests {
         ] {
             assert_eq!(resolve(printed), resolved, "{printed}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_local_target_is_the_pinned_listener_and_only_this_users() {
+        let env = crate::test_env::ChanTestEnv::new();
+        // The unit directory comes from XDG_CONFIG_HOME, which the guard does
+        // not own; point it into the guard's home for this test alone.
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("XDG_CONFIG_HOME"));
+        std::env::set_var("XDG_CONFIG_HOME", env.home().join("config"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let pinned = listener.local_addr().unwrap().port();
+        let units = env.home().join("config").join("systemd").join("user");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(
+            units.join("chan-devserver.service"),
+            format!(
+                "[Service]\nExecStart=/usr/bin/chan devserver run --bind=0.0.0.0 --port={pinned}\n"
+            ),
+        )
+        .unwrap();
+        // The persisted port is stale: the unit's pinned one wins.
+        let stale = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stale_port = stale.local_addr().unwrap().port();
+        drop(stale);
+        let state = env.home().join("devserver");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(
+            state.join("config.json"),
+            format!(r#"{{"devserver_token":"tok","port":{stale_port}}}"#),
+        )
+        .unwrap();
+        let (url, token) = local_target().unwrap();
+        assert_eq!(
+            url.as_str(),
+            format!("http://127.0.0.1:{pinned}/api/metrics")
+        );
+        assert_eq!(token.as_deref(), Some("tok"));
+        // With this user's listener gone, the bearer goes nowhere.
+        drop(listener);
+        let error = local_target().unwrap_err().to_string();
+        assert!(error.contains("no devserver is listening"), "{error}");
     }
 }
