@@ -5918,8 +5918,27 @@ mod devserver_route_tests {
     /// the host ran the teardown; a removal that never lets it go answers
     /// still releasing at that budget instead. The outer bound only turns a
     /// hang into a red.
-    #[tokio::test]
-    async fn local_workspace_remove_confirms_on_live_terminals_then_force_removes() {
+    ///
+    /// The runtime is built here rather than by `tokio::test` so the test
+    /// ends with that red: after a removal that never lets the workspace go,
+    /// the teardown keeps a blocking thread looking for the release, and a
+    /// runtime's drop waits for its blocking threads without a bound.
+    #[test]
+    fn local_workspace_remove_confirms_on_live_terminals_then_force_removes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let removed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(forced_removal_after_a_live_terminal_confirmation())
+        }));
+        runtime.shutdown_background();
+        if let Err(panic) = removed {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn forced_removal_after_a_live_terminal_confirmation() {
         const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
         let cfg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
