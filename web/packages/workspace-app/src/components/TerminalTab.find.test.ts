@@ -1047,6 +1047,47 @@ describe("terminal find on the ghostty backend", () => {
     }
   });
 
+  test("Shift+Enter right after the bar reopens waits for the scan and lands on the oldest match", async () => {
+    // Three thousand rows above NEEDLES, a needle on every tenth: the scan
+    // takes many frames, and the oldest needle is on row 5.
+    const many = Array.from({ length: 3000 }, (_, i) => `row ${i}${i % 10 === 5 ? " needle" : ""}`).join("\r\n");
+    const term = await renderGhostty(`${many}\r\n${NEEDLES.slice(NEEDLES.indexOf("a"))}`);
+    const frames = holdFrames();
+    const input = await openFindWithQuery("needle");
+    frames.settle();
+    await tick();
+    pressEnter(input);
+    await tick();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+    expect(findInput()).toBeNull();
+    fireCommand("app.find.open");
+    await tick();
+    await tick();
+    expect(findInput()?.value).toBe("needle");
+    // One unit of the core's scan per frame: each clock read is past the
+    // last frame's budget.
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => (clock += 5));
+
+    pressEnter(findInput()!, true);
+    await tick();
+    expect(selection(term), "nothing selected while the scan runs").toBeNull();
+    expect(countElement()?.textContent).toBe("");
+    const shown: string[] = [];
+    while (frames.pending()) {
+      frames.frame();
+      await tick();
+      shown.push(countElement()!.textContent!);
+      if (frames.pending()) expect(selection(term), "nothing selected while the scan runs").toBeNull();
+    }
+    const total = term.wasmTerm.plainText()!.split("needle").length - 1;
+    expect(shown.length).toBeGreaterThan(2);
+    for (const text of shown.slice(0, -1)) expect(text).toMatch(/^\? of \d+\+$/);
+    expect(shown.at(-1)).toBe(`${total} of ${total}`);
+    expect(selection(term)).toEqual({ start: { col: 6, absoluteRow: 5 }, end: { col: 11, absoluteRow: 5 } });
+  });
+
   test("Enter steps to older output and Shift+Enter to newer", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input } = await findNeedle(term);

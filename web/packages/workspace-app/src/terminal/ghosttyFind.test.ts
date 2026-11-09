@@ -260,6 +260,163 @@ describe("a step", () => {
   });
 });
 
+describe("a step while the scan runs", () => {
+  // A needle on every line ending in 5 of 3,000: 300 matches, the newest on
+  // row 2995 and the oldest on row 5. One unit of the core's scan a frame
+  // leaves the first frames with the newest matches only, and the core
+  // wraps among those.
+  const LONG = numbered(3000, (i) => i % 10 === 5);
+  /// The k-th match from the newest, counting from 1 as the bar does.
+  const nth = (k: number) => needleAt(2995 - 10 * (k - 1));
+
+  test("Shift+Enter right after the bar reopens waits for the scan and lands on the oldest match", async () => {
+    const { frames, find, manager, counts } = await fixture(LONG);
+    find.find("needle");
+    frames.settle();
+    find.step("needle", "older");
+    find.close();
+    const seen = counts.length;
+
+    // The reopened bar keeps its query, and Shift+Enter is its first step.
+    find.step("needle", "newer");
+    expect(selected(manager), "no match before the scan completes").toBeNull();
+    const shown: Array<MatchRange | null> = [];
+    while (frames.pending()) {
+      frames.frame();
+      shown.push(selected(manager));
+    }
+    expect(shown.length, "the scan took frames").toBeGreaterThan(2);
+    expect(shown.slice(0, -1).filter((s) => s !== null), "no match highlighted on the way").toEqual([]);
+    expect(selected(manager)).toEqual(needleAt(5));
+    const after = counts.slice(seen);
+    expect(after.at(-1)).toEqual({ index: 300, total: 300, partial: false });
+    expect(after.length).toBeGreaterThan(2);
+    for (const count of after.slice(0, -1)) {
+      expect(count, "partial with no index while the step waits").toMatchObject({ index: null, partial: true });
+    }
+  });
+
+  test("Shift+Enter at the newest match waits for the scan instead of wrapping to the oldest found so far", async () => {
+    const { frames, find, manager, counts } = await fixture(LONG);
+    find.find("needle");
+    frames.frame();
+    expect(selected(manager)).toEqual(nth(1));
+    const found = counts.at(-1)!.total;
+    find.step("needle", "newer");
+    expect(selected(manager), "the step waits").toEqual(nth(1));
+    expect(counts.at(-1)).toEqual({ index: 1, total: found, partial: true });
+    frames.settle();
+    expect(selected(manager)).toEqual(needleAt(5));
+    expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
+  });
+
+  /// LONG on its first frame, walked older to the oldest match found so far.
+  async function atTheOldestFound() {
+    const f = await fixture(LONG);
+    f.find.find("needle");
+    f.frames.frame();
+    const found = f.counts.at(-1)!.total;
+    expect(f.counts.at(-1)).toEqual({ index: 1, total: found, partial: true });
+    expect(found).toBeGreaterThan(2);
+    // A step that stays among the matches found so far applies at once.
+    for (let k = 2; k <= found; k++) {
+      f.find.step("needle", "older");
+      expect(selected(f.manager)).toEqual(nth(k));
+      expect(f.counts.at(-1)).toEqual({ index: k, total: found, partial: true });
+    }
+    f.find.step("needle", "newer");
+    expect(selected(f.manager)).toEqual(nth(found - 1));
+    f.find.step("needle", "older");
+    expect(selected(f.manager)).toEqual(nth(found));
+    return { ...f, found };
+  }
+
+  /// atTheOldestFound with one more Enter, which waits.
+  async function waitingPastTheOldestFound() {
+    const f = await atTheOldestFound();
+    f.find.step("needle", "older");
+    expect(selected(f.manager), "the step waits rather than wrap to the newest").toEqual(nth(f.found));
+    expect(f.counts.at(-1)).toEqual({ index: f.found, total: f.found, partial: true });
+    return f;
+  }
+
+  test("Enter at the oldest match found so far waits for the next older one instead of wrapping to the newest", async () => {
+    const { frames, manager, counts, found } = await waitingPastTheOldestFound();
+    let ran = 0;
+    while (selected(manager)?.startRow === nth(found).startRow) {
+      expect(frames.pending(), "the scan goes on while the step waits").toBe(1);
+      frames.frame();
+      ran++;
+    }
+    expect(ran).toBeGreaterThan(0);
+    expect(selected(manager), "the next older match").toEqual(nth(found + 1));
+    expect(counts.at(-1)).toMatchObject({ index: found + 1 });
+    frames.settle();
+    expect(counts.at(-1)).toEqual({ index: found + 1, total: 300, partial: false });
+  });
+
+  test("steps pressed while one waits apply in the order pressed once the scan allows them", async () => {
+    const { frames, find, manager, counts } = await fixture(LONG);
+    // As after the bar reopens: Shift+Enter three times, then Enter.
+    find.step("needle", "newer");
+    find.step("needle", "newer");
+    find.step("needle", "newer");
+    find.step("needle", "older");
+    expect(selected(manager)).toBeNull();
+    frames.settle();
+    // As on a finished scan: the oldest match, two newer, one older again.
+    expect(selected(manager)).toEqual(nth(299));
+    expect(counts.at(-1)).toEqual({ index: 299, total: 300, partial: false });
+  });
+
+  test("closing the bar drops a step that waits", async () => {
+    const { frames, find, manager, counts } = await waitingPastTheOldestFound();
+    find.close();
+    expect(frames.pending()).toBe(0);
+    expect(selected(manager)).toBeNull();
+    // Reopened, Enter lands at once on the newest match, not one past it.
+    find.step("needle", "older");
+    expect(selected(manager)).toEqual(nth(1));
+    expect(counts.at(-1)).toMatchObject({ index: 1, partial: true });
+    frames.settle();
+    expect(selected(manager)).toEqual(nth(1));
+    expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
+  });
+
+  test("a new query drops a step that waits", async () => {
+    const { frames, find, manager, counts } = await waitingPastTheOldestFound();
+    // Rows 29, 290 to 299 and 2900 to 2999 hold it; 2999 is the newest.
+    find.find("line <29");
+    frames.settle();
+    expect(selected(manager)).toEqual(range(2999, 0, 2999, 7));
+    expect(counts.at(-1)).toEqual({ index: 1, total: 111, partial: false });
+  });
+
+  test("a selection the user makes while a step waits stays theirs, and the step moves the count", async () => {
+    const { frames, find, manager, counts } = await fixture(LONG);
+    find.step("needle", "newer");
+    expect(selected(manager)).toBeNull();
+    manager.selectionStart = { col: 0, absoluteRow: 2998 };
+    manager.selectionEnd = { col: 3, absoluteRow: 2998 };
+    frames.settle();
+    expect(selected(manager)).toEqual(range(2998, 0, 2998, 3));
+    expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
+    // The next step is asked for over the user's selection, as any is.
+    find.step("needle", "newer");
+    expect(selected(manager)).toEqual(nth(299));
+  });
+
+  test("a step that waited highlights over the selection there was when it was pressed", async () => {
+    const { frames, find, manager } = await fixture(LONG);
+    manager.selectionStart = { col: 0, absoluteRow: 2998 };
+    manager.selectionEnd = { col: 3, absoluteRow: 2998 };
+    find.step("needle", "newer");
+    expect(selected(manager), "nothing moves while it waits").toEqual(range(2998, 0, 2998, 3));
+    frames.settle();
+    expect(selected(manager)).toEqual(needleAt(5));
+  });
+});
+
 describe("reveal", () => {
   // 200 numbered lines on a ten-row screen: rows 191 to 200 are the active
   // screen, 191 rows of history above them.

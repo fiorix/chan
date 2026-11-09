@@ -21,6 +21,12 @@
 //             the newest match again, its text the needle, and the count
 //             reads 1 of N.
 //   ESCAPE -- Escape closes the bar and clears the selection.
+//   OLDEST -- the chord opens the bar again with the query it kept, and
+//             Shift+Enter, the first step of a fresh search, lands on the
+//             oldest match, the 99 on line 99, once the scan completes:
+//             not on the oldest of the matches found when the key went
+//             down, which the core would wrap to. The count reads N of N
+//             and the match is on the screen. Escape closes the bar.
 //   REOPEN -- the chord opens the bar again, then Escape and the find
 //             command run in one task: the bar reopens before any zero-delay
 //             refocus ghostty-web could have scheduled, and keeps the
@@ -296,6 +302,32 @@ export default {
         throw new Error(`Escape left the selection: ${JSON.stringify(closed)}`);
       }
       await ctx.shot("ghostty-find-closed");
+
+      // OLDEST
+      await pressFindChord();
+      await page.waitForFunction((q) => document.activeElement === document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-oldest-not-open");
+          throw new Error(`oldest: the find chord did not open a focused find bar: ${error.message}`);
+        });
+      const kept = await page.evaluate((q) => document.querySelector(q)?.value ?? null, inputQuery);
+      if (kept !== "99") throw new Error(`oldest: the reopened bar did not keep its query: ${JSON.stringify(kept)}`);
+      await page.keyboard.down("Shift");
+      await page.keyboard.press("Enter");
+      await page.keyboard.up("Shift");
+      const oldest = nines[nines.length - 1];
+      const first = await waitFor("oldest", `${nines.length} of ${nines.length}`, oldest.line);
+      expectMatch("oldest", first, oldest);
+      const firstAt = onScreen(first, first.start.absoluteRow);
+      if (firstAt < 0 || firstAt >= first.rows) throw new Error(`oldest: the selected match is off the screen: ${JSON.stringify(first)}`);
+      readings.oldest = first;
+      await ctx.shot("ghostty-find-oldest");
+      await page.keyboard.press("Escape");
+      await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-oldest-escape-failure");
+          throw new Error(`oldest: Escape did not close the bar: ${error.message}`);
+        });
 
       // REOPEN
       await pressFindChord();

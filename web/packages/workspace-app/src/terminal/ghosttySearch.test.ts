@@ -523,6 +523,58 @@ describe("the scroll policy", () => {
   });
 });
 
+describe("a scan still running", () => {
+  // GhosttyFind holds back a step that would wrap while the scan runs, and
+  // applies any other at once, on what this pins: the core holds the newest
+  // matches found so far, in order, wraps among them, and keeps each one's
+  // place as the scan completes.
+  test("selects and wraps among the newest matches found so far, which keep their places once it completes", async () => {
+    // A needle on every line ending in 5 of 3,000 on a 40x10 terminal: the
+    // match k from the newest, counting from 0, is on row 2995 - 10k, and
+    // the oldest, the 300th, on row 5.
+    const t = await terminal(40, 10, 10_000);
+    lines(t, 3000, (i) => `line <${i}>${i % 10 === 5 ? " needle" : ""}`);
+    const row = (k: number) => 2995 - 10 * k;
+    const at = (s: VtSearch) => {
+      const { index, active, complete } = s.state();
+      return { index, row: active?.startRow ?? null, complete };
+    };
+
+    // Older with nothing selected is the newest match of all, before any scan.
+    const first = t.createSearch();
+    first.setNeedle("needle");
+    expect(first.selectNext()).toBe(true);
+    expect(at(first)).toEqual({ index: 0, row: row(0), complete: false });
+    first.free();
+
+    const s = t.createSearch();
+    s.setNeedle("needle");
+    expect(s.step(0)).toBe("running");
+    const found = s.state().total;
+    expect(found).toBeGreaterThan(2);
+    expect(found).toBeLessThan(300);
+    // Newer with nothing selected is the oldest found so far, not row 5.
+    expect(s.selectPrev()).toBe(true);
+    expect(at(s)).toEqual({ index: found - 1, row: row(found - 1), complete: false });
+    // Older from there wraps to the newest, and newer from the newest back.
+    expect(s.selectNext()).toBe(true);
+    expect(at(s)).toEqual({ index: 0, row: row(0), complete: false });
+    expect(s.selectPrev()).toBe(true);
+    expect(at(s)).toEqual({ index: found - 1, row: row(found - 1), complete: false });
+    // A step inside them lands on its neighbour, which keeps its place once
+    // the scan completes, with the matches it had not reached beyond it.
+    expect(s.selectPrev()).toBe(true);
+    expect(at(s)).toEqual({ index: found - 2, row: row(found - 2), complete: false });
+    scan(s);
+    expect(s.state().total).toBe(300);
+    expect(at(s)).toEqual({ index: found - 2, row: row(found - 2), complete: true });
+    s.selectNext();
+    s.selectNext();
+    expect(at(s)).toEqual({ index: found, row: row(found), complete: true });
+    s.free();
+  });
+});
+
 describe("a large scrollback", () => {
   test("a tiny step budget returns running before complete and ends on the full count", async () => {
     const t = await terminal(120, 40, 20_000);
