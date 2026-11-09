@@ -17,9 +17,9 @@
 //! mint), `created_via_admin` (chan-gateway-admin mint),
 //! `desktop.redeem` (one-time desktop code cashed in), `used`
 //! (validate succeeded), `revoked` (the owner's revoke from the SPA,
-//! a desktop PAT revoking itself, or a desktop PAT whose WireGuard
-//! enrollment failed before delivery), `revoked_via_admin` (operator
-//! revoke; written by profile).
+//! or a desktop PAT whose WireGuard enrollment failed before delivery),
+//! `revoked_via_desktop` (a desktop giving back the PAT it presents),
+//! `revoked_via_admin` (operator revoke; written by profile).
 
 use base64::Engine;
 use chan_tunnel_proto::gateway_assertion::devserver_id_from_token;
@@ -46,6 +46,10 @@ pub const ACTION_CREATED_ADMIN: &str = "created_via_admin";
 pub const ACTION_DESKTOP_REDEEM: &str = "desktop.redeem";
 pub const ACTION_USED: &str = "used";
 pub const ACTION_REVOKED: &str = "revoked";
+/// A desktop giving back the PAT it presents, kept apart from
+/// [`ACTION_REVOKED`] so the owner's history never shows it as their own
+/// revoke.
+pub const ACTION_REVOKED_DESKTOP: &str = "revoked_via_desktop";
 
 /// Where a `create()` call came from. Each origin records a distinct
 /// audit action so operators (and the user themselves) can tell apart
@@ -161,6 +165,17 @@ pub struct PresentedToken {
     pub user_id: Uuid,
     pub username: String,
     pub scopes: Vec<String>,
+}
+
+/// What [`ApiTokenService::give_back`] found as it revoked a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GivenBack {
+    /// Nothing had presented the token (`last_used_at` unset), so it opened
+    /// nothing and the revoke is all there is to undo.
+    Unused,
+    /// Something had presented it (a roster read, an entry mint, a tunnel
+    /// dial), so tunnels and sessions it opened may still be live.
+    Used,
 }
 
 /// Default scope set for a freshly-issued token. It grants only `tunnel`,
@@ -342,22 +357,63 @@ impl ApiTokenService {
     /// row commit together, so an error never follows a revoke that landed
     /// and a landed revoke always has its row.
     pub async fn revoke(&self, user_id: Uuid, token_id: Uuid, meta: &RequestMeta) -> Result<bool> {
+        let revoked = self
+            .soft_revoke(user_id, token_id, ACTION_REVOKED, meta)
+            .await?;
+        Ok(revoked.is_some())
+    }
+
+    /// The soft revoke of [`Self::revoke`] for a desktop giving back the
+    /// token it presents, audited as [`ACTION_REVOKED_DESKTOP`]. `None` when
+    /// the token was already revoked. Whether anything had used the token is
+    /// read in the revoking update itself, so a use racing the give-back
+    /// either lands first and is seen here, or meets the revoked row and
+    /// fails.
+    pub async fn give_back(
+        &self,
+        user_id: Uuid,
+        token_id: Uuid,
+        meta: &RequestMeta,
+    ) -> Result<Option<GivenBack>> {
+        let revoked = self
+            .soft_revoke(user_id, token_id, ACTION_REVOKED_DESKTOP, meta)
+            .await?;
+        Ok(revoked.map(|used| {
+            if used {
+                GivenBack::Used
+            } else {
+                GivenBack::Unused
+            }
+        }))
+    }
+
+    /// Revoke an active token and write its `action` audit row in one
+    /// transaction. `Some(used)` when this call revoked it, `used` saying
+    /// whether `last_used_at` was set; `None` when it was already revoked.
+    async fn soft_revoke(
+        &self,
+        user_id: Uuid,
+        token_id: Uuid,
+        action: &str,
+        meta: &RequestMeta,
+    ) -> Result<Option<bool>> {
         let mut tx = self.pool.begin().await.map_err(Error::from)?;
-        let res = sqlx::query(
+        let used = sqlx::query_scalar::<_, bool>(
             "UPDATE api_tokens SET revoked_at = now() \
-             WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+             WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL \
+             RETURNING last_used_at IS NOT NULL",
         )
         .bind(token_id)
         .bind(user_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(Error::from)?;
-        if res.rows_affected() == 0 {
-            return Ok(false);
-        }
-        insert_audit(&mut *tx, token_id, ACTION_REVOKED, meta).await?;
+        let Some(used) = used else {
+            return Ok(None);
+        };
+        insert_audit(&mut *tx, token_id, action, meta).await?;
         tx.commit().await.map_err(Error::from)?;
-        Ok(true)
+        Ok(Some(used))
     }
 
     /// Ownership probe used to distinguish an idempotent revoke retry from a
