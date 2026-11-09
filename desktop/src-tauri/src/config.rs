@@ -1316,39 +1316,166 @@ pub(crate) async fn generate_wireguard_key(
     )))
 }
 
+/// What a sign-in's [`record_wireguard_enrollment`] wrote and what it
+/// replaced, kept so [`restore_wireguard_enrollment`] can put the replaced
+/// state back. The two byte strings hold private keys: no `Debug`, never
+/// logged, dropped with the commit.
+pub(crate) struct RecordedEnrollment {
+    /// The client file the record wrote.
+    pub(crate) conf: PathBuf,
+    /// The bytes it wrote there.
+    written: Vec<u8>,
+    /// The key it named as the row's enrolled key.
+    key: String,
+    /// The row's file, enrolled key and host map before the record.
+    prior_file: Option<PathBuf>,
+    prior_key: Option<String>,
+    prior_hosts: Vec<WireguardHost>,
+    /// The client file's bytes before the record, `None` when it created it.
+    prior_bytes: Option<Vec<u8>>,
+}
+
 /// Record a sign-in's enrollment on gateway `id` and bring its tunnel up in
 /// the running process: write the client file beside the row's key, then,
 /// under the store's lock, name it as the row's file with the enrolled key
 /// and the host map in one save, and adopt it with that map. The row's
 /// previous tunnel is retired first, since the file is rewritten in place
 /// and an adopt leaves a row running from an unchanged path alone. Answers
-/// the client file's path and the adopt's answer (`None` with no fabric);
-/// a refused adopt also stays on the fabric, where the projection reads it
-/// as the row's `last_error`. An error is the write's or the save's, and the
-/// fabric is then left as it was.
+/// what it wrote and replaced, and the adopt's answer (`None` with no
+/// fabric); a refused adopt also stays on the fabric, where the projection
+/// reads it as the row's `last_error`. An error is the read's, the write's
+/// or the save's, and leaves the row, the client file and the fabric as
+/// they were: a failed save puts back the file the write replaced.
 pub(crate) fn record_wireguard_enrollment(
     store: &Arc<Mutex<ConfigStore>>,
     manager: &crate::gateway::GatewayManager,
     id: &str,
     enrollment: crate::wireguard_keys::Enrollment,
-) -> Result<(PathBuf, Option<Result<String, String>>), String> {
+) -> Result<(RecordedEnrollment, Option<Result<String, String>>), String> {
     let mut guard = store.lock().unwrap();
     let mut cfg = guard.get().map_err(|e| e.to_string())?;
     let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
         return Err(format!("no gateway {id}"));
     };
-    let conf = crate::wireguard_keys::write_client_file(&guard.wireguard_dir(), id, &enrollment)?;
-    gw.wireguard = Some(conf.clone());
-    gw.wireguard_enrolled_key = Some(enrollment.public_key);
-    gw.wireguard_hosts = enrollment.hosts;
+    let dir = guard.wireguard_dir();
+    let path = crate::wireguard_keys::conf_path(&dir, id);
+    let prior_bytes = crate::wireguard_keys::read_client_file(&path)?;
+    let conf = crate::wireguard_keys::write_client_file(&dir, id, &enrollment)?;
+    let written = match crate::wireguard_keys::read_client_file(&conf) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            let error = format!("WireGuard: {} vanished", conf.display());
+            return Err(put_back_failed_enrollment(
+                id,
+                &dir,
+                &conf,
+                prior_bytes.as_deref(),
+                error,
+            ));
+        }
+        Err(error) => {
+            return Err(put_back_failed_enrollment(
+                id,
+                &dir,
+                &conf,
+                prior_bytes.as_deref(),
+                error,
+            ));
+        }
+    };
+    let recorded = RecordedEnrollment {
+        conf: conf.clone(),
+        written,
+        key: enrollment.public_key.clone(),
+        prior_file: gw.wireguard.replace(conf.clone()),
+        prior_key: gw.wireguard_enrolled_key.replace(enrollment.public_key),
+        prior_hosts: std::mem::replace(&mut gw.wireguard_hosts, enrollment.hosts),
+        prior_bytes,
+    };
     let gw = gw.clone();
-    guard.save(&cfg).map_err(|e| e.to_string())?;
+    if let Err(e) = guard.save(&cfg) {
+        let prior = recorded.prior_bytes.as_deref();
+        return Err(put_back_failed_enrollment(
+            id,
+            &dir,
+            &conf,
+            prior,
+            e.to_string(),
+        ));
+    }
     let adopted = manager.wireguard().map(|fabric| {
         fabric.retire(id);
         fabric.adopt(id, &conf, gw.host_routes())
     });
     drop(guard);
-    Ok((conf, adopted))
+    Ok((recorded, adopted))
+}
+
+/// Put back the client file a failed record replaced, and answer the
+/// record's own error. A put-back that fails too is logged: the record's
+/// error is the one the sign-in reports.
+fn put_back_failed_enrollment(
+    id: &str,
+    dir: &Path,
+    conf: &Path,
+    prior: Option<&[u8]>,
+    error: String,
+) -> String {
+    if let Err(put) = crate::wireguard_keys::put_back_client_file(dir, conf, prior) {
+        tracing::warn!(gateway = %id, error = %put, "putting back the client file a failed enrollment replaced");
+    }
+    error
+}
+
+/// Take back a sign-in's [`record_wireguard_enrollment`] on gateway `id` by
+/// putting back what it replaced, under the store's lock as the record ran.
+/// While the row still names the record's file with the record's key, its
+/// file, enrolled key and host map return to what they were in one save,
+/// and its tunnel is retired, then run again from the earlier file when the
+/// row had one and is enabled. While the client file still holds the bytes
+/// the record wrote, the earlier bytes go back, or the file is deleted when
+/// the record created it. A row or a file a later write changed is left as
+/// it is, and so is a row that is gone. An error is the save's or the
+/// file's.
+pub(crate) fn restore_wireguard_enrollment(
+    store: &Arc<Mutex<ConfigStore>>,
+    manager: &crate::gateway::GatewayManager,
+    id: &str,
+    recorded: &RecordedEnrollment,
+) -> Result<(), String> {
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    let mut rerun = None;
+    if let Some(gw) = cfg.gateways.iter_mut().find(|g| {
+        g.id == id
+            && g.wireguard.as_deref() == Some(recorded.conf.as_path())
+            && g.wireguard_enrolled_key.as_deref() == Some(recorded.key.as_str())
+    }) {
+        gw.wireguard = recorded.prior_file.clone();
+        gw.wireguard_enrolled_key = recorded.prior_key.clone();
+        gw.wireguard_hosts = recorded.prior_hosts.clone();
+        let gw = gw.clone();
+        guard.save(&cfg).map_err(|e| e.to_string())?;
+        if let Some(fabric) = manager.wireguard() {
+            fabric.retire(id);
+            if gw.enabled {
+                rerun = gw.wireguard.clone().map(|file| (file, gw.host_routes()));
+            }
+        }
+    }
+    let current = crate::wireguard_keys::read_client_file(&recorded.conf)?;
+    if current.as_deref() == Some(recorded.written.as_slice()) {
+        crate::wireguard_keys::put_back_client_file(
+            &guard.wireguard_dir(),
+            &recorded.conf,
+            recorded.prior_bytes.as_deref(),
+        )?;
+    }
+    if let (Some((file, routes)), Some(fabric)) = (rerun, manager.wireguard()) {
+        // A refusal stays on the fabric, where the row's last_error reads it.
+        let _ = fabric.adopt(id, &file, routes);
+    }
+    Ok(())
 }
 
 /// What the one-shot legacy migration did, for the startup log and the

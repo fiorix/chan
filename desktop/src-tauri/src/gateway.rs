@@ -34,9 +34,13 @@
 //!
 //! Browser sign-in is single-flight across gateways. The auth module owns
 //! the pending slot and callback settlement, both tied to the connect's
-//! attempt. A stale callback changes no row. Cancellation before credential
-//! commitment stores nothing; a store already committed keeps its PAT and
-//! announces it for a later Connect.
+//! attempt. A stale callback changes no row. The credential commit ends all
+//! kept or none kept: a cancel before it stores nothing, and one that lands
+//! during it lets it finish and then undoes it, putting back what it
+//! replaced, unless a replacing connect waits to use the credentials, which
+//! keeps them and announces them. A cancellation returns only once every
+//! commit it supersedes has ended. A token the sign-in does not keep is
+//! revoked at the gateway.
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -196,8 +200,33 @@ pub(super) struct GatewayAttempt {
     cancel: CancellationToken,
     credentials: Mutex<CredentialCommit>,
     policy: tokio::sync::Mutex<()>,
+    /// The connect that replaced this attempt during its browser wait, set
+    /// before this attempt is cancelled. It waits for this attempt's
+    /// credential commit and then uses what it kept. The link is strong, so
+    /// every attempt in a chain lives while an older one can still commit.
+    successor: std::sync::OnceLock<Arc<GatewayAttempt>>,
+    /// The attempt this one replaced, the other half of `successor`. Weak:
+    /// an attempt that is gone has no commit left to wait for.
+    predecessor: std::sync::OnceLock<std::sync::Weak<GatewayAttempt>>,
+    /// The browser's callback reached this attempt, so the browser wait is
+    /// over and its expiry no longer applies.
+    callback_accepted: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub(super) signin_hooks: auth::SigninTestHooks,
+}
+
+/// What a sign-in's credential commit writes, as one unit the commit can
+/// take back whole.
+pub(super) trait CredentialWrites {
+    /// Write everything or nothing: an error leaves no write of this call
+    /// behind, what it replaced put back.
+    fn write(&mut self) -> Result<(), String>;
+    /// Put back what a successful [`Self::write`] replaced, as far as no
+    /// later write has replaced it again.
+    fn undo(&mut self);
+    /// Whether what the writes were for is gone by the time they end (the
+    /// gateway's row removed), which undoes them as a withdrawal does.
+    fn abandoned(&self) -> bool;
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -220,26 +249,79 @@ impl GatewayAttempt {
         }
     }
 
+    /// Run a sign-in's credential writes under this attempt's credential
+    /// lock. The commit ends all kept (`Ok(true)`) or none kept: `Ok(false)`
+    /// when cancelled, `Err` when a write failed, which `writes` takes back
+    /// itself. A cancel before the writes start refuses them. One that lands
+    /// while they run lets them finish, since a write abandoned midway could
+    /// leave a client file without its token, and then undoes them before
+    /// the lock is released. Every cancellation waits for this lock in
+    /// [`Self::finish_cancellation`], through the attempts the cancelled one
+    /// replaced, so it returns only once nothing of the commit is left. The
+    /// writes are kept while a connect that replaced this attempt is still
+    /// live, and undone when the row they were for is gone.
     pub(super) fn commit_credentials(
         &self,
-        store: impl FnOnce() -> Result<(), String>,
+        writes: &mut impl CredentialWrites,
     ) -> Result<bool, String> {
         let mut commit = self.credentials.lock().unwrap();
         if *commit == CredentialCommit::Cancelled || self.cancel.is_cancelled() {
             *commit = CredentialCommit::Cancelled;
             return Ok(false);
         }
-        store()?;
+        writes.write()?;
+        if self.withdrawn() || writes.abandoned() {
+            writes.undo();
+            *commit = CredentialCommit::Cancelled;
+            return Ok(false);
+        }
         Ok(true)
     }
 
+    /// Whether nothing wants this attempt's credentials any more: it was
+    /// cancelled, and so was every connect that replaced it in turn. A
+    /// Disconnect, a removal's cascade, a 401 cascade or a browser wait that
+    /// expired before its callback withdraws an attempt; a replacing connect
+    /// does not, until it is withdrawn itself.
+    fn withdrawn(&self) -> bool {
+        let mut attempt = self;
+        loop {
+            if !attempt.cancel.is_cancelled() {
+                return false;
+            }
+            match attempt.successor.get() {
+                Some(next) => attempt = &**next,
+                None => return true,
+            }
+        }
+    }
+
+    /// Close this attempt's credential commit once any commit it runs has
+    /// ended, then each attempt it replaced in turn, newest first. A
+    /// cancellation that waits here never returns while a commit it
+    /// supersedes is still writing or undoing, and none of those attempts
+    /// can start one after it.
     async fn finish_cancellation(self: &Arc<Self>) {
         let attempt = Arc::clone(self);
         let _ = tokio::task::spawn_blocking(move || {
-            let mut commit = attempt.credentials.lock().unwrap();
-            *commit = CredentialCommit::Cancelled;
+            let mut next = Some(attempt);
+            while let Some(attempt) = next {
+                *attempt.credentials.lock().unwrap() = CredentialCommit::Cancelled;
+                next = attempt.predecessor.get().and_then(std::sync::Weak::upgrade);
+            }
         })
         .await;
+    }
+
+    /// Record that the browser's callback reached this attempt.
+    pub(super) fn accept_callback(&self) {
+        self.callback_accepted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn callback_was_accepted(&self) -> bool {
+        self.callback_accepted
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -766,7 +848,6 @@ fn persist_enabled(store: &mut config::ConfigStore, gateway_id: &str, enabled: b
 }
 
 struct StartedConnect {
-    gateway: Gateway,
     attempt: Arc<GatewayAttempt>,
     teardown: Option<Arc<CancellationToken>>,
     replaced: Option<Arc<GatewayAttempt>>,
@@ -774,13 +855,15 @@ struct StartedConnect {
 
 fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedConnect>, String> {
     let mut store = state.store.lock().unwrap();
-    let gateway = store
+    if !store
         .get()
         .map_err(|e| e.to_string())?
         .gateways
-        .into_iter()
-        .find(|g| g.id == gateway_id)
-        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+        .iter()
+        .any(|g| g.id == gateway_id)
+    {
+        return Err(format!("no gateway {gateway_id}"));
+    }
     let mut live = state.gateway_manager.state.lock().unwrap();
     let pending = live
         .runtimes
@@ -796,6 +879,11 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
         .attempts
         .insert(gateway_id.into(), Arc::clone(&attempt));
     if let Some(old) = &replaced {
+        // Linked before the cancel, so a commit the cancel lands in sees a
+        // successor that wants its credentials, and a cancellation of the
+        // successor waits for that commit.
+        let _ = old.successor.set(Arc::clone(&attempt));
+        let _ = attempt.predecessor.set(Arc::downgrade(old));
         old.cancel.cancel();
         if let Some(rt) = live.runtimes.get_mut(gateway_id) {
             rt.pending_signin = false;
@@ -808,7 +896,6 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
         auth::clear_gateway_signin(gateway_id, old);
     }
     Ok(Some(StartedConnect {
-        gateway,
         attempt,
         teardown,
         replaced,
@@ -895,7 +982,6 @@ pub async fn connect_gateway<R: tauri::Runtime>(
         return Ok(());
     };
     let StartedConnect {
-        gateway,
         attempt,
         teardown,
         replaced,
@@ -911,6 +997,12 @@ pub async fn connect_gateway<R: tauri::Runtime>(
             return Ok(());
         }
     }
+    // Read the row again: a predecessor's commit this connect waited for may
+    // have enrolled the key, which the enrollment check below must see. A
+    // row removed meanwhile is settled by the removal's own cascade.
+    let Ok(gateway) = gateway_row(&state, &gateway_id) else {
+        return Ok(());
+    };
     #[cfg(test)]
     if let Some(before_discovery) = state
         .gateway_manager
@@ -1474,6 +1566,12 @@ fn expire_signin<R: tauri::Runtime>(
     label: &str,
     attempt: &Arc<GatewayAttempt>,
 ) {
+    // Once the callback has arrived the browser did its part: the sign-in
+    // ends in its own outcome, and an expiry now would undo a commit in
+    // flight or hide a refusal behind a timeout.
+    if attempt.callback_was_accepted() {
+        return;
+    }
     let mut live = state.gateway_manager.state.lock().unwrap();
     if !live.owns(gateway_id, attempt) {
         return;
@@ -1540,8 +1638,9 @@ pub(super) async fn resume_gateway_signin<R: tauri::Runtime>(
         }
     };
     let Some(discovery) = discovery else {
-        // Only a successful credential commit reaches here. It won the
-        // attempt-local lock before cancellation, but the row is no longer ours.
+        // Only a kept credential commit reaches here: one a replacing connect
+        // waited for, or one a cancel reached after it ended. The row is no
+        // longer this attempt's, so the credentials wait for a later Connect.
         match gateway_row(&state, &gateway_id) {
             Ok(row) => emit_notice(
                 &app, "info", "gateway", &gateway_id, &display_label(&row), "Sign-in stored",
@@ -2135,10 +2234,10 @@ pub(crate) mod tests {
         let control = GatewayAttempt::default();
         let mut stores = 0;
         assert!(control
-            .commit_credentials(|| {
+            .commit_credentials(&mut writes(|| {
                 stores += 1;
                 Ok(())
-            })
+            }))
             .unwrap());
         assert_eq!(stores, 1, "a fresh attempt runs its credential store");
         expire_signin(
@@ -2150,10 +2249,10 @@ pub(crate) mod tests {
         );
         let stored = f
             .attempt
-            .commit_credentials(|| {
+            .commit_credentials(&mut writes(|| {
                 stores += 1;
                 Ok(())
-            })
+            }))
             .unwrap();
         assert!(!stored, "an expired attempt refuses credential commitment");
         assert_eq!(stores, 1, "expiry must not call the credential store");
@@ -2447,39 +2546,160 @@ pub(crate) mod tests {
         (origin, requests, server)
     }
 
-    /// Identity's redeem answering `answer` and recording each request
-    /// body, beside a one-row roster so the resumed connect completes.
-    async fn redeem_stub(
-        answer: serde_json::Value,
-    ) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    /// How a stand-in identity behaves beyond answering the redeem.
+    #[derive(Clone, Default)]
+    struct StandIn {
+        /// The answers to successive redeems; the last one repeats.
+        answers: Vec<serde_json::Value>,
+        /// An identity from before the token self-revoke: no route for it,
+        /// and the SPA fallback answers every other path with 200 and a page.
+        without_self_revoke: bool,
+        /// Runs inside each self-revoke before it answers.
+        on_revoke: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    /// A stand-in identity origin: the redeem answering `config.answers` in
+    /// turn and recording each request body, a roster so a resumed connect
+    /// completes, the discovery document with a WireGuard entry so a connect
+    /// can run against it, and the token self-revoke, which revokes each
+    /// token it minted once. It records every request it receives as
+    /// `METHOD path`, a bearer route adding the id of the token its bearer
+    /// presents (`-` for any other).
+    async fn stand_in(
+        config: StandIn,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::response::IntoResponse;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let bodies = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let minted: Arc<Vec<(String, String)>> = Arc::new(
+            config
+                .answers
+                .iter()
+                .map(|answer| {
+                    (
+                        answer["id"].as_str().unwrap_or_default().to_string(),
+                        answer["secret"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect(),
+        );
         let seen = Arc::clone(&bodies);
-        let router = axum::Router::new()
-            .route(
-                "/desktop/authorize/redeem",
-                axum::routing::post(move |body: String| {
-                    let answer = answer.clone();
-                    let seen = Arc::clone(&seen);
-                    async move {
-                        seen.lock().unwrap().push(body);
-                        axum::Json(answer)
+        let log = Arc::clone(&requests);
+        let answers = Arc::new(config.answers);
+        let redeems = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let redeem = axum::routing::post(move |body: String| {
+            let seen = Arc::clone(&seen);
+            let log = Arc::clone(&log);
+            let n = redeems.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = answers[n.min(answers.len() - 1)].clone();
+            async move {
+                log.lock()
+                    .unwrap()
+                    .push("POST /desktop/authorize/redeem".into());
+                seen.lock().unwrap().push(body);
+                axum::Json(answer)
+            }
+        });
+        let log = Arc::clone(&requests);
+        let held = Arc::clone(&minted);
+        let roster = axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let log = Arc::clone(&log);
+            let id = bearer_id(&headers, &held);
+            async move {
+                log.lock()
+                    .unwrap()
+                    .push(format!("GET /desktop/v1/devservers {id}"));
+                axum::Json(serde_json::json!({
+                    "user_id": "11111111-1111-1111-1111-111111111111",
+                    "username": "alice",
+                    "devservers": [],
+                }))
+            }
+        });
+        let disc_origin = origin.clone();
+        let discovery = axum::routing::get(move || {
+            let o = disc_origin.clone();
+            async move {
+                axum::Json(serde_json::json!({
+                    "kind": "chan-gateway",
+                    "api_version": 1,
+                    "identity_origin": o,
+                    "desktop_authorize_url": format!("{o}/desktop/authorize"),
+                    "desktop_entry_url": format!("{o}/desktop/v1/devserver/entry"),
+                    "devserver_proxy_origin": "https://proxy.chan.app",
+                    "devserver_proxy_host_depth": 2,
+                    "roster_url": format!("{o}/desktop/v1/devservers"),
+                    "wireguard": {"endpoint": WG_ENDPOINT, "public_key": WG_SERVER_KEY},
+                }))
+            }
+        });
+        let mut router = axum::Router::new()
+            .route("/desktop/authorize/redeem", redeem)
+            .route("/desktop/v1/devservers", roster)
+            .route("/.well-known/chan-gateway", discovery);
+        if !config.without_self_revoke {
+            let log = Arc::clone(&requests);
+            let revoked = Arc::new(Mutex::new(std::collections::HashSet::new()));
+            let on_revoke = config.on_revoke.clone();
+            let revoke = axum::routing::delete(move |headers: axum::http::HeaderMap| {
+                let log = Arc::clone(&log);
+                let id = bearer_id(&headers, &minted);
+                let live = id != "-" && revoked.lock().unwrap().insert(id.clone());
+                if let Some(on_revoke) = &on_revoke {
+                    on_revoke();
+                }
+                async move {
+                    log.lock()
+                        .unwrap()
+                        .push(format!("DELETE /desktop/v1/token {id}"));
+                    if live {
+                        axum::http::StatusCode::NO_CONTENT.into_response()
+                    } else {
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({"error": "unauthorized"})),
+                        )
+                            .into_response()
                     }
-                }),
-            )
-            .route(
-                "/desktop/v1/devservers",
-                axum::routing::get(|| async {
-                    axum::Json(serde_json::json!({
-                        "user_id": "11111111-1111-1111-1111-111111111111",
-                        "username": "alice",
-                        "devservers": [],
-                    }))
-                }),
-            );
+                }
+            });
+            router = router.route("/desktop/v1/token", revoke);
+        }
+        let log = Arc::clone(&requests);
+        let spa_fallback = config.without_self_revoke;
+        let router = router.fallback(move |method: axum::http::Method, uri: axum::http::Uri| {
+            let log = Arc::clone(&log);
+            async move {
+                log.lock().unwrap().push(format!("{method} {}", uri.path()));
+                if spa_fallback {
+                    axum::response::Html("<!doctype html><title>chan</title>").into_response()
+                } else {
+                    axum::http::StatusCode::NOT_FOUND.into_response()
+                }
+            }
+        });
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        (origin, bodies, server)
+        (origin, bodies, requests, server)
+    }
+
+    /// The id of the token `headers` present as their bearer: the id of the
+    /// `minted` token whose secret it is, `-` for anything else.
+    fn bearer_id(headers: &axum::http::HeaderMap, minted: &[(String, String)]) -> String {
+        let bearer = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        minted
+            .iter()
+            .find(|(_, secret)| bearer == Some(secret.as_str()))
+            .map_or_else(|| "-".into(), |(id, _)| id.clone())
     }
 
     const WG_SERVER_KEY: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
@@ -2515,14 +2735,16 @@ pub(crate) mod tests {
 
     /// One sign-in callback against a redeem answering `answer`, for a row
     /// whose key is generated and stored, sending that key when `send`:
-    /// the fixture, the running fabric, the key directory, the key sent
-    /// and the redeem's request bodies.
+    /// the fixture, the running fabric, the key directory, the key sent,
+    /// the redeem's request bodies and every request the stand-in identity
+    /// received.
     struct EnrollingSignin {
         f: SigninFixture,
         fabric: Arc<crate::wireguard::WireguardFabric>,
         keys: std::path::PathBuf,
         sent: String,
         bodies: Arc<Mutex<Vec<String>>>,
+        requests: Arc<Mutex<Vec<String>>>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -2537,7 +2759,45 @@ pub(crate) mod tests {
         send: bool,
         prepare: impl FnOnce(&std::path::Path),
     ) -> EnrollingSignin {
-        let (origin, bodies, server) = redeem_stub(answer).await;
+        let run = enrolling_fixture(answer, prepare).await;
+        let stored_origin = run.f.discovery.identity_origin.clone();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(stored_origin, pat.clone());
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(send))
+            .await
+            .expect("the callback settles");
+        run
+    }
+
+    /// The row, fabric and stand-in identity [`enrolling_signin_with`] runs
+    /// its callback against, with `prepare` run over the key directory, the
+    /// store hook unset and the callback not run yet.
+    async fn enrolling_fixture(
+        answer: serde_json::Value,
+        prepare: impl FnOnce(&std::path::Path),
+    ) -> EnrollingSignin {
+        enrolling_fixture_with(
+            StandIn {
+                answers: vec![answer],
+                ..Default::default()
+            },
+            prepare,
+        )
+        .await
+    }
+
+    /// [`enrolling_fixture`] against a stand-in identity configured as
+    /// `stand_in` says.
+    async fn enrolling_fixture_with(
+        config: StandIn,
+        prepare: impl FnOnce(&std::path::Path),
+    ) -> EnrollingSignin {
+        let (origin, bodies, requests, server) = stand_in(config).await;
         let f = SigninFixture::new(&origin);
         let fabric = Arc::new(crate::wireguard::start(&[]).await);
         f.state
@@ -2553,33 +2813,13 @@ pub(crate) mod tests {
             store.save(&cfg).unwrap();
         }
         prepare(&keys);
-        let stored_origin = origin.clone();
-        *f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
-            auth::test_gateway_pats()
-                .lock()
-                .unwrap()
-                .insert(stored_origin, pat.clone());
-            Ok(())
-        }));
-        let enrolling = send.then(|| auth::Enrolling {
-            public_key: sent.clone(),
-            entry: crate::devserver::WireguardDiscovery {
-                endpoint: WG_ENDPOINT.into(),
-                public_key: WG_SERVER_KEY.into(),
-            },
-        });
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            f.enrolling_callback("code=test-code&state=nonce-1", enrolling),
-        )
-        .await
-        .expect("the callback settles");
         EnrollingSignin {
             f,
             fabric,
             keys,
             sent,
             bodies,
+            requests,
             server,
         }
     }
@@ -2594,6 +2834,63 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .contains_key(&self.f.discovery.identity_origin)
+        }
+
+        fn conf(&self) -> std::path::PathBuf {
+            crate::wireguard_keys::conf_path(&self.keys, "gw-keychain")
+        }
+
+        /// Every request the stand-in identity received, in order.
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        /// The token the in-process credential store holds for the gateway.
+        fn stored(&self) -> Option<auth::StoredPat> {
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .get(&self.f.discovery.identity_origin)
+                .cloned()
+        }
+
+        /// A store hook that keeps the token in the in-process store, as the
+        /// keyring would.
+        fn storing(&self) -> auth::TestStore {
+            let origin = self.f.discovery.identity_origin.clone();
+            Box::new(move |_, pat| {
+                auth::test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .insert(origin, pat.clone());
+                Ok(())
+            })
+        }
+
+        /// The row's key as a sign-in sends it for enrollment.
+        fn enrolling(&self) -> auth::Enrolling {
+            auth::Enrolling {
+                public_key: self.sent.clone(),
+                entry: crate::devserver::WireguardDiscovery {
+                    endpoint: WG_ENDPOINT.into(),
+                    public_key: WG_SERVER_KEY.into(),
+                },
+            }
+        }
+
+        /// The sign-in's callback, sending the row's key when `send`.
+        fn callback(&self, send: bool) -> impl std::future::Future<Output = ()> + Send + 'static {
+            let enrolling = send.then(|| self.enrolling());
+            self.f
+                .enrolling_callback("code=test-code&state=nonce-1", enrolling)
+        }
+
+        /// The self-revokes the stand-in identity received, in order.
+        fn revokes(&self) -> Vec<String> {
+            self.requests()
+                .into_iter()
+                .filter(|request| request.starts_with("DELETE "))
+                .collect()
         }
 
         async fn finish(self) {
@@ -2802,7 +3099,9 @@ pub(crate) mod tests {
         f.cancel().await;
         let stored = f
             .attempt
-            .commit_credentials(|| panic!("cancel that wins must never call the keyring"))
+            .commit_credentials(&mut writes(|| {
+                panic!("cancel that wins must never call the keyring")
+            }))
             .unwrap();
         assert!(!stored, "cancelled attempt refuses credential commitment");
         let fresh = begin_connect(&f.state, "gw-keychain")
@@ -2811,7 +3110,7 @@ pub(crate) mod tests {
             .attempt;
         assert!(!Arc::ptr_eq(&fresh, &f.attempt));
         assert!(
-            fresh.commit_credentials(|| Ok(())).unwrap(),
+            fresh.commit_credentials(&mut writes(|| Ok(()))).unwrap(),
             "a fresh attempt can commit"
         );
     }
@@ -2825,50 +3124,280 @@ pub(crate) mod tests {
         ));
         assert!(!f
             .stale
-            .commit_credentials(|| panic!("invalidated attempt cannot store"))
+            .commit_credentials(&mut writes(|| panic!("invalidated attempt cannot store")))
             .unwrap());
     }
 
+    /// Credential writes from one closure with nothing to undo, for tests of
+    /// the commit's refusal and locking rather than of a sign-in's writes.
+    struct ClosureWrites<F>(Option<F>);
+
+    impl<F: FnOnce() -> Result<(), String>> CredentialWrites for ClosureWrites<F> {
+        fn write(&mut self) -> Result<(), String> {
+            (self.0.take().expect("the commit writes once"))()
+        }
+
+        fn undo(&mut self) {}
+
+        fn abandoned(&self) -> bool {
+            false
+        }
+    }
+
+    fn writes<F: FnOnce() -> Result<(), String>>(write: F) -> ClosureWrites<F> {
+        ClosureWrites(Some(write))
+    }
+
+    /// Writes that count their calls and run `during` inside the write,
+    /// where a cancel lands in the middle of a commit.
+    struct CountedWrites {
+        writes: usize,
+        undos: usize,
+        during: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl CredentialWrites for CountedWrites {
+        fn write(&mut self) -> Result<(), String> {
+            self.writes += 1;
+            if let Some(during) = self.during.take() {
+                during();
+            }
+            Ok(())
+        }
+
+        fn undo(&mut self) {
+            self.undos += 1;
+        }
+
+        fn abandoned(&self) -> bool {
+            false
+        }
+    }
+
     #[tokio::test]
-    async fn committed_store_survives_cancel_and_announces_without_resuming() {
-        let (origin, mut requests, server) = held_redemption().await;
-        let f = SigninFixture::new(&origin);
-        let events = auth_events(&f.app);
-        let notices = notices(&f.app);
+    async fn commit_undoes_writes_a_cancel_lands_in_unless_a_live_successor_waits() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        type App = tauri::AppHandle<tauri::test::MockRuntime>;
+        type Cancel = Box<dyn FnOnce(&AppState, &App, &Arc<GatewayAttempt>)>;
+        let disconnect: Cancel = Box::new(|state, _, _| {
+            invalidate_gateway(state, "gw-keychain", CascadeReason::UserDisconnect);
+        });
+        let replace: Cancel = Box::new(|state, _, _| {
+            begin_connect(state, "gw-keychain").unwrap().unwrap();
+        });
+        let replace_then_disconnect: Cancel = Box::new(|state, _, _| {
+            begin_connect(state, "gw-keychain").unwrap().unwrap();
+            invalidate_gateway(state, "gw-keychain", CascadeReason::UserDisconnect);
+        });
+        let removal_cascade: Cancel = Box::new(|state, _, _| {
+            invalidate_gateway(state, "gw-keychain", CascadeReason::Removed);
+        });
+        let expiry: Cancel = Box::new(|state, app, attempt| {
+            expire_signin(app, state, "gw-keychain", "gateway", attempt);
+        });
+        let expiry_after_callback: Cancel = Box::new(|state, app, attempt| {
+            attempt.accept_callback();
+            expire_signin(app, state, "gw-keychain", "gateway", attempt);
+        });
+        for (case, cancel, kept) in [
+            ("a disconnect", disconnect, false),
+            ("a removal's cascade", removal_cascade, false),
+            ("an expired browser wait", expiry, false),
+            (
+                "an expiry after the callback arrived",
+                expiry_after_callback,
+                true,
+            ),
+            ("a replacing connect", replace, true),
+            (
+                "a replacing connect then disconnected",
+                replace_then_disconnect,
+                false,
+            ),
+        ] {
+            let f = SigninFixture::new("https://commit-undo.example.test");
+            let state = Arc::clone(&f.state);
+            let app = f.app.handle().clone();
+            let attempt = Arc::clone(&f.attempt);
+            let mut writes = CountedWrites {
+                writes: 0,
+                undos: 0,
+                during: Some(Box::new(move || cancel(&state, &app, &attempt))),
+            };
+            let committed = f.attempt.commit_credentials(&mut writes).unwrap();
+            assert_eq!(committed, kept, "{case}");
+            assert_eq!(writes.writes, 1, "{case}: the commit runs to its end");
+            assert_eq!(
+                writes.undos,
+                usize::from(!kept),
+                "{case}: undone exactly when nothing waits for the credentials"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_answer_revokes_the_minted_token_and_changes_no_row() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let run = enrolling_fixture(
+            redeem_answer(Some(redeem_params(
+                "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
+            ))),
+            |_| {},
+        )
+        .await;
+        let before = run.row();
+        let stores = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&stores);
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, _| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("a refused answer reaches no store".into())
+        }));
+        let revoked_first = auth_error_after_revoke(&run);
+
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some(crate::wireguard_keys::PEER_CHANGED),
+            "the sign-in fails with the refusal"
+        );
+        assert_eq!(stores.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!run.stored_pat(), "no token is stored");
+        assert_eq!(run.row(), before, "the row is unchanged");
+        assert!(!run.conf().exists());
+        assert_eq!(run.fabric.tunnels(), 0);
+        assert_eq!(
+            run.requests(),
+            [
+                "POST /desktop/authorize/redeem",
+                "DELETE /desktop/v1/token pat-wg"
+            ],
+            "one revoke, presenting the token the redeem minted"
+        );
+        assert_eq!(
+            revoked_first.try_recv().ok(),
+            Some(true),
+            "the token is revoked before the sign-in fails"
+        );
+        assert_revoke_logged(&lines);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn failed_store_after_the_client_file_takes_the_enrollment_back_and_revokes() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let before = run.row();
+        // The store fails once the enrollment is recorded: the client file
+        // written, the row naming it, its tunnel adopted.
+        let (recorded, at_store) = std::sync::mpsc::channel();
+        let state = Arc::clone(&run.f.state);
+        let fabric = Arc::clone(&run.fabric);
+        let conf = run.conf();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, _| {
+            let row = gateway_row(&state, "gw-keychain").unwrap();
+            recorded
+                .send((
+                    conf.exists(),
+                    row.wireguard == Some(conf.clone()),
+                    row.wireguard_enrolled_key.is_some(),
+                    fabric.tunnels(),
+                ))
+                .unwrap();
+            Err("test credential store refused".into())
+        }));
+        let revoked_first = auth_error_after_revoke(&run);
+
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+
+        assert_eq!(
+            at_store.try_recv().unwrap(),
+            (true, true, true, 1),
+            "the store ran after the client file, the row and the tunnel"
+        );
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some("test credential store refused")
+        );
+        assert!(!run.stored_pat(), "no token is stored");
+        assert!(!run.conf().exists(), "the client file is removed");
+        assert_eq!(run.row(), before, "the row is back as it was");
+        assert_eq!(run.fabric.tunnels(), 0, "the adopted tunnel is retired");
+        assert_eq!(
+            run.requests(),
+            [
+                "POST /desktop/authorize/redeem",
+                "DELETE /desktop/v1/token pat-wg"
+            ],
+            "one revoke, presenting the token the redeem minted"
+        );
+        assert_eq!(
+            revoked_first.try_recv().ok(),
+            Some(true),
+            "the token is revoked before the sign-in fails"
+        );
+        assert_revoke_logged(&lines);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_during_the_commit_lets_it_finish_then_undoes_it_and_revokes() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let key = run.row().wireguard_public_key;
+        let events = auth_events(&run.f.app);
+        let notices = notices(&run.f.app);
         let (entered, in_store) = tokio::sync::oneshot::channel();
         let (release_store, store_release) = std::sync::mpsc::channel();
-        let saved_origin = origin.clone();
-        *f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |account, pat| {
-            assert_eq!(account, auth::gateway_account(&saved_origin));
-            entered.send(()).unwrap();
-            store_release.recv_timeout(Duration::from_secs(5)).unwrap();
-            auth::test_gateway_pats()
-                .lock()
-                .unwrap()
-                .insert(saved_origin, pat.clone());
-            Ok(())
-        }));
-        let callback = tokio::spawn(f.callback("code=test-code&state=nonce-1"));
-        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        let stored_origin = run.f.discovery.identity_origin.clone();
+        let conf = run.conf();
+        let account = auth::gateway_account(&stored_origin);
+        *run.f.attempt.signin_hooks.store.lock().unwrap() =
+            Some(Box::new(move |stored_as, pat| {
+                assert_eq!(
+                    stored_as, account,
+                    "the token is stored under its gateway's account"
+                );
+                entered.send(conf.exists()).unwrap();
+                store_release.recv_timeout(Duration::from_secs(5)).unwrap();
+                auth::test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .insert(stored_origin, pat.clone());
+                Ok(())
+            }));
+        let callback = tokio::spawn(run.callback(true));
+        let file_written = tokio::time::timeout(Duration::from_secs(5), in_store)
             .await
             .unwrap()
             .unwrap();
-        release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), in_store)
-            .await
-            .unwrap()
-            .unwrap();
-        let commit_locked = f.attempt.credentials.try_lock().is_err();
-        // Poll cancellation through invalidation while the store still owns its
-        // credential lock, then release it before asserting or joining either task.
-        let mut cancel = Box::pin(f.cancel());
+        let commit_locked = run.f.attempt.credentials.try_lock().is_err();
+        // Poll the Disconnect through invalidation while the store still owns
+        // the credential lock, then release the store before joining either.
+        let mut cancel = Box::pin(run.f.cancel());
         let cancel_pending = std::future::poll_fn(|cx| {
             std::task::Poll::Ready(std::future::Future::poll(cancel.as_mut(), cx).is_pending())
         })
         .await;
-        let disappeared = f.state.gateway_manager.view("gw-keychain").is_none();
+        let disappeared = run.f.state.gateway_manager.view("gw-keychain").is_none();
         release_store.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             callback.await.unwrap();
             if cancel_pending {
                 cancel.await;
@@ -2876,33 +3405,726 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
-        server.abort();
-        let pat = auth::test_gateway_pats().lock().unwrap().remove(&origin);
-        assert!(
-            commit_locked,
-            "keyring store must hold the attempt commit lock"
-        );
+
+        assert!(file_written, "the cancel lands after the client file");
+        assert!(commit_locked, "the store holds the attempt's commit lock");
         assert!(
             disappeared,
-            "keyring store must not hold the gateway state lock"
+            "the store does not hold the gateway state lock"
         );
         assert!(
             cancel_pending,
-            "cancellation must wait for the held credential store"
+            "the cancel waits for the commit and its undo"
         );
-        assert!(pat.is_some(), "a committed PAT survives cancel");
+        // Nothing of the commit is left: no client file, no enrolled key, no
+        // stored token, and the token is revoked.
+        assert!(!run.conf().exists(), "the client file is removed");
+        let row = run.row();
+        assert_eq!(row.wireguard, None);
+        assert_eq!(row.wireguard_enrolled_key, None, "no enrolled key");
+        assert!(row.wireguard_hosts.is_empty());
+        assert_eq!(
+            row.wireguard_public_key, key,
+            "the key stays to enroll again"
+        );
+        assert!(!run.stored_pat(), "no stored token");
+        assert_eq!(run.fabric.tunnels(), 0);
+        assert_eq!(
+            run.requests(),
+            [
+                "POST /desktop/authorize/redeem",
+                "DELETE /desktop/v1/token pat-wg"
+            ],
+            "one revoke, presenting the token the redeem minted"
+        );
+        // Reported as cancelled: no auth event, no stored-sign-in notice, and
+        // the sign-in's own line says so.
         assert!(
             events.try_recv().is_err(),
-            "cancelled row receives no auth event"
+            "a cancelled sign-in emits no auth event"
         );
-        assert!(notices
-            .try_recv()
-            .expect("committed callback announces retained credentials")
-            .contains("Sign-in stored"));
-        assert!(notices.try_recv().is_err(), "one stored notice, no error");
         assert!(
-            f.state.gateway_manager.view("gw-keychain").is_none(),
-            "committed callback must not reconnect"
+            notices.try_recv().is_err(),
+            "nothing is announced as stored"
+        );
+        assert!(
+            lines
+                .infos()
+                .iter()
+                .any(|line| line.contains("gateway sign-in cancelled")),
+            "{}",
+            lines.text()
+        );
+        assert!(
+            run.f.state.gateway_manager.view("gw-keychain").is_none(),
+            "the undone callback must not reconnect"
+        );
+        assert_revoke_logged(&lines);
+        run.finish().await;
+    }
+
+    /// A peer key no discovery entry names: the sign-in refuses it.
+    const OTHER_PEER: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+
+    /// Whether `future` is still pending after one poll.
+    async fn still_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) -> bool {
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(future.as_mut(), cx).is_pending())
+        })
+        .await
+    }
+
+    /// Invalidate the gateway as a Disconnect does, from a sync test hook,
+    /// and settle the teardown the cascade would, so a later cascade does not
+    /// wait on it.
+    fn disconnect_now(state: &AppState) {
+        let teardown = invalidate_gateway(state, "gw-keychain", CascadeReason::UserDisconnect);
+        state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .teardowns
+            .remove("gw-keychain");
+        teardown.finished.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_gateway_without_the_self_revoke_reads_as_a_failed_revoke() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let run = enrolling_fixture_with(
+            StandIn {
+                answers: vec![redeem_answer(Some(redeem_params(OTHER_PEER)))],
+                without_self_revoke: true,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(|_, _| {
+            Err("a refused answer reaches no store".into())
+        }));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+        // The old identity's SPA fallback answered the revoke with 200 and a
+        // page: the token is still live there.
+        assert_eq!(
+            run.requests(),
+            ["POST /desktop/authorize/redeem", "DELETE /desktop/v1/token"]
+        );
+        let text = lines.text();
+        assert!(
+            lines.warnings().iter().any(|line| line.contains("pat-wg")
+                && line.contains("HTTP 200 OK")
+                && line.contains("may not offer the token self-revoke")
+                && line.contains("lives until it expires")),
+            "the failed revoke is logged by the token's id: {text}"
+        );
+        assert!(
+            !text.contains("gateway sign-in token revoked"),
+            "nothing reads as revoked: {text}"
+        );
+        assert!(
+            !text.contains("fixture-only"),
+            "a log line carries the token: {text}"
+        );
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some(crate::wireguard_keys::PEER_CHANGED),
+            "the sign-in's outcome is its refusal"
+        );
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_of_a_replacing_connect_waits_for_the_replaced_commit_to_undo() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let mut later = redeem_answer(Some(redeem_params(WG_SERVER_KEY)));
+        later["id"] = "pat-wg-2".into();
+        later["secret"] = "fixture-two".into();
+        let run = enrolling_fixture_with(
+            StandIn {
+                answers: vec![redeem_answer(Some(redeem_params(WG_SERVER_KEY))), later],
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        let origin = run.f.discovery.identity_origin.clone();
+        let (entered, in_store) = tokio::sync::oneshot::channel();
+        let (release_store, store_release) = std::sync::mpsc::channel();
+        let stored_origin = origin.clone();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            entered.send(()).unwrap();
+            store_release.recv_timeout(Duration::from_secs(10)).unwrap();
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(stored_origin, pat.clone());
+            Ok(())
+        }));
+        // A's commit runs and holds its store.
+        let callback = tokio::spawn(run.callback(true));
+        tokio::time::timeout(Duration::from_secs(5), in_store)
+            .await
+            .unwrap()
+            .unwrap();
+        // A Connect replaces A and waits for its commit.
+        let mut replacing = Box::pin(connect_gateway(
+            run.f.app.handle().clone(),
+            Arc::clone(&run.f.state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let replacing_pending = still_pending(replacing.as_mut()).await;
+        let replaced_by =
+            Arc::clone(&run.f.state.gateway_manager.state.lock().unwrap().attempts["gw-keychain"]);
+        assert!(!Arc::ptr_eq(&replaced_by, &run.f.attempt));
+        // Then a Disconnect of that Connect: what it leaves when it returns.
+        let app = run.f.app.handle().clone();
+        let state = Arc::clone(&run.f.state);
+        let conf = run.conf();
+        let after = origin.clone();
+        let mut disconnect = tokio::spawn(async move {
+            cascade_disconnect(&app, &state, "gw-keychain", CascadeReason::UserDisconnect).await;
+            let row = gateway_row(&state, "gw-keychain").unwrap();
+            (
+                auth::test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .contains_key(&after),
+                conf.exists(),
+                row.wireguard_enrolled_key,
+            )
+        });
+        let early = tokio::time::timeout(Duration::from_millis(500), &mut disconnect).await;
+        assert!(
+            early.is_err(),
+            "the Disconnect must not return while the replaced commit is still writing"
+        );
+        release_store.send(()).unwrap();
+        let left = tokio::time::timeout(Duration::from_secs(10), disconnect)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            left,
+            (false, false, None),
+            "the replaced commit's undo ended before the Disconnect returned"
+        );
+        tokio::time::timeout(Duration::from_secs(10), callback)
+            .await
+            .unwrap()
+            .unwrap();
+        if replacing_pending {
+            tokio::time::timeout(Duration::from_secs(10), replacing)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // A Connect after the Disconnect signs in and keeps its own token and
+        // enrollment: nothing of the replaced commit runs after it.
+        let next = begin_connect(&run.f.state, "gw-keychain")
+            .unwrap()
+            .unwrap()
+            .attempt;
+        *next.signin_hooks.store.lock().unwrap() = Some(run.storing());
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            auth::tests::enrolling_callback_for_test(
+                run.f.app.handle().clone(),
+                "gw-keychain",
+                &next,
+                &origin,
+                "code=test-code&state=nonce-1",
+                Some(run.enrolling()),
+            ),
+        )
+        .await
+        .expect("the later callback settles");
+        assert_eq!(run.stored().map(|pat| pat.id).as_deref(), Some("pat-wg-2"));
+        assert!(run.conf().exists());
+        assert_eq!(run.row().wireguard_enrolled_key, Some(run.sent.clone()));
+        assert_eq!(
+            run.revokes(),
+            ["DELETE /desktop/v1/token pat-wg"],
+            "only the replaced commit's token is revoked"
+        );
+        run.finish().await;
+    }
+
+    /// Give the fixture's row a prior enrollment: its client file (owner-only,
+    /// a tunnel the fabric can run), the row naming it with the key it
+    /// enrolled and a host map, and a stored token; then generate the key
+    /// again, so the next sign-in enrolls the new one. Answers the row, the
+    /// client file's bytes and the token as they were before that sign-in.
+    fn with_prior_enrollment(run: &mut EnrollingSignin) -> (Gateway, Vec<u8>, auth::StoredPat) {
+        let conf = run.conf();
+        let text = format!(
+            "[Interface]\nPrivateKey = {OTHER_PEER}\nAddress = 10.7.0.9/32\n\
+             [Peer]\nPublicKey = {WG_SERVER_KEY}\nEndpoint = {WG_ENDPOINT}\n\
+             AllowedIPs = 10.7.0.1/32\n"
+        );
+        std::fs::write(&conf, &text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&conf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let prior = auth::StoredPat {
+            id: "pat-prior".into(),
+            secret: "prior-secret".into(),
+            label: "prior".into(),
+            expires_at: String::new(),
+        };
+        auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .insert(run.f.discovery.identity_origin.clone(), prior.clone());
+        let regenerated = crate::wireguard_keys::generate(&run.keys, "gw-keychain").unwrap();
+        let mut store = run.f.state.store.lock().unwrap();
+        let mut cfg = store.get().unwrap();
+        let row = &mut cfg.gateways[0];
+        row.wireguard = Some(conf);
+        row.wireguard_enrolled_key = Some(std::mem::replace(&mut run.sent, regenerated.clone()));
+        row.wireguard_public_key = Some(regenerated);
+        row.wireguard_hosts = vec![config::WireguardHost {
+            name: "proxy.chan.invalid".into(),
+            addresses: vec!["10.7.0.1".parse().unwrap()],
+        }];
+        let row = row.clone();
+        store.save(&cfg).unwrap();
+        (row, text.into_bytes(), prior)
+    }
+
+    #[tokio::test]
+    async fn an_undone_reenrollment_puts_back_the_prior_token_row_and_client_file() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        for cancel in [true, false] {
+            let case = if cancel { "a cancel" } else { "a failed store" };
+            let mut run =
+                enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+            let (prior_row, prior_bytes, prior_pat) = with_prior_enrollment(&mut run);
+            let (entered, in_store) = tokio::sync::oneshot::channel();
+            let (release_store, store_release) = std::sync::mpsc::channel::<()>();
+            let origin = run.f.discovery.identity_origin.clone();
+            *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+                entered.send(()).unwrap();
+                if !cancel {
+                    return Err("test credential store refused".into());
+                }
+                store_release.recv_timeout(Duration::from_secs(10)).unwrap();
+                auth::test_gateway_pats()
+                    .lock()
+                    .unwrap()
+                    .insert(origin, pat.clone());
+                Ok(())
+            }));
+            let callback = tokio::spawn(run.callback(true));
+            tokio::time::timeout(Duration::from_secs(5), in_store)
+                .await
+                .unwrap()
+                .unwrap();
+            if cancel {
+                let mut disconnect = Box::pin(run.f.cancel());
+                let pending = still_pending(disconnect.as_mut()).await;
+                release_store.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    callback.await.unwrap();
+                    if pending {
+                        disconnect.await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                tokio::time::timeout(Duration::from_secs(10), callback)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let stored = run.stored().expect("the prior token is stored again");
+            assert_eq!(
+                (stored.id.as_str(), stored.secret.as_str()),
+                (prior_pat.id.as_str(), prior_pat.secret.as_str()),
+                "{case}"
+            );
+            let row = run.row();
+            assert_eq!(row.wireguard, prior_row.wireguard, "{case}");
+            assert_eq!(
+                row.wireguard_enrolled_key, prior_row.wireguard_enrolled_key,
+                "{case}"
+            );
+            assert_eq!(row.wireguard_hosts, prior_row.wireguard_hosts, "{case}");
+            assert_eq!(
+                std::fs::read(run.conf()).unwrap(),
+                prior_bytes,
+                "{case}: the prior client file is back"
+            );
+            assert_eq!(
+                run.revokes(),
+                ["DELETE /desktop/v1/token pat-wg"],
+                "{case}: only the new token is revoked, never the prior one"
+            );
+            if cancel {
+                assert_eq!(run.fabric.tunnels(), 0, "a disconnected row runs no tunnel");
+            } else {
+                assert_eq!(
+                    run.fabric.tunnels(),
+                    1,
+                    "the row runs from its prior file again"
+                );
+                let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+                assert_eq!(
+                    view.last_error.as_deref(),
+                    Some("test credential store refused")
+                );
+            }
+            run.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn undo_leaves_what_a_later_write_replaced() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let origin = run.f.discovery.identity_origin.clone();
+        let state = Arc::clone(&run.f.state);
+        let conf = run.conf();
+        // Inside the commit: its token stored, then another commit's token,
+        // enrolled key and client file land, then a Disconnect.
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            let mut pats = auth::test_gateway_pats().lock().unwrap();
+            pats.insert(origin.clone(), pat.clone());
+            pats.insert(
+                origin,
+                auth::StoredPat {
+                    id: "pat-later".into(),
+                    secret: "later-secret".into(),
+                    label: "later".into(),
+                    expires_at: String::new(),
+                },
+            );
+            drop(pats);
+            {
+                let mut store = state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0].wireguard_enrolled_key = Some("later-key".into());
+                store.save(&cfg).unwrap();
+            }
+            std::fs::write(&conf, b"later bytes").unwrap();
+            disconnect_now(&state);
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+        assert_eq!(run.stored().map(|pat| pat.id).as_deref(), Some("pat-later"));
+        assert_eq!(
+            run.row().wireguard_enrolled_key.as_deref(),
+            Some("later-key")
+        );
+        assert_eq!(std::fs::read(run.conf()).unwrap(), b"later bytes");
+        assert_eq!(run.revokes(), ["DELETE /desktop/v1/token pat-wg"]);
+        auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .remove(&run.f.discovery.identity_origin);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn replacing_connect_uses_the_enrollment_its_predecessor_kept() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        // The commit holds its lock before it has recorded anything.
+        let (entered, in_commit) = tokio::sync::oneshot::channel();
+        let (release_commit, commit_release) = std::sync::mpsc::channel();
+        *run.f.attempt.signin_hooks.commit_started.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            commit_release
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }));
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(run.storing());
+        let callback = tokio::spawn(run.callback(true));
+        tokio::time::timeout(Duration::from_secs(5), in_commit)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.row().wireguard_enrolled_key,
+            None,
+            "the replacing connect starts before the enrollment is recorded"
+        );
+        // A start-up connect replaces the sign-in while its commit runs; it
+        // opens no browser, so a row it reads as unenrolled is parked.
+        let mut replacing = Box::pin(connect_gateway(
+            run.f.app.handle().clone(),
+            Arc::clone(&run.f.state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let pending = still_pending(replacing.as_mut()).await;
+        release_commit.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            callback.await.unwrap();
+            if pending {
+                replacing.await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(
+            view.last_error, None,
+            "the replacing connect reads the enrollment its predecessor kept"
+        );
+        assert!(
+            run.requests()
+                .contains(&"GET /desktop/v1/devservers pat-wg".to_string()),
+            "the kept token is used: {:?}",
+            run.requests()
+        );
+        assert_eq!(
+            run.requests()
+                .iter()
+                .filter(|request| request.starts_with("POST /desktop/authorize/redeem"))
+                .count(),
+            1,
+            "no second sign-in"
+        );
+        assert!(!auth::tests::take_pending_for_test(), "no browser wait");
+        assert!(run.revokes().is_empty());
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_that_wins_before_the_commit_revokes_the_token() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(|_, _| {
+            Err("a refused commit reaches no store".into())
+        }));
+        let state = Arc::clone(&run.f.state);
+        *run.f.attempt.signin_hooks.before_commit.lock().unwrap() =
+            Some(Box::new(move || disconnect_now(&state)));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+        assert_eq!(
+            run.requests(),
+            [
+                "POST /desktop/authorize/redeem",
+                "DELETE /desktop/v1/token pat-wg"
+            ]
+        );
+        assert!(run.stored().is_none());
+        assert!(!run.conf().exists());
+        assert_eq!(run.row().wireguard_enrolled_key, None);
+        assert!(
+            lines
+                .infos()
+                .iter()
+                .any(|line| line.contains("gateway sign-in cancelled")),
+            "{}",
+            lines.text()
+        );
+        assert_revoke_logged(&lines);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn removal_during_the_commit_undoes_it_and_revokes() {
+        use chan_server::GatewayRegistry;
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        // The real removal: the row dropped and its files deleted first, the
+        // cascade spawned after, as the desktop wires it. The cascade's cancel
+        // is held until the commit has ended: the window in which only the
+        // row's absence tells the commit to undo.
+        let hook_cell: Arc<std::sync::OnceLock<config::GatewayRemoveHook>> =
+            Arc::new(std::sync::OnceLock::new());
+        let (cascaded, mut cascade_done) = tokio::sync::mpsc::unbounded_channel();
+        let cascade_gate = Arc::new(tokio::sync::Notify::new());
+        let app = run.f.app.handle().clone();
+        let state = Arc::clone(&run.f.state);
+        let runtime = tokio::runtime::Handle::current();
+        let gate = Arc::clone(&cascade_gate);
+        let _ = hook_cell.set(Arc::new(move |id: &str| {
+            let app = app.clone();
+            let state = Arc::clone(&state);
+            let id = id.to_string();
+            let cascaded = cascaded.clone();
+            let gate = Arc::clone(&gate);
+            runtime.spawn(async move {
+                gate.notified().await;
+                cascade_disconnect(&app, &state, &id, CascadeReason::Removed).await;
+                let _ = cascaded.send(());
+            });
+        }));
+        let registry = Arc::new(config::GatewayConfigRegistry::new(
+            Arc::clone(&run.f.state.store),
+            hook_cell,
+            Arc::clone(&run.f.state.gateway_manager),
+        ));
+        let origin = run.f.discovery.identity_origin.clone();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            assert!(registry.remove("gw-keychain").unwrap());
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(origin, pat.clone());
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+        cascade_gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), cascade_done.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(run.stored().is_none(), "a removed row keeps no new token");
+        assert!(!run.conf().exists());
+        assert!(gateway_row(&run.f.state, "gw-keychain").is_err());
+        assert_eq!(run.revokes(), ["DELETE /desktop/v1/token pat-wg"]);
+        run.server.abort();
+    }
+
+    #[tokio::test]
+    async fn expiry_after_the_callback_keeps_the_commit_and_the_refusal() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        // The browser-wait expiry fires while the commit runs: the commit is
+        // kept.
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let announced = notices(&run.f.app);
+        let app = run.f.app.handle().clone();
+        let state = Arc::clone(&run.f.state);
+        let attempt = Arc::clone(&run.f.attempt);
+        let stored_origin = run.f.discovery.identity_origin.clone();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            expire_signin(&app, &state, "gw-keychain", "gateway", &attempt);
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(stored_origin, pat.clone());
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+        assert_eq!(run.stored().map(|pat| pat.id).as_deref(), Some("pat-wg"));
+        assert!(run.conf().exists());
+        assert!(run.revokes().is_empty());
+        assert!(
+            !announced
+                .try_iter()
+                .any(|notice| notice.contains("timed out")),
+            "no timeout is reported for a sign-in the browser finished"
+        );
+        run.finish().await;
+
+        // The expiry fires while a refused answer's token is revoked: the
+        // sign-in reports the refusal.
+        type LateExpiry = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+        let expire: LateExpiry = Arc::new(Mutex::new(None));
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let on_revoke = {
+            let expire = Arc::clone(&expire);
+            let fired = Arc::clone(&fired);
+            Arc::new(move || {
+                if let Some(expire) = expire.lock().unwrap().as_ref() {
+                    fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    expire();
+                }
+            })
+        };
+        let run = enrolling_fixture_with(
+            StandIn {
+                answers: vec![redeem_answer(Some(redeem_params(OTHER_PEER)))],
+                on_revoke: Some(on_revoke),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        let refused = notices(&run.f.app);
+        let events = unlocked_auth_events(&run.f.app, &run.f.state, auth::AUTH_ERROR);
+        let app = run.f.app.handle().clone();
+        let state = Arc::clone(&run.f.state);
+        let attempt = Arc::clone(&run.f.attempt);
+        *expire.lock().unwrap() = Some(Box::new(move || {
+            expire_signin(&app, &state, "gw-keychain", "gateway", &attempt);
+        }));
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(|_, _| {
+            Err("a refused answer reaches no store".into())
+        }));
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some(crate::wireguard_keys::PEER_CHANGED)
+        );
+        let (payload, _) = events.try_recv().expect("one auth-error");
+        assert_eq!(
+            serde_json::from_str::<String>(&payload).unwrap(),
+            crate::wireguard_keys::PEER_CHANGED
+        );
+        assert!(events.try_recv().is_err());
+        assert!(!refused
+            .try_iter()
+            .any(|notice| notice.contains("timed out")));
+        *expire.lock().unwrap() = None;
+        run.finish().await;
+    }
+
+    /// Whether each `auth-error` the sign-in emits comes after the stand-in
+    /// identity received its revoke.
+    fn auth_error_after_revoke(run: &EnrollingSignin) -> std::sync::mpsc::Receiver<bool> {
+        use tauri::Listener;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let requests = Arc::clone(&run.requests);
+        run.f.app.listen(auth::AUTH_ERROR, move |_| {
+            let revoked = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.starts_with("DELETE /desktop/v1/token"));
+            let _ = tx.send(revoked);
+        });
+        rx
+    }
+
+    /// The revoke is logged by the token's id, and no line carries the
+    /// token itself.
+    fn assert_revoke_logged(lines: &crate::devserver::log_capture::Lines) {
+        let text = lines.text();
+        assert!(
+            lines
+                .infos()
+                .iter()
+                .any(|line| line.contains("gateway sign-in token revoked")
+                    && line.contains("pat-wg")),
+            "{text}"
+        );
+        assert!(
+            !text.contains("fixture-only"),
+            "a log line carries the token: {text}"
         );
     }
 

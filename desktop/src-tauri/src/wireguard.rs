@@ -1107,9 +1107,10 @@ pub(crate) mod tests {
 
         let enrollment =
             crate::wireguard_keys::prepare(&keys, "gw-enroll", &sent, &entry, &params).unwrap();
-        let (conf, adopted) =
+        let (recorded, adopted) =
             crate::config::record_wireguard_enrollment(&store, &manager, "gw-enroll", enrollment)
                 .unwrap();
+        let conf = recorded.conf;
         // The running fabric took it: the badge reads the adopt's answer,
         // and a name in the map reaches the peer through the tunnel at once.
         assert_eq!(adopted, Some(Ok("connecting".to_string())));
@@ -1132,7 +1133,7 @@ pub(crate) mod tests {
         let (again, adopted) =
             crate::config::record_wireguard_enrollment(&store, &manager, "gw-enroll", enrollment)
                 .unwrap();
-        assert_eq!(again, conf);
+        assert_eq!(again.conf, conf);
         assert_eq!(adopted, Some(Ok("connecting".to_string())));
         assert_eq!(started(), 2);
         assert_eq!(fabric.tunnels(), 1);
