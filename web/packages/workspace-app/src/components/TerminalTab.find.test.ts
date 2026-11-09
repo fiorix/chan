@@ -1332,15 +1332,43 @@ describe("terminal find on the ghostty backend", () => {
     expect(selection(term)).toEqual(earlier);
   });
 
+  /// Each call of a write method in `source`, as the name written to and the
+  /// method (`term.write`), read through an optional chain, a non-null
+  /// assertion or a cast in parentheses. `unread` counts the mentions of a
+  /// write method that no call accounts for, such as a call on an indexed or
+  /// returned terminal, or the method handed on uncalled.
+  function writeCalls(source: string): { calls: string[]; unread: number } {
+    const calls = [...source.matchAll(/\b(\w+)!?(?:\s+as\s+[^()]*)?\)?[!?]?\.(write|writeln)\(/g)].map(
+      (m) => `${m[1]}.${m[2]}`,
+    );
+    const mentions = source.match(/\.(?:write|writeln)\b/g)?.length ?? 0;
+    return { calls, unread: mentions - calls.length };
+  }
+
   test("every write the tab makes reaches a ghostty terminal through the viewport controller", () => {
     // The controller tells find of each write, and a write around it leaves
     // the count and the highlight behind. On ghostty the PTY writer handed
     // to ptyWrites is the controller's write, chan's own lines take it in
     // writeChanLine, and that helper's xterm arm is the one writeln.
-    const writes = [...terminalTabSource.matchAll(/\b(\w+)\??\.(write|writeln)\(/g)].map((m) => `${m[1]}.${m[2]}`);
-    expect(writes.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "term.writeln", "viewport.write"]);
+    const { calls, unread } = writeCalls(terminalTabSource);
+    expect(calls.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "term.writeln", "viewport.write"]);
+    expect(unread, "no write method is reached another way").toBe(0);
     const helper = terminalTabSource.slice(terminalTabSource.indexOf("function writeChanLine("));
     expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("else term?.writeln(line);");
+  });
+
+  test("the write scan reads a call through an assertion, a cast or an optional chain, and counts what it cannot name", () => {
+    const source = [
+      "term!.write(bytes);",
+      "(term as Terminal).write(bytes);",
+      "(term as unknown as Terminal)?.writeln(line);",
+      "this.term?.writeln(line);",
+    ].join("\n");
+    expect(writeCalls(source)).toEqual({
+      calls: ["term.write", "term.write", "term.writeln", "term.writeln"],
+      unread: 0,
+    });
+    expect(writeCalls("terms[0].write(bytes);\nonData(term.writeln);")).toEqual({ calls: [], unread: 2 });
   });
 
   test("the terminal's teardown frees the open bar's search", async () => {

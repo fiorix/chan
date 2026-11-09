@@ -21,15 +21,17 @@
 /// (about 1.7MB with an empty terminal), which is released with the
 /// terminal.
 ///
-/// The compiled module is cached behind a single promise so concurrent
-/// spawns coalesce. A compile failure stays cached for the page's life:
-/// an engine without the wasm's required features cannot use this core.
-/// So does the binding's refusal of the core (a libghostty-vt other than
-/// the 1.x it drives, or one without search): the vendored file does not
-/// change between spawns. Fetch failures retry at the next spawn, and so
-/// does any other failure of the instance that checks the core, such as a
-/// wasm memory RangeError on a page short of memory. Callers fall back to
-/// xterm.js for each terminal whose load fails.
+/// The kit is cached behind a single promise so concurrent spawns
+/// coalesce. A compile failure stays cached for the page's life: an engine
+/// without the wasm's required features cannot use this core. So does the
+/// binding's refusal of the core (a libghostty-vt other than the 1.x it
+/// drives, or one without search): the vendored file does not change
+/// between spawns. Fetch failures retry at the next spawn, and so does any
+/// other failure of the instance that checks the core, such as a wasm
+/// memory RangeError on a page short of memory. That retry instantiates
+/// the module compiled before: fetching and compiling the 1.2MB again
+/// cannot cure a failure of the instance. Callers fall back to xterm.js
+/// for each terminal whose load fails.
 
 import type { Ghostty, Terminal } from "ghostty-web";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "./ghosttyVt";
@@ -73,11 +75,15 @@ export function ghosttyKitFrom(
 }
 
 let kitPromise: Promise<GhosttyKit> | null = null;
+/// The kit over the compiled module, unchecked; set once the compile
+/// succeeds and kept when the instance that checks the core fails.
+let compiledKit: GhosttyKit | null = null;
 
 /// Load the ghostty kit, fetching the library and compiling the wasm
 /// asset on first use. Compile failures and a refused core stay cached;
 /// any other failure, fetching the library or the wasm or making the
-/// instance that checks the core, retries at the next spawn.
+/// instance that checks the core, retries at the next spawn, from the
+/// compiled module when the compile got that far.
 export function loadGhosttyKit(): Promise<GhosttyKit> {
   if (!kitPromise) {
     let permanent = false;
@@ -86,19 +92,8 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
       throw error;
     };
     kitPromise = (async () => {
-      const [mod, wasmUrl] = await Promise.all([
-        import("ghostty-web"),
-        import("../../vendor/ghostty-vt/ghostty-vt.wasm?url"),
-      ]);
-      const response = await fetch(wasmUrl.default);
-      if (!response.ok) {
-        throw new Error(
-          `fetching ${wasmUrl.default}: ${response.status} ${response.statusText}`,
-        );
-      }
-      const bytes = await response.arrayBuffer();
-      const module = await WebAssembly.compile(bytes).catch(forever);
-      const kit = ghosttyKitFrom(module, mod);
+      compiledKit ??= await compileGhosttyKit(forever);
+      const kit = compiledKit;
       // The binding checks the core's version and features when it is
       // instantiated; one instance here surfaces that before any terminal
       // asks, and is dropped. Only the binding's refusal is the core's own.
@@ -113,4 +108,22 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
     });
   }
   return kitPromise;
+}
+
+/// Fetches the library and the wasm asset and compiles the module; a
+/// compile failure goes through `forever`.
+async function compileGhosttyKit(forever: (error: unknown) => never): Promise<GhosttyKit> {
+  const [mod, wasmUrl] = await Promise.all([
+    import("ghostty-web"),
+    import("../../vendor/ghostty-vt/ghostty-vt.wasm?url"),
+  ]);
+  const response = await fetch(wasmUrl.default);
+  if (!response.ok) {
+    throw new Error(
+      `fetching ${wasmUrl.default}: ${response.status} ${response.statusText}`,
+    );
+  }
+  const bytes = await response.arrayBuffer();
+  const module = await WebAssembly.compile(bytes).catch(forever);
+  return ghosttyKitFrom(module, mod);
 }

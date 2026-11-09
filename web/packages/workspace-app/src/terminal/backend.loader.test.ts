@@ -99,7 +99,8 @@ describe("loadGhosttyKit", () => {
   });
 
   // Anything else an instance can throw may pass: the spawn it fails falls
-  // back, and the next spawn loads and checks again.
+  // back, and the next spawn checks again with a new instance of the module
+  // compiled before.
   test.each([
     [
       "a wasm memory RangeError",
@@ -111,23 +112,26 @@ describe("loadGhosttyKit", () => {
       () => instantiateChanged((exports) => ({ ...exports, ghostty_wasm_alloc: () => 0 })),
       "ghostty-vt: out of memory",
     ],
-  ])("retries a core instance that fails with %s", async (_, failing, message) => {
+  ])("retries a core instance that fails with %s from the module compiled before", async (_, failing, message) => {
     const fetch = vi.fn(() => Promise.resolve(new Response(bytes)));
     vi.stubGlobal("fetch", fetch);
     const compile = vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
-    const spied = vi.spyOn(WebAssembly, "instantiate").mockImplementationOnce(failing);
+    const spied = vi.spyOn(WebAssembly, "instantiate").mockImplementationOnce(failing).mockImplementationOnce(failing);
     const { loadGhosttyKit } = await import("./backend");
     const { GhosttyVtRefusal } = await import("./ghosttyVt");
     const first = loadGhosttyKit();
     await expect(first).rejects.toThrow(message);
     await expect(first, "no refusal").rejects.not.toBeInstanceOf(GhosttyVtRefusal);
+    const second = loadGhosttyKit();
+    expect(second, "the next spawn loads again").not.toBe(first);
+    await expect(second).rejects.toThrow(message);
     const retry = loadGhosttyKit();
-    expect(retry, "the next spawn loads again").not.toBe(first);
+    expect(retry, "and so does the one after").not.toBe(second);
     await expect(retry).resolves.toHaveProperty("instantiate");
-    expect(spied, "the next spawn instantiates again").toHaveBeenCalledTimes(2);
+    expect(spied, "each spawn instantiates again").toHaveBeenCalledTimes(3);
     expect(loadGhosttyKit(), "a successful retry stays cached").toBe(retry);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(compile).toHaveBeenCalledTimes(2);
+    expect(fetch, "one fetch across the retries").toHaveBeenCalledTimes(1);
+    expect(compile, "one compile across the retries").toHaveBeenCalledTimes(1);
     await expect((await retry).instantiate(), "the checked kit still hands out terminals").resolves.toBeDefined();
   });
 
