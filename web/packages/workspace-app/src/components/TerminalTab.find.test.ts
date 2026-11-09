@@ -27,7 +27,9 @@
 //    binding: the active match is ghostty-web's selection, the total
 //    carries a `+` while the scan runs, and Escape clears the selection.
 //    Escape hands the keyboard to the terminal with no later refocus, so a
-//    bar reopened at once keeps it.
+//    bar reopened at once keeps it. A click in the bar keeps the highlight,
+//    and a selection the user drags stays theirs; a click elsewhere in the
+//    page clears the selection, as ghostty-web does.
 //
 // The xterm component cases run on terminal and addon doubles that record
 // the calls. The block after them runs the real addon over a real xterm in
@@ -37,8 +39,8 @@
 // the tab with the doubles backed by a real xterm and the real addon, for
 // what the addon reports on its own: its refresh after output. The ghostty
 // cases run the binding over the vendored core inside a ghostty-web terminal
-// stand-in that carries ghostty-web's own SelectionManager, with animation
-// frames run by the case.
+// stand-in that carries ghostty-web's own SelectionManager, mouse handling
+// included, with animation frames run by the case.
 
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
@@ -192,8 +194,12 @@ type Anchor = { col: number; absoluteRow: number };
 /// What a case reads of a ghostty terminal stand-in.
 type GhosttyStandIn = {
   wasmTerm: VtTerminal;
+  cols: number;
+  rows: number;
   viewportY: number;
   focused: number;
+  /// ghostty-web's canvas, in the element the terminal opened in.
+  canvas: HTMLCanvasElement;
   /// The element the terminal opened in, and the keys that reached it.
   element: HTMLElement | null;
   keys: string[];
@@ -212,9 +218,9 @@ const ghostty = vi.hoisted(() => ({
 // viewport offset (lines scrolled back from the bottom, clamped to the
 // history, back to the bottom after a write), writeln as a write with CRLF,
 // a resize that hands the core the new grid and fires the resize event, and
-// focus as ghostty-web's: open() makes the element it opens in focusable and
-// reads keys there, and focus() focuses that element, then again on a
-// zero-delay timer.
+// focus as ghostty-web's: open() makes the element it opens in focusable,
+// reads keys there and puts its canvas in it, and focus() focuses that
+// element, then again on a zero-delay timer.
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   const { SelectionManager } = await import("ghostty-web");
@@ -244,6 +250,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.element = element;
       if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "0");
       element.addEventListener("keydown", (e) => this.keys.push(e.key));
+      element.append(this.canvas);
       this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
         scrollbackLimit: this.options.scrollback,
       });
@@ -862,12 +869,17 @@ describe("terminal find on the ghostty backend", () => {
       data: JSON.stringify({ type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
     });
     await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
+    await output(text);
+    await vi.waitFor(() => expect(term.wasmTerm.plainText()).toContain("needle f"));
+    return term;
+  }
+
+  /// `text` as PTY output down the attached session.
+  async function output(text: string): Promise<void> {
     const bytes = new TextEncoder().encode(text);
     const buffer = new ArrayBuffer(bytes.length);
     new Uint8Array(buffer).set(bytes);
-    await socket.onmessage?.({ data: buffer });
-    await vi.waitFor(() => expect(term.wasmTerm.plainText()).toContain("needle f"));
-    return term;
+    await TestWebSocket.all[0]!.onmessage?.({ data: buffer });
   }
 
   /// Animation frames held until the case runs them, from here to the end
@@ -1077,6 +1089,85 @@ describe("terminal find on the ghostty backend", () => {
     await tick();
     expect(selection(term)).toBeNull();
     expect(countElement()?.textContent).toBe("");
+  });
+
+  /// A click as a mouse makes one on `target`: pressed and released there.
+  function click(target: Element, at = { clientX: 0, clientY: 0 }): void {
+    const init = { bubbles: true, cancelable: true, button: 0, ...at };
+    target.dispatchEvent(new MouseEvent("mousedown", init));
+    target.dispatchEvent(new MouseEvent("mouseup", init));
+    target.dispatchEvent(new MouseEvent("click", { ...init, detail: 1 }));
+  }
+
+  /// The user's drag over the terminal from one screen cell to another,
+  /// handled by ghostty-web's own mouse code; returns the clipboard writes
+  /// its release made. The canvas has the grid's size, 8 by 16 pixels a cell.
+  function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }) {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.spyOn(term.canvas, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, term.cols * 8, term.rows * 16));
+    const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
+    try {
+      term.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...at(from) }));
+      term.canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(to) }));
+      term.canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
+      term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, ...at(to) }));
+    } finally {
+      delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+    return writeText;
+  }
+
+  // ghostty-web drops its selection on a click anywhere outside its canvas,
+  // and find's highlight is that selection. The bar is the terminal's own:
+  // a click in it keeps the highlight.
+  test.each(["input", "count", "box"] as const)("a click on the find bar's %s keeps find's highlight", async (part) => {
+    const term = await renderGhostty(NEEDLES);
+    const { input, frames } = await findNeedle(term);
+    const target = { input, count: countElement()!, box: document.querySelector(".terminal-find")! }[part];
+    click(target);
+    expect(selection(term)).toEqual(match(5));
+    await output("\r\nmore");
+    frames.settle();
+    await tick();
+    expect(selection(term), "a later frame keeps it too").toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
+    pressEnter(input);
+    await tick();
+    expect(selection(term)).toEqual(match(3));
+  });
+
+  test("a click elsewhere in the page still clears the selection, and find leaves it cleared", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { input, frames } = await findNeedle(term);
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    click(elsewhere);
+    expect(selection(term), "ghostty-web's click outside its canvas").toBeNull();
+    await output("\r\nmore");
+    frames.settle();
+    await tick();
+    expect(selection(term)).toBeNull();
+    expect(countElement()?.textContent).toBe("1 of 3");
+    pressEnter(input);
+    await tick();
+    expect(selection(term), "a step highlights again").toEqual(match(3));
+  });
+
+  test("a selection the user drags after find's highlight stays theirs through a click in the bar", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { input, frames } = await findNeedle(term);
+    const copied = drag(term, { col: 0, row: 0 }, { col: 2, row: 1 });
+    const users = { start: { col: 0, absoluteRow: 0 }, end: { col: 2, absoluteRow: 1 } };
+    expect(selection(term), "ghostty-web made the user's selection").toEqual(users);
+    expect(copied, "and copied it on release").toHaveBeenCalledTimes(1);
+    click(input);
+    expect(selection(term)).toEqual(users);
+    await output("\r\nmore needle");
+    frames.settle();
+    await tick();
+    expect(selection(term), "find does not take it over").toEqual(users);
+    expect(countElement()?.textContent).toBe("2 of 4");
   });
 
   test("a resize drops the highlight, keeps the total with no index, and Enter starts the walk over", async () => {
