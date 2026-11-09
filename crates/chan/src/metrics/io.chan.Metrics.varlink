@@ -25,7 +25,8 @@ type Sample (
   yamuxWaiting: int, yamuxServing: int, yamuxServiceCapacity: int, yamuxStreamLimit: int
 )
 type Identity (instanceId: string, version: string, build: string, pid: int, hostname: ?string)
-# Totals retain their original timestamp when a later scan fails.
+# Totals retain their original timestamp when a later scan fails. Entries
+# this user cannot read, and entries removed during a scan, are not counted.
 type Storage (
   path: string, logicalBytes: ?int, allocatedBytes: ?int, files: ?int,
   sampledAtMs: ?int, scanMillis: ?int, error: ?string
