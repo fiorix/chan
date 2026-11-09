@@ -168,6 +168,7 @@
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
+  import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
@@ -436,6 +437,16 @@
     setTerminalProgramStatus(tab, visible);
   }
   let findQuery = $state("");
+  /// The find bar's match count on either backend (see `FindCount`); null
+  /// leaves the count blank.
+  let findCount = $state<FindCount | null>(null);
+  const findCountText = $derived(
+    findCount === null
+      ? ""
+      : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
+  );
+  /// Matches the search addon decorates and counts; past it its list stops.
+  const FIND_HIGHLIGHT_LIMIT = 1000;
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
   // its own session frame leaves the screen as it was and keeps it; only a
@@ -518,6 +529,10 @@
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
+  // Find on the ghostty backend, made when the find bar first opens (see
+  // ghosttyFinder) and disposed with the terminal. Null on xterm, which
+  // finds through its SearchAddon.
+  let ghosttyFind: GhosttyFind | null = null;
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
@@ -1293,8 +1308,7 @@
       term = new Terminal({
         // xterm gates registerDecoration (plus the markers / unicode
         // namespaces) behind this flag; the search addon's decorated
-        // find (runFind) throws without it and the find bar matches
-        // nothing.
+        // find throws without it and the find bar matches nothing.
         allowProposedApi: true,
         allowTransparency: transparentWindow,
         cursorBlink: false,
@@ -1312,10 +1326,15 @@
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
       const xtermFit = new FitAddon();
       fit = xtermFit;
-      search = new SearchAddon({ highlightLimit: 1000 });
+      search = new SearchAddon({ highlightLimit: FIND_HIGHLIGHT_LIMIT });
       serialize = new SerializeAddon();
       term.loadAddon(xtermFit);
       term.loadAddon(search);
+      // Fires on every decorated find. Addon doubles without the event
+      // leave the count blank.
+      search.onDidChangeResults?.((e) => {
+        findCount = xtermFindCount(e.resultIndex, e.resultCount);
+      });
       term.loadAddon(serialize);
       // Route terminal link clicks through the editor's external-open
       // path: a new browser tab on web, the OS default browser under
@@ -2537,6 +2556,10 @@
     secretMasker = null;
     userInput?.dispose();
     userInput = null;
+    // Before the terminal: it frees its search and clears its highlight
+    // through the terminal's selection.
+    ghosttyFind?.dispose();
+    ghosttyFind = null;
     term?.dispose();
     term = null;
     sawSessionControl = false;
@@ -2550,6 +2573,7 @@
     backend = "xterm";
     fit = null;
     search = null;
+    findCount = null;
     serialize = null;
   }
 
@@ -2710,10 +2734,10 @@
 
   function openFind(): void {
     closeTabMenu();
-    // The find bar runs on xterm's SearchAddon; there is no ghostty-web
-    // search addon, so under the ghostty backend the bar stays closed
-    // (the right-click menu entry is hidden too).
-    if (backend !== "xterm") return;
+    // xterm finds through its SearchAddon and ghostty through libghostty-vt's
+    // search on chan's binding. A ghostty terminal on any other core has no
+    // search, and its bar stays closed.
+    if (backend === "ghostty" && !ghosttyFinder()) return;
     findOpen = true;
     void tick().then(() => searchInput?.focus());
   }
@@ -2810,8 +2834,8 @@
       else if (name === "app.terminal.newFsEntry") openNewFsEntry();
       else if (name === "app.terminal.secretMasking.toggle") toggleSecretMasking();
       else if (name === "app.find.open") openFind();
-      else if (name === "app.find.next" && findOpen) runFind(true);
-      else if (name === "app.find.prev" && findOpen) runFind(false);
+      else if (name === "app.find.next" && findOpen) stepFind("older");
+      else if (name === "app.find.prev" && findOpen) stepFind("newer");
     };
     window.addEventListener("chan:command", onLauncherCommand);
     return () => window.removeEventListener("chan:command", onLauncherCommand);
@@ -2823,12 +2847,8 @@
   // prompt-frame path every terminal uses). Per-terminal text input is the
   // universal Rich Prompt (Cmd+Shift+P) - see RichPrompt.svelte / sendPrompt.
 
-  function runFind(next: boolean): void {
-    if (!findQuery.trim()) {
-      search?.clearDecorations();
-      return;
-    }
-    const opts = {
+  function findOptions() {
+    return {
       decorations: {
         matchBackground: "#7c5cff",
         matchOverviewRuler: "#7c5cff",
@@ -2836,21 +2856,91 @@
         activeMatchColorOverviewRuler: "#58a6ff",
       },
     };
-    if (next) search?.findNext(findQuery, opts);
-    else search?.findPrevious(findQuery, opts);
+  }
+
+  /// The ghostty terminal's find, made on first use; null on xterm, before
+  /// the terminal exists, and on a core without search.
+  function ghosttyFinder(): GhosttyFind | null {
+    if (!ghosttyFind && backend === "ghostty" && term && ghosttyViewport) {
+      ghosttyFind = GhosttyFind.attach(term as GhosttyTerminal, ghosttyViewport, (count) => {
+        findCount = count;
+      });
+    }
+    return ghosttyFind;
+  }
+
+  /// The bar closed or its query emptied: drop the highlights and the count.
+  /// On ghostty this also frees the search and stops its scan.
+  function clearFind(): void {
+    search?.clearDecorations();
+    ghosttyFind?.close();
+    findCount = null;
+  }
+
+  /// The addon lists matches top-down, so its index is turned into a count
+  /// from the newest match, where typing lands. At the highlight limit the
+  /// list holds the oldest thousand: the total is a floor, and a selected
+  /// match's place among them says nothing about its distance from the
+  /// newest, so the index is dropped rather than shown wrong.
+  function xtermFindCount(resultIndex: number, resultCount: number): FindCount {
+    if (resultCount >= FIND_HIGHLIGHT_LIMIT) {
+      return { index: null, total: FIND_HIGHLIGHT_LIMIT, partial: true };
+    }
+    if (resultCount === 0) return { index: 0, total: 0, partial: false };
+    return {
+      index: resultIndex < 0 ? null : resultCount - resultIndex,
+      total: resultCount,
+      partial: false,
+    };
+  }
+
+  /// The query changed: select the newest match, the bottom-most in the
+  /// buffer. On ghostty the scan selects it on the frame that finds it. The
+  /// xterm addon's reverse search starts at the bottom only when nothing is
+  /// selected; from a selection it expands or steps from the previous match
+  /// instead, so a shortened query would keep an older match while a newer
+  /// one sits below it.
+  function findNewest(): void {
+    if (!findQuery.trim()) {
+      clearFind();
+      return;
+    }
+    if (backend === "ghostty") {
+      ghosttyFinder()?.find(findQuery);
+      return;
+    }
+    if (!search) return;
+    term?.clearSelection();
+    search.findPrevious(findQuery, findOptions());
+  }
+
+  /// Step from the selected match. Next (Enter) walks toward older output,
+  /// up the buffer, the way a terminal is read from the prompt: the xterm
+  /// addon's "previous". Newer is down the buffer, its "next". Both wrap.
+  function stepFind(direction: "older" | "newer"): void {
+    if (!findQuery.trim()) {
+      clearFind();
+      return;
+    }
+    if (backend === "ghostty") {
+      ghosttyFinder()?.step(findQuery, direction);
+      return;
+    }
+    if (direction === "older") search?.findPrevious(findQuery, findOptions());
+    else search?.findNext(findQuery, findOptions());
   }
 
   function onFindKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
       e.preventDefault();
       findOpen = false;
-      search?.clearDecorations();
+      clearFind();
       focusTerminal();
       return;
     }
     if (e.key === "Enter") {
       e.preventDefault();
-      runFind(!e.shiftKey);
+      stepFind(e.shiftKey ? "newer" : "older");
     }
   }
 
@@ -3057,16 +3147,13 @@
             <span class="mbtn-chord"></span>
           </button>
           <div class="msep" role="separator"></div>
-          {#if backend === "xterm"}
-            <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
-            <button class="mbtn" role="menuitem" onclick={openFind}>
-              <span class="mbtn-icon">
-                <Search size={16} strokeWidth={1.75} aria-hidden="true" />
-              </span>
-              <span class="mbtn-label">Find</span>
-              <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
-            </button>
-          {/if}
+          <button class="mbtn" role="menuitem" onclick={openFind}>
+            <span class="mbtn-icon">
+              <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">Find</span>
+            <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
+          </button>
           <button class="mbtn" role="menuitem" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -3318,10 +3405,11 @@
         spellcheck="false"
         oninput={(e) => {
           findQuery = (e.currentTarget as HTMLInputElement).value;
-          runFind(true);
+          findNewest();
         }}
         onkeydown={onFindKeydown}
       />
+      <span class="find-count" role="status" aria-label="find matches">{findCountText}</span>
     </div>
   {/if}
   {#if active && tab.cliReloadNotice}
@@ -3466,6 +3554,8 @@
     position: absolute;
     top: 8px;
     right: 10px;
+    display: flex;
+    align-items: center;
     /* Above every layer xterm stacks in the same context (its canvases at
        2, helpers at 5, decorations at 6, message overlay at 10), so the
        box takes its own clicks rather than the terminal under it. */
@@ -3495,6 +3585,18 @@
   }
   .find:focus {
     border-color: var(--link);
+  }
+  /* Always in the tree so the live region exists before it fills; it takes
+     no room while blank. */
+  .find-count {
+    margin-left: 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .find-count:empty {
+    margin-left: 0;
   }
   .terminal-host {
     flex: 1;

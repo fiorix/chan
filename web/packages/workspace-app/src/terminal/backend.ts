@@ -24,8 +24,10 @@
 /// The compiled module is cached behind a single promise so concurrent
 /// spawns coalesce. A compile failure stays cached for the page's life:
 /// an engine without the wasm's required features cannot use this core.
-/// Fetch failures retry at the next spawn. Callers fall back to xterm.js
-/// for each terminal whose load fails.
+/// So does the binding's refusal of the core (a libghostty-vt other than
+/// the 1.x it drives, or one without search): the vendored file does not
+/// change between spawns. Fetch failures retry at the next spawn. Callers
+/// fall back to xterm.js for each terminal whose load fails.
 
 import type { Ghostty, Terminal } from "ghostty-web";
 import { GhosttyVt, type VtHost } from "./ghosttyVt";
@@ -71,11 +73,15 @@ export function ghosttyKitFrom(
 let kitPromise: Promise<GhosttyKit> | null = null;
 
 /// Load the ghostty kit, fetching the library and compiling the wasm
-/// asset on first use. Compile failures stay cached; failures fetching
-/// the library or wasm retry at the next spawn.
+/// asset on first use. Compile failures and a refused core stay cached;
+/// failures fetching the library or wasm retry at the next spawn.
 export function loadGhosttyKit(): Promise<GhosttyKit> {
   if (!kitPromise) {
-    let compileFailed = false;
+    let permanent = false;
+    const forever = (error: unknown): never => {
+      permanent = true;
+      throw error;
+    };
     kitPromise = (async () => {
       const [mod, wasmUrl] = await Promise.all([
         import("ghostty-web"),
@@ -88,14 +94,16 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
         );
       }
       const bytes = await response.arrayBuffer();
-      const module = await WebAssembly.compile(bytes).catch((error: unknown) => {
-        compileFailed = true;
-        throw error;
-      });
-      return ghosttyKitFrom(module, mod);
+      const module = await WebAssembly.compile(bytes).catch(forever);
+      const kit = ghosttyKitFrom(module, mod);
+      // The binding checks the core's version and features when it is
+      // instantiated; one instance here surfaces that before any terminal
+      // asks, and is dropped.
+      await kit.instantiate().catch(forever);
+      return kit;
     })();
     kitPromise.catch(() => {
-      if (!compileFailed) kitPromise = null;
+      if (!permanent) kitPromise = null;
     });
   }
   return kitPromise;

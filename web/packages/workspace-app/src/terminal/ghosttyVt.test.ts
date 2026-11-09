@@ -1,7 +1,18 @@
 import { readFileSync } from "node:fs";
-import { Ghostty, Key, type GhosttyCell, type GhosttyTerminal } from "ghostty-web";
+import { Ghostty, Key, KeyEncoderOption, Mods, type GhosttyCell, type GhosttyTerminal } from "ghostty-web";
 import { beforeAll, describe, expect, test } from "vitest";
-import { ABI, CELL_BITS, GhosttyVt, KEY_SHIFT_FROM, LAYOUT, SCRATCH, upstreamKey } from "./ghosttyVt";
+import {
+  ABI,
+  CELL_BITS,
+  GhosttyVt,
+  KEY_ENCODER_OPTIONS,
+  KEY_SHIFT_FROM,
+  LAYOUT,
+  SCRATCH,
+  STYLE_FLAG_BITS,
+  upstreamKey,
+  upstreamKeyEncoderOption,
+} from "./ghosttyVt";
 import { KeyboardProtocolObserver } from "./keyboardProtocolStream";
 import { copyTerminalKeyboardProtocolState, createTerminalKeyboardProtocolState } from "./keymap";
 
@@ -55,6 +66,24 @@ function text(cells: GhosttyCell[] | null): string {
     .trimEnd();
 }
 
+type Fn = (...args: number[]) => number;
+
+/// `instance` with its `ghostty_build_info` export answering the version
+/// and search queries as given, every other query from the real export.
+function reporting(instance: WebAssembly.Instance, major: number, search: boolean): WebAssembly.Instance {
+  const exports = instance.exports as Record<string, unknown>;
+  const memory = exports.memory as WebAssembly.Memory;
+  const real = exports.ghostty_build_info as Fn;
+  const ghostty_build_info: Fn = (data, out) => {
+    const view = new DataView(memory.buffer);
+    if (data === ABI.GhosttyBuildInfo.VERSION_MAJOR) view.setUint32(out, major, true);
+    else if (data === ABI.GhosttyBuildInfo.FEATURE_SEARCH) view.setUint8(out, search ? 1 : 0);
+    else return real(data, out);
+    return ABI.GhosttyResult.SUCCESS;
+  };
+  return { exports: { ...exports, ghostty_build_info } } as unknown as WebAssembly.Instance;
+}
+
 describe("the binding's ABI tables", () => {
   let json: TypeJson;
   beforeAll(async () => {
@@ -86,6 +115,29 @@ describe("the binding's ABI tables", () => {
     for (const [field, [lsb, width]] of Object.entries(CELL_BITS)) {
       expect(bits[field], field).toEqual(expect.objectContaining({ lsb, width }));
     }
+  });
+
+  test("the style flag bits are the pinned build's", () => {
+    const bits = json.types.GhosttyStyleFlags?.bits ?? {};
+    for (const [field, [lsb, width]] of Object.entries(STYLE_FLAG_BITS)) {
+      expect(bits[field], field).toEqual(expect.objectContaining({ lsb, width }));
+    }
+  });
+
+  test("every ghostty-web key encoder option lands on the upstream option it means", () => {
+    const names = Object.keys(KeyEncoderOption).filter((k) => Number.isNaN(Number(k)));
+    expect(names.sort(), "ghostty-web's options are all translated").toEqual(Object.keys(KEY_ENCODER_OPTIONS).sort());
+    const values = json.types.GhosttyKeyEncoderOption?.values ?? {};
+    for (const [name, { web, upstream }] of Object.entries(KEY_ENCODER_OPTIONS)) {
+      expect(KeyEncoderOption[name as keyof typeof KeyEncoderOption], `ghostty-web ${name}`).toBe(web);
+      expect(upstreamKeyEncoderOption(web), `upstream ${upstream}`).toBe(values[upstream]);
+    }
+    expect(upstreamKeyEncoderOption(Object.keys(KEY_ENCODER_OPTIONS).length)).toBeUndefined();
+  });
+
+  test("ghostty_key_event_set_utf8 takes its string struct as one argument", async () => {
+    const exports = (await WebAssembly.instantiate(vendored, {})).exports;
+    expect((exports.ghostty_key_event_set_utf8 as Fn).length).toBe(2);
   });
 
   test("every ghostty-web key lands on the upstream key of the same name", () => {
@@ -248,6 +300,65 @@ describe("differential: the same bytes through ghostty-web's build and upstream'
     for (const enc of [a, b]) enc.setOption(0, true);
     expect([...b.encode({ action: 1, key: Key.UP, mods: 0 })]).toEqual([...a.encode({ action: 1, key: Key.UP, mods: 0 })]);
   });
+
+  /// A key each option changes the encoding of, so a mistranslated option
+  /// shows as different bytes; `given` is an option the probe needs on
+  /// first (ignoring the keypad with NumLock only matters in keypad
+  /// application mode).
+  const OPTION_PROBES: Record<
+    keyof typeof KEY_ENCODER_OPTIONS,
+    { key: number; mods?: number; utf8?: string; given?: KeyEncoderOption }
+  > = {
+    CURSOR_KEY_APPLICATION: { key: Key.UP },
+    KEYPAD_KEY_APPLICATION: { key: Key.KP_5, utf8: "5" },
+    IGNORE_KEYPAD_WITH_NUMLOCK: { key: Key.KP_5, mods: Mods.NUMLOCK, utf8: "5", given: KeyEncoderOption.KEYPAD_KEY_APPLICATION },
+    ALT_ESC_PREFIX: { key: Key.A, mods: Mods.ALT, utf8: "a" },
+    MODIFY_OTHER_KEYS_STATE_2: { key: Key.TAB, mods: Mods.SHIFT },
+    KITTY_KEYBOARD_FLAGS: { key: Key.ESCAPE },
+  };
+
+  test.each(Object.keys(OPTION_PROBES) as (keyof typeof OPTION_PROBES)[])(
+    "the %s option set through ghostty-web's numbering encodes as in its build",
+    async (name) => {
+      const probe = OPTION_PROBES[name];
+      const event = { action: 1, key: probe.key, mods: probe.mods ?? 0, utf8: probe.utf8 };
+      const a = (await ghosttyWeb()).createKeyEncoder();
+      const b = (await upstream()).createKeyEncoder();
+      if (probe.given !== undefined) for (const enc of [a, b]) enc.setOption(probe.given, true);
+      const before = [...a.encode(event)];
+      for (const enc of [a, b]) {
+        if (name === "KITTY_KEYBOARD_FLAGS") enc.setKittyFlags(1);
+        else enc.setOption(KeyEncoderOption[name], true);
+      }
+      const expected = [...a.encode(event)];
+      expect(expected, "the probe is sensitive to the option").not.toEqual(before);
+      expect([...b.encode(event)]).toEqual(expected);
+    },
+  );
+});
+
+describe("the core the binding accepts", () => {
+  test("the vendored build is a 1.x with search", async () => {
+    const instance = await WebAssembly.instantiate(vendored, {});
+    const exports = instance.exports as Record<string, Fn>;
+    const out = exports.ghostty_wasm_alloc(8);
+    const view = () => new DataView((exports.memory as unknown as WebAssembly.Memory).buffer);
+    expect(exports.ghostty_build_info(ABI.GhosttyBuildInfo.VERSION_MAJOR, out)).toBe(ABI.GhosttyResult.SUCCESS);
+    expect(view().getUint32(out, true)).toBe(1);
+    expect(exports.ghostty_build_info(ABI.GhosttyBuildInfo.FEATURE_SEARCH, out)).toBe(ABI.GhosttyResult.SUCCESS);
+    expect(view().getUint8(out)).toBe(1);
+    expect(() => new GhosttyVt(instance)).not.toThrow();
+  });
+
+  test.each([0, 2])("a core reporting major version %i is refused", async (major) => {
+    const instance = await WebAssembly.instantiate(vendored, {});
+    expect(() => new GhosttyVt(reporting(instance, major, true))).toThrow(`libghostty-vt ${major}.x`);
+  });
+
+  test("a core without search is refused", async () => {
+    const instance = await WebAssembly.instantiate(vendored, {});
+    expect(() => new GhosttyVt(reporting(instance, 1, false))).toThrow("no search");
+  });
 });
 
 describe("upstream's terminal through ghostty-web's binding API", () => {
@@ -349,11 +460,36 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     t.free();
   });
 
+  test("a ranged read formats the selection alone, across history and screen", async () => {
+    const t = (await upstream()).createTerminal(20, 3) as unknown as GhosttyTerminal & {
+      plainText(range?: { startCol: number; startRow: number; endCol: number; endRow: number }): string | null;
+    };
+    t.write(Array.from({ length: 6 }, (_, i) => `row ${i} abcdefghij`).join("\r\n"));
+    expect(t.getScrollbackLength()).toBe(3);
+    expect(t.plainText({ startCol: 6, startRow: 2, endCol: 4, endRow: 3 })).toBe("abcdefghij\nrow 3");
+    expect(t.plainText({ startCol: 0, startRow: 5, endCol: 19, endRow: 5 })).toBe("row 5 abcdefghij");
+    expect(t.plainText()).toBe(Array.from({ length: 6 }, (_, i) => `row ${i} abcdefghij`).join("\n"));
+  });
+
   test("scrollback keeps the configured number of lines, not bytes", async () => {
     const t = (await upstream()).createTerminal(80, 24, { scrollbackLimit: 5_000 });
     t.write(Array.from({ length: 3_000 }, (_, i) => `line ${i}`).join("\r\n"));
     expect(t.getScrollbackLength()).toBe(3_000 - 24);
     expect(text(t.getScrollbackLine(0))).toBe("line 0");
+  });
+
+  test("the line limit holds past the core's default byte cap", async () => {
+    const t = (await upstream()).createTerminal(80, 24, { scrollbackLimit: 10_000 });
+    for (let from = 0; from < 20_000; from += 1_000) {
+      t.write(Array.from({ length: 1_000 }, (_, i) => `line ${from + i} ${"x".repeat(40)}`).join("\r\n") + "\r\n");
+    }
+    // The core prunes whole pages, so the count lands near the limit; the
+    // default byte cap alone would keep one page, about a thousand rows.
+    const rows = t.getScrollbackLength();
+    expect(rows).toBeGreaterThanOrEqual(9_000);
+    expect(rows).toBeLessThanOrEqual(11_000);
+    // The last line's CRLF leaves the cursor on an empty row below it.
+    expect(text(t.getScrollbackLine(rows - 1))).toBe(`line ${20_000 - 24} ${"x".repeat(40)}`);
   });
 
   test.each([
@@ -376,9 +512,20 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
 
   test.each([33, 40, 65])("a cluster of %i codepoints is read into a buffer of its own", async (n) => {
     type Wasm = { bytes(): Uint8Array; alloc(len: number): number; free(ptr: number, len: number): void };
-    const t = (await upstream()).createTerminal(20, 3) as unknown as GhosttyTerminal & { scratch: number; wasm: Wasm };
-    const end = t.scratch + SCRATCH.size;
-    const before = t.wasm.bytes().slice(end, end + 512);
+    type Probe = GhosttyTerminal & { scratch: number; wasm: Wasm };
+    const pastScratch = (term: Probe) => term.wasm.bytes().slice(term.scratch + SCRATCH.size, term.scratch + SCRATCH.size + 512);
+    const moved = (a: Uint8Array, b: Uint8Array) => [...a].flatMap((v, i) => (v !== b[i] ? [i] : []));
+    // The core keeps its own state (the cursor among it) right past the
+    // scratch, so a plain one-cell write on an identical terminal names the
+    // bytes a write moves on its own.
+    const control = (await upstream()).createTerminal(20, 3) as unknown as Probe;
+    const controlBefore = pastScratch(control);
+    control.write("e");
+    control.update();
+    const ownState = moved(controlBefore, pastScratch(control));
+    const t = (await upstream()).createTerminal(20, 3) as unknown as Probe;
+    expect(t.scratch, "the control's layout is this terminal's").toBe(control.scratch);
+    const before = pastScratch(t);
     const allocs: [number, number][] = [];
     const frees: [number, number][] = [];
     const { alloc, free } = t.wasm;
@@ -394,7 +541,7 @@ describe("upstream's terminal through ghostty-web's binding API", () => {
     // One cluster: "e" and n - 1 combining acute accents.
     t.write("e" + "\u0301".repeat(n - 1));
     t.update();
-    expect([...t.wasm.bytes().slice(end, end + 512)], "nothing past the scratch").toEqual([...before]);
+    expect(ownState, "nothing past the scratch but the core's own state").toEqual(expect.arrayContaining(moved(before, pastScratch(t))));
     const own = allocs.filter(([, len]) => len === n * 4);
     expect(own, "one buffer of four bytes a codepoint").toHaveLength(1);
     expect(frees, "freed with its length").toContainEqual(own[0]);

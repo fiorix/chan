@@ -16,24 +16,36 @@ import { VtTerminal } from "./ghosttyVt";
 // one formatter call over it (`VtTerminal.plainText`), what the rows show. A
 // read the core cannot format falls back to ghostty-web's own. The shape is
 // feature-detected, and an absent one leaves ghostty-web's selection as it is.
+// Find writes its active match through the same anchors (ghosttyFind.ts).
 
+/// A cell of the selection: `absoluteRow` 0 is the oldest history row and the
+/// active rows follow.
 type Anchor = { col: number; absoluteRow: number };
 
-type SelectionManagerLike = {
+/// The members of ghostty-web's private SelectionManager chan uses. The
+/// selection runs from `selectionStart` to `selectionEnd`, both cells
+/// included. With the viewport at the bottom ghostty-web repaints only the
+/// rows marked as changed, and `clearSelection` marks the rows of the
+/// selection it drops.
+export type SelectionManagerLike = {
   selectionStart: Anchor | null;
   selectionEnd: Anchor | null;
   getSelection(): string;
   selectAll(): void;
+  clearSelection(): void;
   requestRender(): void;
   selectionChangedEmitter: { fire(): void };
 };
 
-function selectionManagerOf(term: Terminal): SelectionManagerLike | null {
+/// ghostty-web's SelectionManager of `term`, or null when it is absent or not
+/// of the shape chan uses.
+export function selectionManagerOf(term: Terminal): SelectionManagerLike | null {
   const manager = (term as unknown as { selectionManager?: Partial<SelectionManagerLike> }).selectionManager;
   if (
     !manager ||
     typeof manager.getSelection !== "function" ||
     typeof manager.selectAll !== "function" ||
+    typeof manager.clearSelection !== "function" ||
     typeof manager.requestRender !== "function" ||
     typeof manager.selectionChangedEmitter?.fire !== "function" ||
     !("selectionStart" in manager) ||
