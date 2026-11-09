@@ -668,10 +668,7 @@ export type BrowserTab = {
   inspectorWidth?: number;
 };
 
-/// Dashboard tab - read-only surface hosting the shortcut table and
-/// info panels. No per-tab state today; the placeholder fields keep the
-/// discriminated union symmetric with the other tab kinds and let future
-/// additions include view state without re-walking the persistence layer.
+/// Dashboard surface and its persisted carousel/inspector state.
 export type DashboardTab = {
   /// The selected indexing directory opens Details; null means closed.
   indexingSelectedId?: string | null;
@@ -681,8 +678,8 @@ export type DashboardTab = {
   title: string;
   /// Persisted carousel slide index so a reload restores the user to the
   /// slide they were last on. 0 is Workspace; 1 is Search (the Indexing
-  /// graph); 2 is About - matching the `DASHBOARD_SLOT_LABELS` order and
-  /// the `slideIndex === 1` indexing-poll gate in EmptyPaneCarousel.
+  /// graph); 2 is About; 3 is Metrics. These stable ids match
+  /// `DASHBOARD_SLOT_LABELS`; display order is `DASHBOARD_SLOT_ORDER`.
   /// The carousel's play/pause is server-persisted so the auto-rotate
   /// preference survives a reload independently.
   carouselSlide?: number;
@@ -710,77 +707,55 @@ export type ExtensionTab = {
   extensionId: string;
 };
 
-/// The Dashboard carousel's slots in display order, by label. The index is
-/// the slot's identity: `carouselSlide`, `disabledSlots` and the slide
-/// commands store it, and the carousel template renders one slide per
-/// index in a single `{#if}` chain (About at 2, Workspace at 0, Search in
-/// its `{:else}`), whose titles repeat these labels. The tab menu's on/off
-/// rows read them from here.
-export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About"] as const;
-
-/// Carousel slot count, shared by the on/off helpers below, the
-/// restore-time clamp and the carousel's own navigation, so the helpers
-/// can reason about "the last enabled slot" without importing the
-/// component.
+/// Stable slot ids are persisted in layouts and accepted by cs. Display order
+/// is separate so inserting a page does not reinterpret saved cursors.
+export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About", "Metrics"] as const;
+export const DASHBOARD_SLOT_ORDER = [3, 0, 1, 2] as const;
+export const DASHBOARD_METRICS_SLIDE = 3;
 export const DASHBOARD_SLOT_COUNT = DASHBOARD_SLOT_LABELS.length;
 
-/// What the slot walks read: the switched-off slot indices. A DashboardTab
-/// is one; the carousel, which holds only the set as a prop, passes
-/// `{ disabledSlots }`.
 type DashboardSlotSet = { readonly disabledSlots?: readonly number[] };
 
-/// Whether slide `i` is currently shown.
-export function dashboardSlotEnabled(
-  slots: DashboardSlotSet,
-  i: number,
-): boolean {
-  return !(slots.disabledSlots ?? []).includes(i);
+export function dashboardSlotAvailable(i: number): boolean {
+  return i >= 0 && i < DASHBOARD_SLOT_COUNT && (windowCaps.workspace || i >= 2);
 }
 
-/// Toggle slide `i` on/off. Refuses to disable the last enabled slot so
-/// the carousel never goes blank. The disabled set is stored sorted and
-/// cleared entirely when every slot is back on (pre-release: omit the
-/// field rather than persist an empty array).
+export function dashboardSlotEnabled(slots: DashboardSlotSet, i: number): boolean {
+  return dashboardSlotAvailable(i) && !(slots.disabledSlots ?? []).includes(i);
+}
+
 export function toggleDashboardSlot(tab: DashboardTab, i: number): void {
+  if (!dashboardSlotAvailable(i)) return;
   const disabled = new Set(tab.disabledSlots ?? []);
   if (disabled.has(i)) {
     disabled.delete(i);
   } else {
-    if (DASHBOARD_SLOT_COUNT - disabled.size <= 1) return;
+    if (DASHBOARD_SLOT_ORDER.filter((slot) => dashboardSlotEnabled(tab, slot)).length <= 1) return;
     disabled.add(i);
   }
   const next = [...disabled].sort((a, b) => a - b);
   tab.disabledSlots = next.length > 0 ? next : undefined;
 }
 
-/// First enabled slide index. Falls back to 0, which the min-one-enabled
-/// invariant makes unreachable.
 export function firstEnabledSlot(slots: DashboardSlotSet): number {
-  for (let i = 0; i < DASHBOARD_SLOT_COUNT; i++) {
+  return DASHBOARD_SLOT_ORDER.find((i) => dashboardSlotEnabled(slots, i)) ?? DASHBOARD_METRICS_SLIDE;
+}
+
+function walkDashboardSlot(slots: DashboardSlotSet, from: number, direction: number): number {
+  const start = DASHBOARD_SLOT_ORDER.indexOf(from as (typeof DASHBOARD_SLOT_ORDER)[number]);
+  for (let step = 1; step <= DASHBOARD_SLOT_COUNT; step++) {
+    const i = DASHBOARD_SLOT_ORDER[(start + direction * step + DASHBOARD_SLOT_COUNT * 2) % DASHBOARD_SLOT_COUNT];
     if (dashboardSlotEnabled(slots, i)) return i;
   }
-  return 0;
+  return firstEnabledSlot(slots);
 }
 
-/// Next enabled slide index after `from`, wrapping. Used by the carousel
-/// auto-rotate + arrow nav so they step over disabled slots.
 export function nextEnabledSlot(slots: DashboardSlotSet, from: number): number {
-  for (let step = 1; step <= DASHBOARD_SLOT_COUNT; step++) {
-    const cand = (from + step) % DASHBOARD_SLOT_COUNT;
-    if (dashboardSlotEnabled(slots, cand)) return cand;
-  }
-  return from;
+  return walkDashboardSlot(slots, from, 1);
 }
 
-/// Previous enabled slide index before `from`, wrapping and skipping
-/// disabled slots: the backward twin of `nextEnabledSlot`, for the
-/// carousel's arrow nav and the "Previous slide" command.
 export function prevEnabledSlot(slots: DashboardSlotSet, from: number): number {
-  for (let step = 1; step <= DASHBOARD_SLOT_COUNT; step++) {
-    const cand = (from - step + DASHBOARD_SLOT_COUNT) % DASHBOARD_SLOT_COUNT;
-    if (dashboardSlotEnabled(slots, cand)) return cand;
-  }
-  return from;
+  return walkDashboardSlot(slots, from, -1);
 }
 
 export type Tab =
@@ -1230,7 +1205,7 @@ function findTabInPane(
   return null;
 }
 
-export type FocusColor = "blue" | "orange" | "green" | "pink";
+export type FocusColor = "blue" | "orange" | "green" | "pink" | "grey";
 
 export type Split = {
   id: string;
@@ -5371,7 +5346,8 @@ export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
     id: id("dashboard"),
     title: "Dashboard",
   };
-  if (opts?.slide !== undefined) tab.carouselSlide = opts.slide;
+  tab.carouselSlide = opts?.slide !== undefined && dashboardSlotAvailable(opts.slide)
+    ? opts.slide : DASHBOARD_METRICS_SLIDE;
   if (opts?.autoRotate !== undefined) tab.autoRotate = opts.autoRotate;
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
@@ -5408,7 +5384,8 @@ export function openDashboardInPane(
     id: id("dashboard"),
     title: "Dashboard",
   };
-  if (opts?.slide !== undefined) tab.carouselSlide = opts.slide;
+  tab.carouselSlide = opts?.slide !== undefined && dashboardSlotAvailable(opts.slide)
+    ? opts.slide : DASHBOARD_METRICS_SLIDE;
   if (opts?.autoRotate !== undefined) tab.autoRotate = opts.autoRotate;
   tabs.push(tab);
   setPaneActiveTabId(node, tab.id, side);
@@ -6946,7 +6923,7 @@ export type SerTab = {
   /// serialized; it is resolved from the process-local catalog after restore.
   xi?: string;
 };
-export type SerFocusColor = "b" | "o" | "g" | "p";
+export type SerFocusColor = "b" | "o" | "g" | "p" | "y";
 export type SerHybridTheme = "d" | "l";
 export type SerLeaf = {
   k: "l";
@@ -7207,6 +7184,7 @@ function serializeFocusColor(color: FocusColor | undefined): { wc?: SerFocusColo
   if (color === "orange") return { wc: "o" };
   if (color === "green") return { wc: "g" };
   if (color === "pink") return { wc: "p" };
+  if (color === "grey") return { wc: "y" };
   return {};
 }
 
@@ -7214,6 +7192,7 @@ function restoreFocusColor(color: SerFocusColor | undefined): FocusColor {
   if (color === "o") return "orange";
   if (color === "g") return "green";
   if (color === "p") return "pink";
+  if (color === "y") return "grey";
   return "blue";
 }
 
@@ -7733,7 +7712,7 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
         .sort((a, b) => a - b)
     : [];
   const disabledSlots =
-    rawDs.length > 0 && rawDs.length < DASHBOARD_SLOT_COUNT
+    rawDs.length > 0 && DASHBOARD_SLOT_ORDER.some((i) => dashboardSlotAvailable(i) && !rawDs.includes(i))
       ? rawDs
       : [];
   const tab: DashboardTab = {
@@ -7750,7 +7729,7 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
   };
   // Restore the carousel slide when the hash carries one, clamping
   // off a disabled slot to the first enabled one. Absence falls
-  // back to the About slide (slot 0) unless that slot is disabled.
+  // back to the saved default Workspace (slot 0), if available.
   if (typeof sertab.cs === "number" && sertab.cs > 0) {
     const want = Math.max(0, Math.floor(sertab.cs));
     tab.carouselSlide = want < DASHBOARD_SLOT_COUNT && dashboardSlotEnabled(tab, want)

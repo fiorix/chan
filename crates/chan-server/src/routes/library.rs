@@ -614,6 +614,7 @@ fn build_launcher_router(
     // The list's router goes first, so that its GET stays the first method
     // of the path it shares with the mint, as when one route held both.
     let launcher_api = window_feed
+        .route("/api/metrics", get(crate::routes::metrics::api_metrics))
         .merge(windows)
         .merge(workspaces)
         .merge(gateways)

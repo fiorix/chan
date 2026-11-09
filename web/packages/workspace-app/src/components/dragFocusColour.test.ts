@@ -103,7 +103,7 @@ describe("the window's preset", () => {
     expect(tag).toContain("data-focus-color={focusColorForWindow()}");
   });
 
-  test.each(["blue", "orange", "green", "pink"])("the app root's %s preset is the pane's", (color) => {
+  test.each(["blue", "orange", "green", "pink", "grey"])("the app root's %s preset is the pane's", (color) => {
     const fromApp = declaration(app, `.app[data-focus-color="${color}"]`, "--pane-active-focus");
     expect(fromApp).toBe(declaration(pane, `.pane[data-focus-color="${color}"]`, "--pane-active-focus"));
   });

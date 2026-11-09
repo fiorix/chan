@@ -69,15 +69,16 @@ SEE ALSO:
 /// `cs dashboard` long help (manpage head).
 pub(crate) const CS_DASHBOARD: &str = r"Open a Dashboard tab in a window and Hybrid side.
 
-The Dashboard hosts a three-slide carousel: slot 0 Workspace, slot 1
-Search (the live indexing graph), slot 2 About. It auto-advances every
-5 seconds, pausing while the pointer is over it, while it has focus,
-while its tab is not the visible one, when the workspace's carousel
+The Dashboard opens on Metrics (slot 3), followed by Workspace (0),
+Search (1, the live indexing graph), and About (2). Standalone windows
+show Metrics and About. Slot IDs stay stable in saved layouts. It advances
+every 5 seconds, pausing while the pointer is over it, while it has focus,
+while its tab is not the visible one, when the global carousel
 preference is off, or when the tab was opened with --carousel-off.
 
 --carousel-index picks the slide the new tab lands on. The index is
-clamped into range, and an index whose slot the user switched off
-falls back to the first enabled slot.
+validated for the window; unavailable or disabled slots fall back
+to the first enabled slot.
 ";
 
 /// `cs dashboard` examples, side effects, and caveats.

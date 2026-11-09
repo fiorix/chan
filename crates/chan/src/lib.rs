@@ -50,6 +50,7 @@ mod devserver;
 mod index;
 mod mcp;
 mod metadata;
+mod metrics;
 mod parentage;
 mod registry;
 mod remote;
@@ -307,6 +308,7 @@ where
         }
         Command::Serve { args } => cmd_serve_cli(args, personality, verbose).await,
         Command::Ps { json } => cmd_ps(json).await,
+        Command::Metrics(args) => metrics::cmd_metrics(args).await,
         Command::Devserver { action } => cmd_devserver_action(action, verbose).await,
         Command::DevserverDaemon {
             bind,

@@ -240,10 +240,19 @@ pub(crate) fn download_body(
     registration: Option<TransferRegistration>,
 ) -> Body {
     Body::from_stream(stream::unfold(
-        (rx, Some(job), alive_tx, registration),
-        |(mut rx, mut job, alive_tx, registration)| async move {
+        (
+            rx,
+            Some(job),
+            alive_tx,
+            registration,
+            chan_metrics::TRANSFERS.enter(),
+        ),
+        |(mut rx, mut job, alive_tx, registration, metrics)| async move {
             if let Some(message) = rx.recv().await {
-                return Some((message, (rx, job, alive_tx, registration)));
+                if let Ok(bytes) = &message {
+                    chan_metrics::TRANSFERS.sent(bytes.len());
+                }
+                return Some((message, (rx, job, alive_tx, registration, metrics)));
             }
             match job.take()?.outcome().await {
                 BulkOutcome::Done(()) => None,
@@ -252,7 +261,7 @@ pub(crate) fn download_body(
                 BulkOutcome::Cancelled | BulkOutcome::ClientCancelled | BulkOutcome::Stalled => {
                     Some((
                         Err(std::io::Error::other("transfer aborted before completion")),
-                        (rx, job, alive_tx, registration),
+                        (rx, job, alive_tx, registration, metrics),
                     ))
                 }
             }

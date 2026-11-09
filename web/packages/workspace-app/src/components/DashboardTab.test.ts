@@ -110,28 +110,30 @@ describe("a dashboard tab in the layout", () => {
       id: "pane-test",
       t: [
         { k: "d", cs: 1, ds: [1], ar: false },
-        { k: "d", cs: 2, ds: [0, 1, 2] },
+        { k: "d", cs: 2, ds: [0, 1, 2, 3] },
       ],
     } as SerNode);
 
     const [first, second] = pane().tabs as Dashboard[];
-    expect(first).toMatchObject({ carouselSlide: 0, disabledSlots: [1], autoRotate: false });
+    expect(first).toMatchObject({ carouselSlide: 3, disabledSlots: [1], autoRotate: false });
     expect(second.carouselSlide).toBe(2);
     expect(second.disabledSlots).toBeUndefined();
   });
 
   test("keeps at least one slide on, forgets the set once all are back on, and steps past an off slide", () => {
     const tab = dashboard();
-    expect(DASHBOARD_SLOT_COUNT).toBe(3);
+    expect(DASHBOARD_SLOT_COUNT).toBe(4);
 
     toggleDashboardSlot(tab, 0);
     toggleDashboardSlot(tab, 1);
     toggleDashboardSlot(tab, 2);
-    expect(tab.disabledSlots).toEqual([0, 1]);
+    toggleDashboardSlot(tab, 3);
+    expect(tab.disabledSlots).toEqual([0, 1, 2]);
     expect(nextEnabledSlot({ ...tab, disabledSlots: [1] }, 0)).toBe(2);
 
     toggleDashboardSlot(tab, 0);
     toggleDashboardSlot(tab, 1);
+    toggleDashboardSlot(tab, 2);
     expect(tab.disabledSlots).toBeUndefined();
   });
 });
@@ -167,6 +169,7 @@ describe("the dashboard's menu", () => {
     await rightClick();
 
     expect(rows()).toEqual([
+      ["Metrics", "true"],
       ["Workspace", "true"],
       ["Search", "true"],
       ["About", "true"],
@@ -184,8 +187,9 @@ describe("the dashboard's menu", () => {
 
     expect((pane().tabs[0] as Dashboard).disabledSlots).toEqual([1]);
     expect([...document.querySelectorAll(".dots .dot-btn")].map((dot) => dot.getAttribute("aria-label"))).toEqual([
-      "slide 1",
-      "slide 3",
+      "Metrics",
+      "Workspace",
+      "About",
     ]);
   });
 
@@ -258,8 +262,9 @@ describe("the carousel's slides", () => {
         dot.getAttribute("aria-selected"),
       ]),
     ).toEqual([
-      ["slide 1", "true"],
-      ["slide 3", "false"],
+      ["Metrics", "true"],
+      ["Workspace", "false"],
+      ["About", "false"],
     ]);
   });
 

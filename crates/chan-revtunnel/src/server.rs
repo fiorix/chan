@@ -79,6 +79,7 @@ struct Entry {
     control_attached: bool,
     /// The desktop answered `Ready`, so data sockets may now attach.
     live: bool,
+    metrics: Option<chan_metrics::Guard<'static>>,
 }
 
 /// All tunnels a devserver process is currently serving.
@@ -243,6 +244,7 @@ impl TunnelRegistry {
                 close_tx,
                 control_attached: false,
                 live: false,
+                metrics: None,
             },
         );
         Registration {
@@ -299,6 +301,7 @@ impl TunnelRegistry {
         };
         if matches!(report, ReadyReport::Ready { .. }) {
             entry.live = true;
+            entry.metrics = Some(chan_metrics::REVERSE_LISTENERS.enter());
         }
         tx.send(report).is_ok()
     }
@@ -310,6 +313,7 @@ impl TunnelRegistry {
         };
         entry.control_attached = false;
         entry.live = false;
+        entry.metrics = None;
         if notify_gone {
             if let Some(tx) = entry.gone_tx.take() {
                 let _ = tx.send(());

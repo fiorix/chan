@@ -3334,6 +3334,7 @@ where
         Ok(job) => job,
         Err(response) => return *response,
     };
+    let _metrics = chan_metrics::TRANSFERS.enter();
     let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Infallible>();
     if let (Some(events), Some(tracking)) = (events, tracking) {
         crate::routes::ws::spawn_transfer_queue_reporter(
@@ -3355,7 +3356,10 @@ where
                 () = cancelled_or_pending(control.as_deref()) => return None,
             };
             let message = match next {
-                Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
+                Ok(Some(bytes)) => {
+                    chan_metrics::TRANSFERS.received(bytes.len());
+                    RequestBodyMessage::Chunk(bytes)
+                }
                 Ok(None) => RequestBodyMessage::Complete,
                 Err(error) => RequestBodyMessage::Failed(error.to_string()),
             };

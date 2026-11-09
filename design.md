@@ -13,7 +13,7 @@ The product reads as layers. Each one builds on the previous, and the same binar
 5. **A devserver over a TCP tunnel.** A devserver binds loopback by default and is reached over whatever TCP path already exists: an `ssh -L` port forward, a VM's or container's published port, a LAN address. The desktop stores the address and a connect script, runs the script in a control terminal, and opens the devserver's terminals and workspaces as native windows. Disconnecting leaves everything running there.
 6. **A devserver through a gateway.** For an always-on, team-wide setup, a devserver dials out to a chan gateway with a personal access token, and the gateway publishes it at an origin of its own behind sign-in, to the owner and to the accounts the owner shares it with, from any browser or desktop. The gateway is a set of services you deploy on your own infrastructure. Nothing about chan is an online service, and chan itself is free and open source under the Apache 2.0 license.
 
-Around the terminal, chan turns any directory into a workspace: content search, a Markdown editor with diagrams, slide decks and PDF export, a file browser with transfers, a graph of the project's links, tags, mentions and code, a dashboard, and teams of coding agents provisioned into named tabs. A workspace is commonly a git repository. A terminal window with no workspace behind it still browses and edits the machine's own filesystem.
+Around the terminal, chan turns any directory into a workspace: content search, a Markdown editor with diagrams, slide decks and PDF export, a file browser with transfers, a graph of the project's links, tags, mentions and code, a dashboard, and teams of coding agents provisioned into named tabs. A workspace is commonly a git repository. A terminal window with no workspace behind it still browses and edits the machine's own filesystem and has a Dashboard with Metrics and About.
 
 ```mermaid
 flowchart TB
@@ -36,6 +36,7 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 |---|---|
 | `chan-workspace` | The core: a sandboxed filesystem facade, the workspace registry, the search index, the link graph, the watcher, and the per-workspace state under the chan home. |
 | `chan-report` | Per-file language and line counts with COCOMO roll-ups, maintained incrementally and fed into the core. |
+| `chan-metrics` | Fixed-cardinality process counters and metered I/O shared by serving and transport code. |
 | `chan-library` | The host: workspace tenants and the shared terminal tenant under one server, the window registry, terminal sessions and their scrollback, and tmux connections. |
 | `chan-server` | The serving layer: per-tenant HTTP and WebSocket routes, the embedded web apps, the control socket `cs` speaks, the MCP bridge, the devserver and its supervision. |
 | `chan-shell` | `cs`: the control-socket wire contract and the client, shared by `chan` and the desktop. |
@@ -165,6 +166,10 @@ The apps over a workspace are the editor (CodeMirror 6, Markdown rendered live w
 chan-server embeds two Svelte SPAs through rust-embed: debug builds read them from disk per request, release builds bake them into the binary. The workspace app is the per-tenant fallback; the launcher is served at the root of every host. Asset URLs are relative, and the served shell carries the tenant's path prefix in a meta tag, so the same bundle works on the desktop loopback, on a devserver under a tenant prefix, and through the gateway, which forwards paths unchanged. Misses on `/api/*` and `/ws` are real 404s, never the SPA shell. The desktop appends what it knows about the WebKit process's renderer and GPU to each window's URL so the terminal and the empty-pane animations choose the right path on Linux.
 
 chan-desktop is a Tauri shell. It owns windows, the launcher webview, the devserver and gateway registries, the control terminals, native clipboard and file dialogs, and the CLI handoff socket a terminal `chan serve` reaches. A desktop install is also the CLI: invoked as `chan` or `cs` it dispatches the CLI before any GUI init and owns the `~/.local/bin` shims. Its design is [desktop/design.md](desktop/design.md); the frontend's is [web/packages/workspace-app/src/design.md](web/packages/workspace-app/src/design.md).
+
+## Process metrics
+
+The outer server router owns a metrics runtime shared by its launcher and all tenants. One worker samples process and subsystem counters every second into a bounded ten-minute memory history; a separate worker scans chan-home storage. Dashboard, `chan metrics`, and an optional socket-activated Linux Varlink adapter read the same cache. The adapter queries the running devserver and never owns collection or starts that devserver. Measurement scopes, the HTTP contract, and example user units are in [docs/metrics.md](docs/metrics.md).
 
 ## State and ownership
 

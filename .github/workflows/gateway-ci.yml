@@ -30,6 +30,7 @@ on:
     branches: [main]
     paths:
       - 'gateway/**'
+      - 'crates/chan-metrics/**'
       - 'crates/chan-tunnel-client/**'
       - 'crates/chan-tunnel-proto/**'
       - 'crates/chan-tunnel-server/**'
@@ -49,6 +50,7 @@ on:
   pull_request:
     paths:
       - 'gateway/**'
+      - 'crates/chan-metrics/**'
       - 'crates/chan-tunnel-client/**'
       - 'crates/chan-tunnel-proto/**'
       - 'crates/chan-tunnel-server/**'

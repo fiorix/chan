@@ -58,7 +58,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function chooseColor(color: "blue" | "orange" | "green" | "pink"): Promise<void> {
+async function chooseColor(color: "blue" | "orange" | "green" | "pink" | "grey"): Promise<void> {
   await import("./commands/panes");
   const { allCommands } = await import("./commands");
   const command = allCommands().find((entry) => entry.id === `app.pane.focusColor.${color}`);
@@ -91,7 +91,7 @@ function setSavedAddress(path: string): void {
   window.history.replaceState({}, "", `${path}#${hash.toString()}`);
 }
 
-test.each(["blue", "orange", "green", "pink"] as const)("a chosen %s survives pagehide over a stale saved colour", async (color) => {
+test.each(["blue", "orange", "green", "pink", "grey"] as const)("a chosen %s survives pagehide over a stale saved colour", async (color) => {
   const stale = color === "pink" ? "g" : "p";
   getSession.mockResolvedValue({
     layout: { k: "s", d: "r", a: { k: "l", t: [] }, b: { k: "l", t: [] }, wc: stale },
@@ -106,7 +106,7 @@ test.each(["blue", "orange", "green", "pink"] as const)("a chosen %s survives pa
   await chooseColor(color);
   const address = window.location.href;
   const hashLayout = new URLSearchParams(new URL(address).hash.slice(1)).get("s");
-  expect(JSON.parse(hashLayout ?? "null")).toMatchObject({ wc: { blue: "b", orange: "o", green: "g", pink: "p" }[color] });
+  expect(JSON.parse(hashLayout ?? "null")).toMatchObject({ wc: { blue: "b", orange: "o", green: "g", pink: "p", grey: "y" }[color] });
   expect(putSession, "the address is written before the server responds").not.toHaveBeenCalled();
   window.dispatchEvent(new Event("pagehide"));
   expect(sessionStorage.getItem("chan.layout.ownReload:w-focus-choice")).toBe("1");

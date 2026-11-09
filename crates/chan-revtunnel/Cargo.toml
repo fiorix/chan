@@ -17,6 +17,7 @@ default = ["client"]
 client = ["dep:tokio-tungstenite", "dep:futures"]
 
 [dependencies]
+chan-metrics = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -1,0 +1,13 @@
+[Unit]
+Description=chan metrics Varlink socket
+
+[Socket]
+ListenStream=%t/chan-metrics/io.chan.Metrics
+SocketMode=0600
+DirectoryMode=0700
+Accept=yes
+MaxConnections=16
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

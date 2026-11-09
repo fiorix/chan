@@ -89,7 +89,7 @@ registerCommands([
     "tree",
     "explorer",
   ]),
-  reuse("app.dashboard.open", "New dashboard", "Apps", "workspace", [
+  reuse("app.dashboard.open", "New dashboard", "Apps", "any", [
     "slides",
     "present",
   ]),

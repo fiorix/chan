@@ -251,12 +251,13 @@ describe("multi-window live-apply consistency", () => {
 });
 
 describe("NAMED_PANE_HEX named <-> hex map", () => {
-  test("blue is the --pane-focus literal, the other three mirror the presets", () => {
+  test("blue is the --pane-focus literal, the other colours mirror the presets", () => {
     expect(NAMED_PANE_HEX).toEqual({
       blue: "#388bfd",
       orange: "#f97316",
       green: "#22c55e",
       pink: "#ff5fb7",
+      grey: "#808080",
     });
   });
 });
@@ -267,6 +268,7 @@ describe("namedForPaneHex reverse lookup", () => {
     expect(namedForPaneHex("#f97316")).toBe("orange");
     expect(namedForPaneHex("#22c55e")).toBe("green");
     expect(namedForPaneHex("#ff5fb7")).toBe("pink");
+    expect(namedForPaneHex("#808080")).toBe("grey");
   });
   test("normalizes case + shorthand before matching", () => {
     expect(namedForPaneHex("#388BFD")).toBe("blue");

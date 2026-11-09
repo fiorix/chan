@@ -23,6 +23,7 @@ use h2::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub struct H2Duplex {
+    _metrics: chan_metrics::Guard<'static>,
     send: SendStream<Bytes>,
     recv: RecvStream,
     /// Bytes pulled from `recv` but not yet handed to the
@@ -39,6 +40,7 @@ pub struct H2Duplex {
 impl H2Duplex {
     pub fn new(send: SendStream<Bytes>, recv: RecvStream) -> Self {
         Self {
+            _metrics: chan_metrics::HTTP2.enter(),
             send,
             recv,
             pending: Bytes::new(),
@@ -89,6 +91,7 @@ impl AsyncRead for H2Duplex {
         let n = std::cmp::min(self.pending.len(), buf.remaining());
         let chunk = self.pending.split_to(n);
         buf.put_slice(&chunk);
+        chan_metrics::HTTP2.received(n);
         Poll::Ready(Ok(()))
     }
 }
@@ -139,7 +142,10 @@ impl AsyncWrite for H2Duplex {
         let n = std::cmp::min(self.send.capacity(), buf.len());
         let chunk = Bytes::copy_from_slice(&buf[..n]);
         match self.send.send_data(chunk, false) {
-            Ok(()) => Poll::Ready(Ok(n)),
+            Ok(()) => {
+                chan_metrics::HTTP2.sent(n);
+                Poll::Ready(Ok(n))
+            }
             Err(e) => Poll::Ready(Err(h2_to_io(e))),
         }
     }

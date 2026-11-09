@@ -27,7 +27,9 @@ pub async fn splice(
     to_peer: mpsc::Sender<Vec<u8>>,
     mut from_peer: mpsc::Receiver<Vec<u8>>,
 ) {
-    let (mut read, mut write) = tcp.into_split();
+    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::NETWORK);
+    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::REVERSE);
+    let (mut read, mut write) = tokio::io::split(tcp);
     let (stop_tx, stop_rx) = watch::channel(false);
     let downlink_stop_rx = stop_rx.clone();
     let downlink_stop_tx = stop_tx.clone();
@@ -96,7 +98,9 @@ pub async fn splice_half_close(
     to_peer: mpsc::Sender<Vec<u8>>,
     mut from_peer: mpsc::Receiver<Vec<u8>>,
 ) {
-    let (mut read, mut write) = tcp.into_split();
+    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::NETWORK);
+    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::REVERSE);
+    let (mut read, mut write) = tokio::io::split(tcp);
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let downlink_cancel_tx = cancel_tx.clone();
     let downlink_cancel_rx = cancel_rx.clone();

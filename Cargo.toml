@@ -9,6 +9,7 @@ members = [
     "crates/chan-llm",
     "crates/chan-report",
     "crates/chan-library",
+    "crates/chan-metrics",
     "crates/chan-revtunnel",
     "crates/chan-systemd",
     "crates/chan-tmux",
@@ -46,6 +47,7 @@ chan = { version = "0.126.0", path = "crates/chan" }
 chan-workspace = { version = "0.126.0", path = "crates/chan-workspace", default-features = false }
 chan-llm = { version = "0.126.0", path = "crates/chan-llm" }
 chan-report = { version = "0.126.0", path = "crates/chan-report" }
+chan-metrics = { version = "0.126.0", path = "crates/chan-metrics" }
 chan-library = { version = "0.126.0", path = "crates/chan-library" }
 # default-features off drops the desktop half (the WebSocket dialer and the
 # listener) so chan-server links only the wire contract, the spec parser, and

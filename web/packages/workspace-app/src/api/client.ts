@@ -4,6 +4,7 @@
 // reach the same in-process server over loopback HTTP+WS, so there
 // is one transport implementation rather than platform-specific clients.
 
+import type { MetricsView } from "./metrics";
 import type { TmuxRequest } from "../state/tmux";
 import { holderTagOf } from "@chan/web-shared/window-holder";
 import type {
@@ -1355,6 +1356,7 @@ const calls = {
   /// Compile-time identity (chan version + cargo features). Used by
   /// the Settings "About" footer.
   buildInfo: () => req<BuildInfo>("GET", "/api/build-info"),
+  metrics: (since?: number, signal?: AbortSignal) => req<MetricsView>("GET", `/api/metrics?history=true${since === undefined ? "" : `&since=${since}`}`, undefined, signal),
   /// Ready local extensions for this process. The catalog is served to any
   /// authenticated client. Over the gateway tunnel the owner and a grantee
   /// use the proxy alike, and the gateway binds each frame's capability link

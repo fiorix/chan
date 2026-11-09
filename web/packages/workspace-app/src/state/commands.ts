@@ -55,7 +55,7 @@ export type CommandSurface =
 /// Browser / file-operation family, `drafts` for the draft family
 /// (create/inspect/discard/promote, served by both the workspace tenant
 /// and a drafts-capable standalone tenant), and `workspace` for graph,
-/// search, dashboard, and every other index-backed surface. One table
+/// search, and every other index-backed surface. One table
 /// drives both the catalog filter and the dispatch gate so they can
 /// never disagree.
 export type CommandRequirement =

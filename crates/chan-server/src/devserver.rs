@@ -3911,7 +3911,7 @@ fn build_devserver_app(
         ));
     #[cfg(test)]
     let app = crate::refusal_check::check_devserver(app);
-    (app, serve_addr)
+    (crate::metrics::with_metrics(app), serve_addr)
 }
 
 /// Keep the launcher, health, and management APIs responsive while persisted

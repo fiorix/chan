@@ -1121,6 +1121,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-metrics"
+version = "0.126.0"
+dependencies = [
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "chan-report"
 version = "0.126.0"
 dependencies = [
@@ -1138,6 +1146,7 @@ dependencies = [
 name = "chan-revtunnel"
 version = "0.126.0"
 dependencies = [
+ "chan-metrics",
  "futures",
  "serde",
  "serde_json",
@@ -1156,6 +1165,7 @@ dependencies = [
  "base64 0.22.1",
  "chan-library",
  "chan-llm",
+ "chan-metrics",
  "chan-revtunnel",
  "chan-shell",
  "chan-systemd",
@@ -1176,6 +1186,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "sysinfo",
  "tar",
  "tempfile",
  "thiserror 1.0.69",
@@ -1225,6 +1236,7 @@ version = "0.126.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "chan-metrics",
  "chan-tunnel-proto",
  "futures",
  "h2",
@@ -1250,6 +1262,7 @@ version = "0.126.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "chan-metrics",
  "h2",
  "http",
  "libc",

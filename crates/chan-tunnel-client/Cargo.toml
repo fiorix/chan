@@ -9,6 +9,7 @@ description = "Client library for chan-tunnel; driven by `chan devserver`."
 publish = false
 
 [dependencies]
+chan-metrics = { workspace = true }
 chan-tunnel-proto = { workspace = true }
 
 # Router, Extension, and Body need no optional axum features. This crate is

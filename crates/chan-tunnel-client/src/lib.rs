@@ -364,7 +364,9 @@ async fn serve_substreams_inner<S>(
 where
     S: FutAsyncRead + FutAsyncWrite + Unpin + Send + 'static,
 {
+    let _tunnel_metrics = chan_metrics::TUNNELS.enter();
     let limit = max_concurrent_substreams.max(1);
+    let _capacity = chan_metrics::YAMUX_SERVICE_CAPACITY.enter_many(limit as u64);
     let permits = Arc::new(Semaphore::new(limit));
     let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
     let mut refresh_delay = Box::pin(tokio::time::sleep(LEASE_REFRESH_INTERVAL));
@@ -412,10 +414,13 @@ where
             // `TUNNEL_YAMUX_MAX_STREAMS` accounting.
             next = futures::future::poll_fn(|cx| std::pin::Pin::new(&mut conn).poll_next_inbound(cx)) => match next {
             Some(Ok(stream)) => {
+                let waiting = chan_metrics::YAMUX_WAITING.enter();
                 let router = router.clone();
                 let permits = permits.clone();
                 tokio::spawn(async move {
                     let _permit = acquire_substream_permit(permits).await;
+                    drop(waiting);
+                    let _serving = chan_metrics::YAMUX_SERVING.enter();
                     #[cfg(test)]
                     let _task_guard = SubstreamServeGuard::new();
                     serve_one_substream(stream, router).await;
@@ -553,6 +558,7 @@ pub async fn run(cfg: ClientConfig, router: axum::Router) -> Result<(), ClientEr
                 emit(&cfg.events, TunnelEvent::Disconnected { retry_in: backoff });
             }
             Err(e) => {
+                chan_metrics::TUNNEL_DIAL_FAILURES.increment();
                 tracing::warn!(error = %e, ?backoff, "tunnel dial failed; retrying");
                 emit(
                     &cfg.events,
@@ -600,7 +606,10 @@ fn emit(tx: &Option<mpsc::Sender<TunnelEvent>>, ev: TunnelEvent) {
 }
 
 async fn serve_one_substream(stream: yamux::Stream, router: axum::Router) {
-    let io = TokioIo::new(stream.compat());
+    let io = TokioIo::new(chan_metrics::MeteredIo::new(
+        stream.compat(),
+        &chan_metrics::YAMUX,
+    ));
     // The router takes Request<axum::body::Body>; hyper hands us
     // Request<hyper::body::Incoming>. Wrap the incoming body into
     // axum's so we can call the router. axum's serve helper

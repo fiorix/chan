@@ -1,28 +1,6 @@
 <script lang="ts">
-  // Dashboard carousel surface.
-  //
-  // The carousel sits inside the Dashboard tab. It auto-rotates
-  // every 5 s. Pointer hover and focus-within pause auto-rotate so
-  // the user can read whichever slide they happen to be looking at;
-  // the timer resumes when both signals clear. Left / right arrow
-  // keys nudge manually when the carousel container has focus.
-  //
-  // No `oncontextmenu` forwarder prop: DashboardTab does NOT wire a
-  // right-click handler through the carousel, so right-clicks fall
-  // through to the tab strip's own context menu.
-  //
-  // Slide 0 mounts `WorkspaceInfoBody` so the workspace-root
-  // inspector lives alongside the file-browser inspector surface.
-  //
-  // Slide 1 is a read-only mount of `GraphCanvas`, the same
-  // renderer the main Graph tab uses, fed a synthesized
-  // directory-only spine + per-directory `indexState` for the
-  // green/grey/pulsing-orange palette. No depth slider, inspector,
-  // filter chips or scope picker: this surface is purely a status
-  // read-out.
-  //
-  // Slide 2 is an About widget (version, attributions, donation QR,
-  // project links).
+  // Dashboard slides keep stable persisted ids; their display order starts
+  // with Metrics. Hover, focus and hidden tabs pause the five-second rotation.
 
   import { onMount } from "svelte";
   import { api } from "../api/client";
@@ -40,6 +18,9 @@
   } from "../state/store.svelte";
   import {
     DASHBOARD_SLOT_COUNT,
+    DASHBOARD_SLOT_LABELS,
+    DASHBOARD_SLOT_ORDER,
+    DASHBOARD_METRICS_SLIDE,
     dashboardSlotEnabled,
     firstEnabledSlot,
     layout,
@@ -54,6 +35,7 @@
   import GraphCanvas from "./GraphCanvas.svelte";
   import Inspector from "./Inspector.svelte";
   import InspectorBody from "./InspectorBody.svelte";
+  import MetricsSlide from "./MetricsSlide.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import {
     ChevronLeft,
@@ -290,7 +272,7 @@
   let {
     selectedIndexId = $bindable(null),
     inspectorWidth = $bindable(320),
-    slide = 0,
+    slide = DASHBOARD_METRICS_SLIDE,
     onSlideChange,
     active = true,
     disabledSlots = [],
@@ -304,7 +286,7 @@
   /// Enabled slide indices in order; backs the pagination dots so a
   /// disabled slot never gets a dot to click.
   const enabledSlots = $derived(
-    Array.from({ length: DASHBOARD_SLOT_COUNT }, (_, i) => i).filter((i) =>
+    DASHBOARD_SLOT_ORDER.filter((i) =>
       dashboardSlotEnabled(slots, i),
     ),
   );
@@ -351,17 +333,10 @@
 
   async function toggleCycling(): Promise<void> {
     const next = !cycling;
-    if (workspace.info) {
-      workspace.info = {
-        ...workspace.info,
-        preferences: {
-          ...workspace.info.preferences,
-          empty_pane_carousel_cycling: next,
-        },
-      };
-    }
     try {
       await api.setEmptyPaneCarouselCycling(next);
+      const prefs = currentPreferences();
+      if (prefs) prefs.empty_pane_carousel_cycling = next;
     } catch (err) {
       ui.status = `carousel toggle failed: ${(err as Error).message}`;
     }
@@ -410,9 +385,9 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div
   class="carousel"
-  class:carousel-wide={slideIndex === 1}
+  class:carousel-wide={slideIndex === 1 || slideIndex === DASHBOARD_METRICS_SLIDE}
   role="region"
-  aria-label="empty pane carousel"
+  aria-label="Dashboard carousel"
   aria-roledescription="carousel"
   tabindex="0"
   onmouseenter={() => (hovering = true)}
@@ -425,13 +400,10 @@
        fills the tab width/height (minus a 10px breathing border).
        The About + Workspace slides keep the centered column: their
        content is text-shaped and centered reads better there. -->
-  <div class="slide-stage" class:slide-stage-wide={slideIndex === 1}>
-    <!-- Carousel slot order: 0 Workspace, 1 Search (indexing graph), 2
-         About. The blocks below are in a different source order
-         (About, Workspace, indexing); each guard tests its own
-         index, so the `{:else}` indexing block catches the remaining
-         index 1. -->
-    {#if slideIndex === 2}
+  <div class="slide-stage" class:slide-stage-wide={slideIndex === 1 || slideIndex === DASHBOARD_METRICS_SLIDE}>
+    {#if slideIndex === DASHBOARD_METRICS_SLIDE}
+      <MetricsSlide {active} />
+    {:else if slideIndex === 2}
       <!-- About slot (index 2 / last): version + attributions plus
            a "Fund the work" CTA with the donation QR + the website
            / source links, so the user has one self-contained
@@ -657,7 +629,7 @@
           class:active={slideIndex === i}
           role="tab"
           aria-selected={slideIndex === i}
-          aria-label={`slide ${i + 1}`}
+          aria-label={DASHBOARD_SLOT_LABELS[i]}
           onclick={() => goTo(i)}
         ></button>
       {/each}
@@ -733,7 +705,7 @@
     max-width: none;
   }
   .carousel-wide {
-    padding: 10px;
+    padding: 10px 10px 1rem;
   }
   .slide {
     display: flex;
