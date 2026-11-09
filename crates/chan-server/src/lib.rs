@@ -2396,8 +2396,10 @@ mod reindex_cancel_at_shutdown_tests {
         let mut beside = Vec::new();
         for _ in 0..PROBES {
             let (answer, took, thread) = look();
-            thread.join().expect("the look's thread");
+            // Checked before the join: a look at a free cell that never
+            // answers reds here rather than holding the join.
             assert_eq!(answer, Ok(true), "fixture: the look at a free cell");
+            thread.join().expect("the look's thread");
             free.push(took);
             let hold = held_cell::hold(&cell);
             let (answer, took, thread) = look();
@@ -2444,8 +2446,9 @@ mod reindex_cancel_at_shutdown_tests {
         let mut beside = Vec::new();
         for _ in 0..PROBES {
             let (answer, took, thread) = cancel(&free_handle);
-            thread.join().expect("the cancel's thread");
+            // Checked before the join, as for the look.
             assert_eq!(answer, Ok(()), "fixture: the cancel of a free cell");
+            thread.join().expect("the cancel's thread");
             free.push(took);
             let hold = held_cell::hold(&cell);
             let (answer, took, thread) = cancel(&handle);
