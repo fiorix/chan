@@ -5,13 +5,14 @@
 // stand-in with ghostty-web's semantics (an offset of lines scrolled back from
 // the bottom, clamped to the history, back to 0 after a write; a resize that
 // hands the core the new grid, fires the resize event and repaints), and
-// frames run when a case says so. The scan budget is 0, one unit of the
-// core's work per frame, so a scan's progress is the same on any machine.
+// frames run and the clock moves only when a case says so. The scan budget
+// is 0, one unit of the core's work per frame, so a scan's progress is the
+// same on any machine.
 
 import { readFileSync } from "node:fs";
 import { SelectionManager, type Terminal } from "ghostty-web";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import { type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
+import { FIND_WAIT_CAP_MS, type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";
 import { GhosttyVt, type MatchRange, type VtSearch, VtTerminal } from "./ghosttyVt";
 
@@ -63,6 +64,17 @@ function manualFrames() {
     },
   };
   return frames;
+}
+
+/// A clock in milliseconds that moves only when a case moves it.
+function manualClock() {
+  let at = 0;
+  return {
+    now: () => at,
+    set(ms: number) {
+      at = ms;
+    },
+  };
 }
 
 async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit = 10_000 } = {}) {
@@ -120,6 +132,7 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     document.createElement("textarea"),
   );
   const frames = manualFrames();
+  const clock = manualClock();
   const counts: FindCount[] = [];
   const created: VtSearch[] = [];
   const createSearch = core.createSearch.bind(core);
@@ -134,8 +147,9 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     onCount: (count) => counts.push(count),
     frames,
     budgetMs: 0,
+    clock: clock.now,
   });
-  return { core, view, viewport, manager: manager as unknown as Manager, frames, counts, created, find, painted };
+  return { core, view, viewport, manager: manager as unknown as Manager, frames, clock, counts, created, find, painted };
 }
 
 /// The selection as a match range, null when nothing is selected.
@@ -456,6 +470,126 @@ describe("a step while the scan runs", () => {
     expect(selected(manager), "nothing moves while it waits").toEqual(range(2998, 0, 2998, 3));
     frames.settle();
     expect(selected(manager)).toEqual(needleAt(5));
+  });
+
+  test("a step whose scan completes just inside its cap lands at completion on the oldest match", async () => {
+    const { frames, find, manager, counts, clock } = await fixture(LONG);
+    // As after the bar reopens: Shift+Enter, then every frame of the scan a
+    // millisecond short of the cap.
+    find.step("needle", "newer");
+    clock.set(FIND_WAIT_CAP_MS - 1);
+    const shown: Array<MatchRange | null> = [];
+    while (frames.pending()) {
+      frames.frame();
+      shown.push(selected(manager));
+    }
+    expect(shown.length, "the scan took frames").toBeGreaterThan(2);
+    expect(shown.slice(0, -1).filter((s) => s !== null), "no match highlighted on the way").toEqual([]);
+    expect(selected(manager)).toEqual(needleAt(5));
+    expect(counts.at(-1)).toEqual({ index: 300, total: 300, partial: false });
+  });
+
+  test("steps queued behind a capped step apply in order, each as the scan or its own cap allows", async () => {
+    const { frames, find, manager, counts, clock } = await fixture(LONG);
+    // As after the bar reopens: Shift+Enter, then Enter 600 ms later.
+    find.step("needle", "newer");
+    clock.set(600);
+    find.step("needle", "older");
+    expect(selected(manager)).toBeNull();
+    clock.set(FIND_WAIT_CAP_MS);
+    frames.frame();
+    // Shift+Enter's cap ran out: it lands on the oldest match found so far.
+    // Enter from there would wrap to the newest, and its cap has 600 ms to
+    // go, so it waits for the scan to find the next older match.
+    const found = counts.at(-1)!.total;
+    expect(found).toBeGreaterThan(1);
+    expect(found).toBeLessThan(300);
+    expect(selected(manager)).toEqual(nth(found));
+    expect(counts.at(-1)).toEqual({ index: found, total: found, partial: true });
+    frames.frame();
+    expect(selected(manager)).toEqual(nth(found + 1));
+    expect(counts.at(-1)).toMatchObject({ index: found + 1 });
+  });
+});
+
+describe("a step while output outpaces the scan", () => {
+  // An 80x10 screen keeping 3,000 lines of history, a needle on every line
+  // ending in 5, and 3,500 lines of the same written before each frame:
+  // more than the history holds, so the scan never completes while the
+  // output lasts.
+  const KEPT = 3000;
+  const PER_FRAME = 3500;
+  /// The clock's step from frame to frame.
+  const TICK = 100;
+
+  /// The history searched, the bar closed and reopened with Shift+Enter as
+  /// its first step, which waits; `outputFrame` writes a frame of output
+  /// and runs the frame.
+  async function waitingUnderOutput() {
+    const f = await fixture(numbered(KEPT, (i) => i % 10 === 5), { cols: 80, scrollbackLimit: KEPT });
+    f.find.find("needle");
+    f.frames.settle();
+    f.find.close();
+    let next = KEPT;
+    const outputFrame = () => {
+      const lines = Array.from({ length: PER_FRAME }, (_, k) => `line <${next + k}>${(next + k) % 10 === 5 ? " needle" : ""}`);
+      next += PER_FRAME;
+      f.viewport.write(lines.map((line) => `${line}\r\n`).join(""));
+      f.frames.frame();
+    };
+    f.find.step("needle", "newer");
+    expect(selected(f.manager)).toBeNull();
+    return { ...f, outputFrame };
+  }
+
+  test("a step that would wrap lands among the matches found so far once its cap runs out, and not before", async () => {
+    const { clock, created, find, manager, counts, frames, viewport, core, outputFrame } = await waitingUnderOutput();
+    const reveal = vi.spyOn(viewport, "reveal");
+    for (let at = 0; at < FIND_WAIT_CAP_MS; at += TICK) {
+      clock.set(at);
+      outputFrame();
+      expect(created.at(-1)!.state().complete, `${at} ms: the scan runs`).toBe(false);
+      expect(selected(manager), `${at} ms: the step waits`).toBeNull();
+      expect(counts.at(-1), `${at} ms`).toMatchObject({ index: null, partial: true });
+    }
+    clock.set(FIND_WAIT_CAP_MS - 1);
+    outputFrame();
+    expect(created.at(-1)!.state().complete).toBe(false);
+    expect(selected(manager), "a millisecond short of the cap").toBeNull();
+
+    clock.set(FIND_WAIT_CAP_MS);
+    outputFrame();
+    const landed = selected(manager);
+    expect(landed, "the step lands once its cap runs out").not.toBeNull();
+    const state = created.at(-1)!.state();
+    expect(state.complete, "the scan still runs").toBe(false);
+    expect(landed).toEqual(state.active);
+    expect(core.plainText(landed!)).toBe("needle");
+    expect(counts.at(-1)).toEqual({ index: state.total, total: state.total, partial: true });
+    expect(reveal).toHaveBeenCalledWith(landed!.startRow);
+    expect(frames.pending(), "the scan goes on").toBe(1);
+    // The next press applies at once: it does not wrap.
+    find.step("needle", "newer");
+    expect(counts.at(-1)).toEqual({ index: state.total - 1, total: state.total, partial: true });
+  });
+
+  test("a resize drops a step that waits, so its cap running out lands nothing", async () => {
+    const { clock, view, viewport, manager, counts, frames, outputFrame } = await waitingUnderOutput();
+    const reveal = vi.spyOn(viewport, "reveal");
+    clock.set(TICK);
+    outputFrame();
+    // The lines are too short to wrap at 60 columns.
+    view.resize(60, 10);
+    for (let at = FIND_WAIT_CAP_MS; at <= 2 * FIND_WAIT_CAP_MS; at += TICK) {
+      clock.set(at);
+      outputFrame();
+      expect(selected(manager), `${at} ms`).toBeNull();
+      expect(counts.at(-1), `${at} ms`).toMatchObject({ index: null, partial: true });
+    }
+    frames.settle();
+    expect(selected(manager)).toBeNull();
+    expect(counts.at(-1)).toMatchObject({ index: null, partial: false });
+    expect(reveal).not.toHaveBeenCalled();
   });
 });
 
