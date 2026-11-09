@@ -23,7 +23,7 @@ chan's ghostty adapter code outside tests is about 3,800 lines: the binding, the
 
 The find work left gaps the owner deferred on 2026-11-09, recorded in that work's follow-up report:
 - **A resize restarts the walk.** The core forgets its selected match on any resize; its tracked grid refs could keep it.
-- **A feed can blow the frame.** At the largest scrollback, with a needle that matches often, one feed costs 30 to 57 ms in a single frame.
+- **A feed can blow the frame.** At the largest scrollback, with a needle that matches often, one feed costs 30 to 57 ms in a single frame. This is its own item, [a find frame runs long at the largest scrollback](a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md).
 - **Shift+Enter after reopening can land wrong.** Mid-scan, it lands on the oldest match found so far.
 - **Wrapped lines can double-count.** The core counts some matches twice across soft wraps.
 - **Only the active match is highlighted.** Highlighting every match waits for a highlight layer.
@@ -59,7 +59,6 @@ Each part lands in a release once it is green, in this order; one release can ta
 5. **Find on the widget.**
    - Highlight every match.
    - Keep the active match across a resize through tracked grid refs.
-   - Bound a feed's backlog, for example by restarting the search past a threshold, so no find frame exceeds 16 ms at the largest scrollback.
    - Land Shift+Enter after reopening on the true oldest match.
 6. **Modernise the input handler** behind tests.
 
@@ -74,5 +73,5 @@ Each part lands in a release once it is green, in this order; one release can ta
 
 1. Each part lands with chan's web gate green, and with checks 211, 93, 94, 105 and 204 and the terminal pixel harness green in an isolated guest at the integration tip.
 2. After parts 2 to 4, ghostty-web is not an npm dependency, and a source scan proves chan reads no private field of the widget.
-3. After part 5, find highlights every match and keeps the active match across a resize. No find frame exceeds 16 ms at the largest scrollback in the follow-up report's frame measurement, and Shift+Enter after reopening lands on the true oldest match.
+3. After part 5, find highlights every match and keeps the active match across a resize, and Shift+Enter after reopening lands on the true oldest match.
 4. The owner walks chan-desktop on every part that changes rendering or input.

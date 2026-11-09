@@ -59,11 +59,15 @@ The owner added another the same day: the ghostty terminals re-pinned from a pre
 
 Opened 2026-11-09 by the owner with one item taken in parts over this and the following releases: the ghostty terminals render through ghostty-web, a package with no release since v0.4.0 that chan drives from outside through its private internals, so chan forks the parts it uses into `web/packages/ghostty-web-ng`, a widget over libghostty-vt 1.0 with public hooks for highlights, painting, focus and events, decides later whether to extract it to its own repository, and folds in the find gaps the v0.127.0 follow-ups left ([ghosttyng]). v0.127.0 keeps its ghostty work as tested.
 
+The owner added a second the same day, measured in those follow-ups: with the find bar open at the largest scrollback and a needle that matches often, the search's feed runs a find frame to 30 to 57 ms while output streams, so a feed's backlog gets a bound ([findfeed]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
+| [find frames run long at max scrollback][findfeed] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+[findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
 
 ## Completed
 
