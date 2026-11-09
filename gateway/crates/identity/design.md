@@ -4,7 +4,7 @@ identity is the public sign-in surface of the gateway and its only user-facing U
 
 ## Where it sits
 
-Callers: browsers (the SPA, OAuth callbacks, share landings), chan-desktop (discovery, authorize, roster, entry), devserver-proxy (PAT validation and admission leases on the internal listener), and the admin CLI (the operator admin tree). Callees: the OAuth providers, profile-service for every user, grant, flag and policy question, and devserver-control for live-tunnel reads and for tunnel kills and session revocations.
+Callers: browsers (the SPA, OAuth callbacks, share landings), chan-desktop (discovery, authorize, roster, entry, token self-revoke), devserver-proxy (PAT validation and admission leases on the internal listener), and the admin CLI (the operator admin tree). Callees: the OAuth providers, profile-service for every user, grant, flag and policy question, and devserver-control for live-tunnel reads and for tunnel kills and session revocations.
 
 identity owns only its own auth artifacts: the `tower_sessions` rows, the `identity_session_index` and the `api_tokens` tables. It does not own user data. The canonical user record, identities and audit live in profile-service and are reached over HTTP; because identity and profile share one Postgres, the PAT queries join the shared `users` table directly. identity never applies schema changes at serve time; migrations are the dedicated `CHAN_GATEWAY_MIGRATIONS=only` step, run by the same binary under the database-owner credential.
 
@@ -16,7 +16,7 @@ Two routers on two listeners. The public listener carries the session layer at i
 
 1. `/auth/*`: the pre-session OAuth flow. It stashes the CSRF state and PKCE verifier in the anonymous session; the callback consumes them and either upgrades the session to authenticated or fails.
 2. `/api/*`: the session-gated JSON API for the embedded SPA: `me`, profile management, PAT lifecycle, owned and incoming devservers, and sharing grants.
-3. Public discovery and the desktop surface: `/.well-known/chan-gateway`, the `/desktop/authorize` consent flow, the PAT-gated roster and entry routes. The account SPA reads discovery's `tunnel_url` for its devserver setup hints.
+3. Public discovery and the desktop surface: `/.well-known/chan-gateway`, the `/desktop/authorize` consent flow, the PAT-gated roster, entry and token self-revoke routes. The account SPA reads discovery's `tunnel_url` for its devserver setup hints.
 4. `/s/{owner}` and `/s/{owner}/{workspace}`: the share landings that mint the browser entry credential.
 5. `/internal/v1/*` and `/admin/v1/*` on the internal listener: PAT validation for the proxies, OAuth-session `whoami` for the account caller, active WireGuard peers for the node agent, and the operator and account-composite admin trees, each behind its own bearer.
 
@@ -72,7 +72,7 @@ Validation (`/internal/v1/tokens/validate`) is what the proxy calls at dial, for
 
 Validation runs behind a per-token-fingerprint throttle of its own, mirroring the proxy's. Throttled requests are indistinguishable from an unknown token. The proxy's throttle catches the typical case; this one catches a leaked internal bearer being used to brute-force PATs directly.
 
-Revocation is a composition. Profile atomically verifies ownership, marks the row revoked, writes the audit row and reserves a durable revocation generation; identity then makes a best-effort immediate cut of the owner's live tunnels and browser sessions through devserver-control and answers accepted. Identity cuts every tunnel the owner has rather than the revoked PAT's alone: the revoke path does not map the token to its devserver id, although the id is derivable from the same digest and devserver-control exposes an exact kill. Other PATs simply redial. Profile's worker confirms the cut again after the entry-credential quiet window. The operator revoke is the same composition without a session and writes a distinct audit action so the owner's history does not attribute it to them.
+Revocation is a composition. Profile atomically verifies ownership, marks the row revoked, writes the audit row and reserves a durable revocation generation; identity then makes a best-effort immediate cut of the owner's live tunnels and browser sessions through devserver-control and answers accepted. Identity cuts every tunnel the owner has rather than the revoked PAT's alone: the revoke path does not map the token to its devserver id, although the id is derivable from the same digest and devserver-control exposes an exact kill. Other PATs simply redial. Profile's worker confirms the cut again after the entry-credential quiet window. The operator revoke is the same composition without a session and writes a distinct audit action so the owner's history does not attribute it to them. A desktop giving back a PAT it never used is not this composition: it soft-revokes the presented token alone, as [Desktop token self-revoke](#desktop-token-self-revoke) describes.
 
 Minting runs the same policy projection as validation and locks the user and fleet rows, so a concurrent block, suspend or pause has one serialization point. The credential digest and its creation audit commit together; a failed audit rolls back the mint, so a failed mint cannot leave an undelivered active credential.
 
@@ -91,6 +91,12 @@ Redemption delivers the PAT once even when its audit write fails: the code stays
 ### Desktop roster
 
 `GET /desktop/v1/devservers` (PAT with `desktop.account`) lists every devserver the account may enter, owned and shared, each with its immutable identity, label, liveness and exact proxy origin while online. The body carries an `ETag` and an unchanged roster answers not-modified. Only a dead or wrongly scoped PAT is a terminal failure for the desktop; an upstream failure tells it to keep the last roster, and a degraded all-offline roster is never served. Roster polls validate the PAT without writing `used` audit rows, since a poll every few seconds is not a use worth recording.
+
+### Desktop token self-revoke
+
+`DELETE /desktop/v1/token` is how a desktop gives back a PAT it will not keep: one whose redeem answer it refused, whose store failed, or whose sign-in was cancelled while its credentials were being committed. The bearer is the whole request. The route reads no token id, no body and no session, so it can revoke only the token presented, a signed-in browser without the header gets 401, and a cross-site page cannot forge the header, which leaves it nothing to protect with CSRF. The token must be live (not revoked, not expired, its owner not blocked) and carry a desktop scope; the lookup skips the fleet and per-user admission policy that gates use, because a paused fleet or a disabled policy must not keep a holder from giving a token back. Anything else answers the same 401 as the roster and the entry mint, which the desktop reads as nothing left to revoke.
+
+The revoke is the soft one every other path does: `revoked_at` set and the row kept, with a `revoked` audit row written in the same transaction, through the same service call that revokes a PAT whose WireGuard enrollment failed before delivery. Like that path it fires no tunnel or session cut, since the desktop gives back only a token it never presented anywhere else; the token's WireGuard peer leaves the agents' list in the same update. A token in use is revoked from the account page, whose path reserves profile's durable cut of the owner's live surface. The route has no rate limit of its own, as neither neighbouring PAT route has, and its logs carry the user and never the token.
 
 ### Entry credential mint
 

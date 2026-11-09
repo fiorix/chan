@@ -186,8 +186,9 @@ Desktop API (Bearer PAT):
 |--------|-------------------------------|----------------------------------|
 | POST   | `/desktop/v1/devserver/entry` | mint an entry credential         |
 | GET    | `/desktop/v1/devservers`      | account roster (ETag, 304)       |
+| DELETE | `/desktop/v1/token`           | the bearer PAT revokes itself    |
 
-The entry body optionally carries `{path, owner, owner_user_id, devserver_id}` to target an explicit devserver; the response is `{owner_user_id, username, devserver_id, proxy_origin, entry_exchange_url, entry_credential, expires_at}` with `Cache-Control: no-store`. A not-found adds a stable `reason` (`no_devserver`, `devserver_offline`, `access_denied`) so chan-desktop can narrate the failure. The roster answers `{user_id, username, devservers: [{owner_user_id, owner, devserver_id, label, online, proxy_origin|null}]}`.
+The entry body optionally carries `{path, owner, owner_user_id, devserver_id}` to target an explicit devserver; the response is `{owner_user_id, username, devserver_id, proxy_origin, entry_exchange_url, entry_credential, expires_at}` with `Cache-Control: no-store`. A not-found adds a stable `reason` (`no_devserver`, `devserver_offline`, `access_denied`) so chan-desktop can narrate the failure. The roster answers `{user_id, username, devservers: [{owner_user_id, owner, devserver_id, label, online, proxy_origin|null}]}`. The token route reads no id and no body: the bearer, which must carry `desktop.connect` or `desktop.account`, is the only token it soft-revokes (`revoked_at` set, row and audit kept, a `revoked` audit row), answered 204. A revoked, expired, unknown or non-desktop bearer, and a session cookie without one, get the same 401 `{"error":"unauthorized"}` as the other desktop routes.
 
 Internal listener (route-scoped bearers):
 

@@ -16,8 +16,10 @@
 //! `created` (SPA mint), `created_via_desktop` (desktop-authorize
 //! mint), `created_via_admin` (chan-gateway-admin mint),
 //! `desktop.redeem` (one-time desktop code cashed in), `used`
-//! (validate succeeded), `revoked` (owner self-revoke),
-//! `revoked_via_admin` (operator revoke; written by profile).
+//! (validate succeeded), `revoked` (the owner's revoke from the SPA,
+//! a desktop PAT revoking itself, or a desktop PAT whose WireGuard
+//! enrollment failed before delivery), `revoked_via_admin` (operator
+//! revoke; written by profile).
 
 use base64::Engine;
 use chan_tunnel_proto::gateway_assertion::devserver_id_from_token;
@@ -135,7 +137,8 @@ pub struct ValidatedToken {
     /// authenticated encrypted overlay; `IDENTITY_INTERNAL_TOKEN` authenticates
     /// but does not encrypt those internal requests. Desktop roster reads and
     /// entry mints instead present the stored desktop PAT directly to identity
-    /// in their Authorization headers. Identity persists only the base64url
+    /// in their Authorization headers, and a desktop presents a PAT it will
+    /// not keep once more to revoke it. Identity persists only the base64url
     /// `token_hash`, the same digest in a different encoding.
     pub devserver_id: String,
     /// Authorization state retained only long enough to sign the admission
@@ -148,6 +151,16 @@ pub struct ValidatedToken {
     pub admission_lease: Option<AdmissionLease>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_lease_expires_at: Option<DateTime<Utc>>,
+}
+
+/// The live token a bearer presents, as [`ApiTokenService::presented`]
+/// reads it. Carries no secret, so it is safe to log.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PresentedToken {
+    pub token_id: Uuid,
+    pub user_id: Uuid,
+    pub username: String,
+    pub scopes: Vec<String>,
 }
 
 /// Default scope set for a freshly-issued token. It grants only `tunnel`,
@@ -325,21 +338,25 @@ impl ApiTokenService {
     }
 
     /// Soft-revoke: keeps the row for audit history, but
-    /// `validate()` skips revoked tokens.
+    /// `validate()` skips revoked tokens. The revoke and its `revoked` audit
+    /// row commit together, so an error never follows a revoke that landed
+    /// and a landed revoke always has its row.
     pub async fn revoke(&self, user_id: Uuid, token_id: Uuid, meta: &RequestMeta) -> Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(Error::from)?;
         let res = sqlx::query(
             "UPDATE api_tokens SET revoked_at = now() \
              WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
         )
         .bind(token_id)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(Error::from)?;
         if res.rows_affected() == 0 {
             return Ok(false);
         }
-        self.write_audit(token_id, ACTION_REVOKED, meta).await?;
+        insert_audit(&mut *tx, token_id, ACTION_REVOKED, meta).await?;
+        tx.commit().await.map_err(Error::from)?;
         Ok(true)
     }
 
@@ -495,6 +512,33 @@ impl ApiTokenService {
         })
     }
 
+    /// The live token `token` presents, for a holder that gives it back:
+    /// not revoked, not expired, its owner not blocked, exactly as
+    /// [`Self::validate_no_audit`] reads it, but with no admission policy
+    /// and no `last_used_at` bump. Revoking reduces what a token can do,
+    /// so a paused fleet or a disabled per-user policy must not keep a
+    /// holder from it. Anything else is [`Error::Unauthorized`], the answer
+    /// every invalid bearer gets.
+    pub async fn presented(&self, token: &str) -> Result<PresentedToken> {
+        if !token.starts_with(TOKEN_PREFIX) {
+            return Err(Error::Unauthorized);
+        }
+        sqlx::query_as::<_, PresentedToken>(
+            "SELECT t.id AS token_id, t.user_id, u.username, t.scopes \
+             FROM api_tokens t \
+             JOIN users u ON u.id = t.user_id \
+             WHERE t.token_hash = $1 \
+               AND t.revoked_at IS NULL \
+               AND (t.expires_at IS NULL OR t.expires_at > now()) \
+               AND u.blocked_at IS NULL",
+        )
+        .bind(hash_token(token))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Error::from)?
+        .ok_or(Error::Unauthorized)
+    }
+
     /// `pub(crate)` so the desktop-authorize redeem handler can record
     /// its `desktop.redeem` row without a second audit path.
     pub(crate) async fn write_audit(
@@ -503,19 +547,30 @@ impl ApiTokenService {
         action: &str,
         meta: &RequestMeta,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO api_token_audit (token_id, action, ip, user_agent) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(token_id)
-        .bind(action)
-        .bind(meta.ip.as_deref())
-        .bind(meta.user_agent.as_deref())
-        .execute(&self.pool)
-        .await
-        .map_err(Error::from)?;
-        Ok(())
+        insert_audit(&self.pool, token_id, action, meta).await
     }
+}
+
+/// Write one `api_token_audit` row through `executor`: the pool, or a
+/// transaction whose change the row records.
+async fn insert_audit<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    token_id: Uuid,
+    action: &str,
+    meta: &RequestMeta,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO api_token_audit (token_id, action, ip, user_agent) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(token_id)
+    .bind(action)
+    .bind(meta.ip.as_deref())
+    .bind(meta.user_agent.as_deref())
+    .execute(executor)
+    .await
+    .map_err(Error::from)?;
+    Ok(())
 }
 
 /// Hard cap on the per-token scope list to bound row width and

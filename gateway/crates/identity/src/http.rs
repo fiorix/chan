@@ -313,6 +313,10 @@ pub fn routers(
         )
         .route("/desktop/v1/devserver/entry", post(desktop_devserver_entry))
         .route("/desktop/v1/devservers", get(crate::desktop_roster::roster))
+        .route(
+            "/desktop/v1/token",
+            axum::routing::delete(desktop_token_revoke),
+        )
         .fallback(static_files::handler)
         .with_state(state)
         .layer(session_layer)
@@ -1325,6 +1329,52 @@ async fn tokens_revoke(
         tracing::warn!(error = ?error, user = %user.username, "PAT first session cut failed");
     }
     Ok(StatusCode::ACCEPTED)
+}
+
+/// `DELETE /desktop/v1/token` -- a desktop PAT revokes itself. The bearer
+/// is the whole credential and the only token the route can touch: it
+/// takes no id and reads no session, so a browser cookie alone gets 401
+/// and a cross-site page cannot forge the header. A revoked, expired,
+/// unknown or non-desktop token gets the 401 every invalid bearer gets,
+/// which the desktop reads as nothing left to revoke.
+///
+/// The revoke is the soft one (`revoked_at` set, the row and its audit
+/// kept), through [`ApiTokenService::revoke`], the path that already
+/// revokes a desktop PAT whose enrollment failed before delivery. It
+/// fires no tunnel or session cut: the desktop gives back only a token it
+/// never presented anywhere else, while a token in use is revoked from
+/// the account page, whose path cuts the owner's live surface.
+async fn desktop_token_revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode> {
+    let token = bearer_token(&headers).ok_or(Error::Unauthorized)?;
+    let presented = state.api_tokens.presented(token).await?;
+    if !presented
+        .scopes
+        .iter()
+        .any(|scope| scope == DESKTOP_CONNECT_SCOPE || scope == DESKTOP_ACCOUNT_SCOPE)
+    {
+        tracing::warn!(
+            user = %presented.username,
+            "desktop token revoke denied: no desktop scope on the token",
+        );
+        return Err(Error::Unauthorized);
+    }
+    let revoked = state
+        .api_tokens
+        .revoke(
+            presented.user_id,
+            presented.token_id,
+            &request_meta(&headers),
+        )
+        .await?;
+    // Another revoke landed between the lookup and this one: the token is
+    // already gone, which is the invalid-bearer answer.
+    if !revoked {
+        return Err(Error::Unauthorized);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
