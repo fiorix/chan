@@ -11011,7 +11011,10 @@ mod tests {
 
         /// `chan close` of one workspace is answered while another registered
         /// root hangs. The handoff writes its `Closed` reply from what this
-        /// returns, within the CLI's wait for it.
+        /// returns, within the CLI's wait for it: past that budget by no more
+        /// than the host's pace allows, so a loaded host that slows the
+        /// close's own writes does not red it. The wall-clock bound only
+        /// decides how soon a close that waits on the hung root reports.
         #[test]
         fn closing_a_workspace_answers_while_another_root_hangs() {
             let (runtime, desktop) = HungRootDesktop::new();
@@ -11021,16 +11024,18 @@ mod tests {
             let app_handle = app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let other = desktop.other.clone();
-            let outcome =
-                stall.finishes_beside("closing another workspace", cli_reply_bound(), move || {
+            let (outcome, took, pace) = timed_against_the_pace(runtime.handle(), || {
+                stall.finishes_beside("closing another workspace", HEALTHY_ROOT_BOUND, move || {
                     handle.block_on(close_workspace_from_handoff(
                         app_handle, state, other, false,
                     ))
-                });
+                })
+            });
             assert_eq!(
                 outcome,
                 Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
+            assert_within_reply_budget("the close", took, cli_reply_bound(), pace);
             assert_eq!(
                 desktop.on_paths(),
                 Vec::<String>::new(),
@@ -11483,7 +11488,7 @@ mod tests {
                         })
                     };
                     assert!(
-                        stalls[0].wait_entered(std::time::Duration::from_secs(10)),
+                        stalls[0].wait_entered(HEALTHY_ROOT_BOUND),
                         "fixture: the restore never reached the hung root"
                     );
                     Self {
@@ -11772,6 +11777,12 @@ mod tests {
             embedded::in_own_chan_home(&format!("tests::handoff_row::{test}"))
         }
 
+        /// How long a handoff beside a root that hangs may take before the
+        /// test reports it. A handoff that asks the root nothing answers far
+        /// inside it on a loaded host; one that waits on the root without a
+        /// bound never answers, so this only decides how soon that reports.
+        const HANDOFF_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
         /// How long the CLI waits for the handoff's `Opened` reply: past it,
         /// `chan serve` takes the desktop for gone.
         fn cli_reply_bound() -> std::time::Duration {
@@ -12053,7 +12064,10 @@ mod tests {
         /// A handoff of a relinked root the boot restored mints its window
         /// under the row's root before it answers, while the root stops
         /// answering: the host knows the workspace by the path the handoff
-        /// names, and nothing asks the root.
+        /// names, and nothing asks the root. It answers within the CLI's
+        /// reply budget, past it by no more than the host's pace allows; the
+        /// wall-clock bound only decides how soon a handoff that waits on the
+        /// root reports.
         #[cfg(unix)]
         #[test]
         fn a_restored_relinked_roots_handoff_mints_under_its_row_while_it_hangs() {
@@ -12067,12 +12081,15 @@ mod tests {
             let app = desktop.app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let path = root.now.clone();
-            let answer = stall.finishes_beside(
-                "handing off a mounted root that hangs",
-                cli_reply_bound(),
-                move || open_workspace_from_handoff(app, state, path),
-            );
+            let (answer, took, pace) = timed_against_the_pace(desktop.runtime.handle(), || {
+                stall.finishes_beside(
+                    "handing off a mounted root that hangs",
+                    HANDOFF_HANG_GUARD,
+                    move || open_workspace_from_handoff(app, state, path),
+                )
+            });
             assert_eq!(answer, Ok(()));
+            assert_within_reply_budget("the handoff", took, cli_reply_bound(), pace);
             assert_eq!(
                 desktop.window_paths(),
                 std::slice::from_ref(&root.stored),
@@ -12544,8 +12561,10 @@ mod tests {
 
         /// A handoff of a root that is not mounted answers while that root
         /// stops answering: the arm that registers it runs on a task of its
-        /// own, and the handler asks the root nothing. Once the root answers,
-        /// that arm opens the window under the registry row.
+        /// own, and the handler asks the root nothing. It answers within the
+        /// CLI's reply budget, past it by no more than the host's pace
+        /// allows. Once the root answers, that arm opens the window under the
+        /// registry row.
         #[test]
         fn a_handoff_of_a_root_that_is_not_mounted_answers_while_it_hangs() {
             if !own_home("a_handoff_of_a_root_that_is_not_mounted_answers_while_it_hangs") {
@@ -12558,12 +12577,15 @@ mod tests {
             let app = desktop.app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let path = stored.clone();
-            let answer = stall.finishes_beside(
-                "handing off a root that hangs",
-                cli_reply_bound(),
-                move || open_workspace_from_handoff(app, state, path),
-            );
+            let (answer, took, pace) = timed_against_the_pace(desktop.runtime.handle(), || {
+                stall.finishes_beside(
+                    "handing off a root that hangs",
+                    HANDOFF_HANG_GUARD,
+                    move || open_workspace_from_handoff(app, state, path),
+                )
+            });
             assert_eq!(answer, Ok(()));
+            assert_within_reply_budget("the handoff", took, cli_reply_bound(), pace);
             drop(stall);
             let windows = desktop.wait_for_windows(1);
             assert!(
