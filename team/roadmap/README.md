@@ -63,6 +63,8 @@ A third came the same day from the review of v0.127.0's live-metrics fixes: the 
 
 The owner moved two more here from v0.127.0 the same day, both not started: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]), and the system CA store for the Rust TLS clients, read on three platforms ([systemca]).
 
+The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, and copy and paste carry no stray bytes ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -70,12 +72,20 @@ The owner moved two more here from v0.127.0 the same day, both not started: one 
 | [local devserver calls go through a proxy][cliproxy] | not started | design |
 | [one WireGuard ingress per proxy node][wgnode] | not started | decision |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
+| [a tmux window's title bar is empty][tmuxbar] | not started | design |
+| [wrapped ghostty copies paste broken][gcopy] | not started | design |
+| [a theme switch leaves ghostty colours][livetheme] | not started | design |
+| [the system cannot open files in chan][openwith] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
 [cliproxy]: v0.128.0/the-clis-local-devserver-calls-go-through-a-proxy.md
 [wgnode]: v0.128.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [systemca]: v0.128.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
+[tmuxbar]: v0.128.0/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
+[gcopy]: v0.128.0/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md
+[livetheme]: v0.128.0/a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch.md
+[openwith]: v0.128.0/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md
 
 ## Completed
 
