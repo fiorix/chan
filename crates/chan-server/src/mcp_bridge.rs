@@ -643,7 +643,9 @@ mod tests {
                 cell.indexer.cancel();
                 cell.workspace.stop_open_recovery();
             };
-        }).await.unwrap();
+        })
+        .await
+        .expect("the test body did not end within its hang guard");
     }
 
     #[tokio::test]
@@ -708,7 +710,9 @@ mod tests {
             );
             let _reopened = library.open_workspace(root.path()).unwrap();
             drop(handle);
-        }).await.unwrap();
+        })
+        .await
+        .expect("the test body did not end within its hang guard");
     }
 
     #[tokio::test]
@@ -757,7 +761,7 @@ mod tests {
             let _reopened = library.open_workspace(root.path()).unwrap();
         })
         .await
-        .unwrap();
+        .expect("the test body did not end within its hang guard");
     }
 
     // Dropping the bridge's handle, as unmount does, cancels the requests of
@@ -834,7 +838,7 @@ mod tests {
             .expect("the workspace was not released after the body stopped");
         })
         .await
-        .unwrap();
+        .expect("the test body did not end within its hang guard");
     }
 
     struct SocketObservingBuilder(tokio::sync::mpsc::UnboundedSender<PathBuf>);
@@ -973,7 +977,7 @@ mod tests {
                 .completed());
         })
         .await
-        .unwrap();
+        .expect("the test body did not end within its hang guard");
     }
 
     #[tokio::test]
