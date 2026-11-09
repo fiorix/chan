@@ -10,10 +10,32 @@
 //! an end-of-stream marker so each direction can finish independently.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
 use crate::wire::MAX_DATA_FRAME_BYTES;
+
+type Metered<T> = chan_metrics::MeteredIo<chan_metrics::MeteredIo<T>>;
+
+/// Count a connection's bytes on its owned halves. The halves stay tokio's
+/// lock-free split with their own shutdown-on-drop, and the returned guards
+/// count the connection once until the splice that holds them ends.
+fn metered(
+    read: OwnedReadHalf,
+    write: OwnedWriteHalf,
+) -> (
+    (chan_metrics::Guard<'static>, chan_metrics::Guard<'static>),
+    Metered<OwnedReadHalf>,
+    Metered<OwnedWriteHalf>,
+) {
+    use chan_metrics::{MeteredIo, NETWORK, REVERSE};
+    (
+        (NETWORK.enter(), REVERSE.enter()),
+        MeteredIo::half(MeteredIo::half(read, &NETWORK), &REVERSE),
+        MeteredIo::half(MeteredIo::half(write, &NETWORK), &REVERSE),
+    )
+}
 
 /// Splice `tcp` against a peer reachable through `to_peer` / `from_peer`.
 ///
@@ -27,9 +49,8 @@ pub async fn splice(
     to_peer: mpsc::Sender<Vec<u8>>,
     mut from_peer: mpsc::Receiver<Vec<u8>>,
 ) {
-    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::NETWORK);
-    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::REVERSE);
-    let (mut read, mut write) = tokio::io::split(tcp);
+    let (read, write) = tcp.into_split();
+    let (_active, mut read, mut write) = metered(read, write);
     let (stop_tx, stop_rx) = watch::channel(false);
     let downlink_stop_rx = stop_rx.clone();
     let downlink_stop_tx = stop_tx.clone();
@@ -98,9 +119,8 @@ pub async fn splice_half_close(
     to_peer: mpsc::Sender<Vec<u8>>,
     mut from_peer: mpsc::Receiver<Vec<u8>>,
 ) {
-    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::NETWORK);
-    let tcp = chan_metrics::MeteredIo::new(tcp, &chan_metrics::REVERSE);
-    let (mut read, mut write) = tokio::io::split(tcp);
+    let (read, write) = tcp.into_split();
+    let (_active, mut read, mut write) = metered(read, write);
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let downlink_cancel_tx = cancel_tx.clone();
     let downlink_cancel_rx = cancel_rx.clone();
