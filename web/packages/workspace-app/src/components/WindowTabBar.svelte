@@ -10,7 +10,8 @@
   // shown over the page, the band holds neither the tree button nor the
   // strip: they belong to the covered window. On Windows it holds the
   // launcher menubar's menus there instead, since the frameless window wears
-  // no menubar, and the window's title after them.
+  // no menubar, and the window's title after them. A tmux pane has no strip,
+  // so while one is active the band names it and marks the window as tmux's.
 
   import {
     isTauriDesktop,
@@ -29,7 +30,7 @@
     togglePaneTree,
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
-  import { activeLayout } from "../state/tabs.svelte";
+  import { activeLayout, activeTabInPane, paneShowsTmux, tabLabel } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
     windowTabBar,
@@ -52,6 +53,19 @@
   const chord = $derived(chordFor(PANE_TREE_COMMAND_ID) ?? "");
   // The overlay hangs its dropdown under the element carrying this.
   const anchor = { [PANE_TREE_ANCHOR_ATTR]: "" };
+
+  // A pane showing a tmux pane draws no strip (Pane.svelte hides it on the
+  // same test), so while one is active the bar shows its name where the
+  // strip would sit: the label the pane tree gives it, which the server
+  // keeps on the tmux window's name. A pane Hybrid Nav stages has no tmux
+  // pane yet and reads as the mode names it. Null in any other pane.
+  const tmuxName = $derived.by(() => {
+    const id = viewLayout.activePaneId;
+    if (!paneShowsTmux(id)) return null;
+    const pane = viewLayout.nodes[id];
+    const tab = pane?.kind === "leaf" ? activeTabInPane(pane) : null;
+    return tab ? tabLabel(tab) : "New tmux pane";
+  });
 
   // The desktop marks the page's root while the window's Computers launcher
   // is shown over it, from before the launcher slides in until after it has
@@ -186,7 +200,20 @@
       <span class="badge" data-status={status} aria-hidden="true"></span>
     {/if}
   </button>
+  <!-- The name and the badge are display only, so nothing here reopens the
+       hidden strip or offers a tab action tmux cannot take; on the desktop a
+       press on either drags the window as the band around them does. Each
+       holds its text directly, since Tauri's drag script reads the
+       attribute on the element pressed. -->
+  {#if tmuxName !== null}
+    <div class="tmux-name" class:covered data-tauri-drag-region={drag}>{tmuxName}</div>
+  {/if}
   <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
+  {#if tmuxName !== null}
+    <!-- Where the A and B toggle sits in a window whose panes have sides;
+         a tmux window's have none. -->
+    <div class="tmux-badge" class:covered data-tauri-drag-region={drag}>tmux</div>
+  {/if}
   {#if menus.length > 0 || titleShown}
     <!-- While the launcher covers the page the band belongs to the window.
          A frameless window has no menubar and no title of its own, so the
@@ -327,6 +354,35 @@
     align-self: stretch;
     display: flex;
     align-items: center;
+  }
+  /* In the strip's type, at its active tab's weight; a long name gives up
+     the slot's empty stretch first, then ends in an ellipsis. */
+  .tmux-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 0 8px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  /* Black with white text in either theme: it names tmux, not a state the
+     theme colours. In the side toggle's type, and as far from the band's
+     end (the bar's gap and this margin) as the strip keeps its last
+     control. */
+  .tmux-badge {
+    flex: none;
+    margin-right: 4px;
+    padding: 0 6px;
+    height: 20px;
+    border-radius: 4px;
+    background: #000;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 20px;
   }
   /* Windows 11 caption buttons: square-cornered, clear at rest, a light
      wash under the pointer and a lighter one with a dimmed glyph while
