@@ -34,8 +34,31 @@ pub(crate) const A_HOLD_PAST_ANY_GRACE: Duration = Duration::from_secs(600);
 /// for it on the worker stops the probe for good and the probe ends at its
 /// last step or never: the bound only decides how soon a stopped probe
 /// reports, and a loaded host that stretches every step still ends far
-/// inside it.
+/// inside it. A bounded wait on the worker is read against the probe's
+/// control instead.
 const PROBE_BOUND: Duration = Duration::from_secs(60);
+
+/// How far past twice its control a probe may run and still count as
+/// running at the control's pace: room for one scheduling stall of a loaded
+/// host that the control did not meet.
+pub(crate) const CONTROL_SLACK: Duration = Duration::from_millis(250);
+
+/// Whether a probe that took `beside` next to what a pin holds ran at the
+/// pace of `control`, the same probe timed in the same run with nothing
+/// held: within twice it and [`CONTROL_SLACK`]. The control carries the
+/// host's load into the bound, so a loaded host stretches both sides; a
+/// wait the held state costs the probe is time the control does not have,
+/// and past the slack it reds on an idle host and a loaded one alike.
+pub(crate) fn at_the_controls_pace(beside: Duration, control: Duration) -> bool {
+    beside <= control.saturating_mul(2).saturating_add(CONTROL_SLACK)
+}
+
+/// The median of `times`: a set of probes read this way is not moved by
+/// one stall of a loaded host.
+pub(crate) fn median(mut times: Vec<Duration>) -> Duration {
+    times.sort_unstable();
+    times[times.len() / 2]
+}
 
 /// The probe needs its worker this many times, this far apart: six hundred
 /// milliseconds in all, longer than two ticks of a flusher.
@@ -130,31 +153,58 @@ pub(crate) fn within(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
 ///
 /// The probe is a task that needs the worker again and again for longer than
 /// two flusher ticks, so a task that waits for the cell on the worker stops
-/// the probe whichever of the two the worker runs first.
+/// the probe whichever of the two the worker runs first. The probe ends, and
+/// at the pace of the same probe alone on a runtime of its own, timed before
+/// and after it in the same run: a task that waits for the cell on the
+/// worker for a while and then goes on holds the probe back by that while.
 pub(crate) fn worker_stays_free<K>(start: impl FnOnce(Cell) -> K) -> bool {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("runtime of one worker");
+    let alone_before = probe_alone();
+    let runtime = one_worker();
     let cell: Cell = Arc::new(RwLock::new(None));
     let held = cell.write().expect("workspace cell");
     let kept = {
         let _inside = runtime.enter();
         start(cell.clone())
     };
+    let (ended, took) = probe(&runtime);
+    // A task that waits for the cell on the worker goes on once the guard is
+    // dropped, so the runtime can stop.
+    drop(held);
+    drop(kept);
+    runtime.shutdown_timeout(MUST_HAPPEN);
+    let alone = alone_before.max(probe_alone());
+    eprintln!("worker probe beside the held cell: ended {ended}, took {took:?}; alone {alone:?}");
+    ended && at_the_controls_pace(took, alone)
+}
+
+fn one_worker() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime of one worker")
+}
+
+/// Run the probe on `runtime`: whether it ended within [`PROBE_BOUND`], and
+/// how long it took.
+fn probe(runtime: &tokio::runtime::Runtime) -> (bool, Duration) {
     let (done, finished) = std::sync::mpsc::channel();
+    let started = Instant::now();
     runtime.spawn(async move {
         for _ in 0..PROBE_STEPS {
             tokio::time::sleep(PROBE_STEP).await;
         }
         let _ = done.send(());
     });
-    let free = finished.recv_timeout(PROBE_BOUND).is_ok();
-    // A task that waits for the cell on the worker goes on once the guard is
-    // dropped, so the runtime can stop.
-    drop(held);
-    drop(kept);
-    runtime.shutdown_timeout(MUST_HAPPEN);
-    free
+    let ended = finished.recv_timeout(PROBE_BOUND).is_ok();
+    (ended, started.elapsed())
+}
+
+/// How long the probe takes alone on a runtime of one worker: its own cost
+/// on this host in this run.
+fn probe_alone() -> Duration {
+    let runtime = one_worker();
+    let (ended, took) = probe(&runtime);
+    assert!(ended, "fixture: the probe alone did not end");
+    took
 }

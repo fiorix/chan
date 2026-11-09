@@ -2199,8 +2199,8 @@ mod reindex_cancel_at_shutdown_tests {
     /// and how long a wait the test ends lasts at most. A green run ends
     /// every such wait by the order of its events, long before this; a run
     /// whose task makes an unbounded wait for the cell on the runtime's only
-    /// worker ends here, red and not hung. A wait shorter than this that then
-    /// goes on is not what these pins read.
+    /// worker ends here, red and not hung. A bounded wait that then goes on
+    /// is read against a control probe timed in the same run instead.
     const HANG_GUARD: Duration = Duration::from_secs(60);
 
     /// Hold `cell`'s write guard on a thread of its own until the returned
@@ -2258,32 +2258,90 @@ mod reindex_cancel_at_shutdown_tests {
         ([cfg, root], cell, indexer)
     }
 
-    /// The stop's side task beside a cell that a storage reset or a metadata
-    /// import holds when the signal fires: it keeps no runtime worker while
-    /// it waits, and cancels the reindex once the cell is let go.
-    ///
-    /// The order of events is the assertion: unrelated async work, a timer
-    /// behind the stop's task on the runtime's only worker, runs while the
-    /// cell is still held, and the test lets the hold go only after it has.
-    /// A task that makes an unbounded wait for the cell on that worker stops
-    /// the timer too, so the hold runs out by itself instead, and the test
-    /// reads that.
-    #[tokio::test(flavor = "current_thread")]
-    async fn the_stops_reindex_cancel_beside_a_held_cell_keeps_no_worker_and_cancels_once_let_go() {
-        let (_dirs, cell, indexer) = bound_cell();
-        let (release, writer) = hold_until_let_go(&cell);
-        let (shutdown, signal) = watch::channel(false);
-        shutdown.send(true).expect("signal the stop");
+    /// How many times a pin times its probe beside the held cell, and the
+    /// same probe with nothing held; it compares the medians.
+    const PROBES: usize = 5;
 
-        // Scheduled first: a wait for the cell here parks the only worker,
-        // and the timer behind it cannot fire.
-        let stop = tokio::spawn(cancel_reindex_at_shutdown(Arc::clone(&cell), signal));
+    /// Run `call` on a thread of its own and wait for its answer, at most
+    /// [`HANG_GUARD`]: the answer, the time from the spawn to the answer, and
+    /// the thread, which the caller joins once nothing it holds can keep the
+    /// call waiting.
+    fn answered_on_a_thread<T: Send + 'static>(
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> (
+        Result<T, mpsc::RecvTimeoutError>,
+        Duration,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (answered, answer) = mpsc::channel();
+        let started = std::time::Instant::now();
+        let thread = std::thread::spawn(move || {
+            let _ = answered.send(call());
+        });
+        let answer = answer.recv_timeout(HANG_GUARD);
+        (answer, started.elapsed(), thread)
+    }
+
+    /// A timer spawned on the runtime behind whatever the caller spawned
+    /// before it: how long it took to fire. On a runtime of one worker, a
+    /// task ahead of it that waits on the worker holds it back by that wait.
+    async fn a_timer_behind() -> Duration {
+        let started = std::time::Instant::now();
         let (fired, progress) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let _ = fired.send(());
         });
         progress.await.expect("the timer task");
+        started.elapsed()
+    }
+
+    /// The stop's side task over `cell`, its signal already fired, and the
+    /// sender that keeps the signal's channel open.
+    fn the_stop_over(
+        cell: &Arc<RwLock<Option<WorkspaceCell>>>,
+    ) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+        let (shutdown, signal) = watch::channel(false);
+        shutdown.send(true).expect("signal the stop");
+        let stop = tokio::spawn(cancel_reindex_at_shutdown(Arc::clone(cell), signal));
+        (shutdown, stop)
+    }
+
+    /// The stop's side task beside a cell that a storage reset or a metadata
+    /// import holds when the signal fires: it keeps no runtime worker while
+    /// it waits, and cancels the reindex once the cell is let go.
+    ///
+    /// Unrelated async work, a timer behind each stop's task on the
+    /// runtime's only worker, runs while the cell is still held, since the
+    /// test lets the hold go only after it has, and at the pace of the same
+    /// timer behind stops over a free cell timed first. A task that makes an
+    /// unbounded wait for the cell on that worker stops the timer too, so
+    /// the hold runs out by itself instead, and the test reads that; one
+    /// that waits on the worker for a while and then goes on holds each
+    /// timer back by that while.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_stops_reindex_cancel_beside_a_held_cell_keeps_no_worker_and_cancels_once_let_go() {
+        let (_dirs, cell, indexer) = bound_cell();
+        let (_control_dirs, free_cell, _free_indexer) = bound_cell();
+        let mut free = Vec::new();
+        for _ in 0..PROBES {
+            let (_shutdown, stop) = the_stop_over(&free_cell);
+            free.push(a_timer_behind().await);
+            tokio::time::timeout(HANG_GUARD, stop)
+                .await
+                .expect("fixture: the stop over a free cell did not end")
+                .expect("the stop's task");
+        }
+
+        let (release, writer) = hold_until_let_go(&cell);
+        let mut stops = Vec::new();
+        let mut beside = Vec::new();
+        for _ in 0..PROBES {
+            // Scheduled first: a wait for the cell here parks the only
+            // worker, and the timer behind it cannot fire.
+            stops.push(the_stop_over(&cell));
+            beside.push(a_timer_behind().await);
+        }
         let cancelled_while_held = indexer.cancel_requested();
         let _ = release.send(());
         let let_go_by_the_test = writer.join().expect("workspace cell writer");
@@ -2296,10 +2354,21 @@ mod reindex_cancel_at_shutdown_tests {
             !cancelled_while_held,
             "fixture: the reindex was cancelled while the cell was held"
         );
-        tokio::time::timeout(HANG_GUARD, stop)
-            .await
-            .expect("the stop's task did not end once the cell was let go")
-            .expect("the stop's task");
+        let (free, beside) = (
+            crate::doc_sessions::held_cell::median(free),
+            crate::doc_sessions::held_cell::median(beside),
+        );
+        assert!(
+            crate::doc_sessions::held_cell::at_the_controls_pace(beside, free),
+            "the stop's wait for a held workspace cell held unrelated async work \
+             back: its timer took {beside:?}, beside a stop over a free cell {free:?}"
+        );
+        for (_shutdown, stop) in stops {
+            tokio::time::timeout(HANG_GUARD, stop)
+                .await
+                .expect("the stop's task did not end once the cell was let go")
+                .expect("the stop's task");
+        }
         assert!(
             indexer.cancel_requested(),
             "the stop did not cancel the reindex once the cell was let go"
@@ -2310,29 +2379,47 @@ mod reindex_cancel_at_shutdown_tests {
     /// reset or a metadata import holds: none at once, and the workspace
     /// once the cell is let go.
     ///
-    /// "At once" is an order of events: the look answers while the hold is
-    /// still in place, since the test lets go only once it has the answer.
-    /// The look runs on a thread of its own, so one that makes an unbounded
-    /// wait for the cell ends this test red at the hang guard and not hung.
+    /// "At once" is read two ways. By order: each look answers while the
+    /// hold is still in place, since the test lets go only once it has the
+    /// answer. By pace: the looks beside the hold take no longer than looks
+    /// at the free cell timed between them, so a look that waits for the
+    /// cell for a while and then answers none reds too. Each look runs on a
+    /// thread of its own, so one that makes an unbounded wait for the cell
+    /// ends this test red at the hang guard and not hung.
     #[tokio::test]
     async fn the_hosts_look_at_a_held_cell_answers_none_at_once_and_the_workspace_once_let_go() {
+        use crate::doc_sessions::held_cell;
         use chan_library::WorkspaceCellHandle;
         let (_dirs, cell, _indexer) = bound_cell();
         let handle = Arc::new(CellHandle(Arc::clone(&cell)));
-        let hold = crate::doc_sessions::held_cell::hold(&cell);
-        let (answered, answer) = mpsc::channel();
-        let looking = Arc::clone(&handle);
-        let look = std::thread::spawn(move || {
-            let _ = answered.send(looking.workspace().is_some());
-        });
-        let beside_the_hold = answer.recv_timeout(HANG_GUARD);
-        drop(hold);
-        look.join().expect("the look's thread");
+        let look = || {
+            let looking = Arc::clone(&handle);
+            answered_on_a_thread(move || looking.workspace().is_some())
+        };
+        let mut free = Vec::new();
+        let mut beside = Vec::new();
+        for _ in 0..PROBES {
+            let (answer, took, thread) = look();
+            thread.join().expect("the look's thread");
+            assert_eq!(answer, Ok(true), "fixture: the look at a free cell");
+            free.push(took);
+            let hold = held_cell::hold(&cell);
+            let (answer, took, thread) = look();
+            drop(hold);
+            thread.join().expect("the look's thread");
+            assert_eq!(
+                answer,
+                Ok(false),
+                "the host's look at a held workspace cell did not answer none while it was held"
+            );
+            beside.push(took);
+        }
 
-        assert_eq!(
-            beside_the_hold,
-            Ok(false),
-            "the host's look at a held workspace cell did not answer none at once"
+        let (free, beside) = (held_cell::median(free), held_cell::median(beside));
+        assert!(
+            held_cell::at_the_controls_pace(beside, free),
+            "the host's look at a held workspace cell took {beside:?}, past the pace \
+             of a look at the free cell, {free:?}: it did not answer none at once"
         );
         assert!(
             handle.workspace().is_some(),
@@ -2342,32 +2429,50 @@ mod reindex_cancel_at_shutdown_tests {
 
     /// The host's reindex cancel beside a held cell returns at once and
     /// reaches no indexer, and cancels once the cell is let go. As with the
-    /// look, "at once" is that it returns while the hold is still in place.
+    /// look, "at once" is that it returns while the hold is still in place,
+    /// and at the pace of a cancel of a free cell timed between; that cell
+    /// is another one, since a cancel there reaches its indexer.
     #[tokio::test]
     async fn the_hosts_reindex_cancel_beside_a_held_cell_returns_at_once_and_cancels_once_let_go() {
+        use crate::doc_sessions::held_cell;
         use chan_library::WorkspaceCellHandle;
         let (_dirs, cell, indexer) = bound_cell();
+        let (_control_dirs, free_cell, _free_indexer) = bound_cell();
         let handle = Arc::new(CellHandle(Arc::clone(&cell)));
-        let hold = crate::doc_sessions::held_cell::hold(&cell);
-        let (returned, back) = mpsc::channel();
-        let cancelling = Arc::clone(&handle);
-        let cancel = std::thread::spawn(move || {
-            cancelling.cancel_reindex();
-            let _ = returned.send(());
-        });
-        let beside_the_hold = back.recv_timeout(HANG_GUARD);
-        let cancelled_while_held = indexer.cancel_requested();
-        drop(hold);
-        cancel.join().expect("the cancel's thread");
+        let free_handle = Arc::new(CellHandle(free_cell));
+        let cancel = |handle: &Arc<CellHandle>| {
+            let cancelling = Arc::clone(handle);
+            answered_on_a_thread(move || cancelling.cancel_reindex())
+        };
+        let mut free = Vec::new();
+        let mut beside = Vec::new();
+        for _ in 0..PROBES {
+            let (answer, took, thread) = cancel(&free_handle);
+            thread.join().expect("the cancel's thread");
+            assert_eq!(answer, Ok(()), "fixture: the cancel of a free cell");
+            free.push(took);
+            let hold = held_cell::hold(&cell);
+            let (answer, took, thread) = cancel(&handle);
+            let cancelled_while_held = indexer.cancel_requested();
+            drop(hold);
+            thread.join().expect("the cancel's thread");
+            assert_eq!(
+                answer,
+                Ok(()),
+                "the host's reindex cancel waited for a held workspace cell"
+            );
+            assert!(
+                !cancelled_while_held,
+                "the host's reindex cancel reached the indexer of a held cell"
+            );
+            beside.push(took);
+        }
 
-        assert_eq!(
-            beside_the_hold,
-            Ok(()),
-            "the host's reindex cancel waited for a held workspace cell"
-        );
+        let (free, beside) = (held_cell::median(free), held_cell::median(beside));
         assert!(
-            !cancelled_while_held,
-            "the host's reindex cancel reached the indexer of a held cell"
+            held_cell::at_the_controls_pace(beside, free),
+            "the host's reindex cancel beside a held workspace cell took {beside:?}, \
+             past the pace of a cancel of a free cell, {free:?}: it did not return at once"
         );
         handle.cancel_reindex();
         assert!(
@@ -2376,23 +2481,60 @@ mod reindex_cancel_at_shutdown_tests {
         );
     }
 
+    /// The host's calls into the tenant at `stored`, spawned ahead of a
+    /// timer on a runtime of one worker: what they answered (the workspace
+    /// read mounted, the open handed the mount back), and how long they and
+    /// the timer behind them took from the spawn. A call that waits on the
+    /// worker holds the timer back with it.
+    async fn the_hosts_calls_and_a_timer(
+        host: &Arc<chan_library::WorkspaceHost>,
+        stored: &std::path::Path,
+        config: &ServeConfig,
+    ) -> ((bool, bool), Duration) {
+        let started = std::time::Instant::now();
+        // Scheduled first: a wait for the cell here parks the only worker,
+        // and the timer behind it cannot fire.
+        let calls = tokio::spawn({
+            let host = Arc::clone(host);
+            let stored = stored.to_path_buf();
+            let config = config.clone();
+            async move {
+                let mounted = host.is_workspace_mounted_by_key(&stored);
+                host.cancel_all_reindex();
+                let handed_back = host
+                    .open_or_get_registered_workspace(&stored, config)
+                    .await
+                    .is_ok();
+                (mounted, handed_back)
+            }
+        });
+        a_timer_behind().await;
+        let answers = tokio::time::timeout(HANG_GUARD, calls)
+            .await
+            .expect("the host's calls did not answer")
+            .expect("the host's calls");
+        (answers, started.elapsed())
+    }
+
     /// While a storage reset holds a mounted tenant's cell, the host's calls
     /// into that tenant keep no runtime worker: the workspace reads mounted
     /// by the root its registry row stores, the reindex cancel of every
     /// tenant returns, and an open of the mounted root hands the mount back
     /// without its revalidation.
     ///
-    /// The reset is held past its admission by its test gate, and the order
-    /// of events is the assertion: the calls answer, and unrelated async
-    /// work behind them on the runtime's only worker runs, while the gate
-    /// still holds, since the test lets it go only after both. Calls that
-    /// make an unbounded wait for the cell hold the gate until it runs out
-    /// by itself, which the test reads from its release, red and not hung;
-    /// calls that wait on something the held reset never signals end at the
-    /// hang guard, red as well.
+    /// The reset is held past its admission by its test gate. The calls
+    /// answer, and unrelated async work behind them on the runtime's only
+    /// worker runs, while the gate still holds, since the test lets it go
+    /// only after both, and at the pace of the same calls into the tenant
+    /// before the reset, when its cell was free. Calls that make an
+    /// unbounded wait for the cell hold the gate until it runs out by
+    /// itself, which the test reads from its release, red and not hung;
+    /// calls that wait on the worker for a while and then go on hold the
+    /// timer back by that while, past the free cell's pace.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn the_hosts_calls_into_a_tenant_whose_cell_a_reset_holds_keep_no_worker() {
+        use crate::doc_sessions::held_cell;
         use tower::ServiceExt;
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace root");
@@ -2415,6 +2557,16 @@ mod reindex_cancel_at_shutdown_tests {
         host.open_or_get_registered_workspace(&stored, config.clone())
             .await
             .expect("mount the workspace");
+        let mut free = Vec::new();
+        for _ in 0..PROBES {
+            let (answers, took) = the_hosts_calls_and_a_timer(&host, &stored, &config).await;
+            assert_eq!(
+                answers,
+                (true, true),
+                "fixture: the host's calls into the tenant before the reset"
+            );
+            free.push(took);
+        }
 
         let (entered, held) = tokio::sync::oneshot::channel();
         let (release, released) = mpsc::channel();
@@ -2429,31 +2581,13 @@ mod reindex_cancel_at_shutdown_tests {
             .expect("fixture: the reset never reached its hold")
             .expect("fixture: the reset's gate was dropped");
 
-        // Scheduled first: a wait for the cell here parks the only worker,
-        // and the timer behind it cannot fire.
-        let calls = tokio::spawn({
-            let host = Arc::clone(&host);
-            let stored = stored.clone();
-            async move {
-                let mounted = host.is_workspace_mounted_by_key(&stored);
-                host.cancel_all_reindex();
-                let handed_back = host
-                    .open_or_get_registered_workspace(&stored, config)
-                    .await
-                    .is_ok();
-                (mounted, handed_back)
-            }
-        });
-        let (fired, progress) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            let _ = fired.send(());
-        });
-        progress.await.expect("the timer task");
-        let answers = tokio::time::timeout(HANG_GUARD, calls)
-            .await
-            .expect("the host's calls did not answer beside a held cell")
-            .expect("the host's calls");
+        let mut beside = Vec::new();
+        let mut answers = Vec::new();
+        for _ in 0..PROBES {
+            let (answered, took) = the_hosts_calls_and_a_timer(&host, &stored, &config).await;
+            answers.push(answered);
+            beside.push(took);
+        }
         let look_while_held = host.live_workspace(&stored).is_some();
         // A gate that ran out by itself has dropped its receiver.
         let let_go_by_the_test = release.send(()).is_ok();
@@ -2469,14 +2603,20 @@ mod reindex_cancel_at_shutdown_tests {
             .expect("the reset's response")
             .status();
 
-        assert_eq!(
-            answers,
-            (true, true),
-            "beside a held cell: (the workspace read mounted, the open handed the mount back)"
+        assert!(
+            answers.iter().all(|answered| *answered == (true, true)),
+            "beside a held cell: (the workspace read mounted, the open handed the mount back) \
+             for each call: {answers:?}"
         );
         assert!(
             !look_while_held,
             "fixture: the cell was not held while the host's calls ran"
+        );
+        let (free, beside) = (held_cell::median(free), held_cell::median(beside));
+        assert!(
+            held_cell::at_the_controls_pace(beside, free),
+            "the host's calls into a tenant whose cell a reset holds held unrelated async \
+             work back: they and a timer took {beside:?}, against {free:?} with the cell free"
         );
         assert_eq!(
             reset_status,
