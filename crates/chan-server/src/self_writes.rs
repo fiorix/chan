@@ -220,7 +220,7 @@ impl SelfWrites {
     /// `should_suppress` against an explicit clock reading, so tests
     /// drive synthetic times instead of sleeping.
     #[cfg(test)]
-    fn should_suppress_at(&self, rel: &str, now: Instant) -> bool {
+    pub(crate) fn should_suppress_at(&self, rel: &str, now: Instant) -> bool {
         self.origin_at(rel, now).is_noted()
     }
 

@@ -6634,8 +6634,15 @@ mod write_tests {
 
     #[tokio::test]
     async fn a_create_a_delete_and_a_move_note_the_window_that_asked() {
-        use crate::self_writes::SelfWriteOrigin;
-        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        use crate::self_writes::{SelfWriteOrigin, SelfWrites};
+        let (_cfg, root, mut state) = super::doc_divert_tests::divert_app();
+        // The notes are read after each route returns, and a route that
+        // fsyncs several files can take longer than the production window
+        // on a busy disk, so a later note of its own would evict the first.
+        // A window past any host's cost keeps every note this test reads;
+        // the window's own expiry is pinned with synthetic times elsewhere.
+        Arc::get_mut(&mut state).expect("fresh state").self_writes =
+            Arc::new(SelfWrites::with_window(std::time::Duration::from_secs(600)));
         let window = || {
             Query(MutationWindowQuery {
                 w: Some("w-1".into()),
