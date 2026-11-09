@@ -26,6 +26,8 @@
 //    direction and count, found by libghostty-vt's search on chan's
 //    binding: the active match is ghostty-web's selection, the total
 //    carries a `+` while the scan runs, and Escape clears the selection.
+//    Escape hands the keyboard to the terminal with no later refocus, so a
+//    bar reopened at once keeps it.
 //
 // The xterm component cases run on terminal and addon doubles that record
 // the calls. The block after them runs the real addon over a real xterm in
@@ -192,6 +194,9 @@ type GhosttyStandIn = {
   wasmTerm: VtTerminal;
   viewportY: number;
   focused: number;
+  /// The element the terminal opened in, and the keys that reached it.
+  element: HTMLElement | null;
+  keys: string[];
   selectionManager: { selectionStart: Anchor | null; selectionEnd: Anchor | null };
   resize(cols: number, rows: number): void;
 };
@@ -206,7 +211,10 @@ const ghostty = vi.hoisted(() => ({
 // terminal as its core, ghostty-web's own SelectionManager over it, its
 // viewport offset (lines scrolled back from the bottom, clamped to the
 // history, back to the bottom after a write), writeln as a write with CRLF,
-// and a resize that hands the core the new grid and fires the resize event.
+// a resize that hands the core the new grid and fires the resize event, and
+// focus as ghostty-web's: open() makes the element it opens in focusable and
+// reads keys there, and focus() focuses that element, then again on a
+// zero-delay timer.
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   const { SelectionManager } = await import("ghostty-web");
@@ -230,7 +238,12 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.options = options;
       ghostty.terminals.push(this as unknown as GhosttyStandIn);
     }
-    open() {
+    element: HTMLElement | null = null;
+    keys: string[] = [];
+    open(element: HTMLElement) {
+      this.element = element;
+      if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "0");
+      element.addEventListener("keydown", (e) => this.keys.push(e.key));
       this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
         scrollbackLimit: this.options.scrollback,
       });
@@ -280,6 +293,8 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     }
     focus() {
       this.focused += 1;
+      this.element?.focus();
+      setTimeout(() => this.element?.focus(), 0);
     }
     blur() {}
     getSelection() {
@@ -305,6 +320,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.selectionManager.clearSelection();
     }
     dispose() {
+      this.element = null;
       this.selectionManager?.dispose();
       this.wasmTerm?.free();
     }
@@ -988,14 +1004,13 @@ describe("terminal find on the ghostty backend", () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     const free = vi.spyOn(VtSearch.prototype, "free");
-    const focused = term.focused;
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
     expect(findInput()).toBeNull();
     expect(selection(term)).toBeNull();
     expect(free).toHaveBeenCalledTimes(1);
-    expect(term.focused).toBe(focused + 1);
+    expect(document.activeElement, "the element the terminal reads keys from").toBe(term.element);
 
     // Reopening shows the kept query with no stale count beside it; Enter
     // searches again and lands on the newest match while the scan finishes.
@@ -1012,6 +1027,48 @@ describe("terminal find on the ghostty backend", () => {
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
   });
+
+  // ghostty-web's focus() focuses again on a zero-delay timer. A bar that
+  // reopens before that timer runs, as a quick Escape and find chord can,
+  // keeps the keyboard, and the next Escape is the bar's.
+  test.each(["in Escape's own task", "once Escape has closed it"])(
+    "a bar reopened %s keeps the keyboard",
+    async (when) => {
+      const term = await renderGhostty(NEEDLES);
+      // The mount's own refocus timer runs first.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const { input } = await findNeedle(term);
+      expect(document.activeElement, "the open bar holds the keyboard").toBe(input);
+      const press = (key: string) =>
+        document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        press("Escape");
+        if (when === "once Escape has closed it") {
+          await tick();
+          expect(findInput()).toBeNull();
+          expect(document.activeElement).toBe(term.element);
+        }
+        fireCommand("app.find.open");
+        await tick();
+        await tick();
+        const reopened = findInput();
+        expect(document.activeElement, "the reopened bar takes the keyboard").toBe(reopened);
+        vi.runAllTimers();
+        expect(document.activeElement, "no refocus takes it back").toBe(reopened);
+
+        // Escape closes the bar without reaching the terminal, and the key
+        // after it does reach the terminal.
+        press("Escape");
+        await tick();
+        expect(findInput()).toBeNull();
+        press("a");
+        expect(term.keys).toEqual(["a"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   test("an emptied query clears the selection and the count", async () => {
     const term = await renderGhostty(NEEDLES);

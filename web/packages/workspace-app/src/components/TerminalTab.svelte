@@ -2228,14 +2228,16 @@
   function openCommandsFromMenu(e: MouseEvent): void {
     const row = e.currentTarget as Element;
     closeTabMenu();
-    openCommandLauncherFromMenu(row, focusTerminalBeforeLauncher);
+    openCommandLauncherFromMenu(row, focusTerminalOnce);
   }
 
   // ghostty-web's focus() focuses its element and then again on a zero-delay
-  // timer, which would take the keyboard back from the launcher's input once
-  // the launcher has it. On ghostty the host it opened in, the element it
-  // reads keys from, is focused once instead; xterm.js focuses at once.
-  function focusTerminalBeforeLauncher(): void {
+  // timer, which takes the keyboard back from an input that took it in
+  // between: the launcher's, opened from the body menu, or the find bar's,
+  // reopened at once after Escape. On ghostty the host it opened in, the
+  // element it reads keys from, is focused once instead; xterm.js focuses at
+  // once.
+  function focusTerminalOnce(): void {
     if (backend !== "ghostty") {
       focusTerminal();
       return;
@@ -2956,7 +2958,7 @@
       e.preventDefault();
       findOpen = false;
       clearFind();
-      focusTerminal();
+      focusTerminalOnce();
       return;
     }
     if (e.key === "Enter") {

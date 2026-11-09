@@ -21,6 +21,12 @@
 //             the newest match again, its text the needle, and the count
 //             reads 1 of N.
 //   ESCAPE -- Escape closes the bar and clears the selection.
+//   REOPEN -- the chord opens the bar again, then Escape and the find
+//             command run in one task: the bar reopens before any zero-delay
+//             refocus ghostty-web could have scheduled, and keeps the
+//             keyboard past it. A trusted Escape closes the bar, the
+//             keyboard goes back to the terminal, and a command typed next
+//             runs in the shell.
 //
 // The selection and the viewport are read from ghostty-web's own Terminal
 // in the page: its SelectionManager's anchors (absolute rows, 0 the oldest
@@ -179,11 +185,14 @@ export default {
 
       // OPEN
       const mac = await page.evaluate(() => /Mac/.test(navigator.userAgent));
-      await page.evaluate((q) => document.querySelector(`${q} textarea`)?.focus(), hostQuery);
-      const modifiers = mac ? ["Meta"] : ["Control", "Shift"];
-      for (const key of modifiers) await page.keyboard.down(key);
-      await page.keyboard.press("KeyF");
-      for (const key of modifiers.reverse()) await page.keyboard.up(key);
+      const pressFindChord = async () => {
+        await page.evaluate((q) => document.querySelector(`${q} textarea`)?.focus(), hostQuery);
+        const modifiers = mac ? ["Meta"] : ["Control", "Shift"];
+        for (const key of modifiers) await page.keyboard.down(key);
+        await page.keyboard.press("KeyF");
+        for (const key of modifiers.reverse()) await page.keyboard.up(key);
+      };
+      await pressFindChord();
       await page.waitForFunction((q) => document.activeElement === document.querySelector(q), { timeout: 10_000 }, inputQuery)
         .catch(async (error) => {
           await ctx.shot("ghostty-find-not-open");
@@ -287,6 +296,46 @@ export default {
         throw new Error(`Escape left the selection: ${JSON.stringify(closed)}`);
       }
       await ctx.shot("ghostty-find-closed");
+
+      // REOPEN
+      await pressFindChord();
+      await page.waitForFunction((q) => document.activeElement === document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-reopen-not-open");
+          throw new Error(`reopen: the find chord did not open a focused find bar: ${error.message}`);
+        });
+      readings.reopened = await page.evaluate(async (q) => {
+        document.querySelector(q).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.find.open" } }));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const input = document.querySelector(q);
+        return { open: !!input, focused: !!input && document.activeElement === input, active: document.activeElement?.tagName ?? null };
+      }, inputQuery);
+      if (!readings.reopened.open || !readings.reopened.focused) {
+        await ctx.shot("ghostty-find-reopen-failure");
+        throw new Error(`reopen: the bar reopened at once did not keep the keyboard: ${JSON.stringify(readings.reopened)}`);
+      }
+      await page.keyboard.press("Escape");
+      await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-reopen-escape-failure");
+          throw new Error(`reopen: Escape did not close the reopened bar: ${error.message}`);
+        });
+      const keyboard = await page.evaluate((q) => {
+        const host = document.querySelector(q);
+        return !!host && host.contains(document.activeElement);
+      }, hostQuery);
+      if (!keyboard) throw new Error("reopen: Escape did not hand the keyboard back to the terminal");
+      await page.keyboard.type(`echo ${MARK}$((6*7))\n`);
+      const typed = Date.now() + 15_000;
+      while (!(await term.evaluate((t, mark) => (t.wasmTerm.plainText() ?? "").includes(`${mark}42`), MARK))) {
+        if (Date.now() > typed) {
+          await ctx.shot("ghostty-find-reopen-typing-failure");
+          throw new Error("reopen: a command typed after Escape never ran in the shell");
+        }
+        await sleep(100);
+      }
+      await ctx.shot("ghostty-find-reopen-typed");
       return readings;
     } finally {
       if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
