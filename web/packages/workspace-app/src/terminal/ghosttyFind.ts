@@ -11,12 +11,17 @@
 /// ends. The scan works from the newest output up, so the first match it
 /// finds is the newest of all and is selected on the frame that finds it.
 ///
-/// Output keeps arriving while the bar is open. The viewport controller,
-/// the terminal's only write path, reports every write; the search is fed
-/// once per animation frame however many came, and the count and the
-/// highlight follow it. The core keeps the active match on its text, so the
-/// highlight moves only when pruned history, or a reflow the next write
-/// brings in, has moved the match's rows.
+/// Output keeps arriving while the bar is open. The viewport controller
+/// reports every change to the terminal, each write (output and the lines
+/// chan prints itself) and each resize; the search is fed once per
+/// animation frame however many came, and the count and the highlight
+/// follow it. Across output the core keeps the active match on its text,
+/// so the highlight moves only when pruned history has moved the match's
+/// rows. A resize is different: the core forgets the active match and scans
+/// again from scratch, so the highlight, whose rows the reflow gave other
+/// text, goes before ghostty-web repaints, and the count has no index until
+/// a step selects again, starting over: older lands on the newest match and
+/// newer on the oldest.
 ///
 /// The highlight is ghostty-web's own selection, written through its
 /// SelectionManager's anchors. ghostty-web's public `select()` counts its
@@ -26,7 +31,7 @@
 
 import type { Terminal } from "ghostty-web";
 import { selectionManagerOf, type SelectionManagerLike } from "./ghosttySelection";
-import type { GhosttyViewportController } from "./ghosttyViewport";
+import type { GhosttyChange, GhosttyViewportController } from "./ghosttyViewport";
 import { type MatchRange, type SearchState, type VtSearch, VtTerminal } from "./ghosttyVt";
 
 /// The find bar's match count. `index` counts from the newest match (1 is
@@ -35,8 +40,8 @@ import { type MatchRange, type SearchState, type VtSearch, VtTerminal } from "./
 export type FindCount = { index: number | null; total: number; partial: boolean };
 
 /// What find needs of the terminal's viewport controller: word of every
-/// write, and the one call that scrolls to a match.
-export type FindViewport = Pick<GhosttyViewportController, "observeWrites" | "reveal">;
+/// change to the terminal, and the one call that scrolls to a match.
+export type FindViewport = Pick<GhosttyViewportController, "observeChanges" | "reveal">;
 
 /// Runs a callback once on a coming animation frame; `cancel` drops one that
 /// has not run.
@@ -89,7 +94,7 @@ export class GhosttyFind {
   private needle = "";
   /// The query changed and its first match is still to be selected.
   private selectFirst = false;
-  /// Output arrived since the search was last fed.
+  /// The terminal changed since the search was last fed.
   private dirty = false;
   /// The range last written to the selection.
   private written: MatchRange | null = null;
@@ -103,7 +108,7 @@ export class GhosttyFind {
     this.onCount = options.onCount;
     this.frames = options.frames ?? animationFrames;
     this.budgetMs = options.budgetMs ?? FIND_SCAN_BUDGET_MS;
-    this.stopObserving = options.viewport.observeWrites(() => this.onWrite());
+    this.stopObserving = options.viewport.observeChanges((change) => this.onChange(change));
   }
 
   /// The query changed: scan for it from scratch and select its newest match
@@ -163,8 +168,12 @@ export class GhosttyFind {
     return this.search;
   }
 
-  private onWrite(): void {
+  private onChange(change: GhosttyChange): void {
     if (!this.search) return;
+    // The core drops its selected match on any resize, so no active match
+    // is left to move the highlight to, and the rows under it hold other
+    // text once the grid reflows.
+    if (change === "resize") this.dropHighlight();
     this.dirty = true;
     this.schedule();
   }
@@ -266,8 +275,8 @@ function sameRange(a: MatchRange | null, b: MatchRange | null): boolean {
 }
 
 /// The bar's count of a search: `index` is the core's, 0 the newest, plus
-/// one. Nothing found reads `0 of 0`; a match that is not selected (a screen
-/// switch or pruning took the selected one) has no index.
+/// one. Nothing found reads `0 of 0`; with no match selected (a screen
+/// switch, pruning or a resize took the selected one) there is no index.
 function findCount(state: SearchState): FindCount {
   const partial = !state.complete;
   if (state.total === 0) return { index: 0, total: 0, partial };

@@ -526,8 +526,9 @@
   let ghosttyKeyParity: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
-  // reconciliation plus the calibrated macOS pixel-scroll path), non-null
-  // ONLY on the ghostty backend and disposed with the terminal.
+  // reconciliation plus the calibrated macOS pixel-scroll path) and the one
+  // path chan writes to the terminal through (PTY output and writeChanLine),
+  // non-null ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
   // Find on the ghostty backend, made when the find bar first opens (see
   // ghosttyFinder) and disposed with the terminal. Null on xterm, which
@@ -1848,7 +1849,7 @@
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         if (missedBytes > 0 && !resetBeforeReplay) {
-          term?.writeln(`\r\nterminal replay missed ${missedBytes} bytes`);
+          writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
       } else if (frame.type === "renamed") {
         if (tab.terminalSessionId) {
@@ -1931,7 +1932,7 @@
           scheduleSessionSave();
         } else {
           scheduleTerminalSessionSave();
-          term?.writeln(`\r\nsession ended (${frame.reason})`);
+          writeChanLine(`\r\nsession ended (${frame.reason})`);
         }
       } else if (frame.type === "exit") {
         status = "exited";
@@ -1944,7 +1945,7 @@
         if (focused) markProgramCompletionsSeen(tab.programStatus);
         clearTerminalSession(tab, true);
         scheduleTerminalSessionSave();
-        term?.writeln(
+        writeChanLine(
           frame.code == null
             ? "\r\nprocess exited; press Ctrl+D to close this tab"
             : `\r\nprocess exited (${frame.code}); press Ctrl+D to close this tab`,
@@ -1957,7 +1958,7 @@
         // do not splat it into the terminal.
         if (!detail.includes("unknown variant `ping`")) {
           statusDetail = detail;
-          term?.writeln(`\r\nterminal error: ${detail}`);
+          writeChanLine(`\r\nterminal error: ${detail}`);
         }
       }
     };
@@ -2278,6 +2279,15 @@
       onComplete?.();
       completeMaskScan();
     });
+  }
+
+  /// A line chan prints in the terminal itself: a replay gap, the session
+  /// ending, an error. On ghostty it takes the viewport controller's write,
+  /// as output does, so an open find bar counts it and a scrolled-back
+  /// viewport keeps its place.
+  function writeChanLine(line: string): void {
+    if (ghosttyViewport) ghosttyViewport.write(`${line}\r\n`);
+    else term?.writeln(line);
   }
 
   /// OS file dropped on this terminal: type the dropped files' absolute

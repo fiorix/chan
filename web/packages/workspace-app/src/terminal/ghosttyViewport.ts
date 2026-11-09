@@ -4,6 +4,8 @@
 /// ghostty-web is constructed with smoothScrollDuration 0 so its wheel
 /// handler applies synchronously and no private animation target can
 /// outlive a write-side restore; the controller's restore therefore sticks.
+/// It is also where a reader of the core hears of every change to what the
+/// terminal holds (`observeChanges`).
 
 /// Compatibility constant, not a preference: macOS trackpads deliver pixel
 /// deltas that Ghostty converts to roughly twice xterm.js's travel on the
@@ -22,7 +24,14 @@ export type GhosttyViewportTerminal = {
   scrollLines(amount: number): void;
   scrollToLine(line: number): void;
   write(data: string | Uint8Array): void;
+  /// ghostty-web's resize event: it fires once the core has the new grid,
+  /// before ghostty-web repaints it, whoever called `resize`.
+  onResize(listener: (size: { cols: number; rows: number }) => void): { dispose(): void };
 };
+
+/// A change to what the terminal holds: output written, or the grid
+/// resized, which reflows the screen and its history.
+export type GhosttyChange = "write" | "resize";
 
 export type GhosttyWheelEvent = Pick<WheelEvent, "deltaY" | "deltaMode">;
 
@@ -37,21 +46,29 @@ export type GhosttyViewportContext = {
 };
 
 export class GhosttyViewportController {
-  private readonly writeObservers = new Set<() => void>();
+  private readonly changeObservers = new Set<(change: GhosttyChange) => void>();
 
   constructor(
     private readonly terminal: GhosttyViewportTerminal,
     private readonly context: GhosttyViewportContext,
-  ) {}
+  ) {
+    // Lives as long as the terminal, whose disposal ends the subscription.
+    terminal.onResize(() => this.notify("resize"));
+  }
 
-  /// Calls `observer` after every write that goes through `write`, the
-  /// terminal's only write path, so a reader of the core that keeps state
-  /// across writes (find's search) learns that the screen changed without a
-  /// second hook on the PTY stream. Returns the call that stops it.
-  observeWrites(observer: () => void): () => void {
-    this.writeObservers.add(observer);
+  /// Calls `observer` after every change to what the terminal holds, so a
+  /// reader of the core that keeps state across changes (find's search)
+  /// learns of them without a hook of its own: each write through `write`,
+  /// the one path chan's writes to the terminal take (PTY output and the
+  /// lines chan prints itself), and each resize, heard from ghostty-web's
+  /// own resize event so that no caller can resize around it. A resize is
+  /// reported before ghostty-web repaints the new grid, so an observer can
+  /// take a mark off rows the reflow gave other text before they are drawn.
+  /// Returns the call that stops it.
+  observeChanges(observer: (change: GhosttyChange) => void): () => void {
+    this.changeObservers.add(observer);
     return () => {
-      this.writeObservers.delete(observer);
+      this.changeObservers.delete(observer);
     };
   }
 
@@ -74,7 +91,11 @@ export class GhosttyViewportController {
         Math.min(scrollbackAfter, viewportBefore + appendedLines),
       );
     }
-    for (const observer of this.writeObservers) observer();
+    this.notify("write");
+  }
+
+  private notify(change: GhosttyChange): void {
+    for (const observer of this.changeObservers) observer(change);
   }
 
   /// Bring absolute row `row` into view: 0 is the oldest history row and the

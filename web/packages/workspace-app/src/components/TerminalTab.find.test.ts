@@ -40,6 +40,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 import TerminalTab from "./TerminalTab.svelte";
+import terminalTabSource from "./TerminalTab.svelte?raw";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -157,6 +158,7 @@ type GhosttyStandIn = {
   viewportY: number;
   focused: number;
   selectionManager: { selectionStart: Anchor | null; selectionEnd: Anchor | null };
+  resize(cols: number, rows: number): void;
 };
 
 const ghostty = vi.hoisted(() => ({
@@ -166,9 +168,10 @@ const ghostty = vi.hoisted(() => ({
 
 // The ghostty kit over the vendored core, with a stand-in for ghostty-web's
 // Terminal that holds what TerminalTab and find reach: the binding's
-// terminal as its core, ghostty-web's own SelectionManager over it, and its
+// terminal as its core, ghostty-web's own SelectionManager over it, its
 // viewport offset (lines scrolled back from the bottom, clamped to the
-// history, back to the bottom after a write).
+// history, back to the bottom after a write), writeln as a write with CRLF,
+// and a resize that hands the core the new grid and fires the resize event.
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
   const { SelectionManager } = await import("ghostty-web");
@@ -208,8 +211,10 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     onData() {
       return { dispose() {} };
     }
-    onResize() {
-      return { dispose() {} };
+    resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
+    onResize(listener: (size: { cols: number; rows: number }) => void) {
+      this.resizeListeners.add(listener);
+      return { dispose: () => this.resizeListeners.delete(listener) };
     }
     hasMouseTracking() {
       return false;
@@ -227,9 +232,17 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.wasmTerm.write(data);
       this.viewportY = 0;
     }
-    writeln() {}
+    writeln(data: string) {
+      this.write(`${data}\r\n`);
+    }
     paste() {}
-    resize() {}
+    resize(cols: number, rows: number) {
+      if (cols === this.cols && rows === this.rows) return;
+      this.cols = cols;
+      this.rows = rows;
+      this.wasmTerm.resize(cols, rows);
+      for (const listener of this.resizeListeners) listener({ cols, rows });
+    }
     focus() {
       this.focused += 1;
     }
@@ -860,6 +873,58 @@ describe("terminal find on the ghostty backend", () => {
     await tick();
     expect(selection(term)).toBeNull();
     expect(countElement()?.textContent).toBe("");
+  });
+
+  test("a resize drops the highlight, keeps the total with no index, and Enter starts the walk over", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { input, frames } = await findNeedle(term);
+    pressEnter(input);
+    await tick();
+    expect(selection(term)).toEqual(match(3));
+    expect(countElement()?.textContent).toBe("2 of 3");
+
+    // ghostty-web's own resize, where the fit and a broadcast grid end.
+    term.resize(60, 24);
+    expect(selection(term), "gone before ghostty-web repaints").toBeNull();
+    frames.settle();
+    await tick();
+    expect(countElement()?.textContent).toBe("? of 3");
+
+    pressEnter(input);
+    await tick();
+    expect(selection(term)).toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
+  });
+
+  test("a line chan prints when the session ends counts in an open bar", async () => {
+    const term = await renderGhostty(`${NEEDLES}\r\na job ended`);
+    const frames = holdFrames();
+    await openFindWithQuery("ended");
+    frames.settle();
+    await tick();
+    const earlier = { start: { col: 6, absoluteRow: 6 }, end: { col: 10, absoluteRow: 6 } };
+    expect(selection(term)).toEqual(earlier);
+    expect(countElement()?.textContent).toBe("1 of 1");
+
+    await TestWebSocket.all[0]!.onmessage?.({ data: JSON.stringify({ type: "closed", reason: "idle" }) });
+    expect(term.wasmTerm.plainText()).toContain("session ended (idle)");
+    expect(frames.pending(), "find heard the line").toBe(1);
+    frames.settle();
+    await tick();
+    // The core keeps the selection on its text; the line's match is newer.
+    expect(countElement()?.textContent).toBe("2 of 2");
+    expect(selection(term)).toEqual(earlier);
+  });
+
+  test("every write the tab makes reaches a ghostty terminal through the viewport controller", () => {
+    // The controller tells find of each write, and a write around it leaves
+    // the count and the highlight behind. On ghostty the PTY writer handed
+    // to ptyWrites is the controller's write, chan's own lines take it in
+    // writeChanLine, and that helper's xterm arm is the one writeln.
+    const writes = [...terminalTabSource.matchAll(/\b(\w+)\??\.(write|writeln)\(/g)].map((m) => `${m[1]}.${m[2]}`);
+    expect(writes.sort()).toEqual(["ghosttyViewport.write", "ptyWrites.write", "term.writeln", "viewport.write"]);
+    const helper = terminalTabSource.slice(terminalTabSource.indexOf("function writeChanLine("));
+    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("else term?.writeln(line);");
   });
 
   test("the terminal's teardown frees the open bar's search", async () => {

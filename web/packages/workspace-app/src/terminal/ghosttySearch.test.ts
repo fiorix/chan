@@ -286,6 +286,52 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
+  test("a resize drops the selected match and scans again, to the same matches on their reflowed rows", async () => {
+    // Find relies on this: after a resize there is no active match to move a
+    // highlight to, and a select starts the walk over.
+    const t = await terminal(20, 6);
+    t.write(
+      [
+        "first needle a",
+        `${"x".repeat(10)} needle b ${"y".repeat(12)}`,
+        `${"z".repeat(17)}needle c`,
+        "needle d",
+      ].map((line) => `${line}\r\n`).join(""),
+    );
+    const s = t.createSearch();
+    s.setNeedle("needle");
+    scan(s);
+    s.selectNext();
+    s.selectNext();
+    expect(s.state()).toMatchObject({ total: 4, index: 1, active: range(3, 17, 4, 2) });
+    for (const [cols, rows] of [
+      [12, 6],
+      [12, 8],
+      [33, 6],
+    ] as const) {
+      t.resize(cols, rows);
+      s.feed();
+      expect(s.state(), `${cols}x${rows}, rows only or reflowing`).toMatchObject({ index: null, active: null, complete: false });
+      scan(s);
+      const fresh = t.createSearch();
+      fresh.setNeedle("needle");
+      scan(fresh);
+      expect(s.state()).toEqual({ total: 4, index: null, active: null, complete: true });
+      expect(s.matchesBetween(0, 100, 10)).toEqual(fresh.matchesBetween(0, 100, 10));
+      fresh.free();
+      // Selected again, so the next resize has a match to drop.
+      expect(s.selectNext()).toBe(true);
+      expect(s.state().index).toBe(0);
+    }
+    // A select toward newer output from no selection lands on the oldest.
+    t.resize(20, 6);
+    s.feed();
+    scan(s);
+    expect(s.selectPrev()).toBe(true);
+    expect(s.state()).toMatchObject({ index: 3, active: range(0, 6, 0, 11) });
+    s.free();
+  });
+
   test("an empty needle returns the search to idle", async () => {
     const t = await errorTerminal();
     const s = t.createSearch();

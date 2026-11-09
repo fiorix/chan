@@ -13,6 +13,13 @@
 //   OLDER  -- Enter steps to older matches, through 4999's other one and
 //             4998 to 4990 on the screen with the viewport still, then to
 //             4899 above it: the viewport moves and centres that row.
+//   RESIZE -- the page narrows, then widens back, and the terminal reflows
+//             to each width. libghostty-vt forgets the selected match on a
+//             resize and scans again, so each time the highlight goes (it
+//             would sit on rows the reflow gave other text), the count keeps
+//             its N with no index, and Enter starts over: the selection is
+//             the newest match again, its text the needle, and the count
+//             reads 1 of N.
 //   ESCAPE -- Escape closes the bar and clears the selection.
 //
 // The selection and the viewport are read from ghostty-web's own Terminal
@@ -76,6 +83,8 @@ export default {
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
     const flipped = original.ghostty !== true;
+    const pageViewport = page.viewport();
+    let resized = false;
     const readings = {};
     try {
       if (flipped) await writeTerminalPrefs(page, token, { ghostty: true });
@@ -114,9 +123,9 @@ export default {
         throw new Error(`no ghostty-web Terminal from ${chunk} holds this tab's terminal host`);
       }
 
-      /// The terminal as find leaves it: the selection's anchors and the
-      /// text of its start row, the viewport offset, the history length and
-      /// the screen's rows.
+      /// The terminal as find leaves it: the selection's anchors, its text
+      /// and the text of its start row, the viewport offset, the history
+      /// length and the grid.
       const state = () => term.evaluate((t) => {
         const m = t.selectionManager;
         const start = m?.selectionStart ?? null;
@@ -127,9 +136,11 @@ export default {
           end,
           startRowText: start ? rowText(start.absoluteRow) : null,
           hasSelection: t.hasSelection(),
+          selectedText: t.hasSelection() ? t.getSelection() : "",
           viewportY: t.getViewportY(),
           scrollback: t.getScrollbackLength(),
           rows: t.rows,
+          cols: t.cols,
         };
       });
       const onScreen = (s, absoluteRow) => absoluteRow - s.scrollback + Math.floor(s.viewportY);
@@ -233,6 +244,39 @@ export default {
       readings.revealed = revealed;
       await ctx.shot("ghostty-find-older-revealed");
 
+      // RESIZE
+      const size = pageViewport ?? { width: 1600, height: 1000 };
+      readings.resize = [];
+      for (const [stage, width] of [["narrower", size.width - 400], ["wider", size.width]]) {
+        const before = await state();
+        resized = true;
+        await page.setViewport({ ...size, width });
+        const until = Date.now() + 15_000;
+        let after = null;
+        for (;;) {
+          const count = await page.evaluate((q) => document.querySelector(q)?.textContent ?? null, countQuery);
+          after = { count, ...(await state()) };
+          if (after.cols !== before.cols && count === `? of ${nines.length}` && !after.hasSelection) break;
+          if (Date.now() > until) {
+            await ctx.shot(`ghostty-find-resize-${stage}-failure`);
+            throw new Error(`resize ${stage}: expected a reflowed grid, no highlight and the count ? of ${nines.length}; page showed ${JSON.stringify({ before, after })}`);
+          }
+          await sleep(50);
+        }
+        if (stage === "narrower" && !(after.cols < before.cols)) {
+          throw new Error(`resize ${stage}: the grid did not narrow: ${JSON.stringify({ before, after })}`);
+        }
+        await ctx.shot(`ghostty-find-resize-${stage}`);
+        await page.keyboard.press("Enter");
+        const again = await waitFor(`resize-${stage}-enter`, `1 of ${nines.length}`, nines[0].line);
+        expectMatch(`resize-${stage}-enter`, again, nines[0]);
+        if (again.selectedText !== "99") throw new Error(`resize ${stage}: the selected text is not the match: ${JSON.stringify(again)}`);
+        const at = onScreen(again, again.start.absoluteRow);
+        if (at < 0 || at >= again.rows) throw new Error(`resize ${stage}: the selected match is off the screen: ${JSON.stringify(again)}`);
+        readings.resize.push({ stage, colsBefore: before.cols, after, again });
+        await ctx.shot(`ghostty-find-resize-${stage}-enter`);
+      }
+
       // ESCAPE
       await page.keyboard.press("Escape");
       await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery);
@@ -245,6 +289,7 @@ export default {
       await ctx.shot("ghostty-find-closed");
       return readings;
     } finally {
+      if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
       if (flipped) await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
     }

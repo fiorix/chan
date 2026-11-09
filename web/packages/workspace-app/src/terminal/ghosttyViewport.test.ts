@@ -13,13 +13,26 @@ const DOM_DELTA_PAGE = 2;
 /// and scrollToLine clamp into [0, scrollback], and write() parses
 /// synchronously then forces scrollToBottom() whenever the viewport sits
 /// away from the bottom. The script `appendedByWrite` says how many
-/// scrollback lines each write adds (negative trims).
+/// scrollback lines each write adds (negative trims). resize() fires the
+/// resize event for a grid that changed, as ghostty-web's does.
 function fakeGhostty(viewportY: number, scrollback: number) {
   const state = { viewportY, scrollback };
   const clamp = (v: number) => Math.max(0, Math.min(state.scrollback, v));
+  const resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
   const term = {
     appendedByWrite: [] as number[],
+    cols: 80,
     rows: 24,
+    onResize: vi.fn((listener: (size: { cols: number; rows: number }) => void) => {
+      resizeListeners.add(listener);
+      return { dispose: () => resizeListeners.delete(listener) };
+    }),
+    resize(cols: number, rows: number) {
+      if (cols === term.cols && rows === term.rows) return;
+      term.cols = cols;
+      term.rows = rows;
+      for (const listener of resizeListeners) listener({ cols, rows });
+    },
     getViewportY: vi.fn(() => state.viewportY),
     getScrollbackLength: vi.fn(() => state.scrollback),
     scrollLines: vi.fn((amount: number) => {
@@ -152,12 +165,12 @@ describe("GhosttyViewportController writes", () => {
     expect(term.scrollLines).not.toHaveBeenCalled();
   });
 
-  test("write observers run after every write, the anchored restore included, until stopped", () => {
+  test("change observers hear every write, after the anchored restore, until stopped", () => {
     const { state, term } = fakeGhostty(7, 20);
     term.appendedByWrite.push(3, 0, 0);
     const controller = new GhosttyViewportController(term, context());
-    const seen: number[] = [];
-    const stop = controller.observeWrites(() => seen.push(state.viewportY));
+    const seen: Array<[string, number]> = [];
+    const stop = controller.observeChanges((change) => seen.push([change, state.viewportY]));
 
     controller.write("anchored");
     state.viewportY = 0;
@@ -167,7 +180,29 @@ describe("GhosttyViewportController writes", () => {
 
     // The anchored write is observed after its restore, not between the
     // write and the restore.
-    expect(seen).toEqual([10, 0]);
+    expect(seen).toEqual([
+      ["write", 10],
+      ["write", 0],
+    ]);
+  });
+
+  test("change observers hear every resize the terminal reports, whoever resized it", () => {
+    const { term } = fakeGhostty(0, 20);
+    const controller = new GhosttyViewportController(term, context());
+    const seen: string[] = [];
+    const stop = controller.observeChanges((change) => seen.push(change));
+
+    // Through ghostty-web's own resize, not a method of the controller: the
+    // fit, a broadcast grid and ghostty-web's option setter all end there.
+    term.resize(60, 24);
+    term.resize(60, 24);
+    term.resize(60, 30);
+    stop();
+    term.resize(80, 24);
+
+    // An unchanged grid fires no event.
+    expect(seen).toEqual(["resize", "resize"]);
+    expect(term.onResize).toHaveBeenCalledTimes(1);
   });
 });
 
