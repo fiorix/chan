@@ -40,7 +40,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [time-bound tests go red on a loaded host][timebound] | not started | design |
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | built | gateway run |
 | [no CI job runs the gateway packaging and roles suites][gwci] | built | owner |
-| [a shared devserver's root link refuses its grantees][grantroot] | built | CI run |
+| [a shared devserver's root link refuses its grantees][grantroot] | built | guest run |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 | [a running chan shows no live process metrics][metrics] | built | guest run |
 | [ghostty terminals run on a pre-1.0 core][ghostty1] | built | owner |
