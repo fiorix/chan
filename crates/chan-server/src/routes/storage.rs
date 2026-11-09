@@ -251,8 +251,11 @@ fn perform_reset_with(
     drop(cell);
     let drain_bound = RESET_DRAIN_DEADLINE;
     #[cfg(all(test, unix))]
-    let drain_bound =
-        super::metadata::test_wait_bound(&workspace_strong.paths().lock, drain_bound, |b| b.drain);
+    let drain_bound = super::metadata::test_wait_bound(
+        &workspace_strong.paths().lock,
+        super::metadata::RouteWait::Drain,
+        drain_bound,
+    );
     let deadline = Instant::now() + drain_bound;
     while Arc::strong_count(&workspace_strong) > 1 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
@@ -1190,27 +1193,26 @@ mod tests {
             RESET_DRAIN_DEADLINE
         };
         let lengthened = crate::routes::metadata::TestWaitBounds {
-            drain: PAST_ANY_LOAD,
-            owners: PAST_ANY_LOAD,
-            lock: PAST_ANY_LOAD,
-            reopen: PAST_ANY_LOAD,
+            drain: Some(PAST_ANY_LOAD),
+            owners: Some(PAST_ANY_LOAD),
+            lock: Some(PAST_ANY_LOAD),
+            reopen: Some(PAST_ANY_LOAD),
         };
-        // Only the wait the owner outlasts keeps the route's bound.
+        // Only the wait the owner outlasts runs at the bound the route
+        // passes for it.
         let bounds = match owner {
             LateOwner::LetsGoSoon | LateOwner::DropHeldUntilLockWait => lengthened,
             LateOwner::OutlastsTheRoute => crate::routes::metadata::TestWaitBounds {
-                owners: route_bound,
+                owners: None,
                 ..lengthened
             },
             LateOwner::DropHeldUntilReopenRefused => crate::routes::metadata::TestWaitBounds {
-                lock: route_bound,
+                lock: None,
                 ..lengthened
             },
         };
-        crate::routes::metadata::set_test_wait_bounds(
-            &started_with.upgrade().unwrap().paths().lock,
-            bounds,
-        );
+        let lock_dir = started_with.upgrade().unwrap().paths().lock.clone();
+        crate::routes::metadata::set_test_wait_bounds(&lock_dir, bounds);
         // The session close runs between the route's count and its drop.
         let (counted, at_the_close) = tokio::sync::oneshot::channel();
         let (go_on, gone_on) = std::sync::mpsc::channel();
@@ -1333,6 +1335,28 @@ mod tests {
             .map(|workspace| std::sync::Weak::ptr_eq(&started_with, &Arc::downgrade(&workspace)));
         drop(answered);
         holder.join().unwrap();
+        // The route's own bound stays under test for the waits this fixture
+        // lengthens: each wait it made was passed that bound.
+        let operation = if import { "import" } else { "reset" };
+        let passed = crate::routes::metadata::test_waits_passed(&lock_dir);
+        let waits: Vec<_> = passed.iter().map(|(wait, _)| *wait).collect();
+        let expected = {
+            use crate::routes::metadata::RouteWait::{Drain, Lock, Owners, Reopen};
+            match owner {
+                LateOwner::OutlastsTheRoute => vec![Drain, Owners, Lock],
+                _ => vec![Drain, Owners, Lock, Reopen],
+            }
+        };
+        assert_eq!(
+            waits, expected,
+            "the {operation} answered {status} after these waits for its workspace"
+        );
+        for (wait, bound) in passed {
+            assert_eq!(
+                bound, route_bound,
+                "the {operation} passed its {wait:?} wait {bound:?}, not its own bound"
+            );
+        }
         if let Some((timed_out, released_at)) = drop_gate_timed_out {
             assert!(
                 !timed_out.load(std::sync::atomic::Ordering::SeqCst),

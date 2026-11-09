@@ -285,7 +285,11 @@ fn perform_metadata_import_with(
 
     let drain_bound = IMPORT_DRAIN_DEADLINE;
     #[cfg(all(test, unix))]
-    let drain_bound = test_wait_bound(&workspace_strong.paths().lock, drain_bound, |b| b.drain);
+    let drain_bound = test_wait_bound(
+        &workspace_strong.paths().lock,
+        RouteWait::Drain,
+        drain_bound,
+    );
     let deadline = Instant::now() + drain_bound;
     while Arc::strong_count(&workspace_strong) > 1 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
@@ -335,50 +339,98 @@ fn perform_metadata_import_with(
 /// How often a route looks again for the workspace it let go.
 const RELEASE_POLL: Duration = Duration::from_millis(2);
 
-/// The bounds of a reset's or an import's four waits for one workspace, as
-/// a test sets them: the wait for in-flight clones to drain, for the
-/// workspace's last owner, for its writer lock, and for a reopen refused
-/// over that lock. A test that waits one of them out keeps it at the route's
-/// bound and lengthens the others past any host's cost, so its outcome
-/// reads which wait ran out, never how fast the host ran the others.
+/// One of a reset's or an import's four waits for the workspace it lets go.
 #[cfg(all(test, unix))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RouteWait {
+    /// For in-flight clones to drain.
+    Drain,
+    /// For the workspace's last owner.
+    Owners,
+    /// For its writer lock.
+    Lock,
+    /// For a reopen refused over that lock.
+    Reopen,
+}
+
+/// The bounds a test sets on a reset's or an import's four waits for one
+/// workspace; `None` keeps the bound the route passes. A test that waits
+/// one of them out keeps it and lengthens the others past any host's cost,
+/// so its outcome reads which wait ran out, never how fast the host ran
+/// the others.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct TestWaitBounds {
-    pub(super) drain: Duration,
-    pub(super) owners: Duration,
-    pub(super) lock: Duration,
-    pub(super) reopen: Duration,
+    pub(super) drain: Option<Duration>,
+    pub(super) owners: Option<Duration>,
+    pub(super) lock: Option<Duration>,
+    pub(super) reopen: Option<Duration>,
 }
 
 #[cfg(all(test, unix))]
-static TEST_WAIT_BOUNDS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestWaitBounds>>,
+impl TestWaitBounds {
+    fn of(&self, wait: RouteWait) -> Option<Duration> {
+        match wait {
+            RouteWait::Drain => self.drain,
+            RouteWait::Owners => self.owners,
+            RouteWait::Lock => self.lock,
+            RouteWait::Reopen => self.reopen,
+        }
+    }
+}
+
+/// A test's bounds for one workspace's waits, and the bound the route
+/// passed for each wait it made, in order. A lengthened wait no longer runs
+/// at the route's bound, so the record is what keeps that bound under test.
+#[cfg(all(test, unix))]
+struct TestWaits {
+    bounds: TestWaitBounds,
+    passed: Vec<(RouteWait, Duration)>,
+}
+
+#[cfg(all(test, unix))]
+static TEST_WAITS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestWaits>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Set the bounds of the waits a reset or an import makes for the workspace
 /// whose writer lock is `lock_dir`.
 #[cfg(all(test, unix))]
 pub(super) fn set_test_wait_bounds(lock_dir: &Path, bounds: TestWaitBounds) {
-    assert!(TEST_WAIT_BOUNDS
+    let waits = TestWaits {
+        bounds,
+        passed: Vec::new(),
+    };
+    assert!(TEST_WAITS
         .lock()
         .unwrap()
-        .insert(lock_dir.to_path_buf(), bounds)
+        .insert(lock_dir.to_path_buf(), waits)
         .is_none());
 }
 
-/// The bound a test set, with `pick`, for one wait over `lock_dir`, or the
-/// route's own `bound` when it set none.
+/// The bound `wait` over `lock_dir` runs at: the test's, or the route's own
+/// `bound` when the test set none or kept that one. Records `bound` when
+/// the test set bounds for `lock_dir`.
 #[cfg(all(test, unix))]
-pub(super) fn test_wait_bound(
-    lock_dir: &Path,
-    bound: Duration,
-    pick: impl FnOnce(&TestWaitBounds) -> Duration,
-) -> Duration {
-    TEST_WAIT_BOUNDS
+pub(super) fn test_wait_bound(lock_dir: &Path, wait: RouteWait, bound: Duration) -> Duration {
+    let mut waits = TEST_WAITS.lock().unwrap();
+    let Some(waits) = waits.get_mut(lock_dir) else {
+        return bound;
+    };
+    waits.passed.push((wait, bound));
+    waits.bounds.of(wait).unwrap_or(bound)
+}
+
+/// The bound the route passed for each wait it made over `lock_dir`, in
+/// the order it made them.
+#[cfg(all(test, unix))]
+pub(super) fn test_waits_passed(lock_dir: &Path) -> Vec<(RouteWait, Duration)> {
+    TEST_WAITS
         .lock()
         .unwrap()
         .get(lock_dir)
-        .map_or(bound, pick)
+        .map(|waits| waits.passed.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(all(test, unix))]
@@ -443,8 +495,8 @@ pub(super) fn held_past_release(
     let (owners_bound, lock_bound) = (bound, bound);
     #[cfg(all(test, unix))]
     let (owners_bound, lock_bound) = (
-        test_wait_bound(lock_dir, owners_bound, |b| b.owners),
-        test_wait_bound(lock_dir, lock_bound, |b| b.lock),
+        test_wait_bound(lock_dir, RouteWait::Owners, owners_bound),
+        test_wait_bound(lock_dir, RouteWait::Lock, lock_bound),
     );
     let owners_deadline = Instant::now() + owners_bound;
     while released.strong_count() > 0 {
@@ -532,7 +584,7 @@ pub(super) fn reopen_released(
     mut open: impl FnMut() -> chan_workspace::Result<Arc<Workspace>>,
 ) -> chan_workspace::Result<Reopened> {
     #[cfg(all(test, unix))]
-    let bound = test_wait_bound(lock_dir, bound, |b| b.reopen);
+    let bound = test_wait_bound(lock_dir, RouteWait::Reopen, bound);
     let deadline = Instant::now() + bound;
     let mut recovered_from = None;
     loop {
