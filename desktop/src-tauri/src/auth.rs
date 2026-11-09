@@ -1042,8 +1042,12 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             // bounds the wait.
             let mut redeemed = match redeem_inner(&identity_origin, &code, &code_verifier).await {
                 Ok(redeemed) => redeemed,
-                Err(error) => {
-                    fail_signin(&app, &state, &gateway, &error);
+                Err(RedeemError { message, minted }) => {
+                    if let Some(minted) = &minted {
+                        revoke_unkept(&gateway.id, &identity_origin, &minted.id, &minted.secret)
+                            .await;
+                    }
+                    fail_signin(&app, &state, &gateway, &message);
                     return;
                 }
             };
@@ -1059,7 +1063,7 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             let enrollment = match prepare_enrollment(&state, &gateway.id, enrolling, params) {
                 Ok(enrollment) => enrollment,
                 Err(error) => {
-                    revoke_unkept(&gateway.id, &identity_origin, &pat).await;
+                    revoke_unkept(&gateway.id, &identity_origin, &pat.id, &pat.secret).await;
                     fail_signin(&app, &state, &gateway, &error);
                     return;
                 }
@@ -1110,10 +1114,10 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                         gateway = %gateway.id,
                         "gateway sign-in cancelled; its credentials are not kept",
                     );
-                    revoke_unkept(&gateway.id, &identity_origin, &pat).await;
+                    revoke_unkept(&gateway.id, &identity_origin, &pat.id, &pat.secret).await;
                 }
                 Err(error) => {
-                    revoke_unkept(&gateway.id, &identity_origin, &pat).await;
+                    revoke_unkept(&gateway.id, &identity_origin, &pat.id, &pat.secret).await;
                     fail_signin(&app, &state, &gateway, &error);
                 }
             }
@@ -1363,24 +1367,61 @@ async fn revoke_inner(identity_origin: &str, secret: &str) -> Result<Revoked, St
 /// already failed or been cancelled, so the revoke's own outcome is only
 /// logged, by the token's id and never its secret, at the level a failed
 /// gateway connect logs.
-async fn revoke_unkept(gateway_id: &str, identity_origin: &str, pat: &StoredPat) {
-    match revoke_inner(identity_origin, &pat.secret).await {
+async fn revoke_unkept(gateway_id: &str, identity_origin: &str, token_id: &str, secret: &str) {
+    match revoke_inner(identity_origin, secret).await {
         Ok(Revoked::Now) => {
-            tracing::info!(gateway = %gateway_id, token = %pat.id, "gateway sign-in token revoked");
+            tracing::info!(gateway = %gateway_id, token = %token_id, "gateway sign-in token revoked");
         }
         Ok(Revoked::AlreadyGone) => {
             tracing::info!(
                 gateway = %gateway_id,
-                token = %pat.id,
+                token = %token_id,
                 "gateway sign-in token had nothing left to revoke",
             );
         }
         Err(error) => tracing::warn!(
             gateway = %gateway_id,
-            token = %pat.id,
+            token = %token_id,
             %error,
             "revoking a gateway sign-in token the desktop does not keep failed; the token lives until it expires",
         ),
+    }
+}
+
+/// The token a redeem answer names, decoded before the rest of the answer:
+/// identity minted it once it answered, so it can be revoked even when
+/// nothing else in the answer can be used.
+#[derive(Deserialize)]
+struct MintedToken {
+    id: String,
+    secret: String,
+}
+
+impl std::fmt::Debug for MintedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedToken")
+            .field("id", &self.id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Why a redeem gave the sign-in no answer it can use.
+#[derive(Debug)]
+struct RedeemError {
+    message: String,
+    /// The token an answer named when the rest of it did not decode. The
+    /// sign-in keeps nothing of that answer, so it revokes the token before
+    /// it fails.
+    minted: Option<MintedToken>,
+}
+
+impl From<String> for RedeemError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            minted: None,
+        }
     }
 }
 
@@ -1438,7 +1479,7 @@ async fn redeem_inner(
     identity_origin: &str,
     code: &str,
     code_verifier: &str,
-) -> Result<RedeemedPat, String> {
+) -> Result<RedeemedPat, RedeemError> {
     let url = format!(
         "{}/desktop/authorize/redeem",
         identity_origin.trim_end_matches('/')
@@ -1457,17 +1498,32 @@ async fn redeem_inner(
     let status = resp.status();
     if status == reqwest::StatusCode::GONE {
         return Err(
-            "the sign-in link expired or was already used; try signing in again".to_string(),
+            "the sign-in link expired or was already used; try signing in again"
+                .to_string()
+                .into(),
         );
     }
     if !status.is_success() {
-        return Err(format!(
-            "redeeming sign-in code: the gateway answered HTTP {status}"
-        ));
+        return Err(format!("redeeming sign-in code: the gateway answered HTTP {status}").into());
     }
-    resp.json::<RedeemedPat>()
+    let body = resp
+        .bytes()
         .await
-        .map_err(|e| format!("decoding redeemed token: {e}"))
+        .map_err(|e| format!("reading redeemed token: {e}"))?;
+    decode_redeemed(&body)
+}
+
+/// Decode a redeem answer in two steps, the token it names first and then
+/// the whole answer, so an answer whose token decodes and whose rest does
+/// not (a keepalive out of range, a field of the wrong type) still hands
+/// back the token identity minted, for the sign-in to revoke.
+fn decode_redeemed(body: &[u8]) -> Result<RedeemedPat, RedeemError> {
+    let minted: MintedToken =
+        serde_json::from_slice(body).map_err(|e| format!("decoding redeemed token: {e}"))?;
+    serde_json::from_slice(body).map_err(|e| RedeemError {
+        message: format!("decoding redeemed token: {e}"),
+        minted: Some(minted),
+    })
 }
 
 /// Map an identity-origin `error=` reason token to the banner string. The
@@ -2488,7 +2544,11 @@ pub(crate) mod tests {
         let err = redeem_inner(&origin, "stale", "v")
             .await
             .expect_err("410 is an error");
-        assert!(err.contains("expired or was already used"), "{err}");
+        assert!(
+            err.message.contains("expired or was already used"),
+            "{err:?}"
+        );
+        assert!(err.minted.is_none(), "no token was minted");
     }
 
     #[tokio::test]
@@ -2497,7 +2557,37 @@ pub(crate) mod tests {
         let err = redeem_inner(&origin, "c1", "v")
             .await
             .expect_err("500 is an error");
-        assert!(err.contains("HTTP 500"), "{err}");
+        assert!(err.message.contains("HTTP 500"), "{err:?}");
+        assert!(err.minted.is_none(), "no token was minted");
+    }
+
+    #[test]
+    fn decode_redeemed_hands_back_a_token_whose_answer_does_not_decode() {
+        let overflow = br#"{"id":"t-1","secret":"chan_pat_x","label":"mbp","expires_at":null,
+            "wireguard":{"server_public_key":"k","endpoint":"e","addresses":[],
+            "allowed_ips":[],"persistent_keepalive":70000}}"#;
+        let err = decode_redeemed(overflow).expect_err("a keepalive above 65535");
+        let minted = err.minted.as_ref().expect("the token decodes on its own");
+        assert_eq!(
+            (minted.id.as_str(), minted.secret.as_str()),
+            ("t-1", "chan_pat_x")
+        );
+        assert!(
+            err.message.starts_with("decoding redeemed token"),
+            "{err:?}"
+        );
+        assert!(
+            !format!("{} {err:?}", err.message).contains("chan_pat_x"),
+            "neither the message nor the debug form carries the token"
+        );
+        // An answer naming no token leaves nothing to revoke.
+        for body in [
+            br#"{"id":"t-1","label":"mbp"}"#.as_slice(),
+            b"<!doctype html>".as_slice(),
+        ] {
+            let err = decode_redeemed(body).expect_err("no token");
+            assert!(err.minted.is_none(), "{err:?}");
+        }
     }
 
     /// An identity answering every request with `status` and `body`, which

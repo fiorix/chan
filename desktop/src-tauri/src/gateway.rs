@@ -3336,6 +3336,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn answer_that_does_not_decode_past_its_token_revokes_it() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        // A keepalive no WireGuard field can hold: the answer names its token
+        // and nothing else in it can be used.
+        let mut params = redeem_params(WG_SERVER_KEY);
+        params["persistent_keepalive"] = serde_json::json!(70000);
+        let run = enrolling_fixture(redeem_answer(Some(params)), |_| {}).await;
+        let before = run.row();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(|_, _| {
+            Err("an answer that does not decode reaches no store".into())
+        }));
+        let revoked_first = auth_error_after_revoke(&run);
+
+        tokio::time::timeout(Duration::from_secs(10), run.callback(true))
+            .await
+            .expect("the callback settles");
+
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert!(
+            view.last_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("decoding redeemed token")),
+            "the sign-in fails on the answer: {view:?}"
+        );
+        assert!(!run.stored_pat(), "no token is stored");
+        assert_eq!(run.row(), before, "the row is unchanged");
+        assert!(!run.conf().exists());
+        assert_eq!(run.fabric.tunnels(), 0);
+        assert_eq!(
+            run.requests(),
+            [
+                "POST /desktop/authorize/redeem",
+                "DELETE /desktop/v1/token pat-wg"
+            ],
+            "one revoke, presenting the token the answer named"
+        );
+        assert_eq!(
+            revoked_first.try_recv().ok(),
+            Some(true),
+            "the token is revoked before the sign-in fails"
+        );
+        assert_revoke_logged(&lines);
+        run.finish().await;
+    }
+
+    #[tokio::test]
     async fn cancel_during_the_commit_lets_it_finish_then_undoes_it_and_revokes() {
         let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
         let lines = crate::devserver::log_capture::Lines::default();
