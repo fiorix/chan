@@ -20,7 +20,7 @@ import type { Ghostty, GhosttyCell, GhosttyTerminal, KeyEncoder } from "ghostty-
 
 /// Enum values of the pinned build, by upstream C type.
 export const ABI = {
-  GhosttyResult: { SUCCESS: 0, OUT_OF_SPACE: -3 },
+  GhosttyResult: { SUCCESS: 0, OUT_OF_SPACE: -3, NO_VALUE: -4 },
   GhosttyTerminalOption: {
     WRITE_PTY: 2,
     DEVICE_ATTRIBUTES: 9,
@@ -42,7 +42,7 @@ export const ABI = {
     MODE: 37,
   },
   GhosttyTerminalScreen: { ALTERNATE: 1 },
-  GhosttyPointTag: { ACTIVE: 0, HISTORY: 3 },
+  GhosttyPointTag: { ACTIVE: 0, VIEWPORT: 1, SCREEN: 2, HISTORY: 3 },
   GhosttyRenderStateData: { DIRTY: 3, ROW_ITERATOR: 4, CURSOR_VISIBLE: 11, COLORS: 19 },
   GhosttyRenderStateDirty: { FALSE: 0, PARTIAL: 1, FULL: 2 },
   GhosttyRenderStateRowData: { DIRTY: 1, CELLS: 3 },
@@ -66,6 +66,19 @@ export const ABI = {
     KITTY_FLAGS: 6,
   },
   GhosttyBuildInfo: { VERSION_MAJOR: 6, FEATURE_SEARCH: 14 },
+  GhosttySearchOption: { NEEDLE: 1, SELECT_SCROLL: 4 },
+  GhosttySearchData: {
+    STATUS: 1,
+    NEEDLE: 2,
+    TOTAL_MATCHES: 3,
+    SELECTED_INDEX: 4,
+    SELECTED_MATCH: 5,
+    MATCHES: 6,
+    VIEWPORT_MATCHES: 7,
+    SELECT_SCROLL: 8,
+  },
+  GhosttySearchStatus: { RUNNING: 0, FEED_REQUIRED: 1, COMPLETE: 2 },
+  GhosttySearchScroll: { IF_NEEDED: 0, NONE: 1 },
 } as const;
 
 /// Struct sizes and field offsets of the pinned build, by upstream C type.
@@ -94,6 +107,7 @@ export const LAYOUT = {
   },
   GhosttySelection: { size: 20, fields: { start: 0, end: 8, rectangle: 16 } },
   GhosttyString: { size: 8, fields: { ptr: 0, len: 4 } },
+  GhosttySelectionBuffer: { size: 12, fields: { ptr: 0, cap: 4, len: 8 } },
   GhosttyCodepointBuffer: { size: 12, fields: { ptr: 0, cap: 4, len: 8 } },
 } as const;
 
@@ -227,6 +241,7 @@ const FUNCTIONS = [
   "ghostty_terminal_resize",
   "ghostty_terminal_vt_write",
   "ghostty_terminal_grid_ref",
+  "ghostty_terminal_point_from_grid_ref",
   "ghostty_grid_ref_cell",
   "ghostty_grid_ref_row",
   "ghostty_grid_ref_style",
@@ -261,6 +276,15 @@ const FUNCTIONS = [
   "ghostty_key_event_set_mods",
   "ghostty_key_event_set_utf8",
   "ghostty_build_info",
+  "ghostty_search_new",
+  "ghostty_search_free",
+  "ghostty_search_tick",
+  "ghostty_search_feed",
+  "ghostty_search_run",
+  "ghostty_search_set",
+  "ghostty_search_get",
+  "ghostty_search_select_next",
+  "ghostty_search_select_prev",
 ] as const;
 
 type Fns = Record<(typeof FUNCTIONS)[number], Fn> & {
@@ -595,6 +619,9 @@ export class VtTerminal {
   private rowDirty = new Uint8Array(0);
   /// Writes or a resize since the render state was last read.
   private stale = true;
+  /// Writes and resizes taken so far. A search compares it with the count
+  /// at its last feed to tell whether the matches it holds are current.
+  private changes = 0;
   private forceFull = true;
   private lastScreenAlternate = false;
   private fg: Rgb = { r: 204, g: 204, b: 204 };
@@ -646,6 +673,7 @@ export class VtTerminal {
     }
     this.wasm.bytes().set(bytes, this.writeBuf);
     this.stale = true;
+    this.changes++;
     this.wasm.fn.ghostty_terminal_vt_write(this.handle, this.writeBuf, bytes.length);
   }
 
@@ -653,6 +681,7 @@ export class VtTerminal {
     if (cols === this._cols && rows === this._rows) return;
     this._cols = cols;
     this._rows = rows;
+    this.changes++;
     const cell = this.owner.host?.cellSize();
     this.wasm.fn.ghostty_terminal_resize(
       this.handle, cols, rows,
@@ -928,6 +957,15 @@ export class VtTerminal {
   getScrollbackGraphemeString(offset: number, col: number): string {
     if (!this.gridRef(ABI.GhosttyPointTag.HISTORY, col, offset)) return " ";
     return this.gridGraphemes() ?? " ";
+  }
+
+  // ------------------------------------------------------------------
+  // Search
+  // ------------------------------------------------------------------
+
+  /// A search of this terminal on the core's engine; see `VtSearch`.
+  createSearch(): VtSearch {
+    return new VtSearch(this.wasm, { handle: () => this.handle, changes: () => this.changes });
   }
 
   // ------------------------------------------------------------------
@@ -1306,6 +1344,285 @@ export class VtTerminal {
       }
     }
     return null;
+  }
+}
+
+/// A match of a `VtSearch` as rows and columns, both ends included. Rows
+/// are SCREEN rows: 0 is the oldest history row and the active rows follow,
+/// the numbering of ghostty-web's `absoluteRow` and of `TextRange`; the
+/// alternate screen has no history, so there they are its rows. A range is
+/// a reading of one moment: a write, a resize or a reset moves rows, and
+/// the search reads the current rows again after its next feed.
+export type MatchRange = { startRow: number; startCol: number; endRow: number; endCol: number };
+
+/// What a find bar shows of a search. `index` counts from the newest match,
+/// 0 the newest, the order of `VtSearch.matchesBetween`, so the bar reads
+/// `index + 1` of `total`; it and `active` are null while nothing is
+/// selected. `complete` means the scan has caught up with the terminal as
+/// of the last feed, which a later write undoes until the next one.
+export type SearchState = { total: number; index: number | null; active: MatchRange | null; complete: boolean };
+
+/// Byte offsets of the scratch area each search keeps for out parameters.
+const SEARCH_SCRATCH = {
+  slot: 0, // u32: a status, a count or an index
+  scroll: 4, // GhosttySearchScroll
+  coord: 8, // GhosttyPointCoordinate (8 bytes)
+  selection: 16, // GhosttySelection (20 bytes)
+  buffer: 36, // GhosttySelectionBuffer (12 bytes)
+  size: 48,
+} as const;
+
+/// What a search reads of its terminal: the core's handle, 0 once the
+/// terminal was freed, and the count of writes and resizes it has taken.
+type SearchTerminal = { handle(): number; changes(): number };
+
+/// A search of a `VtTerminal` for a string on the core's own engine, over
+/// the rows and the history of the screen the program shows. The scan is
+/// incremental (`step`), learns of writes through `feed`, and lists matches
+/// newest first for a "k of n" count. Create one with
+/// `VtTerminal.createSearch()` and `free` it when the find bar closes; the
+/// terminal may be freed first, after which the search reports nothing.
+export class VtSearch {
+  private readonly wasm: VtWasm;
+  private readonly terminal: SearchTerminal;
+  private handle: number;
+  private readonly scratch: number;
+  /// The terminal's change count at the last feed. A match the core hands
+  /// out is a snapshot into the terminal's pages as of that feed, which a
+  /// later write may have moved or pruned, so a read after a change feeds
+  /// first rather than resolve a stale snapshot.
+  private fed: number;
+
+  constructor(wasm: VtWasm, terminal: SearchTerminal) {
+    this.wasm = wasm;
+    this.terminal = terminal;
+    this.scratch = wasm.alloc(SEARCH_SCRATCH.size);
+    this.handle = wasm.newHandle((slot) => wasm.fn.ghostty_search_new(0, slot, terminal.handle()), "search");
+    this.fed = terminal.changes();
+    // ghostty-web scrolls in JS and upstream's viewport never moves, so the
+    // render state this binding reads is the active screen (see
+    // `VtTerminal`). The core's default policy, IF_NEEDED, scrolls that
+    // viewport to a selected match in history, and the render state then
+    // shows history rows as the active screen, where every later write
+    // lands too. The find bar scrolls ghostty-web to the match instead.
+    const scroll = this.scratch + SEARCH_SCRATCH.scroll;
+    wasm.view().setInt32(scroll, ABI.GhosttySearchScroll.NONE, true);
+    const result = wasm.fn.ghostty_search_set(this.handle, ABI.GhosttySearchOption.SELECT_SCROLL, scroll);
+    if (result !== ABI.GhosttyResult.SUCCESS) {
+      this.free();
+      throw new Error(`ghostty-vt: setting the search's scroll policy failed (${result})`);
+    }
+  }
+
+  /// Sets the text to look for. A new needle drops the results and leaves
+  /// the search waiting for a feed, so `step` scans again from scratch; the
+  /// same needle again keeps them, so a find bar can resubmit freely. The
+  /// core compares bytes, with ASCII letters case-insensitively and nothing
+  /// else folded: `error` matches `ERROR`, `élan` does not match `Élan`.
+  /// An empty needle returns the search to idle: no matches, no selection,
+  /// complete.
+  setNeedle(needle: string): void {
+    if (!this.live()) return;
+    const S = LAYOUT.GhosttyString;
+    const bytes = new TextEncoder().encode(needle);
+    // One block: the `GhosttyString` header, then the bytes it points at,
+    // which the core copies. A null string clears the needle.
+    const len = bytes.length ? S.size + bytes.length : 0;
+    const str = len ? this.wasm.alloc(len) : 0;
+    try {
+      if (str) {
+        this.wasm.bytes().set(bytes, str + S.size);
+        const view = this.wasm.view();
+        view.setUint32(str + S.fields.ptr, str + S.size, true);
+        view.setUint32(str + S.fields.len, bytes.length, true);
+      }
+      this.check("setting the needle", this.wasm.fn.ghostty_search_set(this.handle, ABI.GhosttySearchOption.NEEDLE, str));
+    } finally {
+      this.wasm.free(str, len);
+    }
+  }
+
+  /// Works toward a complete scan for about `budgetMs` milliseconds: a feed
+  /// when the search needs the terminal, a tick while it has copied data
+  /// to scan, at least one of either, until the scan is complete or the
+  /// budget is spent. "running" asks for another call. "complete" means
+  /// caught up with the terminal as of the last feed; a later write needs
+  /// another feed.
+  step(budgetMs: number): "running" | "complete" {
+    if (!this.live()) return "complete";
+    const S = ABI.GhosttySearchStatus;
+    const deadline = performance.now() + budgetMs;
+    let status = this.status();
+    while (status !== S.COMPLETE) {
+      if (status === S.FEED_REQUIRED) this.feed();
+      else this.check("scanning", this.wasm.fn.ghostty_search_tick(this.handle, 0));
+      status = this.status();
+      if (performance.now() >= deadline) break;
+    }
+    return status === S.COMPLETE ? "complete" : "running";
+  }
+
+  /// Reads the terminal's changes since the last feed into the search: new
+  /// output, pruned history, a switch of screens. The only way the search
+  /// learns of a write. Bounded work, which can leave the search running;
+  /// `step` finishes it.
+  feed(): void {
+    if (!this.live()) return;
+    this.fed = this.terminal.changes();
+    this.check("feeding", this.wasm.fn.ghostty_search_feed(this.handle));
+  }
+
+  /// Selects the next match toward older output: the newest match first,
+  /// then up through the history, wrapping from the oldest to the newest.
+  /// Feeds the terminal's changes first and selects among the matches found
+  /// so far: right after a needle change those are the newest ones, and the
+  /// selection stays on its match while `step` completes the scan. False
+  /// when there is no match.
+  selectNext(): boolean {
+    return this.select(true);
+  }
+
+  /// Selects the next match toward newer output, wrapping from the newest
+  /// to the oldest; otherwise as `selectNext`.
+  selectPrev(): boolean {
+    return this.select(false);
+  }
+
+  /// The count, the selected match and whether the scan is complete. When
+  /// the terminal changed since the last feed this feeds first, so the
+  /// range is never read from a snapshot the change invalidated. After the
+  /// terminal was freed: no matches, nothing selected, complete.
+  state(): SearchState {
+    if (!this.live()) return { total: 0, index: null, active: null, complete: true };
+    this.catchUp();
+    const D = ABI.GhosttySearchData;
+    const selection = this.scratch + SEARCH_SCRATCH.selection;
+    const selected = this.wasm.fn.ghostty_search_get(this.handle, D.SELECTED_MATCH, selection) === ABI.GhosttyResult.SUCCESS;
+    return {
+      total: this.count(D.TOTAL_MATCHES) ?? 0,
+      index: this.count(D.SELECTED_INDEX),
+      active: selected ? this.range(selection) : null,
+      complete: this.status() === ABI.GhosttySearchStatus.COMPLETE,
+    };
+  }
+
+  /// The matches whose rows touch `firstRow` to `lastRow`, newest first, at
+  /// most `cap` of them. Feeds first when the terminal changed, as `state`
+  /// does. The core lists every match of the screen newest first; this
+  /// places each one until the rows fall above the window, so a window high
+  /// in a long history costs a placement per match below it.
+  matchesBetween(firstRow: number, lastRow: number, cap: number): MatchRange[] {
+    const found: MatchRange[] = [];
+    if (cap <= 0 || !this.live()) return found;
+    this.catchUp();
+    const S = LAYOUT.GhosttySelection;
+    const B = LAYOUT.GhosttySelectionBuffer.fields;
+    const buf = this.scratch + SEARCH_SCRATCH.buffer;
+    const list = (ptr: number, capacity: number): number => {
+      const view = this.wasm.view();
+      view.setUint32(buf + B.ptr, ptr, true);
+      view.setUint32(buf + B.cap, capacity, true);
+      view.setUint32(buf + B.len, 0, true);
+      return this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf);
+    };
+    // A null buffer asks how many there are; none is a success.
+    const asked = list(0, 0);
+    if (asked === ABI.GhosttyResult.SUCCESS) return found;
+    if (asked !== ABI.GhosttyResult.OUT_OF_SPACE) this.check("counting the matches", asked);
+    const count = this.wasm.view().getUint32(buf + B.len, true);
+    const arr = this.wasm.alloc(count * S.size);
+    try {
+      this.check("listing the matches", list(arr, count));
+      const len = this.wasm.view().getUint32(buf + B.len, true);
+      for (let i = 0; i < len && found.length < cap; i++) {
+        const sel = arr + i * S.size;
+        const start = this.screenPoint(sel + S.fields.start);
+        // Newer than the window: the match starts below it.
+        if (!start || start.y > lastRow) continue;
+        const end = this.screenPoint(sel + S.fields.end);
+        if (!end) continue;
+        // Older than the window, and every match after it is older still.
+        if (end.y < firstRow) break;
+        found.push({ startRow: start.y, startCol: start.x, endRow: end.y, endCol: end.x });
+      }
+    } finally {
+      this.wasm.free(arr, count * S.size);
+    }
+    return found;
+  }
+
+  /// Releases the search. Safe after the terminal was freed, and again
+  /// after itself.
+  free(): void {
+    if (!this.handle) return;
+    this.wasm.fn.ghostty_search_free(this.handle);
+    this.wasm.free(this.scratch, SEARCH_SCRATCH.size);
+    this.handle = 0;
+  }
+
+  /// Whether the search and its terminal are both still allocated. The
+  /// core detaches a search when its terminal is freed: every call that
+  /// reads the terminal then fails, and the match snapshots the search still
+  /// holds point into freed pages.
+  private live(): boolean {
+    return this.handle !== 0 && this.terminal.handle() !== 0;
+  }
+
+  private check(what: string, result: number): void {
+    if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`ghostty-vt: ${what} of a search failed (${result})`);
+  }
+
+  /// Feeds when the terminal changed since the last feed.
+  private catchUp(): void {
+    if (this.fed !== this.terminal.changes()) this.feed();
+  }
+
+  private status(): number {
+    const out = this.scratch + SEARCH_SCRATCH.slot;
+    this.check("reading the status", this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.STATUS, out));
+    return this.wasm.view().getUint32(out, true);
+  }
+
+  /// A `size_t` field of the search, null when it has no value.
+  private count(data: number): number | null {
+    const out = this.scratch + SEARCH_SCRATCH.slot;
+    const result = this.wasm.fn.ghostty_search_get(this.handle, data, out);
+    if (result === ABI.GhosttyResult.NO_VALUE) return null;
+    this.check("reading a count", result);
+    return this.wasm.view().getUint32(out, true);
+  }
+
+  private select(older: boolean): boolean {
+    if (!this.live()) return false;
+    // The core brings the search up to date with the terminal first.
+    this.fed = this.terminal.changes();
+    const fn = this.wasm.fn;
+    const result = older ? fn.ghostty_search_select_next(this.handle) : fn.ghostty_search_select_prev(this.handle);
+    if (result === ABI.GhosttyResult.NO_VALUE) return false;
+    this.check("selecting a match", result);
+    return true;
+  }
+
+  /// The SCREEN rows and columns of the `GhosttySelection` at `sel`, null
+  /// when the core cannot place an end on the screen.
+  private range(sel: number): MatchRange | null {
+    const F = LAYOUT.GhosttySelection.fields;
+    const start = this.screenPoint(sel + F.start);
+    const end = start && this.screenPoint(sel + F.end);
+    return start && end ? { startRow: start.y, startCol: start.x, endRow: end.y, endCol: end.x } : null;
+  }
+
+  /// The SCREEN coordinate of the cell the grid reference at `ref` names,
+  /// null when the core cannot place it there.
+  private screenPoint(ref: number): { x: number; y: number } | null {
+    const out = this.scratch + SEARCH_SCRATCH.coord;
+    const result = this.wasm.fn.ghostty_terminal_point_from_grid_ref(
+      this.terminal.handle(), ref, ABI.GhosttyPointTag.SCREEN, out,
+    );
+    if (result !== ABI.GhosttyResult.SUCCESS) return null;
+    const view = this.wasm.view();
+    const C = LAYOUT.GhosttyPointCoordinate.fields;
+    return { x: view.getUint16(out + C.x, true), y: view.getUint32(out + C.y, true) };
   }
 }
 
