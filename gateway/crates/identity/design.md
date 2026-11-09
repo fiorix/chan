@@ -110,7 +110,6 @@ sequenceDiagram
     else signed-in caller
         ID->>Profile: find_user_by_username owner
         Profile-->>ID: owner user record or 404
-        Note over ID: /s/{owner} requires caller == owner first
         ID->>Profile: get_user caller
         Profile-->>ID: caller user or missing
         alt caller missing or blocked
@@ -133,7 +132,7 @@ sequenceDiagram
 *Share-landing handoff: resolve the owner and a live devserver, run the profile access check, mint the credential, and let devserver-proxy exchange it for its own host-only cookies.*
 
 1. Validate the path and sanitize the optional `?d=` devserver selector. Without a session, stash the share URL and send the caller to sign-in; the callback consumes the stash and lands the user back here.
-2. Resolve the owner handle through profile. `/s/{owner}` is owner-only: the caller must be the owner, otherwise the answer is the same not-found as an unknown handle, so ownership is not revealed. The per-workspace landing admits an owner or a grantee. A missing or blocked caller gets the same not-found.
+2. Resolve the owner handle through profile; an unknown handle gets the same not-found response as a caller without access, so the response alone does not tell a handle that does not exist from a devserver the caller may not enter. Both landings admit the same callers, the owner and every accepted grantee, through the access check in step 4: a grant is the whole devserver, so the root `/s/{owner}` differs from `/s/{owner}/{workspace}` only in the path it signs. A missing or blocked caller gets the same not-found.
 3. Resolve the owner's live devservers from devserver-control by immutable owner id, never by username. Pick the `?d=` match, the single live one, or the first the caller can access; an ambiguous selector is refused. Every controller row must carry a lease that verifies under the admission ring and the owning node's base URL.
 4. Ask profile `devserver_access(owner, devserver, caller)`. The owner or an accepted grantee passes; anything else is the uniform not-found. A grant is whole-devserver, so the `{workspace}` segment never enters the check.
 5. Sign the credential. Its subject is the caller, not the owner, so the opaque session minted on the next leg carries the right identity for upstream attribution. Its audience is the exact tenant origin `{owner}--{disc}.<node base>`, built from the controller row's node base after checking that the base sits exactly one DNS label below the configured proxy apex with the same scheme and port; a row that fails that check is an upstream error, never a fallback to the shared apex. Its `client` claim names the route that minted it, `browser` or `desktop`; the proxy keeps it on the session and signs it into every gateway assertion, and chan-server opens the reverse-tunnel legs only to the owner on a `desktop` session. Every mint states its client in code, so a new mint cannot omit it.

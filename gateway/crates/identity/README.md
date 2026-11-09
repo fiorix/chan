@@ -167,7 +167,9 @@ Share landings (no auth at the door; sign-in then mint):
 | Method | Path                     | Purpose                            |
 |--------|--------------------------|------------------------------------|
 | GET    | `/s/{owner}/{workspace}` | per-tenant share link              |
-| GET    | `/s/{owner}`             | whole-devserver open (owner-only)  |
+| GET    | `/s/{owner}`             | whole-devserver share link         |
+
+Both admit the devserver's owner and every accepted grantee, and answer any other caller with the not-found an unknown handle gets.
 
 Desktop authorize (PAT mint for chan-desktop):
 
