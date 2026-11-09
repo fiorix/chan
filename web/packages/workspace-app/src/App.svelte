@@ -1632,9 +1632,10 @@
         lockNow();
         return;
       // Open Dashboard in the active pane. Same command from the command
-      // launcher, pane hamburger Apps row, and carousel slide-1 button.
+      // launcher, pane hamburger Apps row, and carousel slide-1 button. A
+      // pane showing a tmux pane draws no tab strip and refuses it.
       case "app.dashboard.open":
-        openDashboardInActivePane();
+        if (!openDashboardInActivePane()) setTransientStatus("no dashboard in a tmux pane");
         return;
       // Obsidian-style Mod+E "Show Source Code" toggle. Flips the active
       // file tab's mode between source and rendered surface. No-op when

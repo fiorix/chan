@@ -197,7 +197,6 @@ pub(super) enum Command {
     /// chan-workspace's gates instead of touching the workspace directly.
     /// Not for end-user invocation.
     #[command(name = "__mcp", hide = true)]
-    #[command(alias = "m")]
     Mcp {
         /// Workspace root to expose. Must already be registered.
         path: PathBuf,
@@ -1415,6 +1414,7 @@ mod tests {
         // Pin the original names independently of the live tree so a new
         // command or alias cannot silently steal an existing abbreviation.
         let names = [
+            "metrics",
             "serve",
             "close",
             "ps",
@@ -1456,6 +1456,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hidden_internal_commands_take_no_short_spelling() {
+        // chan spawns its internal commands by their full `__` names. An
+        // alias or a letter prefix that reached one would start an internal
+        // server from a typo, so each takes no alias and is reachable only
+        // through a spelling that starts with `__`.
+        let hidden: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|sub| sub.is_hide_set())
+            .map(|sub| {
+                assert!(sub.get_name().starts_with("__"), "{}", sub.get_name());
+                assert_eq!(
+                    sub.get_all_aliases().collect::<Vec<_>>(),
+                    Vec::<&str>::new(),
+                    "{} has an alias",
+                    sub.get_name()
+                );
+                sub.get_name().to_string()
+            })
+            .collect();
+        assert!(hidden.iter().any(|name| name == "__mcp"));
+        let letters = 'a'..='z';
+        let spellings = letters.clone().map(String::from).chain(
+            letters
+                .clone()
+                .flat_map(|a| letters.clone().map(move |b| format!("{a}{b}"))),
+        );
+        for spelling in spellings {
+            let matches = Cli::command()
+                .ignore_errors(true)
+                .try_get_matches_from(["chan", spelling.as_str()]);
+            if let Some(name) = matches
+                .ok()
+                .and_then(|m| m.subcommand_name().map(str::to_owned))
+            {
+                assert!(!hidden.contains(&name), "`chan {spelling}` reaches {name}");
+            }
+        }
+        let cli = Cli::try_parse_from(["chan", "m"]).unwrap();
+        assert!(matches!(cli.command, Command::Metrics(_)), "{cli:?}");
     }
 
     #[test]

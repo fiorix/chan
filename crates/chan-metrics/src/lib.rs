@@ -117,17 +117,33 @@ pub static HTTP2: Counter = Counter::new();
 /// Reverse-forward TCP connections and their payloads.
 pub static REVERSE: Counter = Counter::new();
 
-/// Count successful I/O and hold the active guard as long as the I/O exists.
+/// Count successful I/O without changing it: every call, vectored writes
+/// included, reaches the inner stream as it would unwrapped, so a wrapped
+/// transport keeps its write strategy and buffering.
 pub struct MeteredIo<T> {
     inner: T,
-    guard: Guard<'static>,
+    counter: &'static Counter,
+    _active: Option<Guard<'static>>,
 }
 
 impl<T> MeteredIo<T> {
+    /// Count a whole stream, holding its active count while it exists.
     pub fn new(inner: T, counter: &'static Counter) -> Self {
         Self {
             inner,
-            guard: counter.enter(),
+            counter,
+            _active: Some(counter.enter()),
+        }
+    }
+
+    /// Count one half of a split stream. The owner of both halves holds the
+    /// active count with [`Counter::enter`], so a connection counts once
+    /// however it is split.
+    pub fn half(inner: T, counter: &'static Counter) -> Self {
+        Self {
+            inner,
+            counter,
+            _active: None,
         }
     }
 }
@@ -140,7 +156,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for MeteredIo<T> {
     ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-        self.guard.0.received(buf.filled().len() - before);
+        self.counter.received(buf.filled().len() - before);
         result
     }
 }
@@ -153,9 +169,28 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for MeteredIo<T> {
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(n)) = result {
-            self.guard.0.sent(n);
+            self.counter.sent(n);
         }
         result
+    }
+
+    // tokio's defaults would report a non-vectored stream and write only the
+    // first buffer, which turns hyper and rustls batching into one copy or one
+    // record per call.
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
+        if let Poll::Ready(Ok(n)) = result {
+            self.counter.sent(n);
+        }
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -185,6 +220,87 @@ mod tests {
         a.read_exact(&mut bytes[..2]).await.unwrap();
         assert_eq!(COUNTER.snapshot().active, 1);
         drop(a);
+        let sample = COUNTER.snapshot();
+        assert_eq!(
+            (
+                sample.active,
+                sample.opened,
+                sample.received_bytes,
+                sample.sent_bytes
+            ),
+            (0, 1, 2, 3)
+        );
+    }
+
+    /// A transport that takes every buffer of a vectored write in one call.
+    #[derive(Default)]
+    struct VectoredSink(Vec<u8>);
+
+    impl AsyncWrite for VectoredSink {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.get_mut().0.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let sink = self.get_mut();
+            for buf in bufs {
+                sink.0.extend_from_slice(buf);
+            }
+            Poll::Ready(Ok(bufs.iter().map(|buf| buf.len()).sum()))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn vectored_writes_reach_the_inner_stream_whole_and_counted() {
+        static COUNTER: Counter = Counter::new();
+        let mut io = MeteredIo::new(VectoredSink::default(), &COUNTER);
+        assert!(io.is_write_vectored(), "the wrapper hides vectored writes");
+        let written = io
+            .write_vectored(&[io::IoSlice::new(&[1; 100]), io::IoSlice::new(&[2; 100])])
+            .await
+            .unwrap();
+        assert_eq!(written, 200, "one call carries both buffers");
+        assert_eq!(io.inner.0.len(), 200);
+        assert_eq!(COUNTER.snapshot().sent_bytes, 200);
+    }
+
+    #[tokio::test]
+    async fn split_halves_count_bytes_and_leave_the_active_count_to_their_owner() {
+        static COUNTER: Counter = Counter::new();
+        let (a, mut b) = tokio::io::duplex(64);
+        let (read, write) = tokio::io::split(a);
+        let owner = COUNTER.enter();
+        let mut read = MeteredIo::half(read, &COUNTER);
+        let mut write = MeteredIo::half(write, &COUNTER);
+        write.write_all(b"abc").await.unwrap();
+        b.write_all(b"xy").await.unwrap();
+        let mut bytes = [0; 2];
+        read.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(COUNTER.snapshot().active, 1);
+        drop((read, write));
+        assert_eq!(COUNTER.snapshot().active, 1);
+        drop(owner);
         let sample = COUNTER.snapshot();
         assert_eq!(
             (

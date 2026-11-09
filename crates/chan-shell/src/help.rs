@@ -99,7 +99,9 @@ SIDE EFFECTS:
 CAUTIONS:
   The command refuses an offline target instead of claiming it queued.
   Once accepted it returns before the tab renders. Each run appends
-  another Dashboard tab; they stack.
+  another Dashboard tab; they stack. A control window and a pane
+  showing a tmux pane draw no tab strip, so the window refuses the
+  tab there and says so in its status line.
 
 CAVEATS:
   --carousel-off is per tab: it does not change the workspace-wide

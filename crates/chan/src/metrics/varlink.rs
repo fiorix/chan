@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use super::Client;
+use super::{Source, Subscription};
 
 const INTERFACE: &str = "io.chan.Metrics";
 const IDL: &str = include_str!("io.chan.Metrics.varlink");
@@ -57,7 +57,7 @@ async fn write_frame(output: &mut (impl AsyncWrite + Unpin), value: &Value) -> R
 }
 
 pub(super) async fn serve(
-    client: Client,
+    source: &impl Source,
     input: impl AsyncRead + Unpin,
     mut output: impl AsyncWrite + Unpin,
 ) -> Result<()> {
@@ -88,15 +88,17 @@ pub(super) async fn serve(
             continue;
         }
         let get = get.context("missing Get parameters")?;
+        let mut stream = Subscription::new(get.history.unwrap_or(false), get.since);
         loop {
-            let reply = match client.read(get.history.unwrap_or(false), get.since).await {
-                Ok(metrics) => {
+            let reply = match stream.next(source).await {
+                Ok(Some(metrics)) => {
                     let mut reply = json!({"parameters": {"metrics": metrics}});
                     if call.more {
                         reply["continues"] = true.into();
                     }
-                    reply
+                    Some(reply)
                 }
+                Ok(None) => None,
                 Err(error) => {
                     tracing::debug!(%error, "Varlink metrics source unavailable");
                     write_frame(
@@ -107,7 +109,9 @@ pub(super) async fn serve(
                     break;
                 }
             };
-            write_frame(&mut output, &reply).await?;
+            if let Some(reply) = reply {
+                write_frame(&mut output, &reply).await?;
+            }
             if !call.more {
                 break;
             }
@@ -180,6 +184,17 @@ fn dispatch(call: &Call) -> (Option<Value>, Option<Get>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chan_server::metrics::{Runtime, View};
+    use std::sync::Arc;
+
+    /// The runtime behind `/api/metrics`, read in process: its `since`
+    /// filter is the route's.
+    impl Source for Arc<Runtime> {
+        async fn read(&self, history: bool, since: Option<u64>) -> Result<View> {
+            Ok(self.view(history, since))
+        }
+    }
+
     fn call(method: &str, parameters: Value) -> Call {
         Call {
             method: method.into(),
@@ -224,5 +239,60 @@ mod tests {
                 .unwrap()["error"],
             "org.varlink.service.MethodNotFound"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stream_sends_its_history_once_and_then_only_newer_samples() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = Runtime::start(home.path().into()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while runtime.view(true, None).history.len() < 3 {
+            assert!(std::time::Instant::now() < deadline, "no samples");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let (mut client, server) = tokio::io::duplex(1 << 20);
+        let serving = tokio::spawn(async move {
+            let (input, output) = tokio::io::split(server);
+            serve(&runtime, input, output).await
+        });
+        client
+            .write_all(b"{\"method\":\"io.chan.Metrics.Get\",\"parameters\":{\"history\":true},\"more\":true}\0")
+            .await
+            .unwrap();
+        let mut input = BufReader::new(client);
+        let mut replies = Vec::new();
+        for _ in 0..3 {
+            let mut frame = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), input.read_until(0, &mut frame))
+                .await
+                .expect("a reply each second")
+                .unwrap();
+            frame.pop();
+            let reply: Value = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(reply["continues"], true, "{reply}");
+            let view: View =
+                serde_json::from_value(reply["parameters"]["metrics"].clone()).unwrap();
+            replies.push(view);
+        }
+        drop(input);
+        serving.await.unwrap().unwrap();
+        let sequences = |view: &View| view.history.iter().map(|s| s.sequence).collect::<Vec<_>>();
+        let first = sequences(&replies[0]);
+        assert!(
+            first.len() >= 3,
+            "the first reply carries the history: {first:?}"
+        );
+        let mut sent = *first.last().unwrap();
+        for view in &replies[1..] {
+            let newer = sequences(view);
+            assert!(!newer.is_empty(), "a later reply with nothing new");
+            assert!(
+                newer.iter().all(|sequence| *sequence > sent),
+                "repeated {newer:?} after {sent}"
+            );
+            let latest = view.latest.as_ref().unwrap().sequence;
+            assert_eq!(newer.last(), Some(&latest), "latest is the newest sample");
+            sent = latest;
+        }
     }
 }

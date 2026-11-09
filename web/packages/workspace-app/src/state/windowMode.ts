@@ -53,9 +53,12 @@ export const TERMINAL_ONLY_COMMANDS: ReadonlySet<string> = new Set<string>([
 /// namely spawning more terminals (Cmd+T) or splitting the pane into an
 /// empty second pane (which, with the welcome tile gone in terminal-only
 /// mode, would strand a blank pane). Reopening the script PTY is the
-/// connect flow's job, not the user's.
+/// connect flow's job, not the user's. A Dashboard is blocked too: the
+/// control window draws no tab strip, so one would cover the connect
+/// terminal, perhaps waiting on a password, with nothing to switch back.
 export const CONTROL_TERMINAL_BLOCKED: ReadonlySet<string> = new Set<string>([
   "app.terminal.toggle",
+  "app.dashboard.open",
   "app.pane.splitRight",
   "app.pane.splitDown",
 ]);
