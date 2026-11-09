@@ -392,6 +392,48 @@ describe("a step while the scan runs", () => {
     expect(counts.at(-1)).toEqual({ index: 1, total: 111, partial: false });
   });
 
+  test("a resize drops the steps that wait, so none starts the walk over or moves the viewport", async () => {
+    // Enter walked to the oldest match found so far and pressed three more
+    // times. Each waiting step would land from no match selected after the
+    // resize, the first on the newest match and the rest past it.
+    const { frames, find, view, viewport, manager, counts } = await waitingPastTheOldestFound();
+    find.step("needle", "older");
+    find.step("needle", "older");
+    const reveal = vi.spyOn(viewport, "reveal");
+    const viewportY = view.viewportY;
+    expect(viewportY, "the walk scrolled back").toBeGreaterThan(0);
+    // The lines are too short to wrap at 30 columns, so every match keeps
+    // its row; the core still forgets its selected match and scans again.
+    view.resize(30, 10);
+    expect(selected(manager)).toBeNull();
+    frames.frame();
+    expect(selected(manager), "the rescan's first frame selects nothing").toBeNull();
+    expect(counts.at(-1)).toMatchObject({ index: null, partial: true });
+    frames.settle();
+    expect(selected(manager)).toBeNull();
+    expect(counts.at(-1)).toEqual({ index: null, total: 300, partial: false });
+    expect(reveal).not.toHaveBeenCalled();
+    expect(view.viewportY).toBe(viewportY);
+    // The next Enter starts the walk over, at the newest match.
+    find.step("needle", "older");
+    expect(selected(manager)).toEqual(nth(1));
+    expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
+  });
+
+  test("a resize keeps a new query's selection of its newest match and drops the steps pressed behind it", async () => {
+    const { frames, find, view, manager, counts } = await fixture(LONG);
+    find.find("needle");
+    find.step("needle", "older");
+    expect(selected(manager), "nothing scanned yet").toBeNull();
+    view.resize(30, 10);
+    frames.frame();
+    expect(selected(manager)).toEqual(nth(1));
+    expect(counts.at(-1)).toMatchObject({ index: 1, partial: true });
+    frames.settle();
+    expect(selected(manager)).toEqual(nth(1));
+    expect(counts.at(-1)).toEqual({ index: 1, total: 300, partial: false });
+  });
+
   test("a selection the user makes while a step waits stays theirs, and the step moves the count", async () => {
     const { frames, find, manager, counts } = await fixture(LONG);
     find.step("needle", "newer");

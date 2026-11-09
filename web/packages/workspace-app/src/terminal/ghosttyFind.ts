@@ -21,10 +21,10 @@
 /// has found the next older match, or once it completes. Steps pressed
 /// while one waits queue behind it and apply in the order pressed, each
 /// from where the one before landed, so a run of presses ends where it
-/// would on a finished scan. A new query or closing the bar drops them. A
-/// step that waited writes its highlight over the selection there was when
-/// it was pressed; a selection the user makes while it waits stays theirs,
-/// and the step moves only the count.
+/// would on a finished scan. A new query, a resize or closing the bar drops
+/// them. A step that waited writes its highlight over the selection there
+/// was when it was pressed; a selection the user makes while it waits stays
+/// theirs, and the step moves only the count.
 ///
 /// Output keeps arriving while the bar is open. The viewport controller
 /// reports every change to the terminal, each write (output and the lines
@@ -36,7 +36,10 @@
 /// again from scratch, so the highlight, whose rows the reflow gave other
 /// text, goes before ghostty-web repaints, and the count has no index until
 /// a step selects again, starting over: older lands on the newest match and
-/// newer on the oldest.
+/// newer on the oldest. Steps that wait go with the highlight. Each would
+/// start over too and scroll to where it landed, and a resize never moves
+/// the viewport. Only a new query's selection of its newest match stays: it
+/// starts from no match selected anyway.
 ///
 /// The highlight is ghostty-web's own selection, written through its
 /// SelectionManager's anchors. ghostty-web's public `select()` counts its
@@ -61,6 +64,11 @@ export type FindViewport = Pick<GhosttyViewportController, "observeChanges" | "r
 /// A step's way through the matches: toward older output, up the buffer,
 /// or toward newer output, down it.
 type Direction = "older" | "newer";
+
+/// A step held until the scan allows it: a press toward older or newer
+/// output, or a new query's selection of its newest match, which lands as
+/// an older step from no match selected does.
+type Waiting = Direction | "newest";
 
 /// Runs a callback once on a coming animation frame; `cancel` drops one that
 /// has not run.
@@ -111,10 +119,9 @@ export class GhosttyFind {
   /// The open bar's search; null while the bar is closed.
   private search: VtSearch | null = null;
   private needle = "";
-  /// Steps the scan does not allow yet, in the order pressed. A new query's
-  /// selection of its newest match is the first of them, an older step from
-  /// nothing selected.
-  private waiting: Direction[] = [];
+  /// Steps the scan does not allow yet, in the order pressed, behind a new
+  /// query's selection of its newest match while that has not landed.
+  private waiting: Waiting[] = [];
   /// The selection when the bar last asked for a match.
   private askedOver: MatchRange | null = null;
   /// The terminal changed since the search was last fed.
@@ -142,7 +149,7 @@ export class GhosttyFind {
       return;
     }
     if (this.prepare(query)) {
-      this.waiting.push("older");
+      this.waiting.push("newest");
       this.askedOver = this.selectionRange();
     }
     this.schedule();
@@ -205,10 +212,15 @@ export class GhosttyFind {
 
   private onChange(change: GhosttyChange): void {
     if (!this.search) return;
-    // The core drops its selected match on any resize, so no active match
-    // is left to move the highlight to, and the rows under it hold other
-    // text once the grid reflows.
-    if (change === "resize") this.dropHighlight();
+    if (change === "resize") {
+      // The core drops its selected match on any resize, so no active match
+      // is left to move the highlight to, and the rows under it hold other
+      // text once the grid reflows. A press that waits would apply from no
+      // match selected and scroll to wherever that took it; a new query's
+      // selection of its newest match starts there anyway.
+      this.dropHighlight();
+      this.waiting = this.waiting.filter((step) => step === "newest");
+    }
     this.dirty = true;
     this.schedule();
   }
@@ -253,8 +265,8 @@ export class GhosttyFind {
     while (this.waiting.length > 0) {
       const state = search.state();
       if (!state.complete && !landsAsComplete(this.waiting[0]!, state)) break;
-      const direction = this.waiting.shift()!;
-      if (direction === "older" ? search.selectNext() : search.selectPrev()) selected = true;
+      const step = this.waiting.shift()!;
+      if (step === "newer" ? search.selectPrev() : search.selectNext()) selected = true;
     }
     return selected;
   }
@@ -325,9 +337,9 @@ export class GhosttyFind {
 /// wraps among them, so only a step that stays inside them lands so: older
 /// from nothing selected onto the newest once one is found, older from any
 /// but the oldest found so far, and newer from any but the newest.
-function landsAsComplete(direction: Direction, { index, total }: SearchState): boolean {
-  if (direction === "older") return index === null ? total > 0 : index < total - 1;
-  return index !== null && index > 0;
+function landsAsComplete(step: Waiting, { index, total }: SearchState): boolean {
+  if (step === "newer") return index !== null && index > 0;
+  return index === null ? total > 0 : index < total - 1;
 }
 
 function sameRange(a: MatchRange | null, b: MatchRange | null): boolean {
