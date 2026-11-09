@@ -149,41 +149,49 @@
     return devserverId.slice(0, 12);
   }
 
-  // Open one devserver: hand off to the identity `/s/{owner}?d=<disc>`
-  // route, which mints a `__Host-devserver_gate` entry token and redirects
-  // through the proxy to the launcher served at the devserver root.
-  // These are the signed-in user's OWN devservers, so the owner is
-  // always us. Only offered for an online devserver (an offline one
-  // has no live tunnel to open). Same-origin navigation, so a
-  // relative path is enough.
-  function openDevserver(devserverId: string) {
-    const username = meStore.me?.user.username;
-    if (!username) return;
-    window.location.href =
-      `/s/${encodeURIComponent(username)}?d=${discOf(devserverId)}`;
+  // The whole-devserver root on identity, `/s/{owner}?d=<disc>`. identity
+  // admits the owner and every accepted grantee through one access check,
+  // mints a `__Host-devserver_gate` entry token and redirects through the
+  // proxy to the launcher served at the devserver root; anyone else gets
+  // the same not-found as an unknown handle. The same path serves the
+  // owner's rows and the Shared with me rows, so only the owner differs.
+  function devserverPath(owner: string, devserverId: string): string {
+    return `/s/${encodeURIComponent(owner)}?d=${discOf(devserverId)}`;
   }
 
-  // Copy an absolute `?d=`-qualified root link for this owner's devserver.
-  // Identity opens the whole devserver for its owner only and gives anyone
-  // else, including a grantee, the same not-found as an unknown handle.
-  // People this devserver is shared with open it from Chan Desktop.
+  // Same-origin navigation, so a relative path is enough. The owner's rows
+  // offer it only while the devserver is online, since an offline one has
+  // no live tunnel to open.
+  function openDevserver(owner: string, devserverId: string) {
+    window.location.href = devserverPath(owner, devserverId);
+  }
+
+  // Copy the root link as an absolute URL. The owner can send it to the
+  // people the devserver is shared with, and a grantee can keep it: it
+  // opens for whoever holds access when they follow it, and for nobody
+  // else. Keyed by the link, because the owner's rows and the shared rows
+  // are lists of different devservers.
   let copied = $state<string | null>(null);
-  async function copyDevserverLink(devserverId: string) {
-    const username = meStore.me?.user.username;
-    if (!username) return;
-    const url =
-      `${window.location.origin}/s/${encodeURIComponent(username)}?d=${discOf(devserverId)}`;
+  async function copyDevserverLink(owner: string, devserverId: string) {
+    const url = `${window.location.origin}${devserverPath(owner, devserverId)}`;
     try {
       await navigator.clipboard.writeText(url);
-      copied = devserverId;
+      copied = url;
       setTimeout(() => {
-        if (copied === devserverId) copied = null;
+        if (copied === url) copied = null;
       }, 1500);
     } catch {
       // Clipboard denied (permissions/insecure context): leave the
       // button label unchanged rather than surfacing an error row.
     }
   }
+
+  function isCopied(owner: string, devserverId: string): boolean {
+    return copied === `${window.location.origin}${devserverPath(owner, devserverId)}`;
+  }
+
+  // The signed-in user's handle owns every row under My devservers.
+  let myUsername = $derived(meStore.me?.user.username ?? null);
 
   // Client-side email shape check; stricter than the backend's lax
   // `valid_email` because a grant only resolves when an OAuth sign-in
@@ -297,17 +305,18 @@
                 <span class="status" data-status={d.online ? "online" : "offline"} aria-hidden="true">
                   {d.online ? "online" : "offline"}
                 </span>
-                {#if d.online}
-                  <button type="button" class="ghost" onclick={() => openDevserver(d.id)}>
+                {#if d.online && myUsername}
+                  {@const owner = myUsername}
+                  <button type="button" class="ghost" onclick={() => openDevserver(owner, d.id)}>
                     Open
                   </button>
                   <button
                     type="button"
                     class="ghost"
-                    onclick={() => copyDevserverLink(d.id)}
-                    title="Copy my link to this devserver (only I can open it)"
+                    onclick={() => copyDevserverLink(owner, d.id)}
+                    title="Copy a link to this devserver. It opens for you and for everyone you share it with."
                   >
-                    {copied === d.id ? "Copied" : "Copy my link"}
+                    {isCopied(owner, d.id) ? "Copied" : "Copy link"}
                   </button>
                 {/if}
                 <button
@@ -419,6 +428,26 @@
                   <span class="muted small"> - from @{s.owner_username}</span>
                 </div>
                 <div class="muted small">Shell-equivalent devserver access</div>
+              </div>
+              <!-- The incoming list carries no live state, so both actions are
+                   always offered; an offline devserver answers Open with
+                   identity's not-found. -->
+              <div class="actions">
+                <button
+                  type="button"
+                  class="ghost"
+                  onclick={() => openDevserver(s.owner_username, s.devserver_id)}
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  class="ghost"
+                  onclick={() => copyDevserverLink(s.owner_username, s.devserver_id)}
+                  title="Copy a link to this devserver. It opens for its owner and for everyone it is shared with, you included."
+                >
+                  {isCopied(s.owner_username, s.devserver_id) ? "Copied" : "Copy link"}
+                </button>
               </div>
             </div>
           </li>

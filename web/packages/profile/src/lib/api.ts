@@ -124,9 +124,11 @@ export const api = {
   tokenAudit: (id: string) =>
     request<AuditEntry[]>(`/api/tokens/${id}/audit`),
 
-  // The Devservers view builds whole-devserver Open and Copy my link URLs
-  // from the owner's username and the devserver disc, without an API call.
-  // Identity serves the /s/{owner}?d=<disc> root to the owner only.
+  // The Devservers view builds whole-devserver Open and Copy link URLs from
+  // the owner's username and the devserver disc, without an API call, for
+  // the user's own devservers and for the ones shared with them. identity
+  // serves the /s/{owner}?d=<disc> root to the owner and every accepted
+  // grantee.
 
   listDevserverGrants: (devserverId: string) =>
     request<DevserverGrant[]>(`/api/devservers/${encodeURIComponent(devserverId)}/grants`),
