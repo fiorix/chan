@@ -1488,6 +1488,34 @@ impl OwnerCut {
     }
 }
 
+/// A subscriber that keeps every formatted line, and the lines it kept.
+fn capture_logs() -> (
+    impl tracing::Subscriber + Send + Sync,
+    Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    use std::io::Write;
+    use std::sync::Mutex;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    (subscriber, output)
+}
+
 /// Sign `uid` in and run the account-mode authorize, consent, confirm and
 /// redeem through identity's own routes, as chan-desktop does. Answers the
 /// redeemed token's id and secret; `c` keeps the browser session.
@@ -1671,8 +1699,10 @@ async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
         serde_json::from_slice::<serde_json::Value>(&drain.body).unwrap(),
         json!({"scope": "subject", "subject_user_id": uid})
     );
-    // The audit names the desktop's give-back, never the owner's revoke;
-    // profile, finding the token revoked already, adds no row of its own.
+    // The audit names the desktop's give-back, never the owner's revoke.
+    // Profile is a stand-in here: that its revoke of a token already revoked
+    // adds no audit row is pinned by profile's own
+    // `identity_pat_revoke_atomically_denies_audits_and_reserves`.
     assert_eq!(
         audit_actions(&app, used.token.id).await,
         ["created_via_desktop", "revoked_via_desktop"]
@@ -1744,6 +1774,45 @@ async fn a_used_tokens_cut_outlives_a_request_dropped_after_the_give_back() {
     assert_eq!(
         audit_actions(&app, used.token.id).await,
         ["created_via_desktop", "revoked_via_desktop"]
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_used_tokens_first_cut_runs_when_profile_fails() {
+    let (subscriber, output) = capture_logs();
+    let _logs = tracing::subscriber::set_default(subscriber);
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "profile-down@example.com").await;
+    let used = mint(&app, uid, &["desktop.account"]).await;
+    app.api_tokens
+        .validate_no_audit(&used.secret)
+        .await
+        .expect("the token is live");
+    let cut = OwnerCut::mount_answering(&app, uid, used.token.id, ResponseTemplate::new(500)).await;
+
+    let (status, body) = self_revoke(&app, Some(&used.secret)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    assert!(!active(&app, used.token.id).await, "the revoke stands");
+    // Profile was asked once and failed; the first cut runs anyway.
+    assert_eq!(
+        cut.settled(&app, (1, 1, 1)).await,
+        (1, 1, 1),
+        "the first cut runs after a failed reservation"
+    );
+    let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(
+        captured.lines().any(|line| line
+            .contains("reserving the cut of a used desktop token given back failed")
+            && line.contains(&used.token.id.to_string())),
+        "the failed reservation is logged by the token's id: {captured}"
+    );
+    assert!(
+        !captured.contains(&used.secret),
+        "no line carries the token: {captured}"
     );
 
     app.cleanup().await;
