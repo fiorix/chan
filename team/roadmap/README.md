@@ -39,7 +39,7 @@ The owner added another the same day: the ghostty terminals re-pinned from a pre
 | [time-bound tests go red on a loaded host][timebound] | not started | design |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
-| [no CI job runs the gateway packaging and roles suites][gwci] | built | CI run |
+| [no CI job runs the gateway packaging and roles suites][gwci] | built | owner |
 | [a shared devserver's root link refuses its grantees][grantroot] | not started | build |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 | [a running chan shows no live process metrics][metrics] | built | guest run |
