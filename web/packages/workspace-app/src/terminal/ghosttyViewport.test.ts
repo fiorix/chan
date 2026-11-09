@@ -19,6 +19,7 @@ function fakeGhostty(viewportY: number, scrollback: number) {
   const clamp = (v: number) => Math.max(0, Math.min(state.scrollback, v));
   const term = {
     appendedByWrite: [] as number[],
+    rows: 24,
     getViewportY: vi.fn(() => state.viewportY),
     getScrollbackLength: vi.fn(() => state.scrollback),
     scrollLines: vi.fn((amount: number) => {
@@ -149,6 +150,42 @@ describe("GhosttyViewportController writes", () => {
     controller.write("output");
 
     expect(term.scrollLines).not.toHaveBeenCalled();
+  });
+
+  test("write observers run after every write, the anchored restore included, until stopped", () => {
+    const { state, term } = fakeGhostty(7, 20);
+    term.appendedByWrite.push(3, 0, 0);
+    const controller = new GhosttyViewportController(term, context());
+    const seen: number[] = [];
+    const stop = controller.observeWrites(() => seen.push(state.viewportY));
+
+    controller.write("anchored");
+    state.viewportY = 0;
+    controller.write("at the bottom");
+    stop();
+    controller.write("unobserved");
+
+    // The anchored write is observed after its restore, not between the
+    // write and the restore.
+    expect(seen).toEqual([10, 0]);
+  });
+});
+
+describe("GhosttyViewportController reveal", () => {
+  // 100 rows of history on a ten-row screen.
+  test.each([
+    ["on the screen at the bottom", 0, 105, null],
+    ["on the screen scrolled back", 30, 75, null],
+    ["above the screen, centred", 0, 50, 55],
+    ["below the screen, centred", 100, 60, 45],
+    ["near the oldest row, clamped to the top", 0, 2, 100],
+    ["near the newest row, clamped to the bottom", 100, 108, 0],
+  ])("a row %s", (_name, from, row, to) => {
+    const { term } = fakeGhostty(from, 100);
+    term.rows = 10;
+    new GhosttyViewportController(term, context()).reveal(row);
+    if (to === null) expect(term.scrollToLine).not.toHaveBeenCalled();
+    else expect(term.scrollToLine.mock.calls).toEqual([[to]]);
   });
 });
 

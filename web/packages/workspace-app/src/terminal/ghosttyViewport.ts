@@ -1,9 +1,9 @@
 /// Single owner for every Chan-initiated Ghostty viewport mutation on the
 /// primary buffer: PTY writes that must not yank a user-anchored viewport,
-/// and the calibrated macOS pixel-scroll path. ghostty-web is constructed
-/// with smoothScrollDuration 0 so its wheel handler applies synchronously
-/// and no private animation target can outlive a write-side restore; the
-/// controller's restore therefore sticks.
+/// the calibrated macOS pixel-scroll path, and find scrolling to a match.
+/// ghostty-web is constructed with smoothScrollDuration 0 so its wheel
+/// handler applies synchronously and no private animation target can
+/// outlive a write-side restore; the controller's restore therefore sticks.
 
 /// Compatibility constant, not a preference: macOS trackpads deliver pixel
 /// deltas that Ghostty converts to roughly twice xterm.js's travel on the
@@ -16,6 +16,7 @@ export const GHOSTTY_MACOS_PIXEL_SCROLL_FACTOR = 0.5;
 const DOM_DELTA_PIXEL = 0;
 
 export type GhosttyViewportTerminal = {
+  readonly rows: number;
   getViewportY(): number;
   getScrollbackLength(): number;
   scrollLines(amount: number): void;
@@ -36,10 +37,23 @@ export type GhosttyViewportContext = {
 };
 
 export class GhosttyViewportController {
+  private readonly writeObservers = new Set<() => void>();
+
   constructor(
     private readonly terminal: GhosttyViewportTerminal,
     private readonly context: GhosttyViewportContext,
   ) {}
+
+  /// Calls `observer` after every write that goes through `write`, the
+  /// terminal's only write path, so a reader of the core that keeps state
+  /// across writes (find's search) learns that the screen changed without a
+  /// second hook on the PTY stream. Returns the call that stops it.
+  observeWrites(observer: () => void): () => void {
+    this.writeObservers.add(observer);
+    return () => {
+      this.writeObservers.delete(observer);
+    };
+  }
 
   /// ghostty-web calls scrollToBottom() after every write whenever the
   /// viewport is away from the bottom. Restore a user's scrolled viewport
@@ -51,16 +65,34 @@ export class GhosttyViewportController {
     const viewportBefore = this.terminal.getViewportY();
     if (viewportBefore <= 0) {
       this.terminal.write(data);
-      return;
+    } else {
+      const scrollbackBefore = this.terminal.getScrollbackLength();
+      this.terminal.write(data);
+      const scrollbackAfter = this.terminal.getScrollbackLength();
+      const appendedLines = Math.max(0, scrollbackAfter - scrollbackBefore);
+      this.terminal.scrollToLine(
+        Math.min(scrollbackAfter, viewportBefore + appendedLines),
+      );
     }
+    for (const observer of this.writeObservers) observer();
+  }
 
-    const scrollbackBefore = this.terminal.getScrollbackLength();
-    this.terminal.write(data);
-    const scrollbackAfter = this.terminal.getScrollbackLength();
-    const appendedLines = Math.max(0, scrollbackAfter - scrollbackBefore);
-    this.terminal.scrollToLine(
-      Math.min(scrollbackAfter, viewportBefore + appendedLines),
-    );
+  /// Bring absolute row `row` into view: 0 is the oldest history row and the
+  /// active rows follow, the numbering of ghostty-web's selection anchors. A
+  /// row already on screen leaves the viewport where it is; any other is
+  /// centred, clamped to the buffer. ghostty-web's viewport offset counts
+  /// the lines scrolled back from the bottom, so screen row `row -
+  /// scrollback + offset` shows `row`, and `scrollToLine` sets that offset,
+  /// although its doc comment describes a line counted from the top. The
+  /// alternate screen has no history: its scrollback length is 0, its rows
+  /// are its own, and the offset clamps to 0.
+  reveal(row: number): void {
+    const scrollback = this.terminal.getScrollbackLength();
+    const rows = this.terminal.rows;
+    const onScreen = row - scrollback + this.terminal.getViewportY();
+    if (onScreen >= 0 && onScreen < rows) return;
+    const centred = scrollback - row + Math.floor(rows / 2);
+    this.terminal.scrollToLine(Math.max(0, Math.min(scrollback, centred)));
   }
 
   /// Claim only macOS pixel-mode primary-buffer wheel events with no mouse

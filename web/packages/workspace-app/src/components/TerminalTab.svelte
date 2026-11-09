@@ -168,6 +168,7 @@
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
+  import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
   import { Osc52Bridge } from "../terminal/osc52Bridge";
@@ -436,10 +437,8 @@
     setTerminalProgramStatus(tab, visible);
   }
   let findQuery = $state("");
-  /// The find bar's match count. `index` counts from the newest match (1 is
-  /// the one closest to the prompt) and is null when it is not knowable;
-  /// `partial` marks a `total` that is a floor rather than the whole buffer's.
-  type FindCount = { index: number | null; total: number; partial: boolean };
+  /// The find bar's match count on either backend (see `FindCount`); null
+  /// leaves the count blank.
   let findCount = $state<FindCount | null>(null);
   const findCountText = $derived(
     findCount === null
@@ -530,6 +529,10 @@
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
+  // Find on the ghostty backend, made when the find bar first opens (see
+  // ghosttyFinder) and disposed with the terminal. Null on xterm, which
+  // finds through its SearchAddon.
+  let ghosttyFind: GhosttyFind | null = null;
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
   // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
@@ -2553,6 +2556,10 @@
     secretMasker = null;
     userInput?.dispose();
     userInput = null;
+    // Before the terminal: it frees its search and clears its highlight
+    // through the terminal's selection.
+    ghosttyFind?.dispose();
+    ghosttyFind = null;
     term?.dispose();
     term = null;
     sawSessionControl = false;
@@ -2727,10 +2734,10 @@
 
   function openFind(): void {
     closeTabMenu();
-    // The find bar runs on xterm's SearchAddon; there is no ghostty-web
-    // search addon, so under the ghostty backend the bar stays closed
-    // (the right-click menu entry is hidden too).
-    if (backend !== "xterm") return;
+    // xterm finds through its SearchAddon and ghostty through libghostty-vt's
+    // search on chan's binding. A ghostty terminal on any other core has no
+    // search, and its bar stays closed.
+    if (backend === "ghostty" && !ghosttyFinder()) return;
     findOpen = true;
     void tick().then(() => searchInput?.focus());
   }
@@ -2851,8 +2858,22 @@
     };
   }
 
+  /// The ghostty terminal's find, made on first use; null on xterm, before
+  /// the terminal exists, and on a core without search.
+  function ghosttyFinder(): GhosttyFind | null {
+    if (!ghosttyFind && backend === "ghostty" && term && ghosttyViewport) {
+      ghosttyFind = GhosttyFind.attach(term as GhosttyTerminal, ghosttyViewport, (count) => {
+        findCount = count;
+      });
+    }
+    return ghosttyFind;
+  }
+
+  /// The bar closed or its query emptied: drop the highlights and the count.
+  /// On ghostty this also frees the search and stops its scan.
   function clearFind(): void {
     search?.clearDecorations();
+    ghosttyFind?.close();
     findCount = null;
   }
 
@@ -2874,13 +2895,18 @@
   }
 
   /// The query changed: select the newest match, the bottom-most in the
-  /// buffer. The addon's reverse search starts at the bottom only when
-  /// nothing is selected; from a selection it expands or steps from the
-  /// previous match instead, so a shortened query would keep an older
-  /// match while a newer one sits below it.
+  /// buffer. On ghostty the scan selects it on the frame that finds it. The
+  /// xterm addon's reverse search starts at the bottom only when nothing is
+  /// selected; from a selection it expands or steps from the previous match
+  /// instead, so a shortened query would keep an older match while a newer
+  /// one sits below it.
   function findNewest(): void {
     if (!findQuery.trim()) {
       clearFind();
+      return;
+    }
+    if (backend === "ghostty") {
+      ghosttyFinder()?.find(findQuery);
       return;
     }
     if (!search) return;
@@ -2889,11 +2915,15 @@
   }
 
   /// Step from the selected match. Next (Enter) walks toward older output,
-  /// up the buffer, the way a terminal is read from the prompt: the addon's
-  /// "previous". Newer is down the buffer, its "next". Both wrap.
+  /// up the buffer, the way a terminal is read from the prompt: the xterm
+  /// addon's "previous". Newer is down the buffer, its "next". Both wrap.
   function stepFind(direction: "older" | "newer"): void {
     if (!findQuery.trim()) {
       clearFind();
+      return;
+    }
+    if (backend === "ghostty") {
+      ghosttyFinder()?.step(findQuery, direction);
       return;
     }
     if (direction === "older") search?.findPrevious(findQuery, findOptions());
@@ -3117,16 +3147,13 @@
             <span class="mbtn-chord"></span>
           </button>
           <div class="msep" role="separator"></div>
-          {#if backend === "xterm"}
-            <!-- Find rides xterm's SearchAddon; no ghostty-web equivalent. -->
-            <button class="mbtn" role="menuitem" onclick={openFind}>
-              <span class="mbtn-icon">
-                <Search size={16} strokeWidth={1.75} aria-hidden="true" />
-              </span>
-              <span class="mbtn-label">Find</span>
-              <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
-            </button>
-          {/if}
+          <button class="mbtn" role="menuitem" onclick={openFind}>
+            <span class="mbtn-icon">
+              <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">Find</span>
+            <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
+          </button>
           <button class="mbtn" role="menuitem" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">
               <Clipboard size={16} strokeWidth={1.75} aria-hidden="true" />
