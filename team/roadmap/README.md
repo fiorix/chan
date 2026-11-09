@@ -40,7 +40,7 @@ On 2026-11-09 the owner added live process metrics, built directly with an agent
 | [no CI job runs the gateway packaging and roles suites][gwci] | built | CI run |
 | [a shared devserver's root link refuses its grantees][grantroot] | not started | build |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
-| [a running chan shows no live process metrics][metrics] | built | fixes |
+| [a running chan shows no live process metrics][metrics] | built | guest run |
 
 [wgnode]: v0.127.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
