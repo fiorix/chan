@@ -238,6 +238,20 @@ impl Demand {
     }
 }
 
+/// Run `scan` whenever `schedule` says, until the runtime stops or `scan`
+/// returns false. Each period runs from the end of the previous scan, so a
+/// slow scan is followed by a full period of rest, never by the next scan
+/// at once.
+fn walk(demand: &Demand, schedule: Schedule, mut scan: impl FnMut() -> bool) {
+    let mut last_scan = None;
+    while demand.wait_for_scan(schedule, last_scan) {
+        if !scan() {
+            break;
+        }
+        last_scan = Some(Instant::now());
+    }
+}
+
 /// Lifetime owner for the sampler and disk walker. Workers hold only their
 /// cache and stop signal, so there is no owner/worker reference cycle.
 pub struct Runtime {
@@ -307,12 +321,10 @@ impl Runtime {
         std::thread::Builder::new()
             .name("chan-storage-metrics".into())
             .spawn(move || {
-                let mut last_scan = None;
-                while demand.wait_for_scan(schedule, last_scan) {
-                    last_scan = Some(Instant::now());
+                walk(&demand, schedule, || {
                     let result = storage::scan(&home, &stop);
                     if stop.is_stopped() {
-                        break;
+                        return false;
                     }
                     let mut cache = cached.lock().unwrap_or_else(|e| e.into_inner());
                     // A failed scan updates its diagnostic, preserving the last
@@ -321,7 +333,8 @@ impl Runtime {
                         Ok(storage) => cache.storage = storage,
                         Err(error) => cache.storage.error = Some(error.to_string()),
                     }
-                }
+                    true
+                })
             })?;
         Ok(runtime)
     }
@@ -600,6 +613,39 @@ mod tests {
             schedule.next(at(900), Some(at(900)), Some(at(320))),
             Walk::Now
         );
+    }
+
+    #[test]
+    fn each_rescan_waits_a_full_period_after_the_previous_scan_completes() {
+        let demand = std::sync::Arc::new(Demand::default());
+        let schedule = Schedule {
+            period: Duration::from_millis(200),
+            quiet: Duration::from_secs(60),
+        };
+        demand.read();
+        let walker = {
+            let demand = demand.clone();
+            std::thread::spawn(move || {
+                let mut scans = Vec::new();
+                walk(&demand, schedule, || {
+                    let started = Instant::now();
+                    // A scan slower than the period.
+                    std::thread::sleep(Duration::from_millis(300));
+                    scans.push((started, Instant::now()));
+                    scans.len() < 3
+                });
+                scans
+            })
+        };
+        let scans = walker.join().unwrap();
+        assert_eq!(scans.len(), 3);
+        for pair in scans.windows(2) {
+            let rest = pair[1].0.duration_since(pair[0].1);
+            assert!(
+                rest >= schedule.period,
+                "rescanned {rest:?} after the last scan ended"
+            );
+        }
     }
 
     #[test]
