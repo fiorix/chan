@@ -1,7 +1,9 @@
-//! Owned, continuous collection for dashboard and diagnostic clients.
+//! Owned collection for dashboard and diagnostic clients.
 //!
 //! Readers only copy cached data. OS sampling and chan-home scans have separate
 //! workers, so filesystem latency cannot delay process samples or requests.
+//! The process sampler runs from the start; the chan-home walker runs only
+//! while someone reads, since a walk costs a stat per entry of the home.
 
 mod storage;
 
@@ -19,6 +21,13 @@ pub use storage::Storage;
 /// One second per aggregate sample, with ten minutes retained in memory.
 pub const HISTORY_CAPACITY: usize = 600;
 const INTERVAL: Duration = Duration::from_secs(1);
+/// The chan-home walker rescans once a minute while reads arrive, and rests
+/// once five minutes pass with no read: a dashboard polls every second, so a
+/// rest means nobody is looking.
+const STORAGE_SCHEDULE: Schedule = Schedule {
+    period: Duration::from_secs(60),
+    quiet: Duration::from_secs(300),
+};
 
 /// Running server identity. A restart gets a new id even if the PID is reused.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -139,12 +148,103 @@ impl Stop {
     }
 }
 
+/// When the chan-home walker scans: every `period` while reads arrive, and
+/// never once `quiet` has passed since the last read.
+#[derive(Clone, Copy, Debug)]
+struct Schedule {
+    period: Duration,
+    quiet: Duration,
+}
+
+#[derive(Debug, PartialEq)]
+enum Walk {
+    Now,
+    After(Duration),
+    Rest,
+}
+
+impl Schedule {
+    /// The walker's next step at `now`. Pure, so the start-on-read and
+    /// rest-after-quiet rules are testable without waiting.
+    fn next(&self, now: Instant, last_read: Option<Instant>, last_scan: Option<Instant>) -> Walk {
+        let Some(read) = last_read else {
+            return Walk::Rest;
+        };
+        let quiet_left = self
+            .quiet
+            .saturating_sub(now.saturating_duration_since(read));
+        if quiet_left.is_zero() {
+            return Walk::Rest;
+        }
+        let due = last_scan.map_or(Duration::ZERO, |scan| {
+            self.period
+                .saturating_sub(now.saturating_duration_since(scan))
+        });
+        if due.is_zero() {
+            Walk::Now
+        } else {
+            Walk::After(due.min(quiet_left))
+        }
+    }
+}
+
+/// Reads that drive the walker. Its own lock and condvar pair the stop flag
+/// with the last read, so neither a read nor a stop can slip past a walker
+/// that is about to wait.
+#[derive(Default)]
+struct Demand {
+    state: Mutex<DemandState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct DemandState {
+    stopped: bool,
+    last_read: Option<Instant>,
+}
+
+impl Demand {
+    fn read(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_read = Some(Instant::now());
+        self.wake.notify_all();
+    }
+
+    fn stop(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stopped = true;
+        self.wake.notify_all();
+    }
+
+    /// Block until a scan is due. False once the runtime has stopped.
+    fn wait_for_scan(&self, schedule: Schedule, last_scan: Option<Instant>) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if state.stopped {
+                return false;
+            }
+            state = match schedule.next(Instant::now(), state.last_read, last_scan) {
+                Walk::Now => return true,
+                Walk::After(wait) => {
+                    self.wake
+                        .wait_timeout(state, wait)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                Walk::Rest => self.wake.wait(state).unwrap_or_else(|e| e.into_inner()),
+            };
+        }
+    }
+}
+
 /// Lifetime owner for the sampler and disk walker. Workers hold only their
 /// cache and stop signal, so there is no owner/worker reference cycle.
 pub struct Runtime {
     identity: Identity,
     cached: Arc<Mutex<Cached>>,
     stop: Arc<Stop>,
+    demand: Arc<Demand>,
 }
 
 impl Drop for Runtime {
@@ -152,13 +252,19 @@ impl Drop for Runtime {
         // A filesystem syscall can stall indefinitely on a remote mount. Never
         // join that worker on the serving thread; it observes stop on return.
         self.stop.stop();
+        self.demand.stop();
     }
 }
 
 impl Runtime {
     /// Start once at the outer server router, before serving any requests.
     pub fn start(home: PathBuf) -> std::io::Result<Arc<Self>> {
+        Self::start_with(home, STORAGE_SCHEDULE)
+    }
+
+    fn start_with(home: PathBuf, schedule: Schedule) -> std::io::Result<Arc<Self>> {
         let stop = Arc::new(Stop::default());
+        let demand = Arc::new(Demand::default());
         let cached = Arc::new(Mutex::new(Cached {
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
             storage: Storage::pending(&home),
@@ -173,6 +279,7 @@ impl Runtime {
             },
             cached: cached.clone(),
             stop: stop.clone(),
+            demand: demand.clone(),
         });
         let process_cache = cached.clone();
         let process_stop = stop.clone();
@@ -200,10 +307,9 @@ impl Runtime {
         std::thread::Builder::new()
             .name("chan-storage-metrics".into())
             .spawn(move || {
-                loop {
-                    if stop.is_stopped() {
-                        break;
-                    }
+                let mut last_scan = None;
+                while demand.wait_for_scan(schedule, last_scan) {
+                    last_scan = Some(Instant::now());
                     let result = storage::scan(&home, &stop);
                     if stop.is_stopped() {
                         break;
@@ -215,17 +321,16 @@ impl Runtime {
                         Ok(storage) => cache.storage = storage,
                         Err(error) => cache.storage.error = Some(error.to_string()),
                     }
-                    drop(cache);
-                    if stop.wait(Duration::from_secs(60)) {
-                        break;
-                    }
                 }
             })?;
         Ok(runtime)
     }
 
     /// Copy cached samples newer than `since`, without performing collection.
+    /// A read keeps the chan-home walker running; until its next scan
+    /// completes, storage holds the last completed total or pending.
     pub fn view(&self, history: bool, since: Option<u64>) -> View {
+        self.demand.read();
         let cache = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         View {
             schema_version: 1,
@@ -451,7 +556,112 @@ mod tests {
             assert!(process.read_bytes.is_some());
             assert!(process.written_bytes.is_some());
         }
+        let demand = runtime.demand.clone();
         drop(runtime);
         assert!(stop.is_stopped());
+        assert!(demand.state.lock().unwrap().stopped);
+    }
+
+    #[test]
+    fn the_walker_starts_on_a_read_and_rests_after_a_quiet_period() {
+        let schedule = Schedule {
+            period: Duration::from_secs(60),
+            quiet: Duration::from_secs(300),
+        };
+        let boot = Instant::now();
+        let at = |secs| boot + Duration::from_secs(secs);
+        // No read yet: no walk at boot, however long the process has run.
+        assert_eq!(schedule.next(at(0), None, None), Walk::Rest);
+        assert_eq!(schedule.next(at(3600), None, None), Walk::Rest);
+        // The first read starts a scan at once.
+        assert_eq!(schedule.next(at(10), Some(at(10)), None), Walk::Now);
+        // While reads arrive, scans repeat each period.
+        assert_eq!(
+            schedule.next(at(30), Some(at(30)), Some(at(10))),
+            Walk::After(Duration::from_secs(40))
+        );
+        assert_eq!(schedule.next(at(70), Some(at(69)), Some(at(10))), Walk::Now);
+        // The wait never outlasts the quiet deadline.
+        assert_eq!(
+            schedule.next(at(340), Some(at(60)), Some(at(320))),
+            Walk::After(Duration::from_secs(20))
+        );
+        // Quiet for the whole period: the walker rests.
+        assert_eq!(
+            schedule.next(at(360), Some(at(60)), Some(at(320))),
+            Walk::Rest
+        );
+        assert_eq!(
+            schedule.next(at(900), Some(at(60)), Some(at(320))),
+            Walk::Rest
+        );
+        // A read after the quiet period starts a scan again at once.
+        assert_eq!(
+            schedule.next(at(900), Some(at(900)), Some(at(320))),
+            Walk::Now
+        );
+    }
+
+    #[test]
+    fn reads_drive_the_walker_and_storage_keeps_its_last_total_while_it_rests() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("file"), b"12345").unwrap();
+        let schedule = Schedule {
+            period: Duration::from_millis(50),
+            quiet: Duration::from_millis(300),
+        };
+        let runtime = Runtime::start_with(home.path().into(), schedule).unwrap();
+        // Peek at the cache without counting as a read.
+        let storage = || runtime.cached.lock().unwrap().storage.clone();
+        let wait_for = |what: &str, done: &dyn Fn(&Storage) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let storage = storage();
+                if done(&storage) {
+                    return storage;
+                }
+                assert!(Instant::now() < deadline, "{what}: {storage:?}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(storage().sampled_at_ms, None, "walked before any read");
+        let first = runtime.view(false, None);
+        assert_eq!(first.storage.logical_bytes, None, "pending, not zero");
+        let scanned = wait_for("no scan after a read", &|s| s.sampled_at_ms.is_some());
+        assert_eq!(scanned.logical_bytes, Some(5));
+        // Reads keep the walker scanning.
+        let read_until = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < read_until {
+            runtime.view(false, None);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            storage().sampled_at_ms > scanned.sampled_at_ms,
+            "no rescan while read"
+        );
+        // No reads: once the quiet period ends the walker rests and the last
+        // total stays, with its timestamp.
+        std::thread::sleep(Duration::from_millis(1500));
+        let rested = storage();
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            storage().sampled_at_ms,
+            rested.sampled_at_ms,
+            "walked while quiet"
+        );
+        assert_eq!(rested.logical_bytes, Some(5));
+        // A read after the quiet period restarts it.
+        std::fs::write(home.path().join("more"), b"123").unwrap();
+        let view = runtime.view(false, None);
+        assert_eq!(
+            view.storage.logical_bytes,
+            Some(5),
+            "last total until the scan"
+        );
+        let rescanned = wait_for("no scan after the quiet period", &|s| {
+            s.sampled_at_ms > rested.sampled_at_ms
+        });
+        assert_eq!(rescanned.logical_bytes, Some(8));
     }
 }
