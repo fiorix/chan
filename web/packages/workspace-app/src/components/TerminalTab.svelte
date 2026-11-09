@@ -168,6 +168,7 @@
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
+  import { FindAnnouncer } from "../terminal/findAnnouncer";
   import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
@@ -445,6 +446,14 @@
       ? ""
       : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
   );
+  /// The find bar's live region: the count as a screen reader hears it,
+  /// once it settles rather than on every frame the shown count changes.
+  let findAnnounced = $state("");
+  const findAnnouncer = new FindAnnouncer((text) => {
+    findAnnounced = text;
+  });
+  $effect(() => findAnnouncer.update(findCountText, !findCount?.partial));
+  $effect(() => () => findAnnouncer.dispose());
   /// Matches the search addon decorates and counts; past it its list stops.
   const FIND_HIGHLIGHT_LIMIT = 1000;
   /// Whether the xterm search addon holds a search the bar started: set as
@@ -3439,7 +3448,8 @@
         }}
         onkeydown={onFindKeydown}
       />
-      <span class="find-count" role="status" aria-label="find matches">{findCountText}</span>
+      <span class="find-count" aria-hidden="true">{findCountText}</span>
+      <span class="find-announce" role="status" aria-label="find matches">{findAnnounced}</span>
     </div>
   {/if}
   {#if active && tab.cliReloadNotice}
@@ -3616,8 +3626,8 @@
   .find:focus {
     border-color: var(--link);
   }
-  /* Always in the tree so the live region exists before it fills; it takes
-     no room while blank. */
+  /* The count as shown, on every frame it changes; it takes no room while
+     blank. Screen readers hear .find-announce instead. */
   .find-count {
     margin-left: 6px;
     color: var(--text-secondary);
@@ -3627,6 +3637,19 @@
   }
   .find-count:empty {
     margin-left: 0;
+  }
+  /* The live region: in the tree from the bar's first frame so a screen
+     reader hears it fill, and out of sight and of the bar's layout. */
+  .find-announce {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .terminal-host {
     flex: 1;

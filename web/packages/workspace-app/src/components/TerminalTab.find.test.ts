@@ -21,7 +21,8 @@
 //    match, fed by the addon's onDidChangeResults: `0 of 0` without a
 //    match, `? of 1000+` at the highlight limit, blank once the bar
 //    closes or the query empties, and kept blank when the addon's refresh
-//    after output fires after that.
+//    after output fires after that. A screen reader hears the count through
+//    a status region that takes it once it settles, not on every frame.
 // 5. Ghostty. A ghostty terminal has the same bar, menu row, commands,
 //    direction and count, found by libghostty-vt's search on chan's
 //    binding: the active match is ghostty-web's selection, the total
@@ -52,7 +53,8 @@ import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
-import { VtSearch, type VtTerminal } from "../terminal/ghosttyVt";
+import { FIND_ANNOUNCE_INTERVAL_MS } from "../terminal/findAnnouncer";
+import { type SearchState, VtSearch, type VtTerminal } from "../terminal/ghosttyVt";
 
 type ResultsEvent = { resultIndex: number; resultCount: number };
 
@@ -415,6 +417,11 @@ function countElement(): HTMLElement | null {
   return document.querySelector(".terminal-find .find-count");
 }
 
+/// The bar's live region, what a screen reader hears of the count.
+function statusRegion(): HTMLElement | null {
+  return document.querySelector('.terminal-find [role="status"]');
+}
+
 function callNames(): string[] {
   return calls.map((c) => c.name);
 }
@@ -543,14 +550,17 @@ describe("terminal find count", () => {
     expect(countElement()?.textContent).toBe("3 of 3");
   });
 
-  test("is a named status region", async () => {
+  test("is heard through a named status region, the shown count hidden from screen readers", async () => {
     await renderTerminal(terminalTab(), true);
     await openFindWithQuery("needle");
     await reportResults({ resultIndex: 0, resultCount: 1 });
 
-    const count = countElement();
-    expect(count?.getAttribute("role")).toBe("status");
-    expect(count?.getAttribute("aria-label")).toBe("find matches");
+    const region = statusRegion();
+    expect(region?.getAttribute("aria-label")).toBe("find matches");
+    expect(region?.textContent, "a final count is heard at once").toBe("1 of 1");
+    expect(countElement()?.textContent).toBe("1 of 1");
+    expect(countElement()?.getAttribute("aria-hidden")).toBe("true");
+    expect(countElement()?.getAttribute("role")).toBeNull();
   });
 
   test("reads 0 of 0 when nothing matches", async () => {
@@ -965,6 +975,76 @@ describe("terminal find on the ghostty backend", () => {
     await tick();
     expect(countElement()?.textContent).toBe("1 of 3");
     expect(selection(term)).toEqual(match(5));
+  });
+
+  // A screen reader speaks each change to a live region; the shown count
+  // follows every frame of a scan.
+  test("the status region is silent while the scan runs and says the count it settles on", async () => {
+    // Three thousand rows above NEEDLES, a needle on every tenth: the scan
+    // takes many frames.
+    const many = Array.from({ length: 3000 }, (_, i) => `row ${i}${i % 10 === 5 ? " needle" : ""}`).join("\r\n");
+    const term = await renderGhostty(`${many}\r\n${NEEDLES.slice(NEEDLES.indexOf("a"))}`);
+    const frames = holdFrames();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireCommand("app.find.open");
+      await tick();
+      await tick();
+      // One unit of the core's scan per frame: each clock read is past the
+      // last frame's budget.
+      let clock = 0;
+      vi.spyOn(performance, "now").mockImplementation(() => (clock += 5));
+      const states = vi.spyOn(VtSearch.prototype, "state");
+      typeQuery(findInput()!, "needle");
+      /// Per frame: the count of the search state find read last, the count
+      /// shown and the count heard.
+      const read: string[] = [];
+      const shown: string[] = [];
+      const heard: string[] = [];
+      while (frames.pending()) {
+        frames.frame();
+        await tick();
+        const state = states.mock.results.at(-1)!.value as SearchState;
+        read.push(`${state.index! + 1} of ${state.total}${state.complete ? "" : "+"}`);
+        shown.push(countElement()!.textContent!);
+        heard.push(statusRegion()!.textContent!);
+      }
+      const total = term.wasmTerm.plainText()!.split("needle").length - 1;
+      expect(shown, "the shown count is every frame's own").toEqual(read);
+      expect(new Set(shown).size, "and it grew over the scan").toBeGreaterThan(3);
+      expect(shown.at(-1)).toBe(`1 of ${total}`);
+      expect(heard.slice(0, -1).every((text) => text === ""), "nothing heard while partial").toBe(true);
+      expect(heard.at(-1), "the settled count heard once the scan completes").toBe(`1 of ${total}`);
+      expect(selection(term)).toEqual(match(3005));
+
+      // Enter steps at once on the screen; the region holds the step until
+      // an interval has passed since it last spoke.
+      pressEnter(findInput()!);
+      await tick();
+      expect(countElement()?.textContent).toBe(`2 of ${total}`);
+      expect(statusRegion()?.textContent).toBe(`1 of ${total}`);
+      vi.advanceTimersByTime(FIND_ANNOUNCE_INTERVAL_MS);
+      await tick();
+      expect(statusRegion()?.textContent).toBe(`2 of ${total}`);
+
+      // A new query whose scan is held part way: its partial count is heard
+      // once it has stood for an interval.
+      vi.advanceTimersByTime(FIND_ANNOUNCE_INTERVAL_MS);
+      typeQuery(findInput()!, "row 29");
+      frames.frame();
+      await tick();
+      const partial = countElement()!.textContent!;
+      expect(partial).toMatch(/^1 of \d+\+$/);
+      expect(statusRegion()?.textContent).toBe(`2 of ${total}`);
+      vi.advanceTimersByTime(FIND_ANNOUNCE_INTERVAL_MS - 1);
+      await tick();
+      expect(statusRegion()?.textContent).toBe(`2 of ${total}`);
+      vi.advanceTimersByTime(1);
+      await tick();
+      expect(statusRegion()?.textContent).toBe(partial);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("Enter steps to older output and Shift+Enter to newer", async () => {
