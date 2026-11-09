@@ -1,6 +1,6 @@
 # A shared devserver's root link refuses the people it is shared with
 
-Status: raised on 2026-11-08 from the reading behind the manual and design drift item, which found the account page's Copy link comment claiming a safety the root does not have; accepted by the owner for v0.127.0 on 2026-11-08; not started.
+Status: raised on 2026-11-08 from the reading behind the manual and design drift item, which found the account page's Copy link comment claiming a safety the root does not have; accepted by the owner for v0.127.0 on 2026-11-08; built on `fix/shared-devserver-root-admits-grantees` (`1f8340737`, five commits) and merged into the integration branch as `13f6e6e2e` on 2026-11-09. A read-only review at the merge found no admission defect: the root now runs the per-workspace landing's check, decided by profile on every request (the owner, or an accepted grantee of that exact devserver), and a refusal is byte-identical to an unknown handle's; it noted that Open on a shared devserver shows while the devserver is offline and leads to identity's bare not-found. At `13f6e6e2e` the gateway block and `make web-check` are green, so acceptance 2 holds; acceptance 1's identity tests need PostgreSQL and run first in Gateway CI at the next pushed tip, and acceptance 3's `sharedroot` scenario runs real devservers and PostgreSQL, so it waits on an isolated guest.
 
 ## What is there now
 
