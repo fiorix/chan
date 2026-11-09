@@ -11339,7 +11339,8 @@ mod tests {
             /// A boot restore parked on held roots, with two rows queued behind
             /// them: `relinked`, whose root moved under a symlink after it was
             /// registered, and `plain`. Each field holds a row's stored root, the
-            /// spelling its overlay on-row uses.
+            /// spelling its overlay on-row uses. [`HeldRestore::unheld`] lays
+            /// out the same rows with no restore running and no root held.
             struct HeldRestore {
                 runtime: tokio::runtime::Runtime,
                 state: Arc<AppState>,
@@ -11356,6 +11357,18 @@ mod tests {
 
             impl HeldRestore {
                 fn new() -> Self {
+                    Self::build(true)
+                }
+
+                /// The same rows, all on, on a desktop whose roots all answer
+                /// and that runs no restore: a forget here costs what its own
+                /// work costs on this host, with no wait a hung root or a held
+                /// restore could add.
+                fn unheld() -> Self {
+                    Self::build(false)
+                }
+
+                fn build(held: bool) -> Self {
                     use std::os::unix::fs::symlink;
 
                     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -11400,21 +11413,26 @@ mod tests {
                     }
                     let state = empty_state();
                     assert!(state.embedded.set(embedded).is_ok(), "fresh state");
-                    let stalls: Vec<_> = hung_roots.iter().map(root_stall::stall).collect();
                     let app = tauri::test::mock_app();
-                    let restoring = {
-                        let handle = runtime.handle().clone();
-                        let app_handle = app.handle().clone();
-                        let state = Arc::clone(&state);
-                        std::thread::spawn(move || {
-                            let queued = queue_boot_restore(&state);
-                            handle.block_on(restore_on_workspaces(app_handle, state, queued))
-                        })
+                    let (stalls, restoring) = if held {
+                        let stalls: Vec<_> = hung_roots.iter().map(root_stall::stall).collect();
+                        let restoring = {
+                            let handle = runtime.handle().clone();
+                            let app_handle = app.handle().clone();
+                            let state = Arc::clone(&state);
+                            std::thread::spawn(move || {
+                                let queued = queue_boot_restore(&state);
+                                handle.block_on(restore_on_workspaces(app_handle, state, queued))
+                            })
+                        };
+                        assert!(
+                            stalls[0].wait_entered(std::time::Duration::from_secs(10)),
+                            "fixture: the restore never reached the hung root"
+                        );
+                        (stalls, Some(restoring))
+                    } else {
+                        (Vec::new(), None)
                     };
-                    assert!(
-                        stalls[0].wait_entered(std::time::Duration::from_secs(10)),
-                        "fixture: the restore never reached the hung root"
-                    );
                     Self {
                         runtime,
                         state,
@@ -11423,7 +11441,7 @@ mod tests {
                         plain: plain_root,
                         relinked_now: moved.join("ws"),
                         stalls,
-                        restoring: Some(restoring),
+                        restoring,
                         app,
                         _dirs: std::iter::once(config)
                             .chain(hung_dirs)
@@ -11588,11 +11606,16 @@ mod tests {
             /// The budget is read off what the forget's lookups waited on the
             /// stalled rows, the only waits a hung root adds to its answer:
             /// each lookup that gave up on them records the time it waited,
-            /// from the clock, and that time must fit the CLI's wait. The
-            /// forget's own work and registry writes are not the hung roots'
-            /// and stretch with a loaded host, so the wall-clock bound only
-            /// decides how soon a forget that waits on a hung root without a
-            /// bound reports.
+            /// from the clock, and that time must fit the CLI's wait. It is
+            /// the lookup's two-second budget and the wake that ends it; the
+            /// second left of the CLI's three is the product's own room for
+            /// the rest of the reply, so a host that spends it on one wake
+            /// misses the reply too. The forget's own work and registry
+            /// writes are not the hung roots' and stretch with a loaded host,
+            /// so they are bounded against control forgets timed on the same
+            /// host in the same run, with no hung root and no held restore.
+            /// The wall-clock bound only decides how soon a forget that waits
+            /// on a hung root without a bound reports.
             #[test]
             fn a_relinked_forget_answers_in_the_handoff_reply_budget() {
                 let held = HeldRestore::new();
@@ -11614,37 +11637,40 @@ mod tests {
                 let state = Arc::clone(&held.state);
                 let runtime = held.runtime.handle().clone();
                 let path = held.relinked_now.clone();
-                // The control: a forget of the plain row beside the same held
-                // restore, which names the root its row stores and so makes no
-                // lookup. Its time is what a forget's own work costs on this
-                // host in this run.
-                let control_marks = lookup_marks(&held.stalls);
-                let (control, control_took) = {
-                    let app = held.app.handle().clone();
-                    let state = Arc::clone(&held.state);
-                    let runtime = held.runtime.handle().clone();
-                    let plain = PathBuf::from(&held.plain);
+                // The control: forgets of plain rows by the roots their rows
+                // store, on a desktop with the same rows and no held restore
+                // or hung root, so they make no lookup and share no wait
+                // with what the relinked forget runs beside. Their time is
+                // what a forget's own work costs on this host in this run.
+                // One runs before the relinked forget and one after, and the
+                // slower is kept, so a load that changes during the run
+                // weighs on the control as on the forget it bounds.
+                let unheld = HeldRestore::unheld();
+                let control_forget = |stored: &str| {
                     let started = std::time::Instant::now();
-                    let outcome = held.stalls[0].finishes_beside(
-                        "forgetting the plain root",
-                        HEALTHY_ROOT_BOUND,
-                        move || {
-                            runtime.block_on(close_workspace_from_handoff(app, state, plain, true))
-                        },
+                    let outcome = unheld.runtime.block_on(async {
+                        tokio::time::timeout(
+                            HEALTHY_ROOT_BOUND,
+                            close_workspace_from_handoff(
+                                unheld.app.handle().clone(),
+                                Arc::clone(&unheld.state),
+                                PathBuf::from(stored),
+                                true,
+                            ),
+                        )
+                        .await
+                    });
+                    let took = started.elapsed();
+                    assert!(
+                        matches!(
+                            outcome,
+                            Ok(Ok(chan_server::WorkspaceLifecycleOutcome::Completed))
+                        ),
+                        "fixture: the control forget of {stored}: {outcome:?}"
                     );
-                    (outcome, started.elapsed())
+                    took
                 };
-                assert_eq!(
-                    control,
-                    Ok(chan_server::WorkspaceLifecycleOutcome::Completed),
-                    "fixture: the control forget"
-                );
-                let control_work = control_took.saturating_sub(
-                    lookups_since(&held.stalls, &control_marks)
-                        .iter()
-                        .map(|(_, waited)| *waited)
-                        .sum(),
-                );
+                let control_before = control_forget(&unheld.plain);
                 let marks = lookup_marks(&held.stalls);
                 let started = std::time::Instant::now();
                 let outcome = held.stalls.first().expect("hung root").finishes_beside(
@@ -11653,6 +11679,7 @@ mod tests {
                     move || runtime.block_on(close_workspace_from_handoff(app, state, path, true)),
                 );
                 let took = started.elapsed();
+                let control_work = control_before.max(control_forget(&unheld.hung_roots[0]));
                 assert_eq!(
                     outcome,
                     Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
@@ -11675,8 +11702,15 @@ mod tests {
                     cli_reply_bound()
                 );
                 // The rest of the forget's time is its own work, which the
-                // control measured on this host; a wait the stalled rows cost
-                // it that no lookup recorded shows up here.
+                // control measured on this host; a wait no lookup recorded,
+                // whether the held restore or the relinked path costs it,
+                // shows up here. Four times the control takes the host's
+                // swings between the runs. The half second covers what the
+                // relinked forget does and the plain one does not (it
+                // resolves its moved path and probes the healthy rows) and
+                // one scheduling stall; it is half of what the reply budget
+                // leaves past the lookup's, so a wait that slips under it
+                // still leaves the reply inside the budget on an idle host.
                 let work = took.saturating_sub(waited);
                 eprintln!(
                     "relinked forget: took {took:?}, lookup waited {waited:?}, work {work:?}; control work {control_work:?}"
