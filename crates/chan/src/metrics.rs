@@ -17,13 +17,13 @@ pub(crate) struct MetricsArgs {
     /// Omit to query the devserver belonging to this CHAN_HOME.
     #[arg(long)]
     pub url: Option<String>,
-    /// Bearer for an explicit URL; can also be set in CHAN_METRICS_TOKEN.
-    #[arg(
-        long,
-        env = "CHAN_METRICS_TOKEN",
-        hide_env_values = true,
-        requires = "url"
-    )]
+    /// Bearer for an explicit URL. With --url and no --token,
+    /// CHAN_METRICS_TOKEN supplies it; without --url the variable is
+    /// ignored and the local devserver's own bearer is used.
+    // Read in `url_token`, not through clap's `env`: clap counts an env
+    // value as given, so an exported variable would trip `requires = "url"`
+    // on every plain `chan metrics`.
+    #[arg(long, requires = "url")]
     pub token: Option<String>,
     /// Emit the shared metrics schema as JSON.
     #[arg(long)]
@@ -66,13 +66,18 @@ impl Client {
         })
     }
 
+    /// The metrics URL and bearer to read, resolved afresh on every read: the
+    /// activated adapter can outlive a server restart, port change or token
+    /// rotation.
+    fn target(&self) -> Result<(reqwest::Url, Option<String>)> {
+        match &self.args.url {
+            Some(raw) => explicit_target(raw, url_token(self.args.token.as_deref()).as_deref()),
+            None => local_target(),
+        }
+    }
+
     pub(crate) async fn read(&self, history: bool, since: Option<u64>) -> Result<View> {
-        // Resolve on every read: the activated adapter can outlive a server
-        // restart, port change or token rotation.
-        let (url, token) = match &self.args.url {
-            Some(raw) => explicit_target(raw, self.args.token.as_deref())?,
-            None => local_target()?,
-        };
+        let (url, token) = self.target()?;
         let mut request = self
             .http
             .get(url)
@@ -143,6 +148,16 @@ fn metrics_url(mut url: reqwest::Url) -> reqwest::Url {
     url.set_query(None);
     url.set_fragment(None);
     url
+}
+
+/// The bearer an explicit URL is read with when `--token` gave none: the
+/// CHAN_METRICS_TOKEN variable, which applies only beside `--url`.
+fn url_token(flag: Option<&str>) -> Option<String> {
+    flag.map(str::to_owned).or_else(|| {
+        std::env::var("CHAN_METRICS_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty())
+    })
 }
 
 fn explicit_target(raw: &str, token: Option<&str>) -> Result<(reqwest::Url, Option<String>)> {
@@ -499,6 +514,9 @@ mod tests {
             format!(r#"{{"devserver_token":"tok","port":{stale_port}}}"#),
         )
         .unwrap();
+        // The variable belongs to --url reads; the local read keeps the
+        // devserver's own bearer.
+        std::env::set_var("CHAN_METRICS_TOKEN", "from-env");
         let (url, token) = local_target().unwrap();
         assert_eq!(
             url.as_str(),
@@ -509,6 +527,50 @@ mod tests {
         drop(listener);
         let error = local_target().unwrap_err().to_string();
         assert!(error.contains("no devserver is listening"), "{error}");
+    }
+
+    #[test]
+    fn the_token_variable_applies_only_beside_an_explicit_url() {
+        use clap::Parser;
+        let parse =
+            |argv: &[&str]| match crate::cli::Cli::try_parse_from(argv).map(|cli| cli.command) {
+                Ok(crate::cli::Command::Metrics(args)) => Ok(args),
+                Ok(other) => panic!("not metrics: {other:?}"),
+                Err(error) => Err(error),
+            };
+        // The guard owns CHAN_* and restores them; tests reading this
+        // variable hold the same permit.
+        let _env = crate::test_env::ChanTestEnv::new();
+        std::env::set_var("CHAN_METRICS_TOKEN", "from-env");
+        // Exported, it neither breaks a local read nor stands in for --token.
+        for argv in [
+            ["chan", "metrics"].as_slice(),
+            ["chan", "metrics", "--varlink"].as_slice(),
+        ] {
+            let args = parse(argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+            assert_eq!(args.token, None);
+        }
+        // Beside --url it supplies the bearer, and --token still wins.
+        let args = parse(&["chan", "metrics", "--url", "http://example.test/"]).unwrap();
+        let (_, token) = Client::new(args).unwrap().target().unwrap();
+        assert_eq!(token.as_deref(), Some("from-env"));
+        let args = parse(&[
+            "chan",
+            "metrics",
+            "--url",
+            "http://example.test/",
+            "--token",
+            "flag",
+        ])
+        .unwrap();
+        let (_, token) = Client::new(args).unwrap().target().unwrap();
+        assert_eq!(token.as_deref(), Some("flag"));
+        // An explicit --token still needs --url.
+        let error = parse(&["chan", "metrics", "--token", "flag"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     /// The child half of `a_local_read_ignores_a_proxy_in_the_environment`.
