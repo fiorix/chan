@@ -2556,6 +2556,9 @@ pub(crate) mod tests {
         without_self_revoke: bool,
         /// Runs inside each self-revoke before it answers.
         on_revoke: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Holds each redeem once it is received, handing this channel the
+        /// sender that releases its answer.
+        held: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
     }
 
     /// A stand-in identity origin: the redeem answering `config.answers` in
@@ -2594,16 +2597,23 @@ pub(crate) mod tests {
         let log = Arc::clone(&requests);
         let answers = Arc::new(config.answers);
         let redeems = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hold = config.held;
         let redeem = axum::routing::post(move |body: String| {
             let seen = Arc::clone(&seen);
             let log = Arc::clone(&log);
             let n = redeems.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let answer = answers[n.min(answers.len() - 1)].clone();
+            let hold = hold.clone();
             async move {
                 log.lock()
                     .unwrap()
                     .push("POST /desktop/authorize/redeem".into());
                 seen.lock().unwrap().push(body);
+                if let Some(hold) = hold {
+                    let (release, released) = tokio::sync::oneshot::channel();
+                    hold.send(release).unwrap();
+                    let _ = released.await;
+                }
                 axum::Json(answer)
             }
         });
@@ -3063,34 +3073,6 @@ pub(crate) mod tests {
             assert_eq!(run.fabric.tunnels(), 0);
             run.finish().await;
         }
-    }
-
-    #[tokio::test]
-    async fn cancelled_redemption_joins_before_held_response_and_stores_nothing() {
-        let (origin, mut requests, server) = held_redemption().await;
-        let f = SigninFixture::new(&origin);
-        let events = auth_events(&f.app);
-        *f.attempt.signin_hooks.store.lock().unwrap() =
-            Some(Box::new(|_, _| panic!("cancelled redemption cannot store")));
-        let mut callback = tokio::spawn(f.callback("code=test-code&state=nonce-1"));
-        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        f.cancel().await;
-        let joined = tokio::time::timeout(Duration::from_secs(1), &mut callback).await;
-        let _ = release.send(());
-        callback.abort();
-        server.abort();
-        assert!(
-            joined.is_ok(),
-            "cancel must join redemption before response release"
-        );
-        joined.unwrap().unwrap();
-        assert!(
-            events.try_recv().is_err(),
-            "cancelled redemption emits no auth event"
-        );
     }
 
     #[tokio::test]
@@ -3938,6 +3920,84 @@ pub(crate) mod tests {
                 .any(|line| line.contains("gateway sign-in cancelled")),
             "{}",
             lines.text()
+        );
+        assert_revoke_logged(&lines);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_during_the_redeem_waits_for_its_answer_and_revokes_the_token() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let (held, mut redeems) = tokio::sync::mpsc::unbounded_channel();
+        let run = enrolling_fixture_with(
+            StandIn {
+                answers: vec![redeem_answer(Some(redeem_params(WG_SERVER_KEY)))],
+                held: Some(held),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        let key = run.row().wireguard_public_key;
+        let events = auth_events(&run.f.app);
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(|_, _| {
+            Err("a redeem cancelled in flight reaches no store".into())
+        }));
+        let callback = tokio::spawn(run.callback(true));
+        // identity holds the code and mints as it answers: the Disconnect
+        // lands before that answer arrives.
+        let release = tokio::time::timeout(Duration::from_secs(5), redeems.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), run.f.cancel())
+            .await
+            .expect("the cancel does not wait for the redeem");
+        let awaited = !callback.is_finished();
+        // A callback that dropped the redeem has closed its connection, and
+        // the stand-in's release with it.
+        let _ = release.send(());
+        tokio::time::timeout(Duration::from_secs(10), callback)
+            .await
+            .expect("the callback settles")
+            .unwrap();
+
+        assert_eq!(
+            run.requests(),
+            [
+                "POST /desktop/authorize/redeem",
+                "DELETE /desktop/v1/token pat-wg"
+            ],
+            "one revoke, presenting the token the cancelled redeem minted"
+        );
+        assert!(awaited, "the sign-in awaited the redeem's answer");
+        assert!(run.stored().is_none(), "no token is stored");
+        assert!(!run.conf().exists(), "no client file is written");
+        let row = run.row();
+        assert_eq!(row.wireguard, None);
+        assert_eq!(row.wireguard_enrolled_key, None);
+        assert_eq!(
+            row.wireguard_public_key, key,
+            "the key stays to enroll again"
+        );
+        assert_eq!(run.fabric.tunnels(), 0);
+        assert!(
+            events.try_recv().is_err(),
+            "a cancelled sign-in emits no auth event"
+        );
+        assert!(
+            lines
+                .infos()
+                .iter()
+                .any(|line| line.contains("gateway sign-in cancelled")),
+            "{}",
+            lines.text()
+        );
+        assert!(
+            run.f.state.gateway_manager.view("gw-keychain").is_none(),
+            "the cancelled callback must not reconnect"
         );
         assert_revoke_logged(&lines);
         run.finish().await;

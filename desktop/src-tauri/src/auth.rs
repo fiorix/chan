@@ -1035,14 +1035,12 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             let _ = shutdown.send(true);
             gateway.attempt.accept_callback();
             let state = Arc::clone(&app.state::<Arc<crate::AppState>>());
-            let Some(redeemed) = gateway
-                .attempt
-                .wait(redeem_inner(&identity_origin, &code, &code_verifier))
-                .await
-            else {
-                return;
-            };
-            let mut redeemed = match redeemed {
+            // Awaited through a cancel, not raced against it: identity mints
+            // the token as it answers, so a dropped answer would leave a token
+            // nobody can revoke. A cancelled attempt's commit refuses below,
+            // and that refusal revokes the token. The redeem's own timeout
+            // bounds the wait.
+            let mut redeemed = match redeem_inner(&identity_origin, &code, &code_verifier).await {
                 Ok(redeemed) => redeemed,
                 Err(error) => {
                     fail_signin(&app, &state, &gateway, &error);
