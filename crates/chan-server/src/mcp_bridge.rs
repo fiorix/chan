@@ -398,6 +398,24 @@ mod tests {
     /// long the release takes on a loaded host is not measured.
     const HANG_GUARD: Duration = Duration::from_secs(60);
 
+    /// Wait, at most half the hang guard, for the workspace behind `weak` to
+    /// be let go: no owner left and its writer lock free. How long after
+    /// `from` that was, or `None` when it never was.
+    async fn let_go_since(
+        weak: &std::sync::Weak<chan_workspace::Workspace>,
+        lock_dir: &Path,
+        from: std::time::Instant,
+    ) -> Option<Duration> {
+        tokio::time::timeout(HANG_GUARD / 2, async {
+            while weak.strong_count() != 0 || !chan_workspace::lock::is_free(lock_dir) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .ok()
+        .map(|()| from.elapsed())
+    }
+
     fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
         let dir = tempfile::tempdir()?;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -666,14 +684,28 @@ mod tests {
             let mut reply = String::new();
             read.read_line(&mut reply).await.unwrap();
             assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
-            drop(cell.lock().unwrap().take());
             // The client stays connected and idle until after this wait, so
-            // a session that pins the workspace pins it past the guard.
-            tokio::time::timeout(HANG_GUARD / 2, async {
-                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
-                    tokio::task::yield_now().await;
-                }
-            }).await.expect("idle MCP session retains the workspace cell's owner");
+            // a session that pins the workspace pins it past the guard, and
+            // one that keeps it a while lets it go later than the control:
+            // the same workspace reopened and let go where no session can
+            // reach it, timed in the same run.
+            let dropped = std::time::Instant::now();
+            drop(cell.lock().unwrap().take());
+            let released = let_go_since(&weak, &lock_dir, dropped)
+                .await
+                .expect("idle MCP session retains the workspace cell's owner");
+            let reopened = library.open_workspace(root.path()).unwrap();
+            let unreached = Arc::downgrade(&reopened);
+            let dropped = std::time::Instant::now();
+            drop(reopened);
+            let control = let_go_since(&unreached, &lock_dir, dropped)
+                .await
+                .expect("fixture: a workspace no session reaches was not let go");
+            assert!(
+                crate::doc_sessions::held_cell::at_the_controls_pace(released, control),
+                "an idle MCP session kept the workspace cell's owner: it was let go \
+                 {released:?} after the cell, against {control:?} with no session"
+            );
             let _reopened = library.open_workspace(root.path()).unwrap();
             drop(handle);
         }).await.unwrap();
@@ -695,20 +727,32 @@ mod tests {
                 .await
                 .unwrap();
             handle.accepted.acquire().await.unwrap().forget();
-            drop(handle);
             // The silent client stays connected until the test ends, so a
             // session the unmount does not stop keeps the workspace past
-            // the guard.
-            let released = tokio::time::timeout(HANG_GUARD / 2, async {
-                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await;
+            // the guard, and one it stops late lets it go later than the
+            // control: the same unmount with no client, timed in the same
+            // run.
+            let unmounted = std::time::Instant::now();
+            drop(handle);
+            let released = let_go_since(&weak, &lock_dir, unmounted).await;
+            let Some(released) = released else {
+                panic!(
+                    "MCP client retains {} workspace handles",
+                    weak.strong_count()
+                );
+            };
+            let reopened = library.open_workspace(root.path()).unwrap();
+            let unreached = Arc::downgrade(&reopened);
+            let handle = start(pick_socket_path(), move || Some(reopened.clone())).unwrap();
+            let unmounted = std::time::Instant::now();
+            drop(handle);
+            let control = let_go_since(&unreached, &lock_dir, unmounted)
+                .await
+                .expect("fixture: an unmount with no client kept its workspace");
             assert!(
-                released.is_ok(),
-                "MCP client retains {} workspace handles",
-                weak.strong_count()
+                crate::doc_sessions::held_cell::at_the_controls_pace(released, control),
+                "the unmount let a silent client's workspace go {released:?} after it, \
+                 against {control:?} with no client"
             );
             let _reopened = library.open_workspace(root.path()).unwrap();
         })
