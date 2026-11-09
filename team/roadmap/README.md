@@ -33,11 +33,11 @@ On 2026-11-09 the owner added live process metrics, built directly with an agent
 
 The owner added another the same day: the ghostty terminals re-pinned from a pre-1.0 `tip` build of libghostty-vt to the signed 1.0.0 release, with find on ghostty terminals and xterm's find aligned to it, ordered on 2026-11-08 and merged with this row ([ghostty1]).
 
+On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
+
 | Item | State | Next |
 | --- | --- | --- |
-| [one WireGuard ingress per proxy node][wgnode] | not started | decision |
 | [time-bound tests go red on a loaded host][timebound] | not started | design |
-| [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | not started | design |
 | [no CI job runs the gateway packaging and roles suites][gwci] | built | owner |
 | [a shared devserver's root link refuses its grantees][grantroot] | built | CI run |
@@ -45,9 +45,7 @@ The owner added another the same day: the ghostty terminals re-pinned from a pre
 | [a running chan shows no live process metrics][metrics] | built | guest run |
 | [ghostty terminals run on a pre-1.0 core][ghostty1] | built | follow-ups |
 
-[wgnode]: v0.127.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
-[systemca]: v0.127.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
 [gwci]: v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
 [grantroot]: v0.127.0/a-shared-devservers-root-link-refuses-the-people-it-is-shared-with.md
@@ -63,15 +61,21 @@ The owner added a second the same day, measured in those follow-ups: with the fi
 
 A third came the same day from the review of v0.127.0's live-metrics fixes: the CLI's calls to the local devserver (`chan ps`, the terminal drain, `rotate-token` and the health probes) build their HTTP client from the environment, so a proxy setting sends the devserver's token to the proxy; `chan metrics` was fixed in v0.127.0 alone, and the rest get one direct local client with the listener check `chan metrics` uses ([cliproxy]).
 
+The owner moved two more here from v0.127.0 the same day, both not started: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]), and the system CA store for the Rust TLS clients, read on three platforms ([systemca]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
 | [find frames run long at max scrollback][findfeed] | not started | design |
 | [local devserver calls go through a proxy][cliproxy] | not started | design |
+| [one WireGuard ingress per proxy node][wgnode] | not started | decision |
+| [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
 [cliproxy]: v0.128.0/the-clis-local-devserver-calls-go-through-a-proxy.md
+[wgnode]: v0.128.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
+[systemca]: v0.128.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
 
 ## Completed
 

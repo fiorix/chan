@@ -1,6 +1,6 @@
 # A desktop reaches every proxy node through one WireGuard ingress
 
-Status: raised by the owner on 2026-11-08 while planning the chan.app WireGuard rollout; proposed for v0.126.0 and moved to v0.127.0 by the owner on 2026-11-08; not started. Supersedes the v0.125.0 decision "one WireGuard ingress endpoint per gateway, served to the desktop by discovery and the redeem, with no list of ingress hosts distributed to desktops and more regions the operator's concern behind that one endpoint, and one tunnel per gateway row on the desktop" ([release-v0.125.0](../../release/release-v0.125.0.md), decisions, line 60).
+Status: raised by the owner on 2026-11-08 while planning the chan.app WireGuard rollout; proposed for v0.126.0 and moved to v0.127.0 by the owner on 2026-11-08; moved to v0.128.0 by the owner on 2026-11-09; not started. Supersedes the v0.125.0 decision "one WireGuard ingress endpoint per gateway, served to the desktop by discovery and the redeem, with no list of ingress hosts distributed to desktops and more regions the operator's concern behind that one endpoint, and one tunnel per gateway row on the desktop" ([release-v0.125.0](../../release/release-v0.125.0.md), decisions, line 60).
 
 Asked by the owner on 2026-11-08 after reading what a second proxy node would need under v0.125.0 ("with gw, are we funneling bidirectional traffic through that host? it'll become a bottleneck quickly"), and decided the same day: no v0.125.0 rollout on chan.app; each devserver-proxy node terminates its own WireGuard and the desktop reaches the node a devserver is connected to directly, in v0.126.0 ("i prefer to make the changes and release v126").
 
@@ -181,7 +181,7 @@ Each has a recommendation; the build can start on the recommended answers.
 - **Redeem:**
   - `EnrollmentParams` (`wireguard_keys.rs:68-78`) gains `ingresses`.
   - `prepare` (`:110-160`) compares the list with discovery's and validates each ingress's hosts against `allowed_ips` before anything is written. Today hosts are only checked at adopt, where a bad one fails silently into `last_error`.
-  - Coordinate with [patrevoke](a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md), which owns the same completion and commit path (`auth.rs:1015-1163`, `gateway.rs:223-234`): land one first and rebase the other.
+  - Coordinate with [patrevoke](../v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md), which owns the same completion and commit path (`auth.rs:1015-1163`, `gateway.rs:223-234`): land one first and rebase the other.
 - **Row:**
   - The enrolled shape stores the address set, `allowed_ips`, keepalive and the ingress list (`config.rs:119-181`), and keeps `<id>.key`.
   - Recommended: build each tunnel's `Config` in memory from the key file and the row, instead of one wg-quick file per ingress, so the private key stays in one owner-only file and a discovery reconcile writes no key material.
@@ -241,7 +241,7 @@ Each has a recommendation; the build can start on the recommended answers.
 
 ## Related items
 
-- [patrevoke](a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md): same redeem completion and credential commit. Its "no change to the redeem's answer shape" boundary needs amending for this item's additive fields.
-- [gwdefaults](../v0.126.0/the-gateway-setup-defaults-name-the-maintainers-deployment.md): the tunnel ingress shape (namespace apex or node apex). With the node apex, the devserver's tunnel host is inside each ingress's derived host map; with a shared apex behind a load balancer, it stays on the public path. Neither changes this item.
-- [gwci](no-ci-job-runs-the-gateway-packaging-and-roles-suites.md): this item changes configure.sh and the migration markers, which only those suites check.
+- [patrevoke](../v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md): same redeem completion and credential commit. Its "no change to the redeem's answer shape" boundary needs amending for this item's additive fields.
+- [gwdefaults](../done/the-gateway-setup-defaults-name-the-maintainers-deployment.md): the tunnel ingress shape (namespace apex or node apex). With the node apex, the devserver's tunnel host is inside each ingress's derived host map; with a shared apex behind a load balancer, it stays on the public path. Neither changes this item.
+- [gwci](../v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md): this item changes configure.sh and the migration markers, which only those suites check.
 - [systemca](the-rust-tls-clients-ignore-the-systems-ca-store.md): unchanged by this item. The desktop's and the agent's clients still trust the bundled roots only.
