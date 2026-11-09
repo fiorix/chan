@@ -27,7 +27,9 @@ chan metrics --json --watch
 chan metrics --url 'http://127.0.0.1:8787/workspace?t=TOKEN'
 ```
 
-Without `--url`, the command reads the devserver port and bearer belonging to `CHAN_HOME` and connects over IPv4 loopback. Use `--url` for a server bound only to another address. An explicit URL uses its launch token or `--token` / `CHAN_METRICS_TOKEN`; it never inherits the local devserver's bearer. `--watch --json` emits one JSON object per line. The CLI describes the target server, not the short-lived CLI process.
+Without `--url`, the command reads the devserver port and bearer belonging to `CHAN_HOME` and connects over IPv4 loopback. Use `--url` for a server bound only to another address.
+
+`--url` takes a server URL as chan prints it. A launcher or unprefixed `chan serve` URL (`http://HOST:PORT/?t=TOKEN`) reads the server root's `/api/metrics`; a tenant URL, as `chan serve --prefix` and the desktop print it (`http://HOST:PORT/PREFIX/index.html?t=TOKEN`) or as the prefix alone, reads that tenant's `/PREFIX/api/metrics`. An explicit URL uses its launch token or `--token` / `CHAN_METRICS_TOKEN`; it never inherits the local devserver's bearer. The CLI describes the target server, not the short-lived CLI process. `--watch --json` emits one JSON object per line.
 
 Authenticated `GET /api/metrics` is available on the launcher root and tenant routes. `?history=true` includes bounded history; `&since=N` selects sequences greater than N. `latest` is null before the first observation. Readers must discard old history when `identity.instanceId` changes. A sequence gap indicates samples no longer retained or observations that were not delivered. `schemaVersion` identifies the response contract.
 

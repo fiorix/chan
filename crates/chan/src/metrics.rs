@@ -56,7 +56,7 @@ impl Client {
     pub(crate) async fn read(&self, history: bool, since: Option<u64>) -> Result<View> {
         // Resolve on every read: the activated adapter can outlive a server
         // restart, port change or token rotation.
-        let (mut url, token) = match &self.args.url {
+        let (url, token) = match &self.args.url {
             Some(raw) => explicit_target(raw, self.args.token.as_deref())?,
             None => {
                 // Both port and bearer belong to this CHAN_HOME. A systemd
@@ -66,15 +66,11 @@ impl Client {
                 let token = chan_server::persisted_devserver_token()
                     .context("no local devserver token; start a devserver or use --url")?;
                 (
-                    reqwest::Url::parse(&format!("http://127.0.0.1:{port}/"))?,
+                    metrics_url(reqwest::Url::parse(&format!("http://127.0.0.1:{port}/"))?),
                     Some(token),
                 )
             }
         };
-        let path = format!("{}/api/metrics", url.path().trim_end_matches('/'));
-        url.set_path(&path);
-        url.set_query(None);
-        url.set_fragment(None);
         let mut request = self
             .http
             .get(url)
@@ -101,8 +97,25 @@ impl Client {
     }
 }
 
+/// The metrics route for a server URL as chan prints it: a launcher or
+/// unprefixed serve URL (`/?t=`) names the server root, and a tenant URL
+/// (`/<prefix>/index.html?t=`, or the prefix alone) names the tenant, whose
+/// routes are mounted under its prefix.
+fn metrics_url(mut url: reqwest::Url) -> reqwest::Url {
+    let path = url.path();
+    let base = path
+        .strip_suffix("/index.html")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    let path = format!("{base}/api/metrics");
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
 fn explicit_target(raw: &str, token: Option<&str>) -> Result<(reqwest::Url, Option<String>)> {
-    let mut url = reqwest::Url::parse(raw).context("invalid metrics URL")?;
+    let url = reqwest::Url::parse(raw).context("invalid metrics URL")?;
     anyhow::ensure!(
         matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
         "metrics URL must use HTTP or HTTPS"
@@ -116,9 +129,7 @@ fn explicit_target(raw: &str, token: Option<&str>) -> Result<(reqwest::Url, Opti
             .find(|(key, _)| key == "t")
             .map(|(_, value)| value.into_owned())
     });
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok((url, token))
+    Ok((metrics_url(url), token))
 }
 
 pub(crate) async fn cmd_metrics(args: MetricsArgs) -> Result<()> {
@@ -293,7 +304,7 @@ mod tests {
     #[test]
     fn explicit_targets_do_not_inherit_local_credentials_and_strip_launch_secrets() {
         let (url, token) = explicit_target("https://example.test/work?t=secret#x", None).unwrap();
-        assert_eq!(url.as_str(), "https://example.test/work");
+        assert_eq!(url.as_str(), "https://example.test/work/api/metrics");
         assert_eq!(token.as_deref(), Some("secret"));
         assert!(explicit_target("https://example.test/", None)
             .unwrap()
@@ -301,5 +312,58 @@ mod tests {
             .is_none());
         assert!(explicit_target("https://user:secret@example.test/", None).is_err());
         assert!(explicit_target("file:///tmp/x", None).is_err());
+    }
+
+    #[test]
+    fn explicit_targets_resolve_every_url_shape_chan_prints() {
+        let resolve = |raw: &str| explicit_target(raw, None).unwrap().0.to_string();
+        // `chan serve` and `chan serve --prefix`, printed by the one launch URL
+        // builder; a prefixed tenant's routes are mounted under its prefix.
+        let addr = "127.0.0.1:1234".parse().unwrap();
+        for (prefix, path) in [
+            ("", "/api/metrics"),
+            ("/notes", "/notes/api/metrics"),
+            ("/team/notes-1a2b", "/team/notes-1a2b/api/metrics"),
+        ] {
+            let printed = chan_server::ServeHandle {
+                addr,
+                prefix: prefix.into(),
+                token: Some("token".into()),
+            }
+            .launch_url();
+            assert_eq!(
+                resolve(&printed),
+                format!("http://127.0.0.1:1234{path}"),
+                "{printed}"
+            );
+        }
+        for (printed, resolved) in [
+            // The devserver's launcher URL and its marker line.
+            (
+                "http://127.0.0.1:8787/?t=tok",
+                "http://127.0.0.1:8787/api/metrics",
+            ),
+            ("http://127.0.0.1:8787", "http://127.0.0.1:8787/api/metrics"),
+            // The desktop's window and terminal tenants.
+            (
+                "http://127.0.0.1:4090/api/w-1/index.html?t=x&w=w-1",
+                "http://127.0.0.1:4090/api/w-1/api/metrics",
+            ),
+            (
+                "http://127.0.0.1:4090/terminal/index.html?t=x",
+                "http://127.0.0.1:4090/terminal/api/metrics",
+            ),
+            // The docs/metrics.md example, a tenant prefix without index.html.
+            (
+                "http://127.0.0.1:8787/workspace?t=TOKEN",
+                "http://127.0.0.1:8787/workspace/api/metrics",
+            ),
+            (
+                "http://127.0.0.1:8787/workspace/",
+                "http://127.0.0.1:8787/workspace/api/metrics",
+            ),
+        ] {
+            assert_eq!(resolve(printed), resolved, "{printed}");
+        }
     }
 }
