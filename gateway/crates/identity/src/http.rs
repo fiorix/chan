@@ -1589,7 +1589,7 @@ async fn share_landing_root(
     landing(state, session, owner, None, query).await
 }
 
-/// Shared body of `share_landing` and `share_landing_root`. A share link may carry `?d=` to pick one of the owner's devservers. Both forms validate the path and sanitize the selector. Without a session, they stash the share URL and 303 to sign-in. With a session, they resolve the owner first, apply the owner-only rule for the whole-devserver root, then resolve and refuse a missing or blocked caller. The per-workspace route admits an owner or grantee and signs `/{workspace}/`; the owner-only root signs `/`. Both mint against the controller row's tenant origin and return a no-store POST handoff.
+/// Shared body of `share_landing` and `share_landing_root`. A share link may carry `?d=` to pick one of the owner's devservers. Both forms validate the path and sanitize the selector. Without a session, they stash the share URL and 303 to sign-in. With a session, they resolve the owner first, then resolve and refuse a missing or blocked caller. A grant is the whole devserver, so both admit the same callers, the owner and every accepted grantee, through `resolve_entry_target`'s `devserver_access` check, and differ only in the path they sign: `/{workspace}/` for the per-workspace route and `/` for the root. Any other caller gets the not-found an unknown handle gets. Both mint against the controller row's tenant origin and return a no-store POST handoff.
 async fn landing(
     state: AppState,
     session: Session,
@@ -1634,20 +1634,15 @@ async fn landing(
         return Ok(Redirect::to("/").into_response());
     };
 
-    // Resolve the owner handle. 404 is the same shape as "no access" and
-    // "unknown devserver", so a stranger cannot probe a handle's existence.
+    // Resolve the owner handle. An unknown handle gets the same not-found
+    // response as "no access" and "unknown devserver", so the response alone
+    // does not tell a stranger whether a handle exists.
     let owner_user = state
         .cfg
         .profile_client
         .find_user_by_username(&owner)
         .await?
         .ok_or(Error::NotFound)?;
-
-    // Whole-devserver launcher mutation is owner-only. Grantees keep the
-    // per-workspace share landings (`/s/{owner}/{workspace}`).
-    if workspace.is_none() && uid != owner_user.id {
-        return Err(Error::NotFound);
-    }
 
     let caller = state
         .cfg

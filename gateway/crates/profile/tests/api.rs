@@ -2356,6 +2356,65 @@ async fn claim_sweep_fills_pending_grants() {
     app.cleanup().await;
 }
 
+/// Access follows the grant through its life: a grant whose email no
+/// sign-in has claimed yet admits nobody, the claim admits its grantee, and
+/// the owner's revoke takes that away again. Both refusals are the 404 a
+/// stranger gets, so identity's landings cannot tell the three apart.
+#[tokio::test]
+async fn devserver_access_follows_the_grant_through_claim_and_revoke() {
+    let app = TestApp::new().await;
+    let owner = mk_user(&app, "owner@x.com").await;
+    let stranger = mk_user(&app, "s@x.com").await;
+    let dsid = ds("a");
+    let (_, grant) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/devservers/{dsid}/grants"),
+            Some(json!({"grantee_email": "late@x.com"})),
+        )
+        .await;
+    let grant_id = grant["id"].as_str().unwrap().to_string();
+    // The account exists, but no sign-in has claimed the grant yet.
+    let late = mk_user(&app, "late@x.com").await;
+    let access = |caller: &str| format!("/v1/users/{owner}/devservers/{dsid}/access?as={caller}");
+    let refusal = app.req(Method::GET, &access(&stranger), None).await;
+    assert_eq!(refusal.0, StatusCode::NOT_FOUND);
+
+    assert_eq!(
+        app.req(Method::GET, &access(&late), None).await,
+        refusal,
+        "a grant not yet accepted"
+    );
+
+    let (_, v) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{late}/grants/claim"),
+            Some(json!({"emails": ["late@x.com"]})),
+        )
+        .await;
+    assert_eq!(v["claimed"], 1);
+    let (s, v) = app.req(Method::GET, &access(&late), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["access"], true);
+
+    let (s, _) = app
+        .req(
+            Method::DELETE,
+            &format!("/v1/users/{owner}/grants/{grant_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    assert_eq!(
+        app.req(Method::GET, &access(&late), None).await,
+        refusal,
+        "a revoked grant"
+    );
+
+    app.cleanup().await;
+}
+
 #[tokio::test]
 async fn list_owned_and_incoming() {
     let app = TestApp::new().await;
