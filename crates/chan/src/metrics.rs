@@ -49,12 +49,20 @@ pub(crate) struct Client {
 
 impl Client {
     pub(crate) fn new(args: MetricsArgs) -> Result<Self> {
+        let mut http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5));
+        // The local devserver is on this host and its bearer must reach only
+        // the listener `local_target` checked. reqwest otherwise takes the
+        // proxy from the environment (and on macOS and Windows the system),
+        // with no loopback exemption, and would hand the bearer to it. An
+        // explicit URL keeps the user's proxy, which a remote server may need.
+        if args.url.is_none() {
+            http = http.no_proxy();
+        }
         Ok(Self {
             args,
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(5))
-                .build()?,
+            http: http.build()?,
         })
     }
 
@@ -498,6 +506,121 @@ mod tests {
         drop(listener);
         let error = local_target().unwrap_err().to_string();
         assert!(error.contains("no devserver is listening"), "{error}");
+    }
+
+    /// The child half of `a_local_read_ignores_a_proxy_in_the_environment`.
+    /// Proxy variables are process-wide and every reqwest client reads them
+    /// when it is built, so they are set only in a child process that runs
+    /// this case alone.
+    #[cfg(target_os = "linux")]
+    fn local_read_through_a_proxy_environment() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let env = crate::test_env::ChanTestEnv::new();
+        std::env::set_var("XDG_CONFIG_HOME", env.home().join("config"));
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        for name in [
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ] {
+            std::env::set_var(name, &proxy_url);
+        }
+        for name in ["no_proxy", "NO_PROXY", "REQUEST_METHOD"] {
+            std::env::remove_var(name);
+        }
+        let state = env.home().join("devserver");
+        std::fs::create_dir_all(&state).unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::fs::write(
+            state.join("config.json"),
+            format!(r#"{{"devserver_token":"tok","port":{port}}}"#),
+        )
+        .unwrap();
+        let view = chan_server::metrics::Runtime::start(env.home().join("metrics-home"))
+            .unwrap()
+            .view(false, None);
+        let body = serde_json::to_string(&view).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let proxied = std::sync::Arc::new(AtomicBool::new(false));
+            let proxy = tokio::net::TcpListener::from_std({
+                proxy.set_nonblocking(true).unwrap();
+                proxy
+            })
+            .unwrap();
+            let seen = proxied.clone();
+            tokio::spawn(async move {
+                // A proxy that takes the request answers nothing.
+                if let Ok((socket, _)) = proxy.accept().await {
+                    seen.store(true, Ordering::SeqCst);
+                    drop(socket);
+                }
+            });
+            server.set_nonblocking(true).unwrap();
+            let server = tokio::net::TcpListener::from_std(server).unwrap();
+            tokio::spawn(async move {
+                let (mut socket, _) = server.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    if socket.read(&mut byte).await.unwrap() == 0 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                assert!(String::from_utf8_lossy(&head)
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer tok"));
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            let client = Client::new(MetricsArgs {
+                url: None,
+                token: None,
+                json: false,
+                watch: false,
+                history: false,
+                varlink: false,
+            })
+            .unwrap();
+            let read = client.read(false, None).await;
+            assert!(!proxied.load(Ordering::SeqCst), "the bearer went to the proxy");
+            assert_eq!(read.unwrap().schema_version, 1);
+        });
+        println!("local read answered directly");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_local_read_ignores_a_proxy_in_the_environment() {
+        const CHILD: &str = "METRICS_PROXY_TEST_CHILD";
+        const NAME: &str = "metrics::tests::a_local_read_ignores_a_proxy_in_the_environment";
+        if std::env::var_os(CHILD).is_some() {
+            return local_read_through_a_proxy_environment();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}{stderr}");
+        // A filter that matched nothing would pass too; the child prints
+        // this only after its case ran to the end.
+        assert!(
+            stdout.contains("local read answered directly"),
+            "the child did not run its case: {stdout}"
+        );
     }
 
     /// Views from a script, recording the `since` each read asked for.
