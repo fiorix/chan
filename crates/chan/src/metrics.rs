@@ -177,9 +177,11 @@ impl Source for Client {
 /// A subscribe-style stream of views, as systemd's subscribe methods send
 /// state: the first view is complete, and each later one carries only the
 /// samples newer than the last one sent, with `latest` the newest and
-/// nothing sent while nothing is newer. A new `identity.instanceId` means
-/// the server restarted and its sequences with it, so the stream starts
-/// over with a complete view.
+/// nothing sent while nothing is newer. A new `identity.instanceId` between
+/// two successful reads means the server restarted and its sequences with
+/// it, so the stream starts over with a complete view. A failed read is
+/// returned to the caller, which ends the stream: `--watch` exits with it and
+/// a Varlink call ends with `Unavailable`.
 pub(crate) struct Subscription {
     history: bool,
     since: Option<u64>,

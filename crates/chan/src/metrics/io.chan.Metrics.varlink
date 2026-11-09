@@ -39,8 +39,9 @@ type View (
 # With more=true, the first reply is the complete view and each later reply,
 # about once per second, carries only samples newer than the last one sent:
 # history holds them when requested and latest is the newest. No reply is
-# sent while nothing is newer. A changed identity.instanceId means the server
-# restarted, and the next reply is complete again. Slow clients never block
+# sent while nothing is newer. When identity.instanceId differs between two
+# successful reads, the server restarted and that reply is complete again. A
+# failed read ends the call with Unavailable. Slow clients never block
 # collection.
 method Get(history: ?bool, since: ?int) -> (metrics: View)
 error Unavailable()
