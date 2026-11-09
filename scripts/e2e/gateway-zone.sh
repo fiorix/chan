@@ -147,7 +147,7 @@ MAX_DEVSERVERS=2
 # Scenario dispatch: "all" (default) = core suite + every registered
 # scenario; "core" = the inline suite only; a registered name = stack
 # bring-up + that scenario only. Lanes append their scenario name here.
-SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane extension tunnelhint"
+SCENARIOS="sweeper watchdog roster upload windowclose matrix sharedingress movenode ctlrestart proxydown ctloutage ctrlplane extension tunnelhint sharedroot"
 SCENARIO="${1:-all}"
 RUN_CORE=1
 case "$SCENARIO" in all | core) ;; *) RUN_CORE=0 ;; esac
@@ -1388,6 +1388,185 @@ fi # RUN_CORE
 # running stack and must leave the stack usable (clean up what it
 # stops/starts).
 # ---------------------------------------------------------------
+
+# A whole-devserver root link of the shape the account page's Copy link copies
+# (/s/{owner}?d=<first 12 hex of the devserver id>, built here in shell) opens
+# for an accepted grantee through the real identity: grace signs in through
+# the OAuth stub, the callback claims the grant alice made for her email on
+# devserver A, and /s/{alice}?d=<disc A> hands her browser a credential the
+# owning proxy exchanges for a session at the devserver root. heidi, signed in
+# with no grant, gets the not-found an unknown handle gets, and so does grace
+# once alice revokes the grant.
+scenario_sharedroot() {
+    local grace_email="e2e-grace@example.com" heidi_email="e2e-heidi@example.com"
+    local link unknown_link node host grant_id grace_id
+    local stub_before stub_email stub_subject stub_after
+
+    # Other scenarios sign in through the OAuth stub too, so this one hands
+    # back exactly the fixture it found.
+    stub_before="$(curl --noproxy '*' -fsS "http://127.0.0.1:$OAUTH_PORT/user")" ||
+        assert_fail "sharedroot: cannot read the OAuth fixture"
+    stub_email="$(printf %s "$stub_before" | json_get email)"
+    stub_subject="$(printf %s "$stub_before" | json_get id)"
+    if [ -z "$stub_email" ] || [ -z "$stub_subject" ]; then
+        assert_fail "sharedroot: OAuth fixture has no identity"
+    fi
+
+    sharedroot_stop_oauth() {
+        local pid
+        [ -f "$WORK/pids/stub-oauth.pid" ] || return 0
+        pid="$(cat "$WORK/pids/stub-oauth.pid")" || return 1
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" || return 1
+            for _ in $(seq 25); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 0.2
+            done
+            kill -0 "$pid" 2>/dev/null && return 1
+        fi
+        wait "$pid" 2>/dev/null || true
+        rm -f "$WORK/pids/stub-oauth.pid"
+    }
+
+    # Sign <email> in through the OAuth stub with curl alone: the stub's
+    # authorize endpoint bounces straight back to identity's callback, so
+    # following redirects with a cookie jar ends on the dashboard, and the
+    # jar's session then answers /api/me as that account.
+    sharedroot_sign_in() { # sharedroot_sign_in <email> <provider-subject> <jar>
+        local end me
+        sharedroot_stop_oauth || return 1
+        spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$1" "$2"
+        wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 || return 1
+        : > "$3"
+        end="$(curl --noproxy '*' --cacert "$TLS_DIR/ca.crt" -sS -L --max-redirs 5 \
+            --resolve "$ID_NAME:$ID_PORT:127.0.0.1" -c "$3" -b "$3" \
+            -o /dev/null -w '%{http_code} %{url_effective}' "https://$ID_HOST/auth/github")" ||
+            return 1
+        [ "$end" = "200 https://$ID_HOST/" ] || { log "sharedroot: sign-in ended at '$end'"; return 1; }
+        me="$(curl --noproxy '*' --cacert "$TLS_DIR/ca.crt" -fsS \
+            --resolve "$ID_NAME:$ID_PORT:127.0.0.1" -b "$3" "https://$ID_HOST/api/me")" || return 1
+        [ "$(printf %s "$me" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).user.email)}catch{}})')" = "$1" ]
+    }
+
+    # GET an identity path with a session jar; the status line goes to
+    # stdout, the headers and the body to <out>.headers and <out>.body.
+    sharedroot_land() { # sharedroot_land <jar> <path> <out>
+        curl --noproxy '*' --cacert "$TLS_DIR/ca.crt" -sS \
+            --resolve "$ID_NAME:$ID_PORT:127.0.0.1" -b "$1" \
+            -D "$3.headers" -o "$3.body" -w '%{http_code}' "https://$ID_HOST$2"
+    }
+
+    # What a browser can read of a landing's answer, minus the clock: the
+    # Date header and a session cookie's expiry.
+    sharedroot_observable() { # sharedroot_observable <out>
+        tr -d '\r' < "$1.headers" | sed '/^[Dd]ate:/d; s/; *[Ee]xpires=[^;]*//' | sort
+        cat "$1.body"
+    }
+
+    # A signed-in caller without access must get exactly what a handle
+    # profile does not know gets.
+    sharedroot_refused_like_unknown() { # sharedroot_refused_like_unknown <slug> <who> <jar>
+        local code unknown_code
+        code="$(sharedroot_land "$3" "$link" "$WORK/sharedroot-$1")" || code=000
+        unknown_code="$(sharedroot_land "$3" "$unknown_link" "$WORK/sharedroot-$1-unknown")" ||
+            unknown_code=000
+        if [ "$code" = 404 ] && [ "$unknown_code" = 404 ] &&
+            cmp -s <(sharedroot_observable "$WORK/sharedroot-$1") \
+                <(sharedroot_observable "$WORK/sharedroot-$1-unknown"); then
+            assert_pass "sharedroot: $2 gets the not-found an unknown handle gets"
+        else
+            assert_fail "sharedroot: $2 expected the unknown handle's 404, got $code (unknown $unknown_code)"
+        fi
+    }
+
+    node="$(tunnel_field "$DS_A" proxy_id)"
+    [ -n "$node" ] || assert_fail "sharedroot: devserver A is not live"
+    host="$ALICE_USER--$(disc "$DS_A").$node.$APEX"
+    link="/s/$ALICE_USER?d=$(disc "$DS_A")"
+    unknown_link="/s/e2e-nobody-handle?d=$(disc "$DS_A")"
+
+    grant_id="$(curl -fsS -X POST -H "Authorization: Bearer $TOK_PROFILE" \
+        -H 'content-type: application/json' -d "{\"grantee_email\":\"$grace_email\"}" \
+        "http://127.0.0.1:$PROFILE_PORT/v1/users/$ALICE_ID/devservers/$DS_A/grants" | json_get id)"
+    [ -n "$grant_id" ] || assert_fail "sharedroot: alice could not share devserver A"
+
+    sharedroot_sign_in "$grace_email" 424260 "$WORK/sharedroot-grace.jar" ||
+        assert_fail "sharedroot: grace could not sign in through the OAuth stub"
+    grace_id="$(sql "$E2E_DATABASE_URL" "SET search_path TO $E2E_SCHEMA;
+        SELECT grantee_user_id FROM devserver_grants
+        WHERE id = '$grant_id' AND accepted_at IS NOT NULL;")"
+    if [ -n "$grace_id" ]; then
+        assert_pass "sharedroot: grace's sign-in accepted alice's grant"
+    else
+        assert_fail "sharedroot: grace's sign-in left the grant unclaimed"
+    fi
+
+    local code page action credential hdrs cookie location
+    code="$(sharedroot_land "$WORK/sharedroot-grace.jar" "$link" "$WORK/sharedroot-grace-root")" ||
+        code=000
+    [ "$code" = 200 ] || assert_fail "sharedroot: grace's root landing expected 200, got $code"
+    page="$(node -e '
+const page = require("fs").readFileSync(process.argv[1], "utf8");
+const action = /action="([^"]+)"/.exec(page);
+const credential = /name="credential" value="([^"]+)"/.exec(page);
+if (!action || !credential) process.exit(1);
+const claims = JSON.parse(Buffer.from(credential[1].split(".")[1], "base64url").toString());
+console.log(action[1]);
+console.log(credential[1]);
+console.log([claims.sub, claims.owner_user_id, claims.drv, claims.next_path, claims.client].join(" "));
+' "$WORK/sharedroot-grace-root.body")" || assert_fail "sharedroot: grace's landing is not an entry handoff"
+    action="$(printf '%s\n' "$page" | sed -n 1p)"
+    credential="$(printf '%s\n' "$page" | sed -n 2p)"
+    if [ "$action" = "https://$host:$PROXY_PORT/_chan/entry" ] &&
+        [ "$(printf '%s\n' "$page" | sed -n 3p)" = "$grace_id $ALICE_ID $DS_A / browser" ]; then
+        assert_pass "sharedroot: grace's root link hands off a browser credential for devserver A's root"
+    else
+        assert_fail "sharedroot: unexpected handoff for grace: $(printf '%s\n' "$page" | sed -n '1p;3p')"
+    fi
+
+    hdrs="$WORK/sharedroot-grace-exchange.headers"
+    code="$(curl_node "$node" "$host" -o /dev/null -w '%{http_code}' -D "$hdrs" -X POST \
+        -H "Origin: https://$ID_HOST" -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-urlencode "credential=$credential" "$action")" || code=000
+    cookie="$(sed -n 's/^[Ss]et-[Cc]ookie: \(__Host-devserver_gate=[^;]*\).*/\1/p' "$hdrs" | head -1)"
+    location="$(sed -n 's/^[Ll]ocation: //p' "$hdrs" | tr -d '\r' | head -1)"
+    if [ "$code" = 303 ] && [ -n "$cookie" ] && [ "$location" = / ]; then
+        assert_pass "sharedroot: the proxy exchanged grace's credential for a session at /"
+    else
+        assert_fail "sharedroot: exchange expected 303 to / with a session, got $code to '$location'"
+    fi
+    code="$(curl_node "$node" "$host" -o "$WORK/sharedroot-grace-launcher.html" -w '%{http_code}' \
+        -H "Cookie: $cookie" "https://$host:$PROXY_PORT/")" || code=000
+    if [ "$code" = 200 ]; then
+        assert_pass "sharedroot: grace's session opens devserver A's root (200)"
+    elif [ "$LAUNCHER_BUNDLE" = 0 ] && grep -qi "bundle not built" "$WORK/sharedroot-grace-launcher.html"; then
+        assert_pass "sharedroot: grace's session reaches devserver A's root ($code no-bundle banner)"
+    else
+        assert_fail "sharedroot: grace's session expected devserver A's root, got $code"
+    fi
+
+    sharedroot_sign_in "$heidi_email" 424261 "$WORK/sharedroot-heidi.jar" ||
+        assert_fail "sharedroot: heidi could not sign in through the OAuth stub"
+    sharedroot_refused_like_unknown heidi "heidi, signed in with no grant," "$WORK/sharedroot-heidi.jar"
+
+    curl -fsS -X DELETE -o /dev/null -H "Authorization: Bearer $TOK_PROFILE" \
+        "http://127.0.0.1:$PROFILE_PORT/v1/users/$ALICE_ID/grants/$grant_id" ||
+        assert_fail "sharedroot: alice could not revoke grace's grant"
+    sharedroot_refused_like_unknown grace-revoked "grace, after alice revokes the grant," "$WORK/sharedroot-grace.jar"
+
+    sharedroot_stop_oauth || assert_fail "sharedroot: OAuth fixture did not stop"
+    spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$stub_email" "$stub_subject"
+    wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 ||
+        assert_fail "sharedroot: previous OAuth fixture did not return"
+    stub_after="$(curl --noproxy '*' -fsS "http://127.0.0.1:$OAUTH_PORT/user")" ||
+        assert_fail "sharedroot: cannot read the restored OAuth fixture"
+    if [ "$(printf %s "$stub_after" | json_get email)" = "$stub_email" ] &&
+        [ "$(printf %s "$stub_after" | json_get id)" = "$stub_subject" ]; then
+        assert_pass "sharedroot: the OAuth fixture is back as the scenario found it"
+    else
+        assert_fail "sharedroot: the OAuth fixture came back as $stub_after"
+    fi
+}
 
 # Read the account page's command and use its discovered URL for a real tunnel.
 scenario_tunnelhint() {
