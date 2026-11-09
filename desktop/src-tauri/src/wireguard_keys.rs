@@ -172,6 +172,30 @@ pub fn write_client_file(
     Ok(path)
 }
 
+/// The bytes of the client file at `path`, `None` when there is none. They
+/// hold a private key: they are kept only to put the file back, never shown.
+pub fn read_client_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("WireGuard: reading {}: {e}", path.display())),
+    }
+}
+
+/// Put the client file at `path` inside `dir` back to `bytes`, owner-only
+/// like the key beside it, or delete it when `bytes` is `None` (a file that
+/// is not there is not an error).
+pub fn put_back_client_file(dir: &Path, path: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
+    let result = match bytes {
+        Some(bytes) => write_owner_only(dir, path, bytes),
+        None => match std::fs::remove_file(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    result.map_err(|e| format!("WireGuard: putting back {}: {e}", path.display()))
+}
+
 /// The private key in `gateway_id`'s key file under `dir`.
 fn read_key(dir: &Path, gateway_id: &str) -> Result<StaticSecret, String> {
     let path = key_path(dir, gateway_id);

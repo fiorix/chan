@@ -23,8 +23,8 @@ use tower_sessions_sqlx_store::PostgresStore;
 use uuid::Uuid;
 
 use crate::api_tokens::{
-    ApiToken, ApiTokenService, AuditEntry, CreatedToken, NewToken, RequestMeta, TokenOrigin,
-    ValidatedToken, DEFAULT_TOKEN_SCOPES,
+    ApiToken, ApiTokenService, AuditEntry, CreatedToken, GivenBack, NewToken, PresentedToken,
+    RequestMeta, TokenOrigin, ValidatedToken, DEFAULT_TOKEN_SCOPES,
 };
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -313,6 +313,10 @@ pub fn routers(
         )
         .route("/desktop/v1/devserver/entry", post(desktop_devserver_entry))
         .route("/desktop/v1/devservers", get(crate::desktop_roster::roster))
+        .route(
+            "/desktop/v1/token",
+            axum::routing::delete(desktop_token_revoke),
+        )
         .fallback(static_files::handler)
         .with_state(state)
         .layer(session_layer)
@@ -1305,26 +1309,124 @@ async fn tokens_revoke(
         .profile_client
         .revoke_user_api_token(uid, id, meta.ip.as_deref(), meta.user_agent.as_deref())
         .await?;
-    // Best-effort cut of the owner's whole live surface: every tunnel
-    // they own and every proxy session they are the subject of. The
-    // scope is the owner and not the one PAT because this handler has
-    // the token id and profile's revoke returns nothing that maps it
-    // to the token's devserver id; devserver-control's exact
-    // per-tunnel kill is open to identity, and identity does not call
-    // it. A devserver on another PAT is cut here too and comes back
-    // on its next dial; one on the revoked PAT redials and fails
-    // validation every time.
+    first_cut(&state, uid, &user.username).await;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Best-effort first cut of an owner's whole live surface after one of
+/// their PATs is revoked: every tunnel they own and every proxy session
+/// they are the subject of. The scope is the owner and not the one PAT
+/// because the revoke paths have the token id and profile's revoke returns
+/// nothing that maps it to the token's devserver id; devserver-control's
+/// exact per-tunnel kill is open to identity, and identity does not call
+/// it. A devserver on another PAT is cut here too and comes back on its
+/// next dial; one on the revoked PAT redials and fails validation every
+/// time.
+async fn first_cut(state: &AppState, user_id: Uuid, username: &str) {
     let (kill, revoke) = tokio::join!(
-        state.cfg.workspace_admin.kill_owner_tunnels(uid),
-        state.cfg.workspace_admin.revoke_subject_sessions(uid),
+        state.cfg.workspace_admin.kill_owner_tunnels(user_id),
+        state.cfg.workspace_admin.revoke_subject_sessions(user_id),
     );
     if let Err(error) = kill {
-        tracing::warn!(error = ?error, user = %user.username, "PAT first tunnel cut failed");
+        tracing::warn!(error = ?error, user = %username, "PAT first tunnel cut failed");
     }
     if let Err(error) = revoke {
-        tracing::warn!(error = ?error, user = %user.username, "PAT first session cut failed");
+        tracing::warn!(error = ?error, user = %username, "PAT first session cut failed");
     }
-    Ok(StatusCode::ACCEPTED)
+}
+
+/// `DELETE /desktop/v1/token` -- a desktop PAT revokes itself. The bearer
+/// is the whole credential and the only token the route can touch: it
+/// takes no id and reads no session, so a browser cookie alone gets 401
+/// and a cross-site page cannot forge the header. A revoked, expired,
+/// unknown or non-desktop token gets the 401 every invalid bearer gets,
+/// which the desktop reads as nothing left to revoke.
+///
+/// The revoke is the soft one (`revoked_at` set, the row and its audit
+/// kept), audited as `revoked_via_desktop` so the owner's history never
+/// shows it as their own revoke. A token nothing had used gets no more:
+/// it opened nothing. A used one gets the owner's revoke cut as well,
+/// through [`cut_given_back_token`], which runs detached from the request.
+async fn desktop_token_revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode> {
+    let token = bearer_token(&headers).ok_or(Error::Unauthorized)?;
+    let presented = state.api_tokens.presented(token).await?;
+    if !presented
+        .scopes
+        .iter()
+        .any(|scope| scope == DESKTOP_CONNECT_SCOPE || scope == DESKTOP_ACCOUNT_SCOPE)
+    {
+        tracing::warn!(
+            user = %presented.username,
+            "desktop token revoke denied: no desktop scope on the token",
+        );
+        return Err(Error::Unauthorized);
+    }
+    let meta = request_meta(&headers);
+    let given_back = state
+        .api_tokens
+        .give_back(presented.user_id, presented.token_id, &meta)
+        .await?;
+    match given_back {
+        Some(GivenBack::Unused) => {}
+        Some(GivenBack::Used) => {
+            use tracing::instrument::WithSubscriber as _;
+            use tracing::Instrument as _;
+            // The give-back has committed, and the cut is a second
+            // transaction in profile and calls to devserver-control after
+            // it. Awaited here it would end with the request: a desktop that
+            // hangs up or gives up first would leave the token revoked and
+            // nothing cut. Spawned, it runs to its end whatever the client
+            // does, logging where the request logs.
+            let cut = cut_given_back_token(state.clone(), presented, meta);
+            tokio::spawn(cut.in_current_span().with_current_subscriber());
+        }
+        // Another revoke landed between the lookup and this one: the token
+        // is already gone, which is the invalid-bearer answer.
+        None => return Err(Error::Unauthorized),
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The cut a used token's give-back owes. A desktop gives back only a token
+/// it does not keep, but the token can have been presented first: another
+/// reader of the desktop's credential store (a roster poll, an entry mint)
+/// can pick it up in the moment between a cancelled sign-in storing it and
+/// taking it back, and a stolen token is presented by whoever holds it.
+/// Either way tunnels and proxy sessions it opened may still be live, so it
+/// gets the owner's revoke cut. Profile finds the token already revoked, so
+/// it writes no second audit row, and reserves its durable cut of the
+/// owner's live surface; the first cut then runs as the owner's revoke runs
+/// it. The owner's revoke can await both in its request, because profile
+/// commits that revoke and its reservation together; here the revoke has
+/// already committed in identity, so the handler spawns this and answers.
+/// A failed reservation is logged and does not stop the first cut, but
+/// nothing durable repeats the cut then: the token authenticates nothing,
+/// a tunnel on it ends at its next lease refresh, and a proxy session the
+/// first cut missed runs to its lifetime. An identity that stops before
+/// the reservation lands loses the cut the same way.
+async fn cut_given_back_token(state: AppState, presented: PresentedToken, meta: RequestMeta) {
+    if let Err(error) = state
+        .cfg
+        .profile_client
+        .revoke_user_api_token(
+            presented.user_id,
+            presented.token_id,
+            meta.ip.as_deref(),
+            meta.user_agent.as_deref(),
+        )
+        .await
+    {
+        tracing::error!(
+            error = ?error,
+            user = %presented.username,
+            token_id = %presented.token_id,
+            "reserving the cut of a used desktop token given back failed",
+        );
+    }
+    first_cut(&state, presented.user_id, &presented.username).await;
 }
 
 #[derive(Debug, Deserialize)]

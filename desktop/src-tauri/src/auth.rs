@@ -26,9 +26,14 @@
 //!      the PAT (`POST /desktop/authorize/redeem` against the identity
 //!      origin held in the slot -- never one named by the callback URL),
 //!      commits the PAT under the connect attempt's credential lock and
-//!      continues that same attempt. Cancellation before commitment stores
-//!      nothing. A committed PAT survives a later cancel with a notice;
-//!      only a current attempt emits `auth-changed` or `auth-error`.
+//!      continues that same attempt. The commit keeps the enrollment and
+//!      the PAT together or neither: a refused answer, a failed store and
+//!      a cancel (before the commit, or during it, which then undoes it,
+//!      putting back the token and enrollment it replaced, unless a
+//!      replacing connect waits for the PAT) keep nothing of this sign-in,
+//!      and its PAT is then revoked at the identity origin, with itself as
+//!      the bearer. Only a current attempt emits `auth-changed` or
+//!      `auth-error`.
 //!
 //! PKCE (RFC 7636, S256): the `code_verifier` is 32 CSPRNG bytes encoded
 //! base64url-no-pad to a 43-char ASCII string; that STRING is the
@@ -48,8 +53,8 @@
 //!
 //! Keychain layout: service `chan-desktop`, one account per gateway
 //! identity origin (`gateway:<origin>`, see `gateway_account`). Value
-//! is JSON `{id, secret, label, expires_at}`; the token id rides along
-//! for a future server-side revoke pass.
+//! is JSON `{id, secret, label, expires_at}`; the token id names the
+//! token in logs, since a revoke presents the secret itself.
 //!
 //! There is no user-facing sign-out. A gateway that answers 401 has its
 //! entry dropped (`clear_gateway_pat`) so the next connect falls into
@@ -90,7 +95,7 @@ type TestOpener = Box<dyn FnOnce(&str) -> Result<(), String> + Send>;
 type TestAdoption =
     Box<dyn FnOnce(std::net::TcpListener) -> std::io::Result<tokio::net::TcpListener> + Send>;
 #[cfg(test)]
-type TestStore = Box<dyn FnOnce(&str, &StoredPat) -> Result<(), String> + Send>;
+pub(crate) type TestStore = Box<dyn FnOnce(&str, &StoredPat) -> Result<(), String> + Send>;
 
 /// Per-attempt test seams never reach a platform opener or credential service.
 #[cfg(test)]
@@ -100,6 +105,10 @@ pub(super) struct SigninTestHooks {
     pub opener: Mutex<Option<TestOpener>>,
     pub adoption: Mutex<Option<TestAdoption>>,
     pub store: Mutex<Option<TestStore>>,
+    /// Runs after the redeem answered and before the credential commit.
+    pub before_commit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs inside the credential commit, under its lock, before any write.
+    pub commit_started: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Event emitted after a successful gateway sign-in callback. The launcher
@@ -1024,72 +1033,71 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             enrolling,
         } => {
             let _ = shutdown.send(true);
+            gateway.attempt.accept_callback();
             let state = Arc::clone(&app.state::<Arc<crate::AppState>>());
-            let Some(redeemed) = gateway
-                .attempt
-                .wait(redeem_inner(&identity_origin, &code, &code_verifier))
-                .await
-            else {
-                return;
-            };
-            let mut redeemed = match redeemed {
+            // Awaited through a cancel, not raced against it: identity mints
+            // the token as it answers, so a dropped answer would leave a token
+            // nobody can revoke. A cancelled attempt's commit refuses below,
+            // and that refusal revokes the token. The redeem's own timeout
+            // bounds the wait.
+            let mut redeemed = match redeem_inner(&identity_origin, &code, &code_verifier).await {
                 Ok(redeemed) => redeemed,
-                Err(error) => {
-                    fail_signin(&app, &state, &gateway, &error);
+                Err(RedeemError { message, minted }) => {
+                    if let Some(minted) = &minted {
+                        revoke_unkept(&gateway.id, &identity_origin, &minted.id, &minted.secret)
+                            .await;
+                    }
+                    fail_signin(&app, &state, &gateway, &message);
                     return;
                 }
             };
-            // A refused enrollment stores nothing, the token included.
-            let enrollment =
-                match prepare_enrollment(&state, &gateway.id, enrolling, redeemed.wireguard.take())
-                {
-                    Ok(enrollment) => enrollment,
-                    Err(error) => {
-                        fail_signin(&app, &state, &gateway, &error);
-                        return;
-                    }
-                };
+            let params = redeemed.wireguard.take();
             let pat = StoredPat {
                 id: redeemed.id,
                 secret: redeemed.secret,
                 label: redeemed.label,
                 expires_at: redeemed.expires_at.unwrap_or_default(),
             };
-            let flow = gateway.clone();
-            let recording = Arc::clone(&state);
+            // A refused enrollment stores nothing, and the token it came with
+            // is revoked before the sign-in fails.
+            let enrollment = match prepare_enrollment(&state, &gateway.id, enrolling, params) {
+                Ok(enrollment) => enrollment,
+                Err(error) => {
+                    revoke_unkept(&gateway.id, &identity_origin, &pat.id, &pat.secret).await;
+                    fail_signin(&app, &state, &gateway, &error);
+                    return;
+                }
+            };
+            let mut writes = SigninWrites {
+                state: Arc::clone(&state),
+                gateway_id: gateway.id.clone(),
+                identity_origin: identity_origin.clone(),
+                account,
+                pat: pat.clone(),
+                enrollment,
+                prior_pat: None,
+                recorded: None,
+                #[cfg(test)]
+                attempt: Arc::clone(&gateway.attempt),
+            };
+            let attempt = Arc::clone(&gateway.attempt);
+            #[cfg(test)]
+            if let Some(hook) = attempt.signin_hooks.before_commit.lock().unwrap().take() {
+                hook();
+            }
             // Once this worker starts, join it even after cancellation: a
-            // committed PAT must be acknowledged, never silently abandoned.
-            // The enrollment is recorded first, so a token is stored only
-            // beside its peer's client file and row; a failed store leaves
-            // that file, which the next sign-in enrolls again. The worker
-            // logs to this task's subscriber, where the sign-in's own lines
-            // go.
+            // commit is never abandoned midway, and one a cancel lands in is
+            // undone inside it. The worker logs to this task's subscriber,
+            // where the sign-in's own lines go.
             let dispatch = tracing::dispatcher::get_default(|dispatch| dispatch.clone());
             let committed = tokio::task::spawn_blocking(move || {
                 let _logging = tracing::dispatcher::set_default(&dispatch);
-                flow.attempt
-                    .commit_credentials(|| {
-                        if let Some(enrollment) = enrollment {
-                            crate::config::record_wireguard_enrollment(
-                                &recording.store,
-                                &recording.gateway_manager,
-                                &flow.id,
-                                enrollment,
-                            )?;
-                        }
-                        #[cfg(test)]
-                        if let Some(store) = flow.attempt.signin_hooks.store.lock().unwrap().take()
-                        {
-                            return store(&account, &pat);
-                        }
-                        store_for(&account, &pat)
-                    })
-                    .map(|stored| stored.then_some(pat))
+                attempt.commit_credentials(&mut writes)
             })
             .await
             .unwrap_or_else(|e| Err(format!("storing gateway credentials: {e}")));
             match committed {
-                Ok(Some(pat)) => {
+                Ok(true) => {
                     crate::gateway::resume_gateway_signin(
                         app,
                         state,
@@ -1099,8 +1107,19 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                     )
                     .await
                 }
-                Ok(None) => {}
-                Err(error) => fail_signin(&app, &state, &gateway, &error),
+                // Cancelled before the commit or undone after it: nothing of
+                // this sign-in is kept, and the cancel's owner reports the row.
+                Ok(false) => {
+                    tracing::info!(
+                        gateway = %gateway.id,
+                        "gateway sign-in cancelled; its credentials are not kept",
+                    );
+                    revoke_unkept(&gateway.id, &identity_origin, &pat.id, &pat.secret).await;
+                }
+                Err(error) => {
+                    revoke_unkept(&gateway.id, &identity_origin, &pat.id, &pat.secret).await;
+                    fail_signin(&app, &state, &gateway, &error);
+                }
             }
         }
         CallbackAction::Fail {
@@ -1113,6 +1132,296 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             fail_signin(&app, &state, &gateway, &message);
         }
         CallbackAction::Ignore => {}
+    }
+}
+
+/// What a sign-in's credential commit writes, as one unit the commit takes
+/// back whole: the WireGuard enrollment the redeem answered (the client file
+/// and the row naming it, with the tunnel adopted from it), then the token in
+/// the store. The enrollment goes first, so no token is ever stored without
+/// its peer's file and row. What each write replaces is read first, so the
+/// undo puts back the earlier token, row and client file rather than leaving
+/// nothing, and only while no later write has replaced them again.
+struct SigninWrites {
+    state: Arc<crate::AppState>,
+    gateway_id: String,
+    identity_origin: String,
+    account: String,
+    pat: StoredPat,
+    /// The enrollment still to record, taken when it is.
+    enrollment: Option<crate::wireguard_keys::Enrollment>,
+    /// The token the store held before this commit, once read.
+    prior_pat: Option<Option<StoredPat>>,
+    /// What the recorded enrollment wrote and replaced.
+    recorded: Option<crate::config::RecordedEnrollment>,
+    #[cfg(test)]
+    attempt: Arc<GatewayAttempt>,
+}
+
+impl crate::gateway::CredentialWrites for SigninWrites {
+    fn write(&mut self) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .attempt
+            .signin_hooks
+            .commit_started
+            .lock()
+            .unwrap()
+            .take()
+        {
+            hook();
+        }
+        self.prior_pat = Some(read_stored_pat(&self.identity_origin)?);
+        if let Some(enrollment) = self.enrollment.take() {
+            let (recorded, _) = crate::config::record_wireguard_enrollment(
+                &self.state.store,
+                &self.state.gateway_manager,
+                &self.gateway_id,
+                enrollment,
+            )?;
+            self.recorded = Some(recorded);
+        }
+        if let Err(error) = self.store() {
+            // A token that cannot be stored takes its enrollment with it, or
+            // the next sign-in would find a file and a row for a token that
+            // was never kept.
+            self.undo_enrollment();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self) {
+        // The token goes back to what the store held before, unless a later
+        // commit has stored its own since.
+        match read_stored_pat(&self.identity_origin) {
+            Ok(Some(stored)) if stored.id == self.pat.id => {
+                let prior = self.prior_pat.take().flatten();
+                if let Err(error) =
+                    put_back_gateway_pat(&self.identity_origin, &self.account, prior.as_ref())
+                {
+                    tracing::warn!(
+                        gateway = %self.gateway_id,
+                        %error,
+                        "putting back the credential store an undone sign-in replaced failed",
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                gateway = %self.gateway_id,
+                %error,
+                "reading the credential store to undo a sign-in failed",
+            ),
+        }
+        self.undo_enrollment();
+    }
+
+    fn abandoned(&self) -> bool {
+        self.state
+            .store
+            .lock()
+            .unwrap()
+            .get()
+            .is_ok_and(|cfg| !cfg.gateways.iter().any(|g| g.id == self.gateway_id))
+    }
+}
+
+impl SigninWrites {
+    fn store(&self) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(store) = self.attempt.signin_hooks.store.lock().unwrap().take() {
+            return store(&self.account, &self.pat);
+        }
+        store_for(&self.account, &self.pat)
+    }
+
+    fn undo_enrollment(&mut self) {
+        let Some(recorded) = self.recorded.take() else {
+            return;
+        };
+        if let Err(error) = crate::config::restore_wireguard_enrollment(
+            &self.state.store,
+            &self.state.gateway_manager,
+            &self.gateway_id,
+            &recorded,
+        ) {
+            tracing::warn!(
+                gateway = %self.gateway_id,
+                %error,
+                "putting back the WireGuard enrollment a sign-in replaced failed",
+            );
+        }
+    }
+}
+
+/// The token the store holds for `identity_origin`, as a commit reads it
+/// before replacing it and again before undoing.
+#[cfg(not(test))]
+fn read_stored_pat(identity_origin: &str) -> Result<Option<StoredPat>, String> {
+    load_gateway_pat(identity_origin)
+}
+
+/// Tests answer from the in-process store alone: a headless test host has
+/// no credential service to read.
+#[cfg(test)]
+fn read_stored_pat(identity_origin: &str) -> Result<Option<StoredPat>, String> {
+    if let Some(error) = test_gateway_pat_load_errors()
+        .lock()
+        .unwrap()
+        .get(identity_origin)
+    {
+        return Err(error.clone());
+    }
+    Ok(test_gateway_pats()
+        .lock()
+        .unwrap()
+        .get(identity_origin)
+        .cloned())
+}
+
+/// Put `pat` back as the stored token for `identity_origin`, or remove the
+/// stored one when there was none before.
+fn put_back_gateway_pat(
+    identity_origin: &str,
+    account: &str,
+    pat: Option<&StoredPat>,
+) -> Result<(), String> {
+    match pat {
+        Some(pat) => restore_stored_pat(identity_origin, account, pat),
+        None => clear_gateway_pat(identity_origin),
+    }
+}
+
+#[cfg(not(test))]
+fn restore_stored_pat(
+    _identity_origin: &str,
+    account: &str,
+    pat: &StoredPat,
+) -> Result<(), String> {
+    store_for(account, pat)
+}
+
+/// Tests keep the restored token in the in-process store the sign-in's store
+/// hook writes to.
+#[cfg(test)]
+fn restore_stored_pat(
+    identity_origin: &str,
+    _account: &str,
+    pat: &StoredPat,
+) -> Result<(), String> {
+    test_gateway_pats()
+        .lock()
+        .unwrap()
+        .insert(identity_origin.to_string(), pat.clone());
+    Ok(())
+}
+
+/// Bound on revoking a token the sign-in does not keep. A failed sign-in
+/// reports only after it, so it stays short; a revoke that runs out is
+/// logged, and the token then lives until it expires.
+const REVOKE_TIMEOUT_SECS: u64 = 10;
+
+/// What identity answered a token revoking itself.
+#[derive(Debug, PartialEq, Eq)]
+enum Revoked {
+    /// Revoked by this request.
+    Now,
+    /// The answer every invalid bearer gets: the token is already revoked,
+    /// expired or unknown, so nothing is left to revoke and nothing retries.
+    AlreadyGone,
+}
+
+/// Revoke `secret` at the identity origin that minted it, presenting it as
+/// its own bearer, so the request can revoke that token and no other. It
+/// goes through the shared HTTP client and its WireGuard proxy decision, as
+/// the redeem does.
+async fn revoke_inner(identity_origin: &str, secret: &str) -> Result<Revoked, String> {
+    let url = format!("{}/desktop/v1/token", identity_origin.trim_end_matches('/'));
+    let client = crate::wireguard::client_builder()
+        .timeout(Duration::from_secs(REVOKE_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("building revoke http client: {e}"))?;
+    let resp = client
+        .delete(&url)
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|e| format!("revoking the token: {e}"))?;
+    // Exactly the route's answer counts. An identity without the route
+    // answers its SPA fallback (200 and a page) to any path, which revoked
+    // nothing.
+    let status = resp.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        Ok(Revoked::Now)
+    } else if status == reqwest::StatusCode::UNAUTHORIZED {
+        Ok(Revoked::AlreadyGone)
+    } else {
+        Err(format!(
+            "revoking the token: the gateway answered HTTP {status}, so it may not offer the token self-revoke"
+        ))
+    }
+}
+
+/// Revoke a token this sign-in minted and does not keep. The sign-in has
+/// already failed or been cancelled, so the revoke's own outcome is only
+/// logged, by the token's id and never its secret, at the level a failed
+/// gateway connect logs.
+async fn revoke_unkept(gateway_id: &str, identity_origin: &str, token_id: &str, secret: &str) {
+    match revoke_inner(identity_origin, secret).await {
+        Ok(Revoked::Now) => {
+            tracing::info!(gateway = %gateway_id, token = %token_id, "gateway sign-in token revoked");
+        }
+        Ok(Revoked::AlreadyGone) => {
+            tracing::info!(
+                gateway = %gateway_id,
+                token = %token_id,
+                "gateway sign-in token had nothing left to revoke",
+            );
+        }
+        Err(error) => tracing::warn!(
+            gateway = %gateway_id,
+            token = %token_id,
+            %error,
+            "revoking a gateway sign-in token the desktop does not keep failed; the token lives until it expires",
+        ),
+    }
+}
+
+/// The token a redeem answer names, decoded before the rest of the answer:
+/// identity minted it once it answered, so it can be revoked even when
+/// nothing else in the answer can be used.
+#[derive(Deserialize)]
+struct MintedToken {
+    id: String,
+    secret: String,
+}
+
+impl std::fmt::Debug for MintedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedToken")
+            .field("id", &self.id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Why a redeem gave the sign-in no answer it can use.
+#[derive(Debug)]
+struct RedeemError {
+    message: String,
+    /// The token an answer named when the rest of it did not decode. The
+    /// sign-in keeps nothing of that answer, so it revokes the token before
+    /// it fails.
+    minted: Option<MintedToken>,
+}
+
+impl From<String> for RedeemError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            minted: None,
+        }
     }
 }
 
@@ -1170,7 +1479,7 @@ async fn redeem_inner(
     identity_origin: &str,
     code: &str,
     code_verifier: &str,
-) -> Result<RedeemedPat, String> {
+) -> Result<RedeemedPat, RedeemError> {
     let url = format!(
         "{}/desktop/authorize/redeem",
         identity_origin.trim_end_matches('/')
@@ -1189,17 +1498,32 @@ async fn redeem_inner(
     let status = resp.status();
     if status == reqwest::StatusCode::GONE {
         return Err(
-            "the sign-in link expired or was already used; try signing in again".to_string(),
+            "the sign-in link expired or was already used; try signing in again"
+                .to_string()
+                .into(),
         );
     }
     if !status.is_success() {
-        return Err(format!(
-            "redeeming sign-in code: the gateway answered HTTP {status}"
-        ));
+        return Err(format!("redeeming sign-in code: the gateway answered HTTP {status}").into());
     }
-    resp.json::<RedeemedPat>()
+    let body = resp
+        .bytes()
         .await
-        .map_err(|e| format!("decoding redeemed token: {e}"))
+        .map_err(|e| format!("reading redeemed token: {e}"))?;
+    decode_redeemed(&body)
+}
+
+/// Decode a redeem answer in two steps, the token it names first and then
+/// the whole answer, so an answer whose token decodes and whose rest does
+/// not (a keepalive out of range, a field of the wrong type) still hands
+/// back the token identity minted, for the sign-in to revoke.
+fn decode_redeemed(body: &[u8]) -> Result<RedeemedPat, RedeemError> {
+    let minted: MintedToken =
+        serde_json::from_slice(body).map_err(|e| format!("decoding redeemed token: {e}"))?;
+    serde_json::from_slice(body).map_err(|e| RedeemError {
+        message: format!("decoding redeemed token: {e}"),
+        minted: Some(minted),
+    })
 }
 
 /// Map an identity-origin `error=` reason token to the banner string. The
@@ -2220,7 +2544,11 @@ pub(crate) mod tests {
         let err = redeem_inner(&origin, "stale", "v")
             .await
             .expect_err("410 is an error");
-        assert!(err.contains("expired or was already used"), "{err}");
+        assert!(
+            err.message.contains("expired or was already used"),
+            "{err:?}"
+        );
+        assert!(err.minted.is_none(), "no token was minted");
     }
 
     #[tokio::test]
@@ -2229,6 +2557,98 @@ pub(crate) mod tests {
         let err = redeem_inner(&origin, "c1", "v")
             .await
             .expect_err("500 is an error");
-        assert!(err.contains("HTTP 500"), "{err}");
+        assert!(err.message.contains("HTTP 500"), "{err:?}");
+        assert!(err.minted.is_none(), "no token was minted");
+    }
+
+    #[test]
+    fn decode_redeemed_hands_back_a_token_whose_answer_does_not_decode() {
+        let overflow = br#"{"id":"t-1","secret":"chan_pat_x","label":"mbp","expires_at":null,
+            "wireguard":{"server_public_key":"k","endpoint":"e","addresses":[],
+            "allowed_ips":[],"persistent_keepalive":70000}}"#;
+        let err = decode_redeemed(overflow).expect_err("a keepalive above 65535");
+        let minted = err.minted.as_ref().expect("the token decodes on its own");
+        assert_eq!(
+            (minted.id.as_str(), minted.secret.as_str()),
+            ("t-1", "chan_pat_x")
+        );
+        assert!(
+            err.message.starts_with("decoding redeemed token"),
+            "{err:?}"
+        );
+        assert!(
+            !format!("{} {err:?}", err.message).contains("chan_pat_x"),
+            "neither the message nor the debug form carries the token"
+        );
+        // An answer naming no token leaves nothing to revoke.
+        for body in [
+            br#"{"id":"t-1","label":"mbp"}"#.as_slice(),
+            b"<!doctype html>".as_slice(),
+        ] {
+            let err = decode_redeemed(body).expect_err("no token");
+            assert!(err.minted.is_none(), "{err:?}");
+        }
+    }
+
+    /// An identity answering every request with `status` and `body`, which
+    /// reports the `Authorization` header each request carried.
+    async fn status_identity(
+        status: u16,
+        body: &'static str,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<Option<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (seen, bearers) = tokio::sync::mpsc::unbounded_channel();
+        let router = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                let _ = seen.send(
+                    headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                );
+                (axum::http::StatusCode::from_u16(status).unwrap(), body)
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (origin, bearers)
+    }
+
+    #[tokio::test]
+    async fn revoke_inner_counts_only_204_as_revoked() {
+        for (status, body, expected) in [
+            (204, "", Some(Revoked::Now)),
+            (
+                401,
+                r#"{"error":"unauthorized"}"#,
+                Some(Revoked::AlreadyGone),
+            ),
+            // An identity without the route: its SPA fallback answers 200
+            // and a page, which revoked nothing.
+            (200, "<!doctype html><title>chan</title>", None),
+            (202, "", None),
+            (404, "", None),
+            (503, "frontend not built", None),
+        ] {
+            let (origin, mut bearers) = status_identity(status, body).await;
+            let answer = revoke_inner(&origin, "chan_pat_test").await;
+            match expected {
+                Some(revoked) => assert_eq!(answer, Ok(revoked), "{status}"),
+                None => {
+                    let error = answer.expect_err("not revoked");
+                    assert!(
+                        error.contains(&format!("HTTP {status}"))
+                            && error.contains("may not offer the token self-revoke"),
+                        "{status}: {error}"
+                    );
+                }
+            }
+            assert_eq!(
+                bearers.recv().await.unwrap().as_deref(),
+                Some("Bearer chan_pat_test"),
+                "{status}: the token is its own bearer"
+            );
+        }
     }
 }

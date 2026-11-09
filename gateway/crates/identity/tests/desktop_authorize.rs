@@ -14,6 +14,11 @@
 //!   * redeem: `{code, code_verifier}` → PAT once; replayed, unknown,
 //!     and wrong-verifier → 410
 //!   * audit rows record `created_via_desktop` + `desktop.redeem`
+//!   * self-revoke: `DELETE /desktop/v1/token` revokes the presented PAT
+//!     and nothing else, keeps its row and audit under its own action,
+//!     cuts the owner's live surface only when the PAT was used, refuses
+//!     a session alone, and answers every invalid bearer as the PAT auth
+//!     does
 
 #[path = "../../../tests-shared/identity_config.rs"]
 mod identity_config;
@@ -21,6 +26,7 @@ mod identity_config;
 mod test_db;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -30,11 +36,12 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use identity::api_tokens::{ApiTokenService, RequestMeta};
 use identity::config::Config;
+use identity::devserver_control_client::DevserverControlClient;
 use identity::http;
 use identity::profile_client::ProfileClient;
 use identity::providers::github::{GitHubEndpoints, GitHubProvider};
@@ -48,6 +55,8 @@ struct TestApp {
     schema: String,
     admin_url: String,
     profile: MockServer,
+    /// devserver-control's admin API, where a revoke's first cut lands.
+    control: MockServer,
     github: MockServer,
 }
 
@@ -61,6 +70,7 @@ impl TestApp {
             test_db::create_schema(test_db::MigrationOrder::SessionsFirst).await;
 
         let profile = MockServer::start().await;
+        let control = MockServer::start().await;
         let github = MockServer::start().await;
 
         let profile_url: Url = profile.uri().parse().unwrap();
@@ -88,6 +98,11 @@ impl TestApp {
             base_url,
             wireguard,
             providers: vec![Arc::new(provider)],
+            workspace_admin: DevserverControlClient::new(
+                control.uri().parse().unwrap(),
+                "test-identity-admin-token".into(),
+            )
+            .unwrap(),
             ..identity_config::test_config(&url, profile_client)
         });
 
@@ -105,6 +120,7 @@ impl TestApp {
             schema,
             admin_url: url,
             profile,
+            control,
             github,
         }
     }
@@ -1275,5 +1291,709 @@ async fn enroll_failure_revokes_the_pat_and_reports_wireguard_enroll_failed() {
         .iter()
         .any(|request| request.url.path().contains("revoke")));
     app.profile.verify().await;
+    app.cleanup().await;
+}
+
+// ---------------------------------------------------------------
+// Desktop token self-revoke (`DELETE /desktop/v1/token`)
+// ---------------------------------------------------------------
+
+/// One request as a desktop or a browser sends it: `bearer` as the
+/// `Authorization` header, `cookie` as the session, and an optional JSON
+/// body. Answers the status and the body bytes.
+async fn send_as(
+    app: &TestApp,
+    method: Method,
+    uri: &str,
+    bearer: Option<&str>,
+    cookie: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, Vec<u8>) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(bearer) = bearer {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    }
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    let body = match body {
+        Some(json) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(json.to_string())
+        }
+        None => Body::empty(),
+    };
+    let res = app
+        .router
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (status, bytes.to_vec())
+}
+
+/// `DELETE /desktop/v1/token` presenting `bearer`, with no session.
+async fn self_revoke(app: &TestApp, bearer: Option<&str>) -> (StatusCode, Vec<u8>) {
+    send_as(app, Method::DELETE, "/desktop/v1/token", bearer, None, None).await
+}
+
+/// The answer the PAT auth gives a bearer identity has never minted, read
+/// from the roster, the desktop's other PAT-only read.
+async fn invalid_bearer_answer(app: &TestApp) -> (StatusCode, Vec<u8>) {
+    let unknown = "chan_pat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    send_as(
+        app,
+        Method::GET,
+        "/desktop/v1/devservers",
+        Some(unknown),
+        None,
+        None,
+    )
+    .await
+}
+
+/// Mint a token for `uid` straight through the service, as the desktop
+/// authorize flow and the operator mint do.
+async fn mint(app: &TestApp, uid: Uuid, scopes: &[&str]) -> identity::api_tokens::CreatedToken {
+    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
+    app.api_tokens
+        .create(
+            identity::api_tokens::NewToken {
+                user_id: uid,
+                label: "chan-desktop @ host",
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::days(30)),
+                scopes: &scopes,
+                origin: identity::api_tokens::TokenOrigin::Desktop,
+            },
+            &RequestMeta::default(),
+        )
+        .await
+        .expect("mint")
+}
+
+/// Whether token `id` is still unrevoked in `api_tokens`; panics when the
+/// row is gone, since a revoke must keep it.
+async fn active(app: &TestApp, id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT revoked_at IS NULL FROM api_tokens WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("the token row is kept")
+}
+
+/// Token `id`'s audit actions, sorted.
+async fn audit_actions(app: &TestApp, id: Uuid) -> Vec<String> {
+    let mut actions: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1")
+            .bind(id)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    actions.sort_unstable();
+    actions
+}
+
+/// The requests `server` received at `at`.
+async fn received_at(server: &MockServer, at: &str) -> Vec<wiremock::Request> {
+    server
+        .received_requests()
+        .await
+        .expect("request recording is on")
+        .into_iter()
+        .filter(|request| request.url.path() == at)
+        .collect()
+}
+
+/// The owner's revoke cut as it reaches the services: profile's revoke,
+/// which reserves the durable cut, and devserver-control's first cut of the
+/// owner's tunnels and of the sessions they are the subject of.
+struct OwnerCut {
+    profile_revoke: String,
+    tunnel_kill: String,
+}
+
+impl OwnerCut {
+    /// Answer `uid`'s cut for token `token_id` as profile and
+    /// devserver-control answer it.
+    async fn mount(app: &TestApp, uid: Uuid, token_id: Uuid) -> Self {
+        Self::mount_answering(app, uid, token_id, ResponseTemplate::new(202)).await
+    }
+
+    /// [`Self::mount`], with profile's revoke answered by `profile`.
+    async fn mount_answering(
+        app: &TestApp,
+        uid: Uuid,
+        token_id: Uuid,
+        profile: ResponseTemplate,
+    ) -> Self {
+        let cut = Self {
+            profile_revoke: format!("/v1/users/{uid}/tokens/{token_id}/revoke"),
+            tunnel_kill: format!("/admin/v1/owners/{uid}/tunnels/kill"),
+        };
+        Mock::given(method("POST"))
+            .and(path(cut.profile_revoke.as_str()))
+            .respond_with(profile)
+            .mount(&app.profile)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(cut.tunnel_kill.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"killed": 1})))
+            .mount(&app.control)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/admin/v1/sessions/revoke"))
+            .and(body_json(
+                json!({"scope": "subject", "subject_user_id": uid}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "revoked": 1,
+                "tenant_sessions_revoked": 1,
+                "proxies_confirmed": 1,
+                "proxies_expected": 1,
+            })))
+            .mount(&app.control)
+            .await;
+        cut
+    }
+
+    /// How many times each part of the cut was asked for: profile's
+    /// revoke, the tunnel kill and the subject's session drain.
+    async fn counts(&self, app: &TestApp) -> (usize, usize, usize) {
+        (
+            received_at(&app.profile, &self.profile_revoke).await.len(),
+            received_at(&app.control, &self.tunnel_kill).await.len(),
+            received_at(&app.control, "/admin/v1/sessions/revoke")
+                .await
+                .len(),
+        )
+    }
+
+    /// [`Self::counts`] once they reach `expected`, or after ten seconds:
+    /// a used token's cut runs after the give-back has answered.
+    async fn settled(
+        &self,
+        app: &TestApp,
+        expected: (usize, usize, usize),
+    ) -> (usize, usize, usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let counts = self.counts(app).await;
+            if counts == expected || tokio::time::Instant::now() >= deadline {
+                return counts;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// A subscriber that keeps every formatted line, and the lines it kept.
+fn capture_logs() -> (
+    impl tracing::Subscriber + Send + Sync,
+    Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    use std::io::Write;
+    use std::sync::Mutex;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = Capture(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    (subscriber, output)
+}
+
+/// Sign `uid` in and run the account-mode authorize, consent, confirm and
+/// redeem through identity's own routes, as chan-desktop does. Answers the
+/// redeemed token's id and secret; `c` keeps the browser session.
+async fn redeem_account_pat(app: &TestApp, c: &mut Client<'_>, uid: Uuid) -> (Uuid, String) {
+    let email = "selfrevoke@example.com";
+    app.insert_user(uid, email).await;
+    happy_login(app, c, uid, email).await;
+    mock_get_user(app, uid, email, false).await;
+    let resp = c.get(AUTH_URI_ACCOUNT).await;
+    assert_eq!(resp.status, StatusCode::SEE_OTHER);
+    let resp = c.get("/desktop/authorize/consent").await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let csrf = extract_csrf(resp.body_str());
+    let resp = c
+        .post_form(
+            "/desktop/authorize/confirm",
+            &[("csrf", &csrf), ("action", "allow")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let query = parse_callback_query(&extract_handoff_url(resp.body_str()));
+    let code = query.get("code").expect("code in query").clone();
+    let resp = c
+        .post_json(
+            "/desktop/authorize/redeem",
+            &json!({ "code": code, "code_verifier": PKCE_VERIFIER }),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let redeemed: serde_json::Value = serde_json::from_slice(&resp.body).expect("redeem json");
+    let id = redeemed["id"].as_str().unwrap().parse().expect("uuid id");
+    (id, redeemed["secret"].as_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn redeemed_pat_revokes_itself_and_keeps_its_row() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = Uuid::new_v4();
+    let (token_id, secret) = redeem_account_pat(&app, &mut c, uid).await;
+    let cut = OwnerCut::mount(&app, uid, token_id).await;
+
+    let (status, body) = self_revoke(&app, Some(&secret)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    // Nothing presented the token before, so it opened nothing to cut.
+    assert_eq!(cut.counts(&app).await, (0, 0, 0));
+
+    // The account page reads the row back: kept, with `revoked_at` set,
+    // and its audit ends in the desktop's own revoke action, not the
+    // owner's. Nothing validated the token on the way, so there is no
+    // `used` row.
+    let cookie = c.cookie.clone().expect("browser session");
+    let (status, body) = send_as(&app, Method::GET, "/api/tokens", None, Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let rows = rows.as_array().expect("token list");
+    assert_eq!(rows.len(), 1, "the row is kept: {rows:?}");
+    assert_eq!(rows[0]["id"], json!(token_id));
+    assert!(rows[0]["revoked_at"].is_string(), "{rows:?}");
+    let (status, body) = send_as(
+        &app,
+        Method::GET,
+        &format!("/api/tokens/{token_id}/audit"),
+        None,
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let audit: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let mut actions: Vec<&str> = audit
+        .iter()
+        .map(|entry| entry["action"].as_str().unwrap())
+        .collect();
+    actions.sort_unstable();
+    assert_eq!(
+        actions,
+        [
+            "created_via_desktop",
+            "desktop.redeem",
+            "revoked_via_desktop"
+        ]
+    );
+
+    // The token authenticates nothing any more, and revoking it again
+    // gets exactly the answer an unknown bearer gets.
+    let invalid = invalid_bearer_answer(&app).await;
+    assert_eq!(invalid.0, StatusCode::UNAUTHORIZED);
+    let roster = send_as(
+        &app,
+        Method::GET,
+        "/desktop/v1/devservers",
+        Some(&secret),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(roster, invalid);
+    let (status, _) = send_as(
+        &app,
+        Method::POST,
+        "/desktop/v1/devserver/entry",
+        Some(&secret),
+        None,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(app.api_tokens.validate_no_audit(&secret).await.is_err());
+    assert_eq!(self_revoke(&app, Some(&secret)).await, invalid);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_touches_only_the_presented_token() {
+    let app = TestApp::new().await;
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+    app.insert_user(alice, "alice@example.com").await;
+    app.insert_user(bob, "bob@example.com").await;
+    let presented = mint(&app, alice, &["desktop.account"]).await;
+    let sibling = mint(&app, alice, &["desktop.account"]).await;
+    let foreign = mint(&app, bob, &["desktop.account"]).await;
+
+    // A body naming other tokens is not read: the bearer alone is the
+    // credential and the target.
+    let (status, _) = send_as(
+        &app,
+        Method::DELETE,
+        "/desktop/v1/token",
+        Some(&presented.secret),
+        None,
+        Some(json!({
+            "id": sibling.token.id,
+            "ids": [sibling.token.id, foreign.token.id],
+            "secret": foreign.secret,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!active(&app, presented.token.id).await);
+    assert!(active(&app, sibling.token.id).await);
+    assert!(active(&app, foreign.token.id).await);
+    for other in [&sibling.secret, &foreign.secret] {
+        app.api_tokens
+            .validate_no_audit(other)
+            .await
+            .expect("an untouched token still authenticates");
+    }
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "used@example.com").await;
+    let used = mint(&app, uid, &["desktop.account"]).await;
+    let unused = mint(&app, uid, &["desktop.account"]).await;
+    // A roster read presents the token, as an entry mint or a dial would:
+    // each sets `last_used_at`.
+    app.api_tokens
+        .validate_no_audit(&used.secret)
+        .await
+        .expect("the token is live");
+    let used_cut = OwnerCut::mount(&app, uid, used.token.id).await;
+    let unused_cut = OwnerCut::mount(&app, uid, unused.token.id).await;
+
+    let (status, body) = self_revoke(&app, Some(&used.secret)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    assert!(!active(&app, used.token.id).await);
+    // Profile reserved its durable cut for the token, and the first cut of
+    // the owner's tunnels and of the sessions they are the subject of ran.
+    assert_eq!(used_cut.settled(&app, (1, 1, 1)).await, (1, 1, 1));
+    let drain = &received_at(&app.control, "/admin/v1/sessions/revoke").await[0];
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&drain.body).unwrap(),
+        json!({"scope": "subject", "subject_user_id": uid})
+    );
+    // The audit names the desktop's give-back, never the owner's revoke.
+    // Profile is a stand-in here: that its revoke of a token already revoked
+    // adds no audit row is pinned by profile's own
+    // `identity_pat_revoke_atomically_denies_audits_and_reserves`.
+    assert_eq!(
+        audit_actions(&app, used.token.id).await,
+        ["created_via_desktop", "revoked_via_desktop"]
+    );
+
+    // An unused token of the same owner is revoked with no cut at all: no
+    // reservation for it, and no second tunnel kill or session drain.
+    let (status, _) = self_revoke(&app, Some(&unused.secret)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!active(&app, unused.token.id).await);
+    assert_eq!(unused_cut.counts(&app).await.0, 0);
+    assert_eq!(used_cut.counts(&app).await, (1, 1, 1));
+    assert_eq!(
+        audit_actions(&app, unused.token.id).await,
+        ["created_via_desktop", "revoked_via_desktop"]
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_used_tokens_cut_outlives_a_request_dropped_after_the_give_back() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "dropped@example.com").await;
+    let used = mint(&app, uid, &["desktop.account"]).await;
+    app.api_tokens
+        .validate_no_audit(&used.secret)
+        .await
+        .expect("the token is live");
+    // Profile answers slowly, as one under load does: a cut awaited inside
+    // the request would still be waiting on it when the client goes.
+    let cut = OwnerCut::mount_answering(
+        &app,
+        uid,
+        used.token.id,
+        ResponseTemplate::new(202).set_delay(Duration::from_secs(1)),
+    )
+    .await;
+
+    // Drive the request only until the give-back has committed, then drop
+    // it, as a desktop that hangs up or gives up does.
+    let mut request = Box::pin(self_revoke(&app, Some(&used.secret)));
+    let answered = loop {
+        tokio::select! {
+            answer = &mut request => break Some(answer),
+            () = tokio::time::sleep(Duration::from_millis(10)) => {
+                if !active(&app, used.token.id).await {
+                    break None;
+                }
+            }
+        }
+    };
+    drop(request);
+
+    if let Some((status, body)) = answered {
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+    assert!(
+        !active(&app, used.token.id).await,
+        "the give-back committed"
+    );
+    assert_eq!(
+        cut.settled(&app, (1, 1, 1)).await,
+        (1, 1, 1),
+        "profile's reservation and the first cut outlive the request"
+    );
+    assert_eq!(
+        audit_actions(&app, used.token.id).await,
+        ["created_via_desktop", "revoked_via_desktop"]
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_used_tokens_first_cut_runs_when_profile_fails() {
+    let (subscriber, output) = capture_logs();
+    let _logs = tracing::subscriber::set_default(subscriber);
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "profile-down@example.com").await;
+    let used = mint(&app, uid, &["desktop.account"]).await;
+    app.api_tokens
+        .validate_no_audit(&used.secret)
+        .await
+        .expect("the token is live");
+    let cut = OwnerCut::mount_answering(&app, uid, used.token.id, ResponseTemplate::new(500)).await;
+
+    let (status, body) = self_revoke(&app, Some(&used.secret)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    assert!(!active(&app, used.token.id).await, "the revoke stands");
+    // Profile was asked once and failed; the first cut runs anyway.
+    assert_eq!(
+        cut.settled(&app, (1, 1, 1)).await,
+        (1, 1, 1),
+        "the first cut runs after a failed reservation"
+    );
+    let captured = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(
+        captured.lines().any(|line| line
+            .contains("reserving the cut of a used desktop token given back failed")
+            && line.contains(&used.token.id.to_string())),
+        "the failed reservation is logged by the token's id: {captured}"
+    );
+    assert!(
+        !captured.contains(&used.secret),
+        "no line carries the token: {captured}"
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_refuses_a_browser_session_alone() {
+    let app = TestApp::new().await;
+    let mut c = Client::new(&app);
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "session@example.com").await;
+    happy_login(&app, &mut c, uid, "session@example.com").await;
+    mock_get_user(&app, uid, "session@example.com", false).await;
+    let cookie = c.cookie.clone().expect("browser session");
+    // The session is live: the account page answers through it.
+    let (status, _) = send_as(&app, Method::GET, "/api/tokens", None, Some(&cookie), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = mint(&app, uid, &["desktop.account"]).await;
+
+    let invalid = invalid_bearer_answer(&app).await;
+    for bearer in [None, Some("not-a-pat")] {
+        let answer = send_as(
+            &app,
+            Method::DELETE,
+            "/desktop/v1/token",
+            bearer,
+            Some(&cookie),
+            Some(json!({ "id": token.token.id })),
+        )
+        .await;
+        assert_eq!(answer, invalid, "{bearer:?}");
+    }
+    assert!(active(&app, token.token.id).await);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_answers_every_invalid_bearer_as_the_pat_auth_does() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "invalid@example.com").await;
+    let revoked = mint(&app, uid, &["desktop.account"]).await;
+    assert!(app
+        .api_tokens
+        .revoke(uid, revoked.token.id, &RequestMeta::default())
+        .await
+        .unwrap());
+    let expired = mint(&app, uid, &["desktop.account"]).await;
+    sqlx::query("UPDATE api_tokens SET expires_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(expired.token.id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    // A devserver's PAT is not the desktop's to give back here.
+    let tunnel = mint(&app, uid, &["tunnel"]).await;
+
+    let invalid = invalid_bearer_answer(&app).await;
+    assert_eq!(invalid.0, StatusCode::UNAUTHORIZED);
+    let unknown = "chan_pat_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    for (name, bearer) in [
+        ("already revoked", Some(revoked.secret.as_str())),
+        ("expired", Some(expired.secret.as_str())),
+        ("unknown", Some(unknown)),
+        ("not a PAT", Some("opaque")),
+        ("tunnel scope", Some(tunnel.secret.as_str())),
+        ("absent", None),
+    ] {
+        assert_eq!(self_revoke(&app, bearer).await, invalid, "{name}");
+    }
+    // None of them wrote anything: the expired token is not revoked, the
+    // tunnel token still authenticates, and the revoked one has only the
+    // revoke it had.
+    assert!(active(&app, expired.token.id).await);
+    assert!(active(&app, tunnel.token.id).await);
+    for token in [&revoked, &expired, &tunnel] {
+        assert!(
+            !audit_actions(&app, token.token.id)
+                .await
+                .iter()
+                .any(|action| action == "revoked_via_desktop"),
+            "no give-back is audited"
+        );
+    }
+    assert_eq!(
+        audit_actions(&app, revoked.token.id).await,
+        ["created_via_desktop", "revoked"]
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_answers_a_blocked_owners_token_as_an_invalid_bearer() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "blocked@example.com").await;
+    let token = mint(&app, uid, &["desktop.account"]).await;
+    sqlx::query("UPDATE users SET blocked_at = now() WHERE id = $1")
+        .bind(uid)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let invalid = invalid_bearer_answer(&app).await;
+    assert_eq!(self_revoke(&app, Some(&token.secret)).await, invalid);
+    // The blocked account's own path revokes its tokens; this route wrote
+    // nothing.
+    assert!(active(&app, token.token.id).await);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_ignores_the_admission_policy_that_gates_use() {
+    let app = TestApp::new().await;
+    let paused = Uuid::new_v4();
+    let disabled = Uuid::new_v4();
+    app.insert_user(paused, "paused@example.com").await;
+    app.insert_user(disabled, "disabled@example.com").await;
+    let paused_token = mint(&app, paused, &["desktop.account"]).await;
+    let disabled_token = mint(&app, disabled, &["desktop.account"]).await;
+    sqlx::query(
+        "INSERT INTO devserver_user_policies (user_id, enabled, max_connected_devservers) \
+         VALUES ($1, false, 1)",
+    )
+    .bind(disabled)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    // The disabled policy already refuses use; pausing the fleet refuses it
+    // for everyone.
+    assert!(app
+        .api_tokens
+        .validate_no_audit(&disabled_token.secret)
+        .await
+        .is_err());
+    sqlx::query("UPDATE devserver_fleet_policy SET admissions_enabled = false")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert!(app
+        .api_tokens
+        .validate_no_audit(&paused_token.secret)
+        .await
+        .is_err());
+
+    // A holder can still give either token back.
+    for (name, token) in [
+        ("paused fleet", &paused_token),
+        ("disabled user policy", &disabled_token),
+    ] {
+        let (status, body) = self_revoke(&app, Some(&token.secret)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{name}");
+        assert!(body.is_empty(), "{name}");
+        assert!(!active(&app, token.token.id).await, "{name}");
+    }
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn self_revoke_accepts_every_desktop_scope_set() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "scopes@example.com").await;
+    for scopes in [
+        &["desktop.account"][..],
+        &["desktop.connect"][..],
+        &["tunnel", "desktop.connect"][..],
+    ] {
+        let token = mint(&app, uid, scopes).await;
+        let (status, _) = self_revoke(&app, Some(&token.secret)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{scopes:?}");
+        assert!(!active(&app, token.token.id).await, "{scopes:?}");
+        assert_eq!(
+            audit_actions(&app, token.token.id).await,
+            ["created_via_desktop", "revoked_via_desktop"],
+            "{scopes:?}: the revoke wrote its own audit row"
+        );
+    }
+
     app.cleanup().await;
 }
