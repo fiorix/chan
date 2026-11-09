@@ -18,16 +18,18 @@ Paths are under `web/packages/workspace-app/src/` unless they say otherwise.
 2. Every copy path (the chord, the menu's Copy and Copy scrollback, copy on mouse release, double and triple click) produces the same text through chan's writer.
 3. Copied text holds only what the screen shows: no NUL, no control or escape bytes, no private-use or zero-width characters chan or the widget inserted, on Linux (chan-desktop on X11 and Wayland, and the browser), macOS and Windows.
 4. A paste into a ghostty terminal cannot end its own bracket: `ESC[201~` and other escape sequences in the pasted text are removed or neutralized before it is sent, and line endings are converted as xterm.js converts them.
+5. On Linux, chan-desktop supports the PRIMARY selection in terminals of both backends (owner, 2026-11-09): selecting text sets PRIMARY with the same text a copy produces, and a middle click in a terminal pastes PRIMARY through the same cleaned paste, on X11 and Wayland. The CLIPBOARD selection is unchanged by it.
 
 ## Boundaries
 
-- Secret masking stays paint-only; whether copying a masked secret should copy it is a separate decision.
-- No PRIMARY selection (middle-click paste) on Linux; it gets its own row if wanted.
+- Secret masking stays paint-only, and copying a masked secret copies the secret (owner, 2026-11-09: fine).
+- PRIMARY selection is for chan-desktop on Linux; a web page cannot reach it, so chan in a browser keeps the browser's own behaviour.
 - No confirmation dialog for multi-line paste.
 
 ## Acceptance
 
 1. Vitest over the vendored core: a command longer than the width copies as one line, a hard break stays, wide characters and row-end padding copy clean, and the copy-on-select path yields the same string as the chord; the earlier pin that kept soft wraps is replaced, with the reason in the commit.
 2. A paste test: text with `ESC[201~`, other escapes and `\r\n` reaches the terminal with the bracket intact and the line endings converted.
-3. A browser check in an isolated guest: a long command typed into a ghostty terminal, copied by each path, and pasted into a second terminal runs once as one command; the clipboard's bytes are compared with the expected text.
-4. On chan-desktop on Linux (X11 and Wayland) and macOS (owner): the same copy and paste between two terminals, and from a terminal into another application, carries no stray bytes.
+3. Tests of the PRIMARY path: a selection in either backend sets PRIMARY with the copy's text, and a middle click pastes PRIMARY through the cleaned paste, against a stand-in clipboard.
+4. A browser check in an isolated guest: a long command typed into a ghostty terminal, copied by each path, and pasted into a second terminal runs once as one command; the clipboard's bytes are compared with the expected text.
+5. On chan-desktop on Linux (X11 and Wayland) and macOS (owner): the same copy and paste between two terminals, and from a terminal into another application, carries no stray bytes; on Linux, a selection in chan middle-click pastes into another application and back.

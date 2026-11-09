@@ -63,7 +63,7 @@ A third came the same day from the review of v0.127.0's live-metrics fixes: the 
 
 The owner moved two more here from v0.127.0 the same day, both not started: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]), and the system CA store for the Rust TLS clients, read on three platforms ([systemca]).
 
-The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, and copy and paste carry no stray bytes ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]).
+The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, copy and paste carry no stray bytes, and Linux gets middle-click paste from the PRIMARY selection ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]).
 
 | Item | State | Next |
 | --- | --- | --- |

@@ -14,13 +14,13 @@ Status: raised by the owner on 2026-11-09 and accepted for v0.128.0 the same day
 
 1. The desktop's handoff socket takes an open-path request that does what `cs open` does in a standalone window: reuse or create a standalone window, raise it, and open the directory in the file browser or the file in the editor (or reveal it, or create it, by the same rules).
 2. `chan-desktop PATH...` and `chan-desktop` given file URIs (`%U`) deliver each path to the running desktop through that request, launching the desktop first when it is not running; a second launch never starts a second desktop.
-3. The CLI has a verb for the same thing, so `chan <verb> PATH` opens a directory or file in a standalone window of the running desktop or devserver. Its name is the owner's call: `chan open` is taken by `chan serve`.
+3. The CLI has a verb for the same thing, so `chan <verb> PATH` opens a directory or file in a standalone window of the running desktop or devserver. Naming it is hard, since `chan open` is a visible alias of `chan serve`: the item evaluates the options (a new verb, re-pointing `chan open`, or a flag) with what each breaks for existing users and scripts, and records the owner's choice before the verb is built (owner, 2026-11-09).
 4. Linux: the desktop entry, packaged and in the AppImage, declares `inode/directory` and `text/markdown` (at least) with a field code, so `xdg-open` and the desktop environment's Open With can use chan, and the user can make it the default file browser or Markdown editor with `xdg-mime`; installing chan does not make it the default by itself.
 5. macOS: the bundle declares Markdown as a document type chan can edit, without claiming to be its default, so it shows in Open With and can be made the default Markdown app in Finder's Get Info; Finder's open, a double click once it is the default, and `open -a` deliver the file to a standalone window. Being the default file browser is not a goal on macOS.
 
 ## Boundaries
 
-- Windows is outside this item until a standalone window has a file surface there.
+- Windows is out of scope (owner, 2026-11-09); a standalone window has no file surface there either.
 - No change to what `cs open` decides per path; the new ways in reuse it.
 - Plain-text and code files beyond Markdown may be declared later; this item declares directories (Linux) and Markdown.
 
