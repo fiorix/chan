@@ -21,10 +21,9 @@ The done archive records a run of ghostty-web behaviors fixed from outside, amon
 
 chan's ghostty adapter code outside tests is about 3,800 lines: the binding, the compatibility layer, keys, paste, wheel, selection, viewport, find and secret masking. Upstream's `lib/` is about 260 KB of TypeScript outside tests, and its repository also carries the patched Ghostty build, which chan does not use: a submodule, patches, and Zig and Nix tooling.
 
-The find work left gaps the owner deferred on 2026-11-09, recorded in that work's follow-up report:
+The find work left gaps the owner deferred on 2026-11-09, recorded in that work's follow-up report. A further defect found there, a find step that wrapped among the matches found so far while the scan ran, so that Shift+Enter after reopening landed on the wrong match, was fixed for v0.127.0 on the follow-up branch (`7f8fa29bb`) and is not part of this item. The deferred gaps:
 - **A resize restarts the walk.** The core forgets its selected match on any resize; its tracked grid refs could keep it.
 - **A feed can blow the frame.** At the largest scrollback, with a needle that matches often, one feed costs 30 to 57 ms in a single frame. This is its own item, [a find frame runs long at the largest scrollback](a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md).
-- **Shift+Enter after reopening can land wrong.** Mid-scan, it lands on the oldest match found so far.
 - **Wrapped lines can double-count.** The core counts some matches twice across soft wraps.
 - **Only the active match is highlighted.** Highlighting every match waits for a highlight layer.
 
@@ -59,7 +58,6 @@ Each part lands in a release once it is green, in this order; one release can ta
 5. **Find on the widget.**
    - Highlight every match.
    - Keep the active match across a resize through tracked grid refs.
-   - Land Shift+Enter after reopening on the true oldest match.
 6. **Modernise the input handler** behind tests.
 
 ## Boundaries
@@ -73,5 +71,5 @@ Each part lands in a release once it is green, in this order; one release can ta
 
 1. Each part lands with chan's web gate green, and with checks 211, 93, 94, 105 and 204 and the terminal pixel harness green in an isolated guest at the integration tip.
 2. After parts 2 to 4, ghostty-web is not an npm dependency, and a source scan proves chan reads no private field of the widget.
-3. After part 5, find highlights every match and keeps the active match across a resize, and Shift+Enter after reopening lands on the true oldest match.
+3. After part 5, find highlights every match and keeps the active match across a resize.
 4. The owner walks chan-desktop on every part that changes rendering or input.
