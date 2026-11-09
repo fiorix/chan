@@ -26,6 +26,7 @@ mod identity_config;
 mod test_db;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -1417,13 +1418,23 @@ impl OwnerCut {
     /// Answer `uid`'s cut for token `token_id` as profile and
     /// devserver-control answer it.
     async fn mount(app: &TestApp, uid: Uuid, token_id: Uuid) -> Self {
+        Self::mount_answering(app, uid, token_id, ResponseTemplate::new(202)).await
+    }
+
+    /// [`Self::mount`], with profile's revoke answered by `profile`.
+    async fn mount_answering(
+        app: &TestApp,
+        uid: Uuid,
+        token_id: Uuid,
+        profile: ResponseTemplate,
+    ) -> Self {
         let cut = Self {
             profile_revoke: format!("/v1/users/{uid}/tokens/{token_id}/revoke"),
             tunnel_kill: format!("/admin/v1/owners/{uid}/tunnels/kill"),
         };
         Mock::given(method("POST"))
             .and(path(cut.profile_revoke.as_str()))
-            .respond_with(ResponseTemplate::new(202))
+            .respond_with(profile)
             .mount(&app.profile)
             .await;
         Mock::given(method("POST"))
@@ -1457,6 +1468,23 @@ impl OwnerCut {
                 .await
                 .len(),
         )
+    }
+
+    /// [`Self::counts`] once they reach `expected`, or after ten seconds:
+    /// a used token's cut runs after the give-back has answered.
+    async fn settled(
+        &self,
+        app: &TestApp,
+        expected: (usize, usize, usize),
+    ) -> (usize, usize, usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let counts = self.counts(app).await;
+            if counts == expected || tokio::time::Instant::now() >= deadline {
+                return counts;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 
@@ -1637,7 +1665,7 @@ async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
     assert!(!active(&app, used.token.id).await);
     // Profile reserved its durable cut for the token, and the first cut of
     // the owner's tunnels and of the sessions they are the subject of ran.
-    assert_eq!(used_cut.counts(&app).await, (1, 1, 1));
+    assert_eq!(used_cut.settled(&app, (1, 1, 1)).await, (1, 1, 1));
     let drain = &received_at(&app.control, "/admin/v1/sessions/revoke").await[0];
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&drain.body).unwrap(),
@@ -1659,6 +1687,62 @@ async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
     assert_eq!(used_cut.counts(&app).await, (1, 1, 1));
     assert_eq!(
         audit_actions(&app, unused.token.id).await,
+        ["created_via_desktop", "revoked_via_desktop"]
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_used_tokens_cut_outlives_a_request_dropped_after_the_give_back() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "dropped@example.com").await;
+    let used = mint(&app, uid, &["desktop.account"]).await;
+    app.api_tokens
+        .validate_no_audit(&used.secret)
+        .await
+        .expect("the token is live");
+    // Profile answers slowly, as one under load does: a cut awaited inside
+    // the request would still be waiting on it when the client goes.
+    let cut = OwnerCut::mount_answering(
+        &app,
+        uid,
+        used.token.id,
+        ResponseTemplate::new(202).set_delay(Duration::from_secs(1)),
+    )
+    .await;
+
+    // Drive the request only until the give-back has committed, then drop
+    // it, as a desktop that hangs up or gives up does.
+    let mut request = Box::pin(self_revoke(&app, Some(&used.secret)));
+    let answered = loop {
+        tokio::select! {
+            answer = &mut request => break Some(answer),
+            () = tokio::time::sleep(Duration::from_millis(10)) => {
+                if !active(&app, used.token.id).await {
+                    break None;
+                }
+            }
+        }
+    };
+    drop(request);
+
+    if let Some((status, body)) = answered {
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+    }
+    assert!(
+        !active(&app, used.token.id).await,
+        "the give-back committed"
+    );
+    assert_eq!(
+        cut.settled(&app, (1, 1, 1)).await,
+        (1, 1, 1),
+        "profile's reservation and the first cut outlive the request"
+    );
+    assert_eq!(
+        audit_actions(&app, used.token.id).await,
         ["created_via_desktop", "revoked_via_desktop"]
     );
 

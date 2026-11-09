@@ -1346,7 +1346,7 @@ async fn first_cut(state: &AppState, user_id: Uuid, username: &str) {
 /// kept), audited as `revoked_via_desktop` so the owner's history never
 /// shows it as their own revoke. A token nothing had used gets no more:
 /// it opened nothing. A used one gets the owner's revoke cut as well,
-/// through [`cut_given_back_token`].
+/// through [`cut_given_back_token`], which runs detached from the request.
 async fn desktop_token_revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1371,7 +1371,18 @@ async fn desktop_token_revoke(
         .await?;
     match given_back {
         Some(GivenBack::Unused) => {}
-        Some(GivenBack::Used) => cut_given_back_token(&state, &presented, &meta).await,
+        Some(GivenBack::Used) => {
+            use tracing::instrument::WithSubscriber as _;
+            use tracing::Instrument as _;
+            // The give-back has committed, and the cut is a second
+            // transaction in profile and calls to devserver-control after
+            // it. Awaited here it would end with the request: a desktop that
+            // hangs up or gives up first would leave the token revoked and
+            // nothing cut. Spawned, it runs to its end whatever the client
+            // does, logging where the request logs.
+            let cut = cut_given_back_token(state.clone(), presented, meta);
+            tokio::spawn(cut.in_current_span().with_current_subscriber());
+        }
         // Another revoke landed between the lookup and this one: the token
         // is already gone, which is the invalid-bearer answer.
         None => return Err(Error::Unauthorized),
@@ -1388,10 +1399,15 @@ async fn desktop_token_revoke(
 /// gets the owner's revoke cut. Profile finds the token already revoked, so
 /// it writes no second audit row, and reserves its durable cut of the
 /// owner's live surface; the first cut then runs as the owner's revoke runs
-/// it. A failed reservation is logged and leaves the revoke standing: the
-/// token authenticates nothing, its tunnel ends at its next lease refresh,
-/// and the first cut still runs.
-async fn cut_given_back_token(state: &AppState, presented: &PresentedToken, meta: &RequestMeta) {
+/// it. The owner's revoke can await both in its request, because profile
+/// commits that revoke and its reservation together; here the revoke has
+/// already committed in identity, so the handler spawns this and answers.
+/// A failed reservation is logged and does not stop the first cut, but
+/// nothing durable repeats the cut then: the token authenticates nothing,
+/// a tunnel on it ends at its next lease refresh, and a proxy session the
+/// first cut missed runs to its lifetime. An identity that stops before
+/// the reservation lands loses the cut the same way.
+async fn cut_given_back_token(state: AppState, presented: PresentedToken, meta: RequestMeta) {
     if let Err(error) = state
         .cfg
         .profile_client
@@ -1410,7 +1426,7 @@ async fn cut_given_back_token(state: &AppState, presented: &PresentedToken, meta
             "reserving the cut of a used desktop token given back failed",
         );
     }
-    first_cut(state, presented.user_id, &presented.username).await;
+    first_cut(&state, presented.user_id, &presented.username).await;
 }
 
 #[derive(Debug, Deserialize)]
