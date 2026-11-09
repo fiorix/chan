@@ -43,7 +43,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [a shared devserver's root link refuses its grantees][grantroot] | built | CI run |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 | [a running chan shows no live process metrics][metrics] | built | guest run |
-| [ghostty terminals run on a pre-1.0 core][ghostty1] | built | follow-ups |
+| [ghostty terminals run on a pre-1.0 core][ghostty1] | built | owner |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -65,6 +65,8 @@ The owner moved two more here from v0.127.0 the same day, both not started: one 
 
 The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, copy and paste carry no stray bytes, and Linux gets middle-click paste from the PRIMARY selection ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]).
 
+A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's selected match on every resize, so v0.127.0 drops the highlight and shows no index until the next step, and the owner moved keeping the match, through the core's tracked grid references, here ([findresize]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -76,6 +78,7 @@ The owner added four more the same day: a tmux window's title bar shows the acti
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
 | [a theme switch leaves ghostty colours][livetheme] | not started | design |
 | [the system cannot open files in chan][openwith] | not started | design |
+| [find loses its match on a resize][findresize] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -86,6 +89,7 @@ The owner added four more the same day: a tmux window's title bar shows the acti
 [gcopy]: v0.128.0/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md
 [livetheme]: v0.128.0/a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch.md
 [openwith]: v0.128.0/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md
+[findresize]: v0.128.0/a-ghostty-find-loses-its-match-on-a-resize.md
 
 ## Completed
 
