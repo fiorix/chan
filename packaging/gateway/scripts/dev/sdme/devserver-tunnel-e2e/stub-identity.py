@@ -209,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
     def share_landing(self):
         """`GET /s/{owner}` and `GET /s/{owner}/{workspace}`: identity's
         browser handoff, a no-store page whose form POSTs a browser credential
-        to the proxy. The whole-devserver landing is the owner's alone."""
+        to the proxy. Both admit the owner and the grantee, as identity's do."""
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
         session = cookie[BROWSER_SESSION_COOKIE].value if BROWSER_SESSION_COOKIE in cookie else ""
         if session and hmac.compare_digest(session, OWNER_BROWSER_SESSION):
@@ -222,8 +222,6 @@ class Handler(BaseHTTPRequestHandler):
         if not segments or segments[0] != USERNAME or len(segments) > 2:
             return self.json_response(404, {"error": "not found"})
         if len(segments) == 1:
-            if subject != USER_ID:
-                return self.json_response(404, {"error": "not found"})
             next_path = "/"
         elif segments[1] and "." not in segments[1]:
             next_path = f"/{segments[1]}/"
