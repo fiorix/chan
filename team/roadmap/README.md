@@ -55,6 +55,16 @@ The owner added another the same day: the ghostty terminals re-pinned from a pre
 [metrics]: v0.127.0/a-running-chan-shows-no-live-process-metrics.md
 [ghostty1]: v0.127.0/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md
 
+### v0.128.0
+
+Opened 2026-11-09 by the owner with one item taken in parts over this and the following releases: the ghostty terminals render through ghostty-web, a package with no release since v0.4.0 that chan drives from outside through its private internals, so chan forks the parts it uses into `web/packages/ghostty-web-ng`, a widget over libghostty-vt 1.0 with public hooks for highlights, painting, focus and events, decides later whether to extract it to its own repository, and folds in the find gaps the v0.127.0 follow-ups left ([ghosttyng]). v0.127.0 keeps its ghostty work as tested.
+
+| Item | State | Next |
+| --- | --- | --- |
+| [chan drives ghostty-web from outside][ghosttyng] | not started | design |
+
+[ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
+
 ## Completed
 
 ### v0.126.0
