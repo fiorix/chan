@@ -198,16 +198,17 @@ impl Subscription {
 
     /// The next view to send, or `None` when nothing is newer than what was.
     pub(crate) async fn next(&mut self, source: &impl Source) -> Result<Option<View>> {
-        let newest = self.sent.as_ref().and_then(|(_, newest)| *newest);
-        let since = match (self.since, newest) {
-            (Some(since), Some(newest)) => Some(since.max(newest)),
-            (since, newest) => newest.or(since),
+        // The caller's `since` shapes the first reply alone. After that each
+        // reply holds what is newer than the last sample sent, even when the
+        // caller asked from past the server's newest sample.
+        let since = match &self.sent {
+            None => self.since,
+            Some((_, newest)) => *newest,
         };
         let mut view = source.read(self.history, since).await?;
         if let Some((instance, newest)) = &self.sent {
             if view.identity.instance_id != *instance {
-                // The caller's `since` counted the old instance's samples.
-                self.since = None;
+                // A restarted server numbers its samples afresh.
                 view = source.read(self.history, None).await?;
             } else if view.latest.as_ref().map(|sample| sample.sequence) <= *newest {
                 return Ok(None);
@@ -646,6 +647,30 @@ mod tests {
         }
     }
 
+    /// A real view with a sample, to copy scripted views from.
+    async fn sampled_view() -> View {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = chan_server::metrics::Runtime::start(home.path().into()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let view = runtime.view(false, None);
+            if view.latest.is_some() {
+                return view;
+            }
+            assert!(std::time::Instant::now() < deadline, "no sample");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The history and latest sequences of a sent view.
+    fn sequences(view: Option<View>) -> Option<(Vec<u64>, Option<u64>)> {
+        view.map(|view| {
+            let latest = view.latest.map(|sample| sample.sequence);
+            let history = view.history.iter().map(|s| s.sequence).collect();
+            (history, latest)
+        })
+    }
+
     fn view_of(base: &View, instance: &str, sequences: std::ops::RangeInclusive<u64>) -> View {
         let sample = base.latest.clone().unwrap();
         let mut view = base.clone();
@@ -662,17 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_subscription_sends_the_whole_view_once_then_only_what_is_new() {
-        let home = tempfile::tempdir().unwrap();
-        let runtime = chan_server::metrics::Runtime::start(home.path().into()).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let base = loop {
-            let view = runtime.view(false, None);
-            if view.latest.is_some() {
-                break view;
-            }
-            assert!(std::time::Instant::now() < deadline, "no sample");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
+        let base = sampled_view().await;
         let script = Script {
             views: std::sync::Mutex::new(
                 [
@@ -688,13 +703,6 @@ mod tests {
                 .into(),
             ),
             asked: Default::default(),
-        };
-        let sequences = |view: Option<View>| {
-            view.map(|view| {
-                let latest = view.latest.map(|sample| sample.sequence);
-                let history: Vec<u64> = view.history.iter().map(|s| s.sequence).collect();
-                (history, latest)
-            })
         };
         let mut stream = Subscription::new(true, Some(2));
         let expected = [
@@ -714,5 +722,32 @@ mod tests {
             *script.asked.lock().unwrap(),
             [Some(2), Some(5), Some(6), Some(6), Some(8), None, Some(2)]
         );
+    }
+
+    #[tokio::test]
+    async fn a_since_past_the_servers_newest_sample_shapes_only_the_first_reply() {
+        // A caller resuming from an older instance can ask from a sequence
+        // this server has not reached; later replies still carry what is new.
+        let base = sampled_view().await;
+        let script = Script {
+            views: std::sync::Mutex::new(
+                [
+                    view_of(&base, "a", 1..=5),
+                    view_of(&base, "a", 1..=6),
+                    view_of(&base, "a", 1..=8),
+                ]
+                .into(),
+            ),
+            asked: Default::default(),
+        };
+        let mut stream = Subscription::new(true, Some(900));
+        for expected in [
+            Some((vec![], Some(5))),
+            Some((vec![6], Some(6))),
+            Some((vec![7, 8], Some(8))),
+        ] {
+            assert_eq!(sequences(stream.next(&script).await.unwrap()), expected);
+        }
+        assert_eq!(*script.asked.lock().unwrap(), [Some(900), Some(5), Some(6)]);
     }
 }
