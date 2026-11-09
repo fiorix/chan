@@ -14,17 +14,22 @@
 /// While the scan runs the core knows only the newest matches, and its
 /// steps wrap among those: older from the oldest found so far lands on the
 /// newest, and newer from the newest, or with nothing selected, on the
-/// oldest found so far rather than the oldest of all. So a step never wraps
-/// while the scan runs. One that does not wrap applies at once. One that
-/// would wrap, or newer with nothing selected, waits while the frames scan
-/// on and applies on the first frame it can without wrapping: once the scan
-/// has found the next older match, or once it completes. Steps pressed
-/// while one waits queue behind it and apply in the order pressed, each
-/// from where the one before landed, so a run of presses ends where it
-/// would on a finished scan. A new query, a resize or closing the bar drops
-/// them. A step that waited writes its highlight over the selection there
-/// was when it was pressed; a selection the user makes while it waits stays
-/// theirs, and the step moves only the count.
+/// oldest found so far rather than the oldest of all. A step that does not
+/// wrap applies at once. One that would wrap, or newer with nothing
+/// selected, waits while the frames scan on and applies on the first frame
+/// it can without wrapping: once the scan has found the next older match,
+/// or once it completes. It waits at most `FIND_WAIT_CAP_MS` from its
+/// press, because output that outpaces the scan keeps it from completing
+/// for as long as the output lasts. Past the cap it applies among the
+/// matches found so far, wrapping as the core does, and the count stays
+/// partial; with none found yet it waits until one is. Steps pressed while
+/// one waits queue behind it and apply in the order pressed, each from
+/// where the one before landed and each under its own cap, so a run of
+/// presses ends where it would on a finished scan, or, past the cap, where
+/// it would among the matches found by then. A new query, a resize or
+/// closing the bar drops them. A step that waited writes its highlight
+/// over the selection there was when it was pressed; a selection the user
+/// makes while it waits stays theirs, and the step moves only the count.
 ///
 /// Output keeps arriving while the bar is open. The viewport controller
 /// reports every change to the terminal, each write (output and the lines
@@ -65,10 +70,11 @@ export type FindViewport = Pick<GhosttyViewportController, "observeChanges" | "r
 /// or toward newer output, down it.
 type Direction = "older" | "newer";
 
-/// A step held until the scan allows it: a press toward older or newer
-/// output, or a new query's selection of its newest match, which lands as
-/// an older step from no match selected does.
-type Waiting = Direction | "newest";
+/// A step held until the scan or its cap allows it: a press toward older
+/// or newer output, or a new query's selection of its newest match, which
+/// lands as an older step from no match selected does; `at` is the clock
+/// when it was asked for.
+type Waiting = { step: Direction | "newest"; at: number };
 
 /// Runs a callback once on a coming animation frame; `cancel` drops one that
 /// has not run.
@@ -77,6 +83,17 @@ export type FrameScheduler = { request(run: () => void): number; cancel(id: numb
 /// Scanning per animation frame. The core's work comes in units and the
 /// budget is checked after each, so a frame can run a few milliseconds over.
 export const FIND_SCAN_BUDGET_MS = 4;
+
+/// The longest a step that would wrap waits for the scan, from its press.
+/// A full history at the largest scrollback setting, about 55,000 lines
+/// at 200 columns, scans in about twenty frames at the budget above on a
+/// desktop, a third of a second at 60 Hz, so a scan that is only catching
+/// up completes inside the cap and the step lands on the oldest or newest
+/// match of all. Output of more lines per frame than the history holds
+/// keeps the scan from ever completing while it lasts; the cap lands the
+/// step among the matches found so far while the press is still recent,
+/// rather than all at once when the output stops.
+export const FIND_WAIT_CAP_MS = 1000;
 
 const animationFrames: FrameScheduler = {
   request: (run) => requestAnimationFrame(() => run()),
@@ -92,6 +109,9 @@ export type GhosttyFindOptions = {
   onCount(count: FindCount): void;
   frames?: FrameScheduler;
   budgetMs?: number;
+  /// Milliseconds on a clock that never steps back, read for the cap on a
+  /// waiting step; `performance.now` unless given.
+  clock?: () => number;
 };
 
 /// Find for one ghostty terminal, made when its find bar first opens and
@@ -115,12 +135,14 @@ export class GhosttyFind {
   private readonly onCount: (count: FindCount) => void;
   private readonly frames: FrameScheduler;
   private readonly budgetMs: number;
+  private readonly clock: () => number;
   private readonly stopObserving: () => void;
   /// The open bar's search; null while the bar is closed.
   private search: VtSearch | null = null;
   private needle = "";
-  /// Steps the scan does not allow yet, in the order pressed, behind a new
-  /// query's selection of its newest match while that has not landed.
+  /// Steps neither the scan nor their cap allows yet, in the order pressed,
+  /// behind a new query's selection of its newest match while that has not
+  /// landed.
   private waiting: Waiting[] = [];
   /// The selection when the bar last asked for a match.
   private askedOver: MatchRange | null = null;
@@ -138,6 +160,7 @@ export class GhosttyFind {
     this.onCount = options.onCount;
     this.frames = options.frames ?? animationFrames;
     this.budgetMs = options.budgetMs ?? FIND_SCAN_BUDGET_MS;
+    this.clock = options.clock ?? (() => performance.now());
     this.stopObserving = options.viewport.observeChanges((change) => this.onChange(change));
   }
 
@@ -149,7 +172,7 @@ export class GhosttyFind {
       return;
     }
     if (this.prepare(query)) {
-      this.waiting.push("newest");
+      this.waiting.push({ step: "newest", at: this.clock() });
       this.askedOver = this.selectionRange();
     }
     this.schedule();
@@ -157,10 +180,11 @@ export class GhosttyFind {
 
   /// Select the next match toward older output (up the buffer) or newer
   /// output (down), both wrapping, scroll to it and highlight it; while the
-  /// scan runs, a step that would wrap waits for it (see above). A query
-  /// other than the current one is searched for first, so after the bar
-  /// reopens the first step lands on the newest match for older, at once,
-  /// and on the oldest for newer, once the scan completes.
+  /// scan runs, a step that would wrap waits for it, up to its cap (see
+  /// above). A query other than the current one is searched for first, so
+  /// after the bar reopens the first step lands on the newest match for
+  /// older, at once, and on the oldest for newer, once the scan completes
+  /// or, past the cap, on the oldest found by then.
   step(query: string, direction: "older" | "newer"): void {
     if (!query) {
       this.close();
@@ -171,7 +195,7 @@ export class GhosttyFind {
       // does not wrap selects at once.
       this.search!.feed();
     }
-    this.waiting.push(direction);
+    this.waiting.push({ step: direction, at: this.clock() });
     this.askedOver = this.selectionRange();
     const selected = this.applyWaiting();
     // A press that only waits changes nothing yet; the frames show the
@@ -219,7 +243,7 @@ export class GhosttyFind {
       // match selected and scroll to wherever that took it; a new query's
       // selection of its newest match starts there anyway.
       this.dropHighlight();
-      this.waiting = this.waiting.filter((step) => step === "newest");
+      this.waiting = this.waiting.filter(({ step }) => step === "newest");
     }
     this.dirty = true;
     this.schedule();
@@ -257,15 +281,21 @@ export class GhosttyFind {
     if (running) this.schedule();
   }
 
-  /// Applies the waiting steps, oldest press first, up to the first one the
-  /// scan does not allow yet; true when one selected a match.
+  /// Applies the waiting steps, oldest press first, up to the first one
+  /// neither the scan nor its cap allows yet; true when one selected a
+  /// match.
   private applyWaiting(): boolean {
     const search = this.search!;
+    const now = this.clock();
     let selected = false;
     while (this.waiting.length > 0) {
       const state = search.state();
-      if (!state.complete && !landsAsComplete(this.waiting[0]!, state)) break;
-      const step = this.waiting.shift()!;
+      const { step, at } = this.waiting[0]!;
+      // Past its cap a step lands among the matches found so far, so it
+      // needs one to land on.
+      const capped = now - at >= FIND_WAIT_CAP_MS && state.total > 0;
+      if (!state.complete && !landsAsComplete(step, state) && !capped) break;
+      this.waiting.shift();
       if (step === "newer" ? search.selectPrev() : search.selectNext()) selected = true;
     }
     return selected;
@@ -337,7 +367,7 @@ export class GhosttyFind {
 /// wraps among them, so only a step that stays inside them lands so: older
 /// from nothing selected onto the newest once one is found, older from any
 /// but the oldest found so far, and newer from any but the newest.
-function landsAsComplete(step: Waiting, { index, total }: SearchState): boolean {
+function landsAsComplete(step: Waiting["step"], { index, total }: SearchState): boolean {
   if (step === "newer") return index !== null && index > 0;
   return index === null ? total > 0 : index < total - 1;
 }
