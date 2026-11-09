@@ -22,16 +22,16 @@ import type { Ghostty, GhosttyCell, GhosttyTerminal, KeyEncoder } from "ghostty-
 export const ABI = {
   GhosttyResult: { SUCCESS: 0, OUT_OF_SPACE: -3 },
   GhosttyTerminalOption: {
-    WRITE_PTY: 1,
-    DEVICE_ATTRIBUTES: 8,
-    COLOR_FOREGROUND: 11,
-    COLOR_BACKGROUND: 12,
-    COLOR_CURSOR: 13,
-    COLOR_PALETTE: 14,
-    SCROLLBACK_MAX_BYTES: 27,
-    SCROLLBACK_MAX_LINES: 28,
-    MODE_DEFAULT: 33,
-    MODE: 34,
+    WRITE_PTY: 2,
+    DEVICE_ATTRIBUTES: 9,
+    COLOR_FOREGROUND: 12,
+    COLOR_BACKGROUND: 13,
+    COLOR_CURSOR: 14,
+    COLOR_PALETTE: 15,
+    SCROLLBACK_MAX_BYTES: 28,
+    SCROLLBACK_MAX_LINES: 29,
+    MODE_DEFAULT: 34,
+    MODE: 35,
   },
   GhosttyTerminalData: {
     CURSOR_X: 3,
@@ -46,14 +46,7 @@ export const ABI = {
   GhosttyRenderStateData: { DIRTY: 3, ROW_ITERATOR: 4, CURSOR_VISIBLE: 11, COLORS: 19 },
   GhosttyRenderStateDirty: { FALSE: 0, PARTIAL: 1, FULL: 2 },
   GhosttyRenderStateRowData: { DIRTY: 1, CELLS: 3 },
-  GhosttyRenderStateRowCellsData: {
-    RAW: 1,
-    STYLE: 2,
-    GRAPHEMES_LEN: 3,
-    GRAPHEMES_BUF: 4,
-    BG_COLOR: 5,
-    FG_COLOR: 6,
-  },
+  GhosttyRenderStateRowCellsData: { RAW: 1, STYLE: 2, GRAPHEMES_BUF: 4, BG_COLOR: 5, FG_COLOR: 6 },
   GhosttyRowData: { WRAP_CONTINUATION: 2 },
   GhosttyStyleColorTag: { NONE: 0, PALETTE: 1, RGB: 2 },
   GhosttyCellContentTag: {
@@ -63,35 +56,32 @@ export const ABI = {
     BG_COLOR_RGB: 3,
   },
   GhosttyCellWide: { NARROW: 0, WIDE: 1, SPACER_TAIL: 2, SPACER_HEAD: 3 },
-  GhosttyFormatterFormat: { PLAIN: 0 },
+  GhosttyFormatterOption: { SELECTION: 4 },
+  GhosttyKeyEncoderOption: {
+    CURSOR_KEY_APPLICATION: 1,
+    KEYPAD_KEY_APPLICATION: 2,
+    IGNORE_KEYPAD_WITH_NUMLOCK: 3,
+    ALT_ESC_PREFIX: 4,
+    MODIFY_OTHER_KEYS_STATE_2: 5,
+    KITTY_FLAGS: 6,
+  },
+  GhosttyBuildInfo: { VERSION_MAJOR: 6, FEATURE_SEARCH: 14 },
 } as const;
 
 /// Struct sizes and field offsets of the pinned build, by upstream C type.
 export const LAYOUT = {
   GhosttyStyle: {
-    size: 72,
-    fields: {
-      size: 0,
-      fg_color: 8,
-      bg_color: 24,
-      bold: 56,
-      italic: 57,
-      faint: 58,
-      blink: 59,
-      inverse: 60,
-      invisible: 61,
-      strikethrough: 62,
-      underline: 64,
-    },
+    size: 16,
+    fields: { fg_color: 0, bg_color: 4, underline_color: 8, flags: 12 },
   },
-  GhosttyStyleColor: { size: 16, fields: { tag: 0, value: 8 } },
+  GhosttyStyleColor: { size: 4, fields: { tag: 0, value: 1 } },
   GhosttyRenderStateColors: {
     size: 784,
     fields: { size: 0, background: 4, foreground: 7, palette: 14 },
   },
   GhosttyPoint: { size: 24, fields: { tag: 0, value: 8 } },
   GhosttyPointCoordinate: { size: 8, fields: { x: 0, y: 4 } },
-  GhosttyGridRef: { size: 12, fields: { size: 0 } },
+  GhosttyGridRef: { size: 8, fields: { node: 0, x: 4, y: 6 } },
   GhosttyTerminalModeConfig: { size: 4, fields: { mode: 0, value: 2 } },
   GhosttyDeviceAttributes: { size: 148, fields: { primary: 0, secondary: 136 } },
   GhosttyDeviceAttributesPrimary: {
@@ -102,13 +92,9 @@ export const LAYOUT = {
     size: 6,
     fields: { device_type: 0, firmware_version: 2, rom_cartridge: 4 },
   },
-  GhosttyFormatterTerminalOptions: {
-    size: 40,
-    fields: { size: 0, emit: 4, unwrap: 8, trim: 9, extra: 12, selection: 36 },
-  },
-  GhosttyFormatterTerminalExtra: { size: 24, fields: { size: 0, screen: 12 } },
-  GhosttyFormatterScreenExtra: { size: 12, fields: { size: 0 } },
-  GhosttySelection: { size: 32, fields: { size: 0, start: 4, end: 16, rectangle: 28 } },
+  GhosttySelection: { size: 20, fields: { start: 0, end: 8, rectangle: 16 } },
+  GhosttyString: { size: 8, fields: { ptr: 0, len: 4 } },
+  GhosttyCodepointBuffer: { size: 12, fields: { ptr: 0, cap: 4, len: 8 } },
 } as const;
 
 /// Bit ranges `[lsb, width]` of the packed 64-bit `GhosttyCell`.
@@ -120,6 +106,20 @@ export const CELL_BITS = {
   hyperlink: [45, 1],
 } as const;
 
+/// Bit ranges `[lsb, width]` of the packed 16-bit `GhosttyStyleFlags`;
+/// `underline` holds a `GhosttySgrUnderline`, zero for none.
+export const STYLE_FLAG_BITS = {
+  bold: [0, 1],
+  italic: [1, 1],
+  faint: [2, 1],
+  blink: [3, 1],
+  inverse: [4, 1],
+  invisible: [5, 1],
+  strikethrough: [6, 1],
+  overline: [7, 1],
+  underline: [8, 3],
+} as const;
+
 /// First ghostty-web `Key` value that upstream numbers one higher.
 /// Upstream inserted `FN` at this value; every key before it keeps its
 /// number (some under new names, such as `BACKQUOTE` for `GRAVE`).
@@ -127,6 +127,31 @@ export const KEY_SHIFT_FROM = 146;
 
 export function upstreamKey(key: number): number {
   return key >= KEY_SHIFT_FROM ? key + 1 : key;
+}
+
+/// ghostty-web's `KeyEncoderOption` values, which its input handler passes
+/// to `setOption`, each with the name of the upstream option it means.
+/// Upstream numbers these from 1 (0 is `INVALID`) and calls the kitty flags
+/// `KITTY_FLAGS`, so an option is translated by name; `ghosttyVt.test.ts`
+/// checks the web side against the library's enum and the upstream side
+/// against the build's values.
+export const KEY_ENCODER_OPTIONS = {
+  CURSOR_KEY_APPLICATION: { web: 0, upstream: "CURSOR_KEY_APPLICATION" },
+  KEYPAD_KEY_APPLICATION: { web: 1, upstream: "KEYPAD_KEY_APPLICATION" },
+  IGNORE_KEYPAD_WITH_NUMLOCK: { web: 2, upstream: "IGNORE_KEYPAD_WITH_NUMLOCK" },
+  ALT_ESC_PREFIX: { web: 3, upstream: "ALT_ESC_PREFIX" },
+  MODIFY_OTHER_KEYS_STATE_2: { web: 4, upstream: "MODIFY_OTHER_KEYS_STATE_2" },
+  KITTY_KEYBOARD_FLAGS: { web: 5, upstream: "KITTY_FLAGS" },
+} as const satisfies Record<string, { web: number; upstream: keyof typeof ABI.GhosttyKeyEncoderOption }>;
+
+const UPSTREAM_KEY_ENCODER_OPTION = new Map<number, number>(
+  Object.values(KEY_ENCODER_OPTIONS).map((o) => [o.web, ABI.GhosttyKeyEncoderOption[o.upstream]]),
+);
+
+/// Upstream's number for a ghostty-web key encoder option; undefined for a
+/// number ghostty-web does not define.
+export function upstreamKeyEncoderOption(option: number): number | undefined {
+  return UPSTREAM_KEY_ENCODER_OPTION.get(option);
 }
 
 /// ghostty-web's `CellFlags` bits, the shape its renderer reads.
@@ -223,10 +248,11 @@ const FUNCTIONS = [
   "ghostty_key_encoder_new",
   "ghostty_key_encoder_free",
   "ghostty_formatter_terminal_new",
+  "ghostty_formatter_set",
   "ghostty_formatter_format_alloc",
   "ghostty_formatter_free",
   "ghostty_free",
-  "ghostty_key_encoder_setopt",
+  "ghostty_key_encoder_set",
   "ghostty_key_encoder_encode",
   "ghostty_key_event_new",
   "ghostty_key_event_free",
@@ -234,6 +260,7 @@ const FUNCTIONS = [
   "ghostty_key_event_set_key",
   "ghostty_key_event_set_mods",
   "ghostty_key_event_set_utf8",
+  "ghostty_build_info",
 ] as const;
 
 type Fns = Record<(typeof FUNCTIONS)[number], Fn> & {
@@ -262,6 +289,29 @@ class VtWasm {
     this.fn = fn as Fns;
     this.memory = exports.memory as WebAssembly.Memory;
     this.table = exports.__indirect_function_table as WebAssembly.Table;
+    this.checkBuild();
+  }
+
+  /// Refuses a core this binding does not drive. The tables and calls in
+  /// this module are libghostty-vt's 1.x ABI, which a minor only adds to,
+  /// and the ghostty backend needs the search feature Ghostty's wasm builds
+  /// carry. Either mismatch would fail inside a user's terminal; failing
+  /// here lets the loader fall back to xterm.js instead.
+  private checkBuild(): void {
+    const B = ABI.GhosttyBuildInfo;
+    const out = this.alloc(8);
+    try {
+      this.view().setUint32(out, 0, true);
+      this.view().setUint8(out + 4, 0);
+      this.fn.ghostty_build_info(B.VERSION_MAJOR, out);
+      this.fn.ghostty_build_info(B.FEATURE_SEARCH, out + 4);
+      const major = this.view().getUint32(out, true);
+      const search = this.view().getUint8(out + 4) !== 0;
+      if (major !== 1) throw new Error(`ghostty-vt: libghostty-vt ${major}.x is not the 1.x ABI this binding drives`);
+      if (!search) throw new Error("ghostty-vt: this libghostty-vt build has no search");
+    } finally {
+      this.free(out, 8);
+    }
   }
 
   /// Views over the live memory. Any export that allocates can grow it
@@ -480,17 +530,20 @@ function codepointOf(raw: RawCell): number {
 }
 
 /// ghostty-web's `CellFlags` from an upstream `GhosttyStyle` at `ptr`.
+/// Any underline style underlines; overline has no ghostty-web flag.
 function styleFlags(view: DataView, ptr: number): number {
-  const F = LAYOUT.GhosttyStyle.fields;
+  const packed = view.getUint16(ptr + LAYOUT.GhosttyStyle.fields.flags, true);
+  const bit = ([lsb, width]: readonly [number, number]) => (packed >>> lsb) & ((1 << width) - 1);
+  const B = STYLE_FLAG_BITS;
   let flags = 0;
-  if (view.getUint8(ptr + F.bold)) flags |= FLAG.BOLD;
-  if (view.getUint8(ptr + F.italic)) flags |= FLAG.ITALIC;
-  if (view.getInt32(ptr + F.underline, true) !== 0) flags |= FLAG.UNDERLINE;
-  if (view.getUint8(ptr + F.strikethrough)) flags |= FLAG.STRIKETHROUGH;
-  if (view.getUint8(ptr + F.inverse)) flags |= FLAG.INVERSE;
-  if (view.getUint8(ptr + F.invisible)) flags |= FLAG.INVISIBLE;
-  if (view.getUint8(ptr + F.blink)) flags |= FLAG.BLINK;
-  if (view.getUint8(ptr + F.faint)) flags |= FLAG.FAINT;
+  if (bit(B.bold)) flags |= FLAG.BOLD;
+  if (bit(B.italic)) flags |= FLAG.ITALIC;
+  if (bit(B.underline)) flags |= FLAG.UNDERLINE;
+  if (bit(B.strikethrough)) flags |= FLAG.STRIKETHROUGH;
+  if (bit(B.inverse)) flags |= FLAG.INVERSE;
+  if (bit(B.invisible)) flags |= FLAG.INVISIBLE;
+  if (bit(B.blink)) flags |= FLAG.BLINK;
+  if (bit(B.faint)) flags |= FLAG.FAINT;
   return flags;
 }
 
@@ -506,11 +559,12 @@ export const SCRATCH = {
   rgb: 24, // GhosttyColorRgb
   mode: 28, // GhosttyTerminalModeConfig
   point: 32, // GhosttyPoint (24 bytes, 8-aligned)
-  gridRef: 56, // GhosttyGridRef (12 bytes)
-  style: 72, // GhosttyStyle (72 bytes, 8-aligned)
-  colors: 144, // GhosttyRenderStateColors (784 bytes)
-  graphemes: 928, // u32[GRAPHEME_CAP]
-  size: 928 + 32 * 4,
+  gridRef: 56, // GhosttyGridRef (8 bytes)
+  style: 64, // GhosttyStyle (16 bytes)
+  codepoints: 80, // GhosttyCodepointBuffer (12 bytes)
+  colors: 92, // GhosttyRenderStateColors (784 bytes)
+  graphemes: 876, // u32[GRAPHEME_CAP]
+  size: 876 + 32 * 4,
 } as const;
 const GRAPHEME_CAP = 32;
 
@@ -766,11 +820,7 @@ export class VtTerminal {
   /// when the core cannot format it.
   plainText(range?: TextRange): string | null {
     const fn = this.wasm.fn;
-    const O = LAYOUT.GhosttyFormatterTerminalOptions;
-    const E = LAYOUT.GhosttyFormatterTerminalExtra;
-    const X = LAYOUT.GhosttyFormatterScreenExtra;
     const s = this.scratch;
-    let opts = 0;
     let selection = 0;
     let formatter = 0;
     try {
@@ -780,22 +830,16 @@ export class VtTerminal {
         selection = this.selection(range, last);
         if (!selection) return null;
       }
-      opts = this.wasm.alloc(O.size);
-      // Zeroed: no extra state is emitted, and a null selection formats the
-      // whole screen.
-      this.wasm.bytes().fill(0, opts, opts + O.size);
-      const view = this.wasm.view();
-      view.setUint32(opts + O.fields.size, O.size, true);
-      view.setInt32(opts + O.fields.emit, ABI.GhosttyFormatterFormat.PLAIN, true);
-      view.setUint8(opts + O.fields.unwrap, 0);
-      view.setUint8(opts + O.fields.trim, 1);
-      view.setUint32(opts + O.fields.extra + E.fields.size, E.size, true);
-      view.setUint32(opts + O.fields.extra + E.fields.screen + X.fields.size, X.size, true);
-      view.setUint32(opts + O.fields.selection, selection, true);
+      // A new formatter's defaults are this read: plain text, soft wraps
+      // kept, trailing spaces trimmed, the whole screen. A range narrows it
+      // to the selection, which the formatter copies.
       formatter = this.wasm.newHandle(
-        (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.handle, opts),
+        (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.handle),
         "formatter",
       );
+      if (selection && fn.ghostty_formatter_set(formatter, ABI.GhosttyFormatterOption.SELECTION, selection) !== ABI.GhosttyResult.SUCCESS) {
+        return null;
+      }
       const result = fn.ghostty_formatter_format_alloc(formatter, 0, s + SCRATCH.slot, s + SCRATCH.slot2);
       if (result !== ABI.GhosttyResult.SUCCESS) return null;
       const ptr = this.wasm.view().getUint32(s + SCRATCH.slot, true);
@@ -811,7 +855,6 @@ export class VtTerminal {
       return null;
     } finally {
       if (formatter) fn.ghostty_formatter_free(formatter);
-      this.wasm.free(opts, O.size);
       this.wasm.free(selection, LAYOUT.GhosttySelection.size);
     }
   }
@@ -836,8 +879,8 @@ export class VtTerminal {
       return found;
     };
     const sel = this.wasm.alloc(S.size);
+    // Zeroed: not rectangular.
     this.wasm.bytes().fill(0, sel, sel + S.size);
-    this.wasm.view().setUint32(sel + S.fields.size, S.size, true);
     if (corner(range.startCol, range.startRow, sel + S.fields.start) && corner(range.endCol, range.endRow, sel + S.fields.end)) {
       return sel;
     }
@@ -925,10 +968,13 @@ export class VtTerminal {
     const s = this.scratch;
     const O = ABI.GhosttyTerminalOption;
     // ghostty-web counts scrollback in lines, zero meaning unlimited.
-    // Upstream also caps history in bytes, by default at one page (about
-    // 1,100 lines at 80 columns), and the first cap reached wins; the byte
-    // cap is lifted so the line count the user's setting maps to holds.
-    fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_BYTES, 0);
+    // Upstream also caps history in bytes, by default at one page (about a
+    // thousand short lines at 80 columns), and the first cap reached wins.
+    // SIZE_MAX, the wasm32 size_t's maximum, lifts the byte cap so the line
+    // count the user's setting maps to holds; a null value would restore
+    // the default.
+    this.wasm.view().setUint32(s + SCRATCH.slot, 0xffff_ffff, true);
+    fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_BYTES, s + SCRATCH.slot);
     const lines = config?.scrollbackLimit ?? 10_000;
     if (lines > 0) {
       this.wasm.view().setUint32(s + SCRATCH.slot, lines, true);
@@ -1076,7 +1122,6 @@ export class VtTerminal {
       let flags = 0;
       if (raw.styleId !== 0) {
         const style = s + SCRATCH.style;
-        this.wasm.view().setUint32(style, LAYOUT.GhosttyStyle.size, true);
         fn.ghostty_render_state_row_cells_get(this.rowCells, K.STYLE, style);
         flags = styleFlags(this.wasm.view(), style);
         if (fn.ghostty_render_state_row_cells_get(this.rowCells, K.FG_COLOR, s + SCRATCH.rgb) === ok) {
@@ -1090,23 +1135,10 @@ export class VtTerminal {
       }
       let graphemeLen = 0;
       if (raw.tag === T.CODEPOINT_GRAPHEME) {
-        fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_LEN, s + SCRATCH.slot);
-        const len = this.wasm.view().getUint32(s + SCRATCH.slot, true);
-        if (len > 1) {
-          // GRAPHEMES_BUF writes the whole cluster, which can outgrow the
-          // scratch's room, so a longer one is read into a buffer of its own.
-          const own = len > GRAPHEME_CAP ? this.wasm.alloc(len * 4) : 0;
-          const buf = own || s + SCRATCH.graphemes;
-          try {
-            fn.ghostty_render_state_row_cells_get(this.rowCells, K.GRAPHEMES_BUF, buf);
-            const view = this.wasm.view();
-            const cps: number[] = [];
-            for (let i = 0; i < len; i++) cps.push(view.getUint32(buf + i * 4, true));
-            graphemes.set(x, String.fromCodePoint(...cps));
-          } finally {
-            this.wasm.free(own, len * 4);
-          }
-          graphemeLen = len - 1;
+        const cps = this.rowCellCluster();
+        if (cps && cps.length > 1) {
+          graphemes.set(x, String.fromCodePoint(...cps));
+          graphemeLen = cps.length - 1;
         }
       }
       const cell = row[x];
@@ -1135,7 +1167,6 @@ export class VtTerminal {
     view.setInt32(point + LAYOUT.GhosttyPoint.fields.tag, tag, true);
     view.setUint16(coord + LAYOUT.GhosttyPointCoordinate.fields.x, x, true);
     view.setUint32(coord + LAYOUT.GhosttyPointCoordinate.fields.y, y, true);
-    view.setUint32(s + SCRATCH.gridRef, LAYOUT.GhosttyGridRef.size, true);
     return this.wasm.fn.ghostty_terminal_grid_ref(this.handle, point, s + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
   }
 
@@ -1155,7 +1186,6 @@ export class VtTerminal {
     const T = ABI.GhosttyCellContentTag;
     if (raw.styleId !== 0) {
       const style = s + SCRATCH.style;
-      this.wasm.view().setUint32(style, LAYOUT.GhosttyStyle.size, true);
       if (fn.ghostty_grid_ref_style(s + SCRATCH.gridRef, style) === ok) {
         const view = this.wasm.view();
         flags = styleFlags(view, style);
@@ -1189,7 +1219,7 @@ export class VtTerminal {
 
   private styleColor(view: DataView, ptr: number): Rgb | null {
     const C = LAYOUT.GhosttyStyleColor.fields;
-    const tag = view.getInt32(ptr + C.tag, true);
+    const tag = view.getUint8(ptr + C.tag);
     if (tag === ABI.GhosttyStyleColorTag.PALETTE) return this.paletteColor(view.getUint8(ptr + C.value));
     if (tag === ABI.GhosttyStyleColorTag.RGB) return readRgb(view, ptr + C.value);
     return null;
@@ -1200,33 +1230,58 @@ export class VtTerminal {
     return { r: p[index * 3], g: p[index * 3 + 1], b: p[index * 3 + 2] };
   }
 
-  /// The full cluster at the scratch grid ref, base codepoint first.
-  private gridGraphemes(): string | null {
-    const s = this.scratch;
+  /// The codepoints of a cluster, base first, through `read`, which fills
+  /// up to `cap` of them at `buf` and reports the result and the cluster's
+  /// length. The scratch room serves a cluster that fits it; a longer one
+  /// is read again into a buffer of its own.
+  private cluster(read: (buf: number, cap: number) => [result: number, len: number]): number[] | null {
     let want = GRAPHEME_CAP;
     for (let attempt = 0; attempt < 2; attempt++) {
       const cap = want;
       const own = cap > GRAPHEME_CAP ? this.wasm.alloc(cap * 4) : 0;
-      const buf = own || s + SCRATCH.graphemes;
+      const buf = own || this.scratch + SCRATCH.graphemes;
       try {
-        const result = this.wasm.fn.ghostty_grid_ref_graphemes(
-          s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot,
-        );
-        const view = this.wasm.view();
-        const len = view.getUint32(s + SCRATCH.slot, true);
+        const [result, len] = read(buf, cap);
         if (result === ABI.GhosttyResult.OUT_OF_SPACE && len > cap) {
           want = len;
           continue;
         }
         if (result !== ABI.GhosttyResult.SUCCESS || len === 0) return null;
+        const view = this.wasm.view();
         const cps: number[] = [];
         for (let i = 0; i < Math.min(len, cap); i++) cps.push(view.getUint32(buf + i * 4, true));
-        return String.fromCodePoint(...cps);
+        return cps;
       } finally {
         this.wasm.free(own, cap * 4);
       }
     }
     return null;
+  }
+
+  /// The cluster of the row cells iterator's current cell.
+  private rowCellCluster(): number[] | null {
+    const B = LAYOUT.GhosttyCodepointBuffer.fields;
+    const cb = this.scratch + SCRATCH.codepoints;
+    return this.cluster((buf, cap) => {
+      const view = this.wasm.view();
+      view.setUint32(cb + B.ptr, buf, true);
+      view.setUint32(cb + B.cap, cap, true);
+      view.setUint32(cb + B.len, 0, true);
+      const result = this.wasm.fn.ghostty_render_state_row_cells_get(
+        this.rowCells, ABI.GhosttyRenderStateRowCellsData.GRAPHEMES_BUF, cb,
+      );
+      return [result, this.wasm.view().getUint32(cb + B.len, true)];
+    });
+  }
+
+  /// The full cluster at the scratch grid ref, base codepoint first.
+  private gridGraphemes(): string | null {
+    const s = this.scratch;
+    const cps = this.cluster((buf, cap) => {
+      const result = this.wasm.fn.ghostty_grid_ref_graphemes(s + SCRATCH.gridRef, buf, cap, s + SCRATCH.slot);
+      return [result, this.wasm.view().getUint32(s + SCRATCH.slot, true)];
+    });
+    return cps ? String.fromCodePoint(...cps) : null;
   }
 
   private hyperlinkAt(tag: number, x: number, y: number): string | null {
@@ -1266,36 +1321,56 @@ export class VtKeyEncoder {
     this.encoder = wasm.newHandle((slot) => wasm.fn.ghostty_key_encoder_new(0, slot), "key encoder");
   }
 
+  /// Takes ghostty-web's option numbering, as its input handler calls it.
   setOption(option: number, value: boolean | number): void {
-    const ptr = this.wasm.alloc(8);
-    try {
-      this.wasm.view().setUint8(ptr, typeof value === "boolean" ? (value ? 1 : 0) : value);
-      this.wasm.fn.ghostty_key_encoder_setopt(this.encoder, option, ptr);
-    } finally {
-      this.wasm.free(ptr, 8);
-    }
+    const upstream = upstreamKeyEncoderOption(option);
+    if (upstream === undefined) throw new Error(`ghostty-vt: unknown key encoder option ${option}`);
+    this.set(upstream, value);
   }
 
   setKittyFlags(flags: number): void {
-    // KITTY_FLAGS, the same value in both numberings.
-    this.setOption(5, flags);
+    this.set(ABI.GhosttyKeyEncoderOption.KITTY_FLAGS, flags);
+  }
+
+  /// Every option set here is one byte: a `bool`, or the kitty flags'
+  /// `GhosttyKittyKeyFlags`.
+  private set(option: number, value: boolean | number): void {
+    const ptr = this.wasm.alloc(1);
+    try {
+      this.wasm.bytes()[ptr] = typeof value === "boolean" ? (value ? 1 : 0) : value;
+      const result = this.wasm.fn.ghostty_key_encoder_set(this.encoder, option, ptr);
+      if (result !== ABI.GhosttyResult.SUCCESS) {
+        throw new Error(`ghostty-vt: setting key encoder option ${option} failed (${result})`);
+      }
+    } finally {
+      this.wasm.free(ptr, 1);
+    }
   }
 
   encode(event: { action: number; key: number; mods: number; utf8?: string }): Uint8Array {
     const fn = this.wasm.fn;
     const ev = this.wasm.newHandle((slot) => fn.ghostty_key_event_new(0, slot), "key event");
-    let utf8Ptr = 0;
-    let utf8Len = 0;
+    // One block: the `GhosttyString` header, then the bytes it points at.
+    let text = 0;
+    let textLen = 0;
+    const set = (what: string, result: number) => {
+      if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`ghostty-vt: setting a key event's ${what} failed (${result})`);
+    };
     try {
-      fn.ghostty_key_event_set_action(ev, event.action);
-      fn.ghostty_key_event_set_key(ev, upstreamKey(event.key));
-      fn.ghostty_key_event_set_mods(ev, event.mods);
+      set("action", fn.ghostty_key_event_set_action(ev, event.action));
+      set("key", fn.ghostty_key_event_set_key(ev, upstreamKey(event.key)));
+      set("mods", fn.ghostty_key_event_set_mods(ev, event.mods));
       if (event.utf8) {
         const bytes = new TextEncoder().encode(event.utf8);
-        utf8Len = bytes.length;
-        utf8Ptr = this.wasm.alloc(utf8Len);
-        this.wasm.bytes().set(bytes, utf8Ptr);
-        fn.ghostty_key_event_set_utf8(ev, utf8Ptr, utf8Len);
+        const S = LAYOUT.GhosttyString;
+        textLen = S.size + bytes.length;
+        text = this.wasm.alloc(textLen);
+        this.wasm.bytes().set(bytes, text + S.size);
+        const view = this.wasm.view();
+        view.setUint32(text + S.fields.ptr, text + S.size, true);
+        view.setUint32(text + S.fields.len, bytes.length, true);
+        // The string is passed by value, which wasm32 does by address.
+        set("text", fn.ghostty_key_event_set_utf8(ev, text));
       }
       let want = 64;
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -1318,9 +1393,9 @@ export class VtKeyEncoder {
       }
       throw new Error("ghostty-vt: encoding a key failed (out of space)");
     } finally {
-      // The event holds no pointer into the utf8 buffer past encode.
-      this.wasm.free(utf8Ptr, utf8Len);
+      // The event borrows the text until it is freed.
       fn.ghostty_key_event_free(ev);
+      this.wasm.free(text, textLen);
     }
   }
 
