@@ -3177,15 +3177,20 @@ mod tests {
         assert_eq!(on_disk["elements"], json!([]), "debounce holds");
 
         // Past the debounce the file form lands, the token is adopted,
-        // and the clients hear about it.
+        // and the clients hear about it. The flush's self-write note is read
+        // as of before the flush, so a host that takes longer than the note's
+        // window over the write still reads the note the flush made.
         backdate_dirty(ha.session());
+        let flushed_from = Instant::now();
         fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
         let text = fx.workspace.read_text("b.excalidraw").unwrap();
         let on_disk: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(on_disk["type"], "excalidraw");
         assert_eq!(on_disk["source"], "chan");
         assert_eq!(on_disk["elements"][0]["id"], "x");
-        assert!(fx.self_writes.should_suppress("b.excalidraw"));
+        assert!(fx
+            .self_writes
+            .should_suppress_at("b.excalidraw", flushed_from));
         let frames = drain(&mut rxa);
         assert_eq!(types(&frames), ["flush"]);
         assert_eq!(frames[0]["dirty"], false);

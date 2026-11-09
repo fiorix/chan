@@ -390,6 +390,32 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    /// The bound on a test body and on each wait in it for a release the
+    /// test does not cause itself. A green run ends every such wait by the
+    /// order of its events, long before this; the client that could hold
+    /// the workspace stays connected throughout, so a session that keeps
+    /// the workspace keeps it until this runs out, red and not hung. How
+    /// long the release takes on a loaded host is not measured.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
+    /// Wait, at most half the hang guard, for the workspace behind `weak` to
+    /// be let go: no owner left and its writer lock free. How long after
+    /// `from` that was, or `None` when it never was.
+    async fn let_go_since(
+        weak: &std::sync::Weak<chan_workspace::Workspace>,
+        lock_dir: &Path,
+        from: std::time::Instant,
+    ) -> Option<Duration> {
+        tokio::time::timeout(HANG_GUARD / 2, async {
+            while weak.strong_count() != 0 || !chan_workspace::lock::is_free(lock_dir) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .ok()
+        .map(|()| from.elapsed())
+    }
+
     fn private_tempdir() -> std::io::Result<tempfile::TempDir> {
         let dir = tempfile::tempdir()?;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -482,7 +508,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
@@ -557,8 +583,11 @@ mod tests {
             // owner holds the workspace (the tasks `build_app` started wind
             // down on this runtime, and one can take a reference after the
             // route's count), and a client retries that answer. The gate
-            // stays installed until an attempt reaches the close.
-            const SWAP_RETRIES: usize = 3;
+            // stays installed until an attempt reaches the close. How many
+            // busy answers come first is how long those tasks take to wind
+            // down, which a loaded host stretches; only a swap that never
+            // reaches its close, busy for half the hang guard, is red.
+            let retrying_until = tokio::time::Instant::now() + HANG_GUARD / 2;
             let mut retries = 0;
             let swapping = loop {
                 let mut swapping = tokio::spawn(app.clone().oneshot(request()));
@@ -571,7 +600,8 @@ mod tests {
                     answer = &mut swapping => {
                         let status = answer.unwrap().unwrap().status();
                         assert!(
-                            status == StatusCode::CONFLICT && retries < SWAP_RETRIES,
+                            status == StatusCode::CONFLICT
+                                && tokio::time::Instant::now() < retrying_until,
                             "the swap answered {status} before its session close after {retries} retries"
                         );
                         retries += 1;
@@ -613,7 +643,9 @@ mod tests {
                 cell.indexer.cancel();
                 cell.workspace.stop_open_recovery();
             };
-        }).await.unwrap();
+        })
+        .await
+        .expect("the test body did not end within its hang guard");
     }
 
     #[tokio::test]
@@ -626,77 +658,146 @@ mod tests {
         bridge_call_during_workspace_swap(true).await;
     }
 
+    /// How many times an MCP release pin times its release beside the
+    /// client, each in turn with the same release where no session can
+    /// reach the workspace; it compares the fastest release with the median
+    /// control.
+    const RELEASE_PAIRS: usize = 5;
+
+    /// An initialized MCP session that stays connected and idle keeps no
+    /// owner of the workspace cell: the workspace is let go as soon as the
+    /// cell drops it, at the pace of the same workspace let go where no
+    /// session can reach it. Each turn connects a session of its own while
+    /// the cell holds the workspace, so a session that pins what it found
+    /// pins it in every turn.
     #[tokio::test]
     async fn mcp_idle_initialized_session_does_not_pin_the_workspace_cell() {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        use crate::doc_sessions::held_cell;
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
-            let workspace = library.open_workspace(root.path()).unwrap();
-            let weak = Arc::downgrade(&workspace);
-            let lock_dir = workspace.paths().lock.clone();
-            let cell = Arc::new(std::sync::Mutex::new(Some(workspace)));
+            let cell = Arc::new(std::sync::Mutex::new(None::<Arc<chan_workspace::Workspace>>));
             let bridge_cell = cell.clone();
             let handle = start(pick_socket_path(), move || bridge_cell.lock().unwrap().clone()).unwrap();
-            let client = tokio::net::UnixStream::connect(handle.socket_path()).await.unwrap();
-            let (read, mut write) = client.into_split();
-            let mut read = BufReader::new(read);
-            let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                    "clientInfo": {"name": "cell-lifetime-test", "version": "0"}}});
-            write.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
-            let mut reply = String::new();
-            read.read_line(&mut reply).await.unwrap();
-            let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-            assert_eq!(reply["result"]["serverInfo"]["name"], "chan");
-            write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
-            let mut reply = String::new();
-            read.read_line(&mut reply).await.unwrap();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
-            drop(cell.lock().unwrap().take());
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
-                    tokio::task::yield_now().await;
-                }
-            }).await.expect("idle MCP session retains the workspace cell's owner");
+            let mut released = Vec::new();
+            let mut controls = Vec::new();
+            for _ in 0..RELEASE_PAIRS {
+                let unreached = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&unreached);
+                let lock_dir = unreached.paths().lock.clone();
+                let dropped = std::time::Instant::now();
+                drop(unreached);
+                controls.push(
+                    let_go_since(&weak, &lock_dir, dropped)
+                        .await
+                        .expect("fixture: a workspace no session reaches was not let go"),
+                );
+
+                let workspace = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&workspace);
+                let lock_dir = workspace.paths().lock.clone();
+                *cell.lock().unwrap() = Some(workspace);
+                let client = tokio::net::UnixStream::connect(handle.socket_path()).await.unwrap();
+                let (read, mut write) = client.into_split();
+                let mut read = BufReader::new(read);
+                let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                        "clientInfo": {"name": "cell-lifetime-test", "version": "0"}}});
+                write.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
+                let mut reply = String::new();
+                read.read_line(&mut reply).await.unwrap();
+                let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                assert_eq!(reply["result"]["serverInfo"]["name"], "chan");
+                write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
+                let mut reply = String::new();
+                read.read_line(&mut reply).await.unwrap();
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
+                // The client stays connected and idle until after this wait,
+                // so a session that pins the workspace pins it past the guard.
+                let dropped = std::time::Instant::now();
+                drop(cell.lock().unwrap().take());
+                released.push(
+                    let_go_since(&weak, &lock_dir, dropped)
+                        .await
+                        .expect("idle MCP session retains the workspace cell's owner"),
+                );
+                drop((read, write));
+            }
+            let (released, control) = (held_cell::fastest(released), held_cell::median(controls));
+            assert!(
+                held_cell::at_the_controls_pace(released, control),
+                "an idle MCP session kept the workspace cell's owner: it was let go \
+                 {released:?} after the cell at the fastest, against {control:?} with no session"
+            );
             let _reopened = library.open_workspace(root.path()).unwrap();
             drop(handle);
-        }).await.unwrap();
+        })
+        .await
+        .expect("the test body did not end within its hang guard");
     }
 
+    /// Dropping the bridge's handle, as unmount does, lets go of a silent
+    /// client's workspace: the client stays connected and says nothing, and
+    /// the workspace is let go at the pace of the same unmount with no
+    /// client, timed in turn with it.
     #[tokio::test]
     async fn mcp_unmount_releases_a_silent_clients_workspace() {
-        tokio::time::timeout(Duration::from_secs(4), async {
+        use crate::doc_sessions::held_cell;
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
                 chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
-            let workspace = library.open_workspace(root.path()).unwrap();
-            let weak = Arc::downgrade(&workspace);
-            let lock_dir = workspace.paths().lock.clone();
-            let handle = start(pick_socket_path(), move || Some(workspace.clone())).unwrap();
-            let _client = tokio::net::UnixStream::connect(handle.socket_path())
-                .await
-                .unwrap();
-            handle.accepted.acquire().await.unwrap().forget();
-            drop(handle);
-            let released = tokio::time::timeout(Duration::from_secs(1), async {
-                while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await;
+            let mut released = Vec::new();
+            let mut controls = Vec::new();
+            for _ in 0..RELEASE_PAIRS {
+                let unreached = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&unreached);
+                let lock_dir = unreached.paths().lock.clone();
+                let handle = start(pick_socket_path(), move || Some(unreached.clone())).unwrap();
+                let unmounted = std::time::Instant::now();
+                drop(handle);
+                controls.push(
+                    let_go_since(&weak, &lock_dir, unmounted)
+                        .await
+                        .expect("fixture: an unmount with no client kept its workspace"),
+                );
+
+                let workspace = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&workspace);
+                let lock_dir = workspace.paths().lock.clone();
+                let handle = start(pick_socket_path(), move || Some(workspace.clone())).unwrap();
+                let client = tokio::net::UnixStream::connect(handle.socket_path())
+                    .await
+                    .unwrap();
+                handle.accepted.acquire().await.unwrap().forget();
+                // The silent client stays connected until after this wait, so
+                // a session the unmount does not stop keeps the workspace
+                // past the guard.
+                let unmounted = std::time::Instant::now();
+                drop(handle);
+                let Some(release) = let_go_since(&weak, &lock_dir, unmounted).await else {
+                    panic!(
+                        "MCP client retains {} workspace handles",
+                        weak.strong_count()
+                    );
+                };
+                released.push(release);
+                drop(client);
+            }
+            let (released, control) = (held_cell::fastest(released), held_cell::median(controls));
             assert!(
-                released.is_ok(),
-                "MCP client retains {} workspace handles",
-                weak.strong_count()
+                held_cell::at_the_controls_pace(released, control),
+                "the unmount let a silent client's workspace go {released:?} after it at \
+                 the fastest, against {control:?} with no client"
             );
             let _reopened = library.open_workspace(root.path()).unwrap();
         })
         .await
-        .unwrap();
+        .expect("the test body did not end within its hang guard");
     }
 
     // Dropping the bridge's handle, as unmount does, cancels the requests of
@@ -704,7 +805,7 @@ mod tests {
     // entry and drops its workspace.
     #[tokio::test]
     async fn mcp_unmount_stops_a_running_tool_body_inside_its_walk() {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
@@ -747,7 +848,9 @@ mod tests {
                 .unwrap();
             let cancel = hold.entered().await;
             drop(handle);
-            tokio::time::timeout(Duration::from_secs(1), async {
+            // The body stays held inside its walk until the token is seen,
+            // so the cancel has to reach it while it runs.
+            tokio::time::timeout(HANG_GUARD / 3, async {
                 while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     tokio::task::yield_now().await;
                 }
@@ -762,7 +865,7 @@ mod tests {
                 "the stopped body kept its workspace"
             );
             drop(workspace);
-            tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::timeout(HANG_GUARD / 3, async {
                 while weak.strong_count() != 0 || !chan_workspace::lock::is_free(&lock_dir) {
                     tokio::task::yield_now().await;
                 }
@@ -771,7 +874,7 @@ mod tests {
             .expect("the workspace was not released after the body stopped");
         })
         .await
-        .unwrap();
+        .expect("the test body did not end within its hang guard");
     }
 
     struct SocketObservingBuilder(tokio::sync::mpsc::UnboundedSender<PathBuf>);
@@ -824,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_unmount_closes_hosted_sessions_before_waiting_for_the_flock() {
-        tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
@@ -835,6 +938,14 @@ mod tests {
                 library,
                 Arc::new(SocketObservingBuilder(sockets)),
             ));
+            // A close whose teardown is still held at its budget answers
+            // that the workspace is still releasing, which is how a close
+            // that waits on the MCP client's flock reads here: that client
+            // stays connected through the close. The budget is set past any
+            // teardown's cost on a loaded host, so only that wait reaches it.
+            // The ordering in the name is read as "completes inside the
+            // release budget with the client connected".
+            host.test_set_shutdown_release_budget(HANG_GUARD / 4);
             let serve = chan_library::ServeConfig {
                 addr: ([127, 0, 0, 1], 0).into(),
                 prefix: "/workspace".into(),
@@ -878,22 +989,16 @@ mod tests {
                     assert!(reply.get("result").is_some(), "{reply}");
                 }
                 drop(workspace);
-                // Allow loaded watcher backends time to stop, while staying
-                // below the five-second workspace-release fallback window.
                 let close_started = std::time::Instant::now();
-                let closed = tokio::time::timeout(
-                    Duration::from_secs(4),
-                    host.close_workspace_for_root(root.path(), false),
-                )
-                .await;
+                let closed = host.close_workspace_for_root(root.path(), false).await;
                 eprintln!(
                     "mcp_hosted_close initialized={initialized} elapsed_us={}",
                     close_started.elapsed().as_micros()
                 );
-                assert!(closed
-                    .expect("close waited for an MCP client's flock")
-                    .unwrap()
-                    .completed());
+                assert!(
+                    matches!(&closed, Ok(outcome) if outcome.completed()),
+                    "close waited for an MCP client's flock past its release budget: {closed:?}"
+                );
                 assert_eq!(weak.strong_count(), 0);
                 assert!(chan_workspace::lock::is_free(&lock_dir));
                 host.open_registered_workspace(root.path(), serve.clone())
@@ -908,7 +1013,7 @@ mod tests {
                 .completed());
         })
         .await
-        .unwrap();
+        .expect("the test body did not end within its hang guard");
     }
 
     #[tokio::test]

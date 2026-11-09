@@ -10808,6 +10808,72 @@ mod tests {
         assert!(!narrate_parked_migration(app.handle(), &state));
     }
 
+    /// How many times the host's pace a handoff may take past the CLI's
+    /// reply budget. A handoff's own work is a few durable writes and hops,
+    /// which the pace times, so on a host whose disk or CPU is slow the
+    /// allowance grows with that work; on an idle host it is a few
+    /// milliseconds, and a handoff that waits past the budget reds.
+    const PACE_FACTOR: u32 = 4;
+
+    /// How long this host takes, at the moment, for what a handoff does
+    /// besides any wait on a root: three durable writes through the writer
+    /// the registry and the overlay save with (a forget saves those two and
+    /// the window records), on a blocking thread reached from a thread of
+    /// its own through `runtime`.
+    fn reply_pace(runtime: &tokio::runtime::Handle) -> std::time::Duration {
+        let dir = tempfile::tempdir().expect("pace dir");
+        let path = dir.path().to_path_buf();
+        let runtime = runtime.clone();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            runtime.block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    for name in ["config.toml", "workspaces.json", "windows.json"] {
+                        chan_workspace::fs_ops::atomic_write(&path.join(name), b"pace")
+                            .expect("a durable write");
+                    }
+                })
+                .await
+                .expect("the durable writes")
+            })
+        })
+        .join()
+        .expect("the pace thread");
+        started.elapsed()
+    }
+
+    /// Time `handoff`, with the host's pace taken before and after it and
+    /// the slower kept, so a load that changes during the run weighs on the
+    /// pace as on the handoff. Answers its output, how long it took and
+    /// that pace.
+    fn timed_against_the_pace<T>(
+        runtime: &tokio::runtime::Handle,
+        handoff: impl FnOnce() -> T,
+    ) -> (T, std::time::Duration, std::time::Duration) {
+        let before = reply_pace(runtime);
+        let started = std::time::Instant::now();
+        let output = handoff();
+        let took = started.elapsed();
+        (output, took, before.max(reply_pace(runtime)))
+    }
+
+    /// Assert that a handoff that took `took` answered within the CLI's
+    /// `budget`, past it by at most [`PACE_FACTOR`] times the host's `pace`.
+    #[track_caller]
+    fn assert_within_reply_budget(
+        what: &str,
+        took: std::time::Duration,
+        budget: std::time::Duration,
+        pace: std::time::Duration,
+    ) {
+        eprintln!("{what}: took {took:?}; budget {budget:?}; pace {pace:?}");
+        assert!(
+            took <= budget + pace * PACE_FACTOR,
+            "{what} took {took:?}, past the CLI's reply budget of {budget:?} and \
+             {PACE_FACTOR} times the host's pace of {pace:?}"
+        );
+    }
+
     /// The desktop paths that act on one local workspace while another
     /// registered root's filesystem hangs under
     /// `chan_workspace::paths::root_stall`.
@@ -10945,7 +11011,10 @@ mod tests {
 
         /// `chan close` of one workspace is answered while another registered
         /// root hangs. The handoff writes its `Closed` reply from what this
-        /// returns, within the CLI's wait for it.
+        /// returns, within the CLI's wait for it: past that budget by no more
+        /// than the host's pace allows, so a loaded host that slows the
+        /// close's own writes does not red it. The wall-clock bound only
+        /// decides how soon a close that waits on the hung root reports.
         #[test]
         fn closing_a_workspace_answers_while_another_root_hangs() {
             let (runtime, desktop) = HungRootDesktop::new();
@@ -10955,16 +11024,18 @@ mod tests {
             let app_handle = app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let other = desktop.other.clone();
-            let outcome =
-                stall.finishes_beside("closing another workspace", cli_reply_bound(), move || {
+            let (outcome, took, pace) = timed_against_the_pace(runtime.handle(), || {
+                stall.finishes_beside("closing another workspace", HEALTHY_ROOT_BOUND, move || {
                     handle.block_on(close_workspace_from_handoff(
                         app_handle, state, other, false,
                     ))
-                });
+                })
+            });
             assert_eq!(
                 outcome,
                 Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
+            assert_within_reply_budget("the close", took, cli_reply_bound(), pace);
             assert_eq!(
                 desktop.on_paths(),
                 Vec::<String>::new(),
@@ -10975,6 +11046,16 @@ mod tests {
         /// `chan workspace forget` of one workspace is answered while another
         /// registered root hangs, and asks that root nothing: the removal
         /// finds the registry row by the path it stores.
+        ///
+        /// Asking the hung root nothing is what keeps the forget inside the
+        /// CLI's reply budget however long that root hangs: none of the
+        /// forget's time is the hung root's. A registry lookup of the hung
+        /// root starts a probe that enters the stall, so asking it nothing
+        /// also means no lookup waited on it. The rest of the forget's time is
+        /// the healthy root's teardown and the registry writes, which a loaded
+        /// host stretches, so the whole forget must fit the reply budget past
+        /// it by no more than the host's pace allows, and the wall-clock bound
+        /// only decides how soon a forget that waits on the hung root reports.
         #[test]
         fn forgetting_a_workspace_answers_while_another_root_hangs() {
             let (runtime, desktop) = HungRootDesktop::new();
@@ -10984,17 +11065,21 @@ mod tests {
             let app_handle = app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let other = desktop.other.clone();
-            let outcome = stall.finishes_beside(
-                "forgetting another workspace",
-                cli_reply_bound(),
-                move || {
-                    handle.block_on(close_workspace_from_handoff(app_handle, state, other, true))
-                },
-            );
+            let (outcome, took, pace) = timed_against_the_pace(runtime.handle(), || {
+                stall.finishes_beside(
+                    "forgetting another workspace",
+                    HEALTHY_ROOT_BOUND,
+                    move || {
+                        handle
+                            .block_on(close_workspace_from_handoff(app_handle, state, other, true))
+                    },
+                )
+            });
             assert_eq!(
                 outcome,
                 Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
+            assert_within_reply_budget("the forget", took, cli_reply_bound(), pace);
             assert_eq!(
                 stall.entered(),
                 Vec::<String>::new(),
@@ -11403,7 +11488,7 @@ mod tests {
                         })
                     };
                     assert!(
-                        stalls[0].wait_entered(std::time::Duration::from_secs(10)),
+                        stalls[0].wait_entered(HEALTHY_ROOT_BOUND),
                         "fixture: the restore never reached the hung root"
                     );
                     Self {
@@ -11547,9 +11632,45 @@ mod tests {
                 );
             }
 
+            /// How many lookups each stall has recorded so far.
+            fn lookup_marks(stalls: &[root_stall::RootStall]) -> Vec<usize> {
+                stalls
+                    .iter()
+                    .map(|stall| stall.lookup_waits().len())
+                    .collect()
+            }
+
+            /// The registry lookups that gave up on any of `stalls` since
+            /// `marks`, one entry per lookup however many of the stalls it
+            /// gave up on, with the time each waited.
+            fn lookups_since(
+                stalls: &[root_stall::RootStall],
+                marks: &[usize],
+            ) -> Vec<(u64, std::time::Duration)> {
+                let mut lookups: Vec<(u64, std::time::Duration)> = stalls
+                    .iter()
+                    .zip(marks)
+                    .flat_map(|(stall, mark)| stall.lookup_waits().into_iter().skip(*mark))
+                    .collect();
+                lookups.sort_by_key(|(lookup, _)| *lookup);
+                lookups.dedup_by_key(|(lookup, _)| *lookup);
+                lookups
+            }
+
             /// A handoff forget of the moved root makes at most one bounded
             /// registry lookup beside a stalled row, then removes the selected
             /// row and its managed state.
+            ///
+            /// The forget answers within the CLI's reply budget, past it by no
+            /// more than the host's pace allows: the pace times the forget's
+            /// own durable writes and a runtime hop on this host before and
+            /// after, so a loaded host that slows them stretches the bound
+            /// with them, while a wait on the stalled rows or any other wait
+            /// that pushes the answer past the budget reds on an idle host.
+            /// What the forget's lookups waited on the stalled rows is read
+            /// off the clock where they gave up: one lookup, and its wait
+            /// inside the budget. The wall-clock bound only decides how soon
+            /// a forget that waits on a hung root without a bound reports.
             #[test]
             fn a_relinked_forget_answers_in_the_handoff_reply_budget() {
                 let held = HeldRestore::new();
@@ -11571,21 +11692,38 @@ mod tests {
                 let state = Arc::clone(&held.state);
                 let runtime = held.runtime.handle().clone();
                 let path = held.relinked_now.clone();
-                let (outcome, elapsed) = held.stalls.first().expect("hung root").finishes_beside(
-                    "forgetting the relinked root",
-                    cli_reply_bound(),
-                    move || {
-                        let started = std::time::Instant::now();
-                        let outcome =
-                            runtime.block_on(close_workspace_from_handoff(app, state, path, true));
-                        (outcome, started.elapsed())
-                    },
-                );
+                let marks = lookup_marks(&held.stalls);
+                let (outcome, took, pace) = timed_against_the_pace(held.runtime.handle(), || {
+                    held.stalls.first().expect("hung root").finishes_beside(
+                        "forgetting the relinked root",
+                        HEALTHY_ROOT_BOUND,
+                        move || {
+                            runtime.block_on(close_workspace_from_handoff(app, state, path, true))
+                        },
+                    )
+                });
                 assert_eq!(
                     outcome,
                     Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
                 );
-                assert!(elapsed < cli_reply_bound(), "handoff took {elapsed:?}");
+                let lookups = lookups_since(&held.stalls, &marks);
+                assert!(
+                    !lookups.is_empty(),
+                    "fixture: the forget's lookup never waited on a stalled row"
+                );
+                assert_eq!(
+                    lookups.len(),
+                    1,
+                    "the forget made {} registry lookups that gave up beside a stalled row: {lookups:?}",
+                    lookups.len()
+                );
+                let waited: std::time::Duration = lookups.iter().map(|(_, waited)| *waited).sum();
+                assert!(
+                    waited < cli_reply_bound(),
+                    "the forget's lookup waited {waited:?} on the stalled rows, past the reply budget of {:?}",
+                    cli_reply_bound()
+                );
+                assert_within_reply_budget("the relinked forget", took, cli_reply_bound(), pace);
                 assert!(
                     held.embedded()
                         .library()
@@ -11638,6 +11776,12 @@ mod tests {
         fn own_home(test: &str) -> bool {
             embedded::in_own_chan_home(&format!("tests::handoff_row::{test}"))
         }
+
+        /// How long a handoff beside a root that hangs may take before the
+        /// test reports it. A handoff that asks the root nothing answers far
+        /// inside it on a loaded host; one that waits on the root without a
+        /// bound never answers, so this only decides how soon that reports.
+        const HANDOFF_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
 
         /// How long the CLI waits for the handoff's `Opened` reply: past it,
         /// `chan serve` takes the desktop for gone.
@@ -11920,7 +12064,10 @@ mod tests {
         /// A handoff of a relinked root the boot restored mints its window
         /// under the row's root before it answers, while the root stops
         /// answering: the host knows the workspace by the path the handoff
-        /// names, and nothing asks the root.
+        /// names, and nothing asks the root. It answers within the CLI's
+        /// reply budget, past it by no more than the host's pace allows; the
+        /// wall-clock bound only decides how soon a handoff that waits on the
+        /// root reports.
         #[cfg(unix)]
         #[test]
         fn a_restored_relinked_roots_handoff_mints_under_its_row_while_it_hangs() {
@@ -11934,12 +12081,15 @@ mod tests {
             let app = desktop.app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let path = root.now.clone();
-            let answer = stall.finishes_beside(
-                "handing off a mounted root that hangs",
-                cli_reply_bound(),
-                move || open_workspace_from_handoff(app, state, path),
-            );
+            let (answer, took, pace) = timed_against_the_pace(desktop.runtime.handle(), || {
+                stall.finishes_beside(
+                    "handing off a mounted root that hangs",
+                    HANDOFF_HANG_GUARD,
+                    move || open_workspace_from_handoff(app, state, path),
+                )
+            });
             assert_eq!(answer, Ok(()));
+            assert_within_reply_budget("the handoff", took, cli_reply_bound(), pace);
             assert_eq!(
                 desktop.window_paths(),
                 std::slice::from_ref(&root.stored),
@@ -12411,8 +12561,10 @@ mod tests {
 
         /// A handoff of a root that is not mounted answers while that root
         /// stops answering: the arm that registers it runs on a task of its
-        /// own, and the handler asks the root nothing. Once the root answers,
-        /// that arm opens the window under the registry row.
+        /// own, and the handler asks the root nothing. It answers within the
+        /// CLI's reply budget, past it by no more than the host's pace
+        /// allows. Once the root answers, that arm opens the window under the
+        /// registry row.
         #[test]
         fn a_handoff_of_a_root_that_is_not_mounted_answers_while_it_hangs() {
             if !own_home("a_handoff_of_a_root_that_is_not_mounted_answers_while_it_hangs") {
@@ -12425,12 +12577,15 @@ mod tests {
             let app = desktop.app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let path = stored.clone();
-            let answer = stall.finishes_beside(
-                "handing off a root that hangs",
-                cli_reply_bound(),
-                move || open_workspace_from_handoff(app, state, path),
-            );
+            let (answer, took, pace) = timed_against_the_pace(desktop.runtime.handle(), || {
+                stall.finishes_beside(
+                    "handing off a root that hangs",
+                    HANDOFF_HANG_GUARD,
+                    move || open_workspace_from_handoff(app, state, path),
+                )
+            });
             assert_eq!(answer, Ok(()));
+            assert_within_reply_budget("the handoff", took, cli_reply_bound(), pace);
             drop(stall);
             let windows = desktop.wait_for_windows(1);
             assert!(

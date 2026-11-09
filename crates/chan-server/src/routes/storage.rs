@@ -72,9 +72,9 @@ struct ResetResponse {
 /// in the worst case.
 #[cfg(not(test))]
 const RESET_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
-// Under test, 2 s: above the slowest of these waits that the late-owner
-// fixtures measure on a 0.2-CPU quota beside heavy compiles, and no more,
-// since every test that waits a bound out waits this one.
+// Under test, 2 s: every test that waits a bound out waits this one, and a
+// test whose route must end a wait by an event rather than run it out sets
+// that wait past any host's cost (`metadata::TestWaitBounds`).
 #[cfg(test)]
 const RESET_DRAIN_DEADLINE: Duration = Duration::from_millis(2000);
 
@@ -249,7 +249,14 @@ fn perform_reset_with(
     // detached tokio tasks the dropped Indexer struct left behind.
     let workspace_strong = cell.workspace.clone();
     drop(cell);
-    let deadline = Instant::now() + RESET_DRAIN_DEADLINE;
+    let drain_bound = RESET_DRAIN_DEADLINE;
+    #[cfg(all(test, unix))]
+    let drain_bound = super::metadata::test_wait_bound(
+        &workspace_strong.paths().lock,
+        super::metadata::RouteWait::Drain,
+        drain_bound,
+    );
+    let deadline = Instant::now() + drain_bound;
     while Arc::strong_count(&workspace_strong) > 1 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -1057,17 +1064,28 @@ mod tests {
         state.try_workspace().expect("new workspace generation");
     }
 
-    /// How long a reference upgraded beside a route's drop is kept when it is
-    /// let go soon after: longer than the route takes to reach chan-workspace
-    /// once it has dropped its own, and well inside the route's bound.
+    /// How long a reference upgraded beside a route's drop is kept once the
+    /// route has dropped its own and waits for the workspace's last owner.
+    /// That wait is lengthened past any host's cost for the fixtures that
+    /// let go, so this is well inside it however loaded the host is.
     #[cfg(unix)]
     const LATE_REFERENCE_HOLD: Duration = Duration::from_millis(150);
 
-    /// How long a pin waits for its route at the session close. A route that
-    /// answers before it gets there never opens the gate, so the wait ends
-    /// on the route's answer or here and never on the gate alone.
+    /// The bound of each route wait that a late-owner fixture expects to
+    /// end by an event rather than run out: far past what a loaded host
+    /// takes, so the wait that does run out is only the one the fixture
+    /// keeps at the route's own bound.
     #[cfg(unix)]
-    const SESSION_CLOSE_WAIT: Duration = Duration::from_secs(10);
+    const PAST_ANY_LOAD: Duration = Duration::from_secs(30);
+
+    /// How long a pin waits for its route at the session close, and for
+    /// anything else the route does by itself. A route that answers before
+    /// it gets there never opens the gate, so the wait ends on the route's
+    /// answer or here and never on the gate alone. It outlasts every route
+    /// wait, lengthened or not, so a route that runs one out still answers
+    /// inside it; a green run never reaches it.
+    #[cfg(unix)]
+    const SESSION_CLOSE_WAIT: Duration = Duration::from_secs(60);
 
     /// What a route answered beside a late reference, and what its cell holds
     /// once it has answered: whether that is the workspace the route started
@@ -1102,7 +1120,7 @@ mod tests {
     #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum LateOwner {
-        /// Lets go `LATE_REFERENCE_HOLD` after the route goes on.
+        /// Lets go `LATE_REFERENCE_HOLD` after the route has dropped its own.
         LetsGoSoon,
         /// Lets go only once the route has answered.
         OutlastsTheRoute,
@@ -1169,6 +1187,32 @@ mod tests {
             std::fs::read(path).unwrap()
         });
         let started_with = Arc::downgrade(&state.try_workspace().unwrap());
+        let route_bound = if import {
+            crate::routes::metadata::IMPORT_DRAIN_DEADLINE
+        } else {
+            RESET_DRAIN_DEADLINE
+        };
+        let lengthened = crate::routes::metadata::TestWaitBounds {
+            drain: Some(PAST_ANY_LOAD),
+            owners: Some(PAST_ANY_LOAD),
+            lock: Some(PAST_ANY_LOAD),
+            reopen: Some(PAST_ANY_LOAD),
+        };
+        // Only the wait the owner outlasts runs at the bound the route
+        // passes for it.
+        let bounds = match owner {
+            LateOwner::LetsGoSoon | LateOwner::DropHeldUntilLockWait => lengthened,
+            LateOwner::OutlastsTheRoute => crate::routes::metadata::TestWaitBounds {
+                owners: None,
+                ..lengthened
+            },
+            LateOwner::DropHeldUntilReopenRefused => crate::routes::metadata::TestWaitBounds {
+                lock: None,
+                ..lengthened
+            },
+        };
+        let lock_dir = started_with.upgrade().unwrap().paths().lock.clone();
+        crate::routes::metadata::set_test_wait_bounds(&lock_dir, bounds);
         // The session close runs between the route's count and its drop.
         let (counted, at_the_close) = tokio::sync::oneshot::channel();
         let (go_on, gone_on) = std::sync::mpsc::channel();
@@ -1222,23 +1266,47 @@ mod tests {
         let holder = std::thread::spawn({
             let started_with = started_with.clone();
             move || {
+                // Let go only as the workspace's last owner, so its drop
+                // runs here and not inside the route's own. A route that
+                // answered without letting its own go has nothing left to
+                // wait for: let go then, and its answer says what it did.
+                let as_the_last_owner = || {
+                    let dropped_by = Instant::now() + SESSION_CLOSE_WAIT;
+                    while started_with.strong_count() > 1 {
+                        if matches!(
+                            route_answered.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Disconnected)
+                        ) {
+                            return;
+                        }
+                        assert!(
+                            Instant::now() < dropped_by,
+                            "the route kept its own reference past its session close"
+                        );
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                };
                 match owner {
-                    LateOwner::LetsGoSoon => std::thread::sleep(LATE_REFERENCE_HOLD),
+                    LateOwner::LetsGoSoon => {
+                        as_the_last_owner();
+                        std::thread::sleep(LATE_REFERENCE_HOLD);
+                    }
                     LateOwner::OutlastsTheRoute => {
-                        // Returns when the sender is dropped, after the answer.
-                        let _ = route_answered.recv();
+                        // Returns when the sender is dropped, after the
+                        // answer. A route that waits on this owner without a
+                        // bound never answers: the panic lets go of it, so
+                        // the route ends and the test reports this.
+                        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                            route_answered.recv_timeout(SESSION_CLOSE_WAIT)
+                        {
+                            panic!(
+                                "the route did not answer within {SESSION_CLOSE_WAIT:?} \
+                                 while a late owner kept its workspace"
+                            );
+                        }
                     }
                     LateOwner::DropHeldUntilLockWait | LateOwner::DropHeldUntilReopenRefused => {
-                        // Let go only as the workspace's last owner, so its
-                        // drop runs here and not inside the route's own.
-                        let dropped_by = Instant::now() + SESSION_CLOSE_WAIT;
-                        while started_with.strong_count() > 1 {
-                            assert!(
-                                Instant::now() < dropped_by,
-                                "the route kept its own reference past its session close"
-                            );
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
+                        as_the_last_owner();
                     }
                 }
                 drop(late);
@@ -1259,7 +1327,14 @@ mod tests {
                 ),
             }
         }
-        let response = route.await.unwrap();
+        let response = tokio::time::timeout(SESSION_CLOSE_WAIT, &mut route)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the route did not answer within {SESSION_CLOSE_WAIT:?} of its session close"
+                )
+            })
+            .unwrap();
         let status = response.status();
         let retry_after = response
             .headers()
@@ -1276,7 +1351,31 @@ mod tests {
             .try_workspace()
             .map(|workspace| std::sync::Weak::ptr_eq(&started_with, &Arc::downgrade(&workspace)));
         drop(answered);
-        holder.join().unwrap();
+        if let Err(panic) = holder.join() {
+            std::panic::resume_unwind(panic);
+        }
+        // The route's own bound stays under test for the waits this fixture
+        // lengthens: each wait it made was passed that bound.
+        let operation = if import { "import" } else { "reset" };
+        let passed = crate::routes::metadata::test_waits_passed(&lock_dir);
+        let waits: Vec<_> = passed.iter().map(|(wait, _)| *wait).collect();
+        let expected = {
+            use crate::routes::metadata::RouteWait::{Drain, Lock, Owners, Reopen};
+            match owner {
+                LateOwner::OutlastsTheRoute => vec![Drain, Owners, Lock],
+                _ => vec![Drain, Owners, Lock, Reopen],
+            }
+        };
+        assert_eq!(
+            waits, expected,
+            "the {operation} answered {status} after these waits for its workspace"
+        );
+        for (wait, bound) in passed {
+            assert_eq!(
+                bound, route_bound,
+                "the {operation} passed its {wait:?} wait {bound:?}, not its own bound"
+            );
+        }
         if let Some((timed_out, released_at)) = drop_gate_timed_out {
             assert!(
                 !timed_out.load(std::sync::atomic::Ordering::SeqCst),

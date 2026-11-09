@@ -4622,7 +4622,7 @@ mod devserver_route_tests {
 
         use super::mount_bound::{row_error, send, workspace_id, STILL_RELEASING};
         use super::*;
-        use crate::devserver::hung_root_support::completes_beside;
+        use crate::devserver::hung_root_support::{completes_beside, HEALTHY_ROOT_BOUND};
 
         /// Send `method` `uri` and leave it held in the root's open, as a
         /// client that goes away does, then send it again beside that open.
@@ -4641,7 +4641,7 @@ mod devserver_route_tests {
             let stall = root_stall::stall_matching(root, &[root_stall::OPEN_WORKSPACE]);
             let first = tokio::spawn(send(router.clone(), method, uri.clone(), body.clone()));
             assert!(
-                stall.wait_entered(Duration::from_secs(10)),
+                stall.wait_entered(HEALTHY_ROOT_BOUND),
                 "fixture: the first request never reached the root's open"
             );
             first.abort();
@@ -4701,7 +4701,7 @@ mod devserver_route_tests {
             let stall = root_stall::stall_matching(root.path(), &[root_stall::REVALIDATE_ROOT]);
             let abandoned = tokio::spawn(send(router.clone(), "POST", on.clone(), None));
             assert!(
-                stall.wait_entered(Duration::from_secs(10)),
+                stall.wait_entered(HEALTHY_ROOT_BOUND),
                 "fixture: the on never reached its revalidation"
             );
             abandoned.abort();
@@ -4711,8 +4711,11 @@ mod devserver_route_tests {
             );
 
             for attempt in ["the off", "the off after it"] {
+                // The teardown stays held until the stall drops below, so
+                // the off answers at its 200 ms budget or not at all; this
+                // bound only decides how soon one that waits reports.
                 let (status, retry_after, body) = tokio::time::timeout(
-                    Duration::from_secs(8),
+                    HEALTHY_ROOT_BOUND,
                     send(router.clone(), "POST", off.clone(), None),
                 )
                 .await
@@ -4732,7 +4735,7 @@ mod devserver_route_tests {
             }
 
             drop(stall);
-            tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
                 while !row_error(&router, &stored).await.is_null() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -4758,7 +4761,7 @@ mod devserver_route_tests {
                 ),
                 "the final cleanup failed: {close:?}"
             );
-            tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
                 loop {
                     let changed = host.library_change_notify();
                     let returned = changed.notified();
@@ -4823,7 +4826,7 @@ mod devserver_route_tests {
                 Some(add),
             ));
             assert!(
-                stall.wait_entered(Duration::from_secs(10)),
+                stall.wait_entered(HEALTHY_ROOT_BOUND),
                 "fixture: the add never reached the root's registration"
             );
             first.abort();
@@ -4870,7 +4873,7 @@ mod devserver_route_tests {
         ) {
             let first = tokio::spawn(send(router.clone(), method, uri, None));
             assert!(
-                stall.wait_entered(Duration::from_secs(10)),
+                stall.wait_entered(HEALTHY_ROOT_BOUND),
                 "fixture: the first request never reached the call held on its root"
             );
             first.abort();
@@ -5909,15 +5912,42 @@ mod devserver_route_tests {
         }
     }
 
-    #[tokio::test]
-    async fn local_workspace_remove_confirms_on_live_terminals_then_force_removes() {
+    /// The forced removal ends the live terminal and the workspace in one
+    /// call. Its teardown is given a release budget past any host's cost, so
+    /// the 204 reads that the removal let the workspace go and never how fast
+    /// the host ran the teardown; a removal that never lets it go answers
+    /// still releasing at that budget instead. The outer bound only turns a
+    /// hang into a red.
+    ///
+    /// The runtime is built here rather than by `tokio::test` so the test
+    /// ends with that red: after a removal that never lets the workspace go,
+    /// the teardown keeps a blocking thread looking for the release, and a
+    /// runtime's drop waits for its blocking threads without a bound.
+    #[test]
+    fn local_workspace_remove_confirms_on_live_terminals_then_force_removes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let removed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(forced_removal_after_a_live_terminal_confirmation())
+        }));
+        runtime.shutdown_background();
+        if let Err(panic) = removed {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn forced_removal_after_a_live_terminal_confirmation() {
+        const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
         let cfg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         lib.register_workspace(root.path()).unwrap();
         let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        host.test_set_shutdown_release_budget(HANG_GUARD / 2);
         let prefix = chan_library::allocate_workspace_prefix(root.path()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::time::timeout(HANG_GUARD, async {
             host.open_registered_workspace(
                 root.path(),
                 chan_library::ServeConfig {

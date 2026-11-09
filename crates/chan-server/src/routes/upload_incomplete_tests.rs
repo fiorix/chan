@@ -27,7 +27,12 @@ const SERVER_FAILURE: &str = "response failed";
 /// reached quickly.
 const STALL_BOUND: std::time::Duration = std::time::Duration::from_millis(100);
 /// A hang guard on waits that the answer ends; a green run never reaches it.
-const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(10);
+/// The held body stays silent and unreleased through each such wait, so the
+/// order of events is the assertion (the answer comes while the body is
+/// still held) and this only decides how soon a run that waits on the body
+/// reports. It is far above a correct run's cost on a loaded host, and far
+/// below the default stall bound a route that ignored the test's would use.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One captured event: its level and its fields as formatted text.
 #[derive(Debug)]
