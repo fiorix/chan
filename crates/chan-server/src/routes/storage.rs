@@ -1292,8 +1292,18 @@ mod tests {
                         std::thread::sleep(LATE_REFERENCE_HOLD);
                     }
                     LateOwner::OutlastsTheRoute => {
-                        // Returns when the sender is dropped, after the answer.
-                        let _ = route_answered.recv();
+                        // Returns when the sender is dropped, after the
+                        // answer. A route that waits on this owner without a
+                        // bound never answers: the panic lets go of it, so
+                        // the route ends and the test reports this.
+                        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                            route_answered.recv_timeout(SESSION_CLOSE_WAIT)
+                        {
+                            panic!(
+                                "the route did not answer within {SESSION_CLOSE_WAIT:?} \
+                                 while a late owner kept its workspace"
+                            );
+                        }
                     }
                     LateOwner::DropHeldUntilLockWait | LateOwner::DropHeldUntilReopenRefused => {
                         as_the_last_owner();
@@ -1317,7 +1327,14 @@ mod tests {
                 ),
             }
         }
-        let response = route.await.unwrap();
+        let response = tokio::time::timeout(SESSION_CLOSE_WAIT, &mut route)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the route did not answer within {SESSION_CLOSE_WAIT:?} of its session close"
+                )
+            })
+            .unwrap();
         let status = response.status();
         let retry_after = response
             .headers()
@@ -1334,7 +1351,9 @@ mod tests {
             .try_workspace()
             .map(|workspace| std::sync::Weak::ptr_eq(&started_with, &Arc::downgrade(&workspace)));
         drop(answered);
-        holder.join().unwrap();
+        if let Err(panic) = holder.join() {
+            std::panic::resume_unwind(panic);
+        }
         // The route's own bound stays under test for the waits this fixture
         // lengthens: each wait it made was passed that bound.
         let operation = if import { "import" } else { "reset" };
