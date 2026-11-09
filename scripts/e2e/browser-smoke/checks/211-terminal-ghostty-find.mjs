@@ -13,7 +13,26 @@
 //   OLDER  -- Enter steps to older matches, through 4999's other one and
 //             4998 to 4990 on the screen with the viewport still, then to
 //             4899 above it: the viewport moves and centres that row.
+//   RESIZE -- the page narrows, then widens back, and the terminal reflows
+//             to each width. libghostty-vt forgets the selected match on a
+//             resize and scans again, so each time the highlight goes (it
+//             would sit on rows the reflow gave other text), the count keeps
+//             its N with no index, and Enter starts over: the selection is
+//             the newest match again, its text the needle, and the count
+//             reads 1 of N.
 //   ESCAPE -- Escape closes the bar and clears the selection.
+//   OLDEST -- the chord opens the bar again with the query it kept, and
+//             Shift+Enter, the first step of a fresh search, lands on the
+//             oldest match, the 99 on line 99, once the scan completes:
+//             not on the oldest of the matches found when the key went
+//             down, which the core would wrap to. The count reads N of N
+//             and the match is on the screen. Escape closes the bar.
+//   REOPEN -- the chord opens the bar again, then Escape and the find
+//             command run in one task: the bar reopens before any zero-delay
+//             refocus ghostty-web could have scheduled, and keeps the
+//             keyboard past it. A trusted Escape closes the bar, the
+//             keyboard goes back to the terminal, and a command typed next
+//             runs in the shell.
 //
 // The selection and the viewport are read from ghostty-web's own Terminal
 // in the page: its SelectionManager's anchors (absolute rows, 0 the oldest
@@ -76,6 +95,8 @@ export default {
     const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
     const original = await readTerminalPrefs(page, token);
     const flipped = original.ghostty !== true;
+    const pageViewport = page.viewport();
+    let resized = false;
     const readings = {};
     try {
       if (flipped) await writeTerminalPrefs(page, token, { ghostty: true });
@@ -114,9 +135,9 @@ export default {
         throw new Error(`no ghostty-web Terminal from ${chunk} holds this tab's terminal host`);
       }
 
-      /// The terminal as find leaves it: the selection's anchors and the
-      /// text of its start row, the viewport offset, the history length and
-      /// the screen's rows.
+      /// The terminal as find leaves it: the selection's anchors, its text
+      /// and the text of its start row, the viewport offset, the history
+      /// length and the grid.
       const state = () => term.evaluate((t) => {
         const m = t.selectionManager;
         const start = m?.selectionStart ?? null;
@@ -127,9 +148,11 @@ export default {
           end,
           startRowText: start ? rowText(start.absoluteRow) : null,
           hasSelection: t.hasSelection(),
+          selectedText: t.hasSelection() ? t.getSelection() : "",
           viewportY: t.getViewportY(),
           scrollback: t.getScrollbackLength(),
           rows: t.rows,
+          cols: t.cols,
         };
       });
       const onScreen = (s, absoluteRow) => absoluteRow - s.scrollback + Math.floor(s.viewportY);
@@ -168,11 +191,14 @@ export default {
 
       // OPEN
       const mac = await page.evaluate(() => /Mac/.test(navigator.userAgent));
-      await page.evaluate((q) => document.querySelector(`${q} textarea`)?.focus(), hostQuery);
-      const modifiers = mac ? ["Meta"] : ["Control", "Shift"];
-      for (const key of modifiers) await page.keyboard.down(key);
-      await page.keyboard.press("KeyF");
-      for (const key of modifiers.reverse()) await page.keyboard.up(key);
+      const pressFindChord = async () => {
+        await page.evaluate((q) => document.querySelector(`${q} textarea`)?.focus(), hostQuery);
+        const modifiers = mac ? ["Meta"] : ["Control", "Shift"];
+        for (const key of modifiers) await page.keyboard.down(key);
+        await page.keyboard.press("KeyF");
+        for (const key of modifiers.reverse()) await page.keyboard.up(key);
+      };
+      await pressFindChord();
       await page.waitForFunction((q) => document.activeElement === document.querySelector(q), { timeout: 10_000 }, inputQuery)
         .catch(async (error) => {
           await ctx.shot("ghostty-find-not-open");
@@ -233,6 +259,39 @@ export default {
       readings.revealed = revealed;
       await ctx.shot("ghostty-find-older-revealed");
 
+      // RESIZE
+      const size = pageViewport ?? { width: 1600, height: 1000 };
+      readings.resize = [];
+      for (const [stage, width] of [["narrower", size.width - 400], ["wider", size.width]]) {
+        const before = await state();
+        resized = true;
+        await page.setViewport({ ...size, width });
+        const until = Date.now() + 15_000;
+        let after = null;
+        for (;;) {
+          const count = await page.evaluate((q) => document.querySelector(q)?.textContent ?? null, countQuery);
+          after = { count, ...(await state()) };
+          if (after.cols !== before.cols && count === `? of ${nines.length}` && !after.hasSelection) break;
+          if (Date.now() > until) {
+            await ctx.shot(`ghostty-find-resize-${stage}-failure`);
+            throw new Error(`resize ${stage}: expected a reflowed grid, no highlight and the count ? of ${nines.length}; page showed ${JSON.stringify({ before, after })}`);
+          }
+          await sleep(50);
+        }
+        if (stage === "narrower" && !(after.cols < before.cols)) {
+          throw new Error(`resize ${stage}: the grid did not narrow: ${JSON.stringify({ before, after })}`);
+        }
+        await ctx.shot(`ghostty-find-resize-${stage}`);
+        await page.keyboard.press("Enter");
+        const again = await waitFor(`resize-${stage}-enter`, `1 of ${nines.length}`, nines[0].line);
+        expectMatch(`resize-${stage}-enter`, again, nines[0]);
+        if (again.selectedText !== "99") throw new Error(`resize ${stage}: the selected text is not the match: ${JSON.stringify(again)}`);
+        const at = onScreen(again, again.start.absoluteRow);
+        if (at < 0 || at >= again.rows) throw new Error(`resize ${stage}: the selected match is off the screen: ${JSON.stringify(again)}`);
+        readings.resize.push({ stage, colsBefore: before.cols, after, again });
+        await ctx.shot(`ghostty-find-resize-${stage}-enter`);
+      }
+
       // ESCAPE
       await page.keyboard.press("Escape");
       await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery);
@@ -243,8 +302,75 @@ export default {
         throw new Error(`Escape left the selection: ${JSON.stringify(closed)}`);
       }
       await ctx.shot("ghostty-find-closed");
+
+      // OLDEST
+      await pressFindChord();
+      await page.waitForFunction((q) => document.activeElement === document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-oldest-not-open");
+          throw new Error(`oldest: the find chord did not open a focused find bar: ${error.message}`);
+        });
+      const kept = await page.evaluate((q) => document.querySelector(q)?.value ?? null, inputQuery);
+      if (kept !== "99") throw new Error(`oldest: the reopened bar did not keep its query: ${JSON.stringify(kept)}`);
+      await page.keyboard.down("Shift");
+      await page.keyboard.press("Enter");
+      await page.keyboard.up("Shift");
+      const oldest = nines[nines.length - 1];
+      const first = await waitFor("oldest", `${nines.length} of ${nines.length}`, oldest.line);
+      expectMatch("oldest", first, oldest);
+      const firstAt = onScreen(first, first.start.absoluteRow);
+      if (firstAt < 0 || firstAt >= first.rows) throw new Error(`oldest: the selected match is off the screen: ${JSON.stringify(first)}`);
+      readings.oldest = first;
+      await ctx.shot("ghostty-find-oldest");
+      await page.keyboard.press("Escape");
+      await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-oldest-escape-failure");
+          throw new Error(`oldest: Escape did not close the bar: ${error.message}`);
+        });
+
+      // REOPEN
+      await pressFindChord();
+      await page.waitForFunction((q) => document.activeElement === document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-reopen-not-open");
+          throw new Error(`reopen: the find chord did not open a focused find bar: ${error.message}`);
+        });
+      readings.reopened = await page.evaluate(async (q) => {
+        document.querySelector(q).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.find.open" } }));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const input = document.querySelector(q);
+        return { open: !!input, focused: !!input && document.activeElement === input, active: document.activeElement?.tagName ?? null };
+      }, inputQuery);
+      if (!readings.reopened.open || !readings.reopened.focused) {
+        await ctx.shot("ghostty-find-reopen-failure");
+        throw new Error(`reopen: the bar reopened at once did not keep the keyboard: ${JSON.stringify(readings.reopened)}`);
+      }
+      await page.keyboard.press("Escape");
+      await page.waitForFunction((q) => !document.querySelector(q), { timeout: 10_000 }, inputQuery)
+        .catch(async (error) => {
+          await ctx.shot("ghostty-find-reopen-escape-failure");
+          throw new Error(`reopen: Escape did not close the reopened bar: ${error.message}`);
+        });
+      const keyboard = await page.evaluate((q) => {
+        const host = document.querySelector(q);
+        return !!host && host.contains(document.activeElement);
+      }, hostQuery);
+      if (!keyboard) throw new Error("reopen: Escape did not hand the keyboard back to the terminal");
+      await page.keyboard.type(`echo ${MARK}$((6*7))\n`);
+      const typed = Date.now() + 15_000;
+      while (!(await term.evaluate((t, mark) => (t.wasmTerm.plainText() ?? "").includes(`${mark}42`), MARK))) {
+        if (Date.now() > typed) {
+          await ctx.shot("ghostty-find-reopen-typing-failure");
+          throw new Error("reopen: a command typed after Escape never ran in the shell");
+        }
+        await sleep(100);
+      }
+      await ctx.shot("ghostty-find-reopen-typed");
       return readings;
     } finally {
+      if (resized && pageViewport) await page.setViewport(pageViewport).catch(() => {});
       await cs(["close", "--tab-name", TAB]).catch(() => {});
       if (flipped) await writeTerminalPrefs(page, token, { ghostty: original.ghostty }).catch(() => {});
     }

@@ -168,6 +168,7 @@
     installGhosttyOverlayScrollbar,
     measureXtermCellDimensions,
   } from "../terminal/ghosttyCompat";
+  import { FindAnnouncer } from "../terminal/findAnnouncer";
   import { GhosttyFind, type FindCount } from "../terminal/ghosttyFind";
   import { GhosttyViewportController } from "../terminal/ghosttyViewport";
   import { GhosttyWheelRows, ghosttyWheelArrow } from "../terminal/ghosttyWheel";
@@ -445,8 +446,23 @@
       ? ""
       : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
   );
+  /// The find bar's live region: the count as a screen reader hears it,
+  /// once it settles rather than on every frame the shown count changes.
+  let findAnnounced = $state("");
+  const findAnnouncer = new FindAnnouncer((text) => {
+    findAnnounced = text;
+  });
+  $effect(() => findAnnouncer.update(findCountText, !findCount?.partial));
+  $effect(() => () => findAnnouncer.dispose());
   /// Matches the search addon decorates and counts; past it its list stops.
   const FIND_HIGHLIGHT_LIMIT = 1000;
+  /// Whether the xterm search addon holds a search the bar started: set as
+  /// the bar finds or steps, cleared by clearFind. The addon refreshes its
+  /// search 200 ms after each write it parses; a refresh pending when
+  /// clearFind dropped the addon's term still fires and reports no results,
+  /// which the bar must not show as its count: closed, reopened with its
+  /// query kept, or open with the query emptied.
+  let xtermFindLive = false;
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
   // its own session frame leaves the screen as it was and keeps it; only a
@@ -526,8 +542,9 @@
   let ghosttyKeyParity: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
-  // reconciliation plus the calibrated macOS pixel-scroll path), non-null
-  // ONLY on the ghostty backend and disposed with the terminal.
+  // reconciliation plus the calibrated macOS pixel-scroll path) and the one
+  // path chan writes to the terminal through (PTY output and writeChanLine),
+  // non-null ONLY on the ghostty backend and disposed with the terminal.
   let ghosttyViewport: GhosttyViewportController | null = null;
   // Find on the ghostty backend, made when the find bar first opens (see
   // ghosttyFinder) and disposed with the terminal. Null on xterm, which
@@ -1330,10 +1347,10 @@
       serialize = new SerializeAddon();
       term.loadAddon(xtermFit);
       term.loadAddon(search);
-      // Fires on every decorated find. Addon doubles without the event
-      // leave the count blank.
+      // Fires on every decorated find and on the addon's refresh after
+      // output. Addon doubles without the event leave the count blank.
       search.onDidChangeResults?.((e) => {
-        findCount = xtermFindCount(e.resultIndex, e.resultCount);
+        if (xtermFindLive) findCount = xtermFindCount(e.resultIndex, e.resultCount);
       });
       term.loadAddon(serialize);
       // Route terminal link clicks through the editor's external-open
@@ -1848,7 +1865,7 @@
         status = "connected";
         statusDetail = `session ${frame.id.slice(0, 8)}`;
         if (missedBytes > 0 && !resetBeforeReplay) {
-          term?.writeln(`\r\nterminal replay missed ${missedBytes} bytes`);
+          writeChanLine(`\r\nterminal replay missed ${missedBytes} bytes`);
         }
       } else if (frame.type === "renamed") {
         if (tab.terminalSessionId) {
@@ -1931,7 +1948,7 @@
           scheduleSessionSave();
         } else {
           scheduleTerminalSessionSave();
-          term?.writeln(`\r\nsession ended (${frame.reason})`);
+          writeChanLine(`\r\nsession ended (${frame.reason})`);
         }
       } else if (frame.type === "exit") {
         status = "exited";
@@ -1944,7 +1961,7 @@
         if (focused) markProgramCompletionsSeen(tab.programStatus);
         clearTerminalSession(tab, true);
         scheduleTerminalSessionSave();
-        term?.writeln(
+        writeChanLine(
           frame.code == null
             ? "\r\nprocess exited; press Ctrl+D to close this tab"
             : `\r\nprocess exited (${frame.code}); press Ctrl+D to close this tab`,
@@ -1957,7 +1974,7 @@
         // do not splat it into the terminal.
         if (!detail.includes("unknown variant `ping`")) {
           statusDetail = detail;
-          term?.writeln(`\r\nterminal error: ${detail}`);
+          writeChanLine(`\r\nterminal error: ${detail}`);
         }
       }
     };
@@ -2220,14 +2237,16 @@
   function openCommandsFromMenu(e: MouseEvent): void {
     const row = e.currentTarget as Element;
     closeTabMenu();
-    openCommandLauncherFromMenu(row, focusTerminalBeforeLauncher);
+    openCommandLauncherFromMenu(row, focusTerminalOnce);
   }
 
   // ghostty-web's focus() focuses its element and then again on a zero-delay
-  // timer, which would take the keyboard back from the launcher's input once
-  // the launcher has it. On ghostty the host it opened in, the element it
-  // reads keys from, is focused once instead; xterm.js focuses at once.
-  function focusTerminalBeforeLauncher(): void {
+  // timer, which takes the keyboard back from an input that took it in
+  // between: the launcher's, opened from the body menu, or the find bar's,
+  // reopened at once after Escape. On ghostty the host it opened in, the
+  // element it reads keys from, is focused once instead; xterm.js focuses at
+  // once.
+  function focusTerminalOnce(): void {
     if (backend !== "ghostty") {
       focusTerminal();
       return;
@@ -2278,6 +2297,15 @@
       onComplete?.();
       completeMaskScan();
     });
+  }
+
+  /// A line chan prints in the terminal itself: a replay gap, the session
+  /// ending, an error. On ghostty it takes the viewport controller's write,
+  /// as output does, so an open find bar counts it and a scrolled-back
+  /// viewport keeps its place.
+  function writeChanLine(line: string): void {
+    if (ghosttyViewport) ghosttyViewport.write(`${line}\r\n`);
+    else term?.writeln(line);
   }
 
   /// OS file dropped on this terminal: type the dropped files' absolute
@@ -2873,6 +2901,7 @@
   /// On ghostty this also frees the search and stops its scan.
   function clearFind(): void {
     search?.clearDecorations();
+    xtermFindLive = false;
     ghosttyFind?.close();
     findCount = null;
   }
@@ -2911,6 +2940,7 @@
     }
     if (!search) return;
     term?.clearSelection();
+    xtermFindLive = true;
     search.findPrevious(findQuery, findOptions());
   }
 
@@ -2926,8 +2956,10 @@
       ghosttyFinder()?.step(findQuery, direction);
       return;
     }
-    if (direction === "older") search?.findPrevious(findQuery, findOptions());
-    else search?.findNext(findQuery, findOptions());
+    if (!search) return;
+    xtermFindLive = true;
+    if (direction === "older") search.findPrevious(findQuery, findOptions());
+    else search.findNext(findQuery, findOptions());
   }
 
   function onFindKeydown(e: KeyboardEvent): void {
@@ -2935,7 +2967,7 @@
       e.preventDefault();
       findOpen = false;
       clearFind();
-      focusTerminal();
+      focusTerminalOnce();
       return;
     }
     if (e.key === "Enter") {
@@ -3396,7 +3428,14 @@
     </div>
   {/if}
   {#if findOpen}
-    <div class="terminal-find" role="search" aria-label="find in terminal">
+    <!-- ghostty-web drops its selection on a click anywhere in the page
+         outside its canvas, and on ghostty find's highlight is that
+         selection, so a click in the bar (to place the caret) would take the
+         highlight away. The bar is the terminal's own, so its clicks stop
+         here; the menus close on pointerdown and the panes activate on
+         mousedown, which still bubble. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+    <div class="terminal-find" role="search" aria-label="find in terminal" onclick={(e) => e.stopPropagation()}>
       <input
         bind:this={searchInput}
         class="find"
@@ -3409,7 +3448,8 @@
         }}
         onkeydown={onFindKeydown}
       />
-      <span class="find-count" role="status" aria-label="find matches">{findCountText}</span>
+      <span class="find-count" aria-hidden="true">{findCountText}</span>
+      <span class="find-announce" role="status" aria-label="find matches">{findAnnounced}</span>
     </div>
   {/if}
   {#if active && tab.cliReloadNotice}
@@ -3586,8 +3626,8 @@
   .find:focus {
     border-color: var(--link);
   }
-  /* Always in the tree so the live region exists before it fills; it takes
-     no room while blank. */
+  /* The count as shown, on every frame it changes; it takes no room while
+     blank. Screen readers hear .find-announce instead. */
   .find-count {
     margin-left: 6px;
     color: var(--text-secondary);
@@ -3597,6 +3637,19 @@
   }
   .find-count:empty {
     margin-left: 0;
+  }
+  /* The live region: in the tree from the bar's first frame so a screen
+     reader hears it fill, and out of sight and of the bar's layout. */
+  .find-announce {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .terminal-host {
     flex: 1;

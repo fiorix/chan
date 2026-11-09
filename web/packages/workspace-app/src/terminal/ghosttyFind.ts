@@ -11,12 +11,32 @@
 /// ends. The scan works from the newest output up, so the first match it
 /// finds is the newest of all and is selected on the frame that finds it.
 ///
-/// Output keeps arriving while the bar is open. The viewport controller,
-/// the terminal's only write path, reports every write; the search is fed
-/// once per animation frame however many came, and the count and the
-/// highlight follow it. The core keeps the active match on its text, so the
-/// highlight moves only when pruned history, or a reflow the next write
-/// brings in, has moved the match's rows.
+/// While the scan runs the core knows only the newest matches, and its
+/// steps wrap among those: older from the oldest found so far lands on the
+/// newest, and newer from the newest, or with nothing selected, on the
+/// oldest found so far rather than the oldest of all. So a step never wraps
+/// while the scan runs. One that does not wrap applies at once. One that
+/// would wrap, or newer with nothing selected, waits while the frames scan
+/// on and applies on the first frame it can without wrapping: once the scan
+/// has found the next older match, or once it completes. Steps pressed
+/// while one waits queue behind it and apply in the order pressed, each
+/// from where the one before landed, so a run of presses ends where it
+/// would on a finished scan. A new query or closing the bar drops them. A
+/// step that waited writes its highlight over the selection there was when
+/// it was pressed; a selection the user makes while it waits stays theirs,
+/// and the step moves only the count.
+///
+/// Output keeps arriving while the bar is open. The viewport controller
+/// reports every change to the terminal, each write (output and the lines
+/// chan prints itself) and each resize; the search is fed once per
+/// animation frame however many came, and the count and the highlight
+/// follow it. Across output the core keeps the active match on its text,
+/// so the highlight moves only when pruned history has moved the match's
+/// rows. A resize is different: the core forgets the active match and scans
+/// again from scratch, so the highlight, whose rows the reflow gave other
+/// text, goes before ghostty-web repaints, and the count has no index until
+/// a step selects again, starting over: older lands on the newest match and
+/// newer on the oldest.
 ///
 /// The highlight is ghostty-web's own selection, written through its
 /// SelectionManager's anchors. ghostty-web's public `select()` counts its
@@ -26,7 +46,7 @@
 
 import type { Terminal } from "ghostty-web";
 import { selectionManagerOf, type SelectionManagerLike } from "./ghosttySelection";
-import type { GhosttyViewportController } from "./ghosttyViewport";
+import type { GhosttyChange, GhosttyViewportController } from "./ghosttyViewport";
 import { type MatchRange, type SearchState, type VtSearch, VtTerminal } from "./ghosttyVt";
 
 /// The find bar's match count. `index` counts from the newest match (1 is
@@ -35,8 +55,12 @@ import { type MatchRange, type SearchState, type VtSearch, VtTerminal } from "./
 export type FindCount = { index: number | null; total: number; partial: boolean };
 
 /// What find needs of the terminal's viewport controller: word of every
-/// write, and the one call that scrolls to a match.
-export type FindViewport = Pick<GhosttyViewportController, "observeWrites" | "reveal">;
+/// change to the terminal, and the one call that scrolls to a match.
+export type FindViewport = Pick<GhosttyViewportController, "observeChanges" | "reveal">;
+
+/// A step's way through the matches: toward older output, up the buffer,
+/// or toward newer output, down it.
+type Direction = "older" | "newer";
 
 /// Runs a callback once on a coming animation frame; `cancel` drops one that
 /// has not run.
@@ -87,9 +111,13 @@ export class GhosttyFind {
   /// The open bar's search; null while the bar is closed.
   private search: VtSearch | null = null;
   private needle = "";
-  /// The query changed and its first match is still to be selected.
-  private selectFirst = false;
-  /// Output arrived since the search was last fed.
+  /// Steps the scan does not allow yet, in the order pressed. A new query's
+  /// selection of its newest match is the first of them, an older step from
+  /// nothing selected.
+  private waiting: Direction[] = [];
+  /// The selection when the bar last asked for a match.
+  private askedOver: MatchRange | null = null;
+  /// The terminal changed since the search was last fed.
   private dirty = false;
   /// The range last written to the selection.
   private written: MatchRange | null = null;
@@ -103,7 +131,7 @@ export class GhosttyFind {
     this.onCount = options.onCount;
     this.frames = options.frames ?? animationFrames;
     this.budgetMs = options.budgetMs ?? FIND_SCAN_BUDGET_MS;
-    this.stopObserving = options.viewport.observeWrites(() => this.onWrite());
+    this.stopObserving = options.viewport.observeChanges((change) => this.onChange(change));
   }
 
   /// The query changed: scan for it from scratch and select its newest match
@@ -113,25 +141,35 @@ export class GhosttyFind {
       this.close();
       return;
     }
-    this.prepare(query);
+    if (this.prepare(query)) {
+      this.waiting.push("older");
+      this.askedOver = this.selectionRange();
+    }
     this.schedule();
   }
 
   /// Select the next match toward older output (up the buffer) or newer
-  /// output (down), both wrapping, scroll to it and highlight it. A query
+  /// output (down), both wrapping, scroll to it and highlight it; while the
+  /// scan runs, a step that would wrap waits for it (see above). A query
   /// other than the current one is searched for first, so after the bar
-  /// reopens the first step lands on the newest match.
+  /// reopens the first step lands on the newest match for older, at once,
+  /// and on the oldest for newer, once the scan completes.
   step(query: string, direction: "older" | "newer"): void {
     if (!query) {
       this.close();
       return;
     }
-    const search = this.prepare(query);
-    // Right after a query change the core selects among the matches found
-    // so far; when it has none yet, the scan selects the first it finds.
-    const found = direction === "older" ? search.selectNext() : search.selectPrev();
-    if (found) this.selectFirst = false;
-    this.show(true);
+    if (this.prepare(query)) {
+      // The terminal is read now, as a frame would, so that a step that
+      // does not wrap selects at once.
+      this.search!.feed();
+    }
+    this.waiting.push(direction);
+    this.askedOver = this.selectionRange();
+    const selected = this.applyWaiting();
+    // A press that only waits changes nothing yet; the frames show the
+    // count as the scan goes.
+    if (selected || this.waiting.length === 0) this.show(selected);
     this.schedule();
   }
 
@@ -143,7 +181,8 @@ export class GhosttyFind {
     this.search?.free();
     this.search = null;
     this.needle = "";
-    this.selectFirst = false;
+    this.waiting = [];
+    this.askedOver = null;
     this.dirty = false;
   }
 
@@ -153,18 +192,23 @@ export class GhosttyFind {
     this.stopObserving();
   }
 
-  private prepare(query: string): VtSearch {
+  /// Makes the search on first use and sets its needle; true when the
+  /// needle changed, which drops the steps still waiting.
+  private prepare(query: string): boolean {
     this.search ??= this.core.createSearch();
-    if (query !== this.needle) {
-      this.search.setNeedle(query);
-      this.needle = query;
-      this.selectFirst = true;
-    }
-    return this.search;
+    if (query === this.needle) return false;
+    this.search.setNeedle(query);
+    this.needle = query;
+    this.waiting = [];
+    return true;
   }
 
-  private onWrite(): void {
+  private onChange(change: GhosttyChange): void {
     if (!this.search) return;
+    // The core drops its selected match on any resize, so no active match
+    // is left to move the highlight to, and the rows under it hold other
+    // text once the grid reflows.
+    if (change === "resize") this.dropHighlight();
     this.dirty = true;
     this.schedule();
   }
@@ -185,7 +229,7 @@ export class GhosttyFind {
   }
 
   /// One frame of work: feed the output that arrived, scan for the budget,
-  /// select a new query's first match, and show what the search holds.
+  /// apply the steps the scan now allows, and show what the search holds.
   private pump(): void {
     const search = this.search;
     if (!search) return;
@@ -196,13 +240,30 @@ export class GhosttyFind {
       search.feed();
     }
     const running = search.step(this.budgetMs) === "running";
-    let reveal = false;
-    if (this.selectFirst && search.state().total > 0) {
-      this.selectFirst = false;
-      reveal = search.selectNext();
-    }
-    this.show(reveal);
+    const selected = this.applyWaiting();
+    this.show(selected && this.askStands());
     if (running) this.schedule();
+  }
+
+  /// Applies the waiting steps, oldest press first, up to the first one the
+  /// scan does not allow yet; true when one selected a match.
+  private applyWaiting(): boolean {
+    const search = this.search!;
+    let selected = false;
+    while (this.waiting.length > 0) {
+      const state = search.state();
+      if (!state.complete && !landsAsComplete(this.waiting[0]!, state)) break;
+      const direction = this.waiting.shift()!;
+      if (direction === "older" ? search.selectNext() : search.selectPrev()) selected = true;
+    }
+    return selected;
+  }
+
+  /// Whether a step that waited may write its highlight: the user has not
+  /// selected anything of their own since the bar asked.
+  private askStands(): boolean {
+    const now = this.selectionRange();
+    return now === null || sameRange(now, this.askedOver) || this.ownsSelection();
   }
 
   /// Show what the search holds: the count, and the active match as the
@@ -247,17 +308,26 @@ export class GhosttyFind {
 
   /// Whether the selection is still the range written last.
   private ownsSelection(): boolean {
-    const range = this.written;
+    return this.written !== null && sameRange(this.selectionRange(), this.written);
+  }
+
+  /// The selection as a match range; null when nothing is selected.
+  private selectionRange(): MatchRange | null {
     const start = this.selection?.selectionStart;
     const end = this.selection?.selectionEnd;
-    if (!range || !start || !end) return false;
-    return (
-      start.col === range.startCol &&
-      start.absoluteRow === range.startRow &&
-      end.col === range.endCol &&
-      end.absoluteRow === range.endRow
-    );
+    if (!start || !end) return null;
+    return { startRow: start.absoluteRow, startCol: start.col, endRow: end.absoluteRow, endCol: end.col };
   }
+}
+
+/// Whether a step lands now where it would once the scan completes. Until
+/// then the core holds the newest `total` matches, index 0 the newest, and
+/// wraps among them, so only a step that stays inside them lands so: older
+/// from nothing selected onto the newest once one is found, older from any
+/// but the oldest found so far, and newer from any but the newest.
+function landsAsComplete(direction: Direction, { index, total }: SearchState): boolean {
+  if (direction === "older") return index === null ? total > 0 : index < total - 1;
+  return index !== null && index > 0;
 }
 
 function sameRange(a: MatchRange | null, b: MatchRange | null): boolean {
@@ -266,8 +336,8 @@ function sameRange(a: MatchRange | null, b: MatchRange | null): boolean {
 }
 
 /// The bar's count of a search: `index` is the core's, 0 the newest, plus
-/// one. Nothing found reads `0 of 0`; a match that is not selected (a screen
-/// switch or pruning took the selected one) has no index.
+/// one. Nothing found reads `0 of 0`; with no match selected (a screen
+/// switch, pruning or a resize took the selected one) there is no index.
 function findCount(state: SearchState): FindCount {
   const partial = !state.complete;
   if (state.total === 0) return { index: 0, total: 0, partial };

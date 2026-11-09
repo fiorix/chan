@@ -68,6 +68,34 @@ type Raw = {
 };
 const raw = (o: unknown): Raw => o as Raw;
 
+/// The blocks and opaque slots taken from `t`'s allocator from here on and
+/// not given back yet, each described by its size.
+function liveAllocations(t: VtTerminal): Map<number, string> {
+  const fn = raw(t).wasm.fn;
+  const live = new Map<number, string>();
+  const { ghostty_wasm_alloc: alloc, ghostty_wasm_free: free } = fn;
+  const { ghostty_wasm_alloc_opaque: allocOpaque, ghostty_wasm_free_opaque: freeOpaque } = fn;
+  fn.ghostty_wasm_alloc = (len) => {
+    const ptr = alloc(len);
+    if (ptr) live.set(ptr, `${len} bytes`);
+    return ptr;
+  };
+  fn.ghostty_wasm_free = (ptr, len) => {
+    live.delete(ptr);
+    return free(ptr, len);
+  };
+  fn.ghostty_wasm_alloc_opaque = () => {
+    const ptr = allocOpaque();
+    if (ptr) live.set(ptr, "an opaque slot");
+    return ptr;
+  };
+  fn.ghostty_wasm_free_opaque = (ptr) => {
+    live.delete(ptr);
+    return freeOpaque(ptr);
+  };
+  return live;
+}
+
 describe("a search over the binding's terminal", () => {
   test("lists matches newest first and selects them in that order, wrapping", async () => {
     const t = await errorTerminal();
@@ -286,6 +314,52 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
+  test("a resize drops the selected match and scans again, to the same matches on their reflowed rows", async () => {
+    // Find relies on this: after a resize there is no active match to move a
+    // highlight to, and a select starts the walk over.
+    const t = await terminal(20, 6);
+    t.write(
+      [
+        "first needle a",
+        `${"x".repeat(10)} needle b ${"y".repeat(12)}`,
+        `${"z".repeat(17)}needle c`,
+        "needle d",
+      ].map((line) => `${line}\r\n`).join(""),
+    );
+    const s = t.createSearch();
+    s.setNeedle("needle");
+    scan(s);
+    s.selectNext();
+    s.selectNext();
+    expect(s.state()).toMatchObject({ total: 4, index: 1, active: range(3, 17, 4, 2) });
+    for (const [cols, rows] of [
+      [12, 6],
+      [12, 8],
+      [33, 6],
+    ] as const) {
+      t.resize(cols, rows);
+      s.feed();
+      expect(s.state(), `${cols}x${rows}, rows only or reflowing`).toMatchObject({ index: null, active: null, complete: false });
+      scan(s);
+      const fresh = t.createSearch();
+      fresh.setNeedle("needle");
+      scan(fresh);
+      expect(s.state()).toEqual({ total: 4, index: null, active: null, complete: true });
+      expect(s.matchesBetween(0, 100, 10)).toEqual(fresh.matchesBetween(0, 100, 10));
+      fresh.free();
+      // Selected again, so the next resize has a match to drop.
+      expect(s.selectNext()).toBe(true);
+      expect(s.state().index).toBe(0);
+    }
+    // A select toward newer output from no selection lands on the oldest.
+    t.resize(20, 6);
+    s.feed();
+    scan(s);
+    expect(s.selectPrev()).toBe(true);
+    expect(s.state()).toMatchObject({ index: 3, active: range(0, 6, 0, 11) });
+    s.free();
+  });
+
   test("an empty needle returns the search to idle", async () => {
     const t = await errorTerminal();
     const s = t.createSearch();
@@ -330,6 +404,37 @@ describe("a search over the binding's terminal", () => {
     t.write("more\r\n");
     expect(text(t.getLine(0))).toBe("line 9 ERROR here");
     t.free();
+  });
+});
+
+describe("a search the core fails to make", () => {
+  test("a search made keeps one block, its scratch area, until it is freed", async () => {
+    const t = await errorTerminal();
+    const live = liveAllocations(t);
+    const s = t.createSearch();
+    expect([...live.values()]).toEqual(["48 bytes"]);
+    s.free();
+    expect([...live.values()]).toEqual([]);
+  });
+
+  test.each([
+    // upstream's GHOSTTY_OUT_OF_MEMORY
+    ["refuses it", (t: VtTerminal) => void (raw(t).wasm.fn.ghostty_search_new = () => -1), /creating search failed \(-1\)/],
+    [
+      "traps",
+      (t: VtTerminal) =>
+        void (raw(t).wasm.fn.ghostty_search_new = () => {
+          throw new WebAssembly.RuntimeError("unreachable");
+        }),
+      /unreachable/,
+    ],
+    ["has no terminal", (t: VtTerminal) => t.free(), /creating search failed/],
+  ])("a core that %s keeps none of the memory the search took", async (_, arrange, error) => {
+    const t = await errorTerminal();
+    arrange(t);
+    const live = liveAllocations(t);
+    expect(() => t.createSearch()).toThrow(error);
+    expect([...live.values()], "every block the failed search took is back").toEqual([]);
   });
 });
 
@@ -414,6 +519,58 @@ describe("the scroll policy", () => {
     t.write("after\r\n");
     expect(viewportRowOfHistoryTop(t), "a write does not bring it back").toBe(0);
     expect(text(t.getLine(0)), "the render state shows history as the active screen").toBe("old needle line");
+    s.free();
+  });
+});
+
+describe("a scan still running", () => {
+  // GhosttyFind holds back a step that would wrap while the scan runs, and
+  // applies any other at once, on what this pins: the core holds the newest
+  // matches found so far, in order, wraps among them, and keeps each one's
+  // place as the scan completes.
+  test("selects and wraps among the newest matches found so far, which keep their places once it completes", async () => {
+    // A needle on every line ending in 5 of 3,000 on a 40x10 terminal: the
+    // match k from the newest, counting from 0, is on row 2995 - 10k, and
+    // the oldest, the 300th, on row 5.
+    const t = await terminal(40, 10, 10_000);
+    lines(t, 3000, (i) => `line <${i}>${i % 10 === 5 ? " needle" : ""}`);
+    const row = (k: number) => 2995 - 10 * k;
+    const at = (s: VtSearch) => {
+      const { index, active, complete } = s.state();
+      return { index, row: active?.startRow ?? null, complete };
+    };
+
+    // Older with nothing selected is the newest match of all, before any scan.
+    const first = t.createSearch();
+    first.setNeedle("needle");
+    expect(first.selectNext()).toBe(true);
+    expect(at(first)).toEqual({ index: 0, row: row(0), complete: false });
+    first.free();
+
+    const s = t.createSearch();
+    s.setNeedle("needle");
+    expect(s.step(0)).toBe("running");
+    const found = s.state().total;
+    expect(found).toBeGreaterThan(2);
+    expect(found).toBeLessThan(300);
+    // Newer with nothing selected is the oldest found so far, not row 5.
+    expect(s.selectPrev()).toBe(true);
+    expect(at(s)).toEqual({ index: found - 1, row: row(found - 1), complete: false });
+    // Older from there wraps to the newest, and newer from the newest back.
+    expect(s.selectNext()).toBe(true);
+    expect(at(s)).toEqual({ index: 0, row: row(0), complete: false });
+    expect(s.selectPrev()).toBe(true);
+    expect(at(s)).toEqual({ index: found - 1, row: row(found - 1), complete: false });
+    // A step inside them lands on its neighbour, which keeps its place once
+    // the scan completes, with the matches it had not reached beyond it.
+    expect(s.selectPrev()).toBe(true);
+    expect(at(s)).toEqual({ index: found - 2, row: row(found - 2), complete: false });
+    scan(s);
+    expect(s.state().total).toBe(300);
+    expect(at(s)).toEqual({ index: found - 2, row: row(found - 2), complete: true });
+    s.selectNext();
+    s.selectNext();
+    expect(at(s)).toEqual({ index: found, row: row(found), complete: true });
     s.free();
   });
 });
