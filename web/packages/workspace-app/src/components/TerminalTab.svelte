@@ -447,6 +447,13 @@
   );
   /// Matches the search addon decorates and counts; past it its list stops.
   const FIND_HIGHLIGHT_LIMIT = 1000;
+  /// Whether the xterm search addon holds a search the bar started: set as
+  /// the bar finds or steps, cleared by clearFind. The addon refreshes its
+  /// search 200 ms after each write it parses; a refresh pending when
+  /// clearFind dropped the addon's term still fires and reports no results,
+  /// which the bar must not show as its count: closed, reopened with its
+  /// query kept, or open with the query emptied.
+  let xtermFindLive = false;
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
   // its own session frame leaves the screen as it was and keeps it; only a
@@ -1331,10 +1338,10 @@
       serialize = new SerializeAddon();
       term.loadAddon(xtermFit);
       term.loadAddon(search);
-      // Fires on every decorated find. Addon doubles without the event
-      // leave the count blank.
+      // Fires on every decorated find and on the addon's refresh after
+      // output. Addon doubles without the event leave the count blank.
       search.onDidChangeResults?.((e) => {
-        findCount = xtermFindCount(e.resultIndex, e.resultCount);
+        if (xtermFindLive) findCount = xtermFindCount(e.resultIndex, e.resultCount);
       });
       term.loadAddon(serialize);
       // Route terminal link clicks through the editor's external-open
@@ -2883,6 +2890,7 @@
   /// On ghostty this also frees the search and stops its scan.
   function clearFind(): void {
     search?.clearDecorations();
+    xtermFindLive = false;
     ghosttyFind?.close();
     findCount = null;
   }
@@ -2921,6 +2929,7 @@
     }
     if (!search) return;
     term?.clearSelection();
+    xtermFindLive = true;
     search.findPrevious(findQuery, findOptions());
   }
 
@@ -2936,8 +2945,10 @@
       ghosttyFinder()?.step(findQuery, direction);
       return;
     }
-    if (direction === "older") search?.findPrevious(findQuery, findOptions());
-    else search?.findNext(findQuery, findOptions());
+    if (!search) return;
+    xtermFindLive = true;
+    if (direction === "older") search.findPrevious(findQuery, findOptions());
+    else search.findNext(findQuery, findOptions());
   }
 
   function onFindKeydown(e: KeyboardEvent): void {

@@ -20,7 +20,8 @@
 // 4. The count. The bar reads `k of n` with k counting from the newest
 //    match, fed by the addon's onDidChangeResults: `0 of 0` without a
 //    match, `? of 1000+` at the highlight limit, blank once the bar
-//    closes or the query empties.
+//    closes or the query empties, and kept blank when the addon's refresh
+//    after output fires after that.
 // 5. Ghostty. A ghostty terminal has the same bar, menu row, commands,
 //    direction and count, found by libghostty-vt's search on chan's
 //    binding: the active match is ghostty-web's selection, the total
@@ -30,10 +31,12 @@
 // the calls. The block after them runs the real addon over a real xterm in
 // jsdom to pin what the doubles stand in for: where findPrevious lands from
 // a cleared and from a kept selection, the top-down order of resultIndex,
-// and what the addon reports at its highlight limit. The ghostty cases run
-// the binding over the vendored core inside a ghostty-web terminal stand-in
-// that carries ghostty-web's own SelectionManager, with animation frames
-// run by the case.
+// and what the addon reports at its highlight limit. The next block mounts
+// the tab with the doubles backed by a real xterm and the real addon, for
+// what the addon reports on its own: its refresh after output. The ghostty
+// cases run the binding over the vendored core inside a ghostty-web terminal
+// stand-in that carries ghostty-web's own SelectionManager, with animation
+// frames run by the case.
 
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
@@ -55,6 +58,10 @@ const terminalOptions: Array<Record<string, unknown>> = [];
 /// clears the selection before the reverse search runs.
 const calls: Array<{ name: string; query?: string; opts?: unknown }> = [];
 let resultsListener: ((e: ResultsEvent) => void) | null = null;
+/// While `on`, each xterm double is backed by a real xterm that parses its
+/// writes and holds its selection, and each search addon double hands every
+/// call to a real addon loaded into that xterm.
+const realXterm = vi.hoisted(() => ({ on: false, terminals: [] as Array<{ model: any }> }));
 
 class TestResizeObserver {
   observe() {}
@@ -87,32 +94,49 @@ class TestWebSocket {
   }
 }
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    cols = 80;
-    rows = 24;
-    options: Record<string, unknown> = {};
+vi.mock("@xterm/xterm", async () => {
+  const actual = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+  return {
+    Terminal: class {
+      cols = 80;
+      rows = 24;
+      options: Record<string, unknown> = {};
+      model: InstanceType<typeof actual.Terminal> | null = null;
 
-    constructor(options: Record<string, unknown> = {}) {
-      terminalOptions.push(options);
-    }
+      constructor(options: Record<string, unknown> = {}) {
+        terminalOptions.push(options);
+        if (realXterm.on) {
+          this.model = new actual.Terminal({ allowProposedApi: true, cols: 40, rows: 10, scrollback: 1000 });
+          realXterm.terminals.push(this);
+        }
+      }
 
-    loadAddon() {}
-    open() {}
-    attachCustomKeyEventHandler() {}
-    onData() {}
-    onBinary() {}
-    onResize() {}
-    write() {}
-    writeln() {}
-    resize() {}
-    focus() {}
-    clearSelection() {
-      calls.push({ name: "clearSelection" });
-    }
-    dispose() {}
-  },
-}));
+      loadAddon(addon: { real?: { activate(terminal: unknown): void } | null }) {
+        if (this.model && addon.real) this.model.loadAddon(addon.real as never);
+      }
+      open(element: HTMLElement) {
+        this.model?.open(element);
+      }
+      attachCustomKeyEventHandler() {}
+      onData() {}
+      onBinary() {}
+      onResize() {}
+      write(data: string | Uint8Array, done?: () => void) {
+        this.model?.write(data, done);
+      }
+      writeln() {}
+      resize() {}
+      focus() {}
+      clearSelection() {
+        calls.push({ name: "clearSelection" });
+        this.model?.clearSelection();
+      }
+      dispose() {
+        this.model?.dispose();
+      }
+    },
+  };
+});
 
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
@@ -120,23 +144,34 @@ vi.mock("@xterm/addon-fit", () => ({
   },
 }));
 
-vi.mock("@xterm/addon-search", () => ({
-  SearchAddon: class {
-    findNext(query: string, opts: unknown) {
-      calls.push({ name: "findNext", query, opts });
-    }
-    findPrevious(query: string, opts: unknown) {
-      calls.push({ name: "findPrevious", query, opts });
-    }
-    clearDecorations() {
-      calls.push({ name: "clearDecorations" });
-    }
-    onDidChangeResults(listener: (e: ResultsEvent) => void) {
-      resultsListener = listener;
-      return { dispose() {} };
-    }
-  },
-}));
+vi.mock("@xterm/addon-search", async () => {
+  const actual = await vi.importActual<typeof import("@xterm/addon-search")>("@xterm/addon-search");
+  return {
+    SearchAddon: class {
+      real: InstanceType<typeof actual.SearchAddon> | null;
+      constructor(options?: { highlightLimit?: number }) {
+        this.real = realXterm.on ? new actual.SearchAddon(options) : null;
+      }
+      findNext(query: string, opts: any) {
+        calls.push({ name: "findNext", query, opts });
+        return this.real?.findNext(query, opts) ?? false;
+      }
+      findPrevious(query: string, opts: any) {
+        calls.push({ name: "findPrevious", query, opts });
+        return this.real?.findPrevious(query, opts) ?? false;
+      }
+      clearDecorations() {
+        calls.push({ name: "clearDecorations" });
+        this.real?.clearDecorations();
+      }
+      onDidChangeResults(listener: (e: ResultsEvent) => void) {
+        if (this.real) return this.real.onDidChangeResults(listener);
+        resultsListener = listener;
+        return { dispose() {} };
+      }
+    },
+  };
+});
 
 vi.mock("@xterm/addon-serialize", () => ({
   SerializeAddon: class {
@@ -322,6 +357,8 @@ afterEach(() => {
   terminalOptions.splice(0);
   calls.splice(0);
   resultsListener = null;
+  realXterm.on = false;
+  realXterm.terminals.splice(0);
   TestWebSocket.all.splice(0);
   ghostty.terminals.splice(0);
   globalThis.requestAnimationFrame = syncFrame;
@@ -666,6 +703,116 @@ describe("the real search addon over a real xterm", () => {
     expect(events.at(-1)).toEqual({ resultIndex: 999, resultCount: 1000 });
 
     term.dispose();
+  });
+});
+
+describe("the real search addon in the mounted tab", () => {
+  // The addon refreshes its search 200 ms after each write it parses, from
+  // the term it cached and with the options of the last search, and reports
+  // the outcome through onDidChangeResults. clearFind drops that term, but a
+  // refresh already pending still fires: it takes the empty-term path, which
+  // reports no results.
+  const NEEDLES = ["needle a", "b", "needle c", "d", "needle e"].join("\r\n") + "\r\n";
+
+  /// Mount an xterm terminal, attach its session and print `text` down it,
+  /// parsed by the real xterm behind the double.
+  async function renderXterm(text: string) {
+    realXterm.on = true;
+    await renderTerminal(terminalTab(), true);
+    await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(1));
+    const model = realXterm.terminals.at(-1)!.model;
+    const socket = TestWebSocket.all[0]!;
+    socket.onopen?.();
+    await socket.onmessage?.({
+      data: JSON.stringify({ type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
+    });
+    await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
+    const print = async (out: string) => {
+      const bytes = new TextEncoder().encode(out);
+      const buffer = new ArrayBuffer(bytes.length);
+      new Uint8Array(buffer).set(bytes);
+      await socket.onmessage?.({ data: buffer });
+    };
+    await print(text);
+    await vi.waitFor(() => expect(model.buffer.active.getLine(4)?.translateToString(true)).toBe("needle e"));
+    return { model, print };
+  }
+
+  function pressEscape(input: HTMLInputElement): void {
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  }
+
+  async function reopen(): Promise<void> {
+    fireCommand("app.find.open");
+    await tick();
+    await tick();
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("output in an open bar refreshes the count", async () => {
+    const { print } = await renderXterm(NEEDLES);
+    const input = await openFindWithQuery("needle");
+    expect(countElement()?.textContent).toBe("1 of 3");
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await print("needle f\r\n");
+    vi.advanceTimersByTime(1);
+    expect(countElement()?.textContent, "the refresh waits 200 ms").toBe("1 of 3");
+    vi.advanceTimersByTime(200);
+    await tick();
+    // The refresh keeps the selection, so the selected match is now the
+    // second newest of four.
+    expect(countElement()?.textContent).toBe("2 of 4");
+    expect(input.value).toBe("needle");
+  });
+
+  test.each(["before", "after"])("a refresh pending at Escape that fires %s the bar reopens leaves its count blank", async (fires) => {
+    const { print } = await renderXterm(NEEDLES);
+    const input = await openFindWithQuery("needle");
+    expect(countElement()?.textContent).toBe("1 of 3");
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await print("more\r\n");
+    vi.advanceTimersByTime(1);
+    pressEscape(input);
+    await tick();
+    expect(findInput()).toBeNull();
+
+    if (fires === "before") {
+      vi.advanceTimersByTime(250);
+      await tick();
+      await reopen();
+    } else {
+      await reopen();
+      vi.advanceTimersByTime(250);
+      await tick();
+    }
+    expect(findInput()?.value).toBe("needle");
+    expect(countElement()?.textContent).toBe("");
+
+    // The bar's own search counts again.
+    pressEnter(findInput()!);
+    await tick();
+    expect(countElement()?.textContent).toMatch(/^[123] of 3$/);
+  });
+
+  test("a refresh pending when the query empties leaves the count blank", async () => {
+    const { print } = await renderXterm(NEEDLES);
+    const input = await openFindWithQuery("needle");
+    expect(countElement()?.textContent).toBe("1 of 3");
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await print("more\r\n");
+    vi.advanceTimersByTime(1);
+    typeQuery(input, "");
+    await tick();
+    expect(countElement()?.textContent).toBe("");
+    vi.advanceTimersByTime(250);
+    await tick();
+    expect(countElement()?.textContent).toBe("");
   });
 });
 
