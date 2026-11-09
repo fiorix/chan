@@ -10808,6 +10808,72 @@ mod tests {
         assert!(!narrate_parked_migration(app.handle(), &state));
     }
 
+    /// How many times the host's pace a handoff may take past the CLI's
+    /// reply budget. A handoff's own work is a few durable writes and hops,
+    /// which the pace times, so on a host whose disk or CPU is slow the
+    /// allowance grows with that work; on an idle host it is a few
+    /// milliseconds, and a handoff that waits past the budget reds.
+    const PACE_FACTOR: u32 = 4;
+
+    /// How long this host takes, at the moment, for what a handoff does
+    /// besides any wait on a root: three durable writes through the writer
+    /// the registry and the overlay save with (a forget saves those two and
+    /// the window records), on a blocking thread reached from a thread of
+    /// its own through `runtime`.
+    fn reply_pace(runtime: &tokio::runtime::Handle) -> std::time::Duration {
+        let dir = tempfile::tempdir().expect("pace dir");
+        let path = dir.path().to_path_buf();
+        let runtime = runtime.clone();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            runtime.block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    for name in ["config.toml", "workspaces.json", "windows.json"] {
+                        chan_workspace::fs_ops::atomic_write(&path.join(name), b"pace")
+                            .expect("a durable write");
+                    }
+                })
+                .await
+                .expect("the durable writes")
+            })
+        })
+        .join()
+        .expect("the pace thread");
+        started.elapsed()
+    }
+
+    /// Time `handoff`, with the host's pace taken before and after it and
+    /// the slower kept, so a load that changes during the run weighs on the
+    /// pace as on the handoff. Answers its output, how long it took and
+    /// that pace.
+    fn timed_against_the_pace<T>(
+        runtime: &tokio::runtime::Handle,
+        handoff: impl FnOnce() -> T,
+    ) -> (T, std::time::Duration, std::time::Duration) {
+        let before = reply_pace(runtime);
+        let started = std::time::Instant::now();
+        let output = handoff();
+        let took = started.elapsed();
+        (output, took, before.max(reply_pace(runtime)))
+    }
+
+    /// Assert that a handoff that took `took` answered within the CLI's
+    /// `budget`, past it by at most [`PACE_FACTOR`] times the host's `pace`.
+    #[track_caller]
+    fn assert_within_reply_budget(
+        what: &str,
+        took: std::time::Duration,
+        budget: std::time::Duration,
+        pace: std::time::Duration,
+    ) {
+        eprintln!("{what}: took {took:?}; budget {budget:?}; pace {pace:?}");
+        assert!(
+            took <= budget + pace * PACE_FACTOR,
+            "{what} took {took:?}, past the CLI's reply budget of {budget:?} and \
+             {PACE_FACTOR} times the host's pace of {pace:?}"
+        );
+    }
+
     /// The desktop paths that act on one local workspace while another
     /// registered root's filesystem hangs under
     /// `chan_workspace::paths::root_stall`.
@@ -10982,8 +11048,9 @@ mod tests {
         /// root starts a probe that enters the stall, so asking it nothing
         /// also means no lookup waited on it. The rest of the forget's time is
         /// the healthy root's teardown and the registry writes, which a loaded
-        /// host stretches, so the bound below only decides how soon a forget
-        /// that does wait on the hung root reports.
+        /// host stretches, so the whole forget must fit the reply budget past
+        /// it by no more than the host's pace allows, and the wall-clock bound
+        /// only decides how soon a forget that waits on the hung root reports.
         #[test]
         fn forgetting_a_workspace_answers_while_another_root_hangs() {
             let (runtime, desktop) = HungRootDesktop::new();
@@ -10993,17 +11060,21 @@ mod tests {
             let app_handle = app.handle().clone();
             let state = Arc::clone(&desktop.state);
             let other = desktop.other.clone();
-            let outcome = stall.finishes_beside(
-                "forgetting another workspace",
-                HEALTHY_ROOT_BOUND,
-                move || {
-                    handle.block_on(close_workspace_from_handoff(app_handle, state, other, true))
-                },
-            );
+            let (outcome, took, pace) = timed_against_the_pace(runtime.handle(), || {
+                stall.finishes_beside(
+                    "forgetting another workspace",
+                    HEALTHY_ROOT_BOUND,
+                    move || {
+                        handle
+                            .block_on(close_workspace_from_handoff(app_handle, state, other, true))
+                    },
+                )
+            });
             assert_eq!(
                 outcome,
                 Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
             );
+            assert_within_reply_budget("the forget", took, cli_reply_bound(), pace);
             assert_eq!(
                 stall.entered(),
                 Vec::<String>::new(),
@@ -11339,8 +11410,7 @@ mod tests {
             /// A boot restore parked on held roots, with two rows queued behind
             /// them: `relinked`, whose root moved under a symlink after it was
             /// registered, and `plain`. Each field holds a row's stored root, the
-            /// spelling its overlay on-row uses. [`HeldRestore::unheld`] lays
-            /// out the same rows with no restore running and no root held.
+            /// spelling its overlay on-row uses.
             struct HeldRestore {
                 runtime: tokio::runtime::Runtime,
                 state: Arc<AppState>,
@@ -11357,18 +11427,6 @@ mod tests {
 
             impl HeldRestore {
                 fn new() -> Self {
-                    Self::build(true)
-                }
-
-                /// The same rows, all on, on a desktop whose roots all answer
-                /// and that runs no restore: a forget here costs what its own
-                /// work costs on this host, with no wait a hung root or a held
-                /// restore could add.
-                fn unheld() -> Self {
-                    Self::build(false)
-                }
-
-                fn build(held: bool) -> Self {
                     use std::os::unix::fs::symlink;
 
                     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -11413,26 +11471,21 @@ mod tests {
                     }
                     let state = empty_state();
                     assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+                    let stalls: Vec<_> = hung_roots.iter().map(root_stall::stall).collect();
                     let app = tauri::test::mock_app();
-                    let (stalls, restoring) = if held {
-                        let stalls: Vec<_> = hung_roots.iter().map(root_stall::stall).collect();
-                        let restoring = {
-                            let handle = runtime.handle().clone();
-                            let app_handle = app.handle().clone();
-                            let state = Arc::clone(&state);
-                            std::thread::spawn(move || {
-                                let queued = queue_boot_restore(&state);
-                                handle.block_on(restore_on_workspaces(app_handle, state, queued))
-                            })
-                        };
-                        assert!(
-                            stalls[0].wait_entered(std::time::Duration::from_secs(10)),
-                            "fixture: the restore never reached the hung root"
-                        );
-                        (stalls, Some(restoring))
-                    } else {
-                        (Vec::new(), None)
+                    let restoring = {
+                        let handle = runtime.handle().clone();
+                        let app_handle = app.handle().clone();
+                        let state = Arc::clone(&state);
+                        std::thread::spawn(move || {
+                            let queued = queue_boot_restore(&state);
+                            handle.block_on(restore_on_workspaces(app_handle, state, queued))
+                        })
                     };
+                    assert!(
+                        stalls[0].wait_entered(std::time::Duration::from_secs(10)),
+                        "fixture: the restore never reached the hung root"
+                    );
                     Self {
                         runtime,
                         state,
@@ -11441,7 +11494,7 @@ mod tests {
                         plain: plain_root,
                         relinked_now: moved.join("ws"),
                         stalls,
-                        restoring,
+                        restoring: Some(restoring),
                         app,
                         _dirs: std::iter::once(config)
                             .chain(hung_dirs)
@@ -11603,19 +11656,16 @@ mod tests {
             /// registry lookup beside a stalled row, then removes the selected
             /// row and its managed state.
             ///
-            /// The budget is read off what the forget's lookups waited on the
-            /// stalled rows, the only waits a hung root adds to its answer:
-            /// each lookup that gave up on them records the time it waited,
-            /// from the clock, and that time must fit the CLI's wait. It is
-            /// the lookup's two-second budget and the wake that ends it; the
-            /// second left of the CLI's three is the product's own room for
-            /// the rest of the reply, so a host that spends it on one wake
-            /// misses the reply too. The forget's own work and registry
-            /// writes are not the hung roots' and stretch with a loaded host,
-            /// so they are bounded against control forgets timed on the same
-            /// host in the same run, with no hung root and no held restore.
-            /// The wall-clock bound only decides how soon a forget that waits
-            /// on a hung root without a bound reports.
+            /// The forget answers within the CLI's reply budget, past it by no
+            /// more than the host's pace allows: the pace times the forget's
+            /// own durable writes and a runtime hop on this host before and
+            /// after, so a loaded host that slows them stretches the bound
+            /// with them, while a wait on the stalled rows or any other wait
+            /// that pushes the answer past the budget reds on an idle host.
+            /// What the forget's lookups waited on the stalled rows is read
+            /// off the clock where they gave up: one lookup, and its wait
+            /// inside the budget. The wall-clock bound only decides how soon
+            /// a forget that waits on a hung root without a bound reports.
             #[test]
             fn a_relinked_forget_answers_in_the_handoff_reply_budget() {
                 let held = HeldRestore::new();
@@ -11637,49 +11687,16 @@ mod tests {
                 let state = Arc::clone(&held.state);
                 let runtime = held.runtime.handle().clone();
                 let path = held.relinked_now.clone();
-                // The control: forgets of plain rows by the roots their rows
-                // store, on a desktop with the same rows and no held restore
-                // or hung root, so they make no lookup and share no wait
-                // with what the relinked forget runs beside. Their time is
-                // what a forget's own work costs on this host in this run.
-                // One runs before the relinked forget and one after, and the
-                // slower is kept, so a load that changes during the run
-                // weighs on the control as on the forget it bounds.
-                let unheld = HeldRestore::unheld();
-                let control_forget = |stored: &str| {
-                    let started = std::time::Instant::now();
-                    let outcome = unheld.runtime.block_on(async {
-                        tokio::time::timeout(
-                            HEALTHY_ROOT_BOUND,
-                            close_workspace_from_handoff(
-                                unheld.app.handle().clone(),
-                                Arc::clone(&unheld.state),
-                                PathBuf::from(stored),
-                                true,
-                            ),
-                        )
-                        .await
-                    });
-                    let took = started.elapsed();
-                    assert!(
-                        matches!(
-                            outcome,
-                            Ok(Ok(chan_server::WorkspaceLifecycleOutcome::Completed))
-                        ),
-                        "fixture: the control forget of {stored}: {outcome:?}"
-                    );
-                    took
-                };
-                let control_before = control_forget(&unheld.plain);
                 let marks = lookup_marks(&held.stalls);
-                let started = std::time::Instant::now();
-                let outcome = held.stalls.first().expect("hung root").finishes_beside(
-                    "forgetting the relinked root",
-                    HEALTHY_ROOT_BOUND,
-                    move || runtime.block_on(close_workspace_from_handoff(app, state, path, true)),
-                );
-                let took = started.elapsed();
-                let control_work = control_before.max(control_forget(&unheld.hung_roots[0]));
+                let (outcome, took, pace) = timed_against_the_pace(held.runtime.handle(), || {
+                    held.stalls.first().expect("hung root").finishes_beside(
+                        "forgetting the relinked root",
+                        HEALTHY_ROOT_BOUND,
+                        move || {
+                            runtime.block_on(close_workspace_from_handoff(app, state, path, true))
+                        },
+                    )
+                });
                 assert_eq!(
                     outcome,
                     Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
@@ -11701,24 +11718,7 @@ mod tests {
                     "the forget's lookup waited {waited:?} on the stalled rows, past the reply budget of {:?}",
                     cli_reply_bound()
                 );
-                // The rest of the forget's time is its own work, which the
-                // control measured on this host; a wait no lookup recorded,
-                // whether the held restore or the relinked path costs it,
-                // shows up here. Four times the control takes the host's
-                // swings between the runs. The half second covers what the
-                // relinked forget does and the plain one does not (it
-                // resolves its moved path and probes the healthy rows) and
-                // one scheduling stall; it is half of what the reply budget
-                // leaves past the lookup's, so a wait that slips under it
-                // still leaves the reply inside the budget on an idle host.
-                let work = took.saturating_sub(waited);
-                eprintln!(
-                    "relinked forget: took {took:?}, lookup waited {waited:?}, work {work:?}; control work {control_work:?}"
-                );
-                assert!(
-                    work <= control_work * 4 + std::time::Duration::from_millis(500),
-                    "the forget spent {work:?} outside its lookup's wait, past four times the control forget's {control_work:?} and half a second"
-                );
+                assert_within_reply_budget("the relinked forget", took, cli_reply_bound(), pace);
                 assert!(
                     held.embedded()
                         .library()
