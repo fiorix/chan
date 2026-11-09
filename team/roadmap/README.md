@@ -29,6 +29,8 @@ The reading behind [docsdrift] added a sixth, placed here by the owner the same 
 
 At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake-visibility reading had run on his Mac, so that row moves here with its reading procedure shipped: the terminal tab's comment says WKWebView fires no `visibilitychange` across a sleep, while the owner's Mac log shows WebKit's visibility change at each wake ([wakevis]).
 
+On 2026-11-09 the owner added live process metrics, built directly with an agent outside the round's seats and merged into the integration branch the same day: the Dashboard's Metrics slide, `chan metrics`, and an optional Linux Varlink socket ([metrics]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [one WireGuard ingress per proxy node][wgnode] | not started | decision |
@@ -38,6 +40,7 @@ At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake
 | [no CI job runs the gateway packaging and roles suites][gwci] | built | CI run |
 | [a shared devserver's root link refuses its grantees][grantroot] | not started | build |
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
+| [a running chan shows no live process metrics][metrics] | built | fixes |
 
 [wgnode]: v0.127.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
@@ -46,6 +49,7 @@ At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake
 [gwci]: v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
 [grantroot]: v0.127.0/a-shared-devservers-root-link-refuses-the-people-it-is-shared-with.md
 [wakevis]: v0.127.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
+[metrics]: v0.127.0/a-running-chan-shows-no-live-process-metrics.md
 
 ## Completed
 

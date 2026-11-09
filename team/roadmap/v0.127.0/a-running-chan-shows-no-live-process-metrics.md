@@ -1,0 +1,34 @@
+# A running chan shows no live process metrics
+
+Status: raised and built by the owner directly with an agent on 2026-11-08, outside the round's seats; accepted for v0.127.0 by the owner on 2026-11-09, when it was merged. Built on `feat/dashboard-metrics` (`857a6623e`, two commits over `76f21dee0`) and merged into the integration branch as `c59764946`, where the new crate took the workspace version 0.126.0 and the Nix `cargoHash` was harvested again for the merged lock. Reviewed at the merge in three parts (the Rust backend, the CLI with the Varlink adapter and the docs, the web UI): one blocking defect, `chan m` reaching the hidden MCP server through an alias the branch added, and findings the owner ruled on the same day; the contract below carries those rulings, and the fixes are being made on `fix/dashboard-metrics-review` from the integration tip. At `c59764946` the scoped gate is green (the static checks, the web checks, fmt, clippy, rustdoc, the tests of every crate the branch touches and the gateway block) and so is the Windows cross-check, so acceptance 1 holds for the merged code and acceptance 6 waits on the FreeBSD job; the building agent reports live WebKit in both themes and an isolated Varlink probe, which the review did not repeat.
+
+## What is there now
+
+At the branch's base nothing in chan reports what the serving process costs. The Dashboard's carousel has three slides, Workspace, Search (the live indexing graph) and About, and it needs a workspace: a window holding only terminals has no Dashboard. The devserver's CPU, resident memory and I/O, the size of the chan home, and how busy its tunnels, channels and file transfers are can be read only from outside, with `top` and `du`, and chan's own transport activity cannot be read at all, by a person or by a script.
+
+## Desired contract
+
+1. The serving process samples its own readings once per second into a bounded in-memory history of ten minutes, whether or not anyone is reading; a request copies the cache and never triggers collection. The chan home is walked only while someone reads: not at start, from the first read on, and no longer after a quiet period (owner, 2026-11-09).
+2. The readings cover the process (hostname, version, build, PID, uptime, CPU, resident memory, and I/O where the platform reports it in bytes), the chan home's storage (scanned apart from the sampler, bounded in time, entries and depth, never following a symlink, skipping entries it cannot read), and chan's own service traffic, tunnels, HTTP/2 and yamux channels, and file-transfer workers and payloads, each counted at a documented layer.
+3. Metering never changes how chan does I/O: a metered stream keeps the vectored writes and the split of the stream it wraps (owner, 2026-11-09).
+4. A reading the platform cannot give in its unit is null and labelled unavailable, never zero and never a value in another unit (FreeBSD's block-operation counts, the allocated size on Windows); rates are unavailable until two observations exist.
+5. Authenticated `GET /api/metrics` on the launcher root and the tenant routes serves the latest snapshot and, on request, the history after a sequence number; an instance id lets a reader tell a restart from a counter that went down.
+6. `chan metrics` prints the snapshot as text or JSON, once or as a watch, for the devserver of its `CHAN_HOME` at the address its service is pinned to, or for an explicit URL as chan prints it. It never sends the local devserver's bearer to an explicit URL, nor to a local listener it can tell is not this user's devserver.
+7. An optional Linux Varlink adapter (`chan metrics --varlink` under the example user units in `docs/systemd/`) answers the same snapshot over a socket private to the user, and never starts, stops or owns the devserver or its collection. A stream, there and in `chan metrics --watch`, sends the full view once and then only samples newer than the last one sent, starting over after a server restart (owner, 2026-11-09).
+8. The Dashboard opens on a Metrics slide with live graphs in every window that shows a tab strip: Metrics and About in a window without a workspace, Workspace and Search beside them in a workspace window, and never in a window or pane whose tab strip is hidden. Saved slide ids keep their meaning, and the carousel setting keeps its value under its Dashboard wording.
+
+## Boundaries
+
+- Readings of the serving chan process only: child shells, subprocesses and desktop WebViews are outside, and network counts are chan's own transports, not the host's interfaces.
+- No exporter to a third-party monitoring system and no alerting.
+- The Varlink interface is `io.chan.Metrics`, after systemd's naming (owner, 2026-11-09). Its units are examples the user installs; no package installs or enables them.
+- `chan ps` keeps its own local dial; the bearer rule of contract 6 is for `chan metrics` (owner, 2026-11-09).
+
+## Acceptance
+
+1. The server, CLI and dashboard tests green beside the suites of every crate and package the branch touches, with tests that pin: `chan m` not reaching a hidden command, a metered stream's vectored writes, a skipped unreadable entry in the storage scan, a stream's second reply repeating no sample, the chan home walk starting on a read and stopping after a quiet period, `--url` with each URL shape chan prints, the bearer withheld from a listener that is not this user's devserver, and the Dashboard refused where the tab strip is hidden.
+2. `GET /api/metrics` refuses a request without the server's credential, on the launcher root and on a tenant route.
+3. Against a devserver in an isolated guest, `chan metrics --json` prints a snapshot whose rates are null at the first observation and numbers after the second, and `--watch --json` prints one object per line.
+4. In an isolated Linux guest the Varlink adapter answers `io.chan.Metrics.Get` from the running devserver and `io.chan.Metrics.Unavailable` with it stopped, without starting it.
+5. The Dashboard shows the Metrics slide in a window without a workspace and in a workspace window, in both themes, and a layout saved before the change restores its Dashboard tab on its saved slide.
+6. The Windows cross-check and the FreeBSD CI job compile the platform branches with warnings denied.
