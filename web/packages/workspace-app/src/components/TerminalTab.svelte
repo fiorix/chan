@@ -436,6 +436,18 @@
     setTerminalProgramStatus(tab, visible);
   }
   let findQuery = $state("");
+  /// The find bar's match count. `index` counts from the newest match (1 is
+  /// the one closest to the prompt) and is null when it is not knowable;
+  /// `partial` marks a `total` that is a floor rather than the whole buffer's.
+  type FindCount = { index: number | null; total: number; partial: boolean };
+  let findCount = $state<FindCount | null>(null);
+  const findCountText = $derived(
+    findCount === null
+      ? ""
+      : `${findCount.index ?? "?"} of ${findCount.total}${findCount.partial ? "+" : ""}`,
+  );
+  /// Matches the search addon decorates and counts; past it its list stops.
+  const FIND_HIGHLIGHT_LIMIT = 1000;
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
   // its own session frame leaves the screen as it was and keeps it; only a
@@ -1293,8 +1305,7 @@
       term = new Terminal({
         // xterm gates registerDecoration (plus the markers / unicode
         // namespaces) behind this flag; the search addon's decorated
-        // find (runFind) throws without it and the find bar matches
-        // nothing.
+        // find throws without it and the find bar matches nothing.
         allowProposedApi: true,
         allowTransparency: transparentWindow,
         cursorBlink: false,
@@ -1312,10 +1323,15 @@
       installKeyboardProtocolHandlers(term, keyboardProtocol, sendGeneratedTerminalInput);
       const xtermFit = new FitAddon();
       fit = xtermFit;
-      search = new SearchAddon({ highlightLimit: 1000 });
+      search = new SearchAddon({ highlightLimit: FIND_HIGHLIGHT_LIMIT });
       serialize = new SerializeAddon();
       term.loadAddon(xtermFit);
       term.loadAddon(search);
+      // Fires on every decorated find. Addon doubles without the event
+      // leave the count blank.
+      search.onDidChangeResults?.((e) => {
+        findCount = xtermFindCount(e.resultIndex, e.resultCount);
+      });
       term.loadAddon(serialize);
       // Route terminal link clicks through the editor's external-open
       // path: a new browser tab on web, the OS default browser under
@@ -2550,6 +2566,7 @@
     backend = "xterm";
     fit = null;
     search = null;
+    findCount = null;
     serialize = null;
   }
 
@@ -2810,8 +2827,8 @@
       else if (name === "app.terminal.newFsEntry") openNewFsEntry();
       else if (name === "app.terminal.secretMasking.toggle") toggleSecretMasking();
       else if (name === "app.find.open") openFind();
-      else if (name === "app.find.next" && findOpen) runFind(true);
-      else if (name === "app.find.prev" && findOpen) runFind(false);
+      else if (name === "app.find.next" && findOpen) stepFind("older");
+      else if (name === "app.find.prev" && findOpen) stepFind("newer");
     };
     window.addEventListener("chan:command", onLauncherCommand);
     return () => window.removeEventListener("chan:command", onLauncherCommand);
@@ -2823,12 +2840,8 @@
   // prompt-frame path every terminal uses). Per-terminal text input is the
   // universal Rich Prompt (Cmd+Shift+P) - see RichPrompt.svelte / sendPrompt.
 
-  function runFind(next: boolean): void {
-    if (!findQuery.trim()) {
-      search?.clearDecorations();
-      return;
-    }
-    const opts = {
+  function findOptions() {
+    return {
       decorations: {
         matchBackground: "#7c5cff",
         matchOverviewRuler: "#7c5cff",
@@ -2836,21 +2849,68 @@
         activeMatchColorOverviewRuler: "#58a6ff",
       },
     };
-    if (next) search?.findNext(findQuery, opts);
-    else search?.findPrevious(findQuery, opts);
+  }
+
+  function clearFind(): void {
+    search?.clearDecorations();
+    findCount = null;
+  }
+
+  /// The addon lists matches top-down, so its index is turned into a count
+  /// from the newest match, where typing lands. At the highlight limit the
+  /// list holds the oldest thousand: the total is a floor, and a selected
+  /// match's place among them says nothing about its distance from the
+  /// newest, so the index is dropped rather than shown wrong.
+  function xtermFindCount(resultIndex: number, resultCount: number): FindCount {
+    if (resultCount >= FIND_HIGHLIGHT_LIMIT) {
+      return { index: null, total: FIND_HIGHLIGHT_LIMIT, partial: true };
+    }
+    if (resultCount === 0) return { index: 0, total: 0, partial: false };
+    return {
+      index: resultIndex < 0 ? null : resultCount - resultIndex,
+      total: resultCount,
+      partial: false,
+    };
+  }
+
+  /// The query changed: select the newest match, the bottom-most in the
+  /// buffer. The addon's reverse search starts at the bottom only when
+  /// nothing is selected; from a selection it expands or steps from the
+  /// previous match instead, so a shortened query would keep an older
+  /// match while a newer one sits below it.
+  function findNewest(): void {
+    if (!findQuery.trim()) {
+      clearFind();
+      return;
+    }
+    if (!search) return;
+    term?.clearSelection();
+    search.findPrevious(findQuery, findOptions());
+  }
+
+  /// Step from the selected match. Next (Enter) walks toward older output,
+  /// up the buffer, the way a terminal is read from the prompt: the addon's
+  /// "previous". Newer is down the buffer, its "next". Both wrap.
+  function stepFind(direction: "older" | "newer"): void {
+    if (!findQuery.trim()) {
+      clearFind();
+      return;
+    }
+    if (direction === "older") search?.findPrevious(findQuery, findOptions());
+    else search?.findNext(findQuery, findOptions());
   }
 
   function onFindKeydown(e: KeyboardEvent): void {
     if (e.key === "Escape") {
       e.preventDefault();
       findOpen = false;
-      search?.clearDecorations();
+      clearFind();
       focusTerminal();
       return;
     }
     if (e.key === "Enter") {
       e.preventDefault();
-      runFind(!e.shiftKey);
+      stepFind(e.shiftKey ? "newer" : "older");
     }
   }
 
@@ -3318,10 +3378,11 @@
         spellcheck="false"
         oninput={(e) => {
           findQuery = (e.currentTarget as HTMLInputElement).value;
-          runFind(true);
+          findNewest();
         }}
         onkeydown={onFindKeydown}
       />
+      <span class="find-count" role="status" aria-label="find matches">{findCountText}</span>
     </div>
   {/if}
   {#if active && tab.cliReloadNotice}
@@ -3466,6 +3527,8 @@
     position: absolute;
     top: 8px;
     right: 10px;
+    display: flex;
+    align-items: center;
     /* Above every layer xterm stacks in the same context (its canvases at
        2, helpers at 5, decorations at 6, message overlay at 10), so the
        box takes its own clicks rather than the terminal under it. */
@@ -3495,6 +3558,18 @@
   }
   .find:focus {
     border-color: var(--link);
+  }
+  /* Always in the tree so the live region exists before it fills; it takes
+     no room while blank. */
+  .find-count {
+    margin-left: 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .find-count:empty {
+    margin-left: 0;
   }
   .terminal-host {
     flex: 1;
