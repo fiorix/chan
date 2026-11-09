@@ -292,6 +292,14 @@ type Fns = Record<(typeof FUNCTIONS)[number], Fn> & {
   ghostty_row_get: (row: bigint, data: number, out: number) => number;
 };
 
+/// The binding's refusal of a core it does not drive: one without an
+/// export the binding calls, one that is not libghostty-vt 1.x, or one
+/// without search. A refusal is the core's own and comes again from every
+/// instance of the same module, where any other failure to instantiate (a
+/// wasm memory RangeError on a page short of memory) may pass, so a loader
+/// can keep this one and retry the rest.
+export class GhosttyVtRefusal extends Error {}
+
 /// One wasm instance: its exports, typed views over its memory that
 /// follow growth, and the host callbacks every terminal on it shares.
 class VtWasm {
@@ -307,7 +315,7 @@ class VtWasm {
     const fn = {} as Record<string, unknown>;
     for (const name of [...FUNCTIONS, "ghostty_row_get"]) {
       const f = exports[name];
-      if (typeof f !== "function") throw new Error(`ghostty-vt: missing export ${name}`);
+      if (typeof f !== "function") throw new GhosttyVtRefusal(`ghostty-vt: missing export ${name}`);
       fn[name] = f;
     }
     this.fn = fn as Fns;
@@ -331,8 +339,10 @@ class VtWasm {
       this.fn.ghostty_build_info(B.FEATURE_SEARCH, out + 4);
       const major = this.view().getUint32(out, true);
       const search = this.view().getUint8(out + 4) !== 0;
-      if (major !== 1) throw new Error(`ghostty-vt: libghostty-vt ${major}.x is not the 1.x ABI this binding drives`);
-      if (!search) throw new Error("ghostty-vt: this libghostty-vt build has no search");
+      if (major !== 1) {
+        throw new GhosttyVtRefusal(`ghostty-vt: libghostty-vt ${major}.x is not the 1.x ABI this binding drives`);
+      }
+      if (!search) throw new GhosttyVtRefusal("ghostty-vt: this libghostty-vt build has no search");
     } finally {
       this.free(out, 8);
     }

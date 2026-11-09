@@ -26,11 +26,13 @@
 /// an engine without the wasm's required features cannot use this core.
 /// So does the binding's refusal of the core (a libghostty-vt other than
 /// the 1.x it drives, or one without search): the vendored file does not
-/// change between spawns. Fetch failures retry at the next spawn. Callers
-/// fall back to xterm.js for each terminal whose load fails.
+/// change between spawns. Fetch failures retry at the next spawn, and so
+/// does any other failure of the instance that checks the core, such as a
+/// wasm memory RangeError on a page short of memory. Callers fall back to
+/// xterm.js for each terminal whose load fails.
 
 import type { Ghostty, Terminal } from "ghostty-web";
-import { GhosttyVt, type VtHost } from "./ghosttyVt";
+import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "./ghosttyVt";
 import type { TerminalPreferences } from "../api/types";
 
 export type TerminalBackend = "xterm" | "ghostty";
@@ -74,7 +76,8 @@ let kitPromise: Promise<GhosttyKit> | null = null;
 
 /// Load the ghostty kit, fetching the library and compiling the wasm
 /// asset on first use. Compile failures and a refused core stay cached;
-/// failures fetching the library or wasm retry at the next spawn.
+/// any other failure, fetching the library or the wasm or making the
+/// instance that checks the core, retries at the next spawn.
 export function loadGhosttyKit(): Promise<GhosttyKit> {
   if (!kitPromise) {
     let permanent = false;
@@ -98,8 +101,11 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
       const kit = ghosttyKitFrom(module, mod);
       // The binding checks the core's version and features when it is
       // instantiated; one instance here surfaces that before any terminal
-      // asks, and is dropped.
-      await kit.instantiate().catch(forever);
+      // asks, and is dropped. Only the binding's refusal is the core's own.
+      await kit.instantiate().catch((error: unknown) => {
+        if (error instanceof GhosttyVtRefusal) forever(error);
+        throw error;
+      });
       return kit;
     })();
     kitPromise.catch(() => {
