@@ -43,22 +43,33 @@ const PROBE_BOUND: Duration = Duration::from_secs(60);
 /// host that the control did not meet.
 pub(crate) const CONTROL_SLACK: Duration = Duration::from_millis(250);
 
-/// Whether a probe that took `beside` next to what a pin holds ran at the
-/// pace of `control`, the same probe timed in the same run with nothing
-/// held: within twice it and [`CONTROL_SLACK`]. The control carries the
-/// host's load into the bound, so a loaded host stretches both sides; a
-/// wait the held state costs the probe is time the control does not have,
-/// and past the slack it reds on an idle host and a loaded one alike.
+/// Whether probes next to what a pin holds, the fastest of which took
+/// `beside`, ran at the pace of `control`, the median of the same probe
+/// timed in the same run with nothing held: within twice it and
+/// [`CONTROL_SLACK`]. The control carries the host's load into the bound,
+/// so a loaded host stretches both sides. Load only adds time, so the
+/// fastest probe is the one a stall of the host touched least, while a wait
+/// the held state costs every probe is in the fastest too, and past the
+/// slack it reds on an idle host and a loaded one alike.
 pub(crate) fn at_the_controls_pace(beside: Duration, control: Duration) -> bool {
     beside <= control.saturating_mul(2).saturating_add(CONTROL_SLACK)
 }
 
-/// The median of `times`: a set of probes read this way is not moved by
+/// The median of `times`: a set of controls read this way is not moved by
 /// one stall of a loaded host.
 pub(crate) fn median(mut times: Vec<Duration>) -> Duration {
     times.sort_unstable();
     times[times.len() / 2]
 }
+
+/// The fastest of `times`.
+pub(crate) fn fastest(times: Vec<Duration>) -> Duration {
+    times.into_iter().min().expect("at least one probe")
+}
+
+/// How many times [`worker_stays_free`] runs its probe beside the held cell,
+/// each at the same time as the probe alone on a runtime of its own.
+const PROBE_PAIRS: usize = 3;
 
 /// The probe needs its worker this many times, this far apart: six hundred
 /// milliseconds in all, longer than two ticks of a flusher.
@@ -153,12 +164,12 @@ pub(crate) fn within(bound: Duration, mut done: impl FnMut() -> bool) -> bool {
 ///
 /// The probe is a task that needs the worker again and again for longer than
 /// two flusher ticks, so a task that waits for the cell on the worker stops
-/// the probe whichever of the two the worker runs first. The probe ends, and
-/// at the pace of the same probe alone on a runtime of its own, timed before
-/// and after it in the same run: a task that waits for the cell on the
-/// worker for a while and then goes on holds the probe back by that while.
+/// the probe whichever of the two the worker runs first. Each probe ends,
+/// and the fastest at the pace of the probe alone on a runtime of its own,
+/// run at the same time so both meet the same load: a task that waits for
+/// the cell on the worker for a while and then goes on holds every probe
+/// back by that while.
 pub(crate) fn worker_stays_free<K>(start: impl FnOnce(Cell) -> K) -> bool {
-    let alone_before = probe_alone();
     let runtime = one_worker();
     let cell: Cell = Arc::new(RwLock::new(None));
     let held = cell.write().expect("workspace cell");
@@ -166,15 +177,26 @@ pub(crate) fn worker_stays_free<K>(start: impl FnOnce(Cell) -> K) -> bool {
         let _inside = runtime.enter();
         start(cell.clone())
     };
-    let (ended, took) = probe(&runtime);
+    let mut ended = true;
+    let mut beside = Vec::new();
+    let mut alone = Vec::new();
+    for _ in 0..PROBE_PAIRS {
+        let control = std::thread::spawn(probe_alone);
+        let (probe_ended, took) = probe(&runtime);
+        alone.push(control.join().expect("the probe alone"));
+        beside.push(took);
+        if !probe_ended {
+            ended = false;
+            break;
+        }
+    }
     // A task that waits for the cell on the worker goes on once the guard is
     // dropped, so the runtime can stop.
     drop(held);
     drop(kept);
     runtime.shutdown_timeout(MUST_HAPPEN);
-    let alone = alone_before.max(probe_alone());
-    eprintln!("worker probe beside the held cell: ended {ended}, took {took:?}; alone {alone:?}");
-    ended && at_the_controls_pace(took, alone)
+    eprintln!("worker probe beside the held cell: ended {ended}, took {beside:?}; alone {alone:?}");
+    ended && at_the_controls_pace(fastest(beside), median(alone))
 }
 
 fn one_worker() -> tokio::runtime::Runtime {

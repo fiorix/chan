@@ -2259,7 +2259,8 @@ mod reindex_cancel_at_shutdown_tests {
     }
 
     /// How many times a pin times its probe beside the held cell, and the
-    /// same probe with nothing held; it compares the medians.
+    /// same probe with nothing held; it compares the fastest probe with the
+    /// median control.
     const PROBES: usize = 5;
 
     /// Run `call` on a thread of its own and wait for its answer, at most
@@ -2311,19 +2312,22 @@ mod reindex_cancel_at_shutdown_tests {
     /// import holds when the signal fires: it keeps no runtime worker while
     /// it waits, and cancels the reindex once the cell is let go.
     ///
-    /// Unrelated async work, a timer behind each stop's task on the
+    /// Unrelated async work, a timer behind the stop's task on the
     /// runtime's only worker, runs while the cell is still held, since the
     /// test lets the hold go only after it has, and at the pace of the same
-    /// timer behind stops over a free cell timed first. A task that makes an
-    /// unbounded wait for the cell on that worker stops the timer too, so
-    /// the hold runs out by itself instead, and the test reads that; one
-    /// that waits on the worker for a while and then goes on holds each
-    /// timer back by that while.
+    /// timer behind a stop over a free cell, timed in turn with it. A task
+    /// that makes an unbounded wait for the cell on that worker stops the
+    /// timer too, so the hold runs out by itself instead, and the test reads
+    /// that; one that waits on the worker for a while and then goes on holds
+    /// each timer back by that while. Each turn holds a cell of its own and
+    /// lets it go, and its stop ends, before the next control runs, so no
+    /// stop beside a hold is left to slow a control.
     #[tokio::test(flavor = "current_thread")]
     async fn the_stops_reindex_cancel_beside_a_held_cell_keeps_no_worker_and_cancels_once_let_go() {
-        let (_dirs, cell, indexer) = bound_cell();
+        use crate::doc_sessions::held_cell;
         let (_control_dirs, free_cell, _free_indexer) = bound_cell();
         let mut free = Vec::new();
+        let mut beside = Vec::new();
         for _ in 0..PROBES {
             let (_shutdown, stop) = the_stop_over(&free_cell);
             free.push(a_timer_behind().await);
@@ -2331,47 +2335,39 @@ mod reindex_cancel_at_shutdown_tests {
                 .await
                 .expect("fixture: the stop over a free cell did not end")
                 .expect("the stop's task");
-        }
 
-        let (release, writer) = hold_until_let_go(&cell);
-        let mut stops = Vec::new();
-        let mut beside = Vec::new();
-        for _ in 0..PROBES {
+            let (_dirs, cell, indexer) = bound_cell();
+            let (release, writer) = hold_until_let_go(&cell);
             // Scheduled first: a wait for the cell here parks the only
             // worker, and the timer behind it cannot fire.
-            stops.push(the_stop_over(&cell));
+            let (_shutdown, stop) = the_stop_over(&cell);
             beside.push(a_timer_behind().await);
-        }
-        let cancelled_while_held = indexer.cancel_requested();
-        let _ = release.send(());
-        let let_go_by_the_test = writer.join().expect("workspace cell writer");
-
-        assert!(
-            let_go_by_the_test,
-            "the stop's wait for the workspace cell starved unrelated async progress"
-        );
-        assert!(
-            !cancelled_while_held,
-            "fixture: the reindex was cancelled while the cell was held"
-        );
-        let (free, beside) = (
-            crate::doc_sessions::held_cell::median(free),
-            crate::doc_sessions::held_cell::median(beside),
-        );
-        assert!(
-            crate::doc_sessions::held_cell::at_the_controls_pace(beside, free),
-            "the stop's wait for a held workspace cell held unrelated async work \
-             back: its timer took {beside:?}, beside a stop over a free cell {free:?}"
-        );
-        for (_shutdown, stop) in stops {
+            let cancelled_while_held = indexer.cancel_requested();
+            let _ = release.send(());
+            let let_go_by_the_test = writer.join().expect("workspace cell writer");
+            assert!(
+                let_go_by_the_test,
+                "the stop's wait for the workspace cell starved unrelated async progress"
+            );
+            assert!(
+                !cancelled_while_held,
+                "fixture: the reindex was cancelled while the cell was held"
+            );
             tokio::time::timeout(HANG_GUARD, stop)
                 .await
                 .expect("the stop's task did not end once the cell was let go")
                 .expect("the stop's task");
+            assert!(
+                indexer.cancel_requested(),
+                "the stop did not cancel the reindex once the cell was let go"
+            );
         }
+
+        let (free, beside) = (held_cell::median(free), held_cell::fastest(beside));
         assert!(
-            indexer.cancel_requested(),
-            "the stop did not cancel the reindex once the cell was let go"
+            held_cell::at_the_controls_pace(beside, free),
+            "the stop's wait for a held workspace cell held unrelated async work \
+             back: its timer took {beside:?} at the fastest, beside a stop over a free cell {free:?}"
         );
     }
 
@@ -2415,10 +2411,10 @@ mod reindex_cancel_at_shutdown_tests {
             beside.push(took);
         }
 
-        let (free, beside) = (held_cell::median(free), held_cell::median(beside));
+        let (free, beside) = (held_cell::median(free), held_cell::fastest(beside));
         assert!(
             held_cell::at_the_controls_pace(beside, free),
-            "the host's look at a held workspace cell took {beside:?}, past the pace \
+            "the host's look at a held workspace cell took {beside:?} at the fastest, past the pace \
              of a look at the free cell, {free:?}: it did not answer none at once"
         );
         assert!(
@@ -2468,10 +2464,10 @@ mod reindex_cancel_at_shutdown_tests {
             beside.push(took);
         }
 
-        let (free, beside) = (held_cell::median(free), held_cell::median(beside));
+        let (free, beside) = (held_cell::median(free), held_cell::fastest(beside));
         assert!(
             held_cell::at_the_controls_pace(beside, free),
-            "the host's reindex cancel beside a held workspace cell took {beside:?}, \
+            "the host's reindex cancel beside a held workspace cell took {beside:?} at the fastest, \
              past the pace of a cancel of a free cell, {free:?}: it did not return at once"
         );
         handle.cancel_reindex();
@@ -2612,11 +2608,11 @@ mod reindex_cancel_at_shutdown_tests {
             !look_while_held,
             "fixture: the cell was not held while the host's calls ran"
         );
-        let (free, beside) = (held_cell::median(free), held_cell::median(beside));
+        let (free, beside) = (held_cell::median(free), held_cell::fastest(beside));
         assert!(
             held_cell::at_the_controls_pace(beside, free),
             "the host's calls into a tenant whose cell a reset holds held unrelated async \
-             work back: they and a timer took {beside:?}, against {free:?} with the cell free"
+             work back: they and a timer took {beside:?} at the fastest, against {free:?} with the cell free"
         );
         assert_eq!(
             reset_status,

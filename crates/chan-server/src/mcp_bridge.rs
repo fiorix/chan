@@ -658,55 +658,78 @@ mod tests {
         bridge_call_during_workspace_swap(true).await;
     }
 
+    /// How many times an MCP release pin times its release beside the
+    /// client, each in turn with the same release where no session can
+    /// reach the workspace; it compares the fastest release with the median
+    /// control.
+    const RELEASE_PAIRS: usize = 5;
+
+    /// An initialized MCP session that stays connected and idle keeps no
+    /// owner of the workspace cell: the workspace is let go as soon as the
+    /// cell drops it, at the pace of the same workspace let go where no
+    /// session can reach it. Each turn connects a session of its own while
+    /// the cell holds the workspace, so a session that pins what it found
+    /// pins it in every turn.
     #[tokio::test]
     async fn mcp_idle_initialized_session_does_not_pin_the_workspace_cell() {
+        use crate::doc_sessions::held_cell;
         tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
-            let workspace = library.open_workspace(root.path()).unwrap();
-            let weak = Arc::downgrade(&workspace);
-            let lock_dir = workspace.paths().lock.clone();
-            let cell = Arc::new(std::sync::Mutex::new(Some(workspace)));
+            let cell = Arc::new(std::sync::Mutex::new(None::<Arc<chan_workspace::Workspace>>));
             let bridge_cell = cell.clone();
             let handle = start(pick_socket_path(), move || bridge_cell.lock().unwrap().clone()).unwrap();
-            let client = tokio::net::UnixStream::connect(handle.socket_path()).await.unwrap();
-            let (read, mut write) = client.into_split();
-            let mut read = BufReader::new(read);
-            let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                    "clientInfo": {"name": "cell-lifetime-test", "version": "0"}}});
-            write.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
-            let mut reply = String::new();
-            read.read_line(&mut reply).await.unwrap();
-            let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-            assert_eq!(reply["result"]["serverInfo"]["name"], "chan");
-            write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
-            let mut reply = String::new();
-            read.read_line(&mut reply).await.unwrap();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
-            // The client stays connected and idle until after this wait, so
-            // a session that pins the workspace pins it past the guard, and
-            // one that keeps it a while lets it go later than the control:
-            // the same workspace reopened and let go where no session can
-            // reach it, timed in the same run.
-            let dropped = std::time::Instant::now();
-            drop(cell.lock().unwrap().take());
-            let released = let_go_since(&weak, &lock_dir, dropped)
-                .await
-                .expect("idle MCP session retains the workspace cell's owner");
-            let reopened = library.open_workspace(root.path()).unwrap();
-            let unreached = Arc::downgrade(&reopened);
-            let dropped = std::time::Instant::now();
-            drop(reopened);
-            let control = let_go_since(&unreached, &lock_dir, dropped)
-                .await
-                .expect("fixture: a workspace no session reaches was not let go");
+            let mut released = Vec::new();
+            let mut controls = Vec::new();
+            for _ in 0..RELEASE_PAIRS {
+                let unreached = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&unreached);
+                let lock_dir = unreached.paths().lock.clone();
+                let dropped = std::time::Instant::now();
+                drop(unreached);
+                controls.push(
+                    let_go_since(&weak, &lock_dir, dropped)
+                        .await
+                        .expect("fixture: a workspace no session reaches was not let go"),
+                );
+
+                let workspace = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&workspace);
+                let lock_dir = workspace.paths().lock.clone();
+                *cell.lock().unwrap() = Some(workspace);
+                let client = tokio::net::UnixStream::connect(handle.socket_path()).await.unwrap();
+                let (read, mut write) = client.into_split();
+                let mut read = BufReader::new(read);
+                let initialize = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                        "clientInfo": {"name": "cell-lifetime-test", "version": "0"}}});
+                write.write_all(format!("{initialize}\n").as_bytes()).await.unwrap();
+                let mut reply = String::new();
+                read.read_line(&mut reply).await.unwrap();
+                let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                assert_eq!(reply["result"]["serverInfo"]["name"], "chan");
+                write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await.unwrap();
+                let mut reply = String::new();
+                read.read_line(&mut reply).await.unwrap();
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"], 2);
+                // The client stays connected and idle until after this wait,
+                // so a session that pins the workspace pins it past the guard.
+                let dropped = std::time::Instant::now();
+                drop(cell.lock().unwrap().take());
+                released.push(
+                    let_go_since(&weak, &lock_dir, dropped)
+                        .await
+                        .expect("idle MCP session retains the workspace cell's owner"),
+                );
+                drop((read, write));
+            }
+            let (released, control) = (held_cell::fastest(released), held_cell::median(controls));
             assert!(
-                crate::doc_sessions::held_cell::at_the_controls_pace(released, control),
+                held_cell::at_the_controls_pace(released, control),
                 "an idle MCP session kept the workspace cell's owner: it was let go \
-                 {released:?} after the cell, against {control:?} with no session"
+                 {released:?} after the cell at the fastest, against {control:?} with no session"
             );
             let _reopened = library.open_workspace(root.path()).unwrap();
             drop(handle);
@@ -715,48 +738,61 @@ mod tests {
         .expect("the test body did not end within its hang guard");
     }
 
+    /// Dropping the bridge's handle, as unmount does, lets go of a silent
+    /// client's workspace: the client stays connected and says nothing, and
+    /// the workspace is let go at the pace of the same unmount with no
+    /// client, timed in turn with it.
     #[tokio::test]
     async fn mcp_unmount_releases_a_silent_clients_workspace() {
+        use crate::doc_sessions::held_cell;
         tokio::time::timeout(HANG_GUARD, async {
             let config = private_tempdir().unwrap();
             let root = private_tempdir().unwrap();
             let library =
                 chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
-            let workspace = library.open_workspace(root.path()).unwrap();
-            let weak = Arc::downgrade(&workspace);
-            let lock_dir = workspace.paths().lock.clone();
-            let handle = start(pick_socket_path(), move || Some(workspace.clone())).unwrap();
-            let _client = tokio::net::UnixStream::connect(handle.socket_path())
-                .await
-                .unwrap();
-            handle.accepted.acquire().await.unwrap().forget();
-            // The silent client stays connected until the test ends, so a
-            // session the unmount does not stop keeps the workspace past
-            // the guard, and one it stops late lets it go later than the
-            // control: the same unmount with no client, timed in the same
-            // run.
-            let unmounted = std::time::Instant::now();
-            drop(handle);
-            let released = let_go_since(&weak, &lock_dir, unmounted).await;
-            let Some(released) = released else {
-                panic!(
-                    "MCP client retains {} workspace handles",
-                    weak.strong_count()
+            let mut released = Vec::new();
+            let mut controls = Vec::new();
+            for _ in 0..RELEASE_PAIRS {
+                let unreached = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&unreached);
+                let lock_dir = unreached.paths().lock.clone();
+                let handle = start(pick_socket_path(), move || Some(unreached.clone())).unwrap();
+                let unmounted = std::time::Instant::now();
+                drop(handle);
+                controls.push(
+                    let_go_since(&weak, &lock_dir, unmounted)
+                        .await
+                        .expect("fixture: an unmount with no client kept its workspace"),
                 );
-            };
-            let reopened = library.open_workspace(root.path()).unwrap();
-            let unreached = Arc::downgrade(&reopened);
-            let handle = start(pick_socket_path(), move || Some(reopened.clone())).unwrap();
-            let unmounted = std::time::Instant::now();
-            drop(handle);
-            let control = let_go_since(&unreached, &lock_dir, unmounted)
-                .await
-                .expect("fixture: an unmount with no client kept its workspace");
+
+                let workspace = library.open_workspace(root.path()).unwrap();
+                let weak = Arc::downgrade(&workspace);
+                let lock_dir = workspace.paths().lock.clone();
+                let handle = start(pick_socket_path(), move || Some(workspace.clone())).unwrap();
+                let client = tokio::net::UnixStream::connect(handle.socket_path())
+                    .await
+                    .unwrap();
+                handle.accepted.acquire().await.unwrap().forget();
+                // The silent client stays connected until after this wait, so
+                // a session the unmount does not stop keeps the workspace
+                // past the guard.
+                let unmounted = std::time::Instant::now();
+                drop(handle);
+                let Some(release) = let_go_since(&weak, &lock_dir, unmounted).await else {
+                    panic!(
+                        "MCP client retains {} workspace handles",
+                        weak.strong_count()
+                    );
+                };
+                released.push(release);
+                drop(client);
+            }
+            let (released, control) = (held_cell::fastest(released), held_cell::median(controls));
             assert!(
-                crate::doc_sessions::held_cell::at_the_controls_pace(released, control),
-                "the unmount let a silent client's workspace go {released:?} after it, \
-                 against {control:?} with no client"
+                held_cell::at_the_controls_pace(released, control),
+                "the unmount let a silent client's workspace go {released:?} after it at \
+                 the fastest, against {control:?} with no client"
             );
             let _reopened = library.open_workspace(root.path()).unwrap();
         })
