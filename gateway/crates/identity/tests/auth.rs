@@ -24,7 +24,7 @@ use tower::ServiceExt;
 use tower_sessions_sqlx_store::PostgresStore;
 use url::Url;
 use uuid::Uuid;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use identity::config::Config;
@@ -2380,9 +2380,8 @@ async fn share_landing_root_unauthed_redirects_to_login() {
 
 #[tokio::test]
 async fn share_landing_root_owner_minted_jwt_redirect() {
-    // Whole-devserver open is OWNER-ONLY: the owner opening their
-    // OWN devserver (caller == owner) mints the entry JWT and redirects to
-    // the proxy ROOT, where the launcher is served -- the per-workspace flow
+    // The owner opening their own devserver's root mints the entry JWT for
+    // the proxy root, where the launcher is served: the per-workspace flow
     // minus the tenant path.
     let app = TestApp::new().await;
     let mut c = Client::new(&app);
@@ -2559,6 +2558,13 @@ async fn share_landing_multi_live_falls_back_to_first_accessible() {
 
     let (s, headers, _, location) = c.send(Method::GET, "/s/owner-handle/photos", None).await;
     assert_entry_handoff(s, &headers, &location);
+    // The proxy admits any validly signed `drv`, so the credential must name
+    // the devserver whose access check passed, not the first live one.
+    let (action, credential) = entry_handoff_page(&c, "/s/owner-handle/photos").await;
+    let claims = decode_handoff(&action, &credential, &ds2, owner_uid);
+    assert_eq!(claims.drv, ds2);
+    assert_eq!(claims.sub, caller_uid);
+    assert_eq!(claims.next_path, "/photos/");
     app.cleanup().await;
 }
 
@@ -2677,29 +2683,271 @@ async fn share_landing_unknown_owner_skips_the_caller_lookup() {
     app.cleanup().await;
 }
 
+/// Mock `owner-handle` with the live devservers `live`, on which profile
+/// admits `caller` only where `granted` names the devserver, and sign
+/// `caller` in. Every other handle is unknown, and every other access check
+/// meets profile's refusal. profile answers a caller with no grant, a grant
+/// no sign-in has claimed yet and a revoked grant with that one 404, so
+/// identity cannot tell the three apart; profile's
+/// `devserver_access_follows_the_grant_through_claim_and_revoke` pins that.
+async fn signed_in_against_owner_handle<'a>(
+    app: &'a TestApp,
+    owner_uid: Uuid,
+    live: &[&str],
+    granted: &[&str],
+    caller: Uuid,
+) -> Client<'a> {
+    let not_found = || ResponseTemplate::new(404).set_body_json(json!({"error": "not found"}));
+    Mock::given(method("GET"))
+        .and(path("/v1/users/by-username"))
+        .and(query_param("u", "owner-handle"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            owner_uid,
+            "owner@x.com",
+            "owner-handle",
+        )))
+        .mount(&app.profile)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/users/by-username"))
+        .respond_with(not_found())
+        .with_priority(10)
+        .mount(&app.profile)
+        .await;
+    mock_live_devservers(app, owner_uid, "owner-handle", live).await;
+    for dsid in granted {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/users/{owner_uid}/devservers/{dsid}/access"
+            )))
+            .and(query_param("as", caller.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access": true})))
+            .mount(&app.profile)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/v1/users/[^/]+/devservers/[0-9a-f]{64}/access$",
+        ))
+        .respond_with(not_found())
+        .with_priority(10)
+        .mount(&app.profile)
+        .await;
+    let mut c = Client::new(app);
+    happy_login(app, &mut c, caller, "caller@x.com").await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/users/{caller}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(live_user_body(
+            caller,
+            "caller@x.com",
+            "caller",
+        )))
+        .mount(&app.profile)
+        .await;
+    c
+}
+
+/// The account page's Copy link for a devserver: the whole-devserver root,
+/// qualified by the devserver's disc.
+fn root_link(owner: &str, devserver_id: &str) -> String {
+    format!("/s/{owner}?d={}", &devserver_id[..12])
+}
+
+/// Everything a browser can read from a landing's answer: status, headers,
+/// body and redirect target. A session cookie's expiry date is a clock
+/// reading, so it is left out; the cookie itself is not.
+fn observable(
+    (status, headers, body, location): (StatusCode, Vec<(String, String)>, Value, String),
+) -> (StatusCode, Vec<(String, String)>, Value, String) {
+    let mut headers: Vec<(String, String)> = headers
+        .into_iter()
+        .map(|(name, value)| {
+            if !name.eq_ignore_ascii_case("set-cookie") {
+                return (name, value);
+            }
+            let kept: Vec<&str> = value
+                .split(';')
+                .map(str::trim)
+                .filter(|attribute| !attribute.to_ascii_lowercase().starts_with("expires="))
+                .collect();
+            (name, kept.join("; "))
+        })
+        .collect();
+    headers.sort();
+    (status, headers, body, location)
+}
+
+/// An [`observable`] answer with a session cookie's random id left out, for
+/// answers that each open a fresh session.
+fn without_session_id(
+    (status, headers, body, location): (StatusCode, Vec<(String, String)>, Value, String),
+) -> (StatusCode, Vec<(String, String)>, Value, String) {
+    let headers = headers
+        .into_iter()
+        .map(|(name, value)| {
+            if !name.eq_ignore_ascii_case("set-cookie") {
+                return (name, value);
+            }
+            let Some((pair, attributes)) = value.split_once(';') else {
+                return (name, value);
+            };
+            let cookie = pair
+                .split_once('=')
+                .map_or(pair, |(cookie_name, _)| cookie_name);
+            let redacted = format!("{cookie};{attributes}");
+            (name, redacted)
+        })
+        .collect();
+    (status, headers, body, location)
+}
+
+/// GET `uri`, then the same URI for a handle profile does not know, on one
+/// session, and require one not-found for both: a probe cannot tell a
+/// devserver it has no access to from a handle that does not exist.
+async fn assert_refused_like_an_unknown_handle(c: &mut Client<'_>, uri: &str) {
+    let unknown_uri = uri.replacen("/s/owner-handle", "/s/unknown-handle", 1);
+    let refused = observable(c.send(Method::GET, uri, None).await);
+    let unknown = observable(c.send(Method::GET, &unknown_uri, None).await);
+    assert_eq!(refused.0, StatusCode::NOT_FOUND, "{uri}");
+    assert_eq!(refused.2, json!({"error": "not found"}), "{uri}");
+    assert_eq!(refused, unknown, "{uri} must answer as {unknown_uri} does");
+}
+
 #[tokio::test]
-async fn share_landing_root_grantee_denied() {
-    // A grantee who can open a shared workspace must still not reach the
-    // whole-devserver launcher. The owner-only gate keeps the refusal at the
-    // same 404 shape as an unknown handle.
+async fn share_landing_root_admits_an_accepted_grantee() {
+    // A grant gives the whole devserver, so the root admits a grantee through
+    // the same `devserver_access` check as the per-workspace landing and signs
+    // the devserver root, where the launcher is served, for the browser.
     let app = TestApp::new().await;
-    let caller_uid = fake_user_id();
     let owner_uid = Uuid::new_v4();
+    let grantee_uid = fake_user_id();
+    let dsid = "b".repeat(64);
     let mut c =
-        signed_in_with_a_shared_devserver(&app, owner_uid, &"b".repeat(64), caller_uid, "grantee")
+        signed_in_against_owner_handle(&app, owner_uid, &[&*dsid], &[&*dsid], grantee_uid).await;
+    let link = root_link("owner-handle", &dsid);
+
+    let (status, headers, _, location) = c.send(Method::GET, &link, None).await;
+    assert_entry_handoff(status, &headers, &location);
+    let (action, credential) = entry_handoff_page(&c, &link).await;
+    let claims = decode_handoff(&action, &credential, &dsid, owner_uid);
+    assert_eq!(claims.sub, grantee_uid);
+    assert_eq!(claims.next_path, "/");
+    assert_eq!(
+        claims.client,
+        gateway_common::devserver_gate::ClientType::Browser
+    );
+    let access = format!("/v1/users/{owner_uid}/devservers/{dsid}/access");
+    assert_eq!(
+        profile_request_count(&app, "GET", &access).await,
+        2,
+        "each landing asks profile for the caller's access"
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn share_landing_root_without_a_selector_signs_the_devserver_the_caller_may_enter() {
+    // Two live devservers and no `?d=`: the root signs the one whose access
+    // check passed, here the second. The proxy admits any validly signed
+    // `drv`, so signing the first live devserver would open one the caller
+    // holds no grant on.
+    let app = TestApp::new().await;
+    let owner_uid = Uuid::new_v4();
+    let grantee_uid = fake_user_id();
+    let ds_a = "a".repeat(64);
+    let ds_b = "b".repeat(64);
+    let c =
+        signed_in_against_owner_handle(&app, owner_uid, &[&*ds_a, &*ds_b], &[&*ds_b], grantee_uid)
             .await;
 
-    let caller_path = format!("/v1/users/{caller_uid}");
-    let before = profile_request_count(&app, "GET", &caller_path).await;
-    let (status, _, body, _) = c.send(Method::GET, "/s/owner-handle", None).await;
-    let after = profile_request_count(&app, "GET", &caller_path).await;
+    let (action, credential) = entry_handoff_page(&c, "/s/owner-handle").await;
+    let claims = decode_handoff(&action, &credential, &ds_b, owner_uid);
+    assert_eq!(claims.drv, ds_b);
+    assert_eq!(claims.sub, grantee_uid);
+    assert_eq!(claims.next_path, "/");
+    app.cleanup().await;
+}
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body, json!({"error": "not found"}));
+#[tokio::test]
+async fn share_landing_root_refuses_a_caller_without_a_grant_like_an_unknown_handle() {
+    let app = TestApp::new().await;
+    let dsid = "a".repeat(64);
+    let mut c =
+        signed_in_against_owner_handle(&app, Uuid::new_v4(), &[&*dsid], &[], fake_user_id()).await;
+    for uri in [root_link("owner-handle", &dsid), "/s/owner-handle".into()] {
+        assert_refused_like_an_unknown_handle(&mut c, &uri).await;
+    }
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn share_landing_root_refuses_a_grant_on_another_devserver_like_an_unknown_handle() {
+    // The caller holds a grant on the owner's devserver B only. A link naming
+    // the owner's devserver A is refused whether B is live beside A or
+    // offline, and with B offline the bare root has nothing to enter either.
+    let ds_a = "a".repeat(64);
+    let ds_b = "b".repeat(64);
+    for live in [vec![ds_a.as_str(), ds_b.as_str()], vec![ds_a.as_str()]] {
+        let app = TestApp::new().await;
+        let mut c =
+            signed_in_against_owner_handle(&app, Uuid::new_v4(), &live, &[&*ds_b], fake_user_id())
+                .await;
+        assert_refused_like_an_unknown_handle(&mut c, &root_link("owner-handle", &ds_a)).await;
+        if live.len() == 1 {
+            assert_refused_like_an_unknown_handle(&mut c, "/s/owner-handle").await;
+        }
+        app.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn share_landing_root_refuses_a_revoked_grant_like_an_unknown_handle() {
+    // identity keeps no record of an earlier admission: the grantee entered
+    // through a share link while the grant stood, the owner revoked it, and
+    // profile's next access check refuses, so the root link is refused at once.
+    let app = TestApp::new().await;
+    let owner_uid = Uuid::new_v4();
+    let dsid = "a".repeat(64);
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v1/users/{owner_uid}/devservers/{dsid}/access"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access": true})))
+        .up_to_n_times(1)
+        .mount(&app.profile)
+        .await;
+    let mut c =
+        signed_in_against_owner_handle(&app, owner_uid, &[&*dsid], &[], fake_user_id()).await;
+
+    let (status, headers, _, location) = c.send(Method::GET, "/s/owner-handle/photos", None).await;
+    assert_entry_handoff(status, &headers, &location);
+    assert_refused_like_an_unknown_handle(&mut c, &root_link("owner-handle", &dsid)).await;
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn share_landing_root_without_a_session_answers_every_handle_alike() {
+    // Signed out, the landing stashes the link and sends the browser to sign
+    // in before it resolves anything, so a shared devserver's root link and an
+    // unknown handle's get one answer. Each request opens a fresh session, so
+    // the cookie's random id is the one part left out.
+    let app = TestApp::new().await;
+    let link = root_link("owner-handle", &"a".repeat(64));
+    let unknown_link = link.replacen("owner-handle", "unknown-handle", 1);
+
+    let shared = observable(Client::new(&app).send(Method::GET, &link, None).await);
+    let unknown = observable(
+        Client::new(&app)
+            .send(Method::GET, &unknown_link, None)
+            .await,
+    );
+    assert_eq!(shared.0, StatusCode::SEE_OTHER);
+    assert_eq!(shared.3, "/");
+    assert_eq!(without_session_id(shared), without_session_id(unknown));
     assert_eq!(
-        after - before,
+        profile_request_count(&app, "GET", "/v1/users/by-username").await,
         0,
-        "root owner-only gate must fire before resolving the caller"
+        "a signed-out landing resolves no handle"
     );
     app.cleanup().await;
 }
