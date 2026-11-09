@@ -28,10 +28,13 @@ pub(crate) struct MetricsArgs {
     /// Emit the shared metrics schema as JSON.
     #[arg(long)]
     pub json: bool,
-    /// Repeat every second; JSON mode emits one object per line.
+    /// Repeat about every second with only what is new: the first output is
+    /// complete and each later one carries only newer samples. JSON mode
+    /// emits one object per line.
     #[arg(long)]
     pub watch: bool,
-    /// Include the server's bounded sample history in JSON output.
+    /// Include the server's bounded sample history in JSON output; under
+    /// --watch, later lines hold only the samples newer than the last.
     #[arg(long, requires = "json")]
     pub history: bool,
     /// Serve Varlink on stdin/stdout (systemd StandardInput=socket).
@@ -152,30 +155,89 @@ fn explicit_target(raw: &str, token: Option<&str>) -> Result<(reqwest::Url, Opti
     Ok((metrics_url(url), token))
 }
 
+/// Where a stream reads its views: the HTTP client, or in tests a runtime.
+pub(crate) trait Source {
+    async fn read(&self, history: bool, since: Option<u64>) -> Result<View>;
+}
+
+impl Source for Client {
+    async fn read(&self, history: bool, since: Option<u64>) -> Result<View> {
+        Client::read(self, history, since).await
+    }
+}
+
+/// A subscribe-style stream of views, as systemd's subscribe methods send
+/// state: the first view is complete, and each later one carries only the
+/// samples newer than the last one sent, with `latest` the newest and
+/// nothing sent while nothing is newer. A new `identity.instanceId` means
+/// the server restarted and its sequences with it, so the stream starts
+/// over with a complete view.
+pub(crate) struct Subscription {
+    history: bool,
+    since: Option<u64>,
+    /// The instance and the newest sequence already sent, if any was.
+    sent: Option<(String, Option<u64>)>,
+}
+
+impl Subscription {
+    pub(crate) fn new(history: bool, since: Option<u64>) -> Self {
+        Self {
+            history,
+            since,
+            sent: None,
+        }
+    }
+
+    /// The next view to send, or `None` when nothing is newer than what was.
+    pub(crate) async fn next(&mut self, source: &impl Source) -> Result<Option<View>> {
+        let newest = self.sent.as_ref().and_then(|(_, newest)| *newest);
+        let since = match (self.since, newest) {
+            (Some(since), Some(newest)) => Some(since.max(newest)),
+            (since, newest) => newest.or(since),
+        };
+        let mut view = source.read(self.history, since).await?;
+        if let Some((instance, newest)) = &self.sent {
+            if view.identity.instance_id != *instance {
+                // The caller's `since` counted the old instance's samples.
+                self.since = None;
+                view = source.read(self.history, None).await?;
+            } else if view.latest.as_ref().map(|sample| sample.sequence) <= *newest {
+                return Ok(None);
+            }
+        }
+        self.sent = Some((
+            view.identity.instance_id.clone(),
+            view.latest.as_ref().map(|sample| sample.sequence),
+        ));
+        Ok(Some(view))
+    }
+}
+
 pub(crate) async fn cmd_metrics(args: MetricsArgs) -> Result<()> {
     let client = Client::new(args.clone())?;
     if args.varlink {
         #[cfg(unix)]
-        return varlink::serve(client, tokio::io::stdin(), tokio::io::stdout()).await;
+        return varlink::serve(&client, tokio::io::stdin(), tokio::io::stdout()).await;
         #[cfg(not(unix))]
         anyhow::bail!("Varlink socket activation is available on Unix");
     }
-    loop {
+    if !args.watch {
         let view = client.read(args.history, None).await?;
         if args.json {
-            println!(
-                "{}",
-                if args.watch {
-                    serde_json::to_string(&view)?
-                } else {
-                    serde_json::to_string_pretty(&view)?
-                }
-            );
+            println!("{}", serde_json::to_string_pretty(&view)?);
         } else {
             print!("{}", render(&view));
         }
-        if !args.watch {
-            return Ok(());
+        return Ok(());
+    }
+    let mut stream = Subscription::new(args.history, None);
+    loop {
+        if let Some(view) = stream.next(&client).await? {
+            if args.json {
+                println!("{}", serde_json::to_string(&view)?);
+            } else {
+                print!("{}", render(&view));
+            }
         }
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
@@ -436,5 +498,98 @@ mod tests {
         drop(listener);
         let error = local_target().unwrap_err().to_string();
         assert!(error.contains("no devserver is listening"), "{error}");
+    }
+
+    /// Views from a script, recording the `since` each read asked for.
+    struct Script {
+        views: std::sync::Mutex<std::collections::VecDeque<View>>,
+        asked: std::sync::Mutex<Vec<Option<u64>>>,
+    }
+
+    impl Source for Script {
+        async fn read(&self, history: bool, since: Option<u64>) -> Result<View> {
+            assert!(history);
+            self.asked.lock().unwrap().push(since);
+            let mut view = self
+                .views
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("an unscripted read");
+            // The route's filter.
+            view.history
+                .retain(|sample| since.is_none_or(|seq| sample.sequence > seq));
+            Ok(view)
+        }
+    }
+
+    fn view_of(base: &View, instance: &str, sequences: std::ops::RangeInclusive<u64>) -> View {
+        let sample = base.latest.clone().unwrap();
+        let mut view = base.clone();
+        view.identity.instance_id = instance.into();
+        view.history = sequences
+            .map(|sequence| chan_server::metrics::Sample {
+                sequence,
+                ..sample.clone()
+            })
+            .collect();
+        view.latest = view.history.last().cloned();
+        view
+    }
+
+    #[tokio::test]
+    async fn a_subscription_sends_the_whole_view_once_then_only_what_is_new() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = chan_server::metrics::Runtime::start(home.path().into()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let base = loop {
+            let view = runtime.view(false, None);
+            if view.latest.is_some() {
+                break view;
+            }
+            assert!(std::time::Instant::now() < deadline, "no sample");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let script = Script {
+            views: std::sync::Mutex::new(
+                [
+                    view_of(&base, "a", 1..=5),
+                    view_of(&base, "a", 1..=6),
+                    view_of(&base, "a", 1..=6),
+                    view_of(&base, "a", 1..=8),
+                    // A restart: the new instance's sequences start again.
+                    view_of(&base, "b", 1..=2),
+                    view_of(&base, "b", 1..=2),
+                    view_of(&base, "b", 1..=3),
+                ]
+                .into(),
+            ),
+            asked: Default::default(),
+        };
+        let sequences = |view: Option<View>| {
+            view.map(|view| {
+                let latest = view.latest.map(|sample| sample.sequence);
+                let history: Vec<u64> = view.history.iter().map(|s| s.sequence).collect();
+                (history, latest)
+            })
+        };
+        let mut stream = Subscription::new(true, Some(2));
+        let expected = [
+            Some((vec![3, 4, 5], Some(5))),
+            Some((vec![6], Some(6))),
+            // Nothing newer, nothing sent.
+            None,
+            Some((vec![7, 8], Some(8))),
+            // The restart starts over with the whole view.
+            Some((vec![1, 2], Some(2))),
+            Some((vec![3], Some(3))),
+        ];
+        for expected in expected {
+            assert_eq!(sequences(stream.next(&script).await.unwrap()), expected);
+        }
+        assert_eq!(
+            *script.asked.lock().unwrap(),
+            [Some(2), Some(5), Some(6), Some(6), Some(8), None, Some(2)]
+        );
     }
 }

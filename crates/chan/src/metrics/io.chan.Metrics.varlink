@@ -35,7 +35,12 @@ type View (
   schemaVersion: int, identity: Identity, latest: ?Sample,
   history: []Sample, storage: Storage
 )
-# With more=true, emits once per second; slow clients never block collection.
 # since selects history sequences strictly greater than the supplied value.
+# With more=true, the first reply is the complete view and each later reply,
+# about once per second, carries only samples newer than the last one sent:
+# history holds them when requested and latest is the newest. No reply is
+# sent while nothing is newer. A changed identity.instanceId means the server
+# restarted, and the next reply is complete again. Slow clients never block
+# collection.
 method Get(history: ?bool, since: ?int) -> (metrics: View)
 error Unavailable()
