@@ -27,11 +27,7 @@ pub(super) enum Owner {
 /// every listener that could take the connection.
 #[cfg(target_os = "linux")]
 pub(super) fn ensure_caller_listens(addr: SocketAddr) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let tcp = std::fs::read_to_string("/proc/net/tcp")
-        .context("cannot read /proc/net/tcp to check who listens on the devserver port")?;
-    // A kernel without IPv6 has no tcp6 table, and so no IPv6 listener.
-    let tcp6 = std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default();
+    let (tcp, tcp6) = tables(|path| std::fs::read_to_string(path))?;
     let uid = rustix::process::geteuid().as_raw();
     match owner(&[&tcp, &tcp6], addr, uid) {
         Owner::Caller => Ok(()),
@@ -40,6 +36,25 @@ pub(super) fn ensure_caller_listens(addr: SocketAddr) -> anyhow::Result<()> {
         ),
         Owner::Nobody => anyhow::bail!("no devserver is listening on {addr}"),
     }
+}
+
+/// The IPv4 and IPv6 socket tables, read through `read`. Only a missing
+/// tcp6 table means no IPv6 listener: a kernel without IPv6 has none. Any
+/// other failure refuses, since a table that cannot be read could hide
+/// another user's listener.
+fn tables(read: impl Fn(&str) -> std::io::Result<String>) -> anyhow::Result<(String, String)> {
+    use anyhow::Context;
+    let check = "to check who listens on the devserver port";
+    let tcp =
+        read("/proc/net/tcp").with_context(|| format!("cannot read /proc/net/tcp {check}"))?;
+    let tcp6 = match read("/proc/net/tcp6") {
+        Ok(table) => table,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read /proc/net/tcp6 {check}"))
+        }
+    };
+    Ok((tcp, tcp6))
 }
 
 /// Classify `addr` against the text of `/proc/net/tcp`-format tables.
@@ -223,6 +238,27 @@ mod tests {
         let tcp6 = table(&[row(ip("::1"), 8787, "0A", ME)]);
         assert_eq!(owner(&[&tcp, &tcp6], v6, ME), Owner::Caller);
         assert_eq!(owner(&[HEADER, "garbage", ""], addr, ME), Owner::Nobody);
+    }
+
+    #[test]
+    fn only_a_missing_tcp6_table_reads_as_no_ipv6_listeners() {
+        use std::io::{Error, ErrorKind};
+        let reading = |tcp6: Option<ErrorKind>| {
+            move |path: &str| match (path.ends_with("tcp6"), tcp6) {
+                (true, Some(kind)) => Err(Error::from(kind)),
+                _ => Ok(table(&[row(ip("127.0.0.1"), 8787, "0A", ME)])),
+            }
+        };
+        let (tcp, tcp6) = tables(reading(None)).unwrap();
+        assert!(!tcp.is_empty() && !tcp6.is_empty());
+        let (_, tcp6) = tables(reading(Some(ErrorKind::NotFound))).unwrap();
+        assert_eq!(tcp6, "", "a kernel without IPv6");
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            let error = tables(reading(Some(kind))).unwrap_err();
+            assert!(error.to_string().contains("/proc/net/tcp6"), "{error}");
+        }
+        // A missing IPv4 table is never a kernel shape to wave through.
+        assert!(tables(|_| Err(Error::from(ErrorKind::NotFound))).is_err());
     }
 
     #[cfg(target_os = "linux")]
