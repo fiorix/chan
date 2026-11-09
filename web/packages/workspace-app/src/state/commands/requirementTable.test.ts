@@ -67,15 +67,18 @@ function idsForMode(
 }
 
 describe("command requirement table", () => {
-  it.each(SHAPES)("offers and dispatches New dashboard in $name windows", (shape) => {
+  it.each(SHAPES)("offers and dispatches New dashboard in $name windows unless they lack a tab strip", (shape) => {
     const caps = capsForMode(shape.mode, shape.tenantFiles, shape.tenantDrafts);
     const mode = { terminalOnly: !caps.files, terminalControl: shape.mode === "control" };
     const context = {
       ...mode, caps, activeSurface: "terminal" as const, activeSide: "a" as const,
       activeTabId: "terminal-1", activeExtensionId: null,
     };
-    expect(availableCommands(context).some((c) => c.id === "app.dashboard.open")).toBe(true);
-    expect(windowModeAllowsCommand("app.dashboard.open", mode)).toBe(true);
+    // A control window hides its tab strip, so a Dashboard would cover its
+    // one terminal with nothing to switch back.
+    const strip = shape.mode !== "control";
+    expect(availableCommands(context).some((c) => c.id === "app.dashboard.open")).toBe(strip);
+    expect(windowModeAllowsCommand("app.dashboard.open", mode)).toBe(strip);
     expect(dispatchAllowsCommand("app.dashboard.open", caps)).toBe(true);
     const dashboard = availableCommands({ ...context, activeSurface: "dashboard" });
     expect(dashboard.some((c) => c.id === "app.dashboard.slide.metrics")).toBe(true);

@@ -2297,6 +2297,12 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "open_dashboard") {
+    // A control window and a pane showing a tmux pane draw no tab strip, so
+    // a Dashboard there would hide the terminal with no strip to switch back.
+    if (ui.terminalControl) {
+      setTransientStatus("no dashboard in a control window");
+      return;
+    }
     const destination = resolveWindowCommandDestination(frame);
     if (!destination) return;
     // Apply the server's carousel_index and/or carousel_off to the freshly
@@ -2306,11 +2312,15 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       typeof frame.carousel_index === "number" && frame.carousel_index >= 0
         ? Math.floor(frame.carousel_index)
         : undefined;
-    openDashboardInPane(destination.paneId, {
+    const opened = openDashboardInPane(destination.paneId, {
       slide,
       autoRotate: frame.carousel_off === true ? false : undefined,
       side: destination.side,
     });
+    if (!opened) {
+      setTransientStatus("no dashboard in a tmux pane");
+      return;
+    }
     setTransientStatus("opened dashboard");
     scheduleSessionSave();
     return;

@@ -5368,15 +5368,29 @@ export interface OpenDashboardOptions {
   side?: PaneSide;
 }
 
+/// Whether the pane shows a tmux pane, and so draws no tab strip: the pane
+/// is tmux's and its one tab is tmux's pane. So is every pane while Hybrid
+/// Nav stages a tmux window's layout. Pane.svelte hides the strip on the
+/// same two conditions.
+export function paneShowsTmux(paneId: string): boolean {
+  if (paneMode.tmux !== null) return true;
+  const node = layout.nodes[paneId];
+  if (!node || node.kind !== "leaf") return false;
+  return allPaneTabs(node).some((tab) => tab.kind === "terminal" && Boolean(tab.tmuxPane));
+}
+
 /// Spawn a Dashboard tab inside the named pane (live layout). Mirrors
 /// the shape of `openTerminalInPane` + `openBrowserInActivePane`:
-/// append and flip active. No-op if the pane id doesn't resolve to a leaf.
+/// append and flip active. False, with nothing opened, when the pane id
+/// doesn't resolve to a leaf or the pane shows a tmux pane: with no strip
+/// there, the Dashboard would hide tmux's pane with no way back but the
+/// tab shortcuts, and tmux has no window to hold anything but a terminal.
 export function openDashboardInPane(
   paneId: string,
   opts?: OpenDashboardOptions,
-): void {
+): boolean {
   const node = layout.nodes[paneId];
-  if (!node || node.kind !== "leaf") return;
+  if (!node || node.kind !== "leaf" || paneShowsTmux(paneId)) return false;
   const side = opts?.side ?? paneSide(node);
   const tabs = mutablePaneTabs(node, side);
   const tab: DashboardTab = {
@@ -5391,10 +5405,11 @@ export function openDashboardInPane(
   setPaneActiveTabId(node, tab.id, side);
   node.side = side;
   layout.activePaneId = node.id;
+  return true;
 }
 
-export function openDashboardInActivePane(opts?: OpenDashboardOptions): void {
-  openDashboardInPane(layout.activePaneId, opts);
+export function openDashboardInActivePane(opts?: OpenDashboardOptions): boolean {
+  return openDashboardInPane(layout.activePaneId, opts);
 }
 
 /// Open a local extension inside the named pane. The caller passes only stable

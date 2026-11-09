@@ -15,7 +15,9 @@ import {
 } from "../commands";
 import {
   enterPaneMode,
+  layout,
   panesHaveSides,
+  paneShowsTmux,
   reopenClosedTab,
   canReopenClosedTab,
 } from "../tabs.svelte";
@@ -89,10 +91,13 @@ registerCommands([
     "tree",
     "explorer",
   ]),
-  reuse("app.dashboard.open", "New dashboard", "Apps", "any", [
-    "slides",
-    "present",
-  ]),
+  {
+    ...reuse("app.dashboard.open", "New dashboard", "Apps", "any", ["slides", "present"]),
+    // runCommand refuses it in a pane showing a tmux pane, which draws no
+    // tab strip, so the launcher does not offer it there either.
+    available: (ctx) =>
+      allowedInWindow("app.dashboard.open", ctx) && !paneShowsTmux(layout.activePaneId),
+  },
 
   // Tabs
   reuse("app.tab.close", "Close tab", "Tabs", "any", ["close"], {

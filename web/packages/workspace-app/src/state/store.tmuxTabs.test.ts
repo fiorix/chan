@@ -209,3 +209,22 @@ test("control_release leaves control mode: the chrome bit clears, the URL names 
   expect(store.ui.terminalControl).toBe(false);
   expect(new URL(window.location.href).searchParams.get("kind")).toBe("other");
 });
+
+test("cs dashboard opens nowhere a tab strip is missing: a tmux pane or a control window", async () => {
+  const { store, tabs, resetLayout, terminalTab, sessionWindowId } = await app();
+  const kinds = () => tabs.allPaneTabs(tabs.activePane()).map((tab) => tab.kind);
+  const openDashboard = () =>
+    store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "open_dashboard" });
+  resetLayout([terminalTab({ id: "pane", terminalSessionId: "pane-a", tmuxPane: { connection: 1, pane: "%0" } })]);
+  openDashboard();
+  expect(kinds(), "a tmux pane has no strip").toEqual(["terminal"]);
+  expect(store.ui.status).toBe("no dashboard in a tmux pane");
+  resetLayout([terminalTab({ id: "ctl", terminalSessionId: "control-1" })]);
+  store.ui.terminalControl = true;
+  openDashboard();
+  expect(kinds(), "a control window has no strip").toEqual(["terminal"]);
+  expect(store.ui.status).toBe("no dashboard in a control window");
+  store.ui.terminalControl = false;
+  openDashboard();
+  expect(kinds(), "a plain pane takes one").toEqual(["terminal", "dashboard"]);
+});
