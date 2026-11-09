@@ -1397,7 +1397,14 @@ export class VtSearch {
     this.wasm = wasm;
     this.terminal = terminal;
     this.scratch = wasm.alloc(SEARCH_SCRATCH.size);
-    this.handle = wasm.newHandle((slot) => wasm.fn.ghostty_search_new(0, slot, terminal.handle()), "search");
+    try {
+      this.handle = wasm.newHandle((slot) => wasm.fn.ghostty_search_new(0, slot, terminal.handle()), "search");
+    } catch (error) {
+      // A terminal outlives many searches, each find bar opening makes one,
+      // so a search the core fails to make gives its block back.
+      wasm.free(this.scratch, SEARCH_SCRATCH.size);
+      throw error;
+    }
     this.fed = terminal.changes();
     // ghostty-web scrolls in JS and upstream's viewport never moves, so the
     // render state this binding reads is the active screen (see

@@ -68,6 +68,34 @@ type Raw = {
 };
 const raw = (o: unknown): Raw => o as Raw;
 
+/// The blocks and opaque slots taken from `t`'s allocator from here on and
+/// not given back yet, each described by its size.
+function liveAllocations(t: VtTerminal): Map<number, string> {
+  const fn = raw(t).wasm.fn;
+  const live = new Map<number, string>();
+  const { ghostty_wasm_alloc: alloc, ghostty_wasm_free: free } = fn;
+  const { ghostty_wasm_alloc_opaque: allocOpaque, ghostty_wasm_free_opaque: freeOpaque } = fn;
+  fn.ghostty_wasm_alloc = (len) => {
+    const ptr = alloc(len);
+    if (ptr) live.set(ptr, `${len} bytes`);
+    return ptr;
+  };
+  fn.ghostty_wasm_free = (ptr, len) => {
+    live.delete(ptr);
+    return free(ptr, len);
+  };
+  fn.ghostty_wasm_alloc_opaque = () => {
+    const ptr = allocOpaque();
+    if (ptr) live.set(ptr, "an opaque slot");
+    return ptr;
+  };
+  fn.ghostty_wasm_free_opaque = (ptr) => {
+    live.delete(ptr);
+    return freeOpaque(ptr);
+  };
+  return live;
+}
+
 describe("a search over the binding's terminal", () => {
   test("lists matches newest first and selects them in that order, wrapping", async () => {
     const t = await errorTerminal();
@@ -376,6 +404,37 @@ describe("a search over the binding's terminal", () => {
     t.write("more\r\n");
     expect(text(t.getLine(0))).toBe("line 9 ERROR here");
     t.free();
+  });
+});
+
+describe("a search the core fails to make", () => {
+  test("a search made keeps one block, its scratch area, until it is freed", async () => {
+    const t = await errorTerminal();
+    const live = liveAllocations(t);
+    const s = t.createSearch();
+    expect([...live.values()]).toEqual(["48 bytes"]);
+    s.free();
+    expect([...live.values()]).toEqual([]);
+  });
+
+  test.each([
+    // upstream's GHOSTTY_OUT_OF_MEMORY
+    ["refuses it", (t: VtTerminal) => void (raw(t).wasm.fn.ghostty_search_new = () => -1), /creating search failed \(-1\)/],
+    [
+      "traps",
+      (t: VtTerminal) =>
+        void (raw(t).wasm.fn.ghostty_search_new = () => {
+          throw new WebAssembly.RuntimeError("unreachable");
+        }),
+      /unreachable/,
+    ],
+    ["has no terminal", (t: VtTerminal) => t.free(), /creating search failed/],
+  ])("a core that %s keeps none of the memory the search took", async (_, arrange, error) => {
+    const t = await errorTerminal();
+    arrange(t);
+    const live = liveAllocations(t);
+    expect(() => t.createSearch()).toThrow(error);
+    expect([...live.values()], "every block the failed search took is back").toEqual([]);
   });
 });
 
