@@ -61,13 +61,17 @@ Opened 2026-11-09 by the owner with one item taken in parts over this and the fo
 
 The owner added a second the same day, measured in those follow-ups: with the find bar open at the largest scrollback and a needle that matches often, the search's feed runs a find frame to 30 to 57 ms while output streams, so a feed's backlog gets a bound ([findfeed]).
 
+A third came the same day from the review of v0.127.0's live-metrics fixes: the CLI's calls to the local devserver (`chan ps`, the terminal drain, `rotate-token` and the health probes) build their HTTP client from the environment, so a proxy setting sends the devserver's token to the proxy; `chan metrics` was fixed in v0.127.0 alone, and the rest get one direct local client with the listener check `chan metrics` uses ([cliproxy]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
 | [find frames run long at max scrollback][findfeed] | not started | design |
+| [local devserver calls go through a proxy][cliproxy] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
+[cliproxy]: v0.128.0/the-clis-local-devserver-calls-go-through-a-proxy.md
 
 ## Completed
 
