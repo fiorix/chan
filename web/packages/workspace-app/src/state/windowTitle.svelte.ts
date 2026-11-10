@@ -7,9 +7,9 @@
 //
 // The workspace app has no view of the window feed: its only library access is
 // the short-lived, presence-bound command capability. So the naming fields are
-// read from that snapshot when first needed (at boot in a browser, at the pane
-// tree's first open in title bar tab mode on the desktop; a failed read is
-// tried again at the next open), and the caption is kept current afterwards by
+// read from that snapshot when first needed (at boot in a browser and, in title
+// bar tab mode, at each pane tree open until a read finds this window, which on
+// the desktop is the first open), and the caption is kept current afterwards by
 // the targeted `window_labeled` frame the server pushes to this window's own
 // socket on every surface (store.svelte.ts routes it here). `kind` and
 // `ordinal` are library-owned and fixed for a window's life, so one read is
