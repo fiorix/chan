@@ -73,6 +73,8 @@
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";
+  import { windowTabBar } from "../state/windowTabBar.svelte";
+  import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
 
   const LIST_ID = "chan-pane-tree-list";
   const optionId = (index: number): string => `chan-pane-tree-option-${index}`;
@@ -112,6 +114,11 @@
   const rows = $derived(paneTreeRows(panes));
   const rects = $derived(paneTree.open ? Object.entries(paneRects(layout)) : []);
   const chord = $derived(chordFor(PANE_TREE_COMMAND_ID));
+  const title = $derived(windowTabBar.on ? windowName() : null);
+
+  $effect(() => {
+    if (paneTree.open && windowTabBar.on) untrack(() => void loadWindowTitle());
+  });
 
   function rowKey(row: PaneTreeTab): string {
     return `${row.paneId}\u001f${row.tab.id}`;
@@ -380,6 +387,9 @@
       style:left="{position.left}px"
       style:max-height="calc(100vh - {position.top + EDGE}px)"
     >
+      {#if title}
+        <div class="window-title" title={title}>{title}</div>
+      {/if}
       <div class="filter">
         <Search size={15} strokeWidth={1.75} aria-hidden="true" />
         <input
@@ -504,7 +514,18 @@
     transform-origin: top left;
     animation: pane-tree-pop 160ms cubic-bezier(0.2, 0.85, 0.22, 1.05);
   }
+  .window-title {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 600;
+  }
   .filter {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 8px;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { applyWindowLabel, initWindowTitle, refreshWindowTitle, __resetWindowTitle } from "./windowTitle";
+import { applyWindowLabel, initWindowTitle, loadWindowTitle, refreshWindowTitle, windowName, __resetWindowTitle } from "./windowTitle.svelte";
 import { privacy } from "@chan/web-shared/privacy";
 import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
 import type { ScopedLibraryWindow, ScopedLibrarySnapshot } from "../api/libraryCommand";
@@ -112,6 +112,34 @@ describe("browser tab title", () => {
 });
 
 describe("live caption updates", () => {
+  test("a rename received during the initial snapshot wins over its stale label", async () => {
+    let resolve!: (value: ScopedLibrarySnapshot) => void;
+    loadSnapshot.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const first = loadWindowTitle();
+    const second = loadWindowTitle();
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    applyWindowLabel("latest");
+    resolve(snapshot([scopedWindow({ label: "stale" })]));
+    await Promise.all([first, second]);
+    expect(windowName()).toBe("Window 3 [latest]");
+  });
+
+  test("the desktop loads a pane tree name on demand without changing the document title", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: { invoke: vi.fn() }, configurable: true,
+    });
+    try {
+      loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ control: true })]));
+      await loadWindowTitle();
+      expect(windowName()).toBe("Control terminal");
+      expect(document.title).toBe("Chan");
+      await loadWindowTitle();
+      expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    }
+  });
+
   test("privacy conceals captions live and restores the latest caption", async () => {
     loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "private.example" })]));
     privacy.enabled = true;

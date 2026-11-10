@@ -1,4 +1,4 @@
-// The browser tab title for THIS window.
+// The browser tab title and pane tree's window name for THIS window.
 //
 // The tab is titled the same way the launcher names the row and chan-desktop
 // titles the OS window -- "Terminal Window 2 [deploy shell]" -- so one window
@@ -7,7 +7,8 @@
 //
 // The workspace app has no view of the window feed: its only library access is
 // the short-lived, presence-bound command capability. So the naming fields are
-// read once from that snapshot at boot, and the caption is kept current
+// read once from that snapshot (at boot in a browser, when the pane tree
+// needs its heading on desktop), and the caption is kept current
 // afterwards by the targeted `window_labeled` frame the server pushes to this
 // window's own socket (store.svelte.ts routes it here). `kind` and `ordinal` are
 // library-owned and fixed for a window's life, so the boot read is enough for
@@ -18,8 +19,8 @@
 // title. The tab title is a convenience, never a correctness surface, so every
 // failure here is silent.
 
-import { windowDisplayName, type WindowKind } from "@chan/web-shared/window-label";
-import { privacy } from "@chan/web-shared/privacy";
+import { rowLabel, windowDisplayName, type WindowKind } from "@chan/web-shared/window-label";
+import { privacy, privateText } from "@chan/web-shared/privacy";
 import { sessionWindowId } from "../api/client";
 import { isTauriDesktop } from "../api/desktop";
 import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
@@ -31,7 +32,14 @@ interface WindowNaming {
   control: boolean;
 }
 
-let naming: WindowNaming | null = null;
+let naming = $state<WindowNaming | null>(null);
+let pending: Promise<void> | null = null;
+let latestLabel: string | undefined;
+
+/** The launcher's window name, including its privacy fallback; unknown until loaded. */
+export function windowName(): string | null {
+  return naming ? privateText(windowDisplayName(naming), rowLabel(naming.kind, naming.ordinal)) : null;
+}
 
 export function refreshWindowTitle(): void {
   if (typeof document === "undefined") return;
@@ -49,6 +57,18 @@ export async function initWindowTitle(): Promise<void> {
   // which the window watcher owns. Minting a library capability per window for
   // a string nobody can see is pure cost.
   if (isTauriDesktop()) return;
+  await loadWindowTitle();
+  if (naming) refreshWindowTitle();
+}
+
+/** Load the naming fields on demand, sharing an in-flight read and retrying a failed one. */
+export function loadWindowTitle(): Promise<void> {
+  if (naming) return Promise.resolve();
+  if (!pending) pending = readWindowNaming().finally(() => { pending = null; });
+  return pending;
+}
+
+async function readWindowNaming(): Promise<void> {
   try {
     const snapshot = await loadScopedLibrarySnapshot();
     const me = snapshot.windows.find((w) => w.window_id === sessionWindowId());
@@ -56,10 +76,10 @@ export async function initWindowTitle(): Promise<void> {
     naming = {
       kind: me.kind,
       ordinal: me.ordinal,
-      label: me.label ?? "",
+      // A rename delivered while the snapshot was in flight is newer.
+      label: latestLabel ?? me.label ?? "",
       control: me.control,
     };
-    refreshWindowTitle();
   } catch {
     // No capability, no library, or no live presence yet. The static title
     // stands; there is nothing for the user to act on.
@@ -68,6 +88,7 @@ export async function initWindowTitle(): Promise<void> {
 
 /** The leader retitled this window from the launcher. */
 export function applyWindowLabel(label: string): void {
+  latestLabel = label;
   if (!naming) return;
   naming.label = label;
   refreshWindowTitle();
@@ -76,4 +97,6 @@ export function applyWindowLabel(label: string): void {
 /** Test reset. */
 export function __resetWindowTitle(): void {
   naming = null;
+  pending = null;
+  latestLabel = undefined;
 }

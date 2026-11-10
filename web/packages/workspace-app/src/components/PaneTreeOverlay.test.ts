@@ -13,6 +13,13 @@ import { fileTab, terminalTab } from "../__tests__/tabs";
 import { closePaneTree, openPaneTree, paneTree, PANE_TREE_ANCHOR_ATTR } from "../state/paneTree.svelte";
 import type { ProgramStatusRecord } from "../state/programStatus";
 import { layout, paneMode, tabFocusPulse, type LeafNode, type Node, type Tab } from "../state/tabs.svelte";
+import { windowTabBar } from "../state/windowTabBar.svelte";
+import { applyWindowLabel, __resetWindowTitle } from "../state/windowTitle.svelte";
+import { privacy } from "@chan/web-shared/privacy";
+import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
+import { sessionWindowId } from "../api/client";
+
+vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }));
 
 const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
 
@@ -112,6 +119,16 @@ async function type(text: string): Promise<void> {
 
 beforeEach(async () => {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC);
+  vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue({
+    library_id: "local",
+    workspaces: [],
+    windows: [{
+      window_id: sessionWindowId(), kind: "terminal", ordinal: 2,
+      label: "deploy shell", title: "Unrelated terminal title",
+      control: false, tmux: false, workspace_path: null,
+      connected: true, hidden: false, launch_path: "/terminal/",
+    }],
+  });
   seedLayout();
   closePaneTree();
   await mountOverlay();
@@ -121,11 +138,76 @@ afterEach(async () => {
   paneMode.active = false;
   closePaneTree();
   for (const component of mounted.splice(0)) await unmount(component);
+  windowTabBar.on = false;
+  privacy.enabled = false;
+  __resetWindowTitle();
+  vi.mocked(loadScopedLibrarySnapshot).mockReset();
   document.body.innerHTML = "";
   vi.restoreAllMocks();
 });
 
 describe("rendering", () => {
+  test("names the window above the filter when title bar tabs are on, retaining filter focus", async () => {
+    windowTabBar.on = true;
+    await open();
+    await vi.waitFor(() => expect(panel()?.querySelector(".window-title")?.textContent).toBe("Terminal Window 2 [deploy shell]"));
+    const heading = panel()!.querySelector(".window-title")!;
+    expect(heading.nextElementSibling).toBe(filter().parentElement);
+    expect(document.activeElement).toBe(filter());
+    closePaneTree();
+    await tick();
+    await open();
+    expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  test("follows renames and privacy without putting the label into the filter", async () => {
+    windowTabBar.on = true;
+    await open();
+    await vi.waitFor(() => expect(panel()?.querySelector(".window-title")?.textContent).toContain("deploy shell"));
+    await type("Build");
+    applyWindowLabel("release checks");
+    await tick();
+    expect(panel()!.querySelector(".window-title")?.textContent).toBe("Terminal Window 2 [release checks]");
+    expect(rowTitles()).toEqual(["Build"]);
+    privacy.enabled = true;
+    await tick();
+    expect(panel()!.querySelector(".window-title")?.textContent).toBe("Terminal Window 2");
+    expect(panel()!.querySelector(".window-title")?.getAttribute("title")).toBe("Terminal Window 2");
+    applyWindowLabel("private.example");
+    await tick();
+    expect(panel()!.querySelector(".window-title")?.textContent).not.toContain("private.example");
+    privacy.enabled = false;
+    await tick();
+    expect(panel()!.querySelector(".window-title")?.textContent).toBe("Terminal Window 2 [private.example]");
+    applyWindowLabel("");
+    await tick();
+    expect(panel()!.querySelector(".window-title")?.textContent).toBe("Terminal Window 2");
+  });
+
+  test("keeps ordinary pane strips free of a duplicate window title and follows a mode switch", async () => {
+    await open();
+    expect(panel()!.querySelector(".window-title")).toBeNull();
+    expect(loadScopedLibrarySnapshot).not.toHaveBeenCalled();
+    windowTabBar.on = true;
+    await vi.waitFor(() => expect(panel()?.querySelector(".window-title")).not.toBeNull());
+    windowTabBar.on = false;
+    await tick();
+    expect(panel()!.querySelector(".window-title")).toBeNull();
+  });
+
+  test("keeps the picker usable when the window record cannot be loaded, and retries on reopen", async () => {
+    vi.mocked(loadScopedLibrarySnapshot).mockRejectedValueOnce(new Error("offline"));
+    windowTabBar.on = true;
+    await open();
+    expect(panel()!.querySelector(".window-title")).toBeNull();
+    expect(document.activeElement).toBe(filter());
+    expect(rowTitles()).toEqual(["Shell", "plan.md", "Logs", "Build"]);
+    closePaneTree();
+    await tick();
+    await open();
+    await vi.waitFor(() => expect(panel()?.querySelector(".window-title")?.textContent).toBe("Terminal Window 2 [deploy shell]"));
+  });
+
   test("draws nothing while closed", () => {
     expect(panel()).toBeNull();
   });

@@ -59,7 +59,7 @@ import { docSyncRosterChanged } from "./docSync.svelte";
 import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { clearWindowHidden, isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
-import { applyWindowLabel } from "./windowTitle";
+import { applyWindowLabel } from "./windowTitle.svelte";
 import {
   activeLayout,
   activeTabInPane,
