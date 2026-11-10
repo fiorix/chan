@@ -57,7 +57,7 @@ Each node generates a private key of its own, and every node gives its interface
 
 A missing required value, a poll outside 1 to 60 or a malformed value refuses startup naming the variable.
 
-On a host where the agent's package is installed beside the gateway's services, `packaging/gateway/scripts/configure.sh` writes this file: `IDENTITY_URL=http://127.0.0.1:7004`, the bearer it generates for identity, the node id it is given as the host id, and the interface name it asks for (`wg0` by default). On any other node the file is filled by hand, with the bearer copied from identity's `identity.env`.
+On a host where the agent's package is installed beside the gateway's services, `packaging/gateway/scripts/configure.sh` writes this file: `IDENTITY_URL=http://127.0.0.1:7004`, the bearer it generates for identity, the node id it is given as the host id, and the interface name it asks for (`wg0` by default). It does not write `WIREGUARD_AGENT_POLL_SECS` or `WIREGUARD_WG_BIN`: a rerun over a file that sets either names it before the WireGuard questions, and the replaced file's backup keeps it. On any other node the file is filled by hand, with the bearer copied from identity's `identity.env`.
 
 ## A host id identity does not list
 
