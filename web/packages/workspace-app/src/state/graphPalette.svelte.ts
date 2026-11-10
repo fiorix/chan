@@ -4,8 +4,8 @@
 /// The eight settable node-kind hues (`--g-doc`, `--g-source`,
 /// `--g-binary`, `--g-img`, `--g-folder`, `--g-tag`, `--g-language`,
 /// `--g-contact`) are the app's file-kind palette: the file tree, kind
-/// chips, inspector refs, JSON tree and empty-pane carousel read the
-/// same tokens (see design.md "Canonical semantic palette"). A custom
+/// chips, inspector refs, JSON tree and the Dashboard's carousel read
+/// the same tokens (see design.md "Canonical semantic palette"). A custom
 /// override is therefore applied to the graph surface's subtree
 /// (`.graph-tab`) and its portaled tab-menu bubble only, never to
 /// `:root`, so the graph alone repaints and every other surface keeps

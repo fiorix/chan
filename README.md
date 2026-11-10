@@ -10,6 +10,7 @@ Contributors and agents: start at [.agents/README.md](.agents/README.md); the pr
 
 - [docs/extensions.md](docs/extensions.md) - how Chan uses extensions and how to build one.
 - [docs/config-reference.md](docs/config-reference.md) - every persisted configuration file and field.
+- [docs/metrics.md](docs/metrics.md) - the process metrics: what the Dashboard's Metrics slide, `chan metrics` and `/api/metrics` report, and the optional Varlink interface.
 
 ## Design documents
 
@@ -26,6 +27,7 @@ Core:
 - [crates/chan-systemd](crates/chan-systemd/design.md) - the systemd boundary: notify, watchdog, fdstore, unit render and classification.
 - [crates/chan-tmux](crates/chan-tmux/design.md) - the tmux control-mode protocol: stream framing, notifications, commands, layouts.
 - [crates/chan-report](crates/chan-report/design.md) - repository reports: the walker, the JSONL schema, the COCOMO model.
+- [crates/chan-metrics](crates/chan-metrics/design.md) - the process-wide counters and the metered I/O wrapper the serving and transport code feed.
 - [crates/fetch-models](crates/fetch-models/design.md) - build-only helper that produces the embedded-model tarball.
 
 Desktop and web:

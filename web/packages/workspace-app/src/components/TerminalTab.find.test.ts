@@ -8,10 +8,13 @@
 //    nothing" because the search dies mid-keystroke.
 // 2. The find command family (app.find.open / next / prev) reaches the
 //    focused terminal over the chan:command bus. On desktop the key
-//    bridge claims Mod+F / Mod+G before the webview sees the keydown
+//    bridge claims the find chords before the webview sees the keydown
 //    and fires these commands; App.svelte serves them for file tabs
 //    only, so the terminal must serve itself or the chord is dead on
-//    a terminal pane.
+//    a terminal pane. With the keyboard inside the active terminal tab
+//    the bridge releases Mod+F in both forms and Ctrl+G, and the tab
+//    takes those as keys: its root opens the bar on `terminal.find`,
+//    and the find input steps on the Find next chord.
 // 3. Direction. Typing selects the newest match, the bottom-most in the
 //    buffer: the selection is cleared and the addon's reverse search
 //    starts from the bottom. Enter and app.find.next step to older

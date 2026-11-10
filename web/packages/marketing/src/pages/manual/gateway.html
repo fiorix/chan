@@ -271,6 +271,8 @@ chan devserver start --port 8787 \
     <li>Let the other person in: <code>chan-gateway-admin flag grant oauth_login friend@example.com</code>.</li>
     <li>In <strong>Devservers</strong>, click <strong>Share</strong> on <code>build-host</code>, enter their email, and click <strong>Add</strong>. The share reads <em>pending sign-in</em> until they sign in with that verified email, then <em>active</em>.</li>
     <li>They add your gateway to their Chan Desktop, as above. Your devserver is listed on their Computers screen; the first time they open it, Chan Desktop asks them to grant it native access.</li>
+    <li>They can use a browser instead of Chan Desktop. While <code>build-host</code> is online, <strong>Copy link</strong> on its row under <strong>My devservers</strong> copies its address at the gateway. Send them the link: it asks them to sign in, then opens the devserver's Computers screen, the page <strong>Open</strong> gives you. The link works for you and for everyone the devserver is shared with, and for nobody else.</li>
+    <li>To let them find it without a link, grant their account the <code>share_workspaces</code> flag as well: <code>chan-gateway-admin flag grant share_workspaces friend@example.com</code>. Their <strong>Devservers</strong> tab then lists your devserver under <strong>Shared with me</strong>, with <strong>Open</strong> and <strong>Copy link</strong> of its own. A shared row does not say whether the devserver is online; while it is offline, the link answers not found.</li>
   </ol>
   <p>To take access away, click <strong>Revoke</strong> on the share. Their sessions on that devserver end.</p>
 </section>
