@@ -332,6 +332,97 @@ pub(crate) async fn peers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    /// Two ingresses, `p2` listed first, so the first entry is not the one
+    /// an ordering by id would pick.
+    fn enrollment(persistent_keepalive: Option<u16>) -> WireguardEnrollment {
+        let ingress = |id: &str| Ingress {
+            id: id.into(),
+            endpoint: format!("{id}.proxy.example.test:51820"),
+            public_key: format!("key-of-{id}"),
+        };
+        WireguardEnrollment::new(
+            vec![ingress("p2"), ingress("p1")],
+            "proxy.example.test",
+            &["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+            vec!["10.7.0.0/24".into(), "fd00:7::/64".into()],
+            persistent_keepalive,
+        )
+        .unwrap()
+    }
+
+    /// The host map of the ingress `id`, as both documents carry it.
+    fn hosts(id: &str) -> Value {
+        json!([
+            {"name": format!("{id}.proxy.example.test"), "addresses": ["10.7.0.1", "fd00:7::1"]},
+            {"name": format!("*.{id}.proxy.example.test"), "addresses": ["10.7.0.1", "fd00:7::1"]},
+        ])
+    }
+
+    #[test]
+    fn redeem_parameters_describe_the_first_ingress_and_list_discoverys_ingresses() {
+        let enrollment = enrollment(Some(25));
+        let peer = vec!["10.7.0.23/32".to_owned(), "fd00:7::17/128".to_owned()];
+        let parameters = serde_json::to_value(enrollment.parameters(peer)).unwrap();
+        assert_eq!(
+            parameters,
+            json!({
+                "server_public_key": "key-of-p2",
+                "endpoint": "p2.proxy.example.test:51820",
+                "addresses": ["10.7.0.23/32", "fd00:7::17/128"],
+                "allowed_ips": ["10.7.0.0/24", "fd00:7::/64"],
+                "persistent_keepalive": 25,
+                "hosts": hosts("p2"),
+                "ingresses": [
+                    {
+                        "id": "p2",
+                        "endpoint": "p2.proxy.example.test:51820",
+                        "server_public_key": "key-of-p2",
+                        "hosts": hosts("p2"),
+                    },
+                    {
+                        "id": "p1",
+                        "endpoint": "p1.proxy.example.test:51820",
+                        "server_public_key": "key-of-p1",
+                        "hosts": hosts("p1"),
+                    },
+                ],
+            })
+        );
+
+        // The redeem's list is discovery's, entry for entry, with each key
+        // under the redeem's name for it, and the single-ingress fields of
+        // the two documents agree, which a desktop compares.
+        let discovery = serde_json::to_value(enrollment.discovery()).unwrap();
+        let renamed: Vec<Value> = discovery["ingresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(|mut entry| {
+                let key = entry.as_object_mut().unwrap().remove("public_key").unwrap();
+                entry["server_public_key"] = key;
+                entry
+            })
+            .collect();
+        assert_eq!(renamed.len(), 2);
+        assert_eq!(parameters["ingresses"], Value::Array(renamed));
+        assert_eq!(parameters["server_public_key"], discovery["public_key"]);
+        for shared in ["endpoint", "allowed_ips", "persistent_keepalive"] {
+            assert_eq!(parameters[shared], discovery[shared], "{shared}");
+        }
+
+        // A keepalive that is off is absent from both, not null.
+        let off = self::enrollment(None);
+        for document in [
+            serde_json::to_value(off.parameters(Vec::new())).unwrap(),
+            serde_json::to_value(off.discovery()).unwrap(),
+        ] {
+            assert!(document.get("persistent_keepalive").is_none(), "{document}");
+            assert!(document.get("ingresses").is_some());
+        }
+    }
 
     #[test]
     fn a_refused_host_is_logged_when_it_starts_and_once_per_interval() {
