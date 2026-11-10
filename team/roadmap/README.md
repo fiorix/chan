@@ -55,7 +55,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [every tmux pane takes the active pane's name][panenames] | built | owner |
 | [a Computers label on a tmux window is lost][tmuxlabel] | built | owner |
 | [a desktop upload's row reads "Uploading Upload"][uploadrow] | built | owner |
-| [a second reading finds small defects][reread] | built | docs |
+| [a second reading finds small defects][reread] | built | owner |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md

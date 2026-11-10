@@ -32,6 +32,13 @@ The CLI and the desktop:
 - The metrics runtime carries two stop flags that its `Drop` has to set together (`crates/chan-server/src/metrics.rs`).
 - rustfmt gives up on statements that hold a literal wider than its limit, and `cargo fmt --check` passes them unformatted: tests in `crates/chan/src/metrics.rs`, `metrics/varlink.rs`, `metrics/listener.rs` and `devserver/persisted.rs` have such statements (shown by run for the ones v0.127.0 rewrote: a perturbed copy of the old statement passed the check).
 
+The documents:
+
+- `desktop/design.md` and the web app's `design.md` say a tmux window answers New Window by asking tmux; that holds only for a tmux window of the desktop's own library, as the manual says since v0.127.0. `desktop/design.md` also says the Window menu lists hidden windows, where it lists open ones too, and its single-instance paragraph does not name the separate `XDG_RUNTIME_DIR` that keeps two desktops apart.
+- `CONTRIBUTING.md`, `docs/contributing/linux-and-macos.md` and `gateway/docs/dev-setup.md` describe Gateway CI without its packaging job and its wider path filter.
+- The Settings hint under Privacy mode (`components/settings/GlobalSection.svelte`) lists what the mode hides and leaves out workspace paths, WireGuard files and keys, connection errors, window labels and titles, the pane list's heading and the Metrics slide's host name and chan home path.
+- The manual's Metrics section does not say what the storage card reads after a failed scan, and a comment in `App.svelte` still names a "carousel slide-1 button".
+
 ## Desired contract
 
 1. Each line above is fixed, or closed with its reason, in one pass.
