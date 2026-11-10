@@ -1,6 +1,6 @@
 //! Drives a real tmux over `tmux -C`. Runs only when `CHAN_TMUX_BIN` names a
-//! tmux (3.2 or later) to run; the server it starts lives on a private
-//! socket and is killed at the end.
+//! tmux (3.2 or later) to run; each test's server lives on a private socket
+//! of its own and is killed at the end.
 
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command as Process, Stdio};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use chan_tmux::{
     parse_created_id, parse_layout, parse_list_panes, parse_list_windows, parse_pane_state, Client,
-    Command, Event, Limits, Message, PaneId, PaneState, Token, Version, WindowId,
+    Command, Error, Event, Limits, Message, PaneId, PaneState, Token, Version, WindowId,
 };
 
 struct Live {
@@ -25,8 +25,10 @@ struct Live {
 type Rows = Result<Vec<Vec<u8>>, Vec<Vec<u8>>>;
 
 impl Live {
-    fn start(bin: &str) -> Self {
-        let socket = format!("chan-tmux-live-{}", std::process::id());
+    /// Start a server on a socket named for this process and `tag`, so the
+    /// tests of one run each have their own.
+    fn start(bin: &str, tag: &str) -> Self {
+        let socket = format!("chan-tmux-live-{}-{tag}", std::process::id());
         let mut child = Process::new(bin)
             .args([
                 "-L",
@@ -74,13 +76,61 @@ impl Live {
     }
 
     fn pump(&mut self, wait: Duration) -> bool {
+        self.try_pump(wait).expect("stream stays framed")
+    }
+
+    /// Read once, handing back the client's refusal of what was read.
+    fn try_pump(&mut self, wait: Duration) -> Result<bool, Error> {
         match self.rx.recv_timeout(wait) {
             Ok(bytes) => {
-                let ev = self.client.feed(&bytes).expect("stream stays framed");
+                let ev = self.client.feed(&bytes)?;
                 self.events.extend(ev);
-                true
+                Ok(true)
             }
-            Err(_) => false,
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Run a tmux command against the server from outside the client.
+    fn tmux(&self, args: &[&str]) {
+        let _ = Process::new(&self.bin)
+            .args(["-L", &self.socket])
+            .args(args)
+            .output();
+    }
+
+    /// Every name tmux reported for `pane`, oldest first.
+    fn names_of(&self, pane: PaneId) -> Vec<String> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Message(Message::PaneName { pane: p, name }) if *p == pane => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Wait until the last name tmux reported for `pane` is `name`.
+    fn wait_name(&mut self, pane: PaneId, name: &str) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while self.names_of(pane).last().map(String::as_str) != Some(name) {
+            assert!(
+                Instant::now() < end,
+                "pane {pane} was never named {name:?}: {:?}",
+                self.names_of(pane)
+            );
+            self.pump(Duration::from_millis(50));
+        }
+    }
+
+    /// Read for `time`, long enough for tmux's once-a-second look at the
+    /// panes to have run.
+    fn settle(&mut self, time: Duration) {
+        let end = Instant::now() + time;
+        while Instant::now() < end {
+            self.pump(Duration::from_millis(50));
         }
     }
 
@@ -161,9 +211,7 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        let _ = Process::new(&self.bin)
-            .args(["-L", &self.socket, "kill-server"])
-            .output();
+        self.tmux(&["kill-server"]);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -175,7 +223,7 @@ fn against_a_real_tmux() {
         eprintln!("CHAN_TMUX_BIN unset: skipping the live tmux test");
         return;
     };
-    let mut t = Live::start(&bin);
+    let mut t = Live::start(&bin, "protocol");
     let pane = PaneId(0);
 
     // The interrupt line is a command tmux refuses and nothing more.
@@ -354,4 +402,134 @@ fn against_a_real_tmux() {
     // Detach ends the session cleanly.
     t.send(&Command::Detach);
     t.wait(|l| l.events.iter().any(|e| matches!(e, Event::Exited { .. })));
+}
+
+/// The pane names subscription against a real tmux: what a pane is called
+/// when it is new, when a program titles it, when the program is gone, and
+/// what a window's rename and a hostile command name do.
+#[test]
+fn pane_names_against_a_real_tmux() {
+    let Ok(bin) = std::env::var("CHAN_TMUX_BIN") else {
+        eprintln!("CHAN_TMUX_BIN unset: skipping the live tmux test");
+        return;
+    };
+    let mut t = Live::start(&bin, "names");
+    // A split runs the default shell, and a user's shell may title its pane
+    // at every prompt; `sh` with no profile leaves the title alone.
+    t.tmux(&["set-option", "-g", "default-shell", "/bin/sh"]);
+    let first = PaneId(0);
+
+    // tmux answers the subscription with an empty reply, then reports every
+    // pane within its once-a-second look. A new pane's title is the host's
+    // name, which names nothing, so the pane reads as its command.
+    assert_eq!(t.call(&Command::SubscribePaneNames), Ok(vec![]));
+    t.wait_name(first, "sh");
+
+    // A pane split off later is reported without being asked for.
+    let second = parse_created_id(
+        &t.call(&Command::SplitWindow {
+            pane: first,
+            horizontal: true,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let second = PaneId::parse(&second).unwrap();
+    t.wait_name(second, "sh");
+
+    // A program titles its pane (OSC 2): that pane takes the title and the
+    // other pane of the window keeps its own name.
+    t.type_into(second, b"printf '\\033]2;build log\\007'\r");
+    t.wait_name(second, "build log");
+    assert_eq!(t.names_of(first).last().unwrap(), "sh");
+
+    // The title outlives the program that set it, and a command run under it
+    // does not replace it. OSC 0 sets it as OSC 2 does.
+    t.type_into(
+        second,
+        b"sh -c \"printf '\\033]0;left by a program\\007'\"; sleep 2\r",
+    );
+    t.wait_name(second, "left by a program");
+    t.settle(Duration::from_millis(3200));
+    assert_eq!(t.names_of(second).last().unwrap(), "left by a program");
+
+    // An emptied title names nothing: the command does again.
+    t.type_into(second, b"printf '\\033]2;\\007'\r");
+    t.wait_name(second, "sh");
+
+    // Under the default title the name follows the foreground command, there
+    // and back.
+    t.type_into(first, b"sleep 2\r");
+    t.wait_name(first, "sleep");
+    t.wait_name(first, "sh");
+
+    // Renaming the window is a window notification and no pane's name.
+    let before = (t.names_of(first).len(), t.names_of(second).len());
+    assert_eq!(
+        t.call(&Command::RenameWindow {
+            window: WindowId(0),
+            name: "renamed".into(),
+        }),
+        Ok(vec![])
+    );
+    t.wait(|l| {
+        l.events.iter().any(
+            |e| matches!(e, Event::Message(Message::WindowRenamed { name, .. }) if name == "renamed"),
+        )
+    });
+    t.settle(Duration::from_millis(2200));
+    assert_eq!(
+        (t.names_of(first).len(), t.names_of(second).len()),
+        before,
+        "a window rename reports no pane"
+    );
+
+    // A pane of a window added later is reported too.
+    let window = parse_created_id(&t.call(&Command::NewWindow { cwd: None }).unwrap()).unwrap();
+    let window = WindowId::parse(&window).unwrap();
+    let panes = parse_list_panes(&t.call(&Command::ListPanes(window)).unwrap()).unwrap();
+    t.wait_name(panes[0].id, "sh");
+
+    // A command whose name holds a line break and a forged exit. A tmux that
+    // prints the name as it is cuts its line, which the client refuses,
+    // ending the stream; one that cleans the name keeps the stream. Either
+    // way the forged line is never read as tmux's exit. The program under
+    // that name is the shell, which runs whatever it is called; a `sleep`
+    // that is one of a multicall binary's names refuses a name it does not
+    // know and is gone before tmux looks at the pane.
+    let hostile = b"d=$(mktemp -d) && f=\"$d/$(printf 'x\\n%%exit')\" && \
+ln -s \"$(command -v sh)\" \"$f\" && \"$f\" -c 'sleep 2; :'; rm -rf \"$d\"\r";
+    let reported = t.names_of(first).len();
+    for c in Command::send_keys(first, hostile) {
+        t.send(&c);
+    }
+    let end = Instant::now() + Duration::from_millis(4500);
+    let mut refused = None;
+    while Instant::now() < end && refused.is_none() {
+        refused = t.try_pump(Duration::from_millis(50)).err();
+    }
+    assert!(
+        !t.events.iter().any(|e| matches!(e, Event::Exited { .. })),
+        "a pane's command name ended control mode"
+    );
+    // Which of the two this tmux did is printed for a run under --nocapture.
+    match refused {
+        Some(error) => {
+            eprintln!("hostile command name: the client refused the cut line");
+            assert_eq!(error, Error::Malformed("subscription-changed"));
+        }
+        None => {
+            let during = t.names_of(first).split_off(reported);
+            eprintln!("hostile command name: tmux reported {during:?}");
+            assert!(!during.is_empty(), "the command was never reported");
+            assert!(
+                during.iter().all(|name| !name.contains(char::is_control)),
+                "{during:?}"
+            );
+            t.wait_name(first, "sh");
+            assert!(t.call(&Command::Version).is_ok(), "the session is intact");
+            t.send(&Command::Detach);
+            t.wait(|l| l.events.iter().any(|e| matches!(e, Event::Exited { .. })));
+        }
+    }
 }

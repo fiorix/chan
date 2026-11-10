@@ -2,7 +2,8 @@
 // active surface. Slide commands move the controlled carousel index on
 // the active DashboardTab (its fields are $state) and persist the
 // session, matching the carousel's own arrows: step next/prev, or jump
-// straight to a named slot (Workspace status / Indexing status / About).
+// straight to a named slot (Metrics / Workspace status / Indexing status /
+// About).
 // See state/commands.ts for the Command shape and the onSurface helper.
 
 import { registerCommands, onSurface, type Command } from "../commands";
@@ -28,9 +29,10 @@ function onDashboard(fn: (tab: DashboardTab) => void): () => void {
 /// A jump-to-slot command, offered whenever a dashboard is the active
 /// surface (same gate as next/prev). A target the user switched off in
 /// the Dashboard tab menu re-clamps to the first enabled slot, matching
-/// how the persisted cursor is restored. The slot indices follow the
-/// carousel's `{#if slideIndex === n}` guards: 0 Workspace, 1
-/// Indexing/Search, 2 About.
+/// how the persisted cursor is restored. The slot indices are the stable
+/// ids the carousel's `slideIndex` guards read: 0 Workspace, 1
+/// Indexing/Search, 2 About, 3 Metrics. The first two need a workspace;
+/// About and Metrics are offered in any window that holds a Dashboard.
 function slideCommand(
   id: string,
   title: string,

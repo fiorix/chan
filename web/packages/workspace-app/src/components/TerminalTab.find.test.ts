@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// Terminal find (issue #6). The contracts pinned here:
+// Terminal find. The contracts pinned here:
 //
 // 1. The xterm Terminal is constructed with `allowProposedApi: true`.
 //    xterm gates registerDecoration behind that flag, and the search
@@ -49,11 +49,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vi
 
 import TerminalTab from "./TerminalTab.svelte";
 import terminalTabSource from "./TerminalTab.svelte?raw";
+import { hydrateOverrides } from "../state/keymapOverrides.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { closeTabMenu } from "../state/tabMenu.svelte";
 import { FIND_ANNOUNCE_INTERVAL_MS } from "../terminal/findAnnouncer";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { type SearchState, VtSearch, type VtTerminal } from "../terminal/ghosttyVt";
 
 type ResultsEvent = { resultIndex: number; resultCount: number };
@@ -442,6 +445,18 @@ async function openFindWithQuery(query: string): Promise<HTMLInputElement> {
   return input!;
 }
 
+/// Restart the focused terminal and answer its confirm; resolves once the
+/// new terminal has dialled its own socket.
+async function restartTerminal(): Promise<TestWebSocket> {
+  const sockets = TestWebSocket.all.length;
+  fireCommand("app.terminal.restart");
+  expect(confirmState.open, "a terminal with a session asks before it restarts").toBe(true);
+  resolveConfirm(true);
+  await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(sockets + 1));
+  await tick();
+  return TestWebSocket.all.at(-1)!;
+}
+
 function pressEnter(input: HTMLInputElement, shiftKey = false): void {
   input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey, bubbles: true }));
 }
@@ -537,6 +552,55 @@ describe("terminal find command routing", () => {
   });
 });
 
+// The row names the chord that opens this bar, `terminal.find`: Cmd+F on
+// macOS and Ctrl+Shift+F elsewhere, in the desktop app and in a browser. The
+// page's own find chord is a different key off macOS, where Ctrl+F is the
+// shell's, and has no browser form.
+describe("the terminal menu's Find row", () => {
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)";
+  const LINUX = "Mozilla/5.0 (X11; Linux x86_64)";
+  const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+  const tauri = window as unknown as { __TAURI_INTERNALS__?: unknown };
+
+  afterEach(() => {
+    delete tauri.__TAURI_INTERNALS__;
+    // The menu's state outlives the component, and a menu left open is
+    // drawn at the next mount, before that case names its platform.
+    closeTabMenu();
+  });
+
+  test.each([
+    ["the Linux desktop", LINUX, true, "Ctrl+Shift+F"],
+    ["the Windows desktop", WINDOWS, true, "Ctrl+Shift+F"],
+    ["the macOS desktop", MAC, true, "Cmd+F"],
+    ["a browser on Linux", LINUX, false, "Ctrl+Shift+F"],
+    ["a browser on macOS", MAC, false, "Cmd+F"],
+  ] as const)("on %s shows the chord that opens the bar", async (_where, agent, desktop, chord) => {
+    await renderTerminal(terminalTab(), true);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent);
+    if (desktop) tauri.__TAURI_INTERNALS__ = {};
+    document
+      .querySelector(".terminal-tab")!
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await tick();
+    await tick();
+    const row = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find(
+      (b) => b.querySelector(".mbtn-label")?.textContent?.trim() === "Find",
+    );
+    expect(row, "the body menu offers Find").toBeTruthy();
+    expect(row!.querySelector(".mbtn-chord")?.textContent?.trim()).toBe(chord);
+
+    // The same chord, pressed in the terminal, opens the bar.
+    const mod = agent === MAC ? { metaKey: true } : { ctrlKey: true, shiftKey: true };
+    document
+      .querySelector(".terminal-tab")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: agent === MAC ? "f" : "F", code: "KeyF", bubbles: true, cancelable: true, ...mod }));
+    await tick();
+    await tick();
+    expect(findInput()).not.toBeNull();
+  });
+});
+
 describe("terminal find count", () => {
   test("reads k of n with k counting from the newest match", async () => {
     await renderTerminal(terminalTab(), true);
@@ -617,6 +681,149 @@ describe("terminal find count", () => {
     await tick();
     expect(findInput()?.value).toBe("needle");
     expect(countElement()?.textContent).toBe("");
+  });
+});
+
+// Find next and Find previous are the desktop's chords (Cmd+G and Cmd+Shift+G
+// on macOS, Ctrl+G and Ctrl+Shift+G elsewhere), and its key bridge claims
+// them ahead of the page and sends the command. Ctrl+G is the exception: it
+// is BEL to a shell, so the bridge leaves it to a focused terminal tab, and
+// the find input is inside that tab. The input therefore steps on the chord
+// itself. Each desktop case runs chan-desktop's own bridge script over this
+// window, so a key the bridge claims and a key the input takes are counted
+// together: one press, one step.
+describe("the find stepping chords in the find input", () => {
+  const AGENTS = {
+    mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)",
+    linux: "Mozilla/5.0 (X11; Linux x86_64)",
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  } as const;
+  const KEY_BRIDGE = readFileSync("../../../desktop/src-tauri/src/key_bridge.js", "utf8");
+  const tauri = window as unknown as { __TAURI_INTERNALS__?: unknown };
+  let removeBridge: (() => void) | null = null;
+
+  afterEach(() => {
+    removeBridge?.();
+    removeBridge = null;
+    delete tauri.__TAURI_INTERNALS__;
+    hydrateOverrides(null);
+  });
+
+  /// The rest of the case runs in a browser on `os`.
+  function inBrowser(os: keyof typeof AGENTS): void {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(AGENTS[os]);
+  }
+
+  /// The rest of the case runs in the desktop app on `os`, with its key
+  /// bridge listening on the window in the capture phase unless `bridge` is
+  /// false, the state of a window whose bridge did not survive a navigation.
+  function onDesktop(os: keyof typeof AGENTS, bridge = true): void {
+    inBrowser(os);
+    tauri.__TAURI_INTERNALS__ = {};
+    if (!bridge) return;
+    const added: Array<[string, EventListener, boolean]> = [];
+    const host = {
+      addEventListener(type: string, listener: EventListener, capture: boolean) {
+        added.push([type, listener, capture]);
+        window.addEventListener(type, listener, capture);
+      },
+      dispatchEvent: (event: Event) => window.dispatchEvent(event),
+    };
+    new Function("window", "location", "CustomEvent", "navigator", KEY_BRIDGE)(
+      host,
+      { pathname: "/" },
+      CustomEvent,
+      { userAgent: AGENTS[os] },
+    );
+    expect(added.map(([type, , capture]) => [type, capture]), "the bridge listens for keys").toEqual([["keydown", true]]);
+    removeBridge = () => {
+      for (const [type, listener, capture] of added) window.removeEventListener(type, listener, capture);
+    };
+  }
+
+  /// A bar open on "needle" in a mounted xterm terminal, the input focused,
+  /// as the bridge reads focus to tell a terminal tab from the page.
+  async function openBar(): Promise<HTMLInputElement> {
+    await renderTerminal(terminalTab(), true);
+    const input = await openFindWithQuery("needle");
+    expect(document.activeElement, "the find input holds the keyboard").toBe(input);
+    expect(input.closest(".terminal-tab.active"), "inside the active terminal tab").not.toBeNull();
+    calls.splice(0);
+    return input;
+  }
+
+  /// Press a key in the input and return the steps it made, in order.
+  function press(input: HTMLInputElement, init: KeyboardEventInit): { steps: string[]; event: KeyboardEvent } {
+    calls.splice(0);
+    const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    input.dispatchEvent(event);
+    return { steps: callNames(), event };
+  }
+
+  const G = { key: "g", code: "KeyG" };
+  const SHIFT_G = { key: "G", code: "KeyG", shiftKey: true };
+
+  test.each(["linux", "windows"] as const)("on the %s desktop Ctrl+G steps to older output once", async (os) => {
+    const input = await openBar();
+    onDesktop(os);
+
+    const next = press(input, { ...G, ctrlKey: true });
+    expect(next.steps).toEqual(["findPrevious"]);
+    expect(calls[0]!.query).toBe("needle");
+    expect(next.event.defaultPrevented).toBe(true);
+
+    // Ctrl+Shift+G is the bridge's: its command steps to newer output, and
+    // the key never reaches the input to step again.
+    expect(press(input, { ...SHIFT_G, ctrlKey: true }).steps).toEqual(["findNext"]);
+  });
+
+  test("on the macOS desktop Cmd+G steps once, through the bridge's command, and Ctrl+G is no find chord", async () => {
+    const input = await openBar();
+    onDesktop("mac");
+
+    expect(press(input, { ...G, metaKey: true }).steps).toEqual(["findPrevious"]);
+    expect(press(input, { ...SHIFT_G, metaKey: true }).steps).toEqual(["findNext"]);
+    // The bridge leaves Ctrl+G to the tab on macOS too, where it is not the
+    // Find next chord.
+    const control = press(input, { ...G, ctrlKey: true });
+    expect(control.steps).toEqual([]);
+    expect(control.event.defaultPrevented).toBe(false);
+  });
+
+  // The pair to the case above: the input does answer Cmd+G on the macOS
+  // desktop, so the single step there is the bridge taking the key first.
+  test.each([
+    ["mac", { metaKey: true }],
+    ["linux", { ctrlKey: true }],
+  ] as const)("on the %s desktop without its bridge both chords step from the input", async (os, mod) => {
+    const input = await openBar();
+    onDesktop(os, false);
+
+    expect(press(input, { ...G, ...mod }).steps).toEqual(["findPrevious"]);
+    expect(press(input, { ...SHIFT_G, ...mod }).steps).toEqual(["findNext"]);
+  });
+
+  test.each([
+    ["linux", { ctrlKey: true }],
+    ["mac", { metaKey: true }],
+  ] as const)("in a browser on %s the keys are left alone", async (os, mod) => {
+    const input = await openBar();
+    inBrowser(os);
+
+    for (const key of [G, SHIFT_G]) {
+      const pressed = press(input, { ...key, ...mod });
+      expect(pressed.steps).toEqual([]);
+      expect(pressed.event.defaultPrevented, "the browser keeps its own find keys").toBe(false);
+    }
+  });
+
+  test("a remapped Find next is the chord the input steps on", async () => {
+    const input = await openBar();
+    onDesktop("linux");
+    hydrateOverrides({ "app.find.next": { linux: "Mod+Alt+N" } });
+
+    expect(press(input, { key: "n", code: "KeyN", ctrlKey: true, altKey: true }).steps).toEqual(["findPrevious"]);
+    expect(press(input, { ...G, ctrlKey: true }).steps, "the chord it replaced").toEqual([]);
   });
 });
 
@@ -753,11 +960,16 @@ describe("the real search addon in the mounted tab", () => {
     realXterm.on = true;
     await renderTerminal(terminalTab(), true);
     await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(1));
+    return attachXterm(TestWebSocket.all[0]!, "sess-1", text);
+  }
+
+  /// Attach the session behind the newest terminal's `socket` and print
+  /// `text` down it.
+  async function attachXterm(socket: TestWebSocket, id: string, text: string) {
     const model = realXterm.terminals.at(-1)!.model;
-    const socket = TestWebSocket.all[0]!;
     socket.onopen?.();
     await socket.onmessage?.({
-      data: JSON.stringify({ type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
+      data: JSON.stringify({ type: "session", id, seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
     });
     await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
     const print = async (out: string) => {
@@ -830,6 +1042,29 @@ describe("the real search addon in the mounted tab", () => {
     pressEnter(findInput()!);
     await tick();
     expect(countElement()?.textContent).toMatch(/^[123] of 3$/);
+  });
+
+  // A restart builds a new terminal in the same tab. The bar searched the
+  // one torn down, so it closes with it; left open it would show its query
+  // over a terminal it has not searched, with no count and no highlight.
+  test("a restart closes the bar, and the kept query searches the new terminal", async () => {
+    const first = await renderXterm(NEEDLES);
+    await openFindWithQuery("needle");
+    expect(countElement()?.textContent).toBe("1 of 3");
+
+    const socket = await restartTerminal();
+    expect(realXterm.terminals, "restart built a second terminal").toHaveLength(2);
+    expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
+
+    const { model } = await attachXterm(socket, "sess-2", NEEDLES);
+    expect(model).not.toBe(first.model);
+    await reopen();
+    expect(findInput()?.value).toBe("needle");
+    expect(countElement()?.textContent).toBe("");
+    pressEnter(findInput()!);
+    await tick();
+    expect(countElement()?.textContent).toBe("1 of 3");
+    expect(model.getSelection()).toBe("needle");
   });
 
   test("a refresh pending when the query empties leaves the count blank", async () => {
@@ -1369,6 +1604,43 @@ describe("terminal find on the ghostty backend", () => {
       unread: 0,
     });
     expect(writeCalls("terms[0].write(bytes);\nonData(term.writeln);")).toEqual({ calls: [], unread: 2 });
+  });
+
+  test("a restart closes the bar and frees its search, and the kept query searches the new terminal", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { frames } = await findNeedle(term);
+    const free = vi.spyOn(VtSearch.prototype, "free");
+
+    await restartTerminal();
+    frames.settle();
+    await vi.waitFor(() => expect(ghostty.terminals).toHaveLength(2));
+    expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
+    expect(free).toHaveBeenCalledTimes(1);
+
+    const next = ghostty.terminals.at(-1)!;
+    const socket = TestWebSocket.all.at(-1)!;
+    socket.onopen?.();
+    await socket.onmessage?.({
+      data: JSON.stringify({ type: "session", id: "sess-2", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
+    });
+    await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
+    const bytes = new TextEncoder().encode(NEEDLES);
+    const buffer = new ArrayBuffer(bytes.length);
+    new Uint8Array(buffer).set(bytes);
+    await socket.onmessage?.({ data: buffer });
+    await vi.waitFor(() => expect(next.wasmTerm.plainText()).toContain("needle f"));
+    expect(document.activeElement, "the new terminal reads the keyboard").toBe(next.element);
+
+    fireCommand("app.find.open");
+    await tick();
+    await tick();
+    expect(findInput()?.value).toBe("needle");
+    expect(countElement()?.textContent).toBe("");
+    pressEnter(findInput()!);
+    frames.settle();
+    await tick();
+    expect(selection(next)).toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
   });
 
   test("the terminal's teardown frees the open bar's search", async () => {

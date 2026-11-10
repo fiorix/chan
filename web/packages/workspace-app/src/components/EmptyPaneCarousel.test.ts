@@ -31,9 +31,9 @@ async function renderCarousel(props: Record<string, any> = {}) {
 
 describe("EmptyPaneCarousel", () => {
   test("renders Metrics first with four dots", async () => {
-    // Slide 0 hosts WorkspaceInfoBody. Slide 1 is the indexing
-    // (Search) graph; slide 2 is the About widget (version +
-    // attributions + donation QR + project links).
+    // Slide ids: 0 hosts WorkspaceInfoBody, 1 is the indexing (Search)
+    // graph, 2 is the About widget (version + attributions + donation QR
+    // + project links) and 3 is Metrics, shown first and the default.
     const target = await renderCarousel();
 
     expect(target.querySelectorAll(".dot-btn").length).toBe(4);

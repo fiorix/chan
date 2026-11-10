@@ -98,6 +98,11 @@ zip = { workspace = true }
 # on a host with no display server.
 chan-revtunnel = { workspace = true, features = ["client"] }
 futures = { workspace = true }
+# The metrics watch and Varlink adapter tests run on a paused clock
+# (`#[tokio::test(start_paused = true)]`), so their one-second turns and
+# their idle and write bounds elapse at once; `start_paused` lives behind
+# tokio's own `test-util` feature.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 # The root-stall seam behind chan-workspace's `test-hooks` feature, so a test
 # can hold one root's filesystem calls and show a command asks nothing of it.

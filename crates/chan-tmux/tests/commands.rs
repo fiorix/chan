@@ -132,6 +132,13 @@ fn commands_render() {
         "new-window -PF '#{window_id}'"
     );
     assert_eq!(r(Command::KillPane(PaneId(4))), "kill-pane -t %4");
+    // Every pane of the session, with the two lengths ahead of the texts
+    // they measure: the parser's check of a line rests on that order.
+    assert_eq!(
+        r(Command::SubscribePaneNames),
+        "refresh-client -B 'chan-pane-name:%*:#{==:#{pane_title},#{host}} \
+         #{n:pane_current_command} #{n:pane_title} #{pane_current_command} #{pane_title}'"
+    );
     assert_eq!(
         r(Command::ResizePane {
             pane: PaneId(4),
@@ -163,6 +170,7 @@ fn only_a_capture_promises_rows() {
     for c in [
         Command::Version,
         Command::ListWindows,
+        Command::SubscribePaneNames,
         Command::Detach,
         Command::KillServer,
         Command::KillWindow(WindowId(1)),

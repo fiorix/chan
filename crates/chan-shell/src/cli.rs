@@ -430,8 +430,9 @@ pub enum ShellAction {
     #[command(long_about = help::CS_DASHBOARD)]
     #[command(after_long_help = help::CS_DASHBOARD_AFTER)]
     Dashboard {
-        /// Initial carousel slide index (0-based). Out-of-range values
-        /// land on the default slide.
+        /// Slot id of the slide the new tab opens on: 3 Metrics,
+        /// 0 Workspace, 1 Search, 2 About. A slot the window does not have
+        /// opens on Metrics, the default slide.
         #[arg(long = "carousel-index", verbatim_doc_comment)]
         carousel_index: Option<u32>,
         /// Open with carousel auto-rotation OFF (the new tab's
@@ -3220,6 +3221,42 @@ mod tests {
         assert!(
             !help.contains("--path") && !new_help.contains("--path"),
             "terminal help:\n{help}\nterminal new help:\n{new_help}"
+        );
+    }
+
+    #[test]
+    fn dashboard_help_names_one_preference_scope_and_one_slot_vocabulary() {
+        use clap::CommandFactory;
+        let mut cmd = CsCli::command();
+        cmd.build();
+        // The hand-wrapping collapsed, so a phrase reads across a line end.
+        let page = cmd
+            .find_subcommand_mut("dashboard")
+            .unwrap()
+            .render_long_help()
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The carousel preference is one setting for the whole library.
+        assert!(
+            page.contains("global carousel preference") && !page.contains("workspace-wide"),
+            "{page}"
+        );
+        // --carousel-index takes a slot id, in the flag's help as in the head.
+        let flag = page
+            .split("--carousel-index <CAROUSEL_INDEX>")
+            .nth(1)
+            .and_then(|rest| rest.split("--carousel-off").next())
+            .expect("the --carousel-index option");
+        assert!(
+            flag.contains("Slot id") && !flag.contains("0-based"),
+            "{flag}"
+        );
+        // One fallback, named the same way in both places.
+        assert_eq!(
+            page.matches("opens on Metrics, the default slide").count(),
+            2
         );
     }
 

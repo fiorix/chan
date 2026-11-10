@@ -56,10 +56,10 @@
 
   // A pane showing a tmux pane draws no strip (Pane.svelte hides it on the
   // same test), so while one is active the bar shows its name where the
-  // strip would sit: the label the pane tree gives it, which the server
-  // keeps on the tmux window's name. A pane Hybrid Nav stages has no tmux
-  // pane yet and reads as the mode names it; outside the mode a pane with no
-  // active tab reads as the pane tree reads it. Null in any other pane.
+  // strip would sit: the label the pane tree gives it, which is what tmux
+  // calls that pane. A pane Hybrid Nav stages has no tmux pane yet and reads
+  // as the mode names it; outside the mode a pane with no active tab reads
+  // as the pane tree reads it. Null in any other pane.
   const tmuxName = $derived.by(() => {
     const id = viewLayout.activePaneId;
     if (!paneShowsTmux(id)) return null;

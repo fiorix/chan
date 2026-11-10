@@ -566,8 +566,8 @@ describe("the window controls", () => {
 
 describe("a tmux window", () => {
   /// Two tmux panes side by side, as the server's tmux_layout lays them
-  /// out: each pane one terminal tab marked with its tmux pane, named after
-  /// the tmux window. The left one is active.
+  /// out: each pane one terminal tab marked with its tmux pane and titled
+  /// with its session's tab name. The left one is active.
   function tmuxPanes(left = "editor", right = "logs"): void {
     const tab = (id: string, title: string, session: string, pane: string) =>
       terminalTab({ id, title, terminalSessionId: session, tmuxPane: { connection: 1, pane } });
@@ -617,6 +617,29 @@ describe("a tmux window", () => {
     expect(nameOf(bar)).toBe("build");
     expect(nameOf(bar)).toBe(paneTreeLabel());
     expect(bar.querySelectorAll(".tmux-badge")).toHaveLength(1);
+  });
+
+  test("shows what tmux calls the active pane, without the suffix its tab name carries", async () => {
+    // Two panes at a shell: the server keeps tab names unique, so the second
+    // session is "bash-2", and tmux calls both panes "bash".
+    tmuxPanes("bash", "bash-2");
+    const entry = (id: string, tabName: string, tmuxName: string) => ({
+      id, tab_name: tabName, tmux_name: tmuxName, tab_group: "tmux", window_id: null, broadcast: false,
+    });
+    applyTerminalRoster([entry("s0", "bash", "bash"), entry("s1", "bash-2", "bash")]);
+    const bar = await renderBar();
+    setActivePane("right");
+    await tick();
+    expect(nameOf(bar)).toBe("bash");
+    expect(nameOf(bar)).toBe(paneTreeLabel());
+
+    // The pane runs top: its own name changes and the other pane's does not.
+    applyTerminalRoster([entry("s0", "bash", "bash"), entry("s1", "top", "top")]);
+    await tick();
+    expect(nameOf(bar)).toBe("top");
+    setActivePane("left");
+    await tick();
+    expect(nameOf(bar)).toBe("bash");
   });
 
   test("an unnamed tmux window reads as the pane tree reads it", async () => {

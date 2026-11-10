@@ -19,8 +19,9 @@
 //!   - date_format (id; UI-side mapping in dateFormats.ts)
 //!   - strip_trailing_whitespace_on_save
 //!   - bubble_overlay_mode (stack / tray for watcher notifications)
-//!   - empty_pane_carousel_cycling (auto-rotate the empty-pane
-//!     carousel; per-user toggle, default true)
+//!   - empty_pane_carousel_cycling (auto-rotate the Dashboard
+//!     carousel, the Settings row "Dashboard carousel"; per-user toggle,
+//!     default true)
 //!   - pane_strip_auto_hide (hide a pane's tab strip while the side it
 //!     shows holds fewer than two tabs; default off)
 //!   - page_width_ratio (editor page-width cap as a ratio of the
@@ -80,11 +81,11 @@ pub struct EditorPrefs {
     pub bubble_overlay_mode: BubbleOverlayMode,
     #[serde(default)]
     pub hybrid_surface_themes: HybridSurfaceThemes,
-    /// Auto-rotate the empty-pane carousel. Default true so
-    /// first-launch behaviour matches the original implementation;
-    /// users who want a stationary welcome state toggle it off and
-    /// the choice persists. Pointer-hover-pause remains independent
-    /// of this flag.
+    /// Auto-rotate the Dashboard carousel: the Settings row "Dashboard
+    /// carousel", under the key's older name. On by default; a user who
+    /// wants a stationary Dashboard turns it off and the choice persists.
+    /// The pause while the pointer is over the carousel is independent of
+    /// this flag.
     #[serde(default = "default_empty_pane_carousel_cycling")]
     pub empty_pane_carousel_cycling: bool,
     /// Hide a pane's tab strip while the side it shows holds fewer than

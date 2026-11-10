@@ -10,8 +10,9 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { flushSync, mount, tick, unmount, type ComponentProps } from "svelte";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import type { GlobalConfig, HybridSurfaceThemes, Preferences } from "../api/types";
 import { __testSetStandalonePreferences, currentPreferences, workspace } from "./store.svelte";
 import { allCommands } from "./commands";
 import "./commands/install";
@@ -157,5 +158,136 @@ describe("each reader of a setting", () => {
     } finally {
       await teardownDemoApp({ mounted: app, timers });
     }
+  });
+});
+
+// The server stores the surface-theme table it is sent whole, so a write has
+// to carry every surface's stored theme, whatever the window that sends it
+// holds. Each case runs a fresh store, in a window with no workspace unless
+// it says otherwise, over a config route that stores a PATCH the way the
+// server does.
+describe("the per-surface body themes", () => {
+  const href = window.location.href;
+  const STORED: HybridSurfaceThemes = { editor: "light", terminal: "dark" };
+  let server: GlobalConfig;
+  let tables: unknown[];
+  let store: typeof import("./store.svelte");
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  }
+
+  /// A fresh module graph for a window of `kind`: the capabilities are read
+  /// from the URL once, at module load.
+  async function openWindow(kind: "terminal" | "workspace"): Promise<void> {
+    vi.resetModules();
+    window.history.replaceState({}, "", kind === "terminal" ? "/?kind=terminal" : "/");
+    store = await import("./store.svelte");
+    const { windowCaps } = await import("./windowCaps");
+    expect(windowCaps.workspace, `a ${kind} window`).toBe(kind === "workspace");
+  }
+
+  /// The command as the launcher runs it, from this window's own registry.
+  async function runCommand(id: string): Promise<void> {
+    const { allCommands } = await import("./commands");
+    await import("./commands/install");
+    const command = allCommands().find((c) => c.id === id);
+    expect(command, id).toBeDefined();
+    await command!.run();
+  }
+
+  function liveTable(): HybridSurfaceThemes {
+    const out: HybridSurfaceThemes = {};
+    for (const kind of store.HYBRID_SURFACE_KINDS) {
+      const value = store.surfaceThemeOverride(kind);
+      if (value) out[kind] = value;
+    }
+    return out;
+  }
+
+  beforeEach(() => {
+    server = { revision: 7, preferences: preferences({ hybrid_surface_themes: { ...STORED } }), workspaces: [] };
+    tables = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/api/workspace")) {
+        return json({ root: "/tmp/ws", label: "ws", metadata_key: "k", preferences: server.preferences, warnings: [] });
+      }
+      if (!url.includes("/api/config")) return new Response(null, { status: 404 });
+      if (init?.method !== "PATCH") return json(server);
+      const sent = JSON.parse(String(init.body)) as { expected_revision: number; preferences: Partial<Preferences> };
+      expect(sent.expected_revision).toBe(server.revision);
+      tables.push(sent.preferences.hybrid_surface_themes);
+      server = {
+        ...server,
+        revision: server.revision + 1,
+        preferences: { ...server.preferences, ...sent.preferences },
+      };
+      return json(server);
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.history.replaceState({}, "", href);
+    vi.resetModules();
+  });
+
+  test("the Dashboard theme command in a window with no workspace keeps the other surfaces' stored themes", async () => {
+    await openWindow("terminal");
+    // The frame every window hears after a settings write, and the same
+    // refresh this window runs at boot.
+    store.onWatchEvent({ kind: "config_changed" });
+    await vi.waitFor(() => expect(store.currentPreferences()).not.toBeNull());
+    expect(liveTable(), "the window took the served table").toEqual(STORED);
+
+    await runCommand("app.dashboard.surfaceTheme.dark");
+
+    expect(tables).toEqual([{ editor: "light", terminal: "dark", dashboard: "dark" }]);
+    expect(server.preferences.hybrid_surface_themes).toEqual({ editor: "light", terminal: "dark", dashboard: "dark" });
+    expect(liveTable()).toEqual({ editor: "light", terminal: "dark", dashboard: "dark" });
+  });
+
+  test("a write merges over the table the server holds, not over the window's own", async () => {
+    await openWindow("terminal");
+    // No refresh has run: the window's own table is empty.
+    expect(liveTable()).toEqual({});
+
+    await runCommand("app.dashboard.surfaceTheme.dark");
+    expect(tables.at(-1)).toEqual({ editor: "light", terminal: "dark", dashboard: "dark" });
+
+    // A clear drops its own surface and nothing else.
+    await store.clearHybridSurfaceTheme("terminal");
+    expect(tables.at(-1)).toEqual({ editor: "light", dashboard: "dark" });
+  });
+
+  test("a config_changed frame brings a window with no workspace a theme stored elsewhere, and takes back a cleared one", async () => {
+    await openWindow("terminal");
+    server = { ...server, preferences: { ...server.preferences, hybrid_surface_themes: { dashboard: "dark" } } };
+    store.onWatchEvent({ kind: "config_changed" });
+    await vi.waitFor(() => expect(store.surfaceThemeOverride("dashboard")).toBe("dark"));
+
+    server = { ...server, preferences: { ...server.preferences, hybrid_surface_themes: { editor: "light" } } };
+    store.onWatchEvent({ kind: "config_changed" });
+    await vi.waitFor(() => expect(liveTable()).toEqual({ editor: "light" }));
+    expect(tables, "a refresh writes nothing").toEqual([]);
+  });
+
+  test("a workspace window sends the stored table with its one change, and keeps a theme stored since its last refresh", async () => {
+    await openWindow("workspace");
+    await store.refreshWorkspace();
+    expect(liveTable()).toEqual(STORED);
+
+    await store.setHybridSurfaceTheme("dashboard", "dark");
+    expect(tables.at(-1)).toEqual({ editor: "light", terminal: "dark", dashboard: "dark" });
+
+    // Another window stores a Graph theme, and this one has not heard yet.
+    server = {
+      ...server,
+      revision: server.revision + 1,
+      preferences: { ...server.preferences, hybrid_surface_themes: { ...server.preferences.hybrid_surface_themes, graph: "light" } },
+    };
+    await store.clearHybridSurfaceTheme("editor");
+    expect(tables.at(-1)).toEqual({ terminal: "dark", dashboard: "dark", graph: "light" });
   });
 });

@@ -335,6 +335,10 @@ export type TerminalSpawnResponse = {
 export type TerminalRosterEntry = {
   id: string;
   tab_name: string | null;
+  /// What tmux calls the pane a tmux pane session shows; absent for any other
+  /// session. `tab_name` is unique among live sessions, so two panes tmux
+  /// calls the same differ there by a suffix. This is the name without it.
+  tmux_name?: string;
   tab_group: string;
   window_id: string | null;
   /// Whether a page holds the session's window. False for a window no page
@@ -431,9 +435,10 @@ export type Preferences = {
   /// Watcher bubbles display mode: show all inline, or collapse
   /// to a count tray until expanded.
   bubble_overlay_mode: BubbleOverlayMode;
-  /// Auto-rotate the empty-pane carousel. Optional on the wire so
-  /// older servers that don't ship the field don't trip the type
-  /// contract; the UI treats `undefined` as the default-true.
+  /// Auto-rotate the Dashboard tab's carousel: the "Dashboard carousel"
+  /// row in Settings -> Global. Optional on the wire so older servers
+  /// that don't ship the field don't trip the type contract; the UI
+  /// treats `undefined` as the default-true.
   empty_pane_carousel_cycling?: boolean;
   /// Hide a pane's tab strip while the side it shows holds fewer than two
   /// tabs. Optional on the wire so older servers that omit it don't trip

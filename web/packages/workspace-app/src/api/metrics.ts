@@ -26,6 +26,6 @@ export interface MetricsView {
   latest: MetricSample | null; history: MetricSample[];
   storage: {
     path: string; logicalBytes: number | null; allocatedBytes: number | null;
-    files: number | null; sampledAtMs: number | null; scanMillis: number | null; error: string | null;
+    files: number | null; sampledAtMs: number | null; scanMs: number | null; error: string | null;
   };
 }

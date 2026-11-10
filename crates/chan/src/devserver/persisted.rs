@@ -24,13 +24,21 @@ pub(super) fn resolve_devserver_addr(
     SocketAddr::new(ip, port)
 }
 
-/// Where to dial this machine's devserver: the running systemd unit's
-/// address, else the persisted port on the default bind.
+/// Where to dial this machine's devserver: the address its systemd unit
+/// file pins, else the recorded port on the default bind. The unit file
+/// stays on disk when the unit is stopped, so this is the address a running
+/// devserver serves only while that unit is the one running; a devserver
+/// started some other way is at [`recorded_devserver_addr`].
 pub(crate) fn local_devserver_dial_addr() -> Option<SocketAddr> {
-    running_systemd_devserver_addr().or_else(|| {
-        chan_server::persisted_devserver_port()
-            .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
-    })
+    running_systemd_devserver_addr().or_else(recorded_devserver_addr)
+}
+
+/// The port the devserver last bound, on the default bind. Every start with
+/// a listener records its port, so this is where a devserver started outside
+/// the unit listens, unless it was given a bind of its own.
+pub(crate) fn recorded_devserver_addr() -> Option<SocketAddr> {
+    chan_server::persisted_devserver_port()
+        .map(|port| SocketAddr::new(DEFAULT_DEVSERVER_BIND, port))
 }
 
 /// The address the RUNNING systemd devserver serves its management API on,

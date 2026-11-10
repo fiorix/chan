@@ -1266,6 +1266,12 @@ impl FdStoreRestoreReport {
 pub struct RosterEntry {
     pub id: String,
     pub tab_name: Option<String>,
+    /// What tmux calls the pane a tmux pane session shows, absent for any
+    /// other session. `tab_name` is unique among live sessions, so two panes
+    /// tmux calls the same differ there by a suffix; this is the name
+    /// without it, which a page shows for the pane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_name: Option<String>,
     /// Resolved group (never empty; `DEFAULT_TERMINAL_GROUP` when unset),
     /// matching the SPA's `terminalTabGroup` so a group compares equal on
     /// both sides of the wire.
@@ -2101,17 +2107,21 @@ impl Registry {
                         self.close(&id, CloseReason::Explicit);
                     }
                 }
-                tmux_connection::TmuxWork::RenamePanes { ids, name } => {
-                    for id in ids {
-                        // tmux renames the pane's tab; its broadcast group
-                        // stays the one it has.
-                        let group = self
-                            .sessions
-                            .lock()
-                            .expect("terminal registry poisoned")
-                            .get(&id)
-                            .map(|pane| pane.live_metadata().group);
-                        self.update_live_metadata(&id, name.clone(), group);
+                tmux_connection::TmuxWork::RenamePane { id, name } => {
+                    let target = self
+                        .sessions
+                        .lock()
+                        .expect("terminal registry poisoned")
+                        .get(&id)
+                        .cloned();
+                    if let Some(target) = target.filter(|target| target.is_tmux_pane()) {
+                        // The pane's name is kept as tmux gave it, for a
+                        // page to show; the tab name is that name settled
+                        // against the live ones, and the broadcast group
+                        // stays the one the session has.
+                        let group = target.live_metadata().group;
+                        target.set_tmux_name(Some(name.clone()));
+                        self.update_live_metadata(&id, name, Some(group));
                     }
                 }
                 tmux_connection::TmuxWork::LabelWindow { window_id, label } => {
@@ -2778,6 +2788,7 @@ impl Registry {
                 RosterEntry {
                     id: session.id.clone(),
                     tab_name: metadata.name,
+                    tmux_name: session.tmux_name(),
                     tab_group: metadata.group,
                     window_live: window_id.as_ref().is_some_and(|id| live.contains(id)),
                     window_id,
@@ -2953,8 +2964,9 @@ impl Registry {
             self.unused_id(&sessions)
         };
         let mut spec = spec;
+        let tmux_name = spec.name.take();
         let mut reservation =
-            self.reserve_metadata(spec.name.take(), Some(spec.group.clone()), None);
+            self.reserve_metadata(tmux_name.clone(), Some(spec.group.clone()), None);
         spec.name = reservation.metadata.name.clone();
         spec.group = reservation.metadata.group.clone();
         let session = Session::for_tmux_pane(
@@ -2964,6 +2976,7 @@ impl Registry {
             sink,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
         );
+        session.set_tmux_name(tmux_name);
         {
             let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
             let mut reservations = self
@@ -4836,6 +4849,9 @@ struct Session {
     exec_argv: Option<Vec<OsString>>,
     /// Set on a tmux pane session, which has no PTY; see [`TmuxPaneRef`].
     tmux_pane: Option<TmuxPaneRef>,
+    /// What tmux calls this session's pane, before the registry settled it
+    /// into a unique tab name; `None` for a session that is no tmux pane.
+    tmux_name: Mutex<Option<String>>,
     /// The control window minted for this session's tmux connection, while
     /// the session sits in it; see `Registry::open_tmux_control_window`.
     tmux_control_window: Mutex<Option<String>>,
@@ -5215,6 +5231,7 @@ impl Session {
             },
             exec_argv,
             tmux_pane: None,
+            tmux_name: Mutex::new(None),
             tmux_control_window: Mutex::new(None),
             child_pid,
             #[cfg(target_os = "linux")]
@@ -5648,6 +5665,7 @@ impl Session {
             // reach it, so an adopted session is always a shell session.
             exec_argv: None,
             tmux_pane: None,
+            tmux_name: Mutex::new(None),
             tmux_control_window: Mutex::new(None),
             child_pid: meta.child_pid,
             child_start_time: child_identity.start_time,
@@ -6377,6 +6395,18 @@ impl Session {
         self.tmux_pane.is_some()
     }
 
+    /// What tmux calls this session's pane; see [`RosterEntry::tmux_name`].
+    fn tmux_name(&self) -> Option<String> {
+        self.tmux_name
+            .lock()
+            .expect("terminal tmux name poisoned")
+            .clone()
+    }
+
+    fn set_tmux_name(&self, name: Option<String>) {
+        *self.tmux_name.lock().expect("terminal tmux name poisoned") = name;
+    }
+
     /// A session for one pane of a tmux connection: no PTY and no threads of
     /// its own, its ring fed by the connection and its commands sent to the
     /// connection's channel. Program status is on, since a program in the
@@ -6428,6 +6458,7 @@ impl Session {
             spawn_opts,
             exec_argv: None,
             tmux_pane: Some(pane),
+            tmux_name: Mutex::new(None),
             tmux_control_window: Mutex::new(None),
             child_pid: None,
             #[cfg(target_os = "linux")]
@@ -8075,7 +8106,9 @@ pub struct TmuxPaneRef {
 #[derive(Debug, Clone)]
 pub struct TmuxPaneSpec {
     pub pane: TmuxPaneRef,
-    /// The tab name, from the tmux window's name.
+    /// What tmux calls the pane, or the label of its id while tmux has
+    /// reported no name. The session's tab name is this, settled against the
+    /// live names.
     pub name: Option<String>,
     pub group: String,
     pub window_id: Option<String>,
@@ -8452,6 +8485,7 @@ mod tests {
             },
             exec_argv: None,
             tmux_pane: None,
+            tmux_name: Mutex::new(None),
             tmux_control_window: Mutex::new(None),
             child_pid: None,
             #[cfg(target_os = "linux")]

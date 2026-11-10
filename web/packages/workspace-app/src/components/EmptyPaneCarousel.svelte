@@ -241,19 +241,14 @@
 
   // ---- carousel state ----------------------------------------------------
 
-  /// DashboardTab passes the persisted slide cursor in (via the
-  /// tabs.svelte.ts serialization round-trip) so a window reload
-  /// restores the carousel to the slide the user was last on.
-  /// `onSlideChange` lets the parent write the live cursor back to
-  /// its DashboardTab.carouselSlide field so subsequent reloads keep
-  /// the position aligned. Both props default to no-op for
-  /// non-DashboardTab hosts.
-  // DashboardTab passes the live slide cursor in (sourced from
-  // tab.carouselSlide) plus `onSlideChange` to write moves back. The
-  // carousel is CONTROLLED: tab.carouselSlide is the single source of
-  // truth, so the dots stay in sync with no snapshot to drift. `active`
-  // is false while the tab is hidden; the carousel then force-pauses
-  // auto-rotate and the indexing poll.
+  // DashboardTab passes the slide cursor in (tab.carouselSlide, which the
+  // layout persists, so a window reload restores the slide the user was
+  // last on) plus `onSlideChange` to write moves back. The carousel is
+  // CONTROLLED: tab.carouselSlide is the single source of truth, so the
+  // dots stay in sync with no snapshot to drift, and a host that passes no
+  // `onSlideChange` stays on the slide it passed. `active` is false while
+  // the tab is hidden; the carousel then force-pauses auto-rotate and the
+  // indexing poll.
   type Props = {
     selectedIndexId?: string | null;
     inspectorWidth?: number;
@@ -404,7 +399,7 @@
     {#if slideIndex === DASHBOARD_METRICS_SLIDE}
       <MetricsSlide {active} />
     {:else if slideIndex === 2}
-      <!-- About slot (index 2 / last): version + attributions plus
+      <!-- About slot (id 2, shown last): version + attributions plus
            a "Fund the work" CTA with the donation QR + the website
            / source links, so the user has one self-contained
            surface to learn what chan is and how to support it. -->
@@ -474,7 +469,7 @@
         </div>
       </div>
     {:else if slideIndex === 0}
-      <!-- Workspace slot (index 0 / first) hosts `WorkspaceInfoBody`,
+      <!-- Workspace slot (id 0, shown after Metrics) hosts `WorkspaceInfoBody`,
            the same inspector body the file browser shows when the
            workspace-root row is selected. `WorkspaceInfoBody` owns its own
            scroll affordance via the slide's `overflow: auto`. -->

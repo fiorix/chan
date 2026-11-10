@@ -20,6 +20,7 @@ mod remote_workspace;
 mod revtunnel;
 mod runtime_capability;
 mod serve;
+mod single_instance;
 mod terminal_mode;
 mod terminal_opacity;
 mod titlebar_tabs;
@@ -270,6 +271,23 @@ pub struct AppState {
     pub restore_pending: Mutex<Vec<String>>,
     /// The permits `chan serve` handoffs register their paths under.
     handoff_registrations: HandoffRegistrations,
+    /// The handoff listener, held for the process's life; a relaunch gives it
+    /// up first (`single_instance::release_endpoint`).
+    pub(crate) handoff_listener: Mutex<Option<chan_server::handoff::ListenerHandle>>,
+    /// The endpoint claim of a handoff listener that failed to start, held in
+    /// the listener's place for the process's life: a desktop that let it go
+    /// would run without the lock that keeps a second launch from booting
+    /// beside it (`single_instance::hold_endpoint`).
+    pub(crate) unserved_endpoint: Mutex<Option<chan_server::handoff::EndpointClaim>>,
+    /// The workspace window that took focus last, the one a second launch
+    /// brings forward (`single_instance::come_forward`).
+    pub(crate) last_focused_window: Mutex<Option<String>>,
+    /// Set once the boot's restore task has ended, by which time every window
+    /// the boot opens is a shown record of the library
+    /// (`single_instance::BootSettled`). Until then a second launch's
+    /// `Activate` opens no terminal, since the boot's own windows are on
+    /// their way.
+    pub(crate) boot_settled: std::sync::atomic::AtomicBool,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -340,6 +358,10 @@ impl AppState {
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
             restore_pending: Mutex::new(Vec::new()),
             handoff_registrations: HandoffRegistrations::default(),
+            handoff_listener: Mutex::new(None),
+            unserved_endpoint: Mutex::new(None),
+            last_focused_window: Mutex::new(None),
+            boot_settled: std::sync::atomic::AtomicBool::new(false),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
@@ -4387,8 +4409,14 @@ async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), Stri
     run_clipboard_op(move || clipboard_write_html(html, alt_text)).await
 }
 
+/// Raise the window of a Window menu Open row. The section lists minimized
+/// windows too, and showing and focusing one leaves it minimized on Windows
+/// and the GTK desktops: tao's `set_visible` only sets the window visible
+/// there, and its `set_focus` skips a minimized window on every platform. So
+/// the window is restored first.
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(label) {
+        let _ = w.unminimize();
         w.show().map_err(err)?;
         w.set_focus().map_err(err)?;
     }
@@ -5527,6 +5555,11 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // One desktop per user: a GUI launch that finds another desktop serving
+    // the handoff endpoint asks it to come forward and exits here, before
+    // the shims, the config, the WireGuard fabric or any window. The claim
+    // it returns is the endpoint the listener serves once setup runs.
+    let endpoint_claim = single_instance::guard();
     // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
     // also provides the `chan` + `cs` CLI without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
@@ -5783,26 +5816,23 @@ fn main() {
                 }
             }
 
-            // CLI-to-desktop handoff listener. Binds the
-            // well-known per-user endpoint (a UDS on unix, a named pipe on
-            // Windows) so a `chan serve <workspace>` in a terminal hands the
-            // workspace to this desktop window instead of failing on the
-            // per-workspace flock. Leaked for the process lifetime (the registry
-            // watcher above uses the same Box::leak pattern; the handle's Drop
-            // tears down the listener, but we want it live until exit, and
-            // RunEvent::Exit tears the process down anyway). A bind failure is
-            // non-fatal: the CLI just falls back to its own server.
-            // `ensure_well_known_socket_path` (bind-side) creates the
-            // owner-only socket directory on the no-XDG arm, or refuses a
-            // squatted one; clients validate the same directory without
-            // creating it.
-            #[cfg(any(unix, windows))]
-            if let Some(sock) = chan_server::handoff::ensure_well_known_socket_path() {
+            // CLI-to-desktop handoff listener. Serves the well-known
+            // per-user endpoint (a UDS on unix, a named pipe on Windows) the
+            // start-up guard claimed, so a `chan serve <workspace>` in a
+            // terminal hands the workspace to this desktop window instead of
+            // failing on the per-workspace flock, and a second desktop launch
+            // asks this one to come forward. The handle lives in the app
+            // state for the process lifetime; its Drop tears down the
+            // listener, which a relaunch does first. A bind failure is
+            // non-fatal: the CLI just falls back to its own server, and the
+            // app state keeps the claim in the listener's place, so a second
+            // launch still meets the endpoint held.
+            if let Some(claim) = endpoint_claim {
                 let app_for_handoff = app.handle().clone();
                 let state_for_handoff = Arc::clone(&state_for_setup);
-                // `start_listener` binds a tokio listener (UnixListener /
-                // named-pipe server) and `tokio::spawn`s the accept loop, so it
-                // MUST run inside a tokio runtime context. The Tauri `setup` runs
+                // `start_claimed_listener` binds a tokio listener (UnixListener
+                // / named-pipe server) and `tokio::spawn`s the accept loop, so
+                // it MUST run inside a tokio runtime context. The Tauri `setup` runs
                 // on the main thread OUTSIDE any runtime, so calling it
                 // directly panics ("there is no reactor running"), which
                 // aborts the whole desktop on launch. Enter the Tauri-
@@ -5811,7 +5841,7 @@ fn main() {
                 // below use) so the bind + the spawned accept loop attach
                 // to it and survive after this returns.
                 let listener = tauri::async_runtime::block_on(async {
-                    chan_server::handoff::start_listener(sock, move |req| {
+                    chan_server::handoff::start_claimed_listener(claim, move |req| {
                         let app = app_for_handoff.clone();
                         let state = Arc::clone(&state_for_handoff);
                         async move {
@@ -6002,18 +6032,14 @@ fn main() {
                                         Err(message) => Response::Error { message },
                                     }
                                 }
+                                Request::Activate { .. } => {
+                                    single_instance::come_forward(&app, &state)
+                                }
                             }
                         }
                     })
                 });
-                match listener {
-                    Ok(handle) => {
-                        Box::leak(Box::new(handle));
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "CLI-to-desktop handoff listener disabled");
-                    }
-                }
+                single_instance::hold_endpoint(&state_for_setup, listener);
             }
 
             // Boot matrix. Every window is a library registry row, so boot is
@@ -6031,6 +6057,10 @@ fn main() {
             // off.
             let queued = queue_boot_restore(&state_for_restore);
             tauri::async_runtime::spawn(async move {
+                // Held to the end of this task, however it ends: until it
+                // drops, a second launch's `Activate` opens no terminal
+                // beside the windows this boot is about to open.
+                let _boot_settled = single_instance::BootSettled::when_dropped(&state_for_restore);
                 // Mount the shared terminal tenant FIRST so persisted terminal
                 // windows resolve and the watcher reopens them on relaunch.
                 if let Some(embedded) = state_for_restore.embedded() {
@@ -6118,16 +6148,20 @@ fn main() {
                     persist_workspaces(&state_for_exit);
                 }
             }
-            // macOS: Dock click or `open -a` while the process is still
-            // alive with no visible window (only hidden-in-place windows
-            // remain): open a standalone terminal, the window the launcher
-            // is toggled in.
+            // macOS: Dock click or `open -a` while the process is alive
+            // with no visible window, because only hidden-in-place windows
+            // remain or because the boot has not opened its windows yet. It
+            // opens a standalone terminal, the window the launcher is
+            // toggled in, unless a window is on its way: a terminal opened
+            // during the boot would be one more saved window. The rule is
+            // `single_instance::reopen_without_a_window`, built and tested
+            // on every target, since this arm is built on macOS alone.
             #[cfg(target_os = "macos")]
             RunEvent::Reopen {
                 has_visible_windows: false,
                 ..
             } => {
-                spawn_terminal_window(_app);
+                single_instance::reopen_without_a_window(_app);
             }
             _ => {}
         }
@@ -6402,7 +6436,7 @@ pub(crate) fn run_menu_item(app: &tauri::AppHandle, id: &str, invoked_for: Optio
                 tracing::warn!(error = %e, "open new window for focused workspace failed");
             }
         }
-        "app-open-in-browser" => {
+        OPEN_IN_BROWSER_MENU_ID => {
             if let Err(e) = open_focused_window_in_browser(app) {
                 tracing::warn!(error = %e, "open focused window in browser failed");
             }
@@ -6829,13 +6863,12 @@ trait WindowMenuSurface {
 /// bottom, and its other items after Zoom. A tail below them is removed by
 /// the wrong indices, which deletes AppKit's items and strands the old
 /// rows where no later pass can find them, so sections pile up with the
-/// titles they were stamped with. Above Minimize the tail's indices hold
-/// as long as AppKit adds nothing there, which is what Tauri's and muda's
-/// code and the owner's menu show: the items above Minimize are chan's
-/// own, Tauri builds Minimize and Zoom below them and has muda hand the
-/// submenu to AppKit as the windows menu (`setWindowsMenu:`), and the menu
-/// AppKit fills shows its items only after Zoom and at the bottom. Off
-/// macOS the submenu ends at Open in Browser and the tail closes it.
+/// titles they were stamped with. Above Minimize the tail's indices hold,
+/// since AppKit adds nothing there: the items above Minimize are chan's
+/// own, and Tauri builds Minimize and Zoom below them and has muda hand
+/// the submenu to AppKit as the windows menu (`setWindowsMenu:`), which
+/// AppKit fills after Zoom and at the bottom. Off macOS the submenu ends
+/// at Open in Browser and the tail closes it.
 fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) {
     // Back to front, so each removal leaves the positions still to come
     // in place.
@@ -7462,12 +7495,6 @@ async fn restore_on_workspaces<R: tauri::Runtime>(
     }
 }
 
-/// Start the one normal-exit drain. Snapshot the mounted overlay before any
-/// tenant is removed, await every embedded tenant, then perform the process
-/// action. Synchronous Tauri hooks call this and return; the async task owns the
-/// remaining state. A second request while a drain is in flight is refused and
-/// handed back, so a caller holding something valuable (the Windows staged
-/// installer) can keep it rather than lose it silently.
 /// Whether the embedded library holds a shown record the window watcher has
 /// not opened yet (`window_watcher::awaiting_native_window`).
 fn window_on_its_way(app: &tauri::AppHandle) -> bool {
@@ -7505,6 +7532,12 @@ fn schedule_exit_when_nothing_opened(app: tauri::AppHandle) {
     });
 }
 
+/// Start the one normal-exit drain. Snapshot the mounted overlay before any
+/// tenant is removed, await every embedded tenant, then perform the process
+/// action. Synchronous Tauri hooks call this and return; the async task owns the
+/// remaining state. A second request while a drain is in flight is refused and
+/// handed back, so a caller holding something valuable (the Windows staged
+/// installer) can keep it rather than lose it silently.
 fn begin_normal_shutdown(
     app: tauri::AppHandle,
     action: ShutdownAction,
@@ -7523,7 +7556,10 @@ fn begin_normal_shutdown(
         match action {
             ShutdownAction::Exit(code) => app.exit(code),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            ShutdownAction::Restart => app.restart(),
+            ShutdownAction::Restart => {
+                single_instance::release_endpoint(&state);
+                app.restart()
+            }
             #[cfg(windows)]
             ShutdownAction::InstallUpdate { update, bytes } => {
                 tracing::info!(
@@ -7538,6 +7574,7 @@ fn begin_normal_shutdown(
                         error = %e,
                         "installing the downloaded update failed; relaunching the current version"
                     );
+                    single_instance::release_endpoint(&state);
                     app.restart();
                 }
                 // On success the plugin has already exited the process.
@@ -8131,7 +8168,7 @@ mod tests {
         );
     }
 
-    /// The owner's menu after privacy mode went on and off: AppKit lists the
+    /// The Window menu as privacy mode goes on and off: AppKit lists the
     /// windows at the bottom of its windows menu and rebuilds stamp the tail
     /// around it. Each rebuild leaves the latest tail alone, with the titles
     /// it was stamped with, and every AppKit item.
@@ -8166,6 +8203,30 @@ mod tests {
             .shown()
             .iter()
             .all(|(_, text)| text != "Chan (privacy mode)"));
+    }
+
+    /// The Open in Browser item's id is spelled once, in its constant: the
+    /// menus are built with it, the dynamic tail is anchored on it and the
+    /// handler matches it, so a rename cannot leave the item without its
+    /// action.
+    #[test]
+    fn the_open_in_browser_item_id_is_spelled_once() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        assert_eq!(
+            production
+                .matches(&format!("\"{OPEN_IN_BROWSER_MENU_ID}\""))
+                .count(),
+            1,
+            "only the constant's definition spells the id"
+        );
+        let handler = source_region(
+            production,
+            "\npub(crate) fn run_menu_item(",
+            "\n/// Window-menu item id namespace for buried-window entries",
+        );
+        assert!(handler.contains("OPEN_IN_BROWSER_MENU_ID => {"));
     }
 
     /// AppKit may add items after Zoom too (the window tiling items) and
@@ -8664,6 +8725,208 @@ mod tests {
                 "the caller-cwd restore must run before {probe}"
             );
         }
+    }
+
+    /// Only the GUI boot refuses a second instance. Every CLI personality
+    /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the default-terminal
+    /// launch returns from `main` before the single-instance guard, so none of
+    /// them claims the handoff endpoint or asks a running desktop anything,
+    /// and the guard runs before the boot touches what a running desktop owns.
+    #[test]
+    fn cli_personalities_never_reach_the_single_instance_guard() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        assert_eq!(
+            production.matches("single_instance::guard(").count(),
+            1,
+            "the guard has one caller"
+        );
+        let main_body = source_region(production, "\nfn main() {", "\nfn install_app_menu(");
+        let guard = main_body
+            .find("single_instance::guard()")
+            .expect("main runs the single-instance guard");
+        for personality in [
+            "run_hidden_mcp_proxy_if_requested()",
+            "run_as_cs_if_requested()",
+            "run_as_chan_if_requested()",
+            "print_version_if_requested()",
+            "terminal_mode::run_if_requested()",
+        ] {
+            let at = main_body
+                .find(personality)
+                .unwrap_or_else(|| panic!("main dispatches {personality}"));
+            assert!(
+                at < guard,
+                "{personality} must return before the single-instance guard"
+            );
+        }
+        for boot in [
+            "cs_install::install_bin_shims()",
+            "ConfigStore::new()",
+            "wireguard::start(",
+            "tauri::Builder::default()",
+        ] {
+            let at = main_body
+                .find(boot)
+                .unwrap_or_else(|| panic!("main boots through {boot}"));
+            assert!(
+                guard < at,
+                "the single-instance guard must run before {boot}"
+            );
+        }
+        assert!(
+            !include_str!("terminal_mode.rs").contains("single_instance"),
+            "the default-terminal launch leaves a running desktop alone"
+        );
+    }
+
+    /// The Window menu's Open section lists minimized windows, so a click on
+    /// a row restores its window before showing and focusing it. A source
+    /// pin: it holds the call and its place, not what the platform then does.
+    #[test]
+    fn an_open_window_row_restores_its_window_before_raising_it() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let row = source_region(
+            production,
+            "if let Some(label) = id.strip_prefix(OPEN_MENU_ID_PREFIX) {",
+            "match id {",
+        );
+        assert!(row.contains("show_window(app, label)"));
+        let raise = source_region(
+            production,
+            "\nfn show_window(",
+            "\n/// The devserver library id of a watcher-opened devserver window label",
+        );
+        let restore = raise.find("w.unminimize()");
+        let show = raise.find("w.show()").expect("the row shows its window");
+        let focus = raise
+            .find("w.set_focus()")
+            .expect("the row focuses its window");
+        assert!(
+            restore.is_some_and(|restore| restore < show) && show < focus,
+            "an open window's row must restore a minimized window before it shows and focuses it"
+        );
+    }
+
+    /// A relaunch gives up the handoff endpoint before it starts the new
+    /// process, whose single-instance guard then claims it instead of meeting
+    /// it held by the desktop on its way out.
+    #[test]
+    fn a_relaunch_releases_the_handoff_endpoint_first() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let shutdown = source_region(
+            production,
+            "\nfn begin_normal_shutdown(",
+            "\n/// Quit, asking first",
+        );
+        let lines: Vec<&str> = shutdown
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let restarts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("app.restart()"))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(restarts.len(), 2, "both relaunches are pinned");
+        for at in restarts {
+            assert_eq!(
+                lines[at - 1],
+                "single_instance::release_endpoint(&state);",
+                "a relaunch must release the endpoint right before it"
+            );
+        }
+    }
+
+    /// A reopen with no visible window, a Dock click on macOS, goes through
+    /// the gated answer, which opens no terminal while the boot or a window
+    /// is on its way. The arm is built on macOS alone, so it makes that one
+    /// call and never opens a terminal itself, and the answer opens one only
+    /// for the choice that says so.
+    #[test]
+    fn a_reopen_with_no_visible_window_goes_through_the_gated_answer() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let arm = source_region(
+            production,
+            "RunEvent::Reopen {",
+            "\n/// Build and install the application menu.",
+        );
+        assert!(arm.contains("has_visible_windows: false,"));
+        assert!(
+            arm.contains("single_instance::reopen_without_a_window(_app);"),
+            "the reopen arm must make the gated call"
+        );
+        assert!(
+            !arm.contains("spawn_terminal_window("),
+            "the reopen arm must not open a terminal itself"
+        );
+        const SINGLE_INSTANCE_RS: &str = include_str!("single_instance.rs");
+        let (answer_source, _) = SINGLE_INSTANCE_RS
+            .split_once(boundary)
+            .expect("the test module separates the production code");
+        let answer = source_region(
+            answer_source,
+            "\npub(crate) fn reopen_without_a_window(",
+            "\n/// The choice for a reopen with no visible window",
+        );
+        assert!(answer.contains("if reopen_for(app, &state) == Forward::OpenTerminal {"));
+        assert_eq!(answer.matches("spawn_terminal_window(").count(), 1);
+    }
+
+    /// The boot's restore task takes its settled-guard inside the task and
+    /// before its first await, so every way out of the task, its end, an
+    /// early return or a panic, marks the boot settled; a boot left pending
+    /// would have every later `Activate` open nothing. The guard's drop is
+    /// the mark's one writer.
+    #[test]
+    fn the_boot_restore_task_settles_the_boot_on_every_way_out() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let boot = source_region(
+            production,
+            "let queued = queue_boot_restore(&state_for_restore);",
+            "spawn_launch_update_check(app.handle().clone());",
+        );
+        let task = boot
+            .find("tauri::async_runtime::spawn(async move {")
+            .expect("the boot restore runs as a task");
+        let first_await = boot
+            .find(".await")
+            .expect("the restore task awaits its mounts");
+        let guard = boot.find(
+            "let _boot_settled = single_instance::BootSettled::when_dropped(&state_for_restore);",
+        );
+        assert!(
+            guard.is_some_and(|guard| task < guard && guard < first_await),
+            "the restore task must hold the boot's settled-guard from before its first await"
+        );
+        assert!(boot.contains("ensure_boot_window(Arc::clone(&state_for_restore)).await"));
+        const SINGLE_INSTANCE_RS: &str = include_str!("single_instance.rs");
+        let (guard_source, _) = SINGLE_INSTANCE_RS
+            .split_once(boundary)
+            .expect("the test module separates the production code");
+        let mark = concat!("boot_settled", ".store(");
+        assert_eq!(
+            production.matches(mark).count() + guard_source.matches(mark).count(),
+            1,
+            "only the guard's drop marks the boot settled"
+        );
+        let drop_body = source_region(
+            guard_source,
+            "\nimpl Drop for BootSettled {",
+            "\n/// Answer a second launch's `Activate`",
+        );
+        assert!(drop_body.contains("self.0.boot_settled.store(true, Ordering::SeqCst);"));
     }
 
     #[test]

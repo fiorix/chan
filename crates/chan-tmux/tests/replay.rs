@@ -78,6 +78,7 @@ fn every_split_point_decodes_the_same() {
         "04-capture.raw",
         "06-exit-in-block.raw",
         "13-forged-end.raw",
+        "14-pane-names.raw",
     ] {
         let bytes = fixture(name);
         let whole = frames(&bytes, usize::MAX, 20);
@@ -210,6 +211,38 @@ fn notifications_of_a_layout_session() {
         pane: PaneId(1)
     }));
     assert!(matches!(msgs[0], Message::SessionsChanged));
+}
+
+/// Two panes of one window as tmux 3.8 reported them: each under the title
+/// tmux gave it, then one with a title a program set and with that title
+/// emptied. The window's rename in between names no pane.
+#[test]
+fn pane_names_of_a_split_window() {
+    let msgs = messages("14-pane-names.raw");
+    let names: Vec<(PaneId, &str)> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            Message::PaneName { pane, name } => Some((*pane, name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            (PaneId(0), "sh"),
+            (PaneId(1), "sh"),
+            (PaneId(1), "build log"),
+            (PaneId(1), "sh"),
+        ]
+    );
+    assert!(msgs.contains(&Message::WindowRenamed {
+        window: WindowId(0),
+        name: "renamed".into()
+    }));
+    assert!(
+        !msgs.iter().any(|m| matches!(m, Message::Other { .. })),
+        "every notification of the capture is one the crate reads: {msgs:?}"
+    );
 }
 
 #[test]

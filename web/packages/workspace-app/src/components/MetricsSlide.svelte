@@ -1,4 +1,8 @@
 <script lang="ts">
+  // Privacy mode conceals the two readings that name the machine or its
+  // user: the host name and the chan home path. The rest are counts, rates
+  // and the build, which name nobody.
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
   import { metrics, watchMetrics } from "../state/metrics.svelte";
   import type { MetricSample } from "../api/metrics";
   import MetricChart from "./MetricChart.svelte";
@@ -33,7 +37,7 @@
 </script>
 <section class="metrics-slide" aria-label="Metrics">
   <header>
-    <div><h2>Metrics</h2><p>Server process{view ? ` · PID ${view.identity.pid}` : ""}</p>{#if view}<p>Host: {view.identity.hostname ?? "n/a"}</p>{/if}</div>
+    <div><h2>Metrics</h2><p>Server process{view ? ` · PID ${view.identity.pid}` : ""}</p>{#if view}<p>Host: {#if view.identity.hostname}<PrivateField field="metrics:host" label="host name">{view.identity.hostname}</PrivateField>{:else}n/a{/if}</p>{/if}</div>
     {#if view}<div class="identity">chan {view.identity.version}<br /><code>{view.identity.build}</code></div>{/if}
   </header>
   {#if metrics.error}<p class="error" role="status">Metrics unavailable: {metrics.error}. Displayed readings may be stale.</p>{/if}
@@ -62,10 +66,10 @@
         <p>Layer payloads overlap. Network counts service TCP/connector bytes.</p>
       </article>
       <article><h3>Storage <strong>{bytes(view?.storage.logicalBytes)}</strong></h3>
-        <p class="path" title={view?.storage.path}>{view?.storage.path}</p>
+        <p class="path"><PrivateField field="metrics:chan-home" label="chan home path"><span title={view?.storage.path}>{view?.storage.path}</span></PrivateField></p>
         <p>{bytes(view?.storage.allocatedBytes)} allocated · {view?.storage.files ?? "n/a"} files</p>
         <p>{view?.storage.sampledAtMs ? `Scanned ${new Date(view.storage.sampledAtMs).toLocaleTimeString()}` : "Scan pending"} · refreshes every minute</p>
-        {#if view?.storage.error}<p class="error">Storage scan failed; showing the last completed total.</p>{/if}
+        {#if view?.storage.error}<p class="error">Storage scan failed: {view.storage.error}{view.storage.logicalBytes == null ? "." : "; showing the last completed total."}</p>{/if}
         <h3 class="transfer-heading">Transfer payload</h3>
         <p>RX {rate(sample.transferPayload.receivedBytesPerSecond)} · TX {rate(sample.transferPayload.sentBytesPerSecond)}</p>
         <p>{sample.transfers.cancelled} cancelled · {sample.transfers.stalled} stalled · {sample.transfers.refused} refused</p>

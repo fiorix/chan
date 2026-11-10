@@ -49,12 +49,43 @@ fn a_pane_session_records_output_into_its_ring_and_is_listed() {
         .find(|entry| entry.id == session.id)
         .expect("in the roster");
     assert_eq!(entry.tab_name.as_deref(), Some("editor"));
+    assert_eq!(entry.tmux_name.as_deref(), Some("editor"));
     assert_eq!(entry.tab_group, "tmux");
     assert_eq!(entry.window_id.as_deref(), Some("win-1"));
     assert!(registry
         .session_summaries()
         .iter()
         .any(|s| s.session_id == session.id && s.cwd.is_none()));
+}
+
+/// What tmux calls a pane rides the roster beside the unique tab name, for a
+/// page to show, and only a pane's entry has it.
+#[test]
+fn the_roster_carries_a_panes_own_name_beside_its_unique_tab_name() {
+    let registry = Registry::new(test_config(4096, 4, 10));
+    let (sink, _commands) = std::sync::mpsc::channel();
+    let first = registry
+        .add_tmux_pane(pane_spec(1, "bash"), sink.clone())
+        .unwrap();
+    let second = registry.add_tmux_pane(pane_spec(2, "bash"), sink).unwrap();
+    let (plain, _plain_commands) = test_session_with_commands(4096);
+    register_session(&registry, &plain);
+    let roster = serde_json::to_value(registry.roster()).unwrap();
+    let entry = |id: &str| {
+        roster
+            .as_array()
+            .and_then(|entries| entries.iter().find(|entry| entry["id"] == id))
+            .cloned()
+            .expect("in the roster")
+    };
+    assert_eq!(entry(&first.id)["tab_name"], "bash");
+    assert_eq!(entry(&second.id)["tab_name"], "bash-2");
+    assert_eq!(entry(&first.id)["tmux_name"], "bash");
+    assert_eq!(entry(&second.id)["tmux_name"], "bash");
+    assert!(
+        entry(&plain.id).get("tmux_name").is_none(),
+        "a terminal of chan's own has no such name"
+    );
 }
 
 #[test]

@@ -342,13 +342,18 @@ gateway-sdme-contract-check: ## Check the gateway package sdme driver against a 
 	$(LINUX_ONLY)
 	packaging/gateway/scripts/dev/sdme/test-build-gateway.sh
 
+.PHONY: gateway-roles-sdme-contract-check
+gateway-roles-sdme-contract-check: ## Check the gateway database roles sdme driver against a stand-in.
+	$(LINUX_ONLY)
+	packaging/gateway/scripts/dev/sdme/test-database-roles-test.sh
+
 .PHONY: e2e-bins-sdme-contract-check
 e2e-bins-sdme-contract-check: ## Check the gateway end-to-end binaries sdme driver against a stand-in.
 	$(LINUX_ONLY)
 	packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/test-build-bins.sh
 
 .PHONY: sdme-contract-check
-sdme-contract-check: sdme-storage-contract-check sdme-parser-contract-check sdme-policy-contract-check aur-sdme-contract-check copr-sdme-contract-check desktop-sdme-contract-check gateway-sdme-contract-check e2e-bins-sdme-contract-check nix-sdme-contract-check ## Check all sdme build driver contracts without starting guests.
+sdme-contract-check: sdme-storage-contract-check sdme-parser-contract-check sdme-policy-contract-check aur-sdme-contract-check copr-sdme-contract-check desktop-sdme-contract-check gateway-sdme-contract-check gateway-roles-sdme-contract-check e2e-bins-sdme-contract-check nix-sdme-contract-check ## Check all sdme driver contracts without starting guests.
 
 .PHONY: nix-hash-check
 nix-hash-check: ## Fail when Cargo.lock is not the lock the Nix cargoHash pins were harvested for.

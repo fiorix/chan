@@ -8,39 +8,9 @@ mod varlink;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chan_server::metrics::View;
-use clap::Args;
+use chan_server::metrics::{View, SCHEMA_VERSION};
 
-#[derive(Args, Debug, Clone)]
-pub(crate) struct MetricsArgs {
-    /// Server base URL, optionally carrying its launch token (?t=...).
-    /// Omit to query the devserver belonging to this CHAN_HOME.
-    #[arg(long)]
-    pub url: Option<String>,
-    /// Bearer for an explicit URL. With --url and no --token,
-    /// CHAN_METRICS_TOKEN supplies it; without --url the variable is
-    /// ignored and the local devserver's own bearer is used.
-    // Read in `url_token`, not through clap's `env`: clap counts an env
-    // value as given, so an exported variable would trip `requires = "url"`
-    // on every plain `chan metrics`.
-    #[arg(long, requires = "url")]
-    pub token: Option<String>,
-    /// Emit the shared metrics schema as JSON.
-    #[arg(long)]
-    pub json: bool,
-    /// Repeat about every second with only what is new: the first output is
-    /// complete and each later one carries only newer samples. JSON mode
-    /// emits one object per line.
-    #[arg(long)]
-    pub watch: bool,
-    /// Include the server's bounded sample history in JSON output; under
-    /// --watch, later lines hold only the samples newer than the last.
-    #[arg(long, requires = "json")]
-    pub history: bool,
-    /// Serve Varlink on stdin/stdout (systemd StandardInput=socket).
-    #[arg(long, conflicts_with_all = ["json", "watch", "history"])]
-    pub varlink: bool,
-}
+use crate::cli::MetricsArgs;
 
 pub(crate) struct Client {
     args: MetricsArgs,
@@ -94,21 +64,39 @@ impl Client {
             .context("cannot reach metrics server")?;
         let status = response.status();
         anyhow::ensure!(status.is_success(), "metrics server returned {status}");
-        let view: View = response.json().await.context("invalid metrics response")?;
-        anyhow::ensure!(
-            view.schema_version == 1,
-            "unsupported metrics schema {}",
-            view.schema_version
-        );
-        Ok(view)
+        let body = response
+            .bytes()
+            .await
+            .context("cannot read the metrics response")?;
+        decode(&body)
     }
 }
 
+/// Decode a metrics response. The schema version is read before the view: a
+/// version this build does not know has a shape it cannot decode, and the
+/// version is the thing to report, not the first field that differs.
+fn decode(body: &[u8]) -> Result<View> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Versioned {
+        schema_version: u32,
+    }
+    let Versioned { schema_version } =
+        serde_json::from_slice(body).context("invalid metrics response")?;
+    anyhow::ensure!(
+        schema_version == SCHEMA_VERSION,
+        "unsupported metrics schema {schema_version}"
+    );
+    serde_json::from_slice(body).context("invalid metrics response")
+}
+
 /// The local devserver's metrics URL and bearer. The address is the one the
-/// devserver unit pins, else the persisted port on loopback; the bearer is
-/// the devserver's own.
+/// devserver unit pins, else the persisted port on loopback, which Linux
+/// also reads when no listener of this user's is at the pinned one; the
+/// bearer is the devserver's own.
 fn local_target() -> Result<(reqwest::Url, Option<String>)> {
-    let addr = crate::devserver::persisted::local_devserver_dial_addr()
+    use crate::devserver::persisted;
+    let addr = persisted::local_devserver_dial_addr()
         .context("no local devserver port; start a devserver or use --url")?;
     // A wildcard bind is reached on loopback.
     let addr = match addr.ip() {
@@ -123,12 +111,20 @@ fn local_target() -> Result<(reqwest::Url, Option<String>)> {
     let token = chan_server::persisted_devserver_token()
         .context("no local devserver token; start a devserver or use --url")?;
     // The persisted port outlives the devserver, so before the bearer goes
-    // out, Linux checks the listener there is this user's. macOS, FreeBSD
-    // and Windows name socket owners only through binary sysctl records or
+    // out, Linux checks the listener there is this user's. The unit file
+    // outlives a stopped unit too, and a devserver started in a terminal
+    // afterwards listens on the port it recorded, so that port is the
+    // second address tried, under the same check. macOS, FreeBSD and
+    // Windows name socket owners only through binary sysctl records or
     // per-process handle walks, none of them a small and sound check, so
-    // there the bearer goes to the port unverified.
+    // there the bearer goes to the first address unverified.
     #[cfg(target_os = "linux")]
-    listener::ensure_caller_listens(addr)?;
+    let addr = {
+        let mut candidates = vec![addr];
+        candidates
+            .extend(persisted::recorded_devserver_addr().filter(|recorded| *recorded != addr));
+        listener::callers_listener(&candidates)?
+    };
     let url = reqwest::Url::parse(&format!("http://{addr}/"))?;
     Ok((metrics_url(url), Some(token)))
 }
@@ -136,14 +132,17 @@ fn local_target() -> Result<(reqwest::Url, Option<String>)> {
 /// The metrics route for a server URL as chan prints it: a launcher or
 /// unprefixed serve URL (`/?t=`) names the server root, and a tenant URL
 /// (`/<prefix>/index.html?t=`, or the prefix alone) names the tenant, whose
-/// routes are mounted under its prefix.
+/// routes are mounted under its prefix. A URL that already ends in the
+/// route names the same server or tenant, and is not appended to.
 fn metrics_url(mut url: reqwest::Url) -> reqwest::Url {
+    const ROUTE: &str = "/api/metrics";
     let path = url.path();
     let base = path
         .strip_suffix("/index.html")
         .unwrap_or(path)
         .trim_end_matches('/');
-    let path = format!("{base}/api/metrics");
+    let base = base.strip_suffix(ROUTE).unwrap_or(base);
+    let path = format!("{base}{ROUTE}");
     url.set_path(&path);
     url.set_query(None);
     url.set_fragment(None);
@@ -247,34 +246,81 @@ pub(crate) async fn cmd_metrics(args: MetricsArgs) -> Result<()> {
         #[cfg(not(unix))]
         anyhow::bail!("Varlink socket activation is available on Unix");
     }
+    // The lock is taken for one view at a time and never held across a read.
+    let print = |view: &View| {
+        let text = output(view, args.json, args.watch)?;
+        write_output(&mut std::io::stdout().lock(), &text)
+    };
     if !args.watch {
-        let view = client.read(args.history, None).await?;
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&view)?);
-        } else {
-            print!("{}", render(&view));
-        }
+        print(&client.read(args.history, None).await?)?;
         return Ok(());
     }
-    let mut stream = Subscription::new(args.history, None);
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    watch(&client, args.history, ctrl_c, print).await
+}
+
+/// `--watch`: print each view the stream sends, about once per second, until
+/// `cancel` (Ctrl-C) or until `print` reports that nobody reads the output
+/// any more. A failed read ends it with the error.
+async fn watch(
+    source: &impl Source,
+    history: bool,
+    cancel: impl std::future::Future<Output = ()>,
+    mut print: impl FnMut(&View) -> Result<bool>,
+) -> Result<()> {
+    // One future for the whole watch, polled around the read as well as the
+    // wait. tokio delivers a signal only to a listener that exists when it
+    // arrives, so a listener made anew for each wait would miss a Ctrl-C
+    // that lands while a read is in flight.
+    tokio::pin!(cancel);
+    let mut stream = Subscription::new(history, None);
     loop {
-        if let Some(view) = stream.next(&client).await? {
-            if args.json {
-                println!("{}", serde_json::to_string(&view)?);
-            } else {
-                print!("{}", render(&view));
+        let view = tokio::select! {
+            _ = &mut cancel => return Ok(()),
+            view = stream.next(source) => view?,
+        };
+        if let Some(view) = view {
+            if !print(&view)? {
+                return Ok(());
             }
         }
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = &mut cancel => return Ok(()),
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
     }
 }
 
+/// One view as the command prints it: the text block, pretty JSON for a
+/// single read, or one JSON object per line under `--watch`.
+fn output(view: &View, json: bool, watch: bool) -> Result<String> {
+    Ok(match (json, watch) {
+        (false, _) => render(view),
+        (true, false) => format!("{}\n", serde_json::to_string_pretty(view)?),
+        (true, true) => format!("{}\n", serde_json::to_string(view)?),
+    })
+}
+
+/// Write one output and flush it. False when the reader is gone: a closed
+/// pipe (`chan metrics --watch --json | head -n1`) ends the output, and the
+/// command with it, without being a failure of the command.
+fn write_output(out: &mut impl std::io::Write, text: &str) -> Result<bool> {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error).context("cannot write the metrics output"),
+    }
+}
+
 fn bytes(value: u64) -> String {
-    let mut n = value as f64;
-    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    // A count of bytes is whole; only the scaled units carry a fraction.
+    if value < 1024 {
+        return format!("{value} B");
+    }
+    let units = ["KiB", "MiB", "GiB", "TiB"];
+    let mut n = value as f64 / 1024.0;
     let mut i = 0;
     while n >= 1024.0 && i < units.len() - 1 {
         n /= 1024.0;
@@ -346,20 +392,39 @@ fn render(view: &View) -> String {
             per_second(traffic.sent_bytes_per_second)
         ));
     }
-    let t = &sample.transfers;
-    out.push_str(&format!("Transfers: {}/{} running, {}/{} queued, {} finished, {} cancelled, {} stalled, {} refused\n",
-        t.running,t.worker_capacity,t.queued,t.queue_capacity,t.finished,t.cancelled,t.stalled,t.refused));
+    // Two short literals: rustfmt leaves a statement alone, unformatted, once
+    // one string in it cannot fit the line width.
+    let transfers = &sample.transfers;
     out.push_str(&format!(
-        "Tunnels: {} gateway, {} reverse listeners; yamux {}/{} serving, {} waiting\n",
-        sample.gateway_tunnels,
-        sample.reverse_listeners,
-        sample.yamux_serving,
-        sample.yamux_service_capacity,
-        sample.yamux_waiting
+        "Transfers: {}/{} running, {}/{} queued, {} finished, ",
+        transfers.running,
+        transfers.worker_capacity,
+        transfers.queued,
+        transfers.queue_capacity,
+        transfers.finished
+    ));
+    out.push_str(&format!(
+        "{} cancelled, {} stalled, {} panicked, {} refused\n",
+        transfers.cancelled, transfers.stalled, transfers.panicked, transfers.refused
+    ));
+    out.push_str(&format!(
+        "Tunnels: {} gateway, {} reverse listeners, {} dial failures; ",
+        sample.gateway_tunnels, sample.reverse_listeners, sample.tunnel_dial_failures
+    ));
+    out.push_str(&format!(
+        "yamux {}/{} serving, {} waiting\n",
+        sample.yamux_serving, sample.yamux_service_capacity, sample.yamux_waiting
     ));
     let storage = &view.storage;
+    let failed = match (&storage.error, storage.logical_bytes) {
+        (None, _) => String::new(),
+        // A failed refresh keeps the totals of the last scan that completed;
+        // a failed first scan has none to keep.
+        (Some(error), Some(_)) => format!(" (scan failed: {error}; last completed total)"),
+        (Some(error), None) => format!(" (scan failed: {error})"),
+    };
     out.push_str(&format!(
-        "{}: {} logical, {} allocated{}\n",
+        "{}: {} logical, {} allocated{failed}\n",
         storage.path,
         storage
             .logical_bytes
@@ -369,18 +434,166 @@ fn render(view: &View) -> String {
             .allocated_bytes
             .map(bytes)
             .unwrap_or_else(|| "n/a".into()),
-        if storage.error.is_some() {
-            " (scan failed; last completed total)"
-        } else {
-            ""
-        }
     ));
     out
+}
+
+/// A view built by hand with every optional part present, so a test of the
+/// text output or of the wire names waits on no sampler.
+#[cfg(test)]
+pub(crate) fn full_view() -> View {
+    use chan_server::metrics::{Identity, Process, Sample, Storage, Traffic, Transfers};
+    let traffic = |received_bytes, sent_bytes| {
+        let mut traffic = Traffic {
+            received_bytes_per_second: Some(0.0),
+            sent_bytes_per_second: Some(2048.0),
+            ..Traffic::default()
+        };
+        traffic.totals.active = 1;
+        traffic.totals.opened = 2;
+        traffic.totals.received_bytes = received_bytes;
+        traffic.totals.sent_bytes = sent_bytes;
+        traffic
+    };
+    let sample = Sample {
+        sequence: 7,
+        elapsed_ms: 7_000,
+        sampled_at_ms: 1_700_000_007_000,
+        collection_micros: 120,
+        process: Some(Process {
+            uptime_seconds: 3_600,
+            cpu_time_ms: 1_250,
+            cpu_percent: Some(1.5),
+            resident_bytes: 12 * 1024 * 1024,
+            io_scope: "storage_io".into(),
+            read_bytes: Some(512),
+            written_bytes: Some(3 * 1024 * 1024),
+            read_bytes_per_second: Some(0.0),
+            written_bytes_per_second: Some(1536.0),
+        }),
+        network: traffic(512, 2048),
+        http2: traffic(0, 0),
+        yamux: traffic(0, 0),
+        reverse_connections: traffic(0, 0),
+        transfer_payload: traffic(1023, 1024),
+        transfers: Transfers {
+            queued: 1,
+            running: 2,
+            worker_capacity: 4,
+            queue_capacity: 16,
+            finished: 9,
+            cancelled: 3,
+            stalled: 5,
+            panicked: 6,
+            refused: 8,
+        },
+        gateway_tunnels: 1,
+        tunnel_dial_failures: 11,
+        reverse_listeners: 2,
+        yamux_waiting: 0,
+        yamux_serving: 3,
+        yamux_service_capacity: 8,
+        yamux_stream_limit: 256,
+    };
+    View {
+        schema_version: SCHEMA_VERSION,
+        identity: Identity {
+            instance_id: "0123456789abcdef0123456789abcdef".into(),
+            version: "0.127.0".into(),
+            build: "git-0123456789ab".into(),
+            pid: 184_223,
+            hostname: Some("box".into()),
+        },
+        latest: Some(sample.clone()),
+        history: vec![sample],
+        storage: Storage {
+            path: "/home/you/.chan".into(),
+            logical_bytes: Some(1536),
+            allocated_bytes: Some(4096),
+            files: Some(3),
+            sampled_at_ms: Some(1_700_000_000_000),
+            scan_ms: Some(12),
+            error: None,
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_help_example_is_the_text_output() {
+        // The first two output lines the help shows, as comments.
+        let shown: Vec<&str> = crate::help::CHAN_METRICS_AFTER
+            .lines()
+            .filter_map(|line| line.strip_prefix("  # "))
+            .take(2)
+            .collect();
+        let text = render(&full_view());
+        assert_eq!(shown, text.lines().take(2).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_text_output_counts_every_outcome_and_prints_whole_bytes() {
+        let text = render(&full_view());
+        let line = |prefix: &str| {
+            text.lines()
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no {prefix} line in:\n{text}"))
+        };
+        // Below 1 KiB a count of bytes is whole.
+        assert_eq!(
+            line("Service transport:"),
+            "Service transport: 1 active  RX 512 B (0 B/s)  TX 2.0 KiB (2.0 KiB/s)"
+        );
+        assert_eq!(
+            [0, 1, 1023, 1024, 1536].map(bytes),
+            ["0 B", "1 B", "1023 B", "1.0 KiB", "1.5 KiB"]
+        );
+        // Every outcome the transfer lane counts, and the failed dials.
+        assert_eq!(
+            line("Transfers:"),
+            "Transfers: 2/4 running, 1/16 queued, 9 finished, 3 cancelled, 5 stalled, \
+             6 panicked, 8 refused"
+        );
+        assert_eq!(
+            line("Tunnels:"),
+            "Tunnels: 1 gateway, 2 reverse listeners, 11 dial failures; \
+             yamux 3/8 serving, 0 waiting"
+        );
+    }
+
+    /// The storage line, the last one of the text output.
+    fn storage_line(view: &View) -> String {
+        render(view).lines().last().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_failed_scan_prints_its_error_and_names_a_total_only_when_there_is_one() {
+        let mut view = full_view();
+        assert_eq!(
+            storage_line(&view),
+            "/home/you/.chan: 1.5 KiB logical, 4.0 KiB allocated"
+        );
+        // The first scan failed: there is no total to speak of.
+        let mut first = view.clone();
+        first.storage.logical_bytes = None;
+        first.storage.allocated_bytes = None;
+        first.storage.error = Some("storage scan exceeded its bound".into());
+        assert_eq!(
+            storage_line(&first),
+            "/home/you/.chan: pending logical, n/a allocated \
+             (scan failed: storage scan exceeded its bound)"
+        );
+        // A refresh failed: the totals are those of the last completed scan.
+        view.storage.error = Some("storage scan exceeded its bound".into());
+        assert_eq!(
+            storage_line(&view),
+            "/home/you/.chan: 1.5 KiB logical, 4.0 KiB allocated \
+             (scan failed: storage scan exceeded its bound; last completed total)"
+        );
+    }
 
     #[test]
     fn unavailable_io_stays_unavailable_in_terminal_output() {
@@ -407,6 +620,71 @@ mod tests {
         process.read_bytes_per_second = None;
         process.written_bytes_per_second = None;
         assert!(render(&view).contains("unavailable read n/a (n/a)  write n/a (n/a)"));
+    }
+
+    /// A loopback server that answers one connection per body, in order,
+    /// with that JSON body.
+    async fn canned(bodies: Vec<String>) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in bodies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    if socket.read(&mut byte).await.unwrap() == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn the_schema_version_is_read_before_the_view_is_decoded() {
+        // This schema with fields a later release added to it, at the top,
+        // in an object and beside flattened counters: a reader skips them.
+        let mut current = serde_json::to_value(full_view()).unwrap();
+        current["addedLater"] = 1.into();
+        current["storage"]["addedLater"] = "x".into();
+        current["latest"]["network"]["addedLater"] = true.into();
+        let addr = canned(vec![
+            // A later schema keeps nothing of this one but the version.
+            r#"{"schemaVersion":2,"samples":[]}"#.into(),
+            current.to_string(),
+            r#"{"identity":{}}"#.into(),
+        ])
+        .await;
+        let client = Client::new(MetricsArgs {
+            url: Some(format!("http://{addr}/")),
+            token: None,
+            json: false,
+            watch: false,
+            history: false,
+            varlink: false,
+        })
+        .unwrap();
+        let error = client.read(false, None).await.unwrap_err();
+        assert_eq!(format!("{error:#}"), "unsupported metrics schema 2");
+        let view = client.read(false, None).await.unwrap();
+        assert_eq!(view.schema_version, 1);
+        assert_eq!(view.latest.unwrap().network.totals.received_bytes, 512);
+        // A body with no version is not a metrics response at all.
+        let error = client.read(false, None).await.unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with("invalid metrics response"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -470,6 +748,16 @@ mod tests {
                 "http://127.0.0.1:8787/workspace/",
                 "http://127.0.0.1:8787/workspace/api/metrics",
             ),
+            // The route itself, as docs/metrics.md names it, on the server
+            // root and on a tenant: read as given, not appended to.
+            (
+                "http://127.0.0.1:8787/api/metrics",
+                "http://127.0.0.1:8787/api/metrics",
+            ),
+            (
+                "http://127.0.0.1:8787/workspace/api/metrics/?t=TOKEN",
+                "http://127.0.0.1:8787/workspace/api/metrics",
+            ),
         ] {
             assert_eq!(resolve(printed), resolved, "{printed}");
         }
@@ -527,6 +815,27 @@ mod tests {
         drop(listener);
         let error = local_target().unwrap_err().to_string();
         assert!(error.contains("no devserver is listening"), "{error}");
+        // The unit file outlives a stopped unit. A devserver started in a
+        // terminal afterwards records its own port, and that listener, this
+        // user's, is the one read.
+        let foreground = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let recorded = foreground.local_addr().unwrap().port();
+        std::fs::write(
+            state.join("config.json"),
+            format!(r#"{{"devserver_token":"tok","port":{recorded}}}"#),
+        )
+        .unwrap();
+        let target = local_target()
+            .map(|(url, token)| (url.to_string(), token))
+            .map_err(|error| error.to_string());
+        assert_eq!(
+            target,
+            Ok((
+                format!("http://127.0.0.1:{recorded}/api/metrics"),
+                Some("tok".to_string())
+            )),
+            "the unit pins closed port {pinned}"
+        );
     }
 
     #[test]
@@ -747,6 +1056,121 @@ mod tests {
             .collect();
         view.latest = view.history.last().cloned();
         view
+    }
+
+    /// Output whose reader has gone away: every write fails as a write to a
+    /// closed pipe does.
+    struct ClosedPipe;
+
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_whose_reader_is_gone_ends_without_an_error() {
+        let base = sampled_view().await;
+        let script = Script {
+            views: std::sync::Mutex::new([view_of(&base, "a", 1..=2)].into()),
+            asked: Default::default(),
+        };
+        let ended = watch(&script, true, std::future::pending(), |view| {
+            write_output(&mut ClosedPipe, &output(view, true, true)?)
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "a closed pipe ended the watch as a failure: {ended:?}"
+        );
+        // It ended at the write that failed, before another read.
+        assert_eq!(*script.asked.lock().unwrap(), [None]);
+        // A single read is printed the same way.
+        let single = output(&view_of(&base, "a", 1..=2), true, false).unwrap();
+        assert!(matches!(write_output(&mut ClosedPipe, &single), Ok(false)));
+    }
+
+    /// A source that answers its first read and never its later ones, and
+    /// says when one of those is in flight.
+    struct Parked {
+        first: std::sync::Mutex<Option<View>>,
+        reading: tokio::sync::Notify,
+    }
+
+    impl Source for Parked {
+        async fn read(&self, _history: bool, _since: Option<u64>) -> Result<View> {
+            let first = self.first.lock().unwrap().take();
+            match first {
+                Some(view) => Ok(view),
+                None => {
+                    self.reading.notify_one();
+                    std::future::pending().await
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_that_arrives_during_a_read_ends_the_watch() {
+        let home = tempfile::tempdir().unwrap();
+        let view = chan_server::metrics::Runtime::start(home.path().into())
+            .unwrap()
+            .view(false, None);
+        let source = Parked {
+            first: std::sync::Mutex::new(Some(view)),
+            reading: tokio::sync::Notify::new(),
+        };
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let printed = std::cell::Cell::new(0);
+        let watching = watch(
+            &source,
+            false,
+            async {
+                let _ = cancelled.await;
+            },
+            |_| {
+                printed.set(printed.get() + 1);
+                Ok(true)
+            },
+        );
+        tokio::pin!(watching);
+        // Run the watch through its first view and its wait, into the read
+        // that never answers.
+        tokio::select! {
+            ended = &mut watching => panic!("the watch ended before its second read: {ended:?}"),
+            _ = source.reading.notified() => {}
+        }
+        assert_eq!(printed.get(), 1);
+        cancel.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(3600), &mut watching).await;
+        assert!(
+            matches!(ended, Ok(Ok(()))),
+            "a cancel that arrived during a read did not end the watch: {ended:?}"
+        );
+    }
+
+    #[test]
+    fn output_is_written_whole_and_other_write_errors_fail_the_command() {
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::StorageFull.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut written = Vec::new();
+        assert!(matches!(write_output(&mut written, "line\n"), Ok(true)));
+        assert_eq!(written, b"line\n");
+        let error = write_output(&mut Full, "line\n").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot write the metrics output"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

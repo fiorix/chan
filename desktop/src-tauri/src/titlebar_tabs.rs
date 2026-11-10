@@ -57,8 +57,10 @@
 //! With the title text hidden, the page is where a window in the mode is
 //! named, so it holds the window's title: the one the title bar shows, with
 //! the devserver's name and privacy mode's mask in it. The desktop sends it as
-//! [`TITLE_EVENT`] when the page asks for the mode, which the page does once
-//! it listens for the event, and again on every retitle ([`title_changed`]).
+//! `TITLE_EVENT` when the page asks for the mode, which the page does once
+//! it listens for the event, and again on every retitle ([`title_changed`]),
+//! where the title sent is the one just set: a window does not report a new
+//! title at once on every host.
 //! The page's pane tree heads itself with it on both hosts, and on Windows,
 //! whose frameless window has no title of its own, the bar draws it while the
 //! Computers launcher covers the page.
@@ -777,34 +779,46 @@ pub(crate) fn launcher_visibility_changed<R: tauri::Runtime>(window: &WebviewWin
     let _ = window;
 }
 
-/// The window's title changed. The page of a window in the mode holds the
-/// title, so it hears the new one; on macOS AppKit also follows the change in
-/// the title bar itself.
-pub(crate) fn title_changed<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+/// The window's title was set to `title`. The page of a window in the mode
+/// holds the title, so it hears the new one; on macOS AppKit also follows the
+/// change in the title bar itself. The caller names the title it set because
+/// the window cannot be asked for it yet: macOS applies a title on a later
+/// turn of the main thread, and until then the window reports the one before,
+/// which would reach the page one retitle late.
+pub(crate) fn title_changed<R: tauri::Runtime>(window: &WebviewWindow<R>, title: &str) {
     #[cfg(any(target_os = "macos", windows, test))]
-    send_title_in_mode(window);
+    send_title_in_mode(window, title);
     #[cfg(not(any(target_os = "macos", windows, test)))]
-    let _ = window;
+    let _ = (window, title);
 }
 
-/// Tell the page of a window in the mode its title. Any other page draws no
-/// tab bar in the title bar and has the title in view, so nothing is sent.
+/// Tell the page of a window in the mode that its title is now `title`. Any
+/// other page draws no tab bar in the title bar and has the title in view, so
+/// nothing is sent.
 #[cfg(any(target_os = "macos", windows, test))]
-fn send_title_in_mode<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+fn send_title_in_mode<R: tauri::Runtime>(window: &WebviewWindow<R>, title: &str) {
     let in_mode = window
         .try_state::<Arc<AppState>>()
         .is_some_and(|state| state.titlebar_windows.is_active(window.label()));
     if in_mode {
-        send_title(window);
+        emit_title(window, title);
     }
 }
 
-/// Send the window's own page its title.
+/// Send the window's own page the title the window reports: for a page
+/// entering the mode, which no retitle of this turn has yet to reach.
 #[cfg(any(target_os = "macos", windows, test))]
 fn send_title<R: tauri::Runtime>(window: &WebviewWindow<R>) {
-    let title = window.title().unwrap_or_default();
+    emit_title(window, &window.title().unwrap_or_default());
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn emit_title<R: tauri::Runtime>(window: &WebviewWindow<R>, title: &str) {
     let target = tauri::EventTarget::webview_window(window.label());
-    if let Err(e) = window.emit_to(target, TITLE_EVENT, TitlePayload { title }) {
+    let payload = TitlePayload {
+        title: title.to_owned(),
+    };
+    if let Err(e) = window.emit_to(target, TITLE_EVENT, payload) {
         tracing::warn!(window = window.label(), error = %e, "sending the window title failed");
     }
 }
@@ -1478,28 +1492,42 @@ mod tests {
     fn a_window_out_of_the_mode_is_sent_no_title() {
         let (app, window, _dir) = titled_window("Work Window 2");
         let seen = heard_titles(&app);
-        title_changed(&window);
+        title_changed(&window, "Work Window 2 [notes]");
         assert!(seen.lock().unwrap().is_empty());
     }
 
     /// The page of a window in the mode heads its pane tree with the window's
-    /// title, so it hears every retitle, whether or not the launcher shows.
-    /// The mock runtime keeps no title, so the payload is whatever the window
-    /// reports.
+    /// title, so it hears every retitle, whether or not the launcher shows,
+    /// and hears the title that was set. The window is not asked: on macOS a
+    /// title is applied on a later turn of the main thread, so a window just
+    /// retitled still reports the title before, and a page told that one
+    /// names its window one rename late. The mock runtime's window keeps
+    /// reporting what it reported before the retitle, as that window does.
     #[test]
-    fn a_window_in_the_mode_hears_every_retitle() {
+    fn a_window_in_the_mode_hears_every_retitle_as_the_title_just_set() {
         use tauri::Manager;
 
-        let (app, window, _dir) = titled_window("\u{2197} geekom / chan Window 1");
+        let (app, window, _dir) = titled_window("Terminal Window 3 [bash]");
         let seen = heard_titles(&app);
         app.state::<Arc<AppState>>()
             .titlebar_windows
             .enable(window.label(), record("http://127.0.0.1:4100/", 38.0, None));
         assert!(!crate::launcher_panel::panel_is_visible(window.label()));
-        title_changed(&window);
-        title_changed(&window);
-        let expected = serde_json::json!({ "title": window.title().unwrap() }).to_string();
-        assert_eq!(*seen.lock().unwrap(), vec![expected.clone(), expected]);
+        let retitles = ["Terminal Window 3 [top]", "Terminal Window 3 [bash]"];
+        for title in retitles {
+            window.set_title(title).unwrap();
+            assert_ne!(
+                window.title().unwrap(),
+                title,
+                "the fixture: the window does not report the title just set"
+            );
+            title_changed(&window, title);
+        }
+        let heard: Vec<String> = retitles
+            .iter()
+            .map(|title| serde_json::json!({ "title": title }).to_string())
+            .collect();
+        assert_eq!(*seen.lock().unwrap(), heard);
     }
 
     /// A page asks for the mode once it listens for the title, and asks again
@@ -1529,7 +1557,7 @@ mod tests {
         let changed = function(module, "\npub(crate) fn title_changed<");
         assert!(
             changed.contains(
-                "#[cfg(any(target_os = \"macos\", windows, test))]\n    send_title_in_mode(window);"
+                "#[cfg(any(target_os = \"macos\", windows, test))]\n    send_title_in_mode(window, title);"
             ),
             "a retitle reaches the page on both hosts"
         );
@@ -1545,9 +1573,11 @@ mod tests {
         let (_, after) = wiring
             .split_once(".set_title(")
             .expect("the watcher retitles windows");
+        let (set, after) = after.split_once(')').expect("the retitle names its title");
+        assert_eq!(set, "&visible_title");
         let hook = after
-            .find("crate::titlebar_tabs::title_changed(&window);")
-            .expect("the retitle tells the title bar");
+            .find("crate::titlebar_tabs::title_changed(&window, &visible_title);")
+            .expect("the retitle tells the title bar the title it set");
         let next = after.find("applied_titles").unwrap_or(usize::MAX);
         assert!(
             hook < next,
@@ -1579,9 +1609,13 @@ mod tests {
         let (_, after) = privacy
             .split_once(".set_title(")
             .expect("privacy mode retitles windows");
+        let (set, after) = after
+            .split_once(')')
+            .expect("the privacy retitle names its title");
+        assert_eq!(set, "visible");
         let hook = after
-            .find("crate::titlebar_tabs::title_changed(&window);")
-            .expect("the privacy retitle tells the title bar");
+            .find("crate::titlebar_tabs::title_changed(&window, visible);")
+            .expect("the privacy retitle tells the title bar the title it set");
         let next = after.find("rebuild_window_menu").unwrap_or(usize::MAX);
         assert!(hook < next, "told for the window just retitled");
         let set = function(privacy, "\npub(crate) fn set_privacy_settings(");

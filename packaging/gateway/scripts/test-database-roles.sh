@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 # Destructive integration test for prepare/reconcile against an isolated DB.
+#
+# Two routes run it, on two PostgreSQL majors. Gateway CI runs it against a
+# postgres:16 service container, the major the Kubernetes manifests deploy.
+# `make gateway-database-roles-test` runs it in the chan-psql sdme guest, which
+# installs PostgreSQL 18, so a local green certifies 18 alone. The privilege
+# reads stay on what both majors share: the ACL columns of pg_namespace,
+# pg_class and pg_attribute through aclexplode. From 17 on a table also has
+# MAINTAIN; the matrix never names it, so it can only be reported as extra.
 
 set -euo pipefail
 
@@ -57,6 +65,120 @@ SQL
 export EXPECTED_SQLX_MIGRATION=$latest_migration
 export DATABASE_ROLE_POLICY_VERSION=2
 
+# Every privilege reconcile-database-roles.sh grants, and the rollout marker's
+# SELECT that prepare-database-roles.sh grants first, one line per grantee and
+# object. The list is exact in both directions: each privilege named here must
+# be granted, and the two application roles and PUBLIC must hold nothing else
+# on any schema, table, column or sequence of the two schemas. A grant the
+# gateway gains or loses changes here and in the reconcile script together.
+role_matrix() {
+    cat <<'MATRIX'
+chan_gateway_identity schema public USAGE
+chan_gateway_identity schema tower_sessions USAGE
+chan_gateway_identity table public.api_token_audit SELECT,INSERT
+chan_gateway_identity table public.api_tokens SELECT,INSERT,UPDATE
+chan_gateway_identity table public.chan_gateway_deployment_state SELECT
+chan_gateway_identity table public.devserver_fleet_policy SELECT
+chan_gateway_identity table public.devserver_user_policies SELECT
+chan_gateway_identity table public.identity_session_index SELECT,INSERT,UPDATE,DELETE
+chan_gateway_identity table public.users SELECT
+chan_gateway_identity table tower_sessions.session SELECT,INSERT,UPDATE,DELETE
+chan_gateway_identity column public.devserver_fleet_policy.updated_at UPDATE
+chan_gateway_identity column public.users.updated_at UPDATE
+chan_gateway_identity sequence public.api_token_audit_id_seq USAGE
+chan_gateway_profile schema public USAGE
+chan_gateway_profile table public.api_token_audit SELECT,INSERT
+chan_gateway_profile table public.api_tokens SELECT,UPDATE
+chan_gateway_profile table public.auth_audit SELECT,INSERT
+chan_gateway_profile table public.chan_gateway_deployment_state SELECT
+chan_gateway_profile table public.control_revocation_jobs SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile table public.devserver_fleet_policy SELECT,INSERT,UPDATE
+chan_gateway_profile table public.devserver_grants SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile table public.devserver_user_policies SELECT,INSERT,UPDATE
+chan_gateway_profile table public.devservers SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile table public.feature_flag_overrides SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile table public.feature_flags SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile table public.identities SELECT,INSERT
+chan_gateway_profile table public.users SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile table public.wireguard_peers SELECT,INSERT,UPDATE,DELETE
+chan_gateway_profile sequence public.api_token_audit_id_seq USAGE
+chan_gateway_profile sequence public.auth_audit_id_seq USAGE
+MATRIX
+}
+
+# What the two application roles and PUBLIC are granted in the two schemas, as
+# "grantee kind object privilege" lines read from the catalog's ACLs. One
+# privilege per line: has_table_privilege with a comma list answers true when
+# any one of the listed privileges is held, so it cannot show that all are.
+# The application roles own nothing and belong to no role (reconcile refuses
+# both), so their ACL entries and PUBLIC's are everything they can use.
+granted_privileges() {
+    psql "$DATABASE_URL" --no-password -X -v ON_ERROR_STOP=1 -Atq <<'SQL'
+SELECT granted.grantee || ' ' || granted.kind || ' ' || granted.object
+    || ' ' || granted.privilege
+FROM (
+    SELECT CASE WHEN entry.grantee = 0 THEN 'PUBLIC'
+                ELSE pg_get_userbyid(entry.grantee)::text END AS grantee,
+           acl.kind,
+           acl.object,
+           entry.privilege_type
+               || CASE WHEN entry.is_grantable THEN ' WITH GRANT OPTION'
+                       ELSE '' END AS privilege
+    FROM (
+        SELECT 'schema' AS kind, nspname::text AS object, nspacl AS acl
+        FROM pg_namespace
+        WHERE nspname IN ('public', 'tower_sessions')
+        UNION ALL
+        SELECT CASE relkind WHEN 'S' THEN 'sequence' ELSE 'table' END,
+               nspname || '.' || relname, relacl
+        FROM pg_class
+        JOIN pg_namespace ON pg_namespace.oid = relnamespace
+        WHERE nspname IN ('public', 'tower_sessions')
+        UNION ALL
+        SELECT 'column', nspname || '.' || relname || '.' || attname, attacl
+        FROM pg_attribute
+        JOIN pg_class ON pg_class.oid = attrelid
+        JOIN pg_namespace ON pg_namespace.oid = relnamespace
+        WHERE nspname IN ('public', 'tower_sessions')
+    ) AS acl
+    CROSS JOIN LATERAL aclexplode(acl.acl) AS entry
+) AS granted
+WHERE granted.grantee IN ('PUBLIC', 'chan_gateway_identity', 'chan_gateway_profile');
+SQL
+}
+
+# Compare the granted privileges with the matrix and name every difference.
+# The verdict goes to standard output and psql's own messages stay on standard
+# error, so neither the comparison nor a caller that captures the differences
+# can take a server notice for a privilege. It returns instead of relying on
+# errexit, which is off when the caller tests its status.
+check_role_matrix() {
+    local expected granted grantee kind object privilege failed=0
+    expected=$(role_matrix \
+        | awk '{ count = split($4, names, ","); for (i = 1; i <= count; i++) print $1, $2, $3, names[i] }' \
+        | LC_ALL=C sort) || return 1
+    if ! granted=$(granted_privileges); then
+        printf 'FAIL: the granted privileges could not be read\n'
+        return 1
+    fi
+    granted=$(LC_ALL=C sort -u <<< "$granted") || return 1
+    while read -r grantee kind object privilege; do
+        [[ -n $grantee ]] || continue
+        printf 'FAIL: %s lacks %s on %s %s\n' \
+            "$grantee" "$privilege" "$kind" "$object"
+        failed=1
+    done < <(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$granted"))
+    while read -r grantee kind object privilege; do
+        [[ -n $grantee ]] || continue
+        printf 'FAIL: %s holds %s on %s %s, which the role matrix does not grant\n' \
+            "$grantee" "$privilege" "$kind" "$object"
+        failed=1
+    done < <(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$granted"))
+    [[ $failed == 0 ]] || return 1
+    printf 'PASS: role privilege matrix is exact: %s privileges on %s objects\n' \
+        "$(wc -l <<< "$expected")" "$(role_matrix | wc -l)"
+}
+
 # An impossible target must fail and leave the durable marker invalid.
 if EXPECTED_SQLX_MIGRATION=$((latest_migration + 1)) \
     "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null 2>&1; then
@@ -68,70 +190,7 @@ fi
 
 "$SCRIPT_DIR/reconcile-database-roles.sh"
 
-psql "$DATABASE_URL" --no-password --set=ON_ERROR_STOP=1 <<'SQL'
-DO $check$
-BEGIN
-    IF NOT has_table_privilege(
-        'chan_gateway_identity', 'public.api_tokens', 'SELECT,INSERT,UPDATE'
-    ) OR has_table_privilege(
-        'chan_gateway_identity', 'public.api_tokens', 'DELETE'
-    ) OR has_table_privilege(
-        'chan_gateway_identity', 'public.users', 'INSERT,UPDATE,DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.users', 'SELECT,INSERT,UPDATE,DELETE'
-    ) OR has_table_privilege(
-        'chan_gateway_profile', 'public.identities', 'UPDATE,DELETE'
-    ) OR has_table_privilege(
-        'chan_gateway_profile', 'tower_sessions.session', 'SELECT'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.control_revocation_jobs',
-        'SELECT,INSERT,UPDATE,DELETE'
-    ) OR has_table_privilege(
-        'chan_gateway_identity', 'public.control_revocation_jobs',
-        'SELECT,INSERT,UPDATE,DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_identity', 'public.devserver_fleet_policy', 'SELECT'
-    ) OR has_table_privilege(
-        'chan_gateway_identity', 'public.devserver_fleet_policy',
-        'INSERT,UPDATE,DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_identity', 'public.devserver_user_policies', 'SELECT'
-    ) OR has_table_privilege(
-        'chan_gateway_identity', 'public.devserver_user_policies',
-        'INSERT,UPDATE,DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_identity', 'public.identity_session_index',
-        'SELECT,INSERT,UPDATE,DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.devserver_fleet_policy',
-        'SELECT,INSERT,UPDATE'
-    ) OR has_table_privilege(
-        'chan_gateway_profile', 'public.devserver_fleet_policy', 'DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.devserver_user_policies',
-        'SELECT,INSERT,UPDATE'
-    ) OR has_table_privilege(
-        'chan_gateway_profile', 'public.devserver_user_policies', 'DELETE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.wireguard_peers', 'SELECT'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.wireguard_peers', 'INSERT'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.wireguard_peers', 'UPDATE'
-    ) OR NOT has_table_privilege(
-        'chan_gateway_profile', 'public.wireguard_peers', 'DELETE'
-    ) OR has_table_privilege(
-        'chan_gateway_identity', 'public.wireguard_peers',
-        'SELECT,INSERT,UPDATE,DELETE'
-    ) OR has_table_privilege(
-        'chan_gateway_profile', 'public.identity_session_index',
-        'SELECT,INSERT,UPDATE,DELETE'
-    ) THEN
-        RAISE EXCEPTION 'application role matrix is not exact';
-    END IF;
-END
-$check$;
-SQL
+check_role_matrix
 
 identity_psql=(psql "postgres://chan_gateway_identity:${IDENTITY_DATABASE_PASSWORD}@127.0.0.1:5432/$EXPECTED_TEST_DATABASE" --no-password)
 profile_psql=(psql "postgres://chan_gateway_profile:${PROFILE_DATABASE_PASSWORD}@127.0.0.1:5432/$EXPECTED_TEST_DATABASE" --no-password)
@@ -160,21 +219,31 @@ assert_identity_lock() {
     printf 'PASS: identity %s\n' "$name"
 }
 
-assert_identity_update_denied() {
-    local name=$1 sql=$2 result status
-    if result=$("${identity_psql[@]}" -X -v ON_ERROR_STOP=1 \
+# A refusal counts only as SQLSTATE 42501, insufficient privilege. Any other
+# error (a constraint, a missing object, a lost connection) says nothing about
+# the grant. The statement runs in a transaction that is rolled back, so one
+# that is wrongly permitted leaves nothing behind.
+assert_denied() {
+    local role=$1 name=$2 sql=$3 result status
+    local -a role_psql
+    case $role in
+        identity) role_psql=("${identity_psql[@]}") ;;
+        profile) role_psql=("${profile_psql[@]}") ;;
+        *) printf 'FAIL: no psql connection for role %s\n' "$role" >&2; return 1 ;;
+    esac
+    if result=$("${role_psql[@]}" -X -v ON_ERROR_STOP=1 \
         -v VERBOSITY=verbose -Atqc "BEGIN; $sql; ROLLBACK" 2>&1); then
-        printf 'FAIL: identity unexpectedly updated %s\n' "$name" >&2
+        printf 'FAIL: %s was permitted: %s\n' "$role" "$name" >&2
         return 1
     else
         status=$?
     fi
     if ! grep -Eq '^ERROR:[[:space:]]+42501:' <<< "$result"; then
-        printf 'FAIL: identity %s denial was not SQLSTATE 42501 (rc=%s)\n%s\n' \
-            "$name" "$status" "$result" >&2
+        printf 'FAIL: %s %s denial was not SQLSTATE 42501 (rc=%s)\n%s\n' \
+            "$role" "$name" "$status" "$result" >&2
         return 1
     fi
-    printf 'PASS: identity %s update denied with SQLSTATE 42501\n' "$name"
+    printf 'PASS: %s %s denied with SQLSTATE 42501\n' "$role" "$name"
 }
 
 check_identity_mint_permissions() {
@@ -214,9 +283,9 @@ END
 $check$;
 SQL
 
-    assert_identity_update_denied users.blocked_at \
+    assert_denied identity 'users.blocked_at update' \
         "UPDATE public.users SET blocked_at = now() WHERE id = '$test_user_id'"
-    assert_identity_update_denied devserver_fleet_policy.admissions_enabled \
+    assert_denied identity 'devserver_fleet_policy.admissions_enabled update' \
         'UPDATE public.devserver_fleet_policy SET admissions_enabled = true WHERE singleton'
 
     snapshot_sql="SELECT updated_at FROM public.users WHERE id = '$test_user_id';
@@ -240,8 +309,12 @@ SQL
 }
 
 test_user_id=00000000-0000-0000-0000-000000000001
+# A second user that never gets a policy row, for the policy insert identity
+# must be refused: against the first user that insert would hit the primary key
+# whatever identity is granted.
+unprovisioned_user_id=00000000-0000-0000-0000-000000000003
 "${profile_psql[@]}" -v ON_ERROR_STOP=1 \
-    -c "INSERT INTO public.users (id, email, username) VALUES ('$test_user_id', 'role-test@example.com', 'role-test')" \
+    -c "INSERT INTO public.users (id, email, username) VALUES ('$test_user_id', 'role-test@example.com', 'role-test'), ('$unprovisioned_user_id', 'role-test-unprovisioned@example.com', 'role-test-unprovisioned')" \
     -c "INSERT INTO public.devserver_user_policies (user_id, enabled, max_connected_devservers) VALUES ('$test_user_id', true, 3)" \
     -c "INSERT INTO public.devserver_fleet_policy (singleton, admissions_enabled) VALUES (true, false) ON CONFLICT (singleton) DO UPDATE SET admissions_enabled = EXCLUDED.admissions_enabled"
 "${identity_psql[@]}" -Atqc \
@@ -256,9 +329,18 @@ check_identity_mint_permissions
     -c "UPDATE public.identity_session_index SET authenticated_at = now() WHERE store_id = 'role-test-session'" \
     -c "DELETE FROM public.identity_session_index WHERE store_id = 'role-test-session'"
 
+# Identity mints, uses and revokes a token and writes its audit rows, whose
+# ids come from the sequence.
 test_token_id=00000000-0000-0000-0000-000000000002
 "${identity_psql[@]}" -v ON_ERROR_STOP=1 \
-    -c "INSERT INTO public.api_tokens (id, user_id, label, token_hash) VALUES ('$test_token_id', '$test_user_id', 'wireguard', 'role-test-token-digest')"
+    -c "INSERT INTO public.api_tokens (id, user_id, label, token_hash) VALUES ('$test_token_id', '$test_user_id', 'wireguard', 'role-test-token-digest')" \
+    -c "INSERT INTO public.api_token_audit (token_id, action) VALUES ('$test_token_id', 'created')" \
+    -c "UPDATE public.api_tokens SET last_used_at = now() WHERE id = '$test_token_id'" \
+    -c "UPDATE public.api_tokens SET revoked_at = now() WHERE id = '$test_token_id'" \
+    -c "INSERT INTO public.api_token_audit (token_id, action) VALUES ('$test_token_id', 'revoked')"
+"${identity_psql[@]}" -Atqc \
+    "SELECT count(*) FROM public.api_token_audit WHERE token_id = '$test_token_id'" \
+    | grep -qx 2
 "${profile_psql[@]}" -v ON_ERROR_STOP=1 \
     -c "INSERT INTO public.wireguard_peers (user_id, token_id, public_key, address_v4) VALUES ('$test_user_id', '$test_token_id', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', '10.7.0.2')" \
     -c "UPDATE public.wireguard_peers SET address_v4 = '10.7.0.3' WHERE token_id = '$test_token_id'"
@@ -267,42 +349,25 @@ test_token_id=00000000-0000-0000-0000-000000000002
     | grep -qx '10.7.0.3'
 "${profile_psql[@]}" -v ON_ERROR_STOP=1 \
     -c "DELETE FROM public.wireguard_peers WHERE token_id = '$test_token_id'"
-if "${identity_psql[@]}" -c 'SELECT * FROM public.wireguard_peers' >/dev/null 2>&1; then
-    echo 'identity role unexpectedly read profile-only WireGuard peers' >&2
-    exit 1
-fi
 
-if "${identity_psql[@]}" -c 'CREATE TABLE public.forbidden (id int)' >/dev/null 2>&1; then
-    echo "identity role unexpectedly created a table" >&2
-    exit 1
-fi
-if "${identity_psql[@]}" -c 'SELECT * FROM public._sqlx_migrations' >/dev/null 2>&1; then
-    echo "identity role unexpectedly read sqlx migration history" >&2
-    exit 1
-fi
-if "${identity_psql[@]}" -c 'SELECT * FROM public.identities' >/dev/null 2>&1; then
-    echo "identity role unexpectedly read profile-only identities" >&2
-    exit 1
-fi
-if "${profile_psql[@]}" -c 'SELECT * FROM tower_sessions.session' >/dev/null 2>&1; then
-    echo "profile role unexpectedly read identity sessions" >&2
-    exit 1
-fi
-if "${profile_psql[@]}" -c 'SELECT * FROM public.identity_session_index' >/dev/null 2>&1; then
-    echo "profile role unexpectedly read the identity session index" >&2
-    exit 1
-fi
-if "${identity_psql[@]}" -c \
-    "INSERT INTO public.devserver_user_policies (user_id, enabled, max_connected_devservers) VALUES ('$test_user_id', true, 4)" \
-    >/dev/null 2>&1; then
-    echo "identity role unexpectedly wrote user policy" >&2
-    exit 1
-fi
-if "${profile_psql[@]}" -c \
-    'DELETE FROM public.devserver_fleet_policy WHERE singleton' >/dev/null 2>&1; then
-    echo "profile role unexpectedly deleted fleet policy" >&2
-    exit 1
-fi
+assert_denied identity 'read of profile-only WireGuard peers' \
+    'SELECT * FROM public.wireguard_peers'
+assert_denied identity 'table creation' 'CREATE TABLE public.forbidden (id int)'
+assert_denied identity 'read of the sqlx migration history' \
+    'SELECT * FROM public._sqlx_migrations'
+assert_denied identity 'read of profile-only identities' \
+    'SELECT * FROM public.identities'
+assert_denied profile 'read of identity sessions' \
+    'SELECT * FROM tower_sessions.session'
+assert_denied profile 'read of the identity session index' \
+    'SELECT * FROM public.identity_session_index'
+assert_denied profile 'fleet policy delete' \
+    'DELETE FROM public.devserver_fleet_policy WHERE singleton'
+# Profile holds the grant and its insert goes through, so identity's refusal of
+# the same statement is the missing grant and not a constraint.
+policy_insert="INSERT INTO public.devserver_user_policies (user_id, enabled, max_connected_devservers) VALUES ('$unprovisioned_user_id', true, 4)"
+"${profile_psql[@]}" -X -v ON_ERROR_STOP=1 -q -c "BEGIN; $policy_insert; ROLLBACK"
+assert_denied identity 'user policy insert' "$policy_insert"
 
 # An owner bypasses every ACL. Poison an expected table, prove reconciliation
 # fails closed, then repair ownership as the migration owner.
@@ -335,14 +400,40 @@ fi
 psql "$DATABASE_URL" --no-password -c 'DROP TABLE public.rogue_table' >/dev/null
 "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null
 
-# Reconciliation replaces both missing and over-broad column grants.
-psql "$DATABASE_URL" --no-password -X -v ON_ERROR_STOP=1 <<'SQL'
+# Reconciliation replaces missing and over-broad grants of every kind. Drift
+# one of each first and require the matrix check to name exactly those, which
+# proves on every run, on either major, that the check can fail.
+psql "$DATABASE_URL" --no-password -X -q -v ON_ERROR_STOP=1 <<'SQL'
+REVOKE UPDATE ON public.api_tokens FROM chan_gateway_identity;
+GRANT DELETE ON public.api_tokens TO chan_gateway_identity;
+GRANT SELECT ON public._sqlx_migrations TO PUBLIC;
+GRANT CREATE ON SCHEMA public TO chan_gateway_profile;
+REVOKE USAGE ON SEQUENCE public.auth_audit_id_seq FROM chan_gateway_profile;
 REVOKE UPDATE (updated_at) ON public.users, public.devserver_fleet_policy
     FROM chan_gateway_identity;
 GRANT UPDATE (blocked_at) ON public.users TO chan_gateway_identity;
 GRANT UPDATE (admissions_enabled) ON public.devserver_fleet_policy TO chan_gateway_identity;
 SQL
+expected_drift='FAIL: chan_gateway_identity lacks UPDATE on column public.devserver_fleet_policy.updated_at
+FAIL: chan_gateway_identity lacks UPDATE on column public.users.updated_at
+FAIL: chan_gateway_identity lacks UPDATE on table public.api_tokens
+FAIL: chan_gateway_profile lacks USAGE on sequence public.auth_audit_id_seq
+FAIL: PUBLIC holds SELECT on table public._sqlx_migrations, which the role matrix does not grant
+FAIL: chan_gateway_identity holds UPDATE on column public.devserver_fleet_policy.admissions_enabled, which the role matrix does not grant
+FAIL: chan_gateway_identity holds UPDATE on column public.users.blocked_at, which the role matrix does not grant
+FAIL: chan_gateway_identity holds DELETE on table public.api_tokens, which the role matrix does not grant
+FAIL: chan_gateway_profile holds CREATE on schema public, which the role matrix does not grant'
+if drift=$(check_role_matrix); then
+    printf 'FAIL: the role matrix check passed over drifted grants\n%s\n' "$drift" >&2
+    exit 1
+fi
+if [[ $drift != "$expected_drift" ]]; then
+    printf 'FAIL: the role matrix check did not name exactly the drifted grants\n%s\n' "$drift" >&2
+    exit 1
+fi
+printf 'PASS: the role matrix check names every drifted grant\n'
 "$SCRIPT_DIR/reconcile-database-roles.sh"
+check_role_matrix
 check_identity_mint_permissions
 
 printf 'PASS: exact database-role prepare/reconcile contract\n'
