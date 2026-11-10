@@ -98,6 +98,27 @@ describe("loadGhosttyKit", () => {
     expect(spied, "one instance across both spawns").toHaveBeenCalledTimes(1);
   });
 
+  // The binding requires the exports it calls and no others: a core is not
+  // refused for lacking one the binding never reaches. The core's search
+  // exports a `run` beside the `tick` and `feed` the binding scans with.
+  test("loads a core without a search export the binding does not call", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(bytes))));
+    vi.spyOn(WebAssembly, "compile").mockResolvedValue(module);
+    const dropped: unknown[] = [];
+    vi.spyOn(WebAssembly, "instantiate").mockImplementation(() =>
+      instantiateChanged(({ ghostty_search_run: run, ...exports }) => {
+        dropped.push(run);
+        return exports;
+      }),
+    );
+    const { loadGhosttyKit } = await import("./backend");
+    const kit = loadGhosttyKit();
+    await expect(kit, "the core is accepted").resolves.toHaveProperty("instantiate");
+    await expect((await kit).instantiate(), "the checked kit hands out terminals").resolves.toBeDefined();
+    expect(dropped.length, "every instance was made without it").toBeGreaterThan(0);
+    for (const run of dropped) expect(run, "the vendored core does export it").toBeTypeOf("function");
+  });
+
   // Anything else an instance can throw may pass: the spawn it fails falls
   // back, and the next spawn checks again with a new instance of the module
   // compiled before.

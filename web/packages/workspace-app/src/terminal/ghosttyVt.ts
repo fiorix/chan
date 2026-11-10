@@ -280,7 +280,6 @@ const FUNCTIONS = [
   "ghostty_search_free",
   "ghostty_search_tick",
   "ghostty_search_feed",
-  "ghostty_search_run",
   "ghostty_search_set",
   "ghostty_search_get",
   "ghostty_search_select_next",
