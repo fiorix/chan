@@ -9,38 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chan_server::metrics::{View, SCHEMA_VERSION};
-use clap::Args;
 
-#[derive(Args, Debug, Clone)]
-pub(crate) struct MetricsArgs {
-    /// Server base URL, optionally carrying its launch token (?t=...).
-    /// Omit to query the devserver belonging to this CHAN_HOME.
-    #[arg(long)]
-    pub url: Option<String>,
-    /// Bearer for an explicit URL. With --url and no --token,
-    /// CHAN_METRICS_TOKEN supplies it; without --url the variable is
-    /// ignored and the local devserver's own bearer is used.
-    // Read in `url_token`, not through clap's `env`: clap counts an env
-    // value as given, so an exported variable would trip `requires = "url"`
-    // on every plain `chan metrics`.
-    #[arg(long, requires = "url")]
-    pub token: Option<String>,
-    /// Emit the shared metrics schema as JSON.
-    #[arg(long)]
-    pub json: bool,
-    /// Repeat about every second with only what is new: the first output is
-    /// complete and each later one carries only newer samples. JSON mode
-    /// emits one object per line.
-    #[arg(long)]
-    pub watch: bool,
-    /// Include the server's bounded sample history in JSON output; under
-    /// --watch, later lines hold only the samples newer than the last.
-    #[arg(long, requires = "json")]
-    pub history: bool,
-    /// Serve Varlink on stdin/stdout (systemd StandardInput=socket).
-    #[arg(long, conflicts_with_all = ["json", "watch", "history"])]
-    pub varlink: bool,
-}
+use crate::cli::MetricsArgs;
 
 pub(crate) struct Client {
     args: MetricsArgs,
@@ -532,6 +502,18 @@ pub(crate) fn full_view() -> View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_help_example_is_the_text_output() {
+        // The first two output lines the help shows, as comments.
+        let shown: Vec<&str> = crate::help::CHAN_METRICS_AFTER
+            .lines()
+            .filter_map(|line| line.strip_prefix("  # "))
+            .take(2)
+            .collect();
+        let text = render(&full_view());
+        assert_eq!(shown, text.lines().take(2).collect::<Vec<_>>());
+    }
 
     /// The storage line, the last one of the text output.
     fn storage_line(view: &View) -> String {

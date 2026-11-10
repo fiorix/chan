@@ -587,6 +587,104 @@ SEE ALSO:
 workspace ls` for the registry alone.
 "#;
 
+/// `chan metrics` long help (manpage head).
+pub(crate) const CHAN_METRICS: &str = r"Print the serving chan process's own readings, once or as a stream.
+
+The server samples itself once per second and keeps ten minutes of
+samples in memory; this command reads that cache over HTTP. It never
+starts a server. The readings are the SERVER process's, not this
+command's and not those of the shells or agents the server started:
+version, build, PID, host, uptime, CPU (100% is one logical core),
+resident memory and process I/O; chan's own traffic at each layer
+(service sockets, HTTP/2, yamux, reverse forwards, file payload);
+transfer workers and gateway tunnels; and the size of the chan home,
+which is scanned only while someone reads. Layers overlap, so their byte
+counts are not to be added up. A reading the platform cannot give prints
+as n/a (null in --json), never as zero.
+
+Without --url the target is the devserver of this CHAN_HOME, read with
+that devserver's own bearer at the address its systemd unit pins with
+--bind and --port, else at the port it last recorded, on loopback. A
+wildcard bind is reached on loopback, and the read never goes through a
+proxy.
+
+--url reads any chan server by a URL chan printed for it: a devserver's
+launcher URL, a `chan serve` URL, or a tenant's. The bearer is --token,
+else CHAN_METRICS_TOKEN, else the URL's ?t= token, and never the local
+devserver's. CHAN_METRICS_TOKEN applies only beside --url.
+
+--json prints the view as one JSON document, and --history adds the
+retained samples to it. --watch repeats about once per second: the first
+output is complete, and with --json each later line is one object that
+carries only the samples newer than the last one sent.
+
+--varlink serves the same view as the Varlink interface io.chan.Metrics
+on stdin and stdout, for a systemd socket unit.
+";
+
+/// `chan metrics` examples, side effects, and caveats.
+pub(crate) const CHAN_METRICS_AFTER: &str = r#"EXAMPLES:
+What this machine's devserver costs right now:
+  chan metrics
+  # chan 0.127.0 (git-0123456789ab)  PID 184223  Host: box
+  # Uptime 3600s  CPU 1.5%  RSS 12.0 MiB
+  # ...then a line each for process I/O, every traffic layer, the
+  # transfer workers, the tunnels and the chan home
+
+The same view as JSON, then with the retained samples:
+  chan metrics --json
+  chan metrics --json --history
+
+Follow it, one JSON object per line, until Ctrl-C:
+  chan metrics --watch --json
+  chan metrics --watch --json | jq '.latest.process.cpuPercent'
+
+Another chan server, by the URL it printed, then with the token kept
+out of the argument list:
+  chan metrics --url 'http://127.0.0.1:8787/?t=TOKEN'
+  CHAN_METRICS_TOKEN=TOKEN chan metrics --url http://127.0.0.1:8787
+
+The Varlink interface, once the example user units are installed:
+  systemctl --user enable --now chan-metrics.socket
+  varlinkctl call "$XDG_RUNTIME_DIR/chan-metrics/io.chan.Metrics" \
+    io.chan.Metrics.Get '{}'
+
+SIDE EFFECTS:
+None on this machine's disk. Each read is one GET of the server's
+/api/metrics. Reads drive the server's scan of the chan home: the first
+read starts one, scans repeat once per minute while reads keep arriving,
+and the scan rests after five minutes with no read. Output goes to
+stdout.
+
+CAVEATS:
+On Linux a read without --url sends the bearer only when every socket
+listening on the address belongs to your user, read from /proc/net/tcp
+and /proc/net/tcp6, because a recorded port outlives its devserver and
+another user could be listening there. It refuses otherwise, also when
+nothing listens there. On macOS, FreeBSD and Windows there is no such
+check, and the bearer goes to the port unverified.
+
+A failed read ends --watch with the error, so a watch rides out a server
+restart only when the server answers again by the next read, about a
+second later. A restart it does ride out shows as one complete output,
+since the server's sample sequences start again.
+
+--history needs --json, and --token needs --url. Without --url,
+CHAN_METRICS_TOKEN is ignored.
+
+--varlink is not for a terminal: systemd passes it one connected client
+on stdin and stdout, from a socket unit with Accept=yes and a service
+template with StandardInput=socket. Example units are in the chan
+repository under docs/systemd/; no package installs them. The adapter
+reads the running devserver on every call and never starts it: with the
+devserver down, io.chan.Metrics.Get answers io.chan.Metrics.Unavailable.
+The adapter is built on Unix only; on Windows the flag is refused.
+
+SEE ALSO:
+`chan ps` for which workspaces are served, `chan devserver status` for
+the devserver's service.
+"#;
+
 /// `chan workspace contacts import csv` long help (manpage head).
 pub(crate) const CHAN_WORKSPACE_CONTACTS_IMPORT_CSV: &str = r#"Import contacts from a CSV file into a workspace, one markdown note
 per contact.

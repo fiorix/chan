@@ -50,8 +50,6 @@ pub(super) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(super) enum Command {
-    /// Show the running server's process, transfer and transport metrics
-    Metrics(crate::metrics::MetricsArgs),
     /// Serve a workspace (same as `chan workspace serve`)
     #[command(long_about = SERVE_LONG_ABOUT, visible_alias = "open")]
     #[command(after_long_help = &*SERVE_AFTER_HELP)]
@@ -77,6 +75,10 @@ pub(super) enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the running server's process, transfer and transport metrics
+    #[command(long_about = help::CHAN_METRICS)]
+    #[command(after_long_help = help::CHAN_METRICS_AFTER)]
+    Metrics(MetricsArgs),
     /// Manage the workspace registry and a workspace's content
     ///
     /// Registers, lists, and forgets workspaces, and drives one
@@ -215,6 +217,38 @@ pub(super) enum Command {
         /// the gemini settings.json / claude --mcp-config payload.
         socket: PathBuf,
     },
+}
+
+/// Arguments of `chan metrics`.
+#[derive(Args, Debug, Clone)]
+pub(super) struct MetricsArgs {
+    /// Server base URL, optionally carrying its launch token (?t=...).
+    /// Omit to query the devserver belonging to this CHAN_HOME.
+    #[arg(long, verbatim_doc_comment)]
+    pub url: Option<String>,
+    /// Bearer for an explicit URL. With --url and no --token,
+    /// CHAN_METRICS_TOKEN supplies it; without --url the variable is
+    /// ignored and the local devserver's own bearer is used.
+    // Read in `metrics::url_token`, not through clap's `env`: clap counts an
+    // env value as given, so an exported variable would trip
+    // `requires = "url"` on every plain `chan metrics`.
+    #[arg(long, requires = "url", verbatim_doc_comment)]
+    pub token: Option<String>,
+    /// Emit the shared metrics schema as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Repeat about every second with only what is new: the first output is
+    /// complete and each later one carries only newer samples. JSON mode
+    /// emits one object per line.
+    #[arg(long, verbatim_doc_comment)]
+    pub watch: bool,
+    /// Include the server's bounded sample history in JSON output; under
+    /// --watch, later lines hold only the samples newer than the last.
+    #[arg(long, requires = "json", verbatim_doc_comment)]
+    pub history: bool,
+    /// Serve Varlink on stdin/stdout (systemd StandardInput=socket).
+    #[arg(long, conflicts_with_all = ["json", "watch", "history"])]
+    pub varlink: bool,
 }
 
 /// Subcommands for `chan devserver`. One noun, two faces, told apart by
@@ -1455,6 +1489,38 @@ mod tests {
                     assert_eq!(matches.subcommand_name(), Some(expected), "prefix {prefix}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn metrics_is_listed_beside_ps_and_carries_long_help() {
+        let cmd = Cli::command();
+        // The command list of `chan -h` is in declaration order.
+        let names: Vec<&str> = cmd.get_subcommands().map(|sub| sub.get_name()).collect();
+        let ps = names.iter().position(|name| *name == "ps").unwrap();
+        assert_eq!(names.get(ps + 1), Some(&"metrics"), "{names:?}");
+        let metrics = cmd.find_subcommand("metrics").unwrap();
+        let help = format!(
+            "{}\n{}",
+            metrics.get_long_about().expect("a long_about"),
+            metrics.get_after_long_help().expect("an after_long_help")
+        );
+        // Every flag the command takes is explained, with the variable that
+        // stands in for one of them, the Linux refusal and the adapter.
+        let flags = metrics
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .map(|long| format!("--{long}"));
+        for needle in flags.chain(
+            [
+                "CHAN_METRICS_TOKEN",
+                "/proc/net/tcp",
+                "io.chan.Metrics",
+                "EXAMPLES:",
+            ]
+            .map(String::from),
+        ) {
+            assert!(help.contains(&needle), "the help does not name {needle}");
         }
     }
 
