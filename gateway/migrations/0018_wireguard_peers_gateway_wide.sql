@@ -13,12 +13,32 @@ ALTER TABLE wireguard_peers DROP COLUMN host;
 -- the order rows are visited in. The id breaks a tie in updated_at, so one row
 -- of a tied pair still goes. A NULL address_v6 equals nothing and is never a
 -- duplicate. A desktop whose row goes enrolls again at its next sign-in.
-DELETE FROM wireguard_peers older
-USING wireguard_peers newer
-WHERE (newer.updated_at, newer.id) > (older.updated_at, older.id)
-  AND (newer.public_key = older.public_key
-       OR newer.address_v4 = older.address_v4
-       OR newer.address_v6 = older.address_v6);
+--
+-- Each column is its own join on equality, which the planner can hash. The
+-- indexes on these columns went with the per-host constraints, and one join on
+-- the three equalities under OR would compare every pair of rows while the
+-- table is locked. The three joins read the table as it stood before the
+-- statement, and a row that more than one of them finds is deleted once.
+DELETE FROM wireguard_peers
+WHERE id IN (
+    SELECT older.id
+    FROM wireguard_peers older
+    JOIN wireguard_peers newer
+      ON newer.public_key = older.public_key
+     AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
+    UNION ALL
+    SELECT older.id
+    FROM wireguard_peers older
+    JOIN wireguard_peers newer
+      ON newer.address_v4 = older.address_v4
+     AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
+    UNION ALL
+    SELECT older.id
+    FROM wireguard_peers older
+    JOIN wireguard_peers newer
+      ON newer.address_v6 = older.address_v6
+     AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
+);
 
 ALTER TABLE wireguard_peers
     ADD UNIQUE (public_key),
