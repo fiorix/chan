@@ -274,6 +274,11 @@ pub struct AppState {
     /// The handoff listener, held for the process's life; a relaunch gives it
     /// up first (`single_instance::release_endpoint`).
     pub(crate) handoff_listener: Mutex<Option<chan_server::handoff::ListenerHandle>>,
+    /// The endpoint claim of a handoff listener that failed to start, held in
+    /// the listener's place for the process's life: a desktop that let it go
+    /// would run without the lock that keeps a second launch from booting
+    /// beside it (`single_instance::hold_endpoint`).
+    pub(crate) unserved_endpoint: Mutex<Option<chan_server::handoff::EndpointClaim>>,
     /// The workspace window that took focus last, the one a second launch
     /// brings forward (`single_instance::come_forward`).
     pub(crate) last_focused_window: Mutex<Option<String>>,
@@ -354,6 +359,7 @@ impl AppState {
             restore_pending: Mutex::new(Vec::new()),
             handoff_registrations: HandoffRegistrations::default(),
             handoff_listener: Mutex::new(None),
+            unserved_endpoint: Mutex::new(None),
             last_focused_window: Mutex::new(None),
             boot_settled: std::sync::atomic::AtomicBool::new(false),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
@@ -5812,7 +5818,9 @@ fn main() {
             // asks this one to come forward. The handle lives in the app
             // state for the process lifetime; its Drop tears down the
             // listener, which a relaunch does first. A bind failure is
-            // non-fatal: the CLI just falls back to its own server.
+            // non-fatal: the CLI just falls back to its own server, and the
+            // app state keeps the claim in the listener's place, so a second
+            // launch still meets the endpoint held.
             if let Some(claim) = endpoint_claim {
                 let app_for_handoff = app.handle().clone();
                 let state_for_handoff = Arc::clone(&state_for_setup);
@@ -6025,17 +6033,7 @@ fn main() {
                         }
                     })
                 });
-                match listener {
-                    Ok(handle) => {
-                        *state_for_setup
-                            .handoff_listener
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "CLI-to-desktop handoff listener disabled");
-                    }
-                }
+                single_instance::hold_endpoint(&state_for_setup, listener);
             }
 
             // Boot matrix. Every window is a library registry row, so boot is

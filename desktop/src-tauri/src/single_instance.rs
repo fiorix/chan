@@ -21,7 +21,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chan_server::handoff::{self, ActivateReply, ClaimError, EndpointClaim, Response};
+use chan_server::handoff::{
+    self, ActivateReply, ClaimError, EndpointClaim, ListenerHandle, ListenerStartError, Response,
+};
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{serve, window_watcher, AppState};
@@ -211,6 +213,34 @@ fn wait_for_release(path: &Path, grace: Duration) -> Option<EndpointClaim> {
     }
 }
 
+/// Keep what the listener's start left this desktop holding of the endpoint,
+/// for the process's life: the listener, or the claim of a listener that
+/// failed to start. Without that claim the desktop would go on with the
+/// endpoint free, and a second launch would claim it and boot beside this
+/// one; with it the launch meets a held endpoint that does not answer, and
+/// exits.
+pub(crate) fn hold_endpoint(state: &AppState, started: Result<ListenerHandle, ListenerStartError>) {
+    match started {
+        Ok(listener) => {
+            *state
+                .handoff_listener
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(listener);
+        }
+        Err(failed) => {
+            tracing::warn!(
+                error = %failed.error,
+                "CLI-to-desktop handoff listener disabled; the endpoint stays claimed, so a \
+                 second launch exits instead of running beside this desktop"
+            );
+            *state
+                .unserved_endpoint
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(failed.claim);
+        }
+    }
+}
+
 /// Give up the endpoint before this process relaunches itself, so the new
 /// process claims it at once instead of meeting it held by a desktop on its
 /// way out. Only the platforms that relaunch themselves call it.
@@ -219,6 +249,13 @@ pub(crate) fn release_endpoint(state: &AppState) {
     drop(
         state
             .handoff_listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(),
+    );
+    drop(
+        state
+            .unserved_endpoint
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take(),
@@ -655,6 +692,55 @@ mod tests {
         );
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
         assert_eq!(startup.exit_code(), Some(1));
+    }
+
+    /// A desktop whose listener failed to start keeps the endpoint claimed:
+    /// a second launch meets a holder that does not answer and exits
+    /// non-zero instead of booting beside it, and a relaunch still gives the
+    /// endpoint up. The bind fails on a socket name past the `sun_path`
+    /// limit, which the lock file beside the socket does not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_desktop_whose_listener_failed_to_start_still_holds_the_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join(format!("{}.sock", "s".repeat(150)));
+        let config = tempfile::tempdir().unwrap();
+        let store = Arc::new(std::sync::Mutex::new(crate::config::ConfigStore::at_path(
+            config.path().join("config.json"),
+        )));
+        let state = AppState::with_store(store);
+        let claimed = handoff::claim_endpoint_at(&sock).unwrap();
+        let started = tauri::async_runtime::block_on(async {
+            handoff::start_claimed_listener(claimed, |_req| async {
+                Response::Error {
+                    message: "unreachable".into(),
+                }
+            })
+        });
+        assert!(
+            started.is_err(),
+            "a socket path past the sun_path limit must not bind"
+        );
+        hold_endpoint(&state, started);
+        let startup = check_at(
+            &sock,
+            Duration::from_millis(400),
+            Duration::from_millis(200),
+        );
+        assert!(
+            matches!(startup, Startup::Unanswered),
+            "a second launch must not boot beside a desktop whose listener failed to start: \
+             {startup:?}"
+        );
+        assert_eq!(startup.exit_code(), Some(1));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            release_endpoint(&state);
+            assert!(
+                matches!(claim(&sock), Lock::Taken(_)),
+                "a relaunch gives the endpoint up"
+            );
+        }
     }
 
     /// A silent holder that exits while the launch asks frees the endpoint,
