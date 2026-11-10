@@ -516,6 +516,10 @@ impl TmuxWindowHook for RecordingHook {
         Some(id)
     }
 
+    fn label(&self, window_id: &str, label: &str) {
+        self.record(format!("label {window_id} {label}"));
+    }
+
     fn control(&self, _connection: &str, title: &str, existing: Option<&str>) -> Option<String> {
         if let Some(existing) = existing {
             self.record(format!("control {title} again {existing}"));
@@ -766,6 +770,110 @@ fn a_requested_window_gets_a_chan_window_of_its_own_and_its_list() {
         },
         TmuxRequest::Detach,
     ));
+}
+
+#[test]
+fn a_renamed_window_relabels_its_chan_window_and_its_panes_keep_their_group() {
+    let (mut rig, pane, hook) = attached_with_hook();
+    rig.feed(b"%window-renamed @0 build\r\n");
+    rig.work();
+    assert_eq!(
+        calls(&hook),
+        vec!["label w-1 build"],
+        "the chan window carries the tmux window's new name"
+    );
+    assert_eq!(pane.live_metadata().name.as_deref(), Some("build"));
+    assert_eq!(
+        pane.live_metadata().group,
+        "tmux",
+        "a rename names the pane and leaves its group"
+    );
+    // A rename to the name the window has relabels nothing.
+    rig.feed(b"%window-renamed @0 build\r\n");
+    rig.work();
+    assert_eq!(calls(&hook), Vec::<String>::new());
+}
+
+#[test]
+fn a_rename_while_the_window_is_minted_relabels_it_once_minted() {
+    let mut rig = Rig::connected();
+    let hook = RecordingHook::install(&rig.registry);
+    rig.feed(ONE_WINDOW);
+    // tmux renames the window before the host has minted its chan window.
+    rig.feed(b"%window-renamed @0 build\r\n");
+    rig.work();
+    rig.work();
+    let recorded = calls(&hook);
+    let mint = recorded.iter().position(|c| c == "mint shell -> w-1");
+    let label = recorded.iter().position(|c| c == "label w-1 build");
+    assert!(
+        matches!((mint, label), (Some(m), Some(l)) if m < l),
+        "minted with the listed name, then relabelled: {recorded:?}"
+    );
+    assert_eq!(
+        rig.pane(0).live_metadata().name.as_deref(),
+        Some("build"),
+        "the pane made with the listed name takes the new one"
+    );
+}
+
+/// A window a notification adds, with pane %5, listed by the `list-windows`
+/// that follows it as named `name`.
+fn added_window_list(rig: &mut Rig, name: &str) -> Vec<u8> {
+    let layout = layout_with_checksum("80x24,0,0,5");
+    let added = format!("@1 {layout} {layout} * {name}");
+    rig.reply(&[
+        b"@0 b25d,80x24,0,0,0 b25d,80x24,0,0,0 - shell",
+        added.as_bytes(),
+    ])
+}
+
+/// Add window @1 by notification and answer its pane list: the chan window
+/// is minted unnamed and the pane's session asked for with no name.
+fn add_unnamed_window(rig: &mut Rig, hook: &Arc<Mutex<Vec<String>>>) {
+    rig.feed(b"%window-add @1\r\n");
+    rig.work();
+    rig.inputs();
+    assert_eq!(calls(hook), vec!["mint tmux @1 -> w-2"]);
+    let panes_reply = rig.reply(&[b"%5 1"]);
+    rig.feed(&panes_reply);
+}
+
+#[test]
+fn a_window_a_notification_added_takes_the_name_its_list_brings() {
+    let (mut rig, _pane, hook) = attached_with_hook();
+    add_unnamed_window(&mut rig, &hook);
+    rig.work();
+    let pane = rig.pane(5);
+    assert_ne!(pane.live_metadata().name.as_deref(), Some("zsh"));
+    let list = added_window_list(&mut rig, "zsh");
+    rig.feed(&list);
+    rig.work();
+    assert_eq!(pane.live_metadata().name.as_deref(), Some("zsh"));
+    assert_eq!(pane.live_metadata().group, "tmux");
+    let labels: Vec<String> = calls(&hook)
+        .into_iter()
+        .filter(|c| c.starts_with("label "))
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["label w-2 zsh"],
+        "the added window is relabelled and the listed one is not"
+    );
+}
+
+#[test]
+fn a_name_listed_before_the_pane_session_exists_reaches_the_session() {
+    let (mut rig, _pane, hook) = attached_with_hook();
+    add_unnamed_window(&mut rig, &hook);
+    // The list's name arrives while the registry has not made the session.
+    let list = added_window_list(&mut rig, "zsh");
+    rig.feed(&list);
+    rig.work();
+    rig.work();
+    let pane = rig.pane(5);
+    assert_eq!(pane.live_metadata().name.as_deref(), Some("zsh"));
+    assert!(calls(&hook).iter().any(|c| c == "label w-2 zsh"));
 }
 
 #[test]

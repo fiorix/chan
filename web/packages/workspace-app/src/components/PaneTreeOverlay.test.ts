@@ -18,6 +18,7 @@ import { applyWindowLabel, __resetWindowTitle } from "../state/windowTitle.svelt
 import { privacy } from "@chan/web-shared/privacy";
 import { loadScopedLibrarySnapshot, type ScopedLibrarySnapshot } from "../api/libraryCommand";
 import { sessionWindowId } from "../api/client";
+import { onWatchEvent } from "../state/store.svelte";
 
 vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }));
 
@@ -439,6 +440,76 @@ describe("the pointer", () => {
     expect(press.defaultPrevented).toBe(true);
     expect(paneTree.open).toBe(false);
     expect(layout.activePaneId).toBe("right");
+  });
+});
+
+describe("a tmux window", () => {
+  /// Two tmux panes side by side, as the server's tmux_layout lays them out:
+  /// each pane one terminal tab bound to its pane session and named after
+  /// the tmux window, the window's record labelled with that name.
+  function seedTmux(recordLabel: string): void {
+    const tab = (id: string, title: string, session: string, pane: string) =>
+      terminalTab({ id, title, terminalSessionId: session, tmuxPane: { connection: 1, pane } });
+    layout.nodes = {
+      root: { id: "root", kind: "split", direction: "row", a: "left", b: "right", ratio: 0.5 },
+      left: leaf("left", [tab("t0", "shell", "s0", "%0")]),
+      right: leaf("right", [tab("t1", "shell-2", "s1", "%1")]),
+    };
+    layout.rootId = "root";
+    layout.activePaneId = "left";
+    const own = ownSnapshot();
+    own.windows[0] = { ...own.windows[0]!, ordinal: 3, label: recordLabel, tmux: true };
+    vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(own);
+  }
+
+  /// A tmux rename as the server sends it: the pane sessions' new names in
+  /// the roster, then the window's new label to its own socket.
+  function hearRename(name: string): void {
+    const entry = (id: string, tabName: string) => ({
+      id, tab_name: tabName, tab_group: "tmux", window_id: sessionWindowId(), broadcast: false,
+    });
+    onWatchEvent({ type: "terminal_roster", sessions: [entry("s0", name), entry("s1", `${name}-2`)] });
+    onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "window_labeled", label: name });
+  }
+
+  function heading(): string | null | undefined {
+    return panel()?.querySelector(".window-title")?.textContent;
+  }
+
+  function paneLabels(): string[] {
+    return [...document.querySelectorAll(".pane-label")].map((label) => label.textContent!.trim());
+  }
+
+  test("a rename reaches the open tree's rows and heading, and a closed tree's next open", async () => {
+    seedTmux("shell");
+    windowTabBar.on = true;
+    await open();
+    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [shell]"));
+    expect(rowTitles()).toEqual(["shell", "shell-2"]);
+
+    hearRename("build");
+    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [build]"));
+    expect(rowTitles()).toEqual(["build", "build-2"]);
+    expect(paneLabels()).toEqual(["build", "build-2"]);
+
+    closePaneTree();
+    await tick();
+    hearRename("vim");
+    await open();
+    expect(heading()).toBe("Terminal Window 3 [vim]");
+    expect(rowTitles()).toEqual(["vim", "vim-2"]);
+    expect(loadScopedLibrarySnapshot, "the frames kept the name; nothing was read again").toHaveBeenCalledTimes(1);
+  });
+
+  test("a rename before the first open shows at that open", async () => {
+    // The server labels the record before it tells the page, so the read at
+    // the first open carries the new name.
+    seedTmux("build");
+    hearRename("build");
+    windowTabBar.on = true;
+    await open();
+    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [build]"));
+    expect(rowTitles()).toEqual(["build", "build-2"]);
   });
 });
 

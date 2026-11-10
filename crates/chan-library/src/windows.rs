@@ -965,6 +965,34 @@ impl WindowRegistry {
         .0
     }
 
+    /// Label the tmux window row `window_id` with `label`, its tmux window's
+    /// name cut to the label bound, as [`Self::create_tmux_window`] does.
+    /// tmux names its windows, so the name it reports replaces any caption.
+    /// Returns the label stored when it changed; any other row, a control
+    /// row included, is left alone. Fires the change notification on a
+    /// change and saves nothing, since the row is never saved.
+    pub fn relabel_tmux_window(&self, window_id: &str, label: &str) -> Option<String> {
+        let label: String = label.chars().take(MAX_WINDOW_LABEL_CHARS).collect();
+        let changed = {
+            let mut windows = self.lock();
+            let row = windows.iter_mut().find(|w| {
+                w.window_id == window_id && w.tmux.as_ref().is_some_and(|mark| !mark.control)
+            });
+            match row {
+                Some(w) if w.label != label => {
+                    w.label = label.clone();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !changed {
+            return None;
+        }
+        self.notify.notify_waiters();
+        Some(label)
+    }
+
     /// Apply `edit` to row `window_id` and return `(matched, changed)`.
     /// Persists and fires the change notification only when `edit` reports a
     /// change.

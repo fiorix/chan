@@ -2103,7 +2103,20 @@ impl Registry {
                 }
                 tmux_connection::TmuxWork::RenamePanes { ids, name } => {
                     for id in ids {
-                        self.update_live_metadata(&id, name.clone(), None);
+                        // tmux renames the pane's tab; its broadcast group
+                        // stays the one it has.
+                        let group = self
+                            .sessions
+                            .lock()
+                            .expect("terminal registry poisoned")
+                            .get(&id)
+                            .map(|pane| pane.live_metadata().group);
+                        self.update_live_metadata(&id, name.clone(), group);
+                    }
+                }
+                tmux_connection::TmuxWork::LabelWindow { window_id, label } => {
+                    if let Some(hook) = self.tmux_window_hook() {
+                        hook.label(&window_id, &label);
                     }
                 }
                 tmux_connection::TmuxWork::MintWindow { key, title } => {
@@ -7959,6 +7972,9 @@ pub trait TmuxWindowHook: Send + Sync {
     /// Mint a chan window for a tmux window of `connection`, labelled
     /// `name` (the tmux window's name), and answer its id.
     fn mint(&self, connection: &str, name: &str) -> Option<String>;
+    /// Label the chan window `window_id` minted for a tmux window `label`,
+    /// the name tmux now gives it, and tell the window's page.
+    fn label(&self, window_id: &str, label: &str);
     /// Give `connection` its control window, titled `title`: mint one,
     /// hidden, or mark `existing` as the control window again when the
     /// control session still sits in the window an earlier connection
