@@ -257,28 +257,58 @@ pub(crate) async fn cmd_metrics(args: MetricsArgs) -> Result<()> {
         #[cfg(not(unix))]
         anyhow::bail!("Varlink socket activation is available on Unix");
     }
+    // The lock is taken for one view at a time and never held across a read.
+    let print = |view: &View| {
+        let text = output(view, args.json, args.watch)?;
+        write_output(&mut std::io::stdout().lock(), &text)
+    };
     if !args.watch {
-        let view = client.read(args.history, None).await?;
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&view)?);
-        } else {
-            print!("{}", render(&view));
-        }
+        print(&client.read(args.history, None).await?)?;
         return Ok(());
     }
-    let mut stream = Subscription::new(args.history, None);
+    watch(&client, args.history, print).await
+}
+
+/// `--watch`: print each view the stream sends, about once per second, until
+/// Ctrl-C or until `print` reports that nobody reads the output any more. A
+/// failed read ends it with the error.
+async fn watch(
+    source: &impl Source,
+    history: bool,
+    mut print: impl FnMut(&View) -> Result<bool>,
+) -> Result<()> {
+    let mut stream = Subscription::new(history, None);
     loop {
-        if let Some(view) = stream.next(&client).await? {
-            if args.json {
-                println!("{}", serde_json::to_string(&view)?);
-            } else {
-                print!("{}", render(&view));
+        if let Some(view) = stream.next(source).await? {
+            if !print(&view)? {
+                return Ok(());
             }
         }
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
+    }
+}
+
+/// One view as the command prints it: the text block, pretty JSON for a
+/// single read, or one JSON object per line under `--watch`.
+fn output(view: &View, json: bool, watch: bool) -> Result<String> {
+    Ok(match (json, watch) {
+        (false, _) => render(view),
+        (true, false) => format!("{}\n", serde_json::to_string_pretty(view)?),
+        (true, true) => format!("{}\n", serde_json::to_string(view)?),
+    })
+}
+
+/// Write one output and flush it. False when the reader is gone: a closed
+/// pipe (`chan metrics --watch --json | head -n1`) ends the output, and the
+/// command with it, without being a failure of the command.
+fn write_output(out: &mut impl std::io::Write, text: &str) -> Result<bool> {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error).context("cannot write the metrics output"),
     }
 }
 
@@ -778,6 +808,62 @@ mod tests {
             .collect();
         view.latest = view.history.last().cloned();
         view
+    }
+
+    /// Output whose reader has gone away: every write fails as a write to a
+    /// closed pipe does.
+    struct ClosedPipe;
+
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_whose_reader_is_gone_ends_without_an_error() {
+        let base = sampled_view().await;
+        let script = Script {
+            views: std::sync::Mutex::new([view_of(&base, "a", 1..=2)].into()),
+            asked: Default::default(),
+        };
+        let ended = watch(&script, true, |view| {
+            write_output(&mut ClosedPipe, &output(view, true, true)?)
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "a closed pipe ended the watch as a failure: {ended:?}"
+        );
+        // It ended at the write that failed, before another read.
+        assert_eq!(*script.asked.lock().unwrap(), [None]);
+        // A single read is printed the same way.
+        let single = output(&view_of(&base, "a", 1..=2), true, false).unwrap();
+        assert!(matches!(write_output(&mut ClosedPipe, &single), Ok(false)));
+    }
+
+    #[test]
+    fn output_is_written_whole_and_other_write_errors_fail_the_command() {
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::StorageFull.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut written = Vec::new();
+        assert!(matches!(write_output(&mut written, "line\n"), Ok(true)));
+        assert_eq!(written, b"line\n");
+        let error = write_output(&mut Full, "line\n").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot write the metrics output"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]
