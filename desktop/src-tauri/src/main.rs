@@ -6148,16 +6148,20 @@ fn main() {
                     persist_workspaces(&state_for_exit);
                 }
             }
-            // macOS: Dock click or `open -a` while the process is still
-            // alive with no visible window (only hidden-in-place windows
-            // remain): open a standalone terminal, the window the launcher
-            // is toggled in.
+            // macOS: Dock click or `open -a` while the process is alive
+            // with no visible window, because only hidden-in-place windows
+            // remain or because the boot has not opened its windows yet. It
+            // opens a standalone terminal, the window the launcher is
+            // toggled in, unless a window is on its way: a terminal opened
+            // during the boot would be one more saved window. The rule is
+            // `single_instance::reopen_without_a_window`, built and tested
+            // on every target, since this arm is built on macOS alone.
             #[cfg(target_os = "macos")]
             RunEvent::Reopen {
                 has_visible_windows: false,
                 ..
             } => {
-                spawn_terminal_window(_app);
+                single_instance::reopen_without_a_window(_app);
             }
             _ => {}
         }
@@ -8839,6 +8843,43 @@ mod tests {
                 "a relaunch must release the endpoint right before it"
             );
         }
+    }
+
+    /// A reopen with no visible window, a Dock click on macOS, goes through
+    /// the gated answer, which opens no terminal while the boot or a window
+    /// is on its way. The arm is built on macOS alone, so it makes that one
+    /// call and never opens a terminal itself, and the answer opens one only
+    /// for the choice that says so.
+    #[test]
+    fn a_reopen_with_no_visible_window_goes_through_the_gated_answer() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let arm = source_region(
+            production,
+            "RunEvent::Reopen {",
+            "\n/// Build and install the application menu.",
+        );
+        assert!(arm.contains("has_visible_windows: false,"));
+        assert!(
+            arm.contains("single_instance::reopen_without_a_window(_app);"),
+            "the reopen arm must make the gated call"
+        );
+        assert!(
+            !arm.contains("spawn_terminal_window("),
+            "the reopen arm must not open a terminal itself"
+        );
+        const SINGLE_INSTANCE_RS: &str = include_str!("single_instance.rs");
+        let (answer_source, _) = SINGLE_INSTANCE_RS
+            .split_once(boundary)
+            .expect("the test module separates the production code");
+        let answer = source_region(
+            answer_source,
+            "\npub(crate) fn reopen_without_a_window(",
+            "\n/// The choice for a reopen with no visible window",
+        );
+        assert!(answer.contains("if reopen_for(app, &state) == Forward::OpenTerminal {"));
+        assert_eq!(answer.matches("spawn_terminal_window(").count(), 1);
     }
 
     /// The boot's restore task takes its settled-guard inside the task and

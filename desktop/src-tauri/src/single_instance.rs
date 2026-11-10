@@ -402,6 +402,30 @@ pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     }
 }
 
+/// Answer a reopen that found no visible window, which on macOS is a Dock
+/// click or a second `open` of the running app: open a standalone terminal,
+/// the window the launcher is toggled in, unless a window is on its way. A
+/// reopen during the boot would otherwise add one more saved window beside
+/// those the boot is about to open, as a second launch's `Activate` would.
+/// Only macOS delivers the event, and its arm of the run loop is built on
+/// macOS alone, so that arm makes this one call and the rule is built and
+/// tested on every target.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn reopen_without_a_window(app: &AppHandle) {
+    let state = app.state::<Arc<AppState>>();
+    if reopen_for(app, &state) == Forward::OpenTerminal {
+        crate::spawn_terminal_window(app);
+    } else {
+        tracing::info!("reopened while a window is on its way; opening none");
+    }
+}
+
+/// The choice for a reopen with no visible window: [`forward_choice`] with
+/// no window shown, so a terminal, or nothing while a window is on its way.
+fn reopen_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Forward {
+    forward_choice(None, &[], local_window_on_its_way(app, state))
+}
+
 /// What coming forward does.
 #[derive(Debug, PartialEq, Eq)]
 enum Forward {
@@ -834,6 +858,42 @@ mod tests {
             .build()
             .expect("mock webview window");
         assert_eq!(forward_for(app, &desktop.state), Forward::Raise(label));
+    }
+
+    /// A reopen with no visible window, on macOS a Dock click or a second
+    /// `open` of the running app. Nothing opens while the boot is pending or
+    /// a minted window has no native window yet, and a settled desktop with
+    /// no window on its way opens the terminal.
+    #[test]
+    fn a_reopen_opens_nothing_while_the_boot_or_a_window_is_on_its_way() {
+        if !crate::embedded::in_own_chan_home(
+            "single_instance::tests::a_reopen_opens_nothing_while_the_boot_or_a_window_is_on_its_way",
+        ) {
+            return;
+        }
+        let desktop = crate::tests::handoff_row::Desktop::new();
+        let app = desktop.app.handle();
+        assert_eq!(
+            reopen_for(app, &desktop.state),
+            Forward::WindowOnItsWay,
+            "a reopen during the boot opens nothing"
+        );
+        drop(BootSettled::when_dropped(&desktop.state));
+        assert_eq!(
+            reopen_for(app, &desktop.state),
+            Forward::OpenTerminal,
+            "a settled desktop with no window and none on its way opens the terminal"
+        );
+        desktop
+            .runtime
+            .block_on(crate::ensure_boot_window(Arc::clone(&desktop.state)))
+            .expect("the boot window rule mints a terminal");
+        assert_eq!(desktop.embedded().local_window_records().len(), 1);
+        assert_eq!(
+            reopen_for(app, &desktop.state),
+            Forward::WindowOnItsWay,
+            "a reopen while a minted window has no native window yet opens nothing"
+        );
     }
 
     /// The I/O half against a real listener on a temporary endpoint: a launch
