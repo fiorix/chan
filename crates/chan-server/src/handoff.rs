@@ -761,6 +761,35 @@ pub fn claim_endpoint_at(_socket_path: &std::path::Path) -> Result<EndpointClaim
     )))
 }
 
+/// Why [`start_claimed_listener`] did not start a listener. It hands the
+/// claim back still held: a desktop that goes on without its listener keeps
+/// the claim, since dropping it would let a second desktop claim the endpoint
+/// and start beside the first.
+#[derive(Debug)]
+pub struct ListenerStartError {
+    pub claim: EndpointClaim,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for ListenerStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for ListenerStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Drops the claim, for a caller that claimed only to start the listener.
+impl From<ListenerStartError> for std::io::Error {
+    fn from(failed: ListenerStartError) -> Self {
+        failed.error
+    }
+}
+
 /// Handle owning the handoff listener and the connections it has accepted.
 /// [`shutdown`](Self::shutdown) stops accepting and lets those connections
 /// finish their replies, within a bound; Drop aborts the accept loop, and
@@ -868,7 +897,7 @@ where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
-    start_claimed_listener(claim_endpoint_at(&socket_path)?, handler)
+    start_claimed_listener(claim_endpoint_at(&socket_path)?, handler).map_err(Into::into)
 }
 
 /// [`start_listener`] on an endpoint this process already claimed.
@@ -876,7 +905,7 @@ where
 pub fn start_claimed_listener<F, Fut>(
     claim: EndpointClaim,
     handler: F,
-) -> std::io::Result<ListenerHandle>
+) -> Result<ListenerHandle, ListenerStartError>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
@@ -891,7 +920,7 @@ fn start_listener_with_peer_uid<F, Fut, U>(
     claim: EndpointClaim,
     handler: F,
     peer_uid: U,
-) -> std::io::Result<ListenerHandle>
+) -> Result<ListenerHandle, ListenerStartError>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
@@ -900,14 +929,19 @@ where
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
+    // Unlink any stale socket from a previous run that didn't clean up
+    // (kill -9, panic in Drop) so bind doesn't EADDRINUSE.
+    let _ = std::fs::remove_file(&claim.socket_path);
+    let listener = match UnixListener::bind(&claim.socket_path) {
+        Ok(listener) => listener,
+        // The claim is taken apart only once the bind holds, so a failed
+        // bind returns it with its lock.
+        Err(error) => return Err(ListenerStartError { claim, error }),
+    };
     let EndpointClaim {
         socket_path,
         lock: stable_lock,
     } = claim;
-    // Unlink any stale socket from a previous run that didn't clean up
-    // (kill -9, panic in Drop) so bind doesn't EADDRINUSE.
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
     // Lock the socket to the owning user. Best-effort: a chmod failure
     // (exotic fs) does not abort the listener, but the per-user
     // directory placement is the primary boundary anyway.
@@ -975,7 +1009,7 @@ where
 pub fn start_claimed_listener<F, Fut>(
     claim: EndpointClaim,
     handler: F,
-) -> std::io::Result<ListenerHandle>
+) -> Result<ListenerHandle, ListenerStartError>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
@@ -1049,17 +1083,20 @@ where
 
 #[cfg(not(any(unix, windows)))]
 pub fn start_claimed_listener<F, Fut>(
-    _claim: EndpointClaim,
+    claim: EndpointClaim,
     _handler: F,
-) -> std::io::Result<ListenerHandle>
+) -> Result<ListenerHandle, ListenerStartError>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "handoff listener requires unix-domain sockets or windows named pipes",
-    ))
+    Err(ListenerStartError {
+        claim,
+        error: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "handoff listener requires unix-domain sockets or windows named pipes",
+        ),
+    })
 }
 
 // Leave room for paths, URLs, labels and an optional connect script.
@@ -3564,6 +3601,35 @@ mod tests {
             claim_endpoint_at(&missing),
             Err(ClaimError::Unavailable(_))
         ));
+    }
+
+    /// A listener that fails to start hands its claim back still held, so a
+    /// desktop that goes on without the listener keeps the endpoint and a
+    /// second claim meets it held until that claim is dropped. The bind fails
+    /// on a socket name past the `sun_path` limit (108 bytes on Linux, 104 on
+    /// macOS), which the lock file beside the socket does not have.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claim_whose_listener_fails_to_start_stays_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join(format!("{}.sock", "s".repeat(150)));
+        let claim = claim_endpoint_at(&sock).unwrap();
+        let failed = start_claimed_listener(claim, |_req| async {
+            Response::Activated {
+                desktop_version: CHAN_VERSION.into(),
+            }
+        })
+        .err()
+        .expect("a socket path past the sun_path limit must not bind");
+        assert!(
+            matches!(claim_endpoint_at(&sock), Err(ClaimError::Held(_))),
+            "the endpoint must stay claimed after its listener failed to start: {failed}"
+        );
+        drop(failed);
+        assert!(
+            claim_endpoint_at(&sock).is_ok(),
+            "dropping the claim the failed start handed back frees the endpoint"
+        );
     }
 
     #[test]
