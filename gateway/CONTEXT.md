@@ -18,7 +18,11 @@ The account, sign-in and reverse-proxy surface of a self-hosted chan gateway, a 
 
 **devserver-control**: The singleton, database-free control plane. Owns the dynamic proxy directory, the aggregate tunnel view, fleet admission and command routing; serves `/admin/v1/*` to identity, profile and the admin CLI. Every proxy node holds one authenticated h2 control session to it. _Avoid_: controller-service, fleet-db
 
-**wireguard-agent**: The proxy-host agent that keeps one kernel WireGuard interface's peers equal to the gateway's peer table for that host. It reads the host's active peers from identity's internal listener, applies them with `wg`, and adds and removes only the peers in its managed set, the ones it added itself. _Avoid_: wg-sync, peer daemon
+**WireGuard ingress**: One proxy node's kernel WireGuard interface as a desktop reaches it: an id, which is the node's proxy id, the interface's public key and its `host:port` endpoint. A gateway offers one per node that terminates WireGuard; every ingress answers on the same tunnel addresses and accepts every enrolled peer, and none forwards for another node. It is not the tunnel ingress, the origin devservers dial. _Avoid_: hub, VPN gateway, WireGuard host
+
+**WireGuard peer**: A desktop's enrolled WireGuard key: one profile record per public key across the gateway, tied to its user and to one PAT, with one address set from the gateway's pool. It is active while that PAT is live and unexpired and its user is not blocked. _Avoid_: client, device
+
+**wireguard-agent**: The agent on a proxy node that keeps the peers of the node's kernel WireGuard interface equal to the gateway's active WireGuard peers. It reads them from identity's internal listener under the node's ingress id, the same list on every node, applies them with `wg`, and adds and removes only the peers in its managed set, the ones it added itself. _Avoid_: wg-sync, peer daemon
 
 **devserver token**: The owner PAT (`chan_pat_*`) that authorizes a devserver to register over the tunnel. One token identifies one devserver; the gateway derives the devserver id from the token's digest. The PAT stays opaque. _Avoid_: tunnel-name, api-key
 

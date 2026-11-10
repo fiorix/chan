@@ -8,13 +8,14 @@ A `chan devserver` dials out to a gateway with a personal access token, and the 
 
 ## What's here
 
-Seven crates in a nested Cargo workspace; see [`design.md`](design.md) for the system design and lifecycles and [`CONTEXT.md`](CONTEXT.md) for the vocabulary.
+Eight crates in a nested Cargo workspace; see [`design.md`](design.md) for the system design and lifecycles and [`CONTEXT.md`](CONTEXT.md) for the vocabulary.
 
 - `profile`: internal HTTP API over Postgres. Users, OAuth identities, devserver grants, feature flags, durable user and fleet devserver policy, and auth audit.
 - `identity`: `gw.{domain}`. OAuth2 sign-in with PKCE, indexed account sessions, personal access tokens, policy enforcement, the desktop API, and composite account and fleet admin operations.
 - `devserver-control`: singleton, database-free control plane. Owns the dynamic proxy directory, signed-lease admission, the aggregate tunnel and tenant-session inventory, and command routing.
 - `devserver-control-proto`: control protocol frames, validated ids and origins, and the shared tunnel and proxy view types.
 - `devserver-proxy`: `{proxy}.proxy.{domain}`. Terminates each `chan devserver`'s yamux tunnel and reverse-proxies it back out at `{owner}--{disc}.{proxy}.proxy.{domain}/{slug}-{8hex}/*`, behind the always-on devserver gate (an unauthenticated request looks like an unknown workspace, so probes cannot enumerate). Every registration is admitted by devserver-control before the client sees `HelloAck::Ok`.
+- `wireguard-agent`: runs on each proxy node that offers a WireGuard ingress and keeps the peers of the node's kernel WireGuard interface equal to the gateway's active peers, through `wg`.
 - `admin`: operator CLI against profile's, identity's and devserver-control's admin trees.
 - `gateway-common`: shared library (HTTP clients, the entry credential, the token bucket, static files, validators, internal-transport checks).
 
@@ -133,18 +134,41 @@ sudo systemctl enable --now chan-gateway-devserver-proxy
 
 The database role policy is version 2 at schema migration 18. Identity can lock the user and fleet-policy rows during PAT minting and can update only their `updated_at` columns; it cannot change account state or admission policy. For an existing deployment, set `DATABASE_ROLE_POLICY_VERSION=2` and `EXPECTED_SQLX_MIGRATION=18` in `migrate.env`, `identity.env` and `profile.env` before installing the new packages, because the postinst scripts require those exact lines and reject any other migration marker and policy version 1 (a v0.124.0 deployment carries migration 16 and policy 1; v0.125.0 and v0.126.0 carry migration 17 and policy 2); after installation, restart `chan-gateway-migrate` before restarting identity and profile. The migration unit prepares the roles, runs pending schema migrations, and reapplies the exact grants before publishing the ready marker. Restart the migration unit even when no schema migration is pending; its completed oneshot state does not rerun reconciliation by itself.
 
-Migration 18 keeps one WireGuard peer per public key, with one address set unique across the gateway. Where a database holds one key or one address enrolled on two ingress hosts, it deletes the earlier enrollment of each pair, and that desktop enrolls again at its next sign-in.
+Migration 18 keeps one WireGuard peer per public key, with one address set unique across the gateway, and drops the peer table's `host` column. Where a database holds one key or one address enrolled on two ingress hosts, it deletes the earlier enrollment of each pair, and that desktop enrolls again at its next sign-in.
+
+A profile from a release that carries migration 17 names the dropped column in every WireGuard statement: on the migrated schema its enrollment and peer-list routes answer 500 and its sweeper releases no address. Where identity and profile are upgraded apart, on separate hosts or in a rolling update, upgrade profile with the migration, before or together with identity. Until profile runs this release, a sign-in that enrolls a key fails with `wireguard_enroll_failed` and every agent keeps the peer list it last read, so a revoke does not reach the interfaces.
+
+A deployment that enrolls WireGuard peers also rewrites identity's enrollment variables before it restarts identity. A non-empty `WIREGUARD_HOST_ID`, `WIREGUARD_ENDPOINT`, `WIREGUARD_PUBLIC_KEY` or `WIREGUARD_HOSTS` stops identity from starting; [WireGuard ingress](#wireguard-ingress) below has the variables that replace them. Each agent's `WIREGUARD_AGENT_HOST_ID` must then be an id in identity's list: identity answers any other id 404, and that agent keeps the peers it has and applies no later enrollment or revoke.
 
 The binaries listen on loopback by default: identity public `7000`, identity internal `7004`, profile `7001`, control `7003`/`7101`, and proxy `7002`/`7100`. Front only identity `7000` and proxy `7002`/`7100` with TLS. Never publish identity `7004` or either control listener.
 
-A proxy host that terminates kernel WireGuard for enrolled desktops also runs the WireGuard agent, which listens on nothing. Bring the interface up first ([`crates/wireguard-agent/README.md`](crates/wireguard-agent/README.md) shows how), then install the package, which depends on `wireguard-tools`, set `WIREGUARD_AGENT_TOKEN` in `/etc/chan-gateway/wireguard-agent.env` to identity's value along with the host id and interface name (`configure.sh` does both on a host that runs identity too), and start it:
-
-```sh
-sudo apt install ./chan-gateway-wireguard-agent_*.deb
-sudo systemctl enable --now chan-gateway-wireguard-agent
-```
-
 Kubernetes and sdme deployment is in [`packaging/kube/README.md`](../packaging/kube/README.md).
+
+### WireGuard ingress
+
+A gateway can enroll a desktop's WireGuard key at sign-in, so that the desktop reaches the proxy nodes through WireGuard. It is optional, and it has three parts: each proxy node that offers it terminates WireGuard in a kernel interface of its own and runs the WireGuard agent, identity lists those nodes, and profile allocates each enrolled key's addresses. The design is in [`design.md`](design.md#wireguard-ingress).
+
+1. **On each node, bring up the interface** ([`crates/wireguard-agent/README.md`](crates/wireguard-agent/README.md#bring-up-the-interface-first) shows the commands). Each node has its own private key and a UDP listen port that desktops can reach. Every node gives its interface the same tunnel address, `10.7.0.1` below, and the node's TLS edge must answer on it for the node's names, as it does on the node's public address.
+2. **In `profile.env`, set the pool**, for example `WIREGUARD_POOL_V4=10.7.0.0/24`. An enrolled key gets one address set from it for the whole gateway, so the pool bounds the gateway's enrolled keys, not one node's. The shared tunnel address must stay outside allocation: profile never allocates a pool's network address or its first host address, which is why `10.7.0.1` fits here, and any other address goes in `WIREGUARD_POOL_RESERVED`. Neither service checks this, since identity cannot read profile's pool.
+3. **In `identity.env`, list the ingresses**, one `id=public_key@endpoint` entry per node with `;` between entries, the tunnel addresses and the CIDRs a desktop routes through a tunnel. The three are required together:
+
+   ```sh
+   WIREGUARD_INGRESSES=p1=<p1 public key>@p1.proxy.example.com:51820;p2=<p2 public key>@p2.proxy.example.com:51820
+   WIREGUARD_INGRESS_ADDRESSES=10.7.0.1
+   WIREGUARD_ALLOWED_IPS=10.7.0.1/32
+   ```
+
+   An entry's `id` is that node's `DEVSERVER_PROXY_ID`, and its key is what `wg show <interface> public-key` prints on the node. identity derives the names each ingress carries, `{id}.{proxy host}` and `*.{id}.{proxy host}` under the host of `DEVSERVER_PROXY_ORIGIN`, so there is no host map to write. The first entry is the one ingress chan-desktop uses: it enrolls there and reaches every other node outside the tunnel, on the public path. [`crates/identity/README.md`](crates/identity/README.md#wireguard-enrollment) has the whole grammar and what identity refuses.
+4. **On each node, install and start the agent.** The package depends on `wireguard-tools` and listens on nothing. Install it, fill `/etc/chan-gateway/wireguard-agent.env`, then start it:
+
+   ```sh
+   sudo apt install ./chan-gateway-wireguard-agent_*.deb
+   sudo systemctl enable --now chan-gateway-wireguard-agent
+   ```
+
+   In the env file, `IDENTITY_URL` is identity's internal listener, `WIREGUARD_AGENT_TOKEN` is identity's value, the same on every node, `WIREGUARD_AGENT_HOST_ID` is the node's `DEVSERVER_PROXY_ID` and `WIREGUARD_INTERFACE` names the interface. `configure.sh` generates the bearer into `identity.env`, and on a host that has the agent package installed it writes this file as well.
+
+Restart profile and identity after editing their files; both read them at start. Every agent reads the same list of active peers, so an enrolled key works on every node, and revoking its PAT, the PAT's expiry or a block of its user removes it from every node, each at its agent's next poll (five seconds by default). Adding a node later is steps 1 and 4 on that node and one more entry in `WIREGUARD_INGRESSES`, with an identity restart; profile does not change. The decision and its costs are in [ADR 0004](docs/adr/0004-one-wireguard-ingress-per-proxy-node.md).
 
 ## Admin
 
