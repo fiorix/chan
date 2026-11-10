@@ -4409,8 +4409,14 @@ async fn write_clipboard_html(html: String, alt_text: String) -> Result<(), Stri
     run_clipboard_op(move || clipboard_write_html(html, alt_text)).await
 }
 
+/// Raise the window of a Window menu Open row. The section lists minimized
+/// windows too, and showing and focusing one leaves it minimized on Windows
+/// and the GTK desktops: tao's `set_visible` only sets the window visible
+/// there, and its `set_focus` skips a minimized window on every platform. So
+/// the window is restored first.
 fn show_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(label) {
+        let _ = w.unminimize();
         w.show().map_err(err)?;
         w.set_focus().map_err(err)?;
     }
@@ -8745,6 +8751,36 @@ mod tests {
         assert!(
             !include_str!("terminal_mode.rs").contains("single_instance"),
             "the default-terminal launch leaves a running desktop alone"
+        );
+    }
+
+    /// The Window menu's Open section lists minimized windows, so a click on
+    /// a row restores its window before showing and focusing it. A source
+    /// pin: it holds the call and its place, not what the platform then does.
+    #[test]
+    fn an_open_window_row_restores_its_window_before_raising_it() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let row = source_region(
+            production,
+            "if let Some(label) = id.strip_prefix(OPEN_MENU_ID_PREFIX) {",
+            "match id {",
+        );
+        assert!(row.contains("show_window(app, label)"));
+        let raise = source_region(
+            production,
+            "\nfn show_window(",
+            "\n/// The devserver library id of a watcher-opened devserver window label",
+        );
+        let restore = raise.find("w.unminimize()");
+        let show = raise.find("w.show()").expect("the row shows its window");
+        let focus = raise
+            .find("w.set_focus()")
+            .expect("the row focuses its window");
+        assert!(
+            restore.is_some_and(|restore| restore < show) && show < focus,
+            "an open window's row must restore a minimized window before it shows and focuses it"
         );
     }
 
