@@ -261,14 +261,14 @@ mod tests {
         assert!(tables(|_| Err(Error::from(ErrorKind::NotFound))).is_err());
     }
 
+    // The live table is read only for a listener this process holds: once
+    // it is dropped, a parallel test can bind the freed port, or a child a
+    // sibling test forks can hold the socket until it execs, so "nobody
+    // listens" is pinned by the fixtures above instead.
     #[cfg(target_os = "linux")]
     #[test]
     fn this_processs_listener_reads_as_the_callers() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         ensure_caller_listens(listener.local_addr().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let error = ensure_caller_listens(addr).unwrap_err().to_string();
-        assert!(error.contains("no devserver is listening"), "{error}");
     }
 }
