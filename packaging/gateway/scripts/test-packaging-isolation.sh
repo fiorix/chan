@@ -352,8 +352,10 @@ require_one_agent_token() {
 
 full_answers="$pg_answers"$'https://gw.example.test\nhttps://proxy.example.test:8443\n\np1\n\n'
 oauth_answers=$'github-client\ngithub-secret\n\n\n'
-# How a run announces that the files it replaces have enrollment on.
+# How a run announces that the files it replaces have enrollment on, and
+# that the pool it writes is not the one they set.
 replaced_enrollment='The configuration this run replaces has WireGuard enrollment on'
+pool_changes='The pool changes from'
 
 # Two nodes, typed with spaces, an uppercase host and a bracketed IPv6
 # endpoint, and a pool of the operator's own. The list is written without
@@ -380,6 +382,7 @@ require_output 'Address = 10.9.8.1/22'
 refute_output 'is not one of them'
 refute_output 'configures WireGuard enrollment for one ingress'
 refute_output "$replaced_enrollment"
+refute_output "$pool_changes"
 printf 'PASS configure: an ingress list enables identity and profile together, as typed less its spaces\n'
 
 # A second run over a configuration that names one ingress in the four
@@ -422,29 +425,43 @@ printf 'PASS configure: an empty list leaves enrollment off and no single-ingres
 # An existing file that only comments those variables out, or leaves one
 # empty, configures nothing and is not announced. The same holds for the
 # list: the file the last run wrote shows it as a commented example, and an
-# empty value sets none. This node's agent is installed but its id is not in
-# the list, which the run points out.
+# empty value sets none. profile.env sets a pool all the same, which rows of
+# an earlier enrollment may hold addresses in: it is the pool question's
+# default, and a pool alone is not announced as enrollment. This node's agent
+# is installed but its id is not in the list, which the run points out.
 printf '%s\n' '# WIREGUARD_HOST_ID=p1' 'WIREGUARD_ENDPOINT=' 'WIREGUARD_HOSTS= ' \
     'WIREGUARD_INGRESSES= ' >> "$full_root/identity.env"
 grep -q '^# WIREGUARD_INGRESSES=p1=' "$full_root/identity.env" \
     || die "the empty-list run left no commented WIREGUARD_INGRESSES example"
+printf '%s\n' 'WIREGUARD_POOL_V4=10.9.8.0/22' >> "$full_root/profile.env"
 configure_run 'list without this node' "$WORK/postinst-bin" \
     "$full_answers"$'wg0\n'"$p2_entry"$'\n\n'"$oauth_answers"
 refute_output 'configures WireGuard enrollment for one ingress'
 refute_output "$replaced_enrollment"
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.9.8.0/22
+require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.9.8.1
+refute_output "$pool_changes"
 require_output 'WireGuard enrollment is on for these nodes: p2'
 require_output "This node's id, p1, is not one of them"
 refute_single_ingress_names
-printf 'PASS configure: a list without this node says its agent is refused\n'
+printf 'PASS configure: a list without this node says its agent is refused, on the pool profile.env sets\n'
 
-# A run over a configuration that has enrollment on. Every run writes the
-# files whole from its own answers, so an empty answer would turn enrollment
+# Runs over a configuration that has enrollment on. Every run writes the
+# files whole from its own answers, so an empty list would turn enrollment
 # off: the run shows the list and the pool it replaces before it asks, each
-# as its file sets it and without a hand-edited line's indentation. What is
-# shown is no default. The list given again is written as it was, and the
-# pool, answered with Enter, is the script's own default and not the one
-# shown.
+# as its file sets it and without a hand-edited line's indentation. The list
+# is no default; the pool is the pool question's default, shown in its
+# prompt, and a pool given in its place is announced with what it does.
 kept_list="$p1_entry;p2=$key_b@[2001:db8::2]:51821"
+plant_enrollment() {
+    cat > "$full_root/identity.env" <<EOF
+WIREGUARD_AGENT_TOKEN=$agent_token
+  WIREGUARD_INGRESSES=$kept_list
+WIREGUARD_INGRESS_ADDRESSES=10.9.8.1
+WIREGUARD_ALLOWED_IPS=10.9.8.1/32
+EOF
+    printf 'WIREGUARD_POOL_V4=%s\n' "$1" > "$full_root/profile.env"
+}
 require_replaced_enrollment() {
     local shown
     require_output "$replaced_enrollment"
@@ -452,23 +469,40 @@ require_replaced_enrollment() {
         grep -Fqx -- "    $shown" "$WORK/configure-full.out" \
             || die "configure run did not show the replaced line: $shown"
     done
-    require_output 'an empty answer below leaves enrollment off'
+    require_output 'An empty answer below leaves enrollment off'
 }
-cat > "$full_root/identity.env" <<EOF
-WIREGUARD_AGENT_TOKEN=$agent_token
-  WIREGUARD_INGRESSES=$kept_list
-WIREGUARD_INGRESS_ADDRESSES=10.9.8.1
-WIREGUARD_ALLOWED_IPS=10.9.8.1/32
-EOF
-printf '%s\n' 'WIREGUARD_POOL_V4=10.9.8.0/22' > "$full_root/profile.env"
-configure_run 'the replaced list given again' "$WORK/postinst-bin" \
-    "$full_answers"$'wg0\n'"$kept_list"$'\n\n'"$oauth_answers"
+# Every file under the scratch root and its digest: a refused run changes none.
+root_digest() {
+    find "$full_root" -type f -exec sha256sum {} + | sort
+}
+
+# The list given again and the pool answered with Enter: both are written as
+# the replaced files set them, and the pool does not change.
+plant_enrollment 10.9.8.0/22
+configure_tty_run "$WORK/postinst-bin" "$full_answers"$'wg0\n'"$kept_list"$'\n\n'"$oauth_answers" \
+    || die "configure run failed (the replaced list given again): $(cat "$WORK/configure-full.out" "$WORK/configure-full.err")"
 require_replaced_enrollment 10.9.8.0/22
+require_output 'WireGuard address pool [10.9.8.0/22]: '
 require_env "$full_root/identity.env" WIREGUARD_INGRESSES "$kept_list"
-require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.7.0.1
-require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.7.0.0/24
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.9.8.0/22
+require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.9.8.1
+require_env "$full_root/identity.env" WIREGUARD_ALLOWED_IPS 10.9.8.1/32
+require_output 'Address = 10.9.8.1/22'
+refute_output "$pool_changes"
 require_output 'WireGuard enrollment is on for these nodes: p1 p2'
-printf 'PASS configure: the enrollment a run replaces is shown, and only what is given again is kept\n'
+printf 'PASS configure: a rerun shows the enrollment it replaces and keeps the pool on Enter\n'
+
+# Another pool given at the same question is written, and the run says that
+# enrolled keys keep their addresses and the interfaces change address.
+plant_enrollment 10.9.8.0/22
+configure_run 'a new pool over a replaced one' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n'"$kept_list"$'\n10.7.0.0/24\n'"$oauth_answers"
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.7.0.0/24
+require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.7.0.1
+require_output 'The pool changes from 10.9.8.0/22 to 10.7.0.0/24. Enrolled keys keep their addresses:'
+require_output 'nothing moves them into the new pool. Each node'"'"'s interface takes the Address printed at the end.'
+require_output 'Address = 10.7.0.1/24'
+printf 'PASS configure: a new pool over a replaced one says what it does to enrolled keys\n'
 
 # The same list, now as the last run wrote it, answered with an empty one.
 # The run says what the answer costs before it takes it, and the answer
@@ -481,13 +515,34 @@ require_wireguard_names "$full_root/profile.env" ''
 refute_output 'WireGuard enrollment is on for these nodes'
 printf 'PASS configure: an empty list over a configured one is announced and leaves enrollment off\n'
 
+# A replaced pool the script refuses, here with host bits set, is no default:
+# the run says so and asks without one, and Enter stops it before anything
+# is written. A pool typed at that question is written.
+plant_enrollment 10.9.8.5/22
+digest_before=$(root_digest)
+if configure_tty_run "$WORK/postinst-bin" "$full_answers"$'wg0\n'"$kept_list"$'\n\n'"$oauth_answers"; then
+    die "configure accepted Enter at a pool question without a default"
+fi
+require_output 'profile.env sets the pool 10.9.8.5/22, which this run does not write:'
+require_output 'This question has no default; an empty answer stops the run.'
+require_output 'WireGuard address pool: error: WireGuard address pool must be an IPv4 network'
+refute_output 'WireGuard address pool ['
+[[ $(root_digest) == "$digest_before" ]] \
+    || die "a run refused at the pool question changed the configuration"
+configure_run 'a pool typed over a refused one' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n'"$kept_list"$'\n10.9.8.0/22\n'"$oauth_answers"
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.9.8.0/22
+require_output 'The pool changes from 10.9.8.5/22 to 10.9.8.0/22.'
+printf 'PASS configure: a replaced pool the script refuses is no default\n'
+
 # A host without the agent's package, whose own node terminates no
-# WireGuard: another node is the one ingress, on the default pool. No agent
-# file is written, the run says what each node's agent needs, and a node
-# that runs no agent is not told its agent is refused.
+# WireGuard: another node is the one ingress, on the default pool of a first
+# run. No agent file is written, the run says what each node's agent needs,
+# and a node that runs no agent is not told its agent is refused.
 rm -rf "$WORK/full-root"
-configure_run 'one ingress, no agent package' "$WORK/no-agent-bin" \
-    "$full_answers$p2_entry"$'\n\n'"$oauth_answers"
+configure_tty_run "$WORK/no-agent-bin" "$full_answers$p2_entry"$'\n\n'"$oauth_answers" \
+    || die "configure run failed (one ingress, no agent package): $(cat "$WORK/configure-full.out" "$WORK/configure-full.err")"
+require_output 'WireGuard address pool [10.7.0.0/24]: '
 require_wireguard_names "$full_root/identity.env" \
     'WIREGUARD_AGENT_TOKEN WIREGUARD_INGRESSES WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS '
 require_env "$full_root/identity.env" WIREGUARD_INGRESSES "$p2_entry"

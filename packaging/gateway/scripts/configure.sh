@@ -15,8 +15,8 @@
 # controller-client tokens)
 # and threads them across the files where they must
 # match. Backs up any existing env files before overwriting: every run
-# writes each file whole from that run's answers, and carries nothing over
-# from the file it replaces.
+# writes each file whole from that run's answers. The one value it takes
+# from a file it replaces is the default of the address pool question.
 
 set -euo pipefail
 
@@ -79,6 +79,50 @@ set_lines() {
     return 1
 }
 
+# Prints NAME=value for each named variable an existing env file sets to a
+# value, as systemd and the service read it: the last line that assigns the
+# name, its value less the whitespace and one pair of quotes around it;
+# nothing for a file that does not exist, a commented line or an empty
+# value. Only the names asked for are printed, and no caller asks for a
+# secret.
+env_settings() {
+    python3 - "$@" <<'PYTHON'
+import sys
+
+path, names = sys.argv[1], sys.argv[2:]
+try:
+    with open(path, "rb") as file:
+        lines = file.read().decode("utf-8", "replace").splitlines()
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    print(f"error: cannot read {path}", file=sys.stderr)
+    sys.exit(1)
+values = {}
+for line in lines:
+    name, equals, value = line.partition("=")
+    name, value = name.strip(), value.strip()
+    if equals and name in names:
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1].strip()
+        values[name] = value
+for name in names:
+    if values.get(name):
+        print(f"{name}={values[name]}")
+PYTHON
+}
+
+# The settings env_settings reads, by name.
+declare -A REPLACED=()
+read_replaced() {
+    local file=$1 settings setting
+    shift
+    settings=$(env_settings "$file" "$@") || exit 1
+    while IFS= read -r setting; do
+        [[ -z $setting ]] || REPLACED[${setting%%=*}]=${setting#*=}
+    done <<< "$settings"
+}
+
 # What the replaced files set for WireGuard enrollment, shown before the
 # WireGuard prompt below. Identity refuses to start while one of the four
 # variables that describe a single ingress is set.
@@ -88,6 +132,8 @@ REPLACED_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
     'WIREGUARD_INGRESSES') || exit 1
 REPLACED_POOL_LINES=$(set_lines /etc/chan-gateway/profile.env \
     'WIREGUARD_POOL_V4') || exit 1
+read_replaced /etc/chan-gateway/profile.env WIREGUARD_POOL_V4
+REPLACED_POOL_V4=${REPLACED[WIREGUARD_POOL_V4]:-}
 
 read -rp "Postgres user [chan]: " PG_USER
 PG_USER=${PG_USER:-chan}
@@ -302,19 +348,32 @@ if [[ -n $SINGLE_INGRESS_LINES ]]; then
     echo "<its node's proxy id>=<WIREGUARD_PUBLIC_KEY>@<WIREGUARD_ENDPOINT>."
 fi
 
-# The list and the pool are this run's answers like every other value, so an
-# empty answer below turns enrollment off where the replaced files have it
-# on. They are shown first, as those files set them, to be given again.
-# Neither becomes an answer's default: a run carries nothing over from the
-# files it replaces, and a default here would keep a node the operator is
-# retiring.
+# The list is this run's answer like every other value, so an empty answer
+# below turns enrollment off where the replaced files have it on. It is
+# shown first, as identity.env sets it, to be given again, and is no
+# default: a default would keep a node the operator is retiring.
 if [[ -n $REPLACED_INGRESS_LINES ]]; then
     echo
     echo "The configuration this run replaces has WireGuard enrollment on:"
     printf '%s\n' "$REPLACED_INGRESS_LINES"
     [[ -z $REPLACED_POOL_LINES ]] || printf '%s\n' "$REPLACED_POOL_LINES"
-    echo "This run carries nothing over: an empty answer below leaves enrollment off."
-    echo "To keep it, answer the next questions with the values shown here."
+    echo "An empty answer below leaves enrollment off. To keep it, give the list"
+    echo "shown here again; the pool question offers this pool as its default."
+fi
+
+# The pool is not retired with a node. Profile keeps every address it has
+# allocated, and moves none of them when the pool changes. The default is
+# the pool the replaced profile.env sets, also when identity.env has no
+# list: an earlier enrollment's rows may still hold addresses in it. A first
+# run offers the stock pool. A replaced pool this script would refuse is no
+# default at all: Enter then stops the run rather than write it, or move the
+# gateway to the stock pool unseen.
+WG_POOL_DEFAULT=10.7.0.0/24
+if [[ -n $REPLACED_POOL_V4 ]]; then
+    WG_POOL_DEFAULT=
+    if WG_ANSWER=$(wireguard_pool "$REPLACED_POOL_V4" 2> /dev/null); then
+        WG_POOL_DEFAULT=${WG_ANSWER%%$'\n'*}
+    fi
 fi
 
 echo
@@ -335,14 +394,27 @@ if [[ -n $WG_INGRESSES ]]; then
     echo "Enrolled desktops take their tunnel addresses from one IPv4 pool. Every"
     echo "ingress interface answers on the pool's first host address, which is"
     echo "never handed out."
-    read -rp "WireGuard address pool [10.7.0.0/24]: " WG_POOL_V4 || true
-    WG_ANSWER=$(wireguard_pool "${WG_POOL_V4:-10.7.0.0/24}") || exit 1
+    if [[ -n $WG_POOL_DEFAULT ]]; then
+        read -rp "WireGuard address pool [$WG_POOL_DEFAULT]: " WG_POOL_V4 || true
+    else
+        echo "profile.env sets the pool $REPLACED_POOL_V4, which this run does not write:"
+        wireguard_pool "$REPLACED_POOL_V4" 2>&1 | sed 's/^error: /    /' || true
+        echo "This question has no default; an empty answer stops the run."
+        read -rp "WireGuard address pool: " WG_POOL_V4 || true
+    fi
+    WG_ANSWER=$(wireguard_pool "${WG_POOL_V4:-$WG_POOL_DEFAULT}") || exit 1
     mapfile -t WG_POOL <<< "$WG_ANSWER"
     [[ ${#WG_POOL[@]} -eq 4 ]] || { echo "WireGuard address pool check failed" >&2; exit 1; }
     WG_POOL_V4=${WG_POOL[0]}
     WG_INGRESS_ADDRESS=${WG_POOL[1]}
     WG_ALLOWED_IPS=${WG_POOL[2]}
     WG_INTERFACE_ADDRESS=${WG_POOL[3]}
+    # Profile allocates from the pool only for a key it has no row for; a key
+    # that signs in again keeps its row and its address.
+    if [[ -n $REPLACED_POOL_V4 && $WG_POOL_V4 != "$REPLACED_POOL_V4" ]]; then
+        echo "The pool changes from $REPLACED_POOL_V4 to $WG_POOL_V4. Enrolled keys keep their addresses:"
+        echo "nothing moves them into the new pool. Each node's interface takes the Address printed at the end."
+    fi
 fi
 
 echo
