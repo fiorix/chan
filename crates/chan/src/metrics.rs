@@ -411,8 +411,15 @@ fn render(view: &View) -> String {
         sample.yamux_waiting
     ));
     let storage = &view.storage;
+    let failed = match (&storage.error, storage.logical_bytes) {
+        (None, _) => String::new(),
+        // A failed refresh keeps the totals of the last scan that completed;
+        // a failed first scan has none to keep.
+        (Some(error), Some(_)) => format!(" (scan failed: {error}; last completed total)"),
+        (Some(error), None) => format!(" (scan failed: {error})"),
+    };
     out.push_str(&format!(
-        "{}: {} logical, {} allocated{}\n",
+        "{}: {} logical, {} allocated{failed}\n",
         storage.path,
         storage
             .logical_bytes
@@ -422,18 +429,124 @@ fn render(view: &View) -> String {
             .allocated_bytes
             .map(bytes)
             .unwrap_or_else(|| "n/a".into()),
-        if storage.error.is_some() {
-            " (scan failed; last completed total)"
-        } else {
-            ""
-        }
     ));
     out
+}
+
+/// A view built by hand with every optional part present, so a test of the
+/// text output or of the wire names waits on no sampler.
+#[cfg(test)]
+pub(crate) fn full_view() -> View {
+    use chan_server::metrics::{Identity, Process, Sample, Storage, Traffic, Transfers};
+    let traffic = |received_bytes, sent_bytes| {
+        let mut traffic = Traffic {
+            received_bytes_per_second: Some(0.0),
+            sent_bytes_per_second: Some(2048.0),
+            ..Traffic::default()
+        };
+        traffic.totals.active = 1;
+        traffic.totals.opened = 2;
+        traffic.totals.received_bytes = received_bytes;
+        traffic.totals.sent_bytes = sent_bytes;
+        traffic
+    };
+    let sample = Sample {
+        sequence: 7,
+        elapsed_ms: 7_000,
+        sampled_at_ms: 1_700_000_007_000,
+        collection_micros: 120,
+        process: Some(Process {
+            uptime_seconds: 3_600,
+            cpu_time_ms: 1_250,
+            cpu_percent: Some(1.5),
+            resident_bytes: 12 * 1024 * 1024,
+            io_scope: "storage_io".into(),
+            read_bytes: Some(512),
+            written_bytes: Some(3 * 1024 * 1024),
+            read_bytes_per_second: Some(0.0),
+            written_bytes_per_second: Some(1536.0),
+        }),
+        network: traffic(512, 2048),
+        http2: traffic(0, 0),
+        yamux: traffic(0, 0),
+        reverse_connections: traffic(0, 0),
+        transfer_payload: traffic(1023, 1024),
+        transfers: Transfers {
+            queued: 1,
+            running: 2,
+            worker_capacity: 4,
+            queue_capacity: 16,
+            finished: 9,
+            cancelled: 3,
+            stalled: 5,
+            panicked: 6,
+            refused: 8,
+        },
+        gateway_tunnels: 1,
+        tunnel_dial_failures: 11,
+        reverse_listeners: 2,
+        yamux_waiting: 0,
+        yamux_serving: 3,
+        yamux_service_capacity: 8,
+        yamux_stream_limit: 256,
+    };
+    View {
+        schema_version: 1,
+        identity: Identity {
+            instance_id: "0123456789abcdef0123456789abcdef".into(),
+            version: "0.127.0".into(),
+            build: "git-0123456789ab".into(),
+            pid: 184_223,
+            hostname: Some("box".into()),
+        },
+        latest: Some(sample.clone()),
+        history: vec![sample],
+        storage: Storage {
+            path: "/home/you/.chan".into(),
+            logical_bytes: Some(1536),
+            allocated_bytes: Some(4096),
+            files: Some(3),
+            sampled_at_ms: Some(1_700_000_000_000),
+            scan_millis: Some(12),
+            error: None,
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The storage line, the last one of the text output.
+    fn storage_line(view: &View) -> String {
+        render(view).lines().last().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_failed_scan_prints_its_error_and_names_a_total_only_when_there_is_one() {
+        let mut view = full_view();
+        assert_eq!(
+            storage_line(&view),
+            "/home/you/.chan: 1.5 KiB logical, 4.0 KiB allocated"
+        );
+        // The first scan failed: there is no total to speak of.
+        let mut first = view.clone();
+        first.storage.logical_bytes = None;
+        first.storage.allocated_bytes = None;
+        first.storage.error = Some("storage scan exceeded its bound".into());
+        assert_eq!(
+            storage_line(&first),
+            "/home/you/.chan: pending logical, n/a allocated \
+             (scan failed: storage scan exceeded its bound)"
+        );
+        // A refresh failed: the totals are those of the last completed scan.
+        view.storage.error = Some("storage scan exceeded its bound".into());
+        assert_eq!(
+            storage_line(&view),
+            "/home/you/.chan: 1.5 KiB logical, 4.0 KiB allocated \
+             (scan failed: storage scan exceeded its bound; last completed total)"
+        );
+    }
 
     #[test]
     fn unavailable_io_stays_unavailable_in_terminal_output() {
