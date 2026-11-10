@@ -35,6 +35,8 @@ The owner added another the same day: the ghostty terminals re-pinned from a pre
 
 On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]). The same day he added one he had built directly with an agent: with tabs in the title bar the window's own title is hidden, so the pane tree popup names the window, as Computers does ([panetitle]). He also raised a bug from his Mac: after privacy mode went on and off, the Window menu held four stale sections with masked titles, fixed the same day ([winmenu]). And a `tmux -CC` window on a devserver that opened twice turned out to be two desktop processes; he ruled the fix into this release, and a second launch now hands over to the running desktop and exits ([single]).
 
+His checks on his Mac the same day raised three more, each fixed that day: every pane of a `tmux -CC` window took the active pane's name, so each pane is named by its own title or command ([panenames]); a label given to a tmux window in Computers lasted only until tmux's next rename, and it stays ([tmuxlabel]); and a desktop upload's row in the Transfers bubble read "Uploading Upload to dev" ([uploadrow]). Before the GA he asked for a second reading of everything merged: three readers found no defect that blocks the release, twelve small ones and documents behind the code, fixed and merged the same day ([reread]).
+
 On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
 
 | Item | State | Next |
@@ -50,6 +52,10 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [a title-bar-tab window shows no name][panetitle] | built | owner |
 | [the macOS Window menu piles up stale sections][winmenu] | built | owner |
 | [a second desktop launch runs beside the first][single] | built | owner |
+| [every tmux pane takes the active pane's name][panenames] | built | owner |
+| [a Computers label on a tmux window is lost][tmuxlabel] | built | owner |
+| [a desktop upload's row reads "Uploading Upload"][uploadrow] | built | owner |
+| [a second reading finds small defects][reread] | built | docs |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -62,6 +68,10 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 [panetitle]: v0.127.0/a-window-with-tabs-in-its-title-bar-shows-its-name-nowhere.md
 [winmenu]: v0.127.0/the-macos-window-menu-piles-up-stale-sections.md
 [single]: v0.127.0/a-second-desktop-launch-runs-beside-the-first.md
+[panenames]: v0.127.0/every-pane-of-a-tmux-window-takes-the-active-panes-name.md
+[tmuxlabel]: v0.127.0/a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it.md
+[uploadrow]: v0.127.0/a-desktop-uploads-transfer-row-reads-uploading-upload.md
+[reread]: v0.127.0/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
 
 ### v0.128.0
 
@@ -81,6 +91,8 @@ A sixth came from the owner on 2026-11-10: in windows that are not tmux windows,
 
 Two more came from the owner the same day: a `tmux -CC` connection's windows, and its hidden control terminal, show under All windows and on the connection's own card but not on the card of the machine they run on ([tmuxcard]); and Cmd+Shift+N in a devserver's `tmux -CC` window opens a plain devserver window, where a local tmux window gets a new tmux window ([tmuxnew]).
 
+Four more came the same day from the second reading of v0.127.0's merged code ([reread]), each left for this release by the owner: a launch beside a desktop that does not answer exits with nothing on screen ([silentlaunch]); the Windows handoff pipe takes clients before it is served and collides across like-named accounts ([winpipe]); coming forward to a minimized window may not activate the app ([minraise]); and the test that an unused sign-in token cuts nothing reads its counters before a cut could run ([tokentest]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -96,6 +108,10 @@ Two more came from the owner the same day: a `tmux -CC` connection's windows, an
 | [tests still red under the heaviest load][loadres] | not started | design |
 | [tmux windows not on their machine card][tmuxcard] | not started | design |
 | [New Window in a devserver tmux window][tmuxnew] | not started | design |
+| [a launch beside a silent desktop shows nothing][silentlaunch] | not started | design |
+| [the Windows handoff pipe's early clients][winpipe] | not started | measure |
+| [a raised minimized window may stay behind][minraise] | not started | owner |
+| [the unused-token test reads too early][tokentest] | not started | build |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -110,6 +126,10 @@ Two more came from the owner the same day: a `tmux -CC` connection's windows, an
 [loadres]: v0.128.0/some-tests-still-go-red-under-the-heaviest-cpu-load.md
 [tmuxcard]: v0.128.0/a-tmux-connections-windows-are-missing-from-their-machines-card.md
 [tmuxnew]: v0.128.0/new-window-in-a-devservers-tmux-window-opens-a-plain-window.md
+[silentlaunch]: v0.128.0/a-launch-beside-a-desktop-that-does-not-answer-shows-nothing.md
+[winpipe]: v0.128.0/the-windows-handoff-pipe-takes-clients-early-and-collides-across-accounts.md
+[minraise]: v0.128.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
+[tokentest]: v0.128.0/the-unused-token-test-reads-its-counters-before-a-cut-could-run.md
 
 ## Completed
 
