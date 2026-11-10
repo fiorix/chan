@@ -35,7 +35,7 @@ The owner added another the same day: the ghostty terminals re-pinned from a pre
 
 On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]). The same day he added one he had built directly with an agent: with tabs in the title bar the window's own title is hidden, so the pane tree popup names the window, as Computers does ([panetitle]). He also raised a bug from his Mac: after privacy mode went on and off, the Window menu held four stale sections with masked titles, fixed the same day ([winmenu]). And a `tmux -CC` window on a devserver that opened twice turned out to be two desktop processes; he ruled the fix into this release, and a second launch now hands over to the running desktop and exits ([single]).
 
-His checks on his Mac the same day raised three more, each fixed that day: every pane of a `tmux -CC` window took the active pane's name, so each pane is named by its own title or command ([panenames]); a label given to a tmux window in Computers lasted only until tmux's next rename, and it stays ([tmuxlabel]); and a desktop upload's row in the Transfers bubble read "Uploading Upload to dev" ([uploadrow]). Before the GA he asked for a second reading of everything merged: three readers found no defect that blocks the release, twelve small ones and documents behind the code, fixed and merged the same day ([reread]).
+His checks on his Mac the same day raised three more, each fixed that day: every pane of a `tmux -CC` window took the active pane's name, so each pane is named by its own title or command ([panenames]); a label given to a tmux window in Computers lasted only until tmux's next rename, and it stays ([tmuxlabel]); and a desktop upload's row in the Transfers bubble read "Uploading Upload to dev" ([uploadrow]). Before the GA he asked for a second reading of everything merged: three readers found no defect that blocks the release, twelve small ones and documents behind the code, fixed and merged the same day ([reread]). With the release closed to new work, his last Mac checks found the Dashboard's Metrics slide at the top left of a wide window; he pulled the fix in before the cut, and the slide sits in the middle of its tab ([dashcenter]).
 
 On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
 
@@ -56,6 +56,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [a Computers label on a tmux window is lost][tmuxlabel] | built | owner |
 | [a desktop upload's row reads "Uploading Upload"][uploadrow] | built | owner |
 | [a second reading finds small defects][reread] | built | owner |
+| [the Metrics slide sits at the top left][dashcenter] | built | owner |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -72,6 +73,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 [tmuxlabel]: v0.127.0/a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it.md
 [uploadrow]: v0.127.0/a-desktop-uploads-transfer-row-reads-uploading-upload.md
 [reread]: v0.127.0/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
+[dashcenter]: v0.127.0/the-dashboards-metrics-slide-sits-at-the-top-left-of-a-wide-window.md
 
 ### v0.128.0
 
