@@ -493,9 +493,12 @@ fn pane_names_against_a_real_tmux() {
     // A command whose name holds a line break and a forged exit. A tmux that
     // prints the name as it is cuts its line, which the client refuses,
     // ending the stream; one that cleans the name keeps the stream. Either
-    // way the forged line is never read as tmux's exit.
+    // way the forged line is never read as tmux's exit. The program under
+    // that name is the shell, which runs whatever it is called; a `sleep`
+    // that is one of a multicall binary's names refuses a name it does not
+    // know and is gone before tmux looks at the pane.
     let hostile = b"d=$(mktemp -d) && f=\"$d/$(printf 'x\\n%%exit')\" && \
-ln -s \"$(command -v sleep)\" \"$f\" && \"$f\" 2; rm -rf \"$d\"\r";
+ln -s \"$(command -v sh)\" \"$f\" && \"$f\" -c 'sleep 2; :'; rm -rf \"$d\"\r";
     let reported = t.names_of(first).len();
     for c in Command::send_keys(first, hostile) {
         t.send(&c);
@@ -509,10 +512,15 @@ ln -s \"$(command -v sleep)\" \"$f\" && \"$f\" 2; rm -rf \"$d\"\r";
         !t.events.iter().any(|e| matches!(e, Event::Exited { .. })),
         "a pane's command name ended control mode"
     );
+    // Which of the two this tmux did is printed for a run under --nocapture.
     match refused {
-        Some(error) => assert_eq!(error, Error::Malformed("subscription-changed")),
+        Some(error) => {
+            eprintln!("hostile command name: the client refused the cut line");
+            assert_eq!(error, Error::Malformed("subscription-changed"));
+        }
         None => {
             let during = t.names_of(first).split_off(reported);
+            eprintln!("hostile command name: tmux reported {during:?}");
             assert!(!during.is_empty(), "the command was never reported");
             assert!(
                 during.iter().all(|name| !name.contains(char::is_control)),
