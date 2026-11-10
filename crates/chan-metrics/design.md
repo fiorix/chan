@@ -16,7 +16,7 @@ The set is fixed and carries no labels: one counter per layer, never one per pee
 
 Each counter names one layer and counts payload bytes at that layer:
 
-- `NETWORK`: the bytes of chan's own sockets: the streams the serving listener accepts, the dialed gateway stream under its TLS, and reverse-forward connections. Each connection is counted once per leg.
+- `NETWORK`: the bytes of chan's own sockets: the streams the serving listener accepts, the transport stream of the gateway dial, counted beneath TLS, and reverse-forward connections. Each connection is counted once per leg.
 - `HTTP2`: the HTTP/2 stream that carries a gateway tunnel.
 - `YAMUX`: the yamux substreams of a tunnel, upgraded WebSockets included. `TUNNELS` counts connected sessions, and `YAMUX_WAITING`, `YAMUX_SERVING` and `YAMUX_SERVICE_CAPACITY` count the substreams waiting for a handler permit, the handlers holding one, and the permits the live sessions have.
 - `REVERSE` and `REVERSE_LISTENERS`: reverse-forward connections with their bytes, and ready listeners.
