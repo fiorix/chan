@@ -246,6 +246,17 @@ async fn wireguard_enroll_allocates_moves_and_refuses() {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error["error"], "wireguard key in use");
     }
+    // One peer per PAT: a second key on the token that holds the peer is
+    // refused, and the counts below show nothing of the attempt is kept.
+    let (status, error) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/wireguard/peers"),
+            Some(json!({"token_id": unnamed, "public_key": wireguard_key(1)})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"], "conflict");
     let peers: i64 = sqlx::query_scalar("SELECT count(*) FROM wireguard_peers")
         .fetch_one(&app.pool)
         .await
@@ -430,6 +441,11 @@ async fn wireguard_enrollment_validates_owner_key_host_and_pool() {
             .0,
         StatusCode::BAD_REQUEST
     );
+    // `?host=` is required: a list that names no host is refused.
+    assert_eq!(
+        app.req(Method::GET, "/v1/wireguard/peers", None).await.0,
+        StatusCode::BAD_REQUEST
+    );
     let unconfigured = profile::http::app(app.state());
     let response = unconfigured
         .oneshot(
@@ -447,6 +463,16 @@ async fn wireguard_enrollment_validates_owner_key_host_and_pool() {
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
     assert_eq!(body["error"], "wireguard pool not configured");
+    // A null host is an absent one: the key enrolls and the answer names none.
+    let (status, row) = app
+        .req(
+            Method::POST,
+            &path,
+            Some(json!({"token_id":token, "public_key":wireguard_key(0), "host":null})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert!(row.get("host").is_none(), "{row}");
     app.cleanup().await;
 }
 
