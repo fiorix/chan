@@ -33,7 +33,7 @@ On 2026-11-09 the owner added live process metrics, built directly with an agent
 
 The owner added another the same day: the ghostty terminals re-pinned from a pre-1.0 `tip` build of libghostty-vt to the signed 1.0.0 release, with find on ghostty terminals and xterm's find aligned to it, ordered on 2026-11-08 and merged with this row ([ghostty1]).
 
-On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]). The same day he added one he had built directly with an agent: with tabs in the title bar the window's own title is hidden, so the pane tree popup names the window, as Computers does ([panetitle]). He also raised a bug from his Mac: after privacy mode went on and off, the Window menu held four stale sections with masked titles, fixed the same day ([winmenu]).
+On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]). The same day he added one he had built directly with an agent: with tabs in the title bar the window's own title is hidden, so the pane tree popup names the window, as Computers does ([panetitle]). He also raised a bug from his Mac: after privacy mode went on and off, the Window menu held four stale sections with masked titles, fixed the same day ([winmenu]). And a `tmux -CC` window on a devserver that opened twice turned out to be two desktop processes; he ruled the fix into this release, and a second launch now hands over to the running desktop and exits ([single]).
 
 On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
 
@@ -49,6 +49,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [a tmux window's title bar is empty][tmuxbar] | built | owner |
 | [a title-bar-tab window shows no name][panetitle] | built | owner |
 | [the macOS Window menu piles up stale sections][winmenu] | built | owner |
+| [a second desktop launch runs beside the first][single] | built | owner |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -60,6 +61,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 [tmuxbar]: v0.127.0/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 [panetitle]: v0.127.0/a-window-with-tabs-in-its-title-bar-shows-its-name-nowhere.md
 [winmenu]: v0.127.0/the-macos-window-menu-piles-up-stale-sections.md
+[single]: v0.127.0/a-second-desktop-launch-runs-beside-the-first.md
 
 ### v0.128.0
 
