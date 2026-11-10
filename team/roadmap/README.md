@@ -93,6 +93,8 @@ Two more came from the owner the same day: a `tmux -CC` connection's windows, an
 
 Four more came the same day from the second reading of v0.127.0's merged code ([reread]), each left for this release by the owner: a launch beside a desktop that does not answer exits with nothing on screen ([silentlaunch]); the Windows handoff pipe takes clients before it is served and collides across like-named accounts ([winpipe]); coming forward to a minimized window may not activate the app ([minraise]); and the test that an unused sign-in token cuts nothing reads its counters before a cut could run ([tokentest]).
 
+Two more came from the fixes of the owner's Mac checks that day, found beside them and left alone: a desktop upload's cancel and error paths leave a failure line, a row and an open picker behind and name local paths to the page ([uploadpaths]); and moving a tmux window to another index may close its chan window, read from a probe of tmux and not yet run through chan ([tmuxmove]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -112,6 +114,8 @@ Four more came the same day from the second reading of v0.127.0's merged code ([
 | [the Windows handoff pipe's early clients][winpipe] | not started | measure |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
 | [the unused-token test reads too early][tokentest] | not started | build |
+| [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
+| [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -130,6 +134,8 @@ Four more came the same day from the second reading of v0.127.0's merged code ([
 [winpipe]: v0.128.0/the-windows-handoff-pipe-takes-clients-early-and-collides-across-accounts.md
 [minraise]: v0.128.0/coming-forward-to-a-minimized-window-may-not-activate-the-app.md
 [tokentest]: v0.128.0/the-unused-token-test-reads-its-counters-before-a-cut-could-run.md
+[uploadpaths]: v0.128.0/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md
+[tmuxmove]: v0.128.0/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md
 
 ## Completed
 

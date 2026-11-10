@@ -16,7 +16,7 @@ Every text of a transfer's row in the Transfers bubble is a verb before the tran
 
 ## Boundaries
 
-- The row's name only. The status-line texts of an upload and the desktop upload's cancel and error paths are unchanged.
+- The row's name only. The status-line texts of an upload and the desktop upload's cancel and error paths are unchanged; what was found on those paths is the v0.128.0 item [a desktop upload's cancel and error paths](../v0.128.0/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md).
 - A failure within one poll of the pick reads unnamed, since the page never saw the selection.
 
 ## Acceptance
