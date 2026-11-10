@@ -174,10 +174,15 @@ assert_contains "$agent_packaging/wireguard-agent.env" "WIREGUARD_AGENT_TOKEN="
 refute_pattern "the WireGuard agent's env carries another service's bearer" \
     '^(IDENTITY_INTERNAL_TOKEN|IDENTITY_SESSION_INTERNAL_TOKEN|IDENTITY_ACCOUNT_ADMIN_TOKEN|IDENTITY_ADMIN_TOKEN|PROFILE_AUTH_TOKEN|PROFILE_ADMIN_TOKEN|DEVSERVER_[A-Z_]*TOKENS?)=' \
     "$agent_packaging/wireguard-agent.env"
-assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
-    'generate_unique_bearer_token; WIREGUARD_AGENT_TOKEN=$UNIQUE_BEARER_TOKEN'
-# The one bearer reaches both ends: each env file configure.sh writes is a
-# heredoc of its own, so each is read on its own.
+# The agent's bearer is minted once. A second mint leaves the first value in
+# the set every later bearer is kept distinct from, held by no file.
+agent_token_mints=$(grep -Fcx \
+    -e 'generate_unique_bearer_token; WIREGUARD_AGENT_TOKEN=$UNIQUE_BEARER_TOKEN' \
+    "$REPO/packaging/gateway/scripts/configure.sh") || true
+[[ "$agent_token_mints" == 1 ]] \
+    || die "configure.sh mints WIREGUARD_AGENT_TOKEN [$agent_token_mints] times, expected once"
+# The one bearer reaches both ends, on one line each: each env file
+# configure.sh writes is a heredoc of its own, so each is read on its own.
 configure_env_body() {
     awk -v target="write_env $1 " '
         { line = $0; sub(/^[ \t]+/, "", line) }
@@ -189,6 +194,9 @@ configure_env_body() {
 for env_file in /etc/chan-gateway/identity.env /etc/chan-gateway/wireguard-agent.env; do
     configure_env_body "$env_file" | grep -Fqx 'WIREGUARD_AGENT_TOKEN=${WIREGUARD_AGENT_TOKEN}' \
         || die "configure.sh does not write WIREGUARD_AGENT_TOKEN into $env_file"
+    agent_token_lines=$(configure_env_body "$env_file" | grep -c '^WIREGUARD_AGENT_TOKEN=') || true
+    [[ "$agent_token_lines" == 1 ]] \
+        || die "configure.sh writes WIREGUARD_AGENT_TOKEN into $env_file [$agent_token_lines] times, expected once"
 done
 
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
