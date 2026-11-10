@@ -1,5 +1,6 @@
 //! Notifications: the `%`-lines tmux sends outside a command reply.
 
+use crate::command::PANE_NAMES_SUBSCRIPTION;
 use crate::error::Error;
 use crate::escape::unescape_output;
 use crate::ids::{PaneId, SessionId, WindowId};
@@ -63,6 +64,16 @@ pub enum Message {
     Pause(PaneId),
     Continue(PaneId),
     PaneModeChanged(PaneId),
+    /// What a pane is called, from the subscription
+    /// [`Command::SubscribePaneNames`](crate::Command::SubscribePaneNames)
+    /// adds: the pane's title, or the name of its foreground command while
+    /// the title is the one tmux gives a new pane (its host's name) or is
+    /// blank. A program in the pane chose either text; control characters
+    /// are removed and the ends trimmed. Empty when tmux has neither.
+    PaneName {
+        pane: PaneId,
+        name: String,
+    },
     /// The client left control mode. `reason` is tmux's text, if any.
     Exit {
         reason: Option<String>,
@@ -167,6 +178,16 @@ pub fn parse_message(line: &[u8]) -> Result<Message, Error> {
             rest.ok_or(bad("pane-mode-changed"))?,
             "pane-mode-changed",
         )?)),
+        // Only the subscription this crate adds is read; a line for any
+        // other name is kept by keyword, as an unknown notification is.
+        "%subscription-changed" => match rest.map(|rest| split_once(rest, b' ')) {
+            Some((name, fields)) if name == PANE_NAMES_SUBSCRIPTION.as_bytes() => {
+                pane_name(fields.ok_or(bad("subscription-changed"))?)
+            }
+            _ => Ok(Message::Other {
+                keyword: keyword.to_owned(),
+            }),
+        },
         "%exit" => Ok(Message::Exit {
             reason: rest
                 .filter(|r| !r.is_empty())
@@ -217,6 +238,72 @@ fn session_and_text(rest: Option<&[u8]>, what: &'static str) -> Result<(SessionI
         session,
         String::from_utf8_lossy(name.unwrap_or_default()).into_owned(),
     ))
+}
+
+/// One line of the pane names subscription, after the subscription's name:
+/// `$<session> @<window> <index> %<pane> : <default> <command bytes> <title
+/// bytes> <command> <title>`.
+///
+/// The two lengths must be exactly what the line holds after them. A text
+/// that carried a line break left its line short of its length, so the line
+/// is refused, and with it the stream, before the lines the text wrote after
+/// the break are read as tmux's.
+fn pane_name(mut rest: &[u8]) -> Result<Message, Error> {
+    const WHAT: &str = "subscription-changed";
+    SessionId::parse(text(field(&mut rest, WHAT)?)?).ok_or(bad(WHAT))?;
+    WindowId::parse(text(field(&mut rest, WHAT)?)?).ok_or(bad(WHAT))?;
+    decimal(field(&mut rest, WHAT)?).ok_or(bad(WHAT))?;
+    let pane = pane_id(field(&mut rest, WHAT)?, WHAT)?;
+    if field(&mut rest, WHAT)? != b":" {
+        return Err(bad(WHAT));
+    }
+    let default_title = match field(&mut rest, WHAT)? {
+        b"0" => false,
+        b"1" => true,
+        _ => return Err(bad(WHAT)),
+    };
+    let command_len = decimal(field(&mut rest, WHAT)?).ok_or(bad(WHAT))?;
+    let title_len = decimal(field(&mut rest, WHAT)?).ok_or(bad(WHAT))?;
+    let whole = command_len
+        .checked_add(1)
+        .and_then(|n| n.checked_add(title_len));
+    if whole != Some(rest.len()) || rest[command_len] != b' ' {
+        return Err(bad(WHAT));
+    }
+    let command = name_text(&rest[..command_len]);
+    let title = name_text(&rest[command_len + 1..]);
+    let name = if default_title || title.is_empty() {
+        command
+    } else {
+        title
+    };
+    Ok(Message::PaneName { pane, name })
+}
+
+/// Take the bytes before the next space off the front of `rest`. The space
+/// must be there: every field read this way has another after it.
+fn field<'a>(rest: &mut &'a [u8], what: &'static str) -> Result<&'a [u8], Error> {
+    let (field, tail) = split_once(rest, b' ');
+    *rest = tail.ok_or(bad(what))?;
+    Ok(field)
+}
+
+/// A number written as digits alone, with no sign.
+fn decimal(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+/// A text a program chose, as a name: control characters removed, since not
+/// every tmux strips them from a command's name, and the ends trimmed.
+fn name_text(bytes: &[u8]) -> String {
+    let kept: String = String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    kept.trim().to_owned()
 }
 
 fn layout_change(rest: &[u8]) -> Result<Message, Error> {

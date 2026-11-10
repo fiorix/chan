@@ -838,7 +838,7 @@ export type BrowserLabelCtx = {
 /// strip stays scannable even when paths are deeply nested. The
 /// full path is reachable via `tabTooltip` for disambiguation.
 export function tabLabel(t: Tab, ctx?: BrowserLabelCtx): string {
-  if (t.kind === "terminal") return terminalTabName(t);
+  if (t.kind === "terminal") return tmuxPaneName(t) ?? terminalTabName(t);
   if (t.kind === "graph") return graphTabLabel(t);
   if (t.kind === "browser") return browserTabLabel(t, ctx);
   if (t.kind === "dashboard") return t.title;
@@ -970,6 +970,18 @@ export function tabTooltip(t: Tab): string {
 
 export function terminalTabName(t: TerminalTab): string {
   return t.title.trim() || "Terminal";
+}
+
+/// What tmux calls the pane a terminal tab shows, which is how a tmux pane is
+/// labelled: its title, or its command under a title that names nothing. The
+/// tab's own name is the session's tab name, which the server keeps unique,
+/// so two panes tmux calls the same differ there by a suffix that says
+/// nothing about either pane. Null for any other tab, and for a pane the
+/// roster has not named.
+export function tmuxPaneName(t: TerminalTab): string | null {
+  if (!t.tmuxPane || !t.terminalSessionId) return null;
+  const entry = terminalRoster.find((e) => e.id === t.terminalSessionId);
+  return entry?.tmux_name?.trim() || null;
 }
 
 export const DEFAULT_TERMINAL_GROUP = "default";

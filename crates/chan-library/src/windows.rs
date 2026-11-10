@@ -243,6 +243,13 @@ pub struct TmuxWindowMark {
     pub connection: String,
     /// The connection's control window, as against a tmux window of it.
     pub control: bool,
+    /// The row's label is one the user gave it in Computers. It stands while
+    /// it is set: tmux's names for the window are left to the connection's
+    /// record and label the row again once the user clears theirs. Known to
+    /// this process alone, since the wire carries the label and not whose
+    /// it is.
+    #[serde(skip)]
+    pub user_label: bool,
 }
 
 /// One live tmux control-mode connection, as the window feed and
@@ -744,6 +751,7 @@ impl WindowRegistry {
         let mark = TmuxWindowMark {
             connection: connection.to_owned(),
             control: false,
+            user_label: false,
         };
         self.mint_tmux_row(kind, workspace_path, mark, None, label, false)
     }
@@ -766,6 +774,7 @@ impl WindowRegistry {
         let mark = TmuxWindowMark {
             connection: connection.to_owned(),
             control: true,
+            user_label: false,
         };
         self.mint_tmux_row(kind, workspace_path, mark, Some(title), "", true)
     }
@@ -821,6 +830,7 @@ impl WindowRegistry {
                     w.tmux = Some(TmuxWindowMark {
                         connection: connection.to_owned(),
                         control: true,
+                        user_label: false,
                     });
                     w.title = title.to_owned();
                     true
@@ -954,29 +964,72 @@ impl WindowRegistry {
     /// control terminals and validates the text; the registry owns persistence
     /// and the watch notification. Returns whether a row matched. Setting the
     /// existing value is an idempotent match and does not rewrite the store.
+    ///
+    /// A tmux window's row has a label without the user: its tmux window's
+    /// name. A caption given to it stands in that name's place until the
+    /// user clears it, and an empty caption hands the row back to tmux, with
+    /// the name the connection's record holds for the window applied at
+    /// once. The caption lasts as long as the row, which is never saved.
     pub fn set_label(&self, window_id: &str, label: String) -> bool {
-        self.update_row(window_id, |w| {
+        self.set_label_shown(window_id, label).0
+    }
+
+    /// [`Self::set_label`], answering beside the match the label the row
+    /// shows once set, when that is another than it showed before: the
+    /// caption, or tmux's name for a tmux window whose caption was cleared.
+    /// It is what the window's page is told, and `None` tells it nothing.
+    pub fn set_label_shown(&self, window_id: &str, label: String) -> (bool, Option<String>) {
+        // Read ahead of the rows' lock, so the two locks never nest.
+        let tmux_label = self.tmux_window_label(window_id);
+        let mut shown = None;
+        let (matched, _) = self.update_row(window_id, |w| {
+            let label = match w.tmux.as_mut().filter(|mark| !mark.control) {
+                Some(mark) => {
+                    mark.user_label = !label.is_empty();
+                    if mark.user_label {
+                        label
+                    } else {
+                        tmux_label.unwrap_or_default()
+                    }
+                }
+                None => label,
+            };
             if w.label == label {
                 return false;
             }
-            w.label = label;
+            w.label = label.clone();
+            shown = Some(label);
             true
-        })
-        .0
+        });
+        (matched, shown)
+    }
+
+    /// The label row `window_id` carries; `None` for no such row.
+    #[cfg(test)]
+    pub(crate) fn label(&self, window_id: &str) -> Option<String> {
+        self.lock()
+            .iter()
+            .find(|w| w.window_id == window_id)
+            .map(|w| w.label.clone())
     }
 
     /// Label the tmux window row `window_id` with `label`, its tmux window's
     /// name cut to the label bound, as [`Self::create_tmux_window`] does.
-    /// tmux names its windows, so the name it reports replaces any caption.
-    /// Returns the label stored when it changed; any other row, a control
-    /// row included, is left alone. Fires the change notification on a
-    /// change and saves nothing, since the row is never saved.
+    /// A row the user labelled in Computers keeps that label: tmux renames a
+    /// window whenever its active pane's command changes, and the user's
+    /// name for the window is not tmux's to replace. Returns the label
+    /// stored when it changed; any other row, a control row included, is
+    /// left alone. Fires the change notification on a change and saves
+    /// nothing, since the row is never saved.
     pub fn relabel_tmux_window(&self, window_id: &str, label: &str) -> Option<String> {
         let label: String = label.chars().take(MAX_WINDOW_LABEL_CHARS).collect();
         let changed = {
             let mut windows = self.lock();
             let row = windows.iter_mut().find(|w| {
-                w.window_id == window_id && w.tmux.as_ref().is_some_and(|mark| !mark.control)
+                w.window_id == window_id
+                    && w.tmux
+                        .as_ref()
+                        .is_some_and(|mark| !mark.control && !mark.user_label)
             });
             match row {
                 Some(w) if w.label != label => {
@@ -991,6 +1044,23 @@ impl WindowRegistry {
         }
         self.notify.notify_waiters();
         Some(label)
+    }
+
+    /// The label tmux's name makes for the tmux window whose chan window is
+    /// `window_id`, cut to the label bound, from the record of the
+    /// connection that lists it; `None` when no live connection does.
+    fn tmux_window_label(&self, window_id: &str) -> Option<String> {
+        self.tmux_connections_lock()
+            .values()
+            .flat_map(|record| &record.windows)
+            .find(|window| window.chan_window.as_deref() == Some(window_id))
+            .map(|window| {
+                window
+                    .label()
+                    .chars()
+                    .take(MAX_WINDOW_LABEL_CHARS)
+                    .collect()
+            })
     }
 
     /// Apply `edit` to row `window_id` and return `(matched, changed)`.
@@ -2167,6 +2237,7 @@ mod tests {
             Some(TmuxWindowMark {
                 connection: "term-1".into(),
                 control: false,
+                user_label: false,
             })
         );
         assert!(!tmux.hidden, "minted shown: its tabs are parked for it");
@@ -2294,11 +2365,95 @@ mod tests {
             Some(TmuxWindowMark {
                 connection: "term-3".into(),
                 control: true,
+                user_label: false,
             })
         );
         assert_eq!(marked.ordinal, 1, "the ordinal is kept across the marks");
         let stored = std::fs::read_to_string(&path).unwrap();
         assert!(!stored.contains(&control.window_id), "{stored}");
+    }
+
+    /// A tmux window's row is labelled by tmux until the user labels it in
+    /// Computers. The user's label then stands against every name tmux gives
+    /// the window, and clearing it hands the row back to tmux at once.
+    #[test]
+    fn a_users_label_on_a_tmux_window_row_stands_until_it_is_cleared() {
+        let (reg, _dir) = registry();
+        let row = reg.create_tmux_window(WindowKind::Terminal, None, "term-a", "bash");
+        let id = row.window_id.as_str();
+        // The connection's record of the window, as each status brings it.
+        let record = |name: &str| {
+            let mut record = connection_record("term-a");
+            record.windows[0].name = name.into();
+            record.windows[0].chan_window = Some(id.to_owned());
+            record
+        };
+        let rename = |name: &str| {
+            let told = reg.relabel_tmux_window(id, name);
+            reg.set_tmux_connection(record(name));
+            told
+        };
+        reg.set_tmux_connection(record("bash"));
+        // With no label of the user's, the row follows tmux.
+        assert_eq!(rename("top"), Some("top".into()));
+        assert_eq!(reg.label(id).as_deref(), Some("top"));
+        // The user labels the window: the row shows the label, and its page
+        // is to be told.
+        assert_eq!(
+            reg.set_label_shown(id, "deploy".into()),
+            (true, Some("deploy".into()))
+        );
+        // tmux renames the window, as it does at each switch between panes:
+        // the label stands and there is nothing to tell the page.
+        for name in ["bash", "top", "vim"] {
+            assert_eq!(rename(name), None, "tmux renamed the window {name}");
+            assert_eq!(reg.label(id).as_deref(), Some("deploy"));
+        }
+        // The same label again is a match that changes and tells nothing.
+        assert_eq!(reg.set_label_shown(id, "deploy".into()), (true, None));
+        // Cleared, the row shows the name tmux has for the window by then,
+        // and follows tmux from there.
+        assert_eq!(
+            reg.set_label_shown(id, String::new()),
+            (true, Some("vim".into()))
+        );
+        assert_eq!(rename("zsh"), Some("zsh".into()));
+        // A label that reads as tmux's name is still the user's.
+        assert_eq!(reg.set_label_shown(id, "zsh".into()), (true, None));
+        assert_eq!(rename("htop"), None);
+        assert_eq!(reg.label(id).as_deref(), Some("zsh"));
+        // A window tmux has no name for reads as its id once cleared.
+        reg.set_tmux_connection(record(""));
+        assert_eq!(
+            reg.set_label_shown(id, String::new()),
+            (true, Some("tmux @1".into()))
+        );
+        // The tmux name is cut to the label bound, as at the mint.
+        assert!(reg.set_label(id, "mine".into()));
+        reg.set_tmux_connection(record(&"n".repeat(MAX_WINDOW_LABEL_CHARS + 9)));
+        assert_eq!(
+            reg.set_label_shown(id, String::new()),
+            (true, Some("n".repeat(MAX_WINDOW_LABEL_CHARS)))
+        );
+        // A window no connection lists has no name to return to.
+        assert!(reg.set_label(id, "mine".into()));
+        assert!(reg.remove_tmux_connection("term-a"));
+        assert_eq!(
+            reg.set_label_shown(id, String::new()),
+            (true, Some(String::new()))
+        );
+        // A plain window's caption is the text given, the empty one too, and
+        // a row that is not there matches nothing.
+        let plain = reg.create(WindowKind::Terminal, None);
+        assert_eq!(
+            reg.set_label_shown(&plain.window_id, "notes".into()),
+            (true, Some("notes".into()))
+        );
+        assert_eq!(
+            reg.set_label_shown(&plain.window_id, String::new()),
+            (true, Some(String::new()))
+        );
+        assert_eq!(reg.set_label_shown("nope", "x".into()), (false, None));
     }
 
     fn connection_record(connection: &str) -> TmuxConnectionRecord {

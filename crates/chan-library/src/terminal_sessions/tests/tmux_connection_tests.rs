@@ -12,11 +12,45 @@ const ENTRY: &[u8] =
 /// submitted commands.
 const VERSION_REPLY: &[u8] =
     b"%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n3.8\r\n%end 2 3 1\r\n";
-/// Empty replies to pause-after and new-layouts.
-const FLAGS_REPLIES: &[u8] = b"%begin 2 4 1\r\n%end 2 4 1\r\n%begin 2 5 1\r\n%end 2 5 1\r\n";
 /// One window, one pane, 80 by 24 (the checksum is tmux's).
 const ONE_WINDOW: &[u8] =
-    b"%begin 2 6 1\r\n@0 b25d,80x24,0,0,0 b25d,80x24,0,0,0 * shell\r\n%end 2 6 1\r\n";
+    b"%begin 2 9 1\r\n@0 b25d,80x24,0,0,0 b25d,80x24,0,0,0 * shell\r\n%end 2 9 1\r\n";
+
+/// Empty replies to the commands a connection submits ahead of its window
+/// list: one for each write in `written` but the last, which is the list.
+fn start_replies(written: &[Vec<u8>]) -> Vec<u8> {
+    assert!(
+        written
+            .last()
+            .is_some_and(|last| last.starts_with(b"list-windows -F ")),
+        "the window list is submitted last: {written:?}"
+    );
+    (0..written.len() - 1)
+        .map(|i| format!("%begin 2 {n} 1\r\n%end 2 {n} 1\r\n", n = 4 + i))
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// tmux's line of the pane names subscription for pane `%<pane>` with
+/// `command` in its foreground: under `title` when a program set one, else
+/// under the title tmux gives a new pane, its host's name.
+fn pane_name(pane: u32, command: &str, title: Option<&str>) -> Vec<u8> {
+    let (default, title) = match title {
+        Some(title) => (0, title),
+        None => (1, "build-host"),
+    };
+    format!(
+        "%subscription-changed chan-pane-name $0 @0 0 %{pane} : {default} {} {} {command} {title}\r\n",
+        command.len(),
+        title.len()
+    )
+    .into_bytes()
+}
+
+/// A session's tab name.
+fn tab_name(session: &Session) -> String {
+    session.live_metadata().name.unwrap_or_default()
+}
 
 struct Rig {
     registry: Registry,
@@ -42,7 +76,7 @@ impl Rig {
             registry,
             control,
             commands,
-            number: 6,
+            number: 9,
         };
         rig.feed(&[MARKER, ENTRY].concat());
         assert_eq!(
@@ -54,13 +88,22 @@ impl Rig {
         );
         rig.feed(VERSION_REPLY);
         let after_version = rig.inputs();
-        assert_eq!(after_version.len(), 3, "{after_version:?}");
         assert!(after_version[0].starts_with(b"refresh-client -f pause-after="));
         assert_eq!(after_version[1], b"refresh-client -f new-layouts\n");
-        assert!(after_version[2].starts_with(b"list-windows -F "));
         rig.work();
-        rig.feed(FLAGS_REPLIES);
+        rig.feed(&start_replies(&after_version));
         rig
+    }
+
+    /// The display name the roster gives a page for `session`: what tmux
+    /// calls its pane.
+    fn shown_name(&self, session: &Session) -> serde_json::Value {
+        let roster = serde_json::to_value(self.registry.roster()).expect("a roster");
+        roster
+            .as_array()
+            .and_then(|entries| entries.iter().find(|entry| entry["id"] == session.id))
+            .map(|entry| entry["tmux_name"].clone())
+            .expect("the session is in the roster")
     }
 
     fn feed(&mut self, bytes: &[u8]) {
@@ -145,6 +188,17 @@ impl Rig {
             .concat()
     }
 
+    /// How many panes the connection keeps a reported name for.
+    fn named_panes(&self) -> usize {
+        self.control
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .connection()
+            .map(|c| c.named_panes())
+            .unwrap_or(0)
+    }
+
     fn windows(&self) -> usize {
         self.control
             .tmux
@@ -177,7 +231,6 @@ fn attached() -> (Rig, Arc<Session>) {
     rig.work();
     let pane = rig.pane(0);
     assert!(pane.is_tmux_pane());
-    assert_eq!(pane.live_metadata().name.as_deref(), Some("shell"));
     assert_eq!(pane.live_metadata().group, "tmux");
     let capture = rig.inputs();
     assert_eq!(capture.len(), 1, "{capture:?}");
@@ -433,12 +486,195 @@ fn windows_past_the_cap_are_listed_but_not_materialized() {
     assert_eq!(rig.windows(), 10, "all ten are known");
 }
 
+/// The subscription that names the panes is asked of every connection with
+/// the first commands: of the oldest tmux the gate connects to as of the
+/// newest, and again by the connection a second run in the same terminal
+/// makes, which starts with no names.
 #[test]
-fn a_renamed_window_renames_its_pane_sessions() {
+fn a_connection_subscribes_to_its_panes_names_at_its_start() {
+    let subscriptions = |written: &[Vec<u8>]| {
+        written
+            .iter()
+            .filter(|w| w.starts_with(b"refresh-client -B 'chan-pane-name:%*:"))
+            .count()
+    };
+    let registry = Registry::new(test_config(1 << 16, 4, 10));
+    let (control, commands) = test_session_with_commands(1 << 16);
+    register_session(&registry, &control);
+    *control
+        .tmux_foreground
+        .lock()
+        .expect("terminal tmux foreground poisoned") = Some(Foreground {
+        name: Some("tmux".into()),
+        command: Some("tmux -CC".into()),
+    });
+    let written = || {
+        let mut out = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let PtyCommand::Input(bytes) = command {
+                out.push(bytes);
+            }
+        }
+        out
+    };
+    for version in ["3.2", "3.8"] {
+        control.record_output(&[MARKER, ENTRY].concat());
+        written();
+        control.record_output(
+            format!("%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n{version}\r\n%end 2 3 1\r\n")
+                .as_bytes(),
+        );
+        let start = written();
+        assert_eq!(
+            subscriptions(&start),
+            1,
+            "tmux {version} is asked for its panes' names once: {start:?}"
+        );
+        assert!(
+            start
+                .last()
+                .is_some_and(|last| last.starts_with(b"list-windows -F ")),
+            "ahead of the window list: {start:?}"
+        );
+        control.record_output(&start_replies(&start));
+        control.record_output(b"%exit\r\n\x1b\\");
+        registry.perform_tmux_work(&control);
+    }
+}
+
+/// tmux has reported no name for the pane yet: its session reads as the
+/// pane's id, never as the window it is in.
+#[test]
+fn a_pane_reads_as_its_id_until_tmux_names_it() {
+    let (rig, pane) = attached();
+    assert_eq!(tab_name(&pane), "tmux %0");
+    assert_eq!(rig.shown_name(&pane), "tmux %0");
+}
+
+/// One window, two panes: a shell at its prompt and `top`, each under the
+/// title tmux gave it. With automatic renaming the window is called after
+/// its active pane's command, so every switch between the panes renames it.
+#[test]
+fn two_panes_of_one_window_keep_their_own_names_when_the_window_is_renamed() {
+    let (mut rig, shell) = attached();
+    let body = "80x24,0,0{40x24,0,0,0,39x24,41,0,1}";
+    let layout = layout_with_checksum(body);
+    rig.feed(format!("%layout-change @0 {layout} {layout} *\r\n").as_bytes());
+    rig.work();
+    let top = rig.pane(1);
+    rig.feed(&pane_name(0, "bash", None));
+    rig.feed(&pane_name(1, "top", None));
+    rig.work();
+    assert_eq!(
+        (tab_name(&shell).as_str(), tab_name(&top).as_str()),
+        ("bash", "top")
+    );
+    for window_name in ["top", "bash", "top"] {
+        rig.feed(format!("%window-renamed @0 {window_name}\r\n").as_bytes());
+        rig.work();
+        assert_eq!(
+            (tab_name(&shell).as_str(), tab_name(&top).as_str()),
+            ("bash", "top"),
+            "with the window renamed {window_name}"
+        );
+        assert_eq!(rig.shown_name(&shell), "bash");
+        assert_eq!(rig.shown_name(&top), "top");
+    }
+}
+
+/// A tab name is unique among live sessions, so two panes tmux calls the
+/// same differ there by a suffix. What a page shows is the pane's own name,
+/// and a suffix stays until its own pane is renamed: the name another pane
+/// frees does not move it.
+#[test]
+fn panes_tmux_calls_the_same_show_that_name_and_differ_only_in_tab_name() {
+    let (mut rig, first) = attached();
+    let body = "80x24,0,0{40x24,0,0,0,39x24,41,0,1}";
+    let layout = layout_with_checksum(body);
+    rig.feed(format!("%layout-change @0 {layout} {layout} *\r\n").as_bytes());
+    rig.work();
+    let second = rig.pane(1);
+    rig.feed(&pane_name(0, "bash", None));
+    rig.feed(&pane_name(1, "bash", None));
+    rig.work();
+    assert_eq!(
+        (tab_name(&first).as_str(), tab_name(&second).as_str()),
+        ("bash", "bash-2")
+    );
+    assert_eq!(rig.shown_name(&first), "bash");
+    assert_eq!(
+        rig.shown_name(&second),
+        "bash",
+        "no suffix on what a page shows"
+    );
+    // The first pane runs another program: the second keeps its tab name,
+    // which is how `cs` addresses it, and still shows as what it runs.
+    rig.feed(&pane_name(0, "vim", None));
+    rig.work();
+    assert_eq!(
+        (tab_name(&first).as_str(), tab_name(&second).as_str()),
+        ("vim", "bash-2")
+    );
+    assert_eq!(rig.shown_name(&first), "vim");
+    assert_eq!(rig.shown_name(&second), "bash");
+    // Its own next name is settled afresh, with no suffix to carry.
+    rig.feed(&pane_name(1, "top", None));
+    rig.feed(&pane_name(1, "bash", None));
+    rig.work();
+    assert_eq!(tab_name(&second), "bash");
+    assert_eq!(rig.shown_name(&second), "bash");
+}
+
+/// The name is the pane's title, and its foreground command while the title
+/// is the one tmux gave it or is empty; a title outlives the program that
+/// set it. With neither, the pane reads as its id again.
+#[test]
+fn a_pane_is_named_by_its_title_and_by_its_command_under_a_default_title() {
     let (mut rig, pane) = attached();
+    for (line, name) in [
+        (pane_name(0, "bash", None), "bash"),
+        (pane_name(0, "vim", None), "vim"),
+        (
+            pane_name(0, "vim", Some("notes.md - vim")),
+            "notes.md - vim",
+        ),
+        (
+            pane_name(0, "bash", Some("notes.md - vim")),
+            "notes.md - vim",
+        ),
+        (pane_name(0, "bash", Some("")), "bash"),
+        (pane_name(0, "", Some("")), "tmux %0"),
+        (pane_name(0, "", None), "tmux %0"),
+        (pane_name(0, "top", None), "top"),
+    ] {
+        rig.feed(&line);
+        rig.work();
+        assert_eq!(tab_name(&pane), name, "{}", String::from_utf8_lossy(&line));
+        assert_eq!(rig.shown_name(&pane), name);
+        assert_eq!(
+            pane.live_metadata().group,
+            "tmux",
+            "a name leaves the group"
+        );
+    }
+    // A title longer than a terminal's name may be is cut to that bound.
+    let long = "n".repeat(300);
+    rig.feed(&pane_name(0, "bash", Some(&long)));
+    rig.work();
+    assert_eq!(tab_name(&pane), "n".repeat(128));
+}
+
+#[test]
+fn a_renamed_window_leaves_its_pane_sessions_their_names() {
+    let (mut rig, pane) = attached();
+    // Before tmux named the pane, and after.
     rig.feed(b"%window-renamed @0 build\r\n");
     rig.work();
-    assert_eq!(pane.live_metadata().name.as_deref(), Some("build"));
+    assert_eq!(tab_name(&pane), "tmux %0");
+    rig.feed(&pane_name(0, "vim", None));
+    rig.feed(b"%window-renamed @0 release\r\n");
+    rig.work();
+    assert_eq!(tab_name(&pane), "vim");
 }
 
 #[test]
@@ -459,6 +695,17 @@ fn a_layout_change_sizes_the_pane_session_and_adds_a_new_pane() {
     rig.work();
     let second = rig.pane(1);
     assert_eq!(second.winsize.lock().unwrap().cols, 39);
+    // The pane split off is named by its own report, and the one beside it
+    // is left as it was.
+    rig.feed(&pane_name(0, "bash", None));
+    rig.work();
+    assert_eq!(tab_name(&second), "tmux %1");
+    rig.feed(&pane_name(1, "top", None));
+    rig.work();
+    assert_eq!(
+        (tab_name(&pane).as_str(), tab_name(&second).as_str()),
+        ("bash", "top")
+    );
 }
 
 /// A recording window hook: mints `w-<n>` ids, keeps every window call in
@@ -634,7 +881,7 @@ fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
 fn the_source_window_lets_the_control_tab_go_after_the_first_window_is_minted() {
     let registry = Registry::new(test_config(1 << 16, 4, 10));
     let hook = RecordingHook::install(&registry);
-    let (control, _commands) = test_session_with_commands(1 << 16);
+    let (control, commands) = test_session_with_commands(1 << 16);
     register_session(&registry, &control);
     control.set_window_id(Some("w-source".into()));
     *control
@@ -645,8 +892,15 @@ fn the_source_window_lets_the_control_tab_go_after_the_first_window_is_minted() 
         command: Some("tmux -CC".into()),
     });
     control.record_output(&[MARKER, ENTRY].concat());
+    while commands.try_recv().is_ok() {}
     control.record_output(VERSION_REPLY);
-    control.record_output(FLAGS_REPLIES);
+    let mut start = Vec::new();
+    while let Ok(command) = commands.try_recv() {
+        if let PtyCommand::Input(bytes) = command {
+            start.push(bytes);
+        }
+    }
+    control.record_output(&start_replies(&start));
     registry.perform_tmux_work(&control);
     let at_connect = calls(&hook);
     assert!(
@@ -773,8 +1027,10 @@ fn a_requested_window_gets_a_chan_window_of_its_own_and_its_list() {
 }
 
 #[test]
-fn a_renamed_window_relabels_its_chan_window_and_its_panes_keep_their_group() {
+fn a_renamed_window_relabels_its_chan_window_and_its_panes_keep_their_name_and_group() {
     let (mut rig, pane, hook) = attached_with_hook();
+    rig.feed(&pane_name(0, "vim", None));
+    rig.work();
     rig.feed(b"%window-renamed @0 build\r\n");
     rig.work();
     assert_eq!(
@@ -782,11 +1038,15 @@ fn a_renamed_window_relabels_its_chan_window_and_its_panes_keep_their_group() {
         vec!["label w-1 build"],
         "the chan window carries the tmux window's new name"
     );
-    assert_eq!(pane.live_metadata().name.as_deref(), Some("build"));
+    assert_eq!(
+        tab_name(&pane),
+        "vim",
+        "the window's name is not its pane's"
+    );
     assert_eq!(
         pane.live_metadata().group,
         "tmux",
-        "a rename names the pane and leaves its group"
+        "a name given by tmux leaves the pane's group"
     );
     // A rename to the name the window has relabels nothing.
     rig.feed(b"%window-renamed @0 build\r\n");
@@ -811,9 +1071,9 @@ fn a_rename_while_the_window_is_minted_relabels_it_once_minted() {
         "minted with the listed name, then relabelled: {recorded:?}"
     );
     assert_eq!(
-        rig.pane(0).live_metadata().name.as_deref(),
-        Some("build"),
-        "the pane made with the listed name takes the new one"
+        tab_name(&rig.pane(0)),
+        "tmux %0",
+        "the pane takes neither of the window's names"
     );
 }
 
@@ -845,11 +1105,15 @@ fn a_window_a_notification_added_takes_the_name_its_list_brings() {
     add_unnamed_window(&mut rig, &hook);
     rig.work();
     let pane = rig.pane(5);
-    assert_ne!(pane.live_metadata().name.as_deref(), Some("zsh"));
+    assert_eq!(tab_name(&pane), "tmux %5");
     let list = added_window_list(&mut rig, "zsh");
     rig.feed(&list);
     rig.work();
-    assert_eq!(pane.live_metadata().name.as_deref(), Some("zsh"));
+    assert_eq!(
+        tab_name(&pane),
+        "tmux %5",
+        "the list names the window, and the pane waits for its own name"
+    );
     assert_eq!(pane.live_metadata().group, "tmux");
     let labels: Vec<String> = calls(&hook)
         .into_iter()
@@ -863,17 +1127,164 @@ fn a_window_a_notification_added_takes_the_name_its_list_brings() {
 }
 
 #[test]
-fn a_name_listed_before_the_pane_session_exists_reaches_the_session() {
+fn names_reported_before_the_pane_session_exists_reach_the_window_and_the_session() {
     let (mut rig, _pane, hook) = attached_with_hook();
     add_unnamed_window(&mut rig, &hook);
-    // The list's name arrives while the registry has not made the session.
+    // The list's name for the window and tmux's name for the pane arrive
+    // while the registry has not made the pane's session.
     let list = added_window_list(&mut rig, "zsh");
     rig.feed(&list);
+    rig.feed(&pane_name(5, "zsh", Some("notes")));
     rig.work();
     rig.work();
     let pane = rig.pane(5);
-    assert_eq!(pane.live_metadata().name.as_deref(), Some("zsh"));
+    assert_eq!(tab_name(&pane), "notes");
+    assert_eq!(rig.shown_name(&pane), "notes");
+    assert_eq!(pane.live_metadata().group, "tmux");
     assert!(calls(&hook).iter().any(|c| c == "label w-2 zsh"));
+}
+
+/// tmux looks at the panes on its own clock, so a pane's name can come
+/// ahead of the list that brings the pane: the session is made with it.
+#[test]
+fn a_name_reported_before_its_pane_is_listed_names_the_session_made_for_it() {
+    let (mut rig, _pane, hook) = attached_with_hook();
+    rig.feed(b"%window-add @1\r\n");
+    rig.feed(&pane_name(5, "htop", None));
+    rig.work();
+    rig.inputs();
+    calls(&hook);
+    let panes_reply = rig.reply(&[b"%5 1"]);
+    rig.feed(&panes_reply);
+    rig.work();
+    assert_eq!(tab_name(&rig.pane(5)), "htop");
+}
+
+/// A pane joined to another window leaves the window it was in first, as
+/// tmux reports a join, which ends its session there. The session it gets in
+/// the window it joined is made with the name tmux gave the pane.
+#[test]
+fn a_pane_moved_to_another_window_keeps_its_name_in_the_session_it_gets_there() {
+    let (mut rig, _first, hook) = attached_with_hook();
+    let split = layout_with_checksum("80x24,0,0{40x24,0,0,0,39x24,41,0,1}");
+    rig.feed(format!("%layout-change @0 {split} {split} *\r\n").as_bytes());
+    rig.work();
+    let before = rig.pane(1);
+    let capture = rig.capture(1, 0, 24, &[b"$ "]);
+    rig.feed(&capture);
+    rig.feed(&pane_name(0, "bash", None));
+    rig.feed(&pane_name(1, "top", None));
+    rig.work();
+    assert_eq!(tab_name(&before), "top");
+    rig.inputs();
+    calls(&hook);
+    add_unnamed_window(&mut rig, &hook);
+    rig.work();
+    // The join: the window left is laid out without the pane, then the
+    // window joined with it.
+    let left = layout_with_checksum("80x24,0,0,0");
+    let joined = layout_with_checksum("80x24,0,0[80x12,0,0,5,80x11,0,13,1]");
+    rig.feed(format!("%layout-change @0 {left} {left} -\r\n").as_bytes());
+    rig.feed(format!("%layout-change @1 {joined} {joined} *\r\n").as_bytes());
+    rig.work();
+    rig.work();
+    let after = rig.pane(1);
+    assert_ne!(after.id, before.id, "a session of the window joined");
+    assert!(rig.registry.attach(&before.id, None).is_none());
+    assert_eq!(after.window_id().as_deref(), Some("w-2"));
+    assert_eq!(tab_name(&after), "top");
+    assert_eq!(rig.shown_name(&after), "top");
+}
+
+/// A window past the cap has no pane sessions, and tmux names its panes all
+/// the same; opened later, its panes' sessions are made with those names.
+#[test]
+fn a_window_opened_past_the_cap_finds_the_names_tmux_gave_its_panes() {
+    let mut rig = Rig::connected();
+    let rows: Vec<Vec<u8>> = (0..10)
+        .map(|i| format!("@{i} b25d,80x24,0,0,{i} b25d,80x24,0,0,{i} - w{i}").into_bytes())
+        .collect();
+    let refs: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+    let list = rig.reply(&refs);
+    rig.feed(&list);
+    rig.feed(&pane_name(9, "mutt", None));
+    rig.work();
+    let shown = rig.pane(0).tmux_pane.expect("a pane");
+    rig.inputs();
+    assert!(rig.registry.tmux_request_for(
+        &shown,
+        TmuxRequest::OpenWindow {
+            window: "@9".into()
+        },
+    ));
+    let listed = rig.inputs();
+    assert!(
+        listed.iter().any(|w| w.starts_with(b"list-panes -t @9 ")),
+        "{listed:?}"
+    );
+    // tmux answers in the order asked: the pane lists of the eight windows
+    // within the cap, the first pane's capture, then the opened window's list.
+    for pane in 0..8 {
+        let reply = rig.reply(&[format!("%{pane} 1").as_bytes()]);
+        rig.feed(&reply);
+    }
+    let capture = rig.capture(0, 0, 24, &[b"$ "]);
+    rig.feed(&capture);
+    let panes_reply = rig.reply(&[b"%9 1"]);
+    rig.feed(&panes_reply);
+    rig.work();
+    assert_eq!(tab_name(&rig.pane(9)), "mutt");
+}
+
+/// tmux names every pane of the session and a peer can report any number, so
+/// the names kept are bounded. At the bound the names of panes no listed
+/// window holds go first; with every kept name a listed pane's, a name for
+/// another pane is dropped, and a pane already named still takes its next.
+#[test]
+fn the_names_kept_are_bounded_and_those_of_panes_no_window_holds_go_first() {
+    const BOUND: usize = 1024;
+    let mut rig = Rig::connected();
+    // Ten windows: the first holds pane %0, and the last, past the cap, as
+    // many panes as with %0 make the bound.
+    let wide: Vec<String> = (0..BOUND - 1)
+        .map(|i| format!("1x24,{},0,{}", 2 * i, 1000 + i))
+        .collect();
+    let wide = layout_with_checksum(&format!(
+        "{}x24,0,0{{{}}}",
+        2 * (BOUND - 1) - 1,
+        wide.join(",")
+    ));
+    let rows: Vec<Vec<u8>> = (0..10)
+        .map(|i| match i {
+            9 => format!("@9 {wide} {wide} - w9").into_bytes(),
+            _ => format!("@{i} b25d,80x24,0,0,{i} b25d,80x24,0,0,{i} - w{i}").into_bytes(),
+        })
+        .collect();
+    let refs: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+    let list = rig.reply(&refs);
+    rig.feed(&list);
+    rig.work();
+    let first = rig.pane(0);
+    // Names for panes no listed window holds fill the bound.
+    for pane in 0..BOUND as u32 {
+        rig.feed(&pane_name(5000 + pane, "sh", None));
+    }
+    assert_eq!(rig.named_panes(), BOUND);
+    // A listed pane's name is kept, and theirs make room for it.
+    rig.feed(&pane_name(0, "bash", None));
+    rig.work();
+    assert_eq!(tab_name(&first), "bash");
+    assert_eq!(rig.named_panes(), 1);
+    // Every listed pane is named: the bound is reached with nothing to drop.
+    for pane in 0..BOUND as u32 - 1 {
+        rig.feed(&pane_name(1000 + pane, "sh", None));
+    }
+    assert_eq!(rig.named_panes(), BOUND);
+    rig.feed(&pane_name(9000, "sh", None));
+    assert_eq!(rig.named_panes(), BOUND, "one name more is not kept");
+    rig.feed(&pane_name(0, "vim", None));
+    rig.work();
+    assert_eq!(tab_name(&first), "vim", "a pane already named is renamed");
 }
 
 #[test]
