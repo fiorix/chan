@@ -39,7 +39,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 
 | Item | State | Next |
 | --- | --- | --- |
-| [time-bound tests go red on a loaded host][timebound] | built | owner |
+| [time-bound tests go red on a loaded host][timebound] | built | GA |
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | built | gateway run |
 | [no CI job runs the gateway packaging and roles suites][gwci] | built | owner |
 | [a shared devserver's root link refuses its grantees][grantroot] | built | guest run |
@@ -75,7 +75,7 @@ The owner added four more the same day: a tmux window's title bar shows the acti
 
 A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's selected match on every resize, so v0.127.0 drops the highlight and shows no index until the next step, and the owner moved keeping the match, through the core's tracked grid references, here ([findresize]).
 
-A sixth came from the owner on 2026-11-10: in windows that are not tmux windows, the pane tree shows beside each terminal what runs in it, read as tmux panes are, from the title the program sets, else its foreground command ([termcmd]).
+A sixth came from the owner on 2026-11-10: in windows that are not tmux windows, the pane tree shows beside each terminal what runs in it, read as tmux panes are, from the title the program sets, else its foreground command ([termcmd]). A seventh is the time-bound tests' follow-up: six tests that still go red under the heaviest CPU load, and one that flaked in the full gate's symlink arm ([loadres]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -89,6 +89,7 @@ A sixth came from the owner on 2026-11-10: in windows that are not tmux windows,
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | not started | design |
+| [tests still red under the heaviest load][loadres] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -100,6 +101,7 @@ A sixth came from the owner on 2026-11-10: in windows that are not tmux windows,
 [openwith]: v0.128.0/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md
 [findresize]: v0.128.0/a-ghostty-find-loses-its-match-on-a-resize.md
 [termcmd]: v0.128.0/the-pane-tree-does-not-show-what-a-terminal-is-running.md
+[loadres]: v0.128.0/some-tests-still-go-red-under-the-heaviest-cpu-load.md
 
 ## Completed
 
