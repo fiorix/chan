@@ -47,10 +47,10 @@ profile-service never migrates the schema at serve time. `CHAN_GATEWAY_MIGRATION
 | `DEVSERVER_ADMIN_URL`           | yes      | devserver-control admin base    |
 | `DEVSERVER_PROFILE_ADMIN_TOKEN` | yes      | profile-scoped control token    |
 | `DEVSERVER_RETENTION_MINUTES`   | no       | sweeper retention; `0` disables |
-| `WIREGUARD_POOL_V4`            | no       | IPv4 CIDR; enables enrollment  |
-| `WIREGUARD_POOL_V6`            | no       | optional IPv6 CIDR             |
-| `WIREGUARD_POOL_RESERVED`      | no       | comma-separated excluded IPs   |
-| `WIREGUARD_RELEASE_GRACE_MINUTES` | no    | denial-to-release delay; 5 min |
+| `WIREGUARD_POOL_V4`             | no       | IPv4 CIDR; enables enrollment   |
+| `WIREGUARD_POOL_V6`             | no       | optional IPv6 CIDR              |
+| `WIREGUARD_POOL_RESERVED`       | no       | comma-separated excluded IPs    |
+| `WIREGUARD_RELEASE_GRACE_MINUTES` | no    | denial-to-release delay; 5 min   |
 | `RUST_LOG`                      | no       | tracing filter, default info    |
 
 A missing or empty `PROFILE_ADMIN_TOKEN` makes every `/v1/admin/*` route answer unauthorized; that is the safe default for a fresh deploy. `DEVSERVER_RETENTION_MINUTES` drives the devserver registry sweeper; unset means the built-in default and an unparseable value fails startup.
@@ -88,10 +88,10 @@ Service API (`/v1/users/*`, `/v1/auth-audit`, `/v1/wireguard/peers`):
 | POST   | `/v1/users/{id}/grants/claim`             | claim pending grants by email    |
 | GET    | `/v1/users/{id}/flags`                    | resolved flags for one user      |
 | POST   | `/v1/auth-audit`                          | append an auth event             |
-| POST   | `/v1/users/{id}/wireguard/peers`           | enroll key or replace its PAT    |
-| GET    | `/v1/wireguard/peers?host=p1`              | every active peer; ETag and 304   |
+| POST   | `/v1/users/{id}/wireguard/peers`          | enroll key or replace its PAT    |
+| GET    | `/v1/wireguard/peers?host=p1`             | every active peer; ETag and 304  |
 
-Enrollment takes `{token_id, public_key}` and an optional `host`. Keys are padded standard base64 encoding exactly 32 bytes. A key has one peer across the gateway: a new key returns 201 with `{id, user_id, token_id, public_key, addresses, created_at, updated_at}`; addresses use `/32` and optional `/128` host prefixes. The same user's key moves to the supplied token, preserves its addresses and returns 200. Another user's key or an exhausted pool returns 409; an unknown or differently owned token returns 404. Enrollment and release append `wireguard_enrolled` and `wireguard_released` to the token audit.
+Enrollment takes `{token_id, public_key}` and an optional `host`. Keys are padded standard base64 encoding exactly 32 bytes. A key has one peer across the gateway: a new key returns 201 with `{id, user_id, token_id, public_key, addresses, created_at, updated_at}`; addresses use `/32` and optional `/128` host prefixes. The same user's key moves to the supplied token, preserves its addresses and returns 200. Another user's key or an exhausted pool returns 409; an unknown or differently owned token returns 404. Enrollment and release append `wireguard_enrolled` and `wireguard_released` to the token audit. Schema migration 18 appends `wireguard_released` for each enrollment it deletes as a duplicate, with the migration's `installed_on` time as the row's `ts`.
 
 `host` in the enroll body selects nothing. When present it must be a single lowercase DNS label, and the answer echoes it as `host`; when absent the answer carries no `host`. It exists for an identity one release behind, which names its ingress host and requires the field in the answer.
 

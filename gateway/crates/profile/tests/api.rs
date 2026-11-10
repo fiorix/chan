@@ -246,6 +246,17 @@ async fn wireguard_enroll_allocates_moves_and_refuses() {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error["error"], "wireguard key in use");
     }
+    // One peer per PAT: a second key on the token that holds the peer is
+    // refused, and the counts below show nothing of the attempt is kept.
+    let (status, error) = app
+        .req(
+            Method::POST,
+            &format!("/v1/users/{owner}/wireguard/peers"),
+            Some(json!({"token_id": unnamed, "public_key": wireguard_key(1)})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"], "conflict");
     let peers: i64 = sqlx::query_scalar("SELECT count(*) FROM wireguard_peers")
         .fetch_one(&app.pool)
         .await
@@ -343,35 +354,31 @@ async fn wireguard_never_hands_one_address_to_two_peers() {
     app.cleanup().await;
 }
 
+/// Pins the reserved list: each pool hands out its lowest address that is
+/// neither held nor reserved, whatever host an enrollment names, and is
+/// exhausted while reserved addresses are all that is left.
 #[tokio::test]
-async fn wireguard_pool_skips_reserved_and_serializes_concurrent_enrollments() {
+async fn wireguard_pool_skips_reserved_addresses() {
     let app = wireguard_app(
         "10.7.0.0/29",
         Some("fd00:7::/125"),
         Some("10.7.0.2,10.7.0.4,fd00:7::2,fd00:7::4"),
     )
     .await;
-    let owner = mk_user(&app, "parallel-a@example.com").await;
-    let other = mk_user(&app, "parallel-b@example.com").await;
-    let (a, b) = tokio::join!(
-        enroll_peer_naming(&app, &owner, 0, "p1"),
-        enroll_peer_naming(&app, &other, 1, "p2")
-    );
-    assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
-    assert_eq!(b.0, StatusCode::CREATED, "{}", b.1);
-    let mut actual = vec![a.1["addresses"].clone(), b.1["addresses"].clone()];
-    actual.sort_by_key(ToString::to_string);
-    assert_eq!(
-        actual,
-        vec![
-            json!(["10.7.0.3/32", "fd00:7::3/128"]),
-            json!(["10.7.0.5/32", "fd00:7::5/128"])
-        ]
-    );
+    let owner = mk_user(&app, "reserved-a@example.com").await;
+    let other = mk_user(&app, "reserved-b@example.com").await;
+    let (status, first) = enroll_peer_naming(&app, &owner, 0, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["addresses"], json!(["10.7.0.3/32", "fd00:7::3/128"]));
+    let (status, second) = enroll_peer_naming(&app, &other, 1, "p2").await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_eq!(second["addresses"], json!(["10.7.0.5/32", "fd00:7::5/128"]));
     let (status, last) = enroll_peer(&app, &owner, 2).await;
     assert_eq!(status, StatusCode::CREATED, "{last}");
     assert_eq!(last["addresses"], json!(["10.7.0.6/32", "fd00:7::6/128"]));
-    assert_eq!(enroll_peer(&app, &owner, 3).await.0, StatusCode::CONFLICT);
+    let (status, error) = enroll_peer(&app, &owner, 3).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"], "wireguard pool exhausted");
     app.cleanup().await;
 }
 
@@ -434,6 +441,11 @@ async fn wireguard_enrollment_validates_owner_key_host_and_pool() {
             .0,
         StatusCode::BAD_REQUEST
     );
+    // `?host=` is required: a list that names no host is refused.
+    assert_eq!(
+        app.req(Method::GET, "/v1/wireguard/peers", None).await.0,
+        StatusCode::BAD_REQUEST
+    );
     let unconfigured = profile::http::app(app.state());
     let response = unconfigured
         .oneshot(
@@ -451,6 +463,16 @@ async fn wireguard_enrollment_validates_owner_key_host_and_pool() {
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
     assert_eq!(body["error"], "wireguard pool not configured");
+    // A null host is an absent one: the key enrolls and the answer names none.
+    let (status, row) = app
+        .req(
+            Method::POST,
+            &path,
+            Some(json!({"token_id":token, "public_key":wireguard_key(0), "host":null})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert!(row.get("host").is_none(), "{row}");
     app.cleanup().await;
 }
 
@@ -785,6 +807,156 @@ async fn wireguard_sweeper_releases_without_registry_retention_or_control() {
     app.cleanup().await;
 }
 
+/// Wait until `waiting` of the backends in `pids` wait on a lock, at least
+/// one of them on a lock `holder` holds.
+async fn lock_waiters(pool: &PgPool, pids: &[i32], holder: i32, waiting: i64) {
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (all, behind_holder): (i64, i64) = sqlx::query_as(
+                "SELECT count(*), count(*) FILTER (WHERE $2 = ANY(pg_blocking_pids(pid))) \
+                 FROM pg_stat_activity WHERE pid = ANY($1) AND wait_event_type = 'Lock'",
+            )
+            .bind(pids)
+            .bind(holder)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if all == waiting && behind_holder >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "{waiting} backend(s) never waited on a lock"
+    );
+}
+
+/// Runs a release against an enrollment that moves the same denied peer to a
+/// new token, both in flight at once, in each order. The test holds the
+/// peer's row lock until both wait, then lets them go. Either way one peer is
+/// left and the new token holds it: a release that comes second spares the
+/// moved row, and an enrollment that comes second finds no row and allocates
+/// again.
+#[tokio::test]
+async fn wireguard_release_racing_a_replacement_leaves_the_new_tokens_peer() {
+    for release_first in [false, true] {
+        let app = wireguard_app("10.7.0.0/30", None, None).await;
+        let owner = mk_user(&app, "race@example.com").await;
+        let (status, row) = enroll_peer(&app, &owner, 0).await;
+        assert_eq!(status, StatusCode::CREATED, "{row}");
+        let peer: Uuid = row["id"].as_str().unwrap().parse().unwrap();
+        let denied: Uuid = row["token_id"].as_str().unwrap().parse().unwrap();
+        // Past its grace, so a release deletes the peer unless it has moved.
+        sqlx::query("UPDATE wireguard_peers SET updated_at = now() - interval '1 day'")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE api_tokens SET revoked_at = now() - interval '6 minutes' WHERE id = $1",
+        )
+        .bind(denied)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        let replacement = insert_api_token(&app.pool, owner.parse().unwrap(), "replacement").await;
+
+        // The pool's own backends, to tell their lock waits from another
+        // test's: the pool lock is one per database.
+        let mut connections = Vec::new();
+        for _ in 0..app.pool.options().get_max_connections() {
+            connections.push(app.pool.acquire().await.unwrap());
+        }
+        let mut pids = Vec::new();
+        for connection in &mut connections {
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            pids.push(pid);
+        }
+        drop(connections);
+
+        let mut hold = app.pool.begin().await.unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *hold)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM wireguard_peers WHERE id = $1 FOR UPDATE")
+            .bind(peer)
+            .execute(&mut *hold)
+            .await
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/users/{owner}/wireguard/peers"))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"token_id": replacement, "public_key": wireguard_key(0)}).to_string(),
+            ))
+            .unwrap();
+        let router = app.router.clone();
+        let enroll = async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        };
+        let pool = app.pool.clone();
+        let release = async move {
+            profile::wireguard::release_once(&pool, std::time::Duration::from_secs(300))
+                .await
+                .unwrap()
+        };
+        // The first to start waits for the held row; the second waits behind it.
+        let (enrollment, released) = if release_first {
+            let released = tokio::spawn(release);
+            lock_waiters(&app.pool, &pids, holder, 1).await;
+            (tokio::spawn(enroll), released)
+        } else {
+            let enrollment = tokio::spawn(enroll);
+            lock_waiters(&app.pool, &pids, holder, 1).await;
+            (enrollment, tokio::spawn(release))
+        };
+        lock_waiters(&app.pool, &pids, holder, 2).await;
+        hold.commit().await.unwrap();
+        let (status, answer) = enrollment.await.unwrap();
+        let released = released.await.unwrap();
+
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM api_token_audit \
+             WHERE token_id = $1 AND action = 'wireguard_released'",
+        )
+        .bind(denied)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        if release_first {
+            assert_eq!(released, 1);
+            assert_eq!(audits, 1);
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            assert_ne!(answer["id"], row["id"]);
+        } else {
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            assert_eq!(answer["id"], row["id"]);
+            assert_eq!(released, 0, "the release deleted a moved peer");
+            assert_eq!(audits, 0);
+        }
+        assert_eq!(answer["addresses"], row["addresses"]);
+        let left: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT id, token_id FROM wireguard_peers")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+        let id: Uuid = answer["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(left, [(id, replacement)]);
+        app.cleanup().await;
+    }
+}
+
 #[tokio::test]
 async fn wireguard_profile_client_preserves_conditional_responses() {
     use gateway_common::profile_client::{ProfileClient, ProfileError};
@@ -943,9 +1115,11 @@ fn fixture_peer(
 }
 
 /// Pins migration 18's dedupe against rows written at migration 17, where a
-/// key or an address could be held once per host: the later row of each
-/// duplicate stays, unrelated rows are untouched, and the gateway-wide unique
-/// constraints hold afterwards.
+/// key or an address could be held once per host: of each duplicate the row
+/// enrolled last stays, by `updated_at` and then `id`, whichever row was
+/// created first; each row that goes leaves one `wireguard_released` audit
+/// row; unrelated rows are untouched, and the gateway-wide unique constraints
+/// hold afterwards.
 #[tokio::test]
 async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
     let (url, schema, pool) = test_db::create_schema().await;
@@ -956,47 +1130,58 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
     .fetch_one(&pool)
     .await
     .unwrap();
+    // The address each IPv6 pair shares.
+    let v6 = ["fd00:7::a", "fd00:7::b", "fd00:7::c"].map(Some);
+    // Rows get their id and created_at in the order listed. The key and each
+    // address have three pairs: one listed in updated_at order; one listed
+    // later row first, as when the row created first enrolled again after the
+    // other host's row, so id and created_at order oppose updated_at; and one
+    // with equal updated_at, where the greater id stays so the pair still
+    // shrinks.
     let fixture = [
         // One key on two hosts.
         fixture_peer("key-earlier", "p1", 0, "10.7.0.2", None, 1, false),
         fixture_peer("key-later", "p2", 0, "10.7.0.3", None, 2, true),
+        fixture_peer("key-renewed", "p1", 1, "10.7.0.4", None, 2, true),
+        fixture_peer("key-stale", "p2", 1, "10.7.0.5", None, 1, false),
+        fixture_peer("key-tie-lesser-id", "p1", 2, "10.7.0.6", None, 5, false),
+        fixture_peer("key-tie-greater-id", "p2", 2, "10.7.0.7", None, 5, true),
         // One IPv4 address on two hosts.
-        fixture_peer("v4-earlier", "p1", 1, "10.7.0.9", None, 1, false),
-        fixture_peer("v4-later", "p2", 2, "10.7.0.9", None, 2, true),
+        fixture_peer("v4-earlier", "p1", 3, "10.7.0.10", None, 1, false),
+        fixture_peer("v4-later", "p2", 4, "10.7.0.10", None, 2, true),
+        fixture_peer("v4-renewed", "p1", 5, "10.7.0.11", None, 2, true),
+        fixture_peer("v4-stale", "p2", 6, "10.7.0.11", None, 1, false),
+        fixture_peer("v4-tie-lesser-id", "p1", 7, "10.7.0.12", None, 5, false),
+        fixture_peer("v4-tie-greater-id", "p2", 8, "10.7.0.12", None, 5, true),
         // One IPv6 address on two hosts.
-        fixture_peer(
-            "v6-earlier",
-            "p1",
-            3,
-            "10.7.0.20",
-            Some("fd00:7::9"),
-            1,
-            false,
-        ),
-        fixture_peer("v6-later", "p2", 4, "10.7.0.21", Some("fd00:7::9"), 2, true),
+        fixture_peer("v6-earlier", "p1", 9, "10.7.0.20", v6[0], 1, false),
+        fixture_peer("v6-later", "p2", 10, "10.7.0.21", v6[0], 2, true),
+        fixture_peer("v6-renewed", "p1", 11, "10.7.0.22", v6[1], 2, true),
+        fixture_peer("v6-stale", "p2", 12, "10.7.0.23", v6[1], 1, false),
+        fixture_peer("v6-tie-lesser-id", "p1", 13, "10.7.0.24", v6[2], 5, false),
+        fixture_peer("v6-tie-greater-id", "p2", 14, "10.7.0.25", v6[2], 5, true),
         // A row in both sets: the later holder of its key and the earlier
         // holder of its address. It goes, and so does the row it replaced.
-        fixture_peer("chain-first", "p1", 5, "10.7.0.40", None, 1, false),
-        fixture_peer("chain-middle", "p2", 5, "10.7.0.41", None, 2, false),
-        fixture_peer("chain-last", "p1", 6, "10.7.0.41", None, 3, true),
+        fixture_peer("chain-first", "p1", 15, "10.7.0.40", None, 1, false),
+        fixture_peer("chain-middle", "p2", 15, "10.7.0.41", None, 2, false),
+        fixture_peer("chain-last", "p1", 16, "10.7.0.41", None, 3, true),
         // A row that loses its key to one later row and its address to another.
-        fixture_peer("both-earlier", "p1", 7, "10.7.0.50", None, 1, false),
-        fixture_peer("both-key-later", "p2", 7, "10.7.0.51", None, 2, true),
-        fixture_peer("both-v4-later", "p2", 8, "10.7.0.50", None, 3, true),
-        // Equal timestamps: the greater id stays, so the pair still shrinks.
-        fixture_peer("tie-lesser-id", "p1", 9, "10.7.0.60", None, 5, false),
-        fixture_peer("tie-greater-id", "p2", 9, "10.7.0.61", None, 5, true),
+        fixture_peer("both-earlier", "p1", 17, "10.7.0.50", None, 1, false),
+        fixture_peer("both-key-later", "p2", 17, "10.7.0.51", None, 2, true),
+        fixture_peer("both-v4-later", "p2", 18, "10.7.0.50", None, 3, true),
         // No IPv6 address is not a shared address.
-        fixture_peer("alone-on-p1", "p1", 10, "10.7.0.70", None, 1, true),
-        fixture_peer("alone-on-p2", "p2", 11, "10.7.0.71", None, 1, true),
+        fixture_peer("alone-on-p1", "p1", 19, "10.7.0.70", None, 1, true),
+        fixture_peer("alone-on-p2", "p2", 20, "10.7.0.71", None, 1, true),
     ];
     for (index, peer) in fixture.iter().enumerate() {
         let token = insert_api_token(&pool, user, peer.name).await;
         sqlx::query(
             "INSERT INTO wireguard_peers \
-             (id, user_id, token_id, host, public_key, address_v4, address_v6, updated_at) \
+             (id, user_id, token_id, host, public_key, address_v4, address_v6, \
+              created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, \
-                     timestamptz '2026-01-01 00:00:00+00' + make_interval(secs => $8))",
+                     timestamptz '2025-12-31 00:00:00+00' + make_interval(secs => $8), \
+                     timestamptz '2026-01-01 00:00:00+00' + make_interval(secs => $9))",
         )
         .bind(Uuid::from_u128(index as u128 + 1))
         .bind(user)
@@ -1005,6 +1190,7 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
         .bind(wireguard_key(peer.key))
         .bind(peer.v4)
         .bind(peer.v6)
+        .bind(index as f64)
         .bind(f64::from(peer.second))
         .execute(&pool)
         .await
@@ -1042,6 +1228,31 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
     assert_eq!(names(&after), names(&expected));
     assert_eq!(after, expected, "a row that stays is not rewritten");
 
+    // Each deleted enrollment has the audit row a sweep writes on release,
+    // stamped with the time migration 18 was installed. A row two joins find
+    // (both-earlier) has one, and a row that stays has none.
+    let mut released: Vec<(String, String, bool)> = fixture
+        .iter()
+        .filter(|peer| !peer.stays)
+        .map(|peer| {
+            (
+                peer.name.to_string(),
+                "wireguard_released".to_string(),
+                true,
+            )
+        })
+        .collect();
+    released.sort();
+    let audited: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT t.label, a.action, a.ts = m.installed_on \
+         FROM api_token_audit a JOIN api_tokens t ON t.id = a.token_id \
+         JOIN _sqlx_migrations m ON m.version = 18 ORDER BY t.label COLLATE \"C\"",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, released);
+
     let host_columns: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() \
          AND table_name = 'wireguard_peers' AND column_name = 'host'",
@@ -1075,14 +1286,14 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
             None,
             Some("wireguard_peers_public_key_key"),
         ),
-        (20, "10.7.0.3", None, Some("wireguard_peers_address_v4_key")),
+        (23, "10.7.0.3", None, Some("wireguard_peers_address_v4_key")),
         (
-            21,
+            24,
             "10.7.0.101",
-            Some("fd00:7::9"),
+            v6[0],
             Some("wireguard_peers_address_v6_key"),
         ),
-        (22, "10.7.0.102", None, None),
+        (25, "10.7.0.102", None, None),
     ] {
         let token = insert_api_token(&pool, user, "second-holder").await;
         let inserted = sqlx::query(
