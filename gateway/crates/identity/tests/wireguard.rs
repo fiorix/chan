@@ -2,6 +2,8 @@
 
 #[path = "../../../tests-shared/identity_config.rs"]
 mod identity_config;
+#[path = "../../../tests-shared/log_capture.rs"]
+mod log_capture;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
@@ -425,36 +427,24 @@ async fn wireguard_peers_route_relays_every_well_formed_host_while_enrollment_is
     assert_eq!(profile.received_requests().await.unwrap().len(), 3);
 }
 
-/// Every line this test executable logs, whichever test logs it. The
-/// subscriber is the process's one default, not a per-thread one: a
-/// callsite's interest is cached process-wide, and a test on another thread
-/// that reached the callsite first would cache it as disabled.
-#[derive(Clone, Default)]
+/// Every line this test executable logs, whichever test logs it, through the
+/// shared capture subscriber installed as the process's one default rather
+/// than per future: a callsite's interest is cached process-wide, so a
+/// per-future subscriber can miss a line while another test's thread
+/// registers the callsite, and the bearer check reads every test's lines.
+/// A process has one global default, so every test here that reads log
+/// lines calls `install`, which installs it on the first call and returns
+/// the same capture on every later one.
 struct Logged(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for Logged {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 impl Logged {
     fn install() -> &'static Self {
         static LOGGED: std::sync::OnceLock<Logged> = std::sync::OnceLock::new();
         LOGGED.get_or_init(|| {
-            let logged = Logged::default();
-            let writer = logged.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_ansi(false)
-                .with_writer(move || writer.clone())
-                .finish();
-            tracing::subscriber::set_global_default(subscriber).unwrap();
-            logged
+            let (subscriber, output) = log_capture::capture_logs();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("only Logged::install sets this executable's global subscriber");
+            Logged(output)
         })
     }
 
