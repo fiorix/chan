@@ -25,6 +25,40 @@ pub fn valid_host(raw: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// One WireGuard ingress: the kernel interface of one proxy node, as a
+/// desktop reaches it. A gateway offers one per node that terminates
+/// WireGuard, and every ingress lists every enrolled peer.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Ingress {
+    /// The node's proxy id, which is also the host its peer agent reads.
+    pub id: String,
+    /// `host:port` of the interface, an IPv6 literal in brackets.
+    pub endpoint: String,
+    /// The interface's public key, canonical padded base64.
+    pub public_key: String,
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::*;
+
+    #[test]
+    fn ingress_wire_shape_is_id_endpoint_and_public_key() {
+        let ingress = Ingress {
+            id: "p1".into(),
+            endpoint: "p1.proxy.example.test:51820".into(),
+            public_key: STANDARD.encode([7; 32]),
+        };
+        let wire = serde_json::json!({
+            "id": "p1",
+            "endpoint": "p1.proxy.example.test:51820",
+            "public_key": ingress.public_key,
+        });
+        assert_eq!(serde_json::to_value(&ingress).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<Ingress>(wire).unwrap(), ingress);
+    }
+}
+
 /// The persisted peer returned by profile after enrollment or token replacement.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EnrolledPeer {
