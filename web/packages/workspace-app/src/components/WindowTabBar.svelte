@@ -30,7 +30,7 @@
     togglePaneTree,
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
-  import { activeLayout, activeTabInPane, paneShowsTmux, tabLabel } from "../state/tabs.svelte";
+  import { activeLayout, activeTabInPane, paneMode, paneShowsTmux, tabLabel } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
     windowTabBar,
@@ -58,13 +58,15 @@
   // same test), so while one is active the bar shows its name where the
   // strip would sit: the label the pane tree gives it, which the server
   // keeps on the tmux window's name. A pane Hybrid Nav stages has no tmux
-  // pane yet and reads as the mode names it. Null in any other pane.
+  // pane yet and reads as the mode names it; outside the mode a pane with no
+  // active tab reads as the pane tree reads it. Null in any other pane.
   const tmuxName = $derived.by(() => {
     const id = viewLayout.activePaneId;
     if (!paneShowsTmux(id)) return null;
     const pane = viewLayout.nodes[id];
     const tab = pane?.kind === "leaf" ? activeTabInPane(pane) : null;
-    return tab ? tabLabel(tab) : "New tmux pane";
+    if (tab) return tabLabel(tab);
+    return paneMode.tmux !== null ? "New tmux pane" : "Empty pane";
   });
 
   // The desktop marks the page's root while the window's Computers launcher
@@ -206,13 +208,13 @@
        holds its text directly, since Tauri's drag script reads the
        attribute on the element pressed. -->
   {#if tmuxName !== null}
-    <div class="tmux-name" class:covered data-tauri-drag-region={drag}>{tmuxName}</div>
+    <div class="tmux-name" class:covered title={tmuxName} data-tauri-drag-region={drag}>{tmuxName}</div>
   {/if}
   <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
   {#if tmuxName !== null}
     <!-- Where the A and B toggle sits in a window whose panes have sides;
          a tmux window's have none. -->
-    <div class="tmux-badge" class:covered data-tauri-drag-region={drag}>tmux</div>
+    <div class="tmux-badge" class:covered title="tmux window" data-tauri-drag-region={drag}>tmux</div>
   {/if}
   {#if menus.length > 0 || titleShown}
     <!-- While the launcher covers the page the band belongs to the window.
@@ -370,11 +372,11 @@
   }
   /* Black with white text in either theme: it names tmux, not a state the
      theme colours. In the side toggle's type, and as far from the band's
-     end (the bar's gap and this margin) as the strip keeps its last
-     control. */
+     end (the bar's 4px gap and this margin) as the strip keeps its last
+     control (its 8px padding and the same gap). */
   .tmux-badge {
     flex: none;
-    margin-right: 4px;
+    margin-right: 8px;
     padding: 0 6px;
     height: 20px;
     border-radius: 4px;

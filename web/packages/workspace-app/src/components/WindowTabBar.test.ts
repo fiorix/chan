@@ -626,6 +626,24 @@ describe("a tmux window", () => {
     expect(nameOf(bar)).toBe(paneTreeLabel());
   });
 
+  test("a tmux pane with no active tab reads as the pane tree reads it", async () => {
+    tmuxPanes();
+    const left = layout.nodes.left;
+    if (left?.kind !== "leaf") throw new Error("fixture: the left pane is a leaf");
+    left.activeTabId = null;
+    const bar = await renderBar();
+    expect(nameOf(bar)).toBe("Empty pane");
+    expect(nameOf(bar)).toBe(paneTreeLabel());
+    expect(bar.querySelector(".tmux-badge")).not.toBeNull();
+  });
+
+  test("the name carries its whole text as a tooltip, and the badge says what it marks", async () => {
+    tmuxPanes("a tmux window whose name is far too long for the band");
+    const bar = await renderBar();
+    expect(bar.querySelector(".tmux-name")?.getAttribute("title")).toBe("a tmux window whose name is far too long for the band");
+    expect(bar.querySelector(".tmux-badge")?.getAttribute("title")).toBe("tmux window");
+  });
+
   test("Hybrid Nav's staged focus moves the name, and a staged pane reads as the mode names it", async () => {
     tmuxPanes();
     const bar = await renderBar();
