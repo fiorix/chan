@@ -23,7 +23,7 @@ cargo test  -p gateway-common
 - `internal_transport`: fail-closed validation for cleartext internal listeners and service URLs.
 - `token_bucket`: per-fingerprint token bucket with a bounded map, plus the shared default limits for the two validate throttles.
 - `validators`: username shape validation and the lifetime rename cap.
-- `wireguard`: public-key and ingress-host validation, enrolled peer and active-list shapes. `ProfileClient` enrolls a peer and reads its host's active list with ETag/304 support.
+- `wireguard`: public-key and ingress-host validation, enrolled peer and active-list shapes. `ProfileClient` enrolls a peer, one per key across the gateway, and reads the gateway's active list as one host id with ETag/304 support.
 - `static_files`: generic SPA-fallback handler over `rust_embed::RustEmbed`. Each consumer keeps its own `#[derive(Embed)]` (rust_embed resolves the `#[folder]` path relative to the deriving crate) and calls `static_files::serve::<Assets>(uri, banner)`.
 - `shutdown`: graceful-shutdown future (SIGTERM or Ctrl-C) used by every service binary.
 

@@ -16,7 +16,7 @@ One Postgres database, migrated only by the dedicated `CHAN_GATEWAY_MIGRATIONS=o
 
 - `users` and `identities`: the canonical record and its provider identities, unique per `(provider, provider_subject)`. Email and username are unique case-insensitively.
 - `api_tokens` and `api_token_audit`: PATs by digest with their scopes, and the per-token history. identity writes these directly; profile serves the admin views over them.
-- `wireguard_peers`: one enrolled public key per host, tied to its user and PAT, with unique per-host IPv4 and optional IPv6 addresses. Profile owns enrollment, active-list reads and address release; identity has no direct table privileges.
+- `wireguard_peers`: one row per enrolled public key, tied to its user and PAT, with an IPv4 and an optional IPv6 address that are each unique across the gateway. A peer belongs to no ingress host. Profile owns enrollment, active-list reads and address release; identity has no direct table privileges.
 - `auth_audit`: login, logout, denial, block and similar events per user.
 - `devservers`: an owner's shareable devserver, keyed by `(owner_user_id, devserver_id)`, where the id is the digest of the owner's PAT. It is the FK target for grants and lets the dashboard list a devserver that has no grant and no live tunnel yet.
 - `devserver_grants`: one binary, whole-devserver grant per `(owner, devserver, grantee email)`, with the grantee user filled in when a matching sign-in is observed. There is no role column.
@@ -56,10 +56,9 @@ erDiagram
         uuid id PK
         uuid user_id FK
         uuid token_id FK "unique"
-        text host "UK part"
-        text public_key "UK with host"
-        text address_v4 "UK with host"
-        text address_v6 "nullable; UK with host"
+        text public_key UK
+        text address_v4 UK
+        text address_v6 UK "nullable"
         timestamptz updated_at
     }
     AUTH_AUDIT {
@@ -131,11 +130,15 @@ The sweeper marks `devservers` rows from the controller's live-tunnel snapshot o
 
 ### WireGuard peers and address release
 
-Enrollment locks the user before the token, then takes a host-scoped transaction advisory lock for allocation and replacement. Each configured pool assigns its lowest unheld address, skipping the network, first host, explicit reservations and IPv4 broadcast address. Rows retain their addresses while denied. A same-user key moves to the new token without reallocating; another user's key is a conflict. The row and its `wireguard_enrolled` audit entry commit together.
+A public key has one peer and one address set across the gateway. Every ingress host's agent reads the same list, so a peer enrolled once is installed on each of them with the same addresses, and nothing in the row names a host.
 
-The active list joins tokens and users, excludes revoked or expired tokens and blocked users, and sorts keys in byte order. Its ETag is the quoted hexadecimal SHA-256 of the serialized response bytes, computed by PostgreSQL; conditional reads return 304 for the same validator. There is no cached authorization state.
+Enrollment locks the user before the token, then takes one gateway-wide transaction advisory lock for allocation and replacement, so two enrollments never read the same free address. Each configured pool assigns its lowest unheld address, skipping the network, first host, explicit reservations and IPv4 broadcast address. Rows retain their addresses while denied. A same-user key moves to the new token without reallocating; another user's key is a conflict. The row and its `wireguard_enrolled` audit entry commit together. The unique constraints on the key and on each address hold the same rule in the schema.
 
-Every sweep releases denied rows whose grace has elapsed since the earliest applicable denial timestamp: token revocation, past expiry or user block, bounded below by the peer's latest enrollment timestamp. Release uses the same host lock as allocation, deletes the row and writes `wireguard_released` in one transaction. It runs even when the registry sweep is disabled or its controller is unavailable. An address is reusable only after that deletion; user and token deletion also remove peers through their foreign keys.
+The enroll body's `host` and the list's `?host=` select nothing. Profile checks each as a label and echoes it: in the list body because an agent refuses a list that names another host, and in the enroll answer because an identity one release behind names its ingress host and requires the field back. An enroll request that names no host gets an answer with no `host`. Profile does not know which labels are ingress hosts: that is identity's configuration, and any label reads the same peers.
+
+The active list joins tokens and users, excludes revoked or expired tokens and blocked users, and sorts keys in byte order, so a denial removes the peer from every host's list in the same read. Its ETag is the quoted hexadecimal SHA-256 of the serialized response bytes, computed by PostgreSQL; conditional reads return 304 for the same validator. The bytes include the echoed host, so agents with different host ids hold different validators for the same peers: a 304 always stands for a body naming the host that asked, and a host's own validator keeps matching while the active set is unchanged. There is no cached authorization state.
+
+Every sweep releases denied rows whose grace has elapsed since the earliest applicable denial timestamp: token revocation, past expiry or user block, bounded below by the peer's latest enrollment timestamp. Release takes the same gateway-wide lock as allocation, deletes the rows and writes `wireguard_released` in one transaction. It runs even when the registry sweep is disabled or its controller is unavailable. An address is reusable only after that deletion; user and token deletion also remove peers through their foreign keys.
 
 ## Key decisions
 
