@@ -33,11 +33,30 @@ use crate::{serve, window_watcher, AppState};
 /// first thing and binds its listener only once its embedded server is up.
 const ASK_BOUND: Duration = Duration::from_secs(5);
 
-/// How long a launch waits for the endpoint after the holder refused. A
-/// holder on its way out refuses too: one shutting down answers so, and an
-/// older one relaunching after an update answers the request as unknown and
-/// holds the endpoint until it exits.
+/// How long a launch waits for the endpoint after a refusal that does not
+/// say the holder is shutting down. An older desktop relaunching after an
+/// update refuses that way, answering the request as unknown, and holds the
+/// endpoint until it exits.
 const RELEASE_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a launch waits for the endpoint after the holder said it is
+/// shutting down. That desktop holds the endpoint until its process exits,
+/// which follows its drain: every embedded tenant at once, each given 5 s
+/// for its tasks (`TENANT_TASK_SHUTDOWN_GRACE`) and then 5 s for its
+/// workspace to be let go (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`), both in
+/// chan-library, and then the extension runtime, 3 s for a supervisor
+/// (`SUPERVISOR_SHUTDOWN_GRACE` in chan-server). That is 13 s, and the rest
+/// is for the exit itself. The drain has no hard bound, since a task that
+/// outlives its abort holds it and each further stuck supervisor adds 3 s,
+/// so the launch does not wait it out: past this it exits 1.
+const DRAIN_GRACE: Duration = Duration::from_secs(20);
+
+/// What a desktop that is shutting down answers an `Activate` with. The
+/// launch reads it back ([`refusal`]) to tell that desktop, which is about
+/// to free the endpoint, from one that refuses and stays, so the text is
+/// exchanged between releases: a desktop that words it differently is read
+/// as one that stays.
+const SHUTTING_DOWN: &str = "chan-desktop is shutting down";
 
 /// The pause between two looks at the endpoint while waiting.
 const POLL: Duration = Duration::from_millis(100);
@@ -58,7 +77,10 @@ pub(crate) enum Lock<C> {
 pub(crate) enum Answer<C> {
     /// It is coming forward.
     CameForward { version: String },
-    /// It answered without coming forward; `reply` is its answer.
+    /// It answered that it is shutting down.
+    ShuttingDown,
+    /// It answered without coming forward, and not that it is shutting
+    /// down; `reply` is its answer.
     Refused { reply: String },
     /// Nothing answered, and meanwhile the endpoint came free and this
     /// process claimed it: the holder had exited.
@@ -80,8 +102,22 @@ pub(crate) enum Startup<C> {
     /// older one refusing the request as unknown; exit 0, since a desktop is
     /// running and this one would only duplicate its windows.
     Refused { reply: String },
+    /// Another desktop said it was shutting down and still holds the
+    /// endpoint past [`DRAIN_GRACE`]; exit 1, since no desktop may be left
+    /// once it goes and this launch started none.
+    StillShuttingDown,
     /// Another desktop holds the endpoint and does not answer; exit 1.
     Unanswered,
+}
+
+/// Which wait for the endpoint follows a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wait {
+    /// The holder said it is shutting down: through its drain and exit
+    /// ([`DRAIN_GRACE`]).
+    Drain,
+    /// Any other refusal ([`RELEASE_GRACE`]).
+    Release,
 }
 
 impl<C> Startup<C> {
@@ -90,18 +126,21 @@ impl<C> Startup<C> {
         match self {
             Startup::Run(_) | Startup::RunWithoutListener { .. } => None,
             Startup::HandedOver { .. } | Startup::Refused { .. } => Some(0),
-            Startup::Unanswered => Some(1),
+            Startup::StillShuttingDown | Startup::Unanswered => Some(1),
         }
     }
 }
 
 /// The start-up decision. `ask` runs only when the endpoint is held, and
 /// `wait` only when the holder refused: a holder on its way out refuses, so
-/// the launch exits only if the endpoint stays held.
+/// the launch exits only if the endpoint stays held. A holder that said it
+/// is shutting down is waited for through its drain, and a launch that
+/// outwaits it exits non-zero: exiting 0 there would report a running
+/// desktop while the only one is on its way out.
 pub(crate) fn decide<C>(
     lock: Lock<C>,
     ask: impl FnOnce() -> Answer<C>,
-    wait: impl FnOnce() -> Option<C>,
+    wait: impl FnOnce(Wait) -> Option<C>,
 ) -> Startup<C> {
     match lock {
         Lock::Taken(claim) => Startup::Run(claim),
@@ -110,7 +149,11 @@ pub(crate) fn decide<C>(
             Answer::CameForward { version } => Startup::HandedOver { version },
             Answer::Released(claim) => Startup::Run(claim),
             Answer::Silent => Startup::Unanswered,
-            Answer::Refused { reply } => match wait() {
+            Answer::ShuttingDown => match wait(Wait::Drain) {
+                Some(claim) => Startup::Run(claim),
+                None => Startup::StillShuttingDown,
+            },
+            Answer::Refused { reply } => match wait(Wait::Release) {
                 Some(claim) => Startup::Run(claim),
                 None => Startup::Refused { reply },
             },
@@ -123,7 +166,7 @@ pub(crate) fn decide<C>(
 /// process here.
 pub(crate) fn guard() -> Option<EndpointClaim> {
     let startup = match handoff::ensure_well_known_socket_path() {
-        Some(path) => check_at(&path, ASK_BOUND, RELEASE_GRACE),
+        Some(path) => check_at(&path, ASK_BOUND, RELEASE_GRACE, DRAIN_GRACE),
         None => Startup::RunWithoutListener {
             why: "no owner-controlled runtime directory for the handoff endpoint".into(),
         },
@@ -142,6 +185,11 @@ pub(crate) fn guard() -> Option<EndpointClaim> {
             "another chan-desktop holds the handoff endpoint and did not come forward \
              (one older than this launch refuses the request as unknown); this launch exits"
         ),
+        Startup::StillShuttingDown => tracing::error!(
+            waited = ?DRAIN_GRACE,
+            "another chan-desktop said it is shutting down and still holds the handoff endpoint; \
+             this launch exits rather than start a second desktop"
+        ),
         Startup::Unanswered => tracing::error!(
             waited = ?ASK_BOUND,
             "another chan-desktop holds the handoff endpoint but does not answer; this launch \
@@ -157,11 +205,22 @@ pub(crate) fn guard() -> Option<EndpointClaim> {
     }
 }
 
-fn check_at(path: &Path, ask_bound: Duration, grace: Duration) -> Startup<EndpointClaim> {
+fn check_at(
+    path: &Path,
+    ask_bound: Duration,
+    release_grace: Duration,
+    drain_grace: Duration,
+) -> Startup<EndpointClaim> {
     decide(
         claim(path),
         || ask(path, ask_bound),
-        || wait_for_release(path, grace),
+        |wait| {
+            let grace = match wait {
+                Wait::Drain => drain_grace,
+                Wait::Release => release_grace,
+            };
+            wait_for_release(path, grace)
+        },
     )
 }
 
@@ -188,7 +247,7 @@ fn ask(path: &Path, bound: Duration) -> Answer<EndpointClaim> {
                     version: desktop_version,
                 }
             }
-            ActivateReply::Refused { reply } => return Answer::Refused { reply },
+            ActivateReply::Refused { reply } => return refusal(reply),
             ActivateReply::NoReply => {}
         }
         // Nothing answers a holder that is still booting, or one that has
@@ -197,6 +256,22 @@ fn ask(path: &Path, bound: Duration) -> Answer<EndpointClaim> {
             return Answer::Released(claim);
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// Read a holder's refusal: the answer of a desktop that is shutting down
+/// ([`shutting_down`]), or any other.
+fn refusal<C>(reply: String) -> Answer<C> {
+    match serde_json::from_str::<Response>(&reply) {
+        Ok(Response::Error { message }) if message == SHUTTING_DOWN => Answer::ShuttingDown,
+        _ => Answer::Refused { reply },
+    }
+}
+
+/// The refusal of a desktop that is shutting down.
+fn shutting_down() -> Response {
+    Response::Error {
+        message: SHUTTING_DOWN.into(),
     }
 }
 
@@ -297,9 +372,7 @@ impl Drop for BootSettled {
 /// about to go.
 pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     if state.shutdown_started.load(Ordering::SeqCst) {
-        return Response::Error {
-            message: "chan-desktop is shutting down".into(),
-        };
+        return shutting_down();
     }
     // A hidden app's windows read as not visible; a Dock click unhides it
     // before anything else.
@@ -422,7 +495,7 @@ mod tests {
         panic!("the holder must not be asked")
     }
 
-    fn never_waited() -> Option<&'static str> {
+    fn never_waited(_: Wait) -> Option<&'static str> {
         panic!("the endpoint must not be waited for")
     }
 
@@ -463,7 +536,10 @@ mod tests {
             || Answer::Refused {
                 reply: reply.into(),
             },
-            || None,
+            |wait| {
+                assert_eq!(wait, Wait::Release);
+                None
+            },
         );
         assert_eq!(
             startup,
@@ -472,6 +548,110 @@ mod tests {
             }
         );
         assert_eq!(startup.exit_code(), Some(0));
+    }
+
+    /// A relaunch right after Quit: the old desktop says it is shutting down
+    /// and holds the endpoint through its drain, so the launch waits for the
+    /// drain, not the short grace, and boots once the endpoint is free.
+    #[test]
+    fn a_holder_shutting_down_is_waited_for_through_its_drain() {
+        let startup = decide(
+            Lock::Held,
+            || Answer::ShuttingDown,
+            |wait| {
+                assert_eq!(
+                    wait,
+                    Wait::Drain,
+                    "a shutting-down holder is on its way out"
+                );
+                Some("claim")
+            },
+        );
+        assert_eq!(startup, Startup::Run("claim"));
+    }
+
+    /// A holder that said it is shutting down and still holds the endpoint
+    /// after its drain's bound: no desktop comes of this launch and the old
+    /// one is going, so the exit is not the 0 of a launch that handed over.
+    #[test]
+    fn a_holder_still_shutting_down_after_its_drain_exits_non_zero() {
+        let startup = decide(Lock::<&str>::Held, || Answer::ShuttingDown, |_| None);
+        assert_eq!(startup, Startup::StillShuttingDown);
+        assert_eq!(startup.exit_code(), Some(1));
+    }
+
+    /// The launch tells a desktop that is shutting down by the refusal that
+    /// desktop sends, and reads every other refusal, an older desktop's
+    /// unknown request type among them, as a desktop that stays.
+    #[test]
+    fn the_refusal_of_a_desktop_shutting_down_is_read_back_as_shutting_down() {
+        let sent = serde_json::to_string(&shutting_down()).unwrap();
+        assert!(
+            matches!(refusal::<()>(sent.clone()), Answer::ShuttingDown),
+            "{sent}"
+        );
+        for other in [
+            r#"{"status":"error","message":"invalid handoff request: unknown variant `activate`"}"#,
+            r#"{"status":"error","message":"chan-desktop is shutting down soon"}"#,
+            "not json",
+        ] {
+            assert!(
+                matches!(refusal::<()>(other.into()), Answer::Refused { reply } if reply == other),
+                "{other}"
+            );
+        }
+        // The answer `come_forward` gives once a shutdown has started.
+        let (production, _) = include_str!("single_instance.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, come_forward) = production
+            .split_once("\npub(crate) fn come_forward(")
+            .expect("come_forward exists");
+        assert!(come_forward.contains(
+            "if state.shutdown_started.load(Ordering::SeqCst) {\n        return shutting_down();"
+        ));
+    }
+
+    /// The wait for a desktop that is shutting down outlasts the bounds its
+    /// drain runs under, read from where they are defined: a tenant's task
+    /// grace and release budget in chan-library, an extension supervisor's
+    /// grace in chan-server. A bound raised there fails here until
+    /// `DRAIN_GRACE` covers it again.
+    #[test]
+    fn the_wait_for_a_desktop_shutting_down_covers_its_drain() {
+        fn secs(source: &str, name: &str) -> u64 {
+            let declaration = format!("const {name}: Duration = Duration::from_secs(");
+            assert_eq!(
+                source.matches(&declaration).count(),
+                1,
+                "{name} is declared once, in whole seconds"
+            );
+            let (_, rest) = source.split_once(&declaration).unwrap();
+            let (value, _) = rest.split_once(')').unwrap();
+            value.parse().unwrap_or_else(|_| panic!("{name} = {value}"))
+        }
+        let task_grace = secs(
+            include_str!("../../../crates/chan-library/src/tenant.rs"),
+            "TENANT_TASK_SHUTDOWN_GRACE",
+        );
+        let release_budget = secs(
+            include_str!("../../../crates/chan-library/src/host.rs"),
+            "WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT",
+        );
+        let supervisor_grace = secs(
+            include_str!("../../../crates/chan-server/src/extensions.rs"),
+            "SUPERVISOR_SHUTDOWN_GRACE",
+        );
+        let drain = Duration::from_secs(task_grace + release_budget + supervisor_grace);
+        assert_eq!(
+            drain,
+            Duration::from_secs(13),
+            "the bound DRAIN_GRACE states"
+        );
+        assert!(
+            DRAIN_GRACE > drain,
+            "a launch must wait longer than a drain may take ({drain:?}), with time for the exit"
+        );
     }
 
     #[test]
@@ -506,7 +686,7 @@ mod tests {
             || Answer::Refused {
                 reply: "shutting down".into(),
             },
-            || Some("claim"),
+            |_| Some("claim"),
         );
         assert_eq!(startup, Startup::Run("claim"));
     }
@@ -668,13 +848,39 @@ mod tests {
             })
         })
         .unwrap();
-        let startup = check_at(&sock, Duration::from_secs(5), Duration::from_millis(200));
+        let startup = check_at(
+            &sock,
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
         assert_eq!(
             startup.exit_code(),
             Some(0),
             "the launch must exit: {startup:?}"
         );
         assert!(matches!(startup, Startup::HandedOver { version } if version == "9.9.9"));
+    }
+
+    /// A launch beside a desktop that answers it is shutting down and keeps
+    /// the endpoint: with no time left to wait, the launch exits non-zero.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_beside_a_desktop_still_shutting_down_exits_non_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let _listener = tauri::async_runtime::block_on(async {
+            handoff::start_listener(sock.clone(), |_req| async { shutting_down() })
+        })
+        .unwrap();
+        let startup = check_at(
+            &sock,
+            Duration::from_secs(5),
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert!(matches!(startup, Startup::StillShuttingDown), "{startup:?}");
+        assert_eq!(startup.exit_code(), Some(1));
     }
 
     /// A holder with no listener stays silent: the launch exits non-zero
@@ -688,6 +894,7 @@ mod tests {
         let startup = check_at(
             &sock,
             Duration::from_millis(400),
+            Duration::from_millis(200),
             Duration::from_millis(200),
         );
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
@@ -726,6 +933,7 @@ mod tests {
             &sock,
             Duration::from_millis(400),
             Duration::from_millis(200),
+            Duration::from_millis(200),
         );
         assert!(
             matches!(startup, Startup::Unanswered),
@@ -755,7 +963,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             drop(held);
         });
-        let startup = check_at(&sock, Duration::from_secs(5), Duration::from_millis(200));
+        let startup = check_at(
+            &sock,
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
         release.join().unwrap();
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
     }
