@@ -10,6 +10,8 @@
 
 #[path = "../../../tests-shared/identity_config.rs"]
 mod identity_config;
+#[path = "../../../tests-shared/log_capture.rs"]
+mod log_capture;
 #[path = "../../../tests-shared/identity_db.rs"]
 mod test_db;
 
@@ -32,6 +34,8 @@ use identity::devserver_control_client::DevserverControlClient;
 use identity::http;
 use identity::profile_client::ProfileClient;
 use identity::providers::github::{GitHubEndpoints, GitHubProvider};
+
+use log_capture::capture_logs;
 
 const PROFILE_TOKEN: &str = "test-profile-token";
 const VALIDATION_INTERNAL_TOKEN: &str = "test-validation-internal";
@@ -3178,36 +3182,6 @@ async fn known_rename_conflicts_preserve_live_tunnels() {
         assert!(!requests.iter().any(|r| r.method == "PATCH"));
         app.cleanup().await;
     }
-}
-
-/// Plain-text log lines written while a future runs under the returned
-/// subscriber; a per-future subscriber keeps parallel tests from reading
-/// each other's lines.
-fn capture_logs() -> (
-    impl tracing::Subscriber + Send + Sync,
-    Arc<std::sync::Mutex<Vec<u8>>>,
-) {
-    use std::io::Write;
-    use std::sync::Mutex;
-    #[derive(Clone)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-    impl Write for Capture {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let writer = Capture(output.clone());
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (subscriber, output)
 }
 
 #[tokio::test]
