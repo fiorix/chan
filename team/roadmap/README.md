@@ -27,7 +27,7 @@ Opened 2026-11-08 with the five items the owner moved from v0.126.0 the same day
 
 The reading behind [docsdrift] added a sixth, placed here by the owner the same day: identity serves a shared devserver's root link to its owner alone, so the account page's Copy link refuses the people the devserver is shared with, though the per-workspace landing and the desktop admit them ([grantroot]).
 
-At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake-visibility reading had run on his Mac, so that row moves here with its reading procedure shipped: the terminal tab's comment says WKWebView fires no `visibilitychange` across a sleep, while the owner's Mac log shows WebKit's visibility change at each wake ([wakevis]).
+At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake-visibility reading had run on his Mac, so that row moves here with its reading procedure shipped: the terminal tab's comment says WKWebView fires no `visibilitychange` across a sleep, while the owner's Mac log shows WebKit's visibility change at each wake ([wakevis]). On 2026-11-10 he closed the row without the reading or a fix: the terminals come back on his Mac as the code stands, and he reports if that changes.
 
 On 2026-11-09 the owner added live process metrics, built directly with an agent outside the round's seats and merged into the integration branch the same day: the Dashboard's Metrics slide, `chan metrics`, and an optional Linux Varlink socket ([metrics]).
 
@@ -45,7 +45,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | built | gateway run |
 | [no CI job runs the gateway packaging and roles suites][gwci] | built | owner |
 | [a shared devserver's root link refuses its grantees][grantroot] | built | guest run |
-| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
+| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | closed | GA |
 | [a running chan shows no live process metrics][metrics] | built | guest run |
 | [ghostty terminals run on a pre-1.0 core][ghostty1] | built | owner |
 | [a tmux window's title bar is empty][tmuxbar] | built | owner |

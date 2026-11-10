@@ -1,6 +1,6 @@
 # The terminal tab assumes WKWebView fires no visibilitychange across a sleep
 
-Status: carried to v0.127.0 at the v0.126.0 cut on 2026-11-08: the reading procedure, probe and log query shipped in [v0.126.0](../../release/release-v0.126.0.md) through the owner's `docs/wakevis-reading`; the owner's run of the reading and the fix are pending; no code has moved.
+Status: closed by the owner on 2026-11-10 without the reading and without the fix: "the wake-visibility is fine on the mac for now.. if something strange happens i'll report; for now we treat as acceptance and can go to ga". On his Mac the terminals come back after a sleep as the code stands. No code has moved: the comments in `TerminalTab.svelte` and `App.svelte` still state the assumption this item questions, acceptance 1 to 4 below were not run, and the reading procedure stays here for the day he reports something. Carried to v0.127.0 at the v0.126.0 cut on 2026-11-08: the reading procedure, probe and log query shipped in [v0.126.0](../../release/release-v0.126.0.md) through the owner's `docs/wakevis-reading`; the owner's run of the reading and the fix are pending; no code has moved.
 
 Record before the release: raised on 2026-11-07 from the v0.125.0 release's Mac reading of the display-sleep repaint; accepted by the owner for v0.126.0 at the v0.125.0 cut; the reading's procedure, probe and log query are written (Reading procedure, below) and wait on the owner's run; no code has moved.
 
