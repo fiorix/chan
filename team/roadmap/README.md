@@ -33,6 +33,8 @@ On 2026-11-09 the owner added live process metrics, built directly with an agent
 
 The owner added another the same day: the ghostty terminals re-pinned from a pre-1.0 `tip` build of libghostty-vt to the signed 1.0.0 release, with find on ghostty terminals and xterm's find aligned to it, ordered on 2026-11-08 and merged with this row ([ghostty1]).
 
+On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]).
+
 On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
 
 | Item | State | Next |
@@ -44,6 +46,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [the terminal tab assumes no visibilitychange across a sleep][wakevis] | procedure ready | owner |
 | [a running chan shows no live process metrics][metrics] | built | guest run |
 | [ghostty terminals run on a pre-1.0 core][ghostty1] | built | owner |
+| [a tmux window's title bar is empty][tmuxbar] | built | owner |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -52,6 +55,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 [wakevis]: v0.127.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
 [metrics]: v0.127.0/a-running-chan-shows-no-live-process-metrics.md
 [ghostty1]: v0.127.0/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md
+[tmuxbar]: v0.127.0/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 
 ### v0.128.0
 
@@ -63,7 +67,7 @@ A third came the same day from the review of v0.127.0's live-metrics fixes: the 
 
 The owner moved two more here from v0.127.0 the same day, both not started: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]), and the system CA store for the Rust TLS clients, read on three platforms ([systemca]).
 
-The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, copy and paste carry no stray bytes, and Linux gets middle-click paste from the PRIMARY selection ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]).
+The owner added four more the same day: a tmux window's title bar shows the active pane's name and a tmux badge when tabs sit in it ([tmuxbar]); copying from a ghostty terminal keeps a wrapped command whole, copy and paste carry no stray bytes, and Linux gets middle-click paste from the PRIMARY selection ([gcopy]); a light or dark switch repaints a live ghostty terminal and every other surface without a reload ([livetheme]); and chan can be opened from the system as a file browser and as a Markdown editor, through the path `cs open` takes in a standalone window ([openwith]). The tmux title bar was built the next day and moved to v0.127.0.
 
 A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's selected match on every resize, so v0.127.0 drops the highlight and shows no index until the next step, and the owner moved keeping the match, through the core's tracked grid references, here ([findresize]).
 
@@ -74,7 +78,6 @@ A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's s
 | [local devserver calls go through a proxy][cliproxy] | not started | design |
 | [one WireGuard ingress per proxy node][wgnode] | not started | decision |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
-| [a tmux window's title bar is empty][tmuxbar] | not started | design |
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
 | [a theme switch leaves ghostty colours][livetheme] | not started | design |
 | [the system cannot open files in chan][openwith] | not started | design |
@@ -85,7 +88,6 @@ A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's s
 [cliproxy]: v0.128.0/the-clis-local-devserver-calls-go-through-a-proxy.md
 [wgnode]: v0.128.0/a-desktop-reaches-every-proxy-node-through-one-wireguard-ingress.md
 [systemca]: v0.128.0/the-rust-tls-clients-ignore-the-systems-ca-store.md
-[tmuxbar]: v0.128.0/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 [gcopy]: v0.128.0/copying-a-wrapped-command-from-a-ghostty-terminal-pastes-it-broken.md
 [livetheme]: v0.128.0/a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch.md
 [openwith]: v0.128.0/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md
