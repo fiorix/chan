@@ -343,35 +343,31 @@ async fn wireguard_never_hands_one_address_to_two_peers() {
     app.cleanup().await;
 }
 
+/// Pins the reserved list: each pool hands out its lowest address that is
+/// neither held nor reserved, whatever host an enrollment names, and is
+/// exhausted while reserved addresses are all that is left.
 #[tokio::test]
-async fn wireguard_pool_skips_reserved_and_serializes_concurrent_enrollments() {
+async fn wireguard_pool_skips_reserved_addresses() {
     let app = wireguard_app(
         "10.7.0.0/29",
         Some("fd00:7::/125"),
         Some("10.7.0.2,10.7.0.4,fd00:7::2,fd00:7::4"),
     )
     .await;
-    let owner = mk_user(&app, "parallel-a@example.com").await;
-    let other = mk_user(&app, "parallel-b@example.com").await;
-    let (a, b) = tokio::join!(
-        enroll_peer_naming(&app, &owner, 0, "p1"),
-        enroll_peer_naming(&app, &other, 1, "p2")
-    );
-    assert_eq!(a.0, StatusCode::CREATED, "{}", a.1);
-    assert_eq!(b.0, StatusCode::CREATED, "{}", b.1);
-    let mut actual = vec![a.1["addresses"].clone(), b.1["addresses"].clone()];
-    actual.sort_by_key(ToString::to_string);
-    assert_eq!(
-        actual,
-        vec![
-            json!(["10.7.0.3/32", "fd00:7::3/128"]),
-            json!(["10.7.0.5/32", "fd00:7::5/128"])
-        ]
-    );
+    let owner = mk_user(&app, "reserved-a@example.com").await;
+    let other = mk_user(&app, "reserved-b@example.com").await;
+    let (status, first) = enroll_peer_naming(&app, &owner, 0, "p1").await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["addresses"], json!(["10.7.0.3/32", "fd00:7::3/128"]));
+    let (status, second) = enroll_peer_naming(&app, &other, 1, "p2").await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_eq!(second["addresses"], json!(["10.7.0.5/32", "fd00:7::5/128"]));
     let (status, last) = enroll_peer(&app, &owner, 2).await;
     assert_eq!(status, StatusCode::CREATED, "{last}");
     assert_eq!(last["addresses"], json!(["10.7.0.6/32", "fd00:7::6/128"]));
-    assert_eq!(enroll_peer(&app, &owner, 3).await.0, StatusCode::CONFLICT);
+    let (status, error) = enroll_peer(&app, &owner, 3).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["error"], "wireguard pool exhausted");
     app.cleanup().await;
 }
 
