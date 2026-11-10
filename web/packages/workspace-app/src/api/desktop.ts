@@ -11,7 +11,9 @@ import {
   failTransfer,
   finishTransfer,
   setTransferProgress,
+  transferFilesPicked,
   type TransferSource,
+  uploadTransferName,
   waitForTransferSlot,
 } from "../state/transfers.svelte";
 import type { ScopedWindowKind } from "./libraryCommand";
@@ -653,7 +655,15 @@ export async function openWebInspector(): Promise<boolean> {
 
 interface NativeTransferStatus {
   loaded: number;
+  /// The byte count the transfer is measured against, once the desktop knows
+  /// it. For an upload that is when it has validated the picked files, so a
+  /// total also says the picker has closed.
   total: number | null;
+  /// An upload's selection once the desktop has validated it: the first
+  /// file's base name and how many files were picked. Absent while the picker
+  /// is open, for a download, and from a desktop that does not report it; the
+  /// status then gives the transfer's row no name.
+  picked?: { name: string; count: number } | null;
 }
 
 function nativeTransferId(): string {
@@ -661,7 +671,24 @@ function nativeTransferId(): string {
   return random ? `native-${random}` : `native-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function pollNativeProgress(nativeId: string, transferId: string): () => void {
+/// The row name a status's selection gives, or null when it names none. A
+/// selection of any other shape reads as absent, so a change on the wire
+/// leaves the row unnamed instead of naming it wrongly.
+function pickedUploadName(status: NativeTransferStatus): string | null {
+  const picked = status.picked;
+  if (!picked || typeof picked.name !== "string") return null;
+  if (!Number.isInteger(picked.count) || picked.count < 1) return null;
+  return uploadTransferName(picked.name, picked.count);
+}
+
+/// Poll the desktop's status of `nativeId` into the progress of `transferId`
+/// until the returned stop runs. `onStatus` sees each status the desktop
+/// answers; it answers none once the transfer has ended.
+function pollNativeProgress(
+  nativeId: string,
+  transferId: string,
+  onStatus?: (status: NativeTransferStatus) => void,
+): () => void {
   let stopped = false;
   let polling = false;
   const poll = async (): Promise<void> => {
@@ -678,6 +705,7 @@ function pollNativeProgress(nativeId: string, transferId: string): () => void {
             ? Math.min(1, status.loaded / status.total)
             : null;
         setTransferProgress(transferId, fraction);
+        onStatus?.(status);
       }
     } catch {
       // The main invoke owns the error surface. A missed progress poll is
@@ -757,9 +785,30 @@ export interface NativeUploadedFile {
   size: number;
 }
 
+/// The name a stored upload has, read off the path the server answers for
+/// it: a workspace path, or a host path, which a Windows server spells with
+/// `\`. The server stores an upload under a name that holds neither
+/// separator, so the text after the last of either is that name.
+function storedUploadName(path: string): string {
+  return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+}
+
+/// Desktop-native upload: Rust raises the native picker and streams the picked
+/// files to the server, so the page never holds their paths or bytes.
+///
+/// The transfer row exists from the call on, while the picker is still open,
+/// so its Cancel and the window's close guard cover the whole operation.
+/// `name` is the row's display name when the caller knows it beforehand, as
+/// a replace knows its target; it is a file's name and never a sentence. With
+/// null the picked files name the row: the desktop's status says what they
+/// are once it has validated them, and the upload's own answer names a row
+/// that ended before a status reached the page.
+///
+/// Resolves to the files the server stored, empty when the picker was
+/// dismissed; rejects when the desktop reports an error or a cancel.
 export async function runDesktopUpload(
   target: { dir?: string; path?: string; multiple: boolean },
-  label: string,
+  name: string | null,
   root?: TransferRoot,
   filesApp = true,
 ): Promise<NativeUploadedFile[]> {
@@ -770,11 +819,14 @@ export async function runDesktopUpload(
   const cancel = (): void => {
     void tauriInvoke<boolean>("cancel_native_transfer", { transferId: nativeId });
   };
-  const xferId = beginTransfer({ kind: "upload", filename: label, cancel });
+  const xferId = beginTransfer({ kind: "upload", filename: name, cancel, picking: true });
   let stopProgress: (() => void) | null = null;
   try {
     if (!(await waitForTransferSlot(xferId))) return [];
-    stopProgress = pollNativeProgress(nativeId, xferId);
+    stopProgress = pollNativeProgress(nativeId, xferId, (status) => {
+      const picked = pickedUploadName(status);
+      if (picked !== null || status.total !== null) transferFilesPicked(xferId, picked);
+    });
     // Files pickers need the route that supports Replace and rejects links.
     // Terminal uploads retain the transfer route's linked-directory support.
     const url = new URL(
@@ -790,6 +842,11 @@ export async function runDesktopUpload(
       cancelTransfer(xferId);
       return [];
     }
+    // A short upload ends between two polls, before any status named it.
+    transferFilesPicked(
+      xferId,
+      uploadTransferName(storedUploadName(uploaded[0]!.path), uploaded.length),
+    );
     finishTransfer(xferId);
     return uploaded;
   } catch (err) {

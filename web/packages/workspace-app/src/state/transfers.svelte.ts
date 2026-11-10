@@ -51,7 +51,15 @@ export interface Transfer {
   id: string;
   kind: TransferKind;
   /// Display name: a single file's name, or "N files" for a multi-file upload.
-  filename: string;
+  /// null for a desktop upload the page cannot name: its native picker is
+  /// still open, or the desktop did not say what was picked. A name is the
+  /// thing transferred and never a sentence, since each row text puts its own
+  /// verb before it.
+  filename: string | null;
+  /// True while the desktop's native picker is open and nothing is chosen, so
+  /// no bytes are moving yet. NOT persisted: it is read only while active,
+  /// and a reload turns an active record into an interrupted one.
+  picking: boolean;
   /// 0..1 while a content-length is known; null for an indeterminate transfer.
   progress: number | null;
   state: TransferState;
@@ -106,7 +114,7 @@ function storeKey(): string {
 interface PersistedTransfer {
   id: string;
   kind: TransferKind;
-  filename: string;
+  filename: string | null;
   progress: number | null;
   state: TransferState;
   error: string | null;
@@ -204,15 +212,23 @@ function emitSignal(): void {
 /// it was started under when that is not the workspace.
 export type TransferSource = { path: string; isDir: boolean; root?: TransferRoot };
 
+/// An upload row's display name: the file's own name for one file, the count
+/// for several.
+export function uploadTransferName(firstName: string, count: number): string {
+  return count === 1 ? firstName : `${count} files`;
+}
+
 /// Start tracking a transfer; returns its id. It starts active because the
 /// window has started it; whether the server runs it immediately or holds it is
 /// the server's call and arrives later in `queue`. `source` lets an interrupted
-/// download retry.
+/// download retry. `picking` is a desktop upload that begins with its native
+/// picker open; `transferFilesPicked` ends that.
 export function beginTransfer(opts: {
   kind: TransferKind;
-  filename: string;
+  filename: string | null;
   cancel: (() => void) | null;
   source?: TransferSource | null;
+  picking?: boolean;
 }): string {
   const id = transferId();
   const state: TransferState = "active";
@@ -224,6 +240,7 @@ export function beginTransfer(opts: {
     id,
     kind: opts.kind,
     filename: opts.filename,
+    picking: opts.picking === true,
     progress: null,
     state,
     error: null,
@@ -244,6 +261,21 @@ export function beginTransfer(opts: {
 /// catches cancellation or dismissal between `beginTransfer` and the request.
 export function waitForTransferSlot(id: string): Promise<boolean> {
   return Promise.resolve(find(id)?.state === "active");
+}
+
+/// A desktop upload's native picker returned files, so the row is past
+/// choosing. `name` names a row that has no name; a row named when it began
+/// keeps that name, as a replace keeps its target's. A null or empty `name`
+/// names nothing: the desktop did not say what was picked, and the row stays
+/// unnamed. A row that has ended is left as it ended.
+export function transferFilesPicked(id: string, name: string | null): void {
+  const transfer = find(id);
+  if (!transfer || transfer.state !== "active") return;
+  const named = transfer.filename === null && name !== null && name !== "";
+  if (!transfer.picking && !named) return;
+  transfer.picking = false;
+  if (named) transfer.filename = name;
+  persist();
 }
 
 /// Apply one server admission frame. Keyed by `transfer_id` alone: the frame
@@ -470,6 +502,8 @@ export function restoreTransfers(
       id: p.id,
       kind: p.kind,
       filename: p.filename,
+      // No restored record is active, and only an active one is picking.
+      picking: false,
       // An interrupted transfer has no meaningful progress; drop the stale
       // fraction so the bar never shows a frozen mid-transfer value.
       progress: interrupted ? null : p.progress,

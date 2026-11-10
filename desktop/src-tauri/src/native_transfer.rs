@@ -17,10 +17,26 @@ use url::Url;
 
 const UNKNOWN_TOTAL: u64 = u64::MAX;
 
+/// The longest picked file name a status carries, in characters. The page
+/// polls the status, so the name in it is bounded whatever the filesystem
+/// allowed. File names are commonly limited to 255 bytes or UTF-16 units,
+/// which is never more than 255 characters, so an ordinary name is not cut.
+const PICKED_NAME_MAX_CHARS: usize = 255;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointKind {
     Download,
     Upload,
+}
+
+/// What the page is told of an upload's selection: the first file's base name
+/// and how many files were picked. It names the transfer's row from the two,
+/// the name for one file and the count for several, so the payload does not
+/// grow with the selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PickedFiles {
+    name: String,
+    count: u64,
 }
 
 #[derive(Debug)]
@@ -29,6 +45,7 @@ pub struct TransferProgress {
     total: AtomicU64,
     cancelled: AtomicBool,
     cancel_notify: Notify,
+    picked: OnceLock<PickedFiles>,
 }
 
 impl TransferProgress {
@@ -38,12 +55,23 @@ impl TransferProgress {
             total: AtomicU64::new(total.unwrap_or(UNKNOWN_TOTAL)),
             cancelled: AtomicBool::new(false),
             cancel_notify: Notify::new(),
+            picked: OnceLock::new(),
         }
     }
 
     pub fn set_total(&self, total: Option<u64>) {
         self.total
             .store(total.unwrap_or(UNKNOWN_TOTAL), Ordering::Relaxed);
+    }
+
+    /// Record an upload's selection for the status. `first_name` is the first
+    /// file's base name and never a path: the chosen paths stay in this
+    /// process. A selection is recorded once; a later call changes nothing.
+    pub fn set_picked(&self, first_name: &str, count: usize) {
+        let _ = self.picked.set(PickedFiles {
+            name: first_name.chars().take(PICKED_NAME_MAX_CHARS).collect(),
+            count: count as u64,
+        });
     }
 
     pub fn add_loaded(&self, bytes: u64) {
@@ -109,6 +137,10 @@ impl Drop for TransferRegistration {
 pub struct NativeTransferStatus {
     loaded: u64,
     total: Option<u64>,
+    /// An upload's selection, from the moment the upload records it. The
+    /// payload has no such field before that, or for a download.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    picked: Option<PickedFiles>,
 }
 
 #[tauri::command]
@@ -119,6 +151,7 @@ pub fn native_transfer_status(transfer_id: String) -> Option<NativeTransferStatu
     Some(NativeTransferStatus {
         loaded: progress.loaded.load(Ordering::Relaxed),
         total: (total != UNKNOWN_TOTAL).then_some(total),
+        picked: progress.picked.get().cloned(),
     })
 }
 
@@ -547,5 +580,73 @@ mod tests {
         assert!(registration.progress.is_cancelled());
         drop(registration);
         assert!(native_transfer_status("native-test".into()).is_none());
+    }
+
+    /// The status as the page reads it over IPC.
+    fn status_payload(id: &str) -> serde_json::Value {
+        serde_json::to_value(native_transfer_status(id.into()).expect("a live transfer")).unwrap()
+    }
+
+    /// The page names an upload's row from the status, so the status says
+    /// nothing of a selection until the upload records one, and from then on
+    /// carries the first file's name and the count.
+    #[test]
+    fn transfer_status_names_a_selection_only_once_it_is_recorded() {
+        let registration = TransferRegistration::new("native-picked".into(), None).unwrap();
+        assert_eq!(
+            status_payload("native-picked"),
+            serde_json::json!({ "loaded": 0, "total": null }),
+            "nothing is picked yet, so the payload has no selection at all"
+        );
+
+        registration.progress.set_picked("report.pdf", 3);
+        assert_eq!(
+            status_payload("native-picked"),
+            serde_json::json!({
+                "loaded": 0,
+                "total": null,
+                "picked": { "name": "report.pdf", "count": 3 },
+            }),
+        );
+
+        // The selection is the picker's one answer, so it is not replaced.
+        registration.progress.set_picked("other.bin", 1);
+        assert_eq!(
+            status_payload("native-picked")["picked"],
+            serde_json::json!({ "name": "report.pdf", "count": 3 }),
+        );
+    }
+
+    /// The boundary of the name a status carries: a name of exactly the
+    /// limit is whole, one character over is cut, and the cut falls between
+    /// characters. The count is one number however many files were picked,
+    /// so a poll's payload stays small for any selection.
+    #[test]
+    fn transfer_status_bounds_the_picked_name_and_carries_one_count() {
+        let exact = "x".repeat(PICKED_NAME_MAX_CHARS);
+        let registration = TransferRegistration::new("native-picked-exact".into(), None).unwrap();
+        registration.progress.set_picked(&exact, 1);
+        assert_eq!(
+            status_payload("native-picked-exact")["picked"]["name"],
+            serde_json::json!(exact),
+            "a name at the limit is not cut"
+        );
+
+        // A two-byte character, so a cut counted in bytes would split one.
+        let over = "\u{e9}".repeat(PICKED_NAME_MAX_CHARS + 1);
+        let registration = TransferRegistration::new("native-picked-over".into(), None).unwrap();
+        registration.progress.set_picked(&over, 250_000);
+        let payload = status_payload("native-picked-over");
+        assert_eq!(
+            payload["picked"]["name"],
+            serde_json::json!("\u{e9}".repeat(PICKED_NAME_MAX_CHARS)),
+            "one character over the limit is cut to the limit"
+        );
+        assert_eq!(payload["picked"]["count"], serde_json::json!(250_000));
+        let sent = serde_json::to_string(&payload).unwrap().len();
+        assert!(
+            sent <= PICKED_NAME_MAX_CHARS * 4 + 128,
+            "a poll of a large selection stays small: {sent} bytes"
+        );
     }
 }

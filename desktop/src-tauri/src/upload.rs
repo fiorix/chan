@@ -2,8 +2,10 @@
 //!
 //! The native picker returns paths only inside Rust. Each selected regular file
 //! becomes a streaming reqwest multipart part, so neither file paths nor bytes
-//! cross webview IPC. The invoking origin, destination path, cookies, CSRF
-//! mirror, redirects, cancellation, and aggregate progress are validated here.
+//! cross webview IPC. The page is told what to call the selection, the first
+//! file's base name and the file count, through the transfer's status. The
+//! invoking origin, destination path, cookies, CSRF mirror, redirects,
+//! cancellation, and aggregate progress are validated here.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,11 +79,7 @@ pub async fn upload_files_native(
         return Err("upload cancelled".into());
     }
     let files = validate_picked_files(paths).await?;
-    let total = files
-        .iter()
-        .try_fold(0u64, |sum, file| sum.checked_add(file.size))
-        .ok_or_else(|| "native upload byte count overflow".to_string())?;
-    registration.progress.set_total(Some(total));
+    let total = announce_selection(&registration.progress, &files)?;
 
     let client = http_client()?;
     // Preflight before the first POST, so an over-cap selection sends no bytes
@@ -189,6 +187,23 @@ async fn validate_picked_files(paths: Vec<PathBuf>) -> Result<Vec<PickedFile>, S
     })
     .await
     .map_err(|error| format!("validating native upload selection: {error}"))?
+}
+
+/// Publish a validated selection to the transfer's status and answer its byte
+/// total. The status gets the total its progress is measured against, and the
+/// first file's base name with the file count, which is all the page learns
+/// of what was picked. The selection goes first, so a poll that reads a total
+/// reads the selection with it.
+fn announce_selection(progress: &TransferProgress, files: &[PickedFile]) -> Result<u64, String> {
+    let total = files
+        .iter()
+        .try_fold(0u64, |sum, file| sum.checked_add(file.size))
+        .ok_or_else(|| "native upload byte count overflow".to_string())?;
+    if let Some(first) = files.first() {
+        progress.set_picked(&first.name, files.len());
+    }
+    progress.set_total(Some(total));
+    Ok(total)
 }
 
 fn file_stream(
@@ -517,6 +532,58 @@ mod tests {
                 "{unnamed}"
             );
         }
+    }
+
+    /// The status as the page reads it over IPC.
+    fn status_payload(id: &str) -> serde_json::Value {
+        serde_json::to_value(
+            crate::native_transfer::native_transfer_status(id.into()).expect("a live transfer"),
+        )
+        .unwrap()
+    }
+
+    /// The page learns what was picked from the status alone. A validated
+    /// selection puts the first file's base name and the file count there
+    /// with the byte total, and nothing of the directory it was picked in.
+    #[tokio::test]
+    async fn a_validated_selection_reaches_the_status_as_a_base_name_and_a_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.pdf");
+        let notes = dir.path().join("notes.md");
+        std::fs::write(&report, b"12345").unwrap();
+        std::fs::write(&notes, b"12").unwrap();
+
+        let several = TransferRegistration::new("upload-picked-several".into(), None).unwrap();
+        let files = validate_picked_files(vec![report.clone(), notes])
+            .await
+            .unwrap();
+        assert_eq!(
+            status_payload("upload-picked-several"),
+            serde_json::json!({ "loaded": 0, "total": null }),
+            "a selection is not in the status before it is announced"
+        );
+        assert_eq!(announce_selection(&several.progress, &files), Ok(7));
+        assert_eq!(
+            status_payload("upload-picked-several"),
+            serde_json::json!({
+                "loaded": 0,
+                "total": 7,
+                "picked": { "name": "report.pdf", "count": 2 },
+            }),
+            "the first file's base name and the count, with no directory"
+        );
+
+        let one = TransferRegistration::new("upload-picked-one".into(), None).unwrap();
+        let files = validate_picked_files(vec![report]).await.unwrap();
+        assert_eq!(announce_selection(&one.progress, &files), Ok(5));
+        assert_eq!(
+            status_payload("upload-picked-one"),
+            serde_json::json!({
+                "loaded": 0,
+                "total": 5,
+                "picked": { "name": "report.pdf", "count": 1 },
+            }),
+        );
     }
 
     #[tokio::test]

@@ -29,8 +29,17 @@
 
   function statusLine(t: Transfer): string {
     const verb = t.kind === "upload" ? "Uploading" : "Downloading";
+    // A desktop upload has no name until the page learns what was picked,
+    // which it may never do. Each text still reads as its verb and one
+    // thing: "files" where files move or landed, the transfer's own kind
+    // where the transfer is what waits or ended.
+    const files = t.filename ?? "files";
+    const subject = t.filename ?? t.kind;
     switch (t.state) {
       case "active": {
+        // The native picker is open and nothing is chosen: no bytes move,
+        // and there is no file to name yet.
+        if (t.picking) return "Waiting for file selection";
         // The server holds this one. Its rank is among THIS tenant's waiting
         // transfers, so the wording says where it sits in our own queue and
         // never implies a position on the server as a whole. With no rank, and
@@ -42,27 +51,27 @@
           // position and without having to say whether the tenant is a
           // workspace or a standalone terminal.
           return t.queue.position === null
-            ? `Waiting to start ${t.filename}`
-            : `Waiting to start ${t.filename} (#${t.queue.position} in your queue)`;
+            ? `Waiting to start ${subject}`
+            : `Waiting to start ${subject} (#${t.queue.position} in your queue)`;
         }
         const p = pct(t);
-        return p === null ? `${verb} ${t.filename}...` : `${verb} ${t.filename} (${p}%)`;
+        return p === null ? `${verb} ${files}...` : `${verb} ${files} (${p}%)`;
       }
       case "done":
-        if (t.kind !== "upload") return `Saved ${t.savedPath ?? t.filename}`;
+        if (t.kind !== "upload") return `Saved ${t.savedPath ?? files}`;
         // A cancel the server answered too late for: the file landed.
         return t.finishedBeforeCancel
-          ? `Uploaded ${t.filename} (finished before the cancel)`
-          : `Uploaded ${t.filename}`;
+          ? `Uploaded ${files} (finished before the cancel)`
+          : `Uploaded ${files}`;
       case "cancelled":
         // The cancel stopped the files after this one, which had landed.
         return t.finishedBeforeCancel
-          ? `Cancelled ${t.filename} (${t.finishedBeforeCancel} finished before the cancel)`
-          : `Cancelled ${t.filename}`;
+          ? `Cancelled ${subject} (${t.finishedBeforeCancel} finished before the cancel)`
+          : `Cancelled ${subject}`;
       case "failed":
-        return `Failed ${t.filename}${t.error ? `: ${t.error}` : ""}`;
+        return `Failed ${subject}${t.error ? `: ${t.error}` : ""}`;
       case "interrupted":
-        return `Interrupted ${t.filename} (window reloaded)`;
+        return `Interrupted ${subject} (window reloaded)`;
     }
   }
 </script>
@@ -106,6 +115,7 @@
               class="tb-bar"
               class:indeterminate={t.state === "active" &&
                 t.progress === null &&
+                !t.picking &&
                 t.queue?.state !== "waiting"}
               class:done={t.state === "done"}
               class:bad={t.state === "cancelled" ||
