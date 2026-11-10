@@ -3184,7 +3184,7 @@
               <Search size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">Find</span>
-            <span class="mbtn-chord">{chordFor("app.find.open") ?? ""}</span>
+            <span class="mbtn-chord">{chordFor("terminal.find") ?? ""}</span>
           </button>
           <button class="mbtn" role="menuitem" onclick={copySelectionOrScrollback}>
             <span class="mbtn-icon">

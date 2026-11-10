@@ -53,6 +53,7 @@ import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { closeTabMenu } from "../state/tabMenu.svelte";
 import { FIND_ANNOUNCE_INTERVAL_MS } from "../terminal/findAnnouncer";
 import { type SearchState, VtSearch, type VtTerminal } from "../terminal/ghosttyVt";
 
@@ -534,6 +535,55 @@ describe("terminal find command routing", () => {
     fireCommand("app.find.next");
 
     expect(calls).toHaveLength(0);
+  });
+});
+
+// The row names the chord that opens this bar, `terminal.find`: Cmd+F on
+// macOS and Ctrl+Shift+F elsewhere, in the desktop app and in a browser. The
+// page's own find chord is a different key off macOS, where Ctrl+F is the
+// shell's, and has no browser form.
+describe("the terminal menu's Find row", () => {
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)";
+  const LINUX = "Mozilla/5.0 (X11; Linux x86_64)";
+  const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+  const tauri = window as unknown as { __TAURI_INTERNALS__?: unknown };
+
+  afterEach(() => {
+    delete tauri.__TAURI_INTERNALS__;
+    // The menu's state outlives the component, and a menu left open is
+    // drawn at the next mount, before that case names its platform.
+    closeTabMenu();
+  });
+
+  test.each([
+    ["the Linux desktop", LINUX, true, "Ctrl+Shift+F"],
+    ["the Windows desktop", WINDOWS, true, "Ctrl+Shift+F"],
+    ["the macOS desktop", MAC, true, "Cmd+F"],
+    ["a browser on Linux", LINUX, false, "Ctrl+Shift+F"],
+    ["a browser on macOS", MAC, false, "Cmd+F"],
+  ] as const)("on %s shows the chord that opens the bar", async (_where, agent, desktop, chord) => {
+    await renderTerminal(terminalTab(), true);
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent);
+    if (desktop) tauri.__TAURI_INTERNALS__ = {};
+    document
+      .querySelector(".terminal-tab")!
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await tick();
+    await tick();
+    const row = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find(
+      (b) => b.querySelector(".mbtn-label")?.textContent?.trim() === "Find",
+    );
+    expect(row, "the body menu offers Find").toBeTruthy();
+    expect(row!.querySelector(".mbtn-chord")?.textContent?.trim()).toBe(chord);
+
+    // The same chord, pressed in the terminal, opens the bar.
+    const mod = agent === MAC ? { metaKey: true } : { ctrlKey: true, shiftKey: true };
+    document
+      .querySelector(".terminal-tab")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: agent === MAC ? "f" : "F", code: "KeyF", bubbles: true, cancelable: true, ...mod }));
+    await tick();
+    await tick();
+    expect(findInput()).not.toBeNull();
   });
 });
 
