@@ -6,7 +6,9 @@
 // announced control that does nothing. The overlay therefore renders exactly
 // the rows whose capability this window has, and this test mounts it in all
 // three shapes to prove it -- rather than pinning the filter's source text,
-// which cannot tell whether the tags and the handler guards still agree.
+// which cannot tell whether the tags and the handler guards still agree. The
+// Dashboard row follows the launcher's New dashboard rule instead: every
+// window but a control terminal and a tmux window.
 //
 // `windowCaps` is read once at module load, so each shape sets its `?kind=`
 // and its `<meta name="chan-files">` / `<meta name="chan-drafts">` BEFORE
@@ -70,17 +72,17 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
     }
   });
 
-  test("a standalone window with a filesystem lists the browser, not the workspace surfaces", async () => {
+  test("a standalone window with a filesystem lists the browser and the Dashboard, not the workspace surfaces", async () => {
     const actions = await actionsFor("terminal", true);
-    // The file surface this window really has.
+    // The file surface this window really has, and the Dashboard it opens.
     expect(actions).toContain("Stage File Browser");
     expect(actions).toContain("Toggle right-side file browser dock");
     expect(actions).toContain("Toggle left-side file browser dock");
+    expect(actions).toContain("Stage Dashboard");
     // The workspace surfaces it does not: App.svelte returns early on each of
     // these, so advertising them would be advertising dead keys.
     for (const action of [
       "Stage Graph",
-      "Stage Dashboard",
       "Stage New Draft",
       "Stage Excalidraw",
     ]) {
@@ -98,22 +100,21 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
       "Stage New Draft",
       "Stage Excalidraw",
       "Stage Terminal",
+      "Stage Dashboard",
     ]) {
       expect(actions, action).toContain(action);
     }
-    // Graph and Dashboard stay workspace surfaces.
-    for (const action of ["Stage Graph", "Stage Dashboard"]) {
-      expect(actions, action).not.toContain(action);
-    }
+    // Graph stays a workspace surface.
+    expect(actions).not.toContain("Stage Graph");
   });
 
-  test("a terminals-only window lists neither, and drops the empty Dock group", async () => {
+  test("a terminals-only window lists the Dashboard and no file or workspace surface, and drops the empty Dock group", async () => {
     const actions = await actionsFor("terminal", false);
     expect(actions).toContain("Stage Terminal");
+    expect(actions).toContain("Stage Dashboard");
     for (const action of [
       "Stage File Browser",
       "Stage Graph",
-      "Stage Dashboard",
       "Stage New Draft",
       "Stage Excalidraw",
       "Toggle right-side file browser dock",
@@ -132,14 +133,22 @@ describe("Hybrid Nav cheatsheet shows only the keys this window can run", () => 
     for (const action of ["Move focus", "Split right", "Split down", "Move divider left / right", "Commit draft"]) {
       expect(actions, action).toContain(action);
     }
-    for (const action of ["Swap tile with neighbour", "Stage Terminal", "Stage File Browser", "Stage New Draft", "Flip side"]) {
+    for (const action of [
+      "Swap tile with neighbour",
+      "Stage Terminal",
+      "Stage File Browser",
+      "Stage Dashboard",
+      "Stage New Draft",
+      "Flip side",
+    ]) {
       expect(actions, action).not.toContain(action);
     }
   });
 
-  test("a control terminal is terminals-only too", async () => {
+  test("a control terminal is terminals-only too, and lists no Dashboard", async () => {
     const actions = await actionsFor("control", true);
     expect(actions).toContain("Stage Terminal");
     expect(actions).not.toContain("Stage File Browser");
+    expect(actions).not.toContain("Stage Dashboard");
   });
 });

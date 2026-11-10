@@ -184,6 +184,7 @@
   import {
     allCommands,
     commandContext,
+    dashboardOpenAllowed,
     dispatchAllowsCommand,
   } from "./state/commands";
   import { windowCaps } from "./state/windowCaps";
@@ -1099,9 +1100,12 @@
         if (!windowCaps.workspace) return;
         paneModeOpenGraph(resolveSpawnContext());
         return;
+      // The launcher's rule for New dashboard, so `b` stages one in every
+      // window the command opens one in, a window with no workspace included,
+      // and in no control terminal or tmux window.
       case "b":
       case "B":
-        if (!windowCaps.workspace) return;
+        if (!dashboardOpenAllowed(ui)) return;
         paneModeOpenDashboard();
         return;
       case "n":
