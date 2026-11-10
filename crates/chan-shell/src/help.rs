@@ -76,9 +76,10 @@ every 5 seconds, pausing while the pointer is over it, while it has focus,
 while its tab is not the visible one, when the global carousel
 preference is off, or when the tab was opened with --carousel-off.
 
---carousel-index picks the slide the new tab lands on. The index is
-validated for the window; unavailable or disabled slots fall back
-to the first enabled slot.
+--carousel-index takes a slot id and picks the slide the new tab opens
+on. A slot the window does not have, an id that names no slide or
+Workspace or Search in a standalone window, opens on Metrics, the
+default slide.
 ";
 
 /// `cs dashboard` examples, side effects, and caveats.
@@ -104,8 +105,8 @@ CAUTIONS:
   tab there and says so in its status line.
 
 CAVEATS:
-  --carousel-off is per tab: it does not change the workspace-wide
-  carousel preference, so other dashboards keep rotating.
+  --carousel-off is per tab: it does not change the global carousel
+  preference, so other dashboards keep rotating.
   --window defaults to $CHAN_WINDOW_ID; --pane and --side default to
   the target window's active pane and visible side at dequeue time.
 

@@ -299,8 +299,9 @@ pub(crate) static TERMINAL_TENANT: RouteTable = &[
 /// legs. That gate classifies the leg caller, not who sent the window-addressed
 /// trigger; a grantee reaches every other route the owner does.
 pub(crate) static LAUNCHER: RouteTable = &[
-    (Get, "/api/library/windows", NonOwner),
+    // The serving process's readings, by the handler the tenants mount.
     (Get, "/api/metrics", NonOwner),
+    (Get, "/api/library/windows", NonOwner),
     (Post, "/api/library/windows", NonOwner),
     (Get, "/api/library/windows/watch", NonOwner),
     (Delete, "/api/library/windows/{window_id}", NonOwner),

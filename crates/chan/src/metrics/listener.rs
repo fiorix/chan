@@ -9,6 +9,10 @@
 //! the caller's effective uid. The check precedes the connect: only a
 //! listener of this user that closes in the moment between the two lets
 //! another bind in time, and nobody else can make it close.
+//!
+//! A devserver can be at more than one recorded address (the one its unit
+//! file pins, the port it last bound), so the check takes them in order and
+//! names the first that passes; an address that fails is never dialed.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -23,19 +27,40 @@ pub(super) enum Owner {
     Nobody,
 }
 
-/// Refuse to send the devserver bearer to `addr` unless the caller owns
-/// every listener that could take the connection.
+/// The address the devserver bearer may go to: the first of `candidates`
+/// where the caller owns every listener that could take the connection. A
+/// refusal when there is none.
 #[cfg(target_os = "linux")]
-pub(super) fn ensure_caller_listens(addr: SocketAddr) -> anyhow::Result<()> {
+pub(super) fn callers_listener(candidates: &[SocketAddr]) -> anyhow::Result<SocketAddr> {
     let (tcp, tcp6) = tables(|path| std::fs::read_to_string(path))?;
     let uid = rustix::process::geteuid().as_raw();
-    match owner(&[&tcp, &tcp6], addr, uid) {
-        Owner::Caller => Ok(()),
-        Owner::Other(other) => anyhow::bail!(
-            "{addr} is held by uid {other}, not this user's devserver; not sending the devserver token"
-        ),
-        Owner::Nobody => anyhow::bail!("no devserver is listening on {addr}"),
+    first_owned(&[&tcp, &tcp6], candidates, uid).map_err(anyhow::Error::msg)
+}
+
+/// The first of `candidates` that reads as the caller's in `tables`, else
+/// the refusal. Another user's listener is named before an address nobody
+/// listens on: it is the answer that says where the bearer would have gone.
+fn first_owned(tables: &[&str], candidates: &[SocketAddr], uid: u32) -> Result<SocketAddr, String> {
+    let mut foreign = None;
+    for &addr in candidates {
+        match owner(tables, addr, uid) {
+            Owner::Caller => return Ok(addr),
+            Owner::Other(other) => {
+                foreign.get_or_insert((addr, other));
+            }
+            Owner::Nobody => {}
+        }
     }
+    Err(match foreign {
+        Some((addr, other)) => format!(
+            "{addr} is held by uid {other}, not this user's devserver; \
+             not sending the devserver token"
+        ),
+        None => {
+            let tried: Vec<String> = candidates.iter().map(SocketAddr::to_string).collect();
+            format!("no devserver is listening on {}", tried.join(" or "))
+        }
+    })
 }
 
 /// The IPv4 and IPv6 socket tables, read through `read`. Only a missing
@@ -261,6 +286,43 @@ mod tests {
         assert!(tables(|_| Err(Error::from(ErrorKind::NotFound))).is_err());
     }
 
+    #[test]
+    fn the_first_address_the_caller_listens_on_is_the_one_dialed() {
+        let pinned: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let recorded: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let both = [pinned, recorded];
+        let listening = |rows: &[(SocketAddr, u32)]| {
+            let rows: Vec<String> = rows
+                .iter()
+                .map(|(addr, uid)| row(addr.ip(), addr.port(), "0A", *uid))
+                .collect();
+            first_owned(&[&table(&rows)], &both, ME)
+        };
+        // The pinned address wins while the caller listens there.
+        assert_eq!(listening(&[(pinned, ME), (recorded, ME)]), Ok(pinned));
+        // Nothing at the pinned address, or another user's listener there:
+        // the recorded port is read, and the pinned one is never dialed.
+        assert_eq!(listening(&[(recorded, ME)]), Ok(recorded));
+        assert_eq!(listening(&[(pinned, OTHER), (recorded, ME)]), Ok(recorded));
+        // No address of the caller's: the refusal names every address tried,
+        // or the listener that is not the caller's, whichever address has it.
+        assert_eq!(
+            listening(&[]),
+            Err("no devserver is listening on 127.0.0.1:8787 or 127.0.0.1:9000".into())
+        );
+        for foreign in both {
+            let refusal = listening(&[(foreign, OTHER)]).unwrap_err();
+            assert!(
+                refusal.starts_with(&format!("{foreign} is held by uid {OTHER}")),
+                "{refusal}"
+            );
+        }
+        assert_eq!(
+            first_owned(&[""], &[pinned], ME),
+            Err("no devserver is listening on 127.0.0.1:8787".into())
+        );
+    }
+
     // The live table is read only for a listener this process holds: once
     // it is dropped, a parallel test can bind the freed port, or a child a
     // sibling test forks can hold the socket until it execs, so "nobody
@@ -269,6 +331,7 @@ mod tests {
     #[test]
     fn this_processs_listener_reads_as_the_callers() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        ensure_caller_listens(listener.local_addr().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(callers_listener(&[addr]).unwrap(), addr);
     }
 }

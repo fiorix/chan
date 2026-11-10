@@ -2,6 +2,11 @@ import { untrack } from "svelte";
 import { api } from "../api/client";
 import type { MetricSample, MetricsView } from "../api/metrics";
 
+// The samples kept for the graphs. Mirrors the server's history capacity
+// (HISTORY_CAPACITY in crates/chan-server/src/metrics.rs): one sample per
+// second, ten minutes retained.
+const HISTORY_CAPACITY = 600;
+
 export const metrics = $state({ view: null as MetricsView | null, samples: [] as MetricSample[], error: null as string | null });
 let readers = 0;
 let stop: (() => void) | null = null;
@@ -11,7 +16,7 @@ export function mergeMetricHistory(previous: MetricSample[], view: MetricsView, 
   if (sameProcess) for (const sample of previous) samples.set(sample.sequence, sample);
   for (const sample of view.history) samples.set(sample.sequence, sample);
   if (view.latest) samples.set(view.latest.sequence, view.latest);
-  return [...samples.values()].sort((a, b) => a.sequence - b.sequence).slice(-600);
+  return [...samples.values()].sort((a, b) => a.sequence - b.sequence).slice(-HISTORY_CAPACITY);
 }
 
 // One polling owner per window, regardless of how many dashboard tabs exist.

@@ -29,7 +29,7 @@ type Identity (instanceId: string, version: string, build: string, pid: int, hos
 # this user cannot read, and entries removed during a scan, are not counted.
 type Storage (
   path: string, logicalBytes: ?int, allocatedBytes: ?int, files: ?int,
-  sampledAtMs: ?int, scanMillis: ?int, error: ?string
+  sampledAtMs: ?int, scanMs: ?int, error: ?string
 )
 type View (
   schemaVersion: int, identity: Identity, latest: ?Sample,
