@@ -312,8 +312,12 @@ fn write_output(out: &mut impl std::io::Write, text: &str) -> Result<bool> {
 }
 
 fn bytes(value: u64) -> String {
-    let mut n = value as f64;
-    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    // A count of bytes is whole; only the scaled units carry a fraction.
+    if value < 1024 {
+        return format!("{value} B");
+    }
+    let units = ["KiB", "MiB", "GiB", "TiB"];
+    let mut n = value as f64 / 1024.0;
     let mut i = 0;
     while n >= 1024.0 && i < units.len() - 1 {
         n /= 1024.0;
@@ -385,16 +389,28 @@ fn render(view: &View) -> String {
             per_second(traffic.sent_bytes_per_second)
         ));
     }
-    let t = &sample.transfers;
-    out.push_str(&format!("Transfers: {}/{} running, {}/{} queued, {} finished, {} cancelled, {} stalled, {} refused\n",
-        t.running,t.worker_capacity,t.queued,t.queue_capacity,t.finished,t.cancelled,t.stalled,t.refused));
+    // Two short literals: rustfmt leaves a statement alone, unformatted, once
+    // one string in it cannot fit the line width.
+    let transfers = &sample.transfers;
     out.push_str(&format!(
-        "Tunnels: {} gateway, {} reverse listeners; yamux {}/{} serving, {} waiting\n",
-        sample.gateway_tunnels,
-        sample.reverse_listeners,
-        sample.yamux_serving,
-        sample.yamux_service_capacity,
-        sample.yamux_waiting
+        "Transfers: {}/{} running, {}/{} queued, {} finished, ",
+        transfers.running,
+        transfers.worker_capacity,
+        transfers.queued,
+        transfers.queue_capacity,
+        transfers.finished
+    ));
+    out.push_str(&format!(
+        "{} cancelled, {} stalled, {} panicked, {} refused\n",
+        transfers.cancelled, transfers.stalled, transfers.panicked, transfers.refused
+    ));
+    out.push_str(&format!(
+        "Tunnels: {} gateway, {} reverse listeners, {} dial failures; ",
+        sample.gateway_tunnels, sample.reverse_listeners, sample.tunnel_dial_failures
+    ));
+    out.push_str(&format!(
+        "yamux {}/{} serving, {} waiting\n",
+        sample.yamux_serving, sample.yamux_service_capacity, sample.yamux_waiting
     ));
     let storage = &view.storage;
     let failed = match (&storage.error, storage.logical_bytes) {
@@ -513,6 +529,36 @@ mod tests {
             .collect();
         let text = render(&full_view());
         assert_eq!(shown, text.lines().take(2).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_text_output_counts_every_outcome_and_prints_whole_bytes() {
+        let text = render(&full_view());
+        let line = |prefix: &str| {
+            text.lines()
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no {prefix} line in:\n{text}"))
+        };
+        // Below 1 KiB a count of bytes is whole.
+        assert_eq!(
+            line("Service transport:"),
+            "Service transport: 1 active  RX 512 B (0 B/s)  TX 2.0 KiB (2.0 KiB/s)"
+        );
+        assert_eq!(
+            [0, 1, 1023, 1024, 1536].map(bytes),
+            ["0 B", "1 B", "1023 B", "1.0 KiB", "1.5 KiB"]
+        );
+        // Every outcome the transfer lane counts, and the failed dials.
+        assert_eq!(
+            line("Transfers:"),
+            "Transfers: 2/4 running, 1/16 queued, 9 finished, 3 cancelled, 5 stalled, \
+             6 panicked, 8 refused"
+        );
+        assert_eq!(
+            line("Tunnels:"),
+            "Tunnels: 1 gateway, 2 reverse listeners, 11 dial failures; \
+             yamux 3/8 serving, 0 waiting"
+        );
     }
 
     /// The storage line, the last one of the text output.
