@@ -1188,11 +1188,9 @@ fn build_workspace_window_with_completion(
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
                 apply_geometry_plan(&window, &label_owned, geometry_plan);
-                // The window set changed, so the launcher menubar's
-                // dynamic Window-submenu tail (open/hidden/remote
-                // sections) is due a rebuild -- off-mac the launcher's
-                // bar is the only menubar.
-                #[cfg(not(target_os = "macos"))]
+                // The window set changed, so the Window menu's open
+                // section is due a rebuild: the one menubar's on macOS,
+                // every launcher bar's off it.
                 crate::rebuild_window_menu(&app_owned);
                 // Register the OS title + kind so `cs window list` shows
                 // the same title the title bar does. The `Destroyed` arm
@@ -1432,9 +1430,12 @@ fn on_destroyed(app: &AppHandle, label: &str) {
     // Keep a watcher-buried window or a pending devserver hide in the
     // reopen menu after the native surface is destroyed. Only a teardown
     // with neither view burial nor pending hide drops that entry.
-    if !state.hidden_entry_outlives_destroy(label) && state.remove_buried(label) {
-        crate::rebuild_window_menu(app);
+    if !state.hidden_entry_outlives_destroy(label) {
+        state.remove_buried(label);
     }
+    // A destroyed window leaves the Window menu's open section even when it
+    // was never buried.
+    crate::rebuild_window_menu(app);
 }
 
 /// Compose the browser-facing URL for a freshly minted BROWSER window record:
@@ -3743,6 +3744,34 @@ mod tests {
         assert!(
             MAIN_RS.contains("    #[cfg(target_os = \"macos\")]\n    app.set_menu(menu)?;"),
             "the app-wide menu must be installed on macOS alone",
+        );
+    }
+
+    /// The Window menu lists the open windows on macOS's one menubar as much
+    /// as on a launcher bar off it, so building a window rebuilds it on every
+    /// platform, and so does destroying one, buried or not.
+    #[test]
+    fn a_window_built_or_destroyed_rebuilds_the_window_menu() {
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let (production, _) = SERVE_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, built) = production
+            .split_once("apply_geometry_plan(&window, &label_owned, geometry_plan);")
+            .expect("the build reveals the window");
+        let built = &built[..built
+            .find("window.on_window_event(")
+            .expect("and then wires its events")];
+        assert!(built.contains("crate::rebuild_window_menu(&app_owned);"));
+        assert!(!built.contains("target_os"), "on every platform");
+        let (_, destroyed) = production
+            .split_once("\nfn on_destroyed(")
+            .expect("one destroy handler");
+        // The body, through the newline before its closing brace.
+        let destroyed = &destroyed[..=destroyed.find("\n}\n").expect("its body ends")];
+        assert!(
+            destroyed.contains("\n    crate::rebuild_window_menu(app);\n"),
+            "every destroy rebuilds, not only one that drops a hidden entry"
         );
     }
 
