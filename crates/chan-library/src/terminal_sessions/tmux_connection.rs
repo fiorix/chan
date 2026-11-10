@@ -127,6 +127,9 @@ pub(super) enum TmuxWork {
     /// Ask the host for a chan window for a tmux window; answered with
     /// [`WorkDone::WindowMinted`].
     MintWindow { key: WindowId, title: String },
+    /// Give a minted chan window the label its tmux window's name now
+    /// makes, after tmux renamed the window or first named it in a list.
+    LabelWindow { window_id: String, label: String },
     /// Tell a chan window to open a tab for a pane session bound to it (the
     /// control window's tab; a tmux window's tabs come with its layout).
     AttachTab {
@@ -202,8 +205,21 @@ struct Window {
     layout: Option<chan_tmux::Layout>,
     /// The chan window minted for it, once the host answered.
     chan_window: Option<String>,
+    /// The label the chan window was last asked to carry, by its mint or a
+    /// relabel; a name that makes another label is sent as a relabel.
+    label: Option<String>,
     /// Within the window cap: its panes get sessions.
     materialized: bool,
+}
+
+/// The label a tmux window's chan window carries: the window's name, or
+/// `tmux @N` while tmux has not named it.
+fn window_label(window: WindowId, name: &str) -> String {
+    if name.is_empty() {
+        format!("tmux {window}")
+    } else {
+        name.to_owned()
+    }
 }
 
 #[derive(Debug)]
@@ -218,6 +234,10 @@ struct Pane {
     captured: bool,
     /// A session was asked for and not yet answered.
     requested: bool,
+    /// The window name the session was asked for with or last renamed to:
+    /// a name tmux reports while the registry makes the session is the
+    /// session's to take once it exists.
+    named: String,
 }
 
 /// One connection's state. See the module doc.
@@ -329,11 +349,8 @@ impl TmuxConnection {
         }
         w.materialized = true;
         self.dirty = true;
-        let title = if w.name.is_empty() {
-            format!("tmux {window}")
-        } else {
-            w.name.clone()
-        };
+        let title = window_label(window, &w.name);
+        w.label = Some(title.clone());
         steps.push(Step::Action(Action::Work(TmuxWork::MintWindow {
             key: window,
             title,
@@ -507,23 +524,7 @@ impl TmuxConnection {
             }
             Message::WindowRenamed { window, name }
             | Message::UnlinkedWindowRenamed { window, name } => {
-                if let Some(w) = self.windows.get_mut(&window) {
-                    w.name = name.clone();
-                    self.dirty = true;
-                    let ids: Vec<String> = w
-                        .panes
-                        .iter()
-                        .filter_map(|pane| self.panes.get(pane))
-                        .filter_map(|pane| pane.session.as_ref())
-                        .map(|session| session.id.clone())
-                        .collect();
-                    if !ids.is_empty() {
-                        steps.push(Step::Action(Action::Work(TmuxWork::RenamePanes {
-                            ids,
-                            name,
-                        })));
-                    }
-                }
+                self.window_named(window, name, &mut steps);
             }
             Message::LayoutChange { window, layout, .. } => {
                 self.layout_changed(window, &layout, &mut steps);
@@ -693,6 +694,15 @@ impl TmuxConnection {
                         })));
                     }
                 }
+                // tmux named the window while the registry made the session,
+                // as a window a notification added is named by its list.
+                if let Some(name) = window.map(|w| &w.name).filter(|name| **name != pane.named) {
+                    pane.named = name.clone();
+                    steps.push(Step::Action(Action::Work(TmuxWork::RenamePanes {
+                        ids: vec![session.id.clone()],
+                        name: name.clone(),
+                    })));
+                }
                 let tmux_window = pane.window;
                 pane.session = Some(session);
                 let history_rows = capture_history_rows(self.scrollback_mb, size.0);
@@ -731,6 +741,9 @@ impl TmuxConnection {
                         }
                     }
                 }
+                // A name tmux reported while the host minted the window is
+                // not the one the mint carried.
+                self.push_label(key, &mut steps);
                 self.push_layout(key, &mut steps);
             }
         }
@@ -887,9 +900,11 @@ impl TmuxConnection {
 
     /// A window tmux has, by list or notification.
     fn window_seen(&mut self, window: WindowId, name: String, steps: &mut Vec<Step>) {
-        if let Some(existing) = self.windows.get_mut(&window) {
-            if !name.is_empty() {
-                existing.name = name;
+        if let Some(existing) = self.windows.get(&window) {
+            // A window a notification added was listed for its name after
+            // its panes, which took no name; the list's name is a rename.
+            if !name.is_empty() && existing.name != name {
+                self.window_named(window, name, steps);
             }
             return;
         }
@@ -901,11 +916,7 @@ impl TmuxConnection {
         let materialized =
             requested || self.windows.values().filter(|w| w.materialized).count() < WINDOW_CAP;
         let unnamed = name.is_empty();
-        let title = if name.is_empty() {
-            format!("tmux {window}")
-        } else {
-            name.clone()
-        };
+        let title = window_label(window, &name);
         self.dirty = true;
         self.windows.insert(
             window,
@@ -915,6 +926,7 @@ impl TmuxConnection {
                 sizes: HashMap::new(),
                 layout: None,
                 chan_window: None,
+                label: materialized.then(|| title.clone()),
                 materialized,
             },
         );
@@ -934,6 +946,57 @@ impl TmuxConnection {
                 steps.push(Step::Submit(Command::ListWindows, Purpose::ListWindows));
             }
         }
+    }
+
+    /// tmux named `window`: its pane sessions take the name as their tab
+    /// names, and its chan window the label the name makes, so the window's
+    /// title, its pane tree and the launcher read what tmux calls it.
+    fn window_named(&mut self, window: WindowId, name: String, steps: &mut Vec<Step>) {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        w.name = name.clone();
+        self.dirty = true;
+        let mut ids = Vec::new();
+        for pane in &w.panes {
+            // A pane whose session is still being made takes the name when
+            // the registry answers (`WorkDone::PaneAdded`).
+            let Some(pane) = self.panes.get_mut(pane) else {
+                continue;
+            };
+            if let Some(session) = &pane.session {
+                ids.push(session.id.clone());
+                pane.named = name.clone();
+            }
+        }
+        if !ids.is_empty() {
+            steps.push(Step::Action(Action::Work(TmuxWork::RenamePanes {
+                ids,
+                name,
+            })));
+        }
+        self.push_label(window, steps);
+    }
+
+    /// Queue a relabel of `window`'s chan window when its name makes a label
+    /// other than the one the window was last asked to carry. Nothing before
+    /// the host answered the mint: the answer queues it.
+    fn push_label(&mut self, window: WindowId, steps: &mut Vec<Step>) {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        let Some(chan_window) = w.chan_window.clone() else {
+            return;
+        };
+        let label = window_label(window, &w.name);
+        if w.label.as_deref() == Some(label.as_str()) {
+            return;
+        }
+        w.label = Some(label.clone());
+        steps.push(Step::Action(Action::Work(TmuxWork::LabelWindow {
+            window_id: chan_window,
+            label,
+        })));
     }
 
     fn window_closed(&mut self, window: WindowId, steps: &mut Vec<Step>) {
@@ -1038,6 +1101,7 @@ impl TmuxConnection {
                     session: None,
                     captured: false,
                     requested: true,
+                    named: name.clone(),
                 },
             );
             let (cols, rows) = sizes.get(&pane_id).copied().unwrap_or((80, 24));

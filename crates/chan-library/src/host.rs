@@ -7249,6 +7249,21 @@ impl TmuxWindowHook for HostTmuxWindows {
         Some(row.window_id)
     }
 
+    fn label(&self, window_id: &str, label: &str) {
+        let Some(label) = self.registry.relabel_tmux_window(window_id, label) else {
+            return;
+        };
+        self.notify.notify_waiters();
+        // The page keeps the label for its pane tree's window name, and a
+        // browser titles its tab with it; the desktop's window watcher
+        // retitles the OS window from the row. A page with no socket reads
+        // the row when it first needs the name, so the frame is not parked:
+        // a tmux that renames often would fill the window's park.
+        if let Some(frame) = window_command_frame(window_id, "window_labeled", Some(&label)) {
+            self.delivery.deliver_if_live(window_id, frame);
+        }
+    }
+
     fn control(&self, connection: &str, title: &str, existing: Option<&str>) -> Option<String> {
         if let Some(window_id) = existing {
             if self
@@ -7379,6 +7394,7 @@ mod tmux_window_hook_tests {
         registry: Arc<WindowRegistry>,
         pending: Arc<crate::pending_window_commands::PendingWindowCommands>,
         events_rx: tokio::sync::broadcast::Receiver<String>,
+        session_registry: Arc<crate::session_presence::SessionRegistry>,
         controls: TmuxControls,
         hook: Arc<dyn TmuxWindowHook>,
     }
@@ -7397,7 +7413,7 @@ mod tmux_window_hook_tests {
             workspace_path.map(str::to_owned),
             TmuxWindowDelivery {
                 pending: Arc::clone(&pending),
-                session_registry,
+                session_registry: Arc::clone(&session_registry),
                 events_tx,
             },
             "lib-test".to_owned(),
@@ -7408,6 +7424,7 @@ mod tmux_window_hook_tests {
             registry,
             pending,
             events_rx,
+            session_registry,
             controls,
             hook,
         }
@@ -7525,6 +7542,53 @@ mod tmux_window_hook_tests {
         rig.hook.remove(&id);
         assert!(rig.registry.snapshot().iter().all(|w| w.window_id != id));
         assert_eq!(rig.registry.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn a_relabel_names_the_tmux_row_and_tells_its_live_page_alone() {
+        let mut rig = rig(WindowKind::Terminal, None);
+        let label_of = |rig: &Rig, id: &str| {
+            rig.registry
+                .snapshot()
+                .into_iter()
+                .find(|w| w.window_id == id)
+                .map(|w| w.label)
+                .expect("the row is in the registry")
+        };
+        let id = rig.hook.mint("term-1", "shell").expect("a window id");
+        // With no socket the row takes the name, and nothing is sent or
+        // parked: the page reads the row when it first needs the name.
+        rig.hook.label(&id, "build");
+        assert_eq!(label_of(&rig, &id), "build");
+        assert!(rig.events_rx.try_recv().is_err());
+        assert!(rig.pending.take(&id).is_empty());
+        // A live page is told, with the name cut to the label bound.
+        let _socket = rig.session_registry.join(&id, true, None).guard;
+        let long = "n".repeat(MAX_WINDOW_LABEL_CHARS + 20);
+        rig.hook.label(&id, &long);
+        let cut = "n".repeat(MAX_WINDOW_LABEL_CHARS);
+        assert_eq!(label_of(&rig, &id), cut);
+        assert_eq!(
+            rig.events_rx.try_recv().expect("a frame for the page"),
+            format!(
+                r#"{{"type":"window_command","window_id":"{id}","command":"window_labeled","label":"{cut}"}}"#
+            )
+        );
+        // The name it has already sends nothing.
+        rig.hook.label(&id, &long);
+        assert!(rig.events_rx.try_recv().is_err());
+        // Only a tmux window's row takes tmux's name: not the connection's
+        // control row, and not a plain window.
+        let control = rig
+            .hook
+            .control("term-1", "tmux -CC on this machine", None)
+            .expect("a control window");
+        rig.hook.label(&control, "build");
+        assert_eq!(label_of(&rig, &control), "");
+        let plain = rig.registry.create(WindowKind::Terminal, None);
+        rig.hook.label(&plain.window_id, "build");
+        assert_eq!(label_of(&rig, &plain.window_id), "");
+        assert!(rig.events_rx.try_recv().is_err());
     }
 
     #[test]
