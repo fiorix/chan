@@ -56,6 +56,7 @@ import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { closeTabMenu } from "../state/tabMenu.svelte";
 import { FIND_ANNOUNCE_INTERVAL_MS } from "../terminal/findAnnouncer";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { type SearchState, VtSearch, type VtTerminal } from "../terminal/ghosttyVt";
 
 type ResultsEvent = { resultIndex: number; resultCount: number };
@@ -442,6 +443,18 @@ async function openFindWithQuery(query: string): Promise<HTMLInputElement> {
   typeQuery(input!, query);
   await tick();
   return input!;
+}
+
+/// Restart the focused terminal and answer its confirm; resolves once the
+/// new terminal has dialled its own socket.
+async function restartTerminal(): Promise<TestWebSocket> {
+  const sockets = TestWebSocket.all.length;
+  fireCommand("app.terminal.restart");
+  expect(confirmState.open, "a terminal with a session asks before it restarts").toBe(true);
+  resolveConfirm(true);
+  await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(sockets + 1));
+  await tick();
+  return TestWebSocket.all.at(-1)!;
 }
 
 function pressEnter(input: HTMLInputElement, shiftKey = false): void {
@@ -947,11 +960,16 @@ describe("the real search addon in the mounted tab", () => {
     realXterm.on = true;
     await renderTerminal(terminalTab(), true);
     await vi.waitFor(() => expect(TestWebSocket.all).toHaveLength(1));
+    return attachXterm(TestWebSocket.all[0]!, "sess-1", text);
+  }
+
+  /// Attach the session behind the newest terminal's `socket` and print
+  /// `text` down it.
+  async function attachXterm(socket: TestWebSocket, id: string, text: string) {
     const model = realXterm.terminals.at(-1)!.model;
-    const socket = TestWebSocket.all[0]!;
     socket.onopen?.();
     await socket.onmessage?.({
-      data: JSON.stringify({ type: "session", id: "sess-1", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
+      data: JSON.stringify({ type: "session", id, seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
     });
     await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
     const print = async (out: string) => {
@@ -1024,6 +1042,29 @@ describe("the real search addon in the mounted tab", () => {
     pressEnter(findInput()!);
     await tick();
     expect(countElement()?.textContent).toMatch(/^[123] of 3$/);
+  });
+
+  // A restart builds a new terminal in the same tab. The bar searched the
+  // one torn down, so it closes with it; left open it would show its query
+  // over a terminal it has not searched, with no count and no highlight.
+  test("a restart closes the bar, and the kept query searches the new terminal", async () => {
+    const first = await renderXterm(NEEDLES);
+    await openFindWithQuery("needle");
+    expect(countElement()?.textContent).toBe("1 of 3");
+
+    const socket = await restartTerminal();
+    expect(realXterm.terminals, "restart built a second terminal").toHaveLength(2);
+    expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
+
+    const { model } = await attachXterm(socket, "sess-2", NEEDLES);
+    expect(model).not.toBe(first.model);
+    await reopen();
+    expect(findInput()?.value).toBe("needle");
+    expect(countElement()?.textContent).toBe("");
+    pressEnter(findInput()!);
+    await tick();
+    expect(countElement()?.textContent).toBe("1 of 3");
+    expect(model.getSelection()).toBe("needle");
   });
 
   test("a refresh pending when the query empties leaves the count blank", async () => {
@@ -1563,6 +1604,43 @@ describe("terminal find on the ghostty backend", () => {
       unread: 0,
     });
     expect(writeCalls("terms[0].write(bytes);\nonData(term.writeln);")).toEqual({ calls: [], unread: 2 });
+  });
+
+  test("a restart closes the bar and frees its search, and the kept query searches the new terminal", async () => {
+    const term = await renderGhostty(NEEDLES);
+    const { frames } = await findNeedle(term);
+    const free = vi.spyOn(VtSearch.prototype, "free");
+
+    await restartTerminal();
+    frames.settle();
+    await vi.waitFor(() => expect(ghostty.terminals).toHaveLength(2));
+    expect(findInput(), "the bar closed with the terminal it searched").toBeNull();
+    expect(free).toHaveBeenCalledTimes(1);
+
+    const next = ghostty.terminals.at(-1)!;
+    const socket = TestWebSocket.all.at(-1)!;
+    socket.onopen?.();
+    await socket.onmessage?.({
+      data: JSON.stringify({ type: "session", id: "sess-2", seq: 0, generation: 1, missed_bytes: 0, bytes_since_focus: 0 }),
+    });
+    await socket.onmessage?.({ data: JSON.stringify({ type: "ready", cols: 80, rows: 24 }) });
+    const bytes = new TextEncoder().encode(NEEDLES);
+    const buffer = new ArrayBuffer(bytes.length);
+    new Uint8Array(buffer).set(bytes);
+    await socket.onmessage?.({ data: buffer });
+    await vi.waitFor(() => expect(next.wasmTerm.plainText()).toContain("needle f"));
+    expect(document.activeElement, "the new terminal reads the keyboard").toBe(next.element);
+
+    fireCommand("app.find.open");
+    await tick();
+    await tick();
+    expect(findInput()?.value).toBe("needle");
+    expect(countElement()?.textContent).toBe("");
+    pressEnter(findInput()!);
+    frames.settle();
+    await tick();
+    expect(selection(next)).toEqual(match(5));
+    expect(countElement()?.textContent).toBe("1 of 3");
   });
 
   test("the terminal's teardown frees the open bar's search", async () => {

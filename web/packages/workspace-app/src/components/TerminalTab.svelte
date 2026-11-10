@@ -2639,6 +2639,14 @@
       return;
     }
     explicitCloseSession();
+    // An open find bar searches the terminal torn down here. It closes with
+    // it, as on Escape, and keeps its query for the next open: left open it
+    // would show that query over a terminal it has not searched. start()
+    // hands the keyboard to the new terminal.
+    if (findOpen) {
+      findOpen = false;
+      clearFind();
+    }
     teardown();
     void tick().then(start);
   }
