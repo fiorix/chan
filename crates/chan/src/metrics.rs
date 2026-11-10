@@ -8,7 +8,7 @@ mod varlink;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chan_server::metrics::View;
+use chan_server::metrics::{View, SCHEMA_VERSION};
 use clap::Args;
 
 #[derive(Args, Debug, Clone)]
@@ -94,14 +94,30 @@ impl Client {
             .context("cannot reach metrics server")?;
         let status = response.status();
         anyhow::ensure!(status.is_success(), "metrics server returned {status}");
-        let view: View = response.json().await.context("invalid metrics response")?;
-        anyhow::ensure!(
-            view.schema_version == 1,
-            "unsupported metrics schema {}",
-            view.schema_version
-        );
-        Ok(view)
+        let body = response
+            .bytes()
+            .await
+            .context("cannot read the metrics response")?;
+        decode(&body)
     }
+}
+
+/// Decode a metrics response. The schema version is read before the view: a
+/// version this build does not know has a shape it cannot decode, and the
+/// version is the thing to report, not the first field that differs.
+fn decode(body: &[u8]) -> Result<View> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Versioned {
+        schema_version: u32,
+    }
+    let Versioned { schema_version } =
+        serde_json::from_slice(body).context("invalid metrics response")?;
+    anyhow::ensure!(
+        schema_version == SCHEMA_VERSION,
+        "unsupported metrics schema {schema_version}"
+    );
+    serde_json::from_slice(body).context("invalid metrics response")
 }
 
 /// The local devserver's metrics URL and bearer. The address is the one the
@@ -491,7 +507,7 @@ pub(crate) fn full_view() -> View {
         yamux_stream_limit: 256,
     };
     View {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         identity: Identity {
             instance_id: "0123456789abcdef0123456789abcdef".into(),
             version: "0.127.0".into(),
@@ -573,6 +589,70 @@ mod tests {
         process.read_bytes_per_second = None;
         process.written_bytes_per_second = None;
         assert!(render(&view).contains("unavailable read n/a (n/a)  write n/a (n/a)"));
+    }
+
+    /// A loopback server that answers one connection per body, in order,
+    /// with that JSON body.
+    async fn canned(bodies: Vec<String>) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in bodies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0u8; 1];
+                    if socket.read(&mut byte).await.unwrap() == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn the_schema_version_is_read_before_the_view_is_decoded() {
+        // This schema with fields a later release added to it, at the top,
+        // in an object and beside flattened counters: a reader skips them.
+        let mut current = serde_json::to_value(full_view()).unwrap();
+        current["addedLater"] = 1.into();
+        current["storage"]["addedLater"] = "x".into();
+        current["latest"]["network"]["addedLater"] = true.into();
+        let addr = canned(vec![
+            // A later schema keeps nothing of this one but the version.
+            r#"{"schemaVersion":2,"samples":[]}"#.into(),
+            current.to_string(),
+            r#"{"identity":{}}"#.into(),
+        ])
+        .await;
+        let client = Client::new(MetricsArgs {
+            url: Some(format!("http://{addr}/")),
+            token: None,
+            json: false,
+            watch: false,
+            history: false,
+            varlink: false,
+        })
+        .unwrap();
+        let error = client.read(false, None).await.unwrap_err();
+        assert_eq!(format!("{error:#}"), "unsupported metrics schema 2");
+        let view = client.read(false, None).await.unwrap();
+        assert_eq!(view.schema_version, 1);
+        assert_eq!(view.latest.unwrap().network.totals.received_bytes, 512);
+        // A body with no version is not a metrics response at all.
+        let error = client.read(false, None).await.unwrap_err();
+        assert!(
+            format!("{error:#}").starts_with("invalid metrics response"),
+            "{error:#}"
+        );
     }
 
     #[test]

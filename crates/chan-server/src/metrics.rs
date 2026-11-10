@@ -18,6 +18,12 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 pub use storage::Storage;
 
+/// The response contract [`View`] serializes, sent as `schemaVersion`. A
+/// reader checks it first and refuses a version it does not know. Within a
+/// version fields are only added, and a reader takes an added field as
+/// optional; a rename, a removal, or a change of type or unit takes a new
+/// version.
+pub const SCHEMA_VERSION: u32 = 1;
 /// One second per aggregate sample, with ten minutes retained in memory.
 pub const HISTORY_CAPACITY: usize = 600;
 const INTERVAL: Duration = Duration::from_secs(1);
@@ -346,7 +352,7 @@ impl Runtime {
         self.demand.read();
         let cache = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         View {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             identity: self.identity.clone(),
             latest: cache.history.back().cloned(),
             history: if history {
