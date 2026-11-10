@@ -122,8 +122,8 @@ Identity offers one WireGuard ingress per proxy node that terminates WireGuard: 
 
 | Name | Value |
 | --- | --- |
-| `WIREGUARD_INGRESSES` | Semicolon-separated `id=public_key@endpoint`, one per node |
-| `WIREGUARD_INGRESS_ADDRESSES` | Tunnel address of every ingress interface: one IPv4, one IPv6 or both, comma-separated |
+| `WIREGUARD_INGRESSES` | `id=public_key@endpoint` per node, `;` between |
+| `WIREGUARD_INGRESS_ADDRESSES` | Comma-separated tunnel IPs of every ingress |
 | `WIREGUARD_ALLOWED_IPS` | Comma-separated CIDRs routed through each tunnel |
 | `WIREGUARD_PERSISTENT_KEEPALIVE` | Optional seconds, default 25; 0 omits it |
 
