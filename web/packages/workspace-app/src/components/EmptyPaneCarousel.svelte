@@ -695,10 +695,11 @@
      slide needs the full tab width/height to read; the column cap
      that suits About + Workspace text content makes the spine look
      constrained to a vertical band, and the Metrics slide caps its
-     own width. `max-width: none` drops the 720px cap; the
-     carousel-wide variant tightens the carousel's own padding so the
-     breathing border around the canvas reads as ~10px instead of the
-     16-32px the About/Workspace slides want. */
+     own width and centers itself in the stage. `max-width: none`
+     drops the 720px cap; the carousel-wide variant tightens the
+     carousel's own padding so the breathing border around the canvas
+     reads as ~10px instead of the 16-32px the About/Workspace slides
+     want. */
   .slide-stage-wide {
     max-width: none;
   }
