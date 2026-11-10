@@ -470,26 +470,20 @@ impl Origins {
 /// The variables of the single-ingress configuration, which a list of
 /// ingresses cannot be read from. A value in one is refused instead of
 /// ignored, so a deployment that still sets them does not start with
-/// enrollment silently off. Each carries what the operator sets instead.
-const SINGLE_INGRESS_VARS: [(&str, &str); 4] = [
-    (
-        "WIREGUARD_HOST_ID",
-        "each ingress's id is set in WIREGUARD_INGRESSES (id=public_key@endpoint;...)",
-    ),
-    (
-        "WIREGUARD_ENDPOINT",
-        "each ingress's endpoint is set in WIREGUARD_INGRESSES (id=public_key@endpoint;...)",
-    ),
-    (
-        "WIREGUARD_PUBLIC_KEY",
-        "each ingress's public key is set in WIREGUARD_INGRESSES (id=public_key@endpoint;...)",
-    ),
-    (
-        "WIREGUARD_HOSTS",
-        "each ingress's host map is derived from its id in WIREGUARD_INGRESSES, \
-         DEVSERVER_PROXY_ORIGIN's host and WIREGUARD_INGRESS_ADDRESSES",
-    ),
+/// enrollment silently off.
+const SINGLE_INGRESS_VARS: [&str; 4] = [
+    "WIREGUARD_HOST_ID",
+    "WIREGUARD_ENDPOINT",
+    "WIREGUARD_PUBLIC_KEY",
+    "WIREGUARD_HOSTS",
 ];
+
+/// What an operator sets instead of the single-ingress variables.
+const SINGLE_INGRESS_REPLACEMENT: &str =
+    "WIREGUARD_INGRESSES holds one id=public_key@endpoint entry per proxy node \
+     (id: the node's DEVSERVER_PROXY_ID), WIREGUARD_INGRESS_ADDRESSES holds the tunnel \
+     address WIREGUARD_HOSTS mapped, and each ingress's host map is derived from its id and \
+     DEVSERVER_PROXY_ORIGIN's host";
 
 /// Read the WireGuard enrollment offer: `None` when no enrollment variable
 /// is set, and a refusal for a partial or invalid set. `var` is the
@@ -504,6 +498,10 @@ const SINGLE_INGRESS_VARS: [(&str, &str); 4] = [
 ///
 /// Node names are derived under `origins`' proxy apex, and identity's own
 /// origin is checked against them.
+///
+/// A refusal names the variable at fault and never a value, since a key,
+/// an endpoint or a pasted secret may be what is wrong. A refusal about one
+/// entry of the list names the entry by its position, counted from 1.
 fn wireguard_from_vars(
     var: impl Fn(&str) -> Option<String>,
     origins: &Origins,
@@ -516,10 +514,17 @@ fn wireguard_from_vars(
             .map(|raw| raw.trim().to_owned())
             .filter(|raw| !raw.is_empty())
     };
-    for (name, replacement) in SINGLE_INGRESS_VARS {
-        if read(name).is_some() {
-            anyhow::bail!("{name} must be unset: {replacement}");
-        }
+    // Every one that is set is named in the one refusal: naming the first
+    // alone costs a failed start for each of the others.
+    let single: Vec<&str> = SINGLE_INGRESS_VARS
+        .into_iter()
+        .filter(|&name| read(name).is_some())
+        .collect();
+    if !single.is_empty() {
+        anyhow::bail!(
+            "{} must be unset: {SINGLE_INGRESS_REPLACEMENT}",
+            single.join(", ")
+        );
     }
     let names = [
         "WIREGUARD_INGRESSES",
@@ -573,39 +578,57 @@ fn wireguard_from_vars(
             "DEVSERVER_PROXY_ORIGIN must have a DNS host when WireGuard enrollment is configured"
         );
     };
+    // Checked once, before any entry: a host no node name can be built
+    // under is a fault of this variable, not of an ingress id.
+    if !proxy_host.split('.').all(valid_host) {
+        anyhow::bail!(
+            "DEVSERVER_PROXY_ORIGIN's host must be a DNS name of plain labels (letters, digits \
+             and inner hyphens, at most 63 bytes each, no trailing dot) when WireGuard \
+             enrollment is configured"
+        );
+    }
     let identity_host = origins
         .base_url
         .host_str()
         .context("BASE_URL must have a host")?;
-    const ENTRY: &str = "WIREGUARD_INGRESSES entries must be id=public_key@endpoint";
     let mut list: Vec<Ingress> = Vec::new();
-    for entry in ingresses.split(';') {
-        let (id, peer) = entry.split_once('=').context(ENTRY)?;
-        let (public_key, endpoint) = peer.split_once('@').context(ENTRY)?;
+    for (index, entry) in ingresses.split(';').enumerate() {
+        let position = index + 1;
+        let malformed =
+            || format!("WIREGUARD_INGRESSES entry {position} must be id=public_key@endpoint");
+        let (id, peer) = entry.split_once('=').with_context(malformed)?;
+        let (public_key, endpoint) = peer.split_once('@').with_context(malformed)?;
         let (id, endpoint) = (id.trim(), endpoint.trim());
         if ProxyId::parse(id).is_err() {
             anyhow::bail!(
-                "WIREGUARD_INGRESSES ids must be proxy ids, one lowercase DNS label each"
+                "WIREGUARD_INGRESSES entry {position} id must be a proxy id, one lowercase DNS label"
             );
         }
-        let public_key = canonical_public_key(public_key.trim())
-            .context("WIREGUARD_INGRESSES public keys must be padded base64 for 32 bytes")?;
-        validate_wireguard_endpoint(endpoint)?;
-        if list.iter().any(|ingress| ingress.id == id) {
-            anyhow::bail!("WIREGUARD_INGRESSES contains a duplicate id");
+        let public_key = canonical_public_key(public_key.trim()).with_context(|| {
+            format!(
+                "WIREGUARD_INGRESSES entry {position} public key must be padded base64 for 32 bytes"
+            )
+        })?;
+        validate_wireguard_endpoint(endpoint, position)?;
+        if let Some(first) = list.iter().position(|ingress| ingress.id == id) {
+            anyhow::bail!(
+                "WIREGUARD_INGRESSES entry {position} repeats the id of entry {}",
+                first + 1
+            );
         }
         let node = crate::wireguard::node_name(id, proxy_host);
-        if node.len() > 253 || !node.split('.').all(valid_host) {
+        if node.len() > 253 {
             anyhow::bail!(
-                "WIREGUARD_INGRESSES ids must form lowercase DNS names under \
-                 DEVSERVER_PROXY_ORIGIN's host"
+                "WIREGUARD_INGRESSES entry {position} id and DEVSERVER_PROXY_ORIGIN's host must \
+                 form a node name of at most 253 bytes"
             );
         }
         // Identity is where a desktop enrolls and reads discovery, before
         // and without any tunnel, so no ingress may carry its name.
         if identity_host == node || identity_host.ends_with(&format!(".{node}")) {
             anyhow::bail!(
-                "BASE_URL's host must not be a WireGuard ingress's node name or a name below it"
+                "BASE_URL's host must not be the node name of WIREGUARD_INGRESSES entry \
+                 {position} or a name below it"
             );
         }
         list.push(Ingress {
@@ -625,41 +648,40 @@ fn wireguard_from_vars(
     Ok(Some(enrollment))
 }
 
-/// Check one ingress endpoint: `host:port` with a DNS host, or an IPv6
-/// literal in brackets and a port.
-fn validate_wireguard_endpoint(raw: &str) -> anyhow::Result<()> {
+/// Check the endpoint of the ingress at `position` in the list: `host:port`
+/// with a DNS host, or an IPv6 literal in brackets and a port.
+fn validate_wireguard_endpoint(raw: &str, position: usize) -> anyhow::Result<()> {
+    let refusal = |reason: &str| format!("WIREGUARD_INGRESSES entry {position} endpoint {reason}");
     let (host, port) = if let Some(rest) = raw.strip_prefix('[') {
         let (host, tail) = rest
             .split_once(']')
-            .context("WIREGUARD_INGRESSES endpoint has an unterminated IPv6 literal")?;
+            .with_context(|| refusal("has an unterminated IPv6 literal"))?;
         host.parse::<std::net::Ipv6Addr>()
-            .context("WIREGUARD_INGRESSES endpoint has an invalid IPv6 address")?;
+            .with_context(|| refusal("has an invalid IPv6 address"))?;
         (
             host,
             tail.strip_prefix(':')
-                .context("WIREGUARD_INGRESSES endpoint must have a port")?,
+                .with_context(|| refusal("must have a port"))?,
         )
     } else {
         let (host, port) = raw
             .rsplit_once(':')
-            .context("WIREGUARD_INGRESSES endpoint must be host:port")?;
+            .with_context(|| refusal("must be host:port"))?;
         if host.len() > 253
             || !host
                 .to_ascii_lowercase()
                 .split('.')
                 .all(gateway_common::wireguard::valid_host)
         {
-            anyhow::bail!(
-                "WIREGUARD_INGRESSES endpoint must have a DNS host or bracketed IPv6 address"
-            );
+            anyhow::bail!(refusal("must have a DNS host or bracketed IPv6 address"));
         }
         (host, port)
     };
     let port = port
         .parse::<u16>()
-        .context("WIREGUARD_INGRESSES endpoint must have a numeric port")?;
+        .with_context(|| refusal("must have a numeric port"))?;
     if host.is_empty() || port == 0 {
-        anyhow::bail!("WIREGUARD_INGRESSES endpoint must have a host and a nonzero port");
+        anyhow::bail!(refusal("must have a host and a nonzero port"));
     }
     Ok(())
 }
@@ -1275,11 +1297,7 @@ mod wireguard_tests {
         let blank: BTreeMap<String, String> = vars()
             .into_keys()
             .chain(["WIREGUARD_PERSISTENT_KEEPALIVE".to_owned()])
-            .chain(
-                SINGLE_INGRESS_VARS
-                    .iter()
-                    .map(|(name, _)| (*name).to_owned()),
-            )
+            .chain(SINGLE_INGRESS_VARS.iter().map(|name| (*name).to_owned()))
             .zip(["", " ", "\t", "", " ", "", "\n", ""].map(str::to_owned))
             .collect();
         assert_eq!(blank.len(), 8);
@@ -1395,75 +1413,117 @@ mod wireguard_tests {
     #[test]
     fn wireguard_config_refuses_an_invalid_ingress_list() {
         let (k, other) = (key(7), key(8));
-        for (invalid, reason) in [
+        let good = format!("p1={k}@a.example.test:1");
+        // Each refusal is the whole message: the entry's position, counted
+        // from 1, what is wrong with it, and no part of its value.
+        let malformed =
+            |n: u8| format!("WIREGUARD_INGRESSES entry {n} must be id=public_key@endpoint");
+        let id = "WIREGUARD_INGRESSES entry 1 id must be a proxy id, one lowercase DNS label";
+        let public_key = |n: u8| {
+            format!("WIREGUARD_INGRESSES entry {n} public key must be padded base64 for 32 bytes")
+        };
+        let endpoint =
+            |n: u8, reason: &str| format!("WIREGUARD_INGRESSES entry {n} endpoint {reason}");
+        let no_dns_host = "must have a DNS host or bracketed IPv6 address";
+        for (invalid, refused) in [
             // Ids are unique; nothing else has to be.
             (
-                format!("p1={k}@a.example.test:1;p1={other}@b.example.test:2"),
-                "duplicate id",
+                format!("{good};p1={other}@b.example.test:2"),
+                "WIREGUARD_INGRESSES entry 2 repeats the id of entry 1".to_owned(),
+            ),
+            (
+                format!("{good};p2={k}@a.example.test:1;p2={k}@a.example.test:1"),
+                "WIREGUARD_INGRESSES entry 3 repeats the id of entry 2".to_owned(),
             ),
             // An empty list, and a trailing or doubled separator.
-            (";".to_owned(), "entries must be"),
-            (format!("p1={k}@a.example.test:1;"), "entries must be"),
-            (format!(";p1={k}@a.example.test:1"), "entries must be"),
-            (
-                format!("p1={k}@a.example.test:1;;p2={k}@a.example.test:1"),
-                "entries must be",
-            ),
+            (";".to_owned(), malformed(1)),
+            (format!("{good};"), malformed(2)),
+            (format!(";{good}"), malformed(1)),
+            (format!("{good};;p2={k}@a.example.test:1"), malformed(2)),
             // An entry without its `=` or its `@`.
-            ("p1".to_owned(), "entries must be"),
-            (format!("p1={k}"), "entries must be"),
-            (
-                format!("p1@{}a.example.test:1", &k[..43]),
-                "entries must be",
-            ),
+            ("p1".to_owned(), malformed(1)),
+            (format!("p1={k}"), malformed(1)),
+            (format!("p1@{}a.example.test:1", &k[..43]), malformed(1)),
             // The id is one proxy id.
-            (format!("={k}@a.example.test:1"), "ids must be proxy ids"),
-            (format!("P1={k}@a.example.test:1"), "ids must be proxy ids"),
-            (
-                format!("p1.example={k}@a.example.test:1"),
-                "ids must be proxy ids",
-            ),
-            (format!("-p1={k}@a.example.test:1"), "ids must be proxy ids"),
+            (format!("={k}@a.example.test:1"), id.to_owned()),
+            (format!("P1={k}@a.example.test:1"), id.to_owned()),
+            (format!("p1.example={k}@a.example.test:1"), id.to_owned()),
+            (format!("-p1={k}@a.example.test:1"), id.to_owned()),
             (
                 format!("{}={k}@a.example.test:1", "a".repeat(64)),
-                "ids must be proxy ids",
+                id.to_owned(),
             ),
             // The key is canonical padded base64 for 32 bytes.
-            ("p1=bad@a.example.test:1".to_owned(), "public keys must be"),
-            (
-                format!("p1={}@a.example.test:1", &k[..43]),
-                "public keys must be",
-            ),
-            (format!("p1={k}=@a.example.test:1"), "public keys must be"),
+            ("p1=bad@a.example.test:1".to_owned(), public_key(1)),
+            (format!("p1={}@a.example.test:1", &k[..43]), public_key(1)),
+            (format!("p1={k}=@a.example.test:1"), public_key(1)),
             (
                 format!(
                     "p1={}@a.example.test:1",
                     base64::engine::general_purpose::STANDARD.encode([7; 31])
                 ),
-                "public keys must be",
+                public_key(1),
             ),
             (
                 format!("p1=@a.example.test:1;p2={k}@a.example.test:1"),
-                "public keys must be",
+                public_key(1),
             ),
-            // The endpoint is host:port, an IPv6 literal in brackets.
-            (format!("p1={k}@wg.example.test:0"), "endpoint"),
-            (format!("p1={k}@[not-v6]:51820"), "endpoint"),
-            (format!("p1={k}@[2001:db8::1]"), "endpoint"),
-            (format!("p1={k}@example.test:65536"), "endpoint"),
-            (format!("p1={k}@example.test"), "endpoint"),
-            (format!("p1={k}@2001:db8::1:51820"), "endpoint"),
-            (format!("p1={k}@user@example.test:51820"), "endpoint"),
-            (format!("p1={k}@"), "endpoint"),
+            // One bad key among good entries is found by its position.
+            (
+                format!("{good};p2={k}@a.example.test:1;p3=bad@a.example.test:1"),
+                public_key(3),
+            ),
+            // The endpoint is host:port, an IPv6 literal in brackets. Each
+            // way of being wrong has its own message.
+            (
+                format!("p1={k}@wg.example.test:0"),
+                endpoint(1, "must have a host and a nonzero port"),
+            ),
+            (
+                format!("p1={k}@[not-v6]:51820"),
+                endpoint(1, "has an invalid IPv6 address"),
+            ),
+            (
+                format!("p1={k}@[2001:db8::1:51820"),
+                endpoint(1, "has an unterminated IPv6 literal"),
+            ),
+            (
+                format!("p1={k}@[2001:db8::1]"),
+                endpoint(1, "must have a port"),
+            ),
+            (
+                format!("p1={k}@example.test:65536"),
+                endpoint(1, "must have a numeric port"),
+            ),
+            (
+                format!("p1={k}@example.test"),
+                endpoint(1, "must be host:port"),
+            ),
+            (format!("p1={k}@"), endpoint(1, "must be host:port")),
+            (
+                format!("p1={k}@2001:db8::1:51820"),
+                endpoint(1, no_dns_host),
+            ),
+            (
+                format!("p1={k}@user@example.test:51820"),
+                endpoint(1, no_dns_host),
+            ),
+            (format!("p1={k}@:51820"), endpoint(1, no_dns_host)),
+            (
+                format!("p1={k}@wg.example.test.:51820"),
+                endpoint(1, no_dns_host),
+            ),
             // The second entry is checked like the first.
             (
-                format!("p1={k}@a.example.test:1;p2={k}@b.example.test"),
-                "endpoint",
+                format!("{good};p2={k}@b.example.test"),
+                endpoint(2, "must be host:port"),
             ),
         ] {
-            let error = refusal("WIREGUARD_INGRESSES", &invalid);
-            assert!(error.contains("WIREGUARD_INGRESSES"), "{invalid}: {error}");
-            assert!(error.contains(reason), "{invalid}: {error}");
+            assert_eq!(
+                refusal("WIREGUARD_INGRESSES", &invalid),
+                refused,
+                "{invalid}"
+            );
         }
     }
 
@@ -1542,26 +1602,44 @@ mod wireguard_tests {
     }
 
     #[test]
-    fn wireguard_config_refuses_each_single_ingress_name() {
-        for (name, replacement) in [
-            ("WIREGUARD_HOST_ID", "WIREGUARD_INGRESSES"),
-            ("WIREGUARD_ENDPOINT", "WIREGUARD_INGRESSES"),
-            ("WIREGUARD_PUBLIC_KEY", "WIREGUARD_INGRESSES"),
-            ("WIREGUARD_HOSTS", "WIREGUARD_INGRESS_ADDRESSES"),
-        ] {
+    fn wireguard_config_refuses_the_single_ingress_names_in_one_message() {
+        let refused = |names: &str| format!("{names} must be unset: {SINGLE_INGRESS_REPLACEMENT}");
+        for name in SINGLE_INGRESS_VARS {
             // Refused beside a complete list, and alone: a deployment that
             // sets only these must not start with enrollment off.
             for mut values in [vars(), BTreeMap::new()] {
                 values.insert(name.into(), "p1".into());
                 let error = parse(&values).unwrap_err().to_string();
-                assert!(
-                    error.starts_with(&format!("{name} must be unset")),
-                    "{error}"
-                );
-                assert!(error.contains(replacement), "{name}: {error}");
+                assert_eq!(error, refused(name));
             }
         }
-        assert_eq!(SINGLE_INGRESS_VARS.len(), 4);
+        // Every one that is set is named at once, so one failed start
+        // tells the operator all of them, and no value is printed.
+        let set = |names: &[&str]| -> BTreeMap<String, String> {
+            names
+                .iter()
+                .map(|name| ((*name).to_owned(), "a-value".to_owned()))
+                .collect()
+        };
+        let error = parse(&set(&SINGLE_INGRESS_VARS)).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            refused("WIREGUARD_HOST_ID, WIREGUARD_ENDPOINT, WIREGUARD_PUBLIC_KEY, WIREGUARD_HOSTS")
+        );
+        // A blank one is unset, and is not named.
+        let mut values = set(&["WIREGUARD_HOSTS", "WIREGUARD_ENDPOINT"]);
+        values.insert("WIREGUARD_HOST_ID".into(), " ".into());
+        let error = parse(&values).unwrap_err().to_string();
+        assert_eq!(error, refused("WIREGUARD_ENDPOINT, WIREGUARD_HOSTS"));
+        // The message says what to write instead.
+        for name in [
+            "WIREGUARD_INGRESSES",
+            "id=public_key@endpoint",
+            "DEVSERVER_PROXY_ID",
+            "WIREGUARD_INGRESS_ADDRESSES",
+        ] {
+            assert!(SINGLE_INGRESS_REPLACEMENT.contains(name), "{name}");
+        }
     }
 
     #[test]
@@ -1678,35 +1756,57 @@ mod wireguard_tests {
                 "{error}"
             );
         }
-        // A node name is a DNS name of at most 253 bytes, each label a
-        // lowercase one.
+        // A host no node name can be built under is refused once, as a
+        // fault of the apex and not of an id: each label is a plain one.
         for proxy in [
-            format!(
-                "https://{}.test",
-                ["a".repeat(63).as_str(); 4].join(".")[..247].to_owned()
-            ),
             "https://proxy_apex.example.test".to_owned(),
             "https://proxy.example.test.".to_owned(),
+            format!("https://{}.example.test", "a".repeat(64)),
         ] {
             let error = parse_at(&vars(), "https://gw.example.test", &proxy)
                 .unwrap_err()
                 .to_string();
-            assert!(
-                error.contains("DEVSERVER_PROXY_ORIGIN's host"),
-                "{proxy}: {error}"
+            assert_eq!(
+                error,
+                "DEVSERVER_PROXY_ORIGIN's host must be a DNS name of plain labels (letters, \
+                 digits and inner hyphens, at most 63 bytes each, no trailing dot) when \
+                 WireGuard enrollment is configured",
+                "{proxy}"
             );
         }
+        // A node name is at most 253 bytes, a bound the id and the apex's
+        // host share.
+        let long = format!(
+            "https://{}.test",
+            ["a".repeat(63).as_str(); 4].join(".")[..247].to_owned()
+        );
+        let error = parse_at(&vars(), "https://gw.example.test", &long)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "WIREGUARD_INGRESSES entry 1 id and DEVSERVER_PROXY_ORIGIN's host must form a node \
+             name of at most 253 bytes"
+        );
 
-        // Identity's own name is never one an ingress carries.
-        for identity in [
-            "https://p1.proxy.example.test",
-            "https://gw.p2.proxy.example.test",
-            "https://a.b.p1.proxy.example.test",
+        // Identity's own name is never one an ingress carries, and the
+        // refusal says which entry's node it is at or below.
+        for (identity, entry) in [
+            ("https://p1.proxy.example.test", 1),
+            ("https://gw.p2.proxy.example.test", 2),
+            ("https://a.b.p1.proxy.example.test", 1),
         ] {
             let error = parse_at(&vars(), identity, "https://proxy.example.test")
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("BASE_URL's host"), "{identity}: {error}");
+            assert_eq!(
+                error,
+                format!(
+                    "BASE_URL's host must not be the node name of WIREGUARD_INGRESSES entry \
+                     {entry} or a name below it"
+                ),
+                "{identity}"
+            );
         }
         // Beside the nodes, at the apex, or under a node that is no
         // ingress, it is outside every host map.
