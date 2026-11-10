@@ -6432,7 +6432,7 @@ pub(crate) fn run_menu_item(app: &tauri::AppHandle, id: &str, invoked_for: Optio
                 tracing::warn!(error = %e, "open new window for focused workspace failed");
             }
         }
-        "app-open-in-browser" => {
+        OPEN_IN_BROWSER_MENU_ID => {
             if let Err(e) = open_focused_window_in_browser(app) {
                 tracing::warn!(error = %e, "open focused window in browser failed");
             }
@@ -6859,13 +6859,12 @@ trait WindowMenuSurface {
 /// bottom, and its other items after Zoom. A tail below them is removed by
 /// the wrong indices, which deletes AppKit's items and strands the old
 /// rows where no later pass can find them, so sections pile up with the
-/// titles they were stamped with. Above Minimize the tail's indices hold
-/// as long as AppKit adds nothing there, which is what Tauri's and muda's
-/// code and the owner's menu show: the items above Minimize are chan's
-/// own, Tauri builds Minimize and Zoom below them and has muda hand the
-/// submenu to AppKit as the windows menu (`setWindowsMenu:`), and the menu
-/// AppKit fills shows its items only after Zoom and at the bottom. Off
-/// macOS the submenu ends at Open in Browser and the tail closes it.
+/// titles they were stamped with. Above Minimize the tail's indices hold,
+/// since AppKit adds nothing there: the items above Minimize are chan's
+/// own, and Tauri builds Minimize and Zoom below them and has muda hand
+/// the submenu to AppKit as the windows menu (`setWindowsMenu:`), which
+/// AppKit fills after Zoom and at the bottom. Off macOS the submenu ends
+/// at Open in Browser and the tail closes it.
 fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) {
     // Back to front, so each removal leaves the positions still to come
     // in place.
@@ -7492,12 +7491,6 @@ async fn restore_on_workspaces<R: tauri::Runtime>(
     }
 }
 
-/// Start the one normal-exit drain. Snapshot the mounted overlay before any
-/// tenant is removed, await every embedded tenant, then perform the process
-/// action. Synchronous Tauri hooks call this and return; the async task owns the
-/// remaining state. A second request while a drain is in flight is refused and
-/// handed back, so a caller holding something valuable (the Windows staged
-/// installer) can keep it rather than lose it silently.
 /// Whether the embedded library holds a shown record the window watcher has
 /// not opened yet (`window_watcher::awaiting_native_window`).
 fn window_on_its_way(app: &tauri::AppHandle) -> bool {
@@ -7535,6 +7528,12 @@ fn schedule_exit_when_nothing_opened(app: tauri::AppHandle) {
     });
 }
 
+/// Start the one normal-exit drain. Snapshot the mounted overlay before any
+/// tenant is removed, await every embedded tenant, then perform the process
+/// action. Synchronous Tauri hooks call this and return; the async task owns the
+/// remaining state. A second request while a drain is in flight is refused and
+/// handed back, so a caller holding something valuable (the Windows staged
+/// installer) can keep it rather than lose it silently.
 fn begin_normal_shutdown(
     app: tauri::AppHandle,
     action: ShutdownAction,
@@ -8165,7 +8164,7 @@ mod tests {
         );
     }
 
-    /// The owner's menu after privacy mode went on and off: AppKit lists the
+    /// The Window menu as privacy mode goes on and off: AppKit lists the
     /// windows at the bottom of its windows menu and rebuilds stamp the tail
     /// around it. Each rebuild leaves the latest tail alone, with the titles
     /// it was stamped with, and every AppKit item.
@@ -8200,6 +8199,30 @@ mod tests {
             .shown()
             .iter()
             .all(|(_, text)| text != "Chan (privacy mode)"));
+    }
+
+    /// The Open in Browser item's id is spelled once, in its constant: the
+    /// menus are built with it, the dynamic tail is anchored on it and the
+    /// handler matches it, so a rename cannot leave the item without its
+    /// action.
+    #[test]
+    fn the_open_in_browser_item_id_is_spelled_once() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        assert_eq!(
+            production
+                .matches(&format!("\"{OPEN_IN_BROWSER_MENU_ID}\""))
+                .count(),
+            1,
+            "only the constant's definition spells the id"
+        );
+        let handler = source_region(
+            production,
+            "\npub(crate) fn run_menu_item(",
+            "\n/// Window-menu item id namespace for buried-window entries",
+        );
+        assert!(handler.contains("OPEN_IN_BROWSER_MENU_ID => {"));
     }
 
     /// AppKit may add items after Zoom too (the window tiling items) and

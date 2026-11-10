@@ -415,6 +415,14 @@ enum Forward {
 }
 
 /// Read the desktop's windows and choose ([`forward_choice`]).
+///
+/// The caller is the handoff listener's handler, on a runtime worker, and
+/// each window's visibility is a round trip to the main thread that blocks
+/// the worker until it is answered. That keeps the reads in step with the
+/// main thread: one queues behind a window the main thread is building, so
+/// that window is read once its build has run. A main thread that is stuck
+/// answers none, the worker stays parked, and the launch, getting no reply,
+/// exits as beside a desktop that does not answer.
 fn forward_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Forward {
     // Read before the windows. A window the watcher builds between the two
     // reads was on its way at the first, so no terminal opens beside it; in
