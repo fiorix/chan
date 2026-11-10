@@ -75,6 +75,8 @@ The owner added four more the same day: a tmux window's title bar shows the acti
 
 A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's selected match on every resize, so v0.127.0 drops the highlight and shows no index until the next step, and the owner moved keeping the match, through the core's tracked grid references, here ([findresize]).
 
+A sixth came from the owner on 2026-11-10: in windows that are not tmux windows, the pane tree shows beside each terminal what runs in it, read as tmux panes are, from the title the program sets, else its foreground command ([termcmd]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -86,6 +88,7 @@ A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's s
 | [a theme switch leaves ghostty colours][livetheme] | not started | design |
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
+| [the pane tree hides what a terminal runs][termcmd] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -96,6 +99,7 @@ A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's s
 [livetheme]: v0.128.0/a-ghostty-terminal-keeps-its-old-colours-after-a-theme-switch.md
 [openwith]: v0.128.0/chan-cannot-be-opened-as-a-file-browser-or-markdown-editor.md
 [findresize]: v0.128.0/a-ghostty-find-loses-its-match-on-a-resize.md
+[termcmd]: v0.128.0/the-pane-tree-does-not-show-what-a-terminal-is-running.md
 
 ## Completed
 
