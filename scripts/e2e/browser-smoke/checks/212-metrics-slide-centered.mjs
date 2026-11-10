@@ -142,8 +142,8 @@ async function readBoxes(page, selector) {
 const differ = (a, b, by = TOLERANCE) => Math.abs(a - b) > by;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-/// The wide stage takes the whole tab inside the carousel's padding, down to
-/// the controls row. Each judge below returns what is wrong, one line a
+/// The wide stage starts at the carousel's top padding and runs from one side
+/// padding to the other. Each judge below returns what is wrong, one line a
 /// finding, and nothing when nothing is.
 function judgeWideStage(m) {
   const room = m.stageRoom;
@@ -246,8 +246,8 @@ export default {
 
     try {
       await showSlide(page, "Metrics", ".metrics-slide");
-      // The cards arrive with the first sample; the slide before it is two
-      // lines tall, which is no slide to measure.
+      // The cards arrive with the first sample; the slide before it holds
+      // its header and one waiting line, which is no slide to measure.
       await page.waitForSelector(".dashboard.active .metrics-slide .details", {
         timeout: 20_000,
       });
