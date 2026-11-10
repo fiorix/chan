@@ -1152,7 +1152,13 @@ async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uui
     let response = client.get("/desktop/authorize/consent").await;
     assert_eq!(response.status, StatusCode::OK);
     assert!(response.body_str().contains("WireGuard key"));
-    assert!(response.body_str().contains("p1.proxy.example.test:51820"));
+    // The page names both ingresses the fixture offers, by id and endpoint.
+    for ingress in [
+        "p1 at p1.proxy.example.test:51820",
+        "p2 at p2.proxy.example.test:51820",
+    ] {
+        assert!(response.body_str().contains(ingress), "{ingress}");
+    }
     extract_csrf(response.body_str())
 }
 
