@@ -85,13 +85,14 @@ fi
 # host. No disk cap: the guest is removed after the run, and sdme refuses
 # --disk on a host whose btrfs already has quotas enabled by something else.
 printf '==> creating guest %s from rootfs %s\n' "$CONTAINER" "$ROOTFS"
+# Marked as ours before the creating call, on the word of the listing above
+# that no guest had this name: a create cut short after it registered the
+# guest still reaches the cleanup with the guest to remove.
+created=1
 "${SDME_CMD[@]}" create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
     --memory 1G --private-network \
     -b "$REPO/packaging/gateway/scripts:$GUEST/scripts:ro" \
     -b "$REPO/gateway/migrations:$GUEST/migrations:ro"
-# Marked as ours before the boot, so an interrupt during it still reaches the
-# cleanup with the guest to remove.
-created=1
 "${SDME_CMD[@]}" start -t 120 "$CONTAINER"
 
 # chan-pg-bootstrap.service runs after initdb and the server start, and creates

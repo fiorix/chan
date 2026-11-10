@@ -29,6 +29,14 @@ accept --config /tmp/test-sdme.conf create --name probe -r ubuntu --storage btrf
 accept create --config /tmp/test-sdme.conf --name probe -r ubuntu --storage btrfs --disk 44G --started
 accept exec probe timeout -s TERM -k 30s 1s true
 accept exec probe -- timeout -s TERM -k 30s 1s true
+accept exec --user postgres probe -- true
+[ "$SDME_STUB_USER" = postgres ] && [ "$SDME_STUB_NAME" = probe ] \
+    || { printf 'exec --user did not keep the user apart from the name\n' >&2; exit 1; }
+refuse exec --user
+refuse exec --user postgres
+refuse exec --user postgres probe
+accept create --name probe -r ubuntu --storage btrfs --private-network
+refuse create --name probe -r ubuntu --storage btrfs --private-network=yes
 accept new --name probe -r ubuntu --storage btrfs --disk 44G --cpus abc --memory 2X -- true
 accept create --name probe -r ubuntu --storage btrfs --disk 44G --cpus abc --memory 2X --started
 accept --config /tmp/test-sdme.conf set probe --cpus 2 --memory 2G --disk 3G --cpu-weight 100
