@@ -542,6 +542,54 @@ async fn wireguard_peers_list_drops_revoked_expired_and_blocked() {
     app.cleanup().await;
 }
 
+/// Pins the list's validator to the echoed host: agents with different host
+/// ids poll the same peers, an agent refuses a body naming another host, and a
+/// 304 stands for the body the request would have got. So another host's
+/// validator never earns a 304, and a host's own one does while nothing changes.
+#[tokio::test]
+async fn wireguard_peer_list_validator_covers_the_echoed_host() {
+    let app = wireguard_app("10.7.0.0/24", None, None).await;
+    let owner = mk_user(&app, "validator@example.com").await;
+    let (status, first) = enroll_peer(&app, &owner, 0).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(enroll_peer(&app, &owner, 1).await.0, StatusCode::CREATED);
+    let (status, p1_etag, p1_body) = peer_list(&app, "p1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, p2_etag, p2_body) = peer_list(&app, "p2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let p1: Value = serde_json::from_slice(&p1_body).unwrap();
+    let p2: Value = serde_json::from_slice(&p2_body).unwrap();
+    assert_eq!((&p1["host"], &p2["host"]), (&json!("p1"), &json!("p2")));
+    assert_eq!(p1["peers"].as_array().unwrap().len(), 2);
+    assert_eq!(p1["peers"], p2["peers"]);
+    let (status, etag, body) = peer_list(&app, "p2", Some(&p1_etag)).await;
+    assert_eq!(status, StatusCode::OK, "p1's validator must not match p2");
+    assert_eq!(etag, p2_etag);
+    assert_eq!(body, p2_body);
+    assert_ne!(p1_etag, p2_etag);
+    for (host, own) in [("p1", &p1_etag), ("p2", &p2_etag)] {
+        let (status, etag, body) = peer_list(&app, host, Some(own)).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED, "{host}");
+        assert_eq!(&etag, own);
+        assert!(body.is_empty());
+    }
+    let token: Uuid = first["token_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("UPDATE api_tokens SET revoked_at = now() WHERE id = $1")
+        .bind(token)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    for (host, stale) in [("p1", &p1_etag), ("p2", &p2_etag)] {
+        let (status, etag, body) = peer_list(&app, host, Some(stale)).await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+        assert_ne!(&etag, stale);
+        let list: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(list["host"], host);
+        assert_eq!(list["peers"].as_array().unwrap().len(), 1);
+    }
+    app.cleanup().await;
+}
+
 #[tokio::test]
 async fn wireguard_release_frees_an_address_only_after_the_grace() {
     let app = wireguard_app("10.7.0.0/30", None, None).await;
