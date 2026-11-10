@@ -352,10 +352,11 @@ require_one_agent_token() {
 
 full_answers="$pg_answers"$'https://gw.example.test\nhttps://proxy.example.test:8443\n\np1\n\n'
 oauth_answers=$'github-client\ngithub-secret\n\n\n'
-# How a run announces that the files it replaces have enrollment on, and
-# that the pool it writes is not the one they set.
+# How a run announces that the files it replaces have enrollment on, that
+# the pool it writes is not the one they set, and the settings it drops.
 replaced_enrollment='The configuration this run replaces has WireGuard enrollment on'
 pool_changes='The pool changes from'
+not_written='The files this run replaces set these WireGuard settings, which it does not'
 
 # Two nodes, typed with spaces, an uppercase host and a bracketed IPv6
 # endpoint, and a pool of the operator's own. The list is written without
@@ -448,40 +449,55 @@ printf 'PASS configure: a list without this node says its agent is refused, on t
 
 # Runs over a configuration that has enrollment on. Every run writes the
 # files whole from its own answers, so an empty list would turn enrollment
-# off: the run shows the list and the pool it replaces before it asks, each
-# as its file sets it and without a hand-edited line's indentation. The list
-# is no default; the pool is the pool question's default, shown in its
-# prompt, and a pool given in its place is announced with what it does.
+# off: the run says so before it asks, and shows the list as a line to answer
+# with, as the list check writes it. The list is no default; the pool is the
+# pool question's default, shown in its prompt, and a pool given in its
+# place is announced with what it does. The planted list is a hand edit, in
+# quotes, indented and with spaces, which a pasted line must not carry.
 kept_list="$p1_entry;p2=$key_b@[2001:db8::2]:51821"
 plant_enrollment() {
     cat > "$full_root/identity.env" <<EOF
 WIREGUARD_AGENT_TOKEN=$agent_token
-  WIREGUARD_INGRESSES=$kept_list
+  WIREGUARD_INGRESSES=" p1 = $key_a @ p1.proxy.example.test:51820 ; p2=$key_b@[2001:db8::2]:51821 "
 WIREGUARD_INGRESS_ADDRESSES=10.9.8.1
 WIREGUARD_ALLOWED_IPS=10.9.8.1/32
 EOF
     printf 'WIREGUARD_POOL_V4=%s\n' "$1" > "$full_root/profile.env"
 }
 require_replaced_enrollment() {
-    local shown
     require_output "$replaced_enrollment"
-    for shown in "WIREGUARD_INGRESSES=$kept_list" "WIREGUARD_POOL_V4=$1"; do
-        grep -Fqx -- "    $shown" "$WORK/configure-full.out" \
-            || die "configure run did not show the replaced line: $shown"
-    done
-    require_output 'An empty answer below leaves enrollment off'
+    require_output 'answer to the list below turns it off. To keep it, answer with this line:'
+    require_output "The pool question offers the pool profile.env sets, $1."
 }
 # Every file under the scratch root and its digest: a refused run changes none.
 root_digest() {
     find "$full_root" -type f -exec sha256sum {} + | sort
 }
 
-# The list given again and the pool answered with Enter: both are written as
-# the replaced files set them, and the pool does not change.
+# An empty list: the run shows what the answer costs before it takes it,
+# and the answer still turns enrollment off in both files.
 plant_enrollment 10.9.8.0/22
-configure_tty_run "$WORK/postinst-bin" "$full_answers"$'wg0\n'"$kept_list"$'\n\n'"$oauth_answers" \
-    || die "configure run failed (the replaced list given again): $(cat "$WORK/configure-full.out" "$WORK/configure-full.err")"
+configure_run 'empty list over an ingress list' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n\n'"$oauth_answers"
 require_replaced_enrollment 10.9.8.0/22
+shown_list=$(sed -n '/To keep it, answer with this line:$/{n;p;}' "$WORK/configure-full.out")
+[[ -n $shown_list ]] || die "the enrollment notice showed no line to answer with"
+require_wireguard_names "$full_root/identity.env" 'WIREGUARD_AGENT_TOKEN '
+require_wireguard_names "$full_root/profile.env" ''
+refute_output 'WireGuard enrollment is on for these nodes'
+refute_output "$not_written"
+printf 'PASS configure: an empty list over a configured one is announced and leaves enrollment off\n'
+
+# The line shown, given back whole as the answer, and Enter at the pool: the
+# list is written as the replaced file meant it and the pool does not
+# change. The tunnel address and allowed IPs the replaced file sets are the
+# ones the pool gives, so no setting is named as not written.
+plant_enrollment 10.9.8.0/22
+configure_tty_run "$WORK/postinst-bin" "$full_answers"$'wg0\n'"$shown_list"$'\n\n'"$oauth_answers" \
+    || die "configure run failed (the shown line given back): $(cat "$WORK/configure-full.out" "$WORK/configure-full.err")"
+require_replaced_enrollment 10.9.8.0/22
+[[ $shown_list == "    $kept_list" ]] \
+    || die "the enrollment notice showed [$shown_list], expected [    $kept_list]"
 require_output 'WireGuard address pool [10.9.8.0/22]: '
 require_env "$full_root/identity.env" WIREGUARD_INGRESSES "$kept_list"
 require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.9.8.0/22
@@ -489,8 +505,9 @@ require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.9.8.1
 require_env "$full_root/identity.env" WIREGUARD_ALLOWED_IPS 10.9.8.1/32
 require_output 'Address = 10.9.8.1/22'
 refute_output "$pool_changes"
+refute_output "$not_written"
 require_output 'WireGuard enrollment is on for these nodes: p1 p2'
-printf 'PASS configure: a rerun shows the enrollment it replaces and keeps the pool on Enter\n'
+printf 'PASS configure: a rerun shows the replaced list as an answer it takes and keeps the pool on Enter\n'
 
 # Another pool given at the same question is written, and the run says that
 # enrolled keys keep their addresses and the interfaces change address.
@@ -504,16 +521,68 @@ require_output 'nothing moves them into the new pool. Each node'"'"'s interface 
 require_output 'Address = 10.7.0.1/24'
 printf 'PASS configure: a new pool over a replaced one says what it does to enrolled keys\n'
 
-# The same list, now as the last run wrote it, answered with an empty one.
-# The run says what the answer costs before it takes it, and the answer
-# still turns enrollment off.
-configure_run 'empty list over an ingress list' "$WORK/postinst-bin" \
+# A replaced list the check refuses as it stands is shown as the file sets
+# it, with the reason, and is not offered as a line to answer with.
+plant_enrollment 10.9.8.0/22
+printf 'WIREGUARD_INGRESSES=P1=%s@p1.proxy.example.test:51820\n' "$key_a" > "$full_root/identity.env"
+configure_run 'a replaced list the check refuses' "$WORK/postinst-bin" \
     "$full_answers"$'wg0\n\n'"$oauth_answers"
-require_replaced_enrollment 10.7.0.0/24
-require_wireguard_names "$full_root/identity.env" 'WIREGUARD_AGENT_TOKEN '
-require_wireguard_names "$full_root/profile.env" ''
-refute_output 'WireGuard enrollment is on for these nodes'
-printf 'PASS configure: an empty list over a configured one is announced and leaves enrollment off\n'
+require_output 'with a list'
+require_output 'this run refuses (WireGuard ingress entry 1: the id must be a proxy node id, one lowercase DNS label):'
+grep -Fqx -- "    P1=$key_a@p1.proxy.example.test:51820" "$WORK/configure-full.out" \
+    || die "configure run did not show the refused list as identity.env sets it"
+refute_output 'answer with this line:'
+printf 'PASS configure: a replaced list the check refuses is shown with its reason\n'
+
+# The WireGuard settings the run does not carry over are named, each by its
+# file, with a pointer to the backups: the IPv6 pool, the reservations, the
+# release grace, the keepalive, the agent's poll interval and wg binary,
+# and a tunnel address and allowed networks the pool does not give. No
+# secret is printed: the bearers, a look-alike name and a commented line
+# hold a marker that must appear nowhere in the run's output.
+marker=planted-secret-c0ffee
+plant_enrollment 10.9.8.0/22
+cat >> "$full_root/identity.env" <<EOF
+WIREGUARD_AGENT_TOKEN=$marker
+WIREGUARD_AGENT_TOKEN_NEXT=$marker
+IDENTITY_INTERNAL_TOKEN=$marker
+WIREGUARD_INGRESS_ADDRESSES=10.9.8.1,fd00:7::1
+WIREGUARD_ALLOWED_IPS=10.9.8.1/32,fd00:7::1/128
+WIREGUARD_PERSISTENT_KEEPALIVE='25'
+EOF
+cat >> "$full_root/profile.env" <<EOF
+PROFILE_AUTH_TOKEN=$marker
+WIREGUARD_POOL_V6=fd00:7::/64
+WIREGUARD_POOL_RESERVED=10.9.8.10,fd00:7::10
+WIREGUARD_RELEASE_GRACE_MINUTES=7
+# WIREGUARD_RELEASE_GRACE_MINUTES=$marker
+EOF
+cat > "$full_root/wireguard-agent.env" <<EOF
+WIREGUARD_AGENT_TOKEN=$marker
+WIREGUARD_AGENT_POLL_SECS=9
+WIREGUARD_WG_BIN=/usr/local/bin/wg
+EOF
+configure_run 'settings the run does not carry over' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n'"$kept_list"$'\n\n'"$oauth_answers"
+for printed in "$WORK/configure-full.out" "$WORK/configure-full.err"; do
+    if grep -Fq -- "$marker" "$printed"; then
+        die "configure run printed a planted secret"
+    fi
+done
+require_output "$not_written"
+require_output 'carry over. Set them again by hand from the backup it keeps of each file,'
+for shown in 'identity.env: WIREGUARD_INGRESS_ADDRESSES=10.9.8.1,fd00:7::1' \
+    'identity.env: WIREGUARD_ALLOWED_IPS=10.9.8.1/32,fd00:7::1/128' \
+    'identity.env: WIREGUARD_PERSISTENT_KEEPALIVE=25' \
+    'profile.env: WIREGUARD_POOL_V6=fd00:7::/64' \
+    'profile.env: WIREGUARD_POOL_RESERVED=10.9.8.10,fd00:7::10' \
+    'profile.env: WIREGUARD_RELEASE_GRACE_MINUTES=7' \
+    'wireguard-agent.env: WIREGUARD_AGENT_POLL_SECS=9' \
+    'wireguard-agent.env: WIREGUARD_WG_BIN=/usr/local/bin/wg'; do
+    grep -Fqx -- "    $shown" "$WORK/configure-full.out" \
+        || die "configure run did not name the setting it does not carry over: $shown"
+done
+printf 'PASS configure: the settings a run does not carry over are named, and no secret is printed\n'
 
 # A replaced pool the script refuses, here with host bits set, is no default:
 # the run says so and asks without one, and Enter stops it before anything
@@ -525,6 +594,9 @@ if configure_tty_run "$WORK/postinst-bin" "$full_answers"$'wg0\n'"$kept_list"$'\
 fi
 require_output 'profile.env sets the pool 10.9.8.5/22, which this run does not write:'
 require_output 'This question has no default; an empty answer stops the run.'
+# With no default pool to compare with, the tunnel address is named.
+grep -Fqx -- '    identity.env: WIREGUARD_INGRESS_ADDRESSES=10.9.8.1' "$WORK/configure-full.out" \
+    || die "configure run did not name the tunnel address without a default pool"
 require_output 'WireGuard address pool: error: WireGuard address pool must be an IPv4 network'
 refute_output 'WireGuard address pool ['
 [[ $(root_digest) == "$digest_before" ]] \

@@ -123,16 +123,27 @@ read_replaced() {
     done <<< "$settings"
 }
 
-# What the replaced files set for WireGuard enrollment, shown before the
-# WireGuard prompt below. Identity refuses to start while one of the four
-# variables that describe a single ingress is set.
+# What the replaced files set for WireGuard, shown before the WireGuard
+# prompt below. Identity refuses to start while one of the four variables
+# that describe a single ingress is set. The list and the pool are this
+# run's answers. Every other WireGuard setting is one the run never writes:
+# REPLACED_ONLY names them, by the file that carries them. None is a secret.
 SINGLE_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
     'WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)') || exit 1
-REPLACED_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
-    'WIREGUARD_INGRESSES') || exit 1
-REPLACED_POOL_LINES=$(set_lines /etc/chan-gateway/profile.env \
-    'WIREGUARD_POOL_V4') || exit 1
-read_replaced /etc/chan-gateway/profile.env WIREGUARD_POOL_V4
+declare -A REPLACED_ONLY=(
+    [identity]='WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS WIREGUARD_PERSISTENT_KEEPALIVE'
+    [profile]='WIREGUARD_POOL_V6 WIREGUARD_POOL_RESERVED WIREGUARD_RELEASE_GRACE_MINUTES'
+    [wireguard-agent]='WIREGUARD_AGENT_POLL_SECS WIREGUARD_WG_BIN'
+)
+# shellcheck disable=SC2086  # the name lists split into words on purpose
+read_replaced /etc/chan-gateway/identity.env WIREGUARD_INGRESSES ${REPLACED_ONLY[identity]}
+# shellcheck disable=SC2086
+read_replaced /etc/chan-gateway/profile.env WIREGUARD_POOL_V4 ${REPLACED_ONLY[profile]}
+if [[ $AGENT_INSTALLED == true ]]; then
+    # shellcheck disable=SC2086
+    read_replaced /etc/chan-gateway/wireguard-agent.env ${REPLACED_ONLY[wireguard-agent]}
+fi
+REPLACED_INGRESSES=${REPLACED[WIREGUARD_INGRESSES]:-}
 REPLACED_POOL_V4=${REPLACED[WIREGUARD_POOL_V4]:-}
 
 read -rp "Postgres user [chan]: " PG_USER
@@ -348,19 +359,6 @@ if [[ -n $SINGLE_INGRESS_LINES ]]; then
     echo "<its node's proxy id>=<WIREGUARD_PUBLIC_KEY>@<WIREGUARD_ENDPOINT>."
 fi
 
-# The list is this run's answer like every other value, so an empty answer
-# below turns enrollment off where the replaced files have it on. It is
-# shown first, as identity.env sets it, to be given again, and is no
-# default: a default would keep a node the operator is retiring.
-if [[ -n $REPLACED_INGRESS_LINES ]]; then
-    echo
-    echo "The configuration this run replaces has WireGuard enrollment on:"
-    printf '%s\n' "$REPLACED_INGRESS_LINES"
-    [[ -z $REPLACED_POOL_LINES ]] || printf '%s\n' "$REPLACED_POOL_LINES"
-    echo "An empty answer below leaves enrollment off. To keep it, give the list"
-    echo "shown here again; the pool question offers this pool as its default."
-fi
-
 # The pool is not retired with a node. Profile keeps every address it has
 # allocated, and moves none of them when the pool changes. The default is
 # the pool the replaced profile.env sets, also when identity.env has no
@@ -374,6 +372,61 @@ if [[ -n $REPLACED_POOL_V4 ]]; then
     if WG_ANSWER=$(wireguard_pool "$REPLACED_POOL_V4" 2> /dev/null); then
         WG_POOL_DEFAULT=${WG_ANSWER%%$'\n'*}
     fi
+fi
+
+# The list is this run's answer like every other value, so an empty answer
+# below turns enrollment off where the replaced files have it on. It is no
+# default, since a default would keep a node the operator is retiring:
+# it is shown first, as the list check writes it, so that the line shown is
+# an answer the check takes.
+if [[ -n $REPLACED_INGRESSES ]]; then
+    echo
+    if WG_ANSWER=$(wireguard_ingresses "$REPLACED_INGRESSES" \
+        "$(origin_host "$PROXY_ORIGIN")" "$(origin_host "$ID_URL")" 2>&1); then
+        echo "The configuration this run replaces has WireGuard enrollment on. An empty"
+        echo "answer to the list below turns it off. To keep it, answer with this line:"
+        echo "    ${WG_ANSWER%%$'\n'*}"
+    else
+        echo "The configuration this run replaces has WireGuard enrollment on, with a list"
+        echo "this run refuses (${WG_ANSWER#error: }):"
+        echo "    $REPLACED_INGRESSES"
+        echo "An empty answer to the list below turns enrollment off. To keep it, answer"
+        echo "with the list corrected."
+    fi
+    if [[ -n $REPLACED_POOL_V4 && -n $WG_POOL_DEFAULT ]]; then
+        echo "The pool question offers the pool profile.env sets, $WG_POOL_DEFAULT."
+    fi
+fi
+
+# A WireGuard setting this run never writes survives only in the backup of
+# its file, so each one the replaced files set is named here. The tunnel
+# address and the allowed networks are written, but only as the pool's
+# first host address and its /32: a value the default pool would not give,
+# such as an IPv6 address added by hand, is named too, and so is any value
+# when there is no default pool to compare with.
+WG_DERIVED_ADDRESS=
+if [[ -n $WG_POOL_DEFAULT ]]; then
+    mapfile -t WG_POOL < <(wireguard_pool "$WG_POOL_DEFAULT")
+    WG_DERIVED_ADDRESS=${WG_POOL[1]:-}
+fi
+REPLACED_ONLY_LINES=()
+for env_name in identity profile wireguard-agent; do
+    # shellcheck disable=SC2086
+    for setting in ${REPLACED_ONLY[$env_name]}; do
+        value=${REPLACED[$setting]:-}
+        case $setting in
+            WIREGUARD_INGRESS_ADDRESSES) [[ $value != "$WG_DERIVED_ADDRESS" ]] || value= ;;
+            WIREGUARD_ALLOWED_IPS) [[ $value != "$WG_DERIVED_ADDRESS/32" ]] || value= ;;
+        esac
+        [[ -z $value ]] || REPLACED_ONLY_LINES+=("    $env_name.env: $setting=$value")
+    done
+done
+if [[ ${#REPLACED_ONLY_LINES[@]} -gt 0 ]]; then
+    echo
+    echo "The files this run replaces set these WireGuard settings, which it does not"
+    echo "carry over. Set them again by hand from the backup it keeps of each file,"
+    echo "<file>.bak.<date>-<time> in /etc/chan-gateway:"
+    printf '%s\n' "${REPLACED_ONLY_LINES[@]}"
 fi
 
 echo
