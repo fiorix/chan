@@ -943,8 +943,9 @@ fn fixture_peer(
 }
 
 /// Pins migration 18's dedupe against rows written at migration 17, where a
-/// key or an address could be held once per host: the later row of each
-/// duplicate stays, unrelated rows are untouched, and the gateway-wide unique
+/// key or an address could be held once per host: of each duplicate the row
+/// enrolled last stays, by `updated_at` and then `id`, whichever row was
+/// created first; unrelated rows are untouched, and the gateway-wide unique
 /// constraints hold afterwards.
 #[tokio::test]
 async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
@@ -956,47 +957,58 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
     .fetch_one(&pool)
     .await
     .unwrap();
+    // The address each IPv6 pair shares.
+    let v6 = ["fd00:7::a", "fd00:7::b", "fd00:7::c"].map(Some);
+    // Rows get their id and created_at in the order listed. The key and each
+    // address have three pairs: one listed in updated_at order; one listed
+    // later row first, as when the row created first enrolled again after the
+    // other host's row, so id and created_at order oppose updated_at; and one
+    // with equal updated_at, where the greater id stays so the pair still
+    // shrinks.
     let fixture = [
         // One key on two hosts.
         fixture_peer("key-earlier", "p1", 0, "10.7.0.2", None, 1, false),
         fixture_peer("key-later", "p2", 0, "10.7.0.3", None, 2, true),
+        fixture_peer("key-renewed", "p1", 1, "10.7.0.4", None, 2, true),
+        fixture_peer("key-stale", "p2", 1, "10.7.0.5", None, 1, false),
+        fixture_peer("key-tie-lesser-id", "p1", 2, "10.7.0.6", None, 5, false),
+        fixture_peer("key-tie-greater-id", "p2", 2, "10.7.0.7", None, 5, true),
         // One IPv4 address on two hosts.
-        fixture_peer("v4-earlier", "p1", 1, "10.7.0.9", None, 1, false),
-        fixture_peer("v4-later", "p2", 2, "10.7.0.9", None, 2, true),
+        fixture_peer("v4-earlier", "p1", 3, "10.7.0.10", None, 1, false),
+        fixture_peer("v4-later", "p2", 4, "10.7.0.10", None, 2, true),
+        fixture_peer("v4-renewed", "p1", 5, "10.7.0.11", None, 2, true),
+        fixture_peer("v4-stale", "p2", 6, "10.7.0.11", None, 1, false),
+        fixture_peer("v4-tie-lesser-id", "p1", 7, "10.7.0.12", None, 5, false),
+        fixture_peer("v4-tie-greater-id", "p2", 8, "10.7.0.12", None, 5, true),
         // One IPv6 address on two hosts.
-        fixture_peer(
-            "v6-earlier",
-            "p1",
-            3,
-            "10.7.0.20",
-            Some("fd00:7::9"),
-            1,
-            false,
-        ),
-        fixture_peer("v6-later", "p2", 4, "10.7.0.21", Some("fd00:7::9"), 2, true),
+        fixture_peer("v6-earlier", "p1", 9, "10.7.0.20", v6[0], 1, false),
+        fixture_peer("v6-later", "p2", 10, "10.7.0.21", v6[0], 2, true),
+        fixture_peer("v6-renewed", "p1", 11, "10.7.0.22", v6[1], 2, true),
+        fixture_peer("v6-stale", "p2", 12, "10.7.0.23", v6[1], 1, false),
+        fixture_peer("v6-tie-lesser-id", "p1", 13, "10.7.0.24", v6[2], 5, false),
+        fixture_peer("v6-tie-greater-id", "p2", 14, "10.7.0.25", v6[2], 5, true),
         // A row in both sets: the later holder of its key and the earlier
         // holder of its address. It goes, and so does the row it replaced.
-        fixture_peer("chain-first", "p1", 5, "10.7.0.40", None, 1, false),
-        fixture_peer("chain-middle", "p2", 5, "10.7.0.41", None, 2, false),
-        fixture_peer("chain-last", "p1", 6, "10.7.0.41", None, 3, true),
+        fixture_peer("chain-first", "p1", 15, "10.7.0.40", None, 1, false),
+        fixture_peer("chain-middle", "p2", 15, "10.7.0.41", None, 2, false),
+        fixture_peer("chain-last", "p1", 16, "10.7.0.41", None, 3, true),
         // A row that loses its key to one later row and its address to another.
-        fixture_peer("both-earlier", "p1", 7, "10.7.0.50", None, 1, false),
-        fixture_peer("both-key-later", "p2", 7, "10.7.0.51", None, 2, true),
-        fixture_peer("both-v4-later", "p2", 8, "10.7.0.50", None, 3, true),
-        // Equal timestamps: the greater id stays, so the pair still shrinks.
-        fixture_peer("tie-lesser-id", "p1", 9, "10.7.0.60", None, 5, false),
-        fixture_peer("tie-greater-id", "p2", 9, "10.7.0.61", None, 5, true),
+        fixture_peer("both-earlier", "p1", 17, "10.7.0.50", None, 1, false),
+        fixture_peer("both-key-later", "p2", 17, "10.7.0.51", None, 2, true),
+        fixture_peer("both-v4-later", "p2", 18, "10.7.0.50", None, 3, true),
         // No IPv6 address is not a shared address.
-        fixture_peer("alone-on-p1", "p1", 10, "10.7.0.70", None, 1, true),
-        fixture_peer("alone-on-p2", "p2", 11, "10.7.0.71", None, 1, true),
+        fixture_peer("alone-on-p1", "p1", 19, "10.7.0.70", None, 1, true),
+        fixture_peer("alone-on-p2", "p2", 20, "10.7.0.71", None, 1, true),
     ];
     for (index, peer) in fixture.iter().enumerate() {
         let token = insert_api_token(&pool, user, peer.name).await;
         sqlx::query(
             "INSERT INTO wireguard_peers \
-             (id, user_id, token_id, host, public_key, address_v4, address_v6, updated_at) \
+             (id, user_id, token_id, host, public_key, address_v4, address_v6, \
+              created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, \
-                     timestamptz '2026-01-01 00:00:00+00' + make_interval(secs => $8))",
+                     timestamptz '2025-12-31 00:00:00+00' + make_interval(secs => $8), \
+                     timestamptz '2026-01-01 00:00:00+00' + make_interval(secs => $9))",
         )
         .bind(Uuid::from_u128(index as u128 + 1))
         .bind(user)
@@ -1005,6 +1017,7 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
         .bind(wireguard_key(peer.key))
         .bind(peer.v4)
         .bind(peer.v6)
+        .bind(index as f64)
         .bind(f64::from(peer.second))
         .execute(&pool)
         .await
@@ -1075,14 +1088,14 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
             None,
             Some("wireguard_peers_public_key_key"),
         ),
-        (20, "10.7.0.3", None, Some("wireguard_peers_address_v4_key")),
+        (23, "10.7.0.3", None, Some("wireguard_peers_address_v4_key")),
         (
-            21,
+            24,
             "10.7.0.101",
-            Some("fd00:7::9"),
+            v6[0],
             Some("wireguard_peers_address_v6_key"),
         ),
-        (22, "10.7.0.102", None, None),
+        (25, "10.7.0.102", None, None),
     ] {
         let token = insert_api_token(&pool, user, "second-holder").await;
         let inserted = sqlx::query(
