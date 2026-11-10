@@ -370,33 +370,49 @@ async fn wireguard_peers_route_relays_each_configured_ingress_and_answers_404_fo
 }
 
 #[tokio::test]
-async fn wireguard_peers_route_answers_every_host_as_an_unknown_one_while_enrollment_is_off() {
+async fn wireguard_peers_route_relays_every_well_formed_host_while_enrollment_is_off() {
     let profile = MockServer::start().await;
-    mount_empty_lists(&profile).await;
-    let (_, on) = apps(&profile, Some(enrollment()), AGENT).await;
     let (_, off) = apps(&profile, None, AGENT).await;
-    let unknown = request(on.clone(), &peers_uri("p9"), Some(AGENT), None).await;
-    assert_eq!(unknown.0, StatusCode::NOT_FOUND);
-    let unauthorized = request(on.clone(), &peers_uri("p9"), None, None).await;
-    assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
-    for host in ["p1", "p2", "p9"] {
-        // Status, headers and body: nothing tells enrollment off from an
-        // unknown host, with the bearer or without it.
-        assert_eq!(
-            request(off.clone(), &peers_uri(host), Some(AGENT), None).await,
-            unknown,
-            "{host}"
-        );
-        for token in [None, Some("wrong")] {
+    let peer = key(1);
+    // No list names an ingress, so no host disagrees with one: a host is
+    // relayed whatever its id, with that id and the ETag its agent holds.
+    for (host, held, etag) in [
+        ("p1", "\"held-1\"", "\"e1\""),
+        ("p2", "\"held-2\"", "\"e2\""),
+        ("p9", "\"held-9\"", "\"e9\""),
+    ] {
+        let body = list_body(host, &[&peer]);
+        mount_list(&profile, host, etag, &body, Some(held)).await;
+        let (status, headers, actual) =
+            request(off.clone(), &peers_uri(host), Some(AGENT), Some(held)).await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+        assert_eq!(headers[header::ETAG], etag);
+        assert_eq!(actual, body.as_bytes());
+    }
+    profile.verify().await;
+    assert_eq!(profile.received_requests().await.unwrap().len(), 3);
+
+    // The bearer is still checked first, and an unset agent bearer still
+    // answers as an absent route.
+    for token in [None, Some("wrong")] {
+        for host in ["p1", "p9"] {
             assert_eq!(
-                request(off.clone(), &peers_uri(host), token, None).await,
-                unauthorized,
+                request(off.clone(), &peers_uri(host), token, None).await.0,
+                StatusCode::UNAUTHORIZED,
                 "{host}"
             );
         }
     }
-    // A host that is missing or is no label is a bad request before either
-    // answer, with enrollment on or off.
+    let (_, no_bearer) = apps(&profile, None, "").await;
+    assert_eq!(
+        request(no_bearer, &peers_uri("p1"), Some(AGENT), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    // A host that is missing or is no label is a bad request before any
+    // relay, with enrollment on or off.
+    let (_, on) = apps(&profile, Some(enrollment()), AGENT).await;
     for app in [on, off] {
         for uri in ["/internal/v1/wireguard/peers".to_owned(), peers_uri("P1")] {
             assert_eq!(
@@ -406,7 +422,7 @@ async fn wireguard_peers_route_answers_every_host_as_an_unknown_one_while_enroll
             );
         }
     }
-    assert!(profile.received_requests().await.unwrap().is_empty());
+    assert_eq!(profile.received_requests().await.unwrap().len(), 3);
 }
 
 #[tokio::test]

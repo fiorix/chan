@@ -212,17 +212,21 @@ pub(crate) async fn peers(
     if !valid_host(&query.host) {
         return Err(Error::BadRequest("invalid wireguard host".into()));
     }
-    // An agent polls for its own node. A host that is no configured
-    // ingress is a mistyped id or a node the list does not name, and with
-    // enrollment off no host is one: both get the answer of an absent
-    // route, with no call to profile. An agent keeps the list it has on
-    // anything but a served one, so it leaves its interface as it is.
-    let configured = state
+    // An agent polls for its own node. With enrollment configured, a host
+    // that is no ingress id means the agent's host id and the list
+    // disagree: the route answers as an absent one, with no call to
+    // profile, and the agent, which keeps the list it has on anything but
+    // a served one, reports the 404 on its node. With enrollment off there
+    // is no list to disagree with, and the route relays. Profile's list is
+    // the same for every host, so a relay can neither wipe nor misplace a
+    // peer, while a 404 would hold every agent on its last list and keep
+    // revocations from reaching the nodes.
+    let unlisted = state
         .cfg
         .wireguard
         .as_ref()
-        .is_some_and(|enrollment| enrollment.has_ingress(&query.host));
-    if !configured {
+        .is_some_and(|enrollment| !enrollment.has_ingress(&query.host));
+    if unlisted {
         return Err(Error::NotFound);
     }
     let condition = headers
