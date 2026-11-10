@@ -82,15 +82,13 @@ impl Config {
             internal_bind_addr,
         )?;
 
-        let base_url = required_origin("BASE_URL")?;
-        let devserver_proxy_origin = required_origin("DEVSERVER_PROXY_ORIGIN")?;
-        let devserver_tunnel_origin = required_origin("DEVSERVER_TUNNEL_ORIGIN")?;
-
-        let wireguard = wireguard_from_vars(
-            |name| std::env::var(name).ok(),
-            &base_url,
-            &devserver_proxy_origin,
-        )?;
+        let origins = Origins::read(required_origin)?;
+        let wireguard = wireguard_from_vars(|name| std::env::var(name).ok(), &origins)?;
+        let Origins {
+            base_url,
+            devserver_proxy_origin,
+            devserver_tunnel_origin,
+        } = origins;
 
         let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
 
@@ -442,6 +440,33 @@ fn providers_from_vars(
     Ok(providers)
 }
 
+/// The public origins identity is configured with. All three are `Url`s,
+/// so code that needs more than one takes this value and reads each by
+/// name: no call passes two of them side by side, where they could change
+/// places unnoticed.
+struct Origins {
+    /// `BASE_URL`, identity's own origin.
+    base_url: Url,
+    /// `DEVSERVER_PROXY_ORIGIN`, the proxy namespace apex.
+    devserver_proxy_origin: Url,
+    /// `DEVSERVER_TUNNEL_ORIGIN`, the tunnel ingress.
+    devserver_tunnel_origin: Url,
+}
+
+impl Origins {
+    /// Read each origin from the variable it is named after. `origin`
+    /// reads one required origin by its variable's name, a parameter so
+    /// the pairing of variables and fields is testable without touching
+    /// the process environment.
+    fn read(origin: impl Fn(&str) -> anyhow::Result<Url>) -> anyhow::Result<Self> {
+        Ok(Self {
+            base_url: origin("BASE_URL")?,
+            devserver_proxy_origin: origin("DEVSERVER_PROXY_ORIGIN")?,
+            devserver_tunnel_origin: origin("DEVSERVER_TUNNEL_ORIGIN")?,
+        })
+    }
+}
+
 /// The variables of the single-ingress configuration, which a list of
 /// ingresses cannot be read from. A value in one is refused instead of
 /// ignored, so a deployment that still sets them does not start with
@@ -476,10 +501,12 @@ const SINGLE_INGRESS_VARS: [(&str, &str); 4] = [
 /// node, separated by `;`. An entry splits once on its first `=` and then
 /// once on `@`, so the `=` that pads a base64 key is part of the key. The
 /// order is kept: the first entry fills the single-ingress wire fields.
+///
+/// Node names are derived under `origins`' proxy apex, and identity's own
+/// origin is checked against them.
 fn wireguard_from_vars(
     var: impl Fn(&str) -> Option<String>,
-    identity: &Url,
-    proxy: &Url,
+    origins: &Origins,
 ) -> anyhow::Result<Option<crate::wireguard::WireguardEnrollment>> {
     use crate::wireguard::WireguardEnrollment;
     use gateway_common::wireguard::{canonical_public_key, valid_host, Ingress};
@@ -541,12 +568,15 @@ fn wireguard_from_vars(
     // Node names are built under the proxy apex's host, without its port:
     // a host map routes by name, and an address literal has no names
     // below it.
-    let Some(url::Host::Domain(proxy_host)) = proxy.host() else {
+    let Some(url::Host::Domain(proxy_host)) = origins.devserver_proxy_origin.host() else {
         anyhow::bail!(
             "DEVSERVER_PROXY_ORIGIN must have a DNS host when WireGuard enrollment is configured"
         );
     };
-    let identity_host = identity.host_str().context("BASE_URL must have a host")?;
+    let identity_host = origins
+        .base_url
+        .host_str()
+        .context("BASE_URL must have a host")?;
     const ENTRY: &str = "WIREGUARD_INGRESSES entries must be id=public_key@endpoint";
     let mut list: Vec<Ingress> = Vec::new();
     for entry in ingresses.split(';') {
@@ -1073,12 +1103,13 @@ mod tests {
 
     #[test]
     fn stock_packaged_env_configures_no_wireguard_enrollment() {
-        let enrollment = wireguard_from_vars(
-            lookup(packaged_identity_env()),
-            &"https://gw.example.test".parse().unwrap(),
-            &"https://proxy.example.test".parse().unwrap(),
-        )
-        .expect("the packaged identity.env must start identity");
+        let origins = Origins {
+            base_url: "https://gw.example.test".parse().unwrap(),
+            devserver_proxy_origin: "https://proxy.example.test".parse().unwrap(),
+            devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
+        };
+        let enrollment = wireguard_from_vars(lookup(packaged_identity_env()), &origins)
+            .expect("the packaged identity.env must start identity");
         assert!(enrollment.is_none());
     }
 
@@ -1196,11 +1227,12 @@ mod wireguard_tests {
         identity: &str,
         proxy: &str,
     ) -> anyhow::Result<Option<WireguardEnrollment>> {
-        wireguard_from_vars(
-            |name| vars.get(name).cloned(),
-            &identity.parse().unwrap(),
-            &proxy.parse().unwrap(),
-        )
+        let origins = Origins {
+            base_url: identity.parse().unwrap(),
+            devserver_proxy_origin: proxy.parse().unwrap(),
+            devserver_tunnel_origin: "https://tunnel.example.test".parse().unwrap(),
+        };
+        wireguard_from_vars(|name| vars.get(name).cloned(), &origins)
     }
 
     fn parse(vars: &BTreeMap<String, String>) -> anyhow::Result<Option<WireguardEnrollment>> {
@@ -1530,6 +1562,51 @@ mod wireguard_tests {
             }
         }
         assert_eq!(SINGLE_INGRESS_VARS.len(), 4);
+    }
+
+    #[test]
+    fn origins_are_read_from_the_variables_they_are_named_after() {
+        // Each variable answers an origin that spells its own name.
+        let named = |name: &str| -> anyhow::Result<Url> {
+            let host = name.to_ascii_lowercase().replace('_', "-");
+            Ok(format!("https://{host}.example.test").parse()?)
+        };
+        let origins = Origins::read(named).unwrap();
+        assert_eq!(origins.base_url.as_str(), "https://base-url.example.test/");
+        assert_eq!(
+            origins.devserver_proxy_origin.as_str(),
+            "https://devserver-proxy-origin.example.test/"
+        );
+        assert_eq!(
+            origins.devserver_tunnel_origin.as_str(),
+            "https://devserver-tunnel-origin.example.test/"
+        );
+
+        // The enrollment read with them builds its node names under the
+        // origin of DEVSERVER_PROXY_ORIGIN, not under identity's.
+        let vars = vars();
+        let cfg = wireguard_from_vars(|name| vars.get(name).cloned(), &origins)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cfg.ingresses()[0].hosts[0].name,
+            "p1.devserver-proxy-origin.example.test"
+        );
+
+        // A variable that cannot be read fails the whole read, naming it.
+        for missing in [
+            "BASE_URL",
+            "DEVSERVER_PROXY_ORIGIN",
+            "DEVSERVER_TUNNEL_ORIGIN",
+        ] {
+            let error = Origins::read(|name| {
+                anyhow::ensure!(name != missing, "{name} is required");
+                named(name)
+            })
+            .err()
+            .map(|error| error.to_string());
+            assert_eq!(error, Some(format!("{missing} is required")));
+        }
     }
 
     #[test]
