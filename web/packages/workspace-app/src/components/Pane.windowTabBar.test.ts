@@ -4,12 +4,14 @@
 // place; the active pane's strip element moves into the bar's slot with its
 // handlers, every other pane's is hidden, a focus change (Hybrid Nav's
 // staged one included) moves it, and leaving the mode or destroying the pane
-// puts it back where it was. A pane with no strip leaves the slot empty.
+// puts it back where it was. A tmux pane's strip stays hidden in the bar,
+// which names the pane instead.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test } from "vitest";
 
 import Pane from "./Pane.svelte";
+import WindowTabBar from "./WindowTabBar.svelte";
 import {
   activeLayout,
   cancelPaneMode,
@@ -105,6 +107,19 @@ function barOn(): void {
   document.body.append(slot);
   windowTabBar.slot = slot;
   windowTabBar.on = true;
+}
+
+/// The mode on, with the window's own bar holding the slot.
+async function renderBar(): Promise<HTMLElement> {
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.set("bar", mount(WindowTabBar, { target }) as Record<string, unknown>);
+  windowTabBar.on = true;
+  await tick();
+  const bar = target.querySelector<HTMLElement>(".window-tab-bar");
+  if (!bar || !windowTabBar.slot) throw new Error("no bar");
+  slot = windowTabBar.slot;
+  return bar;
 }
 
 function live(id: string): LeafNode {
@@ -237,14 +252,23 @@ describe("the window tab bar mode", () => {
     expect(inPlace("left")?.classList.contains("auto-hidden"), "in place it hides again").toBe(true);
   });
 
-  test("a tmux pane leaves the bar with no strip to show", async () => {
+  test("a tmux pane's strip stays hidden in the bar, which names the pane instead", async () => {
     splitLayout(
-      [terminalTab({ id: "tmux", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } })],
-      [terminalTab({ id: "plain" })],
+      [terminalTab({ id: "tmux", title: "editor", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } })],
+      [terminalTab({ id: "plain", title: "plain one" })],
     );
-    barOn();
+    const bar = await renderBar();
     await renderPanes("left", "right");
-    expect(barStrips()[0]?.classList.contains("control-hidden")).toBe(true);
+    expect(barStrips()).toHaveLength(1);
+    expect(barStrips()[0]?.classList.contains("control-hidden"), "the strip in the bar stays hidden").toBe(true);
+    expect(bar.querySelector(".tmux-name")?.textContent?.trim()).toBe("editor");
+    expect(bar.querySelector(".tmux-badge")).not.toBeNull();
+
+    setActivePane("right");
+    await tick();
+    expect(labels(barStrips()[0]), "a plain pane's strip shows in the bar").toEqual(["plain one"]);
+    expect(barStrips()[0]?.classList.contains("control-hidden")).toBe(false);
+    expect(bar.querySelector(".tmux-name, .tmux-badge"), "and the bar names nothing").toBeNull();
   });
 
   test("on the desktop the strip's empty stretch in the bar drags the window", async () => {

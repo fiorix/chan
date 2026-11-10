@@ -11,7 +11,9 @@
 // the band shows neither the tree button nor the strip, and where the
 // desktop lists menus (Windows, whose frameless window wears no menubar) it
 // draws them at its left, each popping up the desktop's menu under it, with
-// the window's title after them.
+// the window's title after them. A tmux pane has no strip, so while one is
+// active the bar names it as the pane tree does and marks the window with a
+// tmux badge at its right end, both display only.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -25,14 +27,28 @@ vi.mock("../state/paneTree.svelte", async (importOriginal) => ({
 
 import WindowTabBar from "./WindowTabBar.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
-import { closePaneTree, PANE_TREE_ANCHOR_ATTR, paneTree, openPaneTree } from "../state/paneTree.svelte";
-import { layout, setActivePane } from "../state/tabs.svelte";
+import {
+  closePaneTree,
+  PANE_TREE_ANCHOR_ATTR,
+  paneTree,
+  paneTreeModel,
+  openPaneTree,
+} from "../state/paneTree.svelte";
+import {
+  applyTerminalRoster,
+  cancelPaneMode,
+  enterPaneMode,
+  layout,
+  paneModeMoveFocus,
+  paneModeSplit,
+  setActivePane,
+} from "../state/tabs.svelte";
 import {
   NO_TITLEBAR_CHROME,
   WINDOW_TAB_BAR_MIN_HEIGHT,
   windowTabBar,
 } from "../state/windowTabBar.svelte";
-import { resetLayout } from "../__tests__/tabs";
+import { resetLayout, terminalTab } from "../__tests__/tabs";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
 
@@ -50,6 +66,8 @@ afterEach(async () => {
   delete (window as W).__TAURI_INTERNALS__;
   document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
   document.body.innerHTML = "";
+  cancelPaneMode();
+  applyTerminalRoster([]);
   resetLayout();
   vi.restoreAllMocks();
 });
@@ -543,5 +561,119 @@ describe("the window controls", () => {
       document.removeEventListener("mousedown", record);
     }
     expect(seen, "neither the bar nor the document's drag handler hears it").toEqual([]);
+  });
+});
+
+describe("a tmux window", () => {
+  /// Two tmux panes side by side, as the server's tmux_layout lays them
+  /// out: each pane one terminal tab marked with its tmux pane, named after
+  /// the tmux window. The left one is active.
+  function tmuxPanes(left = "editor", right = "logs"): void {
+    const tab = (id: string, title: string, session: string, pane: string) =>
+      terminalTab({ id, title, terminalSessionId: session, tmuxPane: { connection: 1, pane } });
+    layout.nodes = {
+      root: { kind: "split", id: "root", direction: "row", ratio: 0.5, a: "left", b: "right" },
+      left: { kind: "leaf", id: "left", tabs: [tab("t0", left, "s0", "%0")], activeTabId: "t0" },
+      right: { kind: "leaf", id: "right", tabs: [tab("t1", right, "s1", "%1")], activeTabId: "t1" },
+    };
+    layout.rootId = "root";
+    layout.activePaneId = "left";
+  }
+
+  function nameOf(bar: HTMLElement): string | null {
+    return bar.querySelector(".tmux-name")?.textContent?.trim() ?? null;
+  }
+
+  /// The label the pane tree gives the window's active pane.
+  function paneTreeLabel(): string | undefined {
+    return paneTreeModel(layout).find((pane) => pane.active)?.label;
+  }
+
+  /// The bar's parts in order, by their first class.
+  function parts(bar: HTMLElement): string[] {
+    return [...bar.children].map((part) => part.classList[0] ?? "");
+  }
+
+  test("names the active pane where the strip would sit, and badges the window at the right end", async () => {
+    tmuxPanes();
+    const bar = await renderBar();
+    expect(nameOf(bar)).toBe("editor");
+    expect(nameOf(bar), "the pane tree's label for the pane").toBe(paneTreeLabel());
+    expect(bar.querySelector(".tmux-badge")?.textContent?.trim()).toBe("tmux");
+    expect(parts(bar)).toEqual(["inset", "tree-button", "tmux-name", "slot", "tmux-badge", "inset"]);
+  });
+
+  test("follows a change of active pane and a tmux rename at once", async () => {
+    tmuxPanes();
+    const bar = await renderBar();
+
+    setActivePane("right");
+    await tick();
+    expect(nameOf(bar)).toBe("logs");
+
+    // A tmux rename reaches the page as the session's new name in the roster.
+    applyTerminalRoster([{ id: "s1", tab_name: "build", tab_group: "default", window_id: null, broadcast: false }]);
+    await tick();
+    expect(nameOf(bar)).toBe("build");
+    expect(nameOf(bar)).toBe(paneTreeLabel());
+    expect(bar.querySelectorAll(".tmux-badge")).toHaveLength(1);
+  });
+
+  test("an unnamed tmux window reads as the pane tree reads it", async () => {
+    tmuxPanes("", "logs");
+    const bar = await renderBar();
+    expect(nameOf(bar)).toBe("Terminal");
+    expect(nameOf(bar)).toBe(paneTreeLabel());
+  });
+
+  test("Hybrid Nav's staged focus moves the name, and a staged pane reads as the mode names it", async () => {
+    tmuxPanes();
+    const bar = await renderBar();
+    enterPaneMode();
+    await tick();
+
+    paneModeMoveFocus("right");
+    await tick();
+    expect(nameOf(bar)).toBe("logs");
+    expect(layout.activePaneId, "the live layout's focus is untouched").toBe("left");
+
+    paneModeSplit("column");
+    await tick();
+    expect(nameOf(bar)).toBe("New tmux pane");
+    expect(bar.querySelector(".tmux-badge")).not.toBeNull();
+  });
+
+  test("the name and the badge are display only, and on the desktop drag the window", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: { invoke: async () => null } });
+    tmuxPanes();
+    const bar = await renderBar();
+    const shown = [...bar.querySelectorAll<HTMLElement>(".tmux-name, .tmux-badge")];
+    expect(shown).toHaveLength(2);
+    for (const part of shown) {
+      expect(part.getAttribute("data-tauri-drag-region"), part.className).toBe("");
+      expect(part.querySelector("*"), "a press lands on the part itself").toBeNull();
+      expect(part.closest("button, [role], [tabindex]"), "nothing to press or focus").toBeNull();
+      part.click();
+    }
+    await tick();
+    expect(paneTree.open, "a press opens nothing").toBe(false);
+    expect(layout.activePaneId).toBe("left");
+  });
+
+  test("hides with the tree button while the Computers launcher covers the window", async () => {
+    tmuxPanes();
+    const bar = await renderBar();
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+    expect(bar.querySelector(".tmux-name")?.classList.contains("covered")).toBe(true);
+    expect(bar.querySelector(".tmux-badge")?.classList.contains("covered")).toBe(true);
+  });
+
+  test("a window without tmux shows neither", async () => {
+    resetLayout([terminalTab({ id: "plain", title: "shell", terminalSessionId: "s9" })]);
+    const bar = await renderBar();
+    expect(bar.querySelector(".tmux-name, .tmux-badge")).toBeNull();
+    expect(parts(bar)).toEqual(["inset", "tree-button", "slot", "inset"]);
   });
 });
