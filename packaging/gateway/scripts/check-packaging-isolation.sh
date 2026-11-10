@@ -199,6 +199,28 @@ for env_file in /etc/chan-gateway/identity.env /etc/chan-gateway/wireguard-agent
         || die "configure.sh writes WIREGUARD_AGENT_TOKEN into $env_file [$agent_token_lines] times, expected once"
 done
 
+# Identity refuses to start with one of the single-ingress variables set, so
+# no template, generator or manifest assigns one, as a commented example
+# either: an example is what an operator uncomments.
+refute_pattern "packaging assigns a single-ingress WireGuard variable, which identity refuses" \
+    '^[#[:space:]-]*WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)[[:space:]]*[=:]' \
+    "$REPO"/gateway/crates/*/packaging/*.env \
+    "$REPO/packaging/gateway/scripts/configure.sh" \
+    "$REPO/packaging/gateway/scripts/dev/setup.sh" \
+    "$REPO/packaging/gateway/scripts/dev/env.example" \
+    "$REPO"/packaging/kube/*.yaml
+# The packaged templates show enrollment and leave it off: identity's three
+# required values are commented examples, and neither file assigns a value
+# that turns on its half.
+for name in WIREGUARD_INGRESSES WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS; do
+    require_fixed "the packaged identity.env does not show $name as a commented example" \
+        "# $name=" "$REPO/gateway/crates/identity/packaging/identity.env"
+done
+refute_pattern "a packaged env template turns WireGuard enrollment on" \
+    '^[[:space:]]*WIREGUARD_(INGRESSES|INGRESS_ADDRESSES|ALLOWED_IPS|PERSISTENT_KEEPALIVE|POOL_V4|POOL_V6|POOL_RESERVED)=' \
+    "$REPO/gateway/crates/identity/packaging/identity.env" \
+    "$REPO/gateway/crates/profile/packaging/profile.env"
+
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
     "install -d -m 0751 -o root -g root /etc/chan-gateway"
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \

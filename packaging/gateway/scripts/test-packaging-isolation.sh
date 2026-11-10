@@ -6,7 +6,8 @@
 # It runs the real package postinst scripts against a scratch root in all 120
 # install orders of the five account-plane packages, with the WireGuard
 # agent's package at each of the six positions, drives the database
-# readiness check, the postinst conffile
+# readiness check, configure.sh's refusals and whole runs of it against a
+# scratch root, the postinst conffile
 # refusals, the admission keypair helper, and every sdme provisioner refusal
 # path against stubbed id/getent. That takes about half a minute, so it is not
 # part of `make pre-push`; the static half, check-packaging-isolation.sh, is.
@@ -158,6 +159,254 @@ for scheme in https http; do
         "$WORK/configure.out" || die "configure derived the wrong $scheme origins"
 done
 printf 'PASS configure: explicit origins and derived defaults preserve scheme and port\n'
+
+# WireGuard enrollment answers. The keys are canonical base64 for 32 bytes
+# and hold `+`, `/` and the `=` pad, the characters a written list carries
+# unescaped beside its own `=`, `@` and `;`.
+key_a='++++++++++++++++++++++++++++++++++++++++//4='
+key_b='P//wP//wP//wP//wP//wP//wP//wP//wP//wP//wAH8='
+# The postinst getent finds every user, so the agent's package counts as
+# installed and its interface prompt takes the last answer here.
+wg_answers="$pg_answers"$'https://gw.example.test\nhttps://proxy.example.test\n\np1\n\n\n'
+p1_entry="p1=$key_a@p1.proxy.example.test:51820"
+p2_entry="p2=$key_b@p2.proxy.example.test:51820"
+# Padded base64 of the right length for one byte too few, and the Kelvin
+# sign, a letter outside ASCII whose lowercase form is the ASCII k.
+key_31_bytes="$(printf 'A%.0s' {1..42})=="
+kelvin=$'\xe2\x84\xaa'
+while IFS='|' read -r name ingresses message; do
+    configure_refusal "WireGuard ingresses, $name" "$wg_answers$ingresses"$'\n' \
+        "$message" || configure_failures=$((configure_failures + 1))
+done <<EOF
+entry without an endpoint|p1=$key_a|must be id=public_key@endpoint entries
+entry without a key|p1@p1.proxy.example.test:51820|must be id=public_key@endpoint entries
+trailing separator|$p1_entry;|must be id=public_key@endpoint entries
+letter outside ASCII|p1=$key_a@${kelvin}1.proxy.example.test:51820|must be id=public_key@endpoint entries
+uppercase id|P1=$key_a@p1.proxy.example.test:51820|entry 1: the id must be a proxy node id
+id of two labels|p1.proxy=$key_a@p1.proxy.example.test:51820|entry 1: the id must be a proxy node id
+short key|p1=${key_a:1}@p1.proxy.example.test:51820|entry 1: the public key must be padded base64 for 32 bytes
+key with stray trailing bits|p1=${key_a%4=}5=@p1.proxy.example.test:51820|entry 1: the public key must be padded base64 for 32 bytes
+key of 31 bytes|p1=$key_31_bytes@p1.proxy.example.test:51820|entry 1: the public key must be padded base64 for 32 bytes
+endpoint without a port|p1=$key_a@p1.proxy.example.test|entry 1: the endpoint must be host:port
+endpoint port zero|p1=$key_a@p1.proxy.example.test:0|entry 1: the endpoint must be host:port
+endpoint port above 65535|p1=$key_a@p1.proxy.example.test:65536|entry 1: the endpoint must be host:port
+unbracketed IPv6 endpoint|p1=$key_a@2001:db8::2:51820|entry 1: the endpoint must be host:port
+scoped IPv6 endpoint|p1=$key_a@[fe80::1%eth0]:51820|entry 1: the endpoint must be host:port
+endpoint with a user|p1=$key_a@wg@p1.proxy.example.test:51820|entry 1: the endpoint must be host:port
+second entry's endpoint|$p1_entry;p2=$key_b@p2.proxy.example.test|entry 2: the endpoint must be host:port
+repeated id|$p1_entry;p1=$key_b@p2.proxy.example.test:51820|entry 2: the id p1 is listed twice
+EOF
+configure_refusal 'WireGuard ingresses under an address-literal proxy namespace' \
+    "$pg_answers"$'https://gw.example.test\nhttps://192.0.2.7:8443\n\np1\n\n\n'"p1=$key_a@192.0.2.7:51820"$'\n' \
+    'Proxy namespace origin needs a DNS name' || configure_failures=$((configure_failures + 1))
+configure_refusal 'WireGuard ingress that carries the gateway host' \
+    "$pg_answers"$'https://gw.p1.proxy.example.test\nhttps://proxy.example.test\n\np1\n\n\n'"$p1_entry"$'\n' \
+    "entry 1: Gateway public origin's host must not be" || configure_failures=$((configure_failures + 1))
+for invalid_pool in 10.7.0.0/31 10.7.0.5/24 10.7.0.0 10.7.0.0/255.255.255.0 fd00:7::/64 pool; do
+    configure_refusal "WireGuard address pool [$invalid_pool]" \
+        "$wg_answers$p1_entry"$'\n'"$invalid_pool"$'\n' \
+        'WireGuard address pool must be an IPv4 network' || configure_failures=$((configure_failures + 1))
+done
+[[ $configure_failures -eq 0 ]] || die "$configure_failures configure WireGuard refusals failed"
+
+# Whole runs, against a scratch root of their own so the refusals above keep
+# proving they wrote nothing. Database role preparation is a stand-in that
+# takes what the real script requires; every other step is configure.sh's.
+full_root="$WORK/full-root/etc/chan-gateway"
+mkdir -p "$WORK/configure-full" "$WORK/no-agent-bin"
+sed -e '/^if \[\[ \$EUID -ne 0 \]\]; then/,/^fi$/d' \
+    -e "s|/etc/chan-gateway|$full_root|g" \
+    "$REPO/packaging/gateway/scripts/configure.sh" > "$WORK/configure-full/configure.sh"
+cat > "$WORK/configure-full/prepare-database-roles.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${DATABASE_URL:?}" "${IDENTITY_DATABASE_PASSWORD:?}" "${PROFILE_DATABASE_PASSWORD:?}"
+EOF
+chmod +x "$WORK/configure-full/prepare-database-roles.sh"
+cp "$REPO/packaging/gateway/scripts/generate-admission-keypair.py" "$WORK/configure-full/"
+# A host without the agent's package: every service user but the agent's.
+cp "$WORK/postinst-bin/chown" "$WORK/postinst-bin/install" "$WORK/no-agent-bin/"
+cat > "$WORK/no-agent-bin/getent" <<'EOF'
+#!/usr/bin/env bash
+[[ ${2:-} != chan-gateway-wireguard-agent ]]
+EOF
+chmod +x "$WORK/no-agent-bin/getent"
+
+configure_run() {
+    local name=$1 bin=$2 answers=$3
+    printf '%s' "$answers" | PATH="$bin:$PATH" bash "$WORK/configure-full/configure.sh" \
+        > "$WORK/configure-full.out" 2> "$WORK/configure-full.err" \
+        || die "configure run failed ($name): $(cat "$WORK/configure-full.err")"
+}
+
+# The value an env file assigns to a name; every line that assigns it.
+env_value() {
+    sed -n "s/^[[:space:]]*$2=//p" "$1"
+}
+
+# The WireGuard names an env file assigns, in file order, each followed by a
+# space. A name assigned twice is listed twice, and a commented line is no
+# assignment.
+wireguard_names() {
+    sed -n 's/^[[:space:]]*\(WIREGUARD_[A-Z0-9_]*\)=.*/\1/p' "$1" | tr '\n' ' '
+}
+
+require_env() {
+    local file=$1 name=$2 expected=$3 actual
+    actual=$(env_value "$file" "$name")
+    [[ "$actual" == "$expected" ]] \
+        || die "$file assigns $name [$actual], expected [$expected]"
+}
+
+require_wireguard_names() {
+    local file=$1 expected=$2 actual
+    actual=$(wireguard_names "$file")
+    [[ "$actual" == "$expected" ]] \
+        || die "$file assigns the WireGuard names [$actual], expected [$expected]"
+}
+
+require_output() {
+    grep -Fq -- "$1" "$WORK/configure-full.out" \
+        || die "configure run did not print: $1"
+}
+
+refute_output() {
+    local status=0
+    grep -Fq -- "$1" "$WORK/configure-full.out" || status=$?
+    [[ $status -eq 1 ]] || die "configure run printed (or grep failed on): $1"
+}
+
+# Identity refuses to start with a single-ingress variable set, so no file a
+# run leaves in place may name one, commented or not.
+refute_single_ingress_names() {
+    local status=0
+    grep -En 'WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)([^A-Z_]|$)' "$full_root"/*.env \
+        || status=$?
+    [[ $status -eq 1 ]] || die "a configured env file names a single-ingress variable"
+}
+
+# One bearer, minted once: identity.env carries one line of it and the
+# agent's file the same value.
+require_one_agent_token() {
+    agent_token=$(env_value "$full_root/identity.env" WIREGUARD_AGENT_TOKEN)
+    [[ "$agent_token" =~ ^[0-9a-f]{64}$ ]] \
+        || die "identity.env does not carry one generated WIREGUARD_AGENT_TOKEN: [$agent_token]"
+    require_env "$full_root/wireguard-agent.env" WIREGUARD_AGENT_TOKEN "$agent_token"
+}
+
+full_answers="$pg_answers"$'https://gw.example.test\nhttps://proxy.example.test:8443\n\np1\n\n'
+oauth_answers=$'github-client\ngithub-secret\n\n\n'
+
+# Two nodes, typed with spaces, an uppercase host and a bracketed IPv6
+# endpoint, and a pool of the operator's own. The list is written without
+# the spaces and otherwise as typed; the tunnel address and the one routed
+# network follow from the pool, and profile gets the pool in the same run.
+configure_run 'two ingresses' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n'" p1 = $key_a @ P1.proxy.example.test:51820 ; p2=$key_b@[2001:db8::2]:51821 "$'\n10.9.8.0/22\n'"$oauth_answers"
+require_wireguard_names "$full_root/identity.env" \
+    'WIREGUARD_AGENT_TOKEN WIREGUARD_INGRESSES WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS '
+require_env "$full_root/identity.env" WIREGUARD_INGRESSES \
+    "p1=$key_a@P1.proxy.example.test:51820;p2=$key_b@[2001:db8::2]:51821"
+require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.9.8.1
+require_env "$full_root/identity.env" WIREGUARD_ALLOWED_IPS 10.9.8.1/32
+require_wireguard_names "$full_root/profile.env" 'WIREGUARD_POOL_V4 '
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.9.8.0/22
+require_wireguard_names "$full_root/wireguard-agent.env" \
+    'WIREGUARD_AGENT_TOKEN WIREGUARD_AGENT_HOST_ID WIREGUARD_INTERFACE '
+require_env "$full_root/wireguard-agent.env" WIREGUARD_AGENT_HOST_ID p1
+require_one_agent_token
+first_agent_token=$agent_token
+refute_single_ingress_names
+require_output 'WireGuard enrollment is on for these nodes: p1 p2'
+require_output 'Address = 10.9.8.1/22'
+refute_output 'is not one of them'
+refute_output 'configures WireGuard enrollment for one ingress'
+printf 'PASS configure: an ingress list enables identity and profile together, as typed less its spaces\n'
+
+# A second run over a configuration that names one ingress in the four
+# variables identity refuses, answered with an empty list. The run shows the
+# lines it will not carry over, leaves enrollment off in both files, names
+# none of the four, and keeps the replaced file as a backup. Its secrets are
+# its own: the agent's bearer is a new value, again the same in both files.
+cat > "$full_root/identity.env" <<EOF
+WIREGUARD_AGENT_TOKEN=$first_agent_token
+WIREGUARD_HOST_ID=wg1
+  WIREGUARD_ENDPOINT=wg.example.test:51820
+WIREGUARD_PUBLIC_KEY=$key_a
+WIREGUARD_ALLOWED_IPS=10.7.0.1/32
+WIREGUARD_HOSTS=proxy.example.test=10.7.0.1;*.proxy.example.test=10.7.0.1
+EOF
+configure_run 'empty list over one ingress' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n\n'"$oauth_answers"
+require_output 'configures WireGuard enrollment for one ingress'
+for shown in 'WIREGUARD_HOST_ID=wg1' 'WIREGUARD_ENDPOINT=wg.example.test:51820' \
+    "WIREGUARD_PUBLIC_KEY=$key_a" \
+    'WIREGUARD_HOSTS=proxy.example.test=10.7.0.1;*.proxy.example.test=10.7.0.1'; do
+    grep -Fqx -- "    $shown" "$WORK/configure-full.out" \
+        || die "configure run did not show the replaced line: $shown"
+done
+require_wireguard_names "$full_root/identity.env" 'WIREGUARD_AGENT_TOKEN '
+require_wireguard_names "$full_root/profile.env" ''
+refute_single_ingress_names
+refute_output 'WireGuard enrollment is on'
+backups=("$full_root"/identity.env.bak.*)
+[[ ${#backups[@]} -eq 1 ]] && grep -Fqx 'WIREGUARD_HOST_ID=wg1' "${backups[0]}" \
+    || die "the replaced identity.env was not kept as one backup"
+require_one_agent_token
+[[ "$agent_token" != "$first_agent_token" ]] \
+    || die "a second run kept the first run's WIREGUARD_AGENT_TOKEN"
+printf 'PASS configure: an empty list leaves enrollment off and no single-ingress variable behind\n'
+
+# An existing file that only comments those variables out, or leaves one
+# empty, configures nothing and is not announced. This node's agent is
+# installed but its id is not in the list, which the run points out.
+printf '%s\n' '# WIREGUARD_HOST_ID=p1' 'WIREGUARD_ENDPOINT=' 'WIREGUARD_HOSTS= ' \
+    >> "$full_root/identity.env"
+configure_run 'list without this node' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n'"$p2_entry"$'\n\n'"$oauth_answers"
+refute_output 'configures WireGuard enrollment for one ingress'
+require_output 'WireGuard enrollment is on for these nodes: p2'
+require_output "This node's id, p1, is not one of them"
+refute_single_ingress_names
+printf 'PASS configure: a list without this node says its agent is refused\n'
+
+# A host without the agent's package, whose own node terminates no
+# WireGuard: another node is the one ingress, on the default pool. No agent
+# file is written, the run says what each node's agent needs, and a node
+# that runs no agent is not told its agent is refused.
+rm -rf "$WORK/full-root"
+configure_run 'one ingress, no agent package' "$WORK/no-agent-bin" \
+    "$full_answers$p2_entry"$'\n\n'"$oauth_answers"
+require_wireguard_names "$full_root/identity.env" \
+    'WIREGUARD_AGENT_TOKEN WIREGUARD_INGRESSES WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS '
+require_env "$full_root/identity.env" WIREGUARD_INGRESSES "$p2_entry"
+require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.7.0.1
+require_env "$full_root/identity.env" WIREGUARD_ALLOWED_IPS 10.7.0.1/32
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.7.0.0/24
+[[ ! -e "$full_root/wireguard-agent.env" ]] \
+    || die "configure wrote wireguard-agent.env without the agent's package"
+require_output "WIREGUARD_AGENT_HOST_ID to that node's id in WIREGUARD_INGRESSES."
+require_output 'Address = 10.7.0.1/24'
+refute_output 'is not one of them'
+printf 'PASS configure: one ingress and the default pool, without the agent package\n'
+
+# An existing identity.env that cannot be read is not taken for one without
+# the single-ingress variables. Root reads any file, so the case exists only
+# for another user.
+if [[ $EUID -ne 0 ]]; then
+    chmod 000 "$full_root/identity.env"
+    if printf '%s' "$full_answers" | PATH="$WORK/no-agent-bin:$PATH" \
+        bash "$WORK/configure-full/configure.sh" \
+        > "$WORK/configure-full.out" 2> "$WORK/configure-full.err"; then
+        die "configure accepted an unreadable identity.env"
+    fi
+    grep -Fq 'error: cannot read' "$WORK/configure-full.err" \
+        || die "unreadable identity.env refusal returned the wrong error"
+    chmod 0640 "$full_root/identity.env"
+    printf 'PASS configure: an unreadable identity.env is refused\n'
+else
+    printf 'SKIP configure: unreadable identity.env (root reads every file)\n'
+fi
 
 assert_mode() {
     local expected=$1 path=$2
