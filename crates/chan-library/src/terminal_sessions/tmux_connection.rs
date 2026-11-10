@@ -5,7 +5,7 @@
 //! as work the registry performs on its drainer, answering with
 //! [`WorkDone`].
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
@@ -1017,9 +1017,15 @@ impl TmuxConnection {
             self.names.remove(&pane_id);
         } else {
             if self.names.len() >= PANE_NAMES_MAX && !self.names.contains_key(&pane_id) {
-                let windows = &self.windows;
-                self.names
-                    .retain(|pane, _| windows.values().any(|w| w.panes.contains(pane)));
+                // One pass over the listed panes, so a peer that keeps the
+                // names at their bound pays for each line it sends at most
+                // what it made the connection list.
+                let listed: HashSet<PaneId> = self
+                    .windows
+                    .values()
+                    .flat_map(|w| w.panes.iter().copied())
+                    .collect();
+                self.names.retain(|pane, _| listed.contains(pane));
             }
             if self.names.len() >= PANE_NAMES_MAX && !self.names.contains_key(&pane_id) {
                 tracing::debug!(connection = self.id.0, pane = %pane_id, "tmux pane names full; name dropped");
