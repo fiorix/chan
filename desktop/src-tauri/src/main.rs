@@ -403,8 +403,10 @@ pub struct ControlTerminalRun {
 pub struct BuriedWindow {
     /// Tauri window label. Also the Window-menu item id suffix.
     pub label: String,
-    /// OS display title at bury time ("🏠 /path Window 2",
-    /// "Terminal Window 1") -- shown verbatim in the Window menu.
+    /// The window's title at bury time ("🏠 /path Window 2",
+    /// "Terminal Window 1"), never privacy mode's mask
+    /// (`AppState::bury_window`) -- the Window menu's last resort for the
+    /// row's text.
     pub title: String,
     /// Wall-clock millis at bury time; diagnostics only (the Vec's
     /// push order is the recency authority).
@@ -573,12 +575,25 @@ impl AppState {
     /// Record `label` as buried (most recent). Re-burying a label
     /// drops its older entry first so the list holds one entry per
     /// window and recency stays truthful.
+    ///
+    /// `title` is what the title bar shows, which privacy mode masks. The
+    /// window's own title is kept instead when privacy mode holds one, so
+    /// the Window menu row reads right once privacy mode is off, even with
+    /// neither the window nor its record left to ask; while privacy mode is
+    /// on the menu masks every row itself.
     pub fn bury_window(&self, label: &str, title: &str) {
+        let title = self
+            .privacy_titles
+            .lock()
+            .unwrap()
+            .get(label)
+            .cloned()
+            .unwrap_or_else(|| title.to_string());
         let mut buried = self.buried_windows.lock().unwrap();
         buried.retain(|b| b.label != label);
         buried.push(BuriedWindow {
             label: label.to_string(),
-            title: title.to_string(),
+            title,
             buried_at: config::now_millis(),
         });
     }

@@ -166,6 +166,51 @@ mod tests {
         );
     }
 
+    /// The Window menu falls back to the title a window was buried with when
+    /// neither the window nor its record is left, so that title is the
+    /// window's own even when privacy mode masked its title bar.
+    #[test]
+    fn a_window_hidden_in_privacy_mode_keeps_its_own_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = AppState::with_store(store);
+        write(
+            &state.store,
+            PrivacyPatch {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let shown = window_title(&state, "lib-a::w-1", "geekom / chan Window 1");
+        state.bury_window("lib-a::w-1", &shown);
+        // A window privacy mode never titled keeps the title it was given.
+        state.bury_window("control-terminal-a", "Control Terminal");
+        write(
+            &state.store,
+            PrivacyPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.buried_snapshot(),
+            vec![
+                (
+                    "control-terminal-a".to_string(),
+                    "Control Terminal".to_string()
+                ),
+                (
+                    "lib-a::w-1".to_string(),
+                    "geekom / chan Window 1".to_string()
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn privacy_persists_without_replacing_other_desktop_settings() {
         let dir = tempfile::tempdir().unwrap();
