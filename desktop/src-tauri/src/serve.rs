@@ -1216,6 +1216,9 @@ fn build_workspace_window_with_completion(
                         api,
                     ),
                     WindowEvent::Destroyed => on_destroyed(&app_for_close, &label_for_close),
+                    WindowEvent::Focused(true) => {
+                        crate::single_instance::note_focused(&app_for_close, &label_for_close)
+                    }
                     _ => {}
                 });
                 Ok(())

@@ -20,6 +20,7 @@ mod remote_workspace;
 mod revtunnel;
 mod runtime_capability;
 mod serve;
+mod single_instance;
 mod terminal_mode;
 mod terminal_opacity;
 mod titlebar_tabs;
@@ -270,6 +271,12 @@ pub struct AppState {
     pub restore_pending: Mutex<Vec<String>>,
     /// The permits `chan serve` handoffs register their paths under.
     handoff_registrations: HandoffRegistrations,
+    /// The handoff listener, held for the process's life; a relaunch gives it
+    /// up first (`single_instance::release_endpoint`).
+    pub(crate) handoff_listener: Mutex<Option<chan_server::handoff::ListenerHandle>>,
+    /// The workspace window that took focus last, the one a second launch
+    /// brings forward (`single_instance::come_forward`).
+    pub(crate) last_focused_window: Mutex<Option<String>>,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -340,6 +347,8 @@ impl AppState {
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
             restore_pending: Mutex::new(Vec::new()),
             handoff_registrations: HandoffRegistrations::default(),
+            handoff_listener: Mutex::new(None),
+            last_focused_window: Mutex::new(None),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
@@ -5527,6 +5536,11 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // One desktop per user: a GUI launch that finds another desktop serving
+    // the handoff endpoint asks it to come forward and exits here, before
+    // the shims, the config, the WireGuard fabric or any window. The claim
+    // it returns is the endpoint the listener serves once setup runs.
+    let endpoint_claim = single_instance::guard();
     // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
     // also provides the `chan` + `cs` CLI without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
@@ -5783,26 +5797,21 @@ fn main() {
                 }
             }
 
-            // CLI-to-desktop handoff listener. Binds the
-            // well-known per-user endpoint (a UDS on unix, a named pipe on
-            // Windows) so a `chan serve <workspace>` in a terminal hands the
-            // workspace to this desktop window instead of failing on the
-            // per-workspace flock. Leaked for the process lifetime (the registry
-            // watcher above uses the same Box::leak pattern; the handle's Drop
-            // tears down the listener, but we want it live until exit, and
-            // RunEvent::Exit tears the process down anyway). A bind failure is
+            // CLI-to-desktop handoff listener. Serves the well-known
+            // per-user endpoint (a UDS on unix, a named pipe on Windows) the
+            // start-up guard claimed, so a `chan serve <workspace>` in a
+            // terminal hands the workspace to this desktop window instead of
+            // failing on the per-workspace flock, and a second desktop launch
+            // asks this one to come forward. The handle lives in the app
+            // state for the process lifetime; its Drop tears down the
+            // listener, which a relaunch does first. A bind failure is
             // non-fatal: the CLI just falls back to its own server.
-            // `ensure_well_known_socket_path` (bind-side) creates the
-            // owner-only socket directory on the no-XDG arm, or refuses a
-            // squatted one; clients validate the same directory without
-            // creating it.
-            #[cfg(any(unix, windows))]
-            if let Some(sock) = chan_server::handoff::ensure_well_known_socket_path() {
+            if let Some(claim) = endpoint_claim {
                 let app_for_handoff = app.handle().clone();
                 let state_for_handoff = Arc::clone(&state_for_setup);
-                // `start_listener` binds a tokio listener (UnixListener /
-                // named-pipe server) and `tokio::spawn`s the accept loop, so it
-                // MUST run inside a tokio runtime context. The Tauri `setup` runs
+                // `start_claimed_listener` binds a tokio listener (UnixListener
+                // / named-pipe server) and `tokio::spawn`s the accept loop, so
+                // it MUST run inside a tokio runtime context. The Tauri `setup` runs
                 // on the main thread OUTSIDE any runtime, so calling it
                 // directly panics ("there is no reactor running"), which
                 // aborts the whole desktop on launch. Enter the Tauri-
@@ -5811,7 +5820,7 @@ fn main() {
                 // below use) so the bind + the spawned accept loop attach
                 // to it and survive after this returns.
                 let listener = tauri::async_runtime::block_on(async {
-                    chan_server::handoff::start_listener(sock, move |req| {
+                    chan_server::handoff::start_claimed_listener(claim, move |req| {
                         let app = app_for_handoff.clone();
                         let state = Arc::clone(&state_for_handoff);
                         async move {
@@ -6002,13 +6011,19 @@ fn main() {
                                         Err(message) => Response::Error { message },
                                     }
                                 }
+                                Request::Activate { .. } => {
+                                    single_instance::come_forward(&app, &state)
+                                }
                             }
                         }
                     })
                 });
                 match listener {
                     Ok(handle) => {
-                        Box::leak(Box::new(handle));
+                        *state_for_setup
+                            .handoff_listener
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "CLI-to-desktop handoff listener disabled");
@@ -7523,7 +7538,10 @@ fn begin_normal_shutdown(
         match action {
             ShutdownAction::Exit(code) => app.exit(code),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            ShutdownAction::Restart => app.restart(),
+            ShutdownAction::Restart => {
+                single_instance::release_endpoint(&state);
+                app.restart()
+            }
             #[cfg(windows)]
             ShutdownAction::InstallUpdate { update, bytes } => {
                 tracing::info!(
@@ -7538,6 +7556,7 @@ fn begin_normal_shutdown(
                         error = %e,
                         "installing the downloaded update failed; relaunching the current version"
                     );
+                    single_instance::release_endpoint(&state);
                     app.restart();
                 }
                 // On success the plugin has already exited the process.
@@ -8662,6 +8681,94 @@ mod tests {
             assert!(
                 restore < at,
                 "the caller-cwd restore must run before {probe}"
+            );
+        }
+    }
+
+    /// Only the GUI boot refuses a second instance. Every CLI personality
+    /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the default-terminal
+    /// launch returns from `main` before the single-instance guard, so none of
+    /// them claims the handoff endpoint or asks a running desktop anything,
+    /// and the guard runs before the boot touches what a running desktop owns.
+    #[test]
+    fn cli_personalities_never_reach_the_single_instance_guard() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        assert_eq!(
+            production.matches("single_instance::guard(").count(),
+            1,
+            "the guard has one caller"
+        );
+        let main_body = source_region(production, "\nfn main() {", "\nfn install_app_menu(");
+        let guard = main_body
+            .find("single_instance::guard()")
+            .expect("main runs the single-instance guard");
+        for personality in [
+            "run_hidden_mcp_proxy_if_requested()",
+            "run_as_cs_if_requested()",
+            "run_as_chan_if_requested()",
+            "print_version_if_requested()",
+            "terminal_mode::run_if_requested()",
+        ] {
+            let at = main_body
+                .find(personality)
+                .unwrap_or_else(|| panic!("main dispatches {personality}"));
+            assert!(
+                at < guard,
+                "{personality} must return before the single-instance guard"
+            );
+        }
+        for boot in [
+            "cs_install::install_bin_shims()",
+            "ConfigStore::new()",
+            "wireguard::start(",
+            "tauri::Builder::default()",
+        ] {
+            let at = main_body
+                .find(boot)
+                .unwrap_or_else(|| panic!("main boots through {boot}"));
+            assert!(
+                guard < at,
+                "the single-instance guard must run before {boot}"
+            );
+        }
+        assert!(
+            !include_str!("terminal_mode.rs").contains("single_instance"),
+            "the default-terminal launch leaves a running desktop alone"
+        );
+    }
+
+    /// A relaunch gives up the handoff endpoint before it starts the new
+    /// process, whose single-instance guard then claims it instead of meeting
+    /// it held by the desktop on its way out.
+    #[test]
+    fn a_relaunch_releases_the_handoff_endpoint_first() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let shutdown = source_region(
+            production,
+            "\nfn begin_normal_shutdown(",
+            "\n/// Quit, asking first",
+        );
+        let lines: Vec<&str> = shutdown
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let restarts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("app.restart()"))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(restarts.len(), 2, "both relaunches are pinned");
+        for at in restarts {
+            assert_eq!(
+                lines[at - 1],
+                "single_instance::release_endpoint(&state);",
+                "a relaunch must release the endpoint right before it"
             );
         }
     }

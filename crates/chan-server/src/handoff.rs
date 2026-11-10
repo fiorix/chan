@@ -224,6 +224,14 @@ pub enum Request {
         /// across platforms.
         cwd: String,
     },
+    /// A second desktop launch found this endpoint held: come forward as a
+    /// Dock click does, raising the last focused window or opening a
+    /// standalone terminal when none shows. The sender then exits, so a user
+    /// never has two desktops opening every window twice. The handshake
+    /// field `cli_version` carries the launching desktop's version. A
+    /// desktop shutting down answers `Error`; one that predates this request
+    /// answers `Error` for its unknown type.
+    Activate { protocol: u32, cli_version: String },
 }
 
 impl Request {
@@ -241,7 +249,8 @@ impl Request {
             | Request::ServeRemoteWorkspace { protocol, .. }
             | Request::CloseRemoteWorkspace { protocol, .. }
             | Request::ForgetRemoteWorkspace { protocol, .. }
-            | Request::OpenTerminal { protocol, .. } => *protocol,
+            | Request::OpenTerminal { protocol, .. }
+            | Request::Activate { protocol, .. } => *protocol,
         }
     }
 
@@ -259,7 +268,8 @@ impl Request {
             | Request::ServeRemoteWorkspace { cli_version, .. }
             | Request::CloseRemoteWorkspace { cli_version, .. }
             | Request::ForgetRemoteWorkspace { cli_version, .. }
-            | Request::OpenTerminal { cli_version, .. } => cli_version,
+            | Request::OpenTerminal { cli_version, .. }
+            | Request::Activate { cli_version, .. } => cli_version,
         }
     }
 
@@ -371,6 +381,9 @@ pub enum Response {
     /// The desktop minted the throwaway terminal window an `OpenTerminal`
     /// asked for; its window watcher opens it.
     TerminalOpened { desktop_version: String },
+    /// The desktop took an `Activate`: it is raising its last focused
+    /// window, or opening a standalone terminal when none shows.
+    Activated { desktop_version: String },
 }
 
 impl Response {
@@ -650,6 +663,104 @@ pub fn handoff_forced() -> bool {
 // Desktop side: listener on the well-known socket.
 // ---------------------------------------------------------------------------
 
+/// The right to serve the well-known endpoint, taken apart from the bind so
+/// a desktop can learn at the very start of its boot whether another desktop
+/// serves the endpoint, and keep the right through the rest of its boot. On
+/// unix it is the endpoint's flock (`take_stable_lock`); on Windows it is the
+/// pipe's first instance, which no other process can create while it exists.
+/// It ends when the claim, or the listener started on it, is dropped, and
+/// with the process.
+#[derive(Debug)]
+pub struct EndpointClaim {
+    socket_path: PathBuf,
+    #[cfg(unix)]
+    lock: std::fs::File,
+    #[cfg(windows)]
+    first_instance: tokio::net::windows::named_pipe::NamedPipeServer,
+}
+
+impl EndpointClaim {
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.socket_path
+    }
+}
+
+/// Why [`claim_endpoint_at`] did not claim the endpoint.
+#[derive(Debug)]
+pub enum ClaimError {
+    /// A live process holds it.
+    Held(std::io::Error),
+    /// The claim could not be tried: the runtime directory is missing or not
+    /// the user's, the lock file cannot be opened, or the platform has no
+    /// endpoint.
+    Unavailable(std::io::Error),
+}
+
+impl std::fmt::Display for ClaimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaimError::Held(error) | ClaimError::Unavailable(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ClaimError {}
+
+impl From<ClaimError> for std::io::Error {
+    fn from(error: ClaimError) -> Self {
+        match error {
+            ClaimError::Held(error) | ClaimError::Unavailable(error) => error,
+        }
+    }
+}
+
+/// Claim the endpoint at `socket_path` (see [`EndpointClaim`]).
+#[cfg(unix)]
+pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError> {
+    match crate::control_socket::take_stable_lock(socket_path) {
+        Ok(lock) => Ok(EndpointClaim {
+            socket_path: socket_path.to_path_buf(),
+            lock,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Err(ClaimError::Held(error)),
+        Err(error) => Err(ClaimError::Unavailable(error)),
+    }
+}
+
+/// Claim the endpoint at `socket_path` (see [`EndpointClaim`]). The pipe
+/// instance registers with the tokio reactor, so this must be called from
+/// within a tokio runtime, like [`start_listener`].
+#[cfg(windows)]
+pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    // What CreateNamedPipe answers for FILE_FLAG_FIRST_PIPE_INSTANCE when the
+    // name already has an instance.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+
+    match ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(socket_path.as_os_str())
+    {
+        Ok(first_instance) => Ok(EndpointClaim {
+            socket_path: socket_path.to_path_buf(),
+            first_instance,
+        }),
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            Err(ClaimError::Held(error))
+        }
+        Err(error) => Err(ClaimError::Unavailable(error)),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn claim_endpoint_at(_socket_path: &std::path::Path) -> Result<EndpointClaim, ClaimError> {
+    Err(ClaimError::Unavailable(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "handoff endpoint requires unix-domain sockets or windows named pipes",
+    )))
+}
+
 /// Handle owning the handoff listener and the connections it has accepted.
 /// [`shutdown`](Self::shutdown) stops accepting and lets those connections
 /// finish their replies, within a bound; Drop aborts the accept loop, and
@@ -748,20 +859,36 @@ impl Drop for ListenerHandle {
 /// The socket is chmod 0600 immediately after bind so only the owning user
 /// can connect (defense in depth on top of the per-user directory). Must be
 /// called from within a tokio runtime.
-#[cfg(unix)]
+///
+/// Claims the endpoint first and fails `AddrInUse` while a live process
+/// holds it; [`start_claimed_listener`] serves a claim taken earlier.
+#[cfg(any(unix, windows))]
 pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
-    start_listener_with_peer_uid(socket_path, handler, |stream| Ok(stream.peer_cred()?.uid()))
+    start_claimed_listener(claim_endpoint_at(&socket_path)?, handler)
+}
+
+/// [`start_listener`] on an endpoint this process already claimed.
+#[cfg(unix)]
+pub fn start_claimed_listener<F, Fut>(
+    claim: EndpointClaim,
+    handler: F,
+) -> std::io::Result<ListenerHandle>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Response> + Send + 'static,
+{
+    start_listener_with_peer_uid(claim, handler, |stream| Ok(stream.peer_cred()?.uid()))
 }
 
 /// Unix listener with an injectable peer-uid resolver so the refusal boundary
 /// can be tested without requiring a second account on the host.
 #[cfg(unix)]
 fn start_listener_with_peer_uid<F, Fut, U>(
-    socket_path: PathBuf,
+    claim: EndpointClaim,
     handler: F,
     peer_uid: U,
 ) -> std::io::Result<ListenerHandle>
@@ -773,7 +900,10 @@ where
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
-    let stable_lock = crate::control_socket::take_stable_lock(&socket_path)?;
+    let EndpointClaim {
+        socket_path,
+        lock: stable_lock,
+    } = claim;
     // Unlink any stale socket from a previous run that didn't clean up
     // (kill -9, panic in Drop) so bind doesn't EADDRINUSE.
     let _ = std::fs::remove_file(&socket_path);
@@ -842,20 +972,24 @@ where
 /// Same per-connection framing (read one JSON line -> `dispatch` -> write one
 /// JSON line) as the unix arm; `dispatch` applies the protocol-version gate.
 #[cfg(windows)]
-pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
+pub fn start_claimed_listener<F, Fut>(
+    claim: EndpointClaim,
+    handler: F,
+) -> std::io::Result<ListenerHandle>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
     use tokio::net::windows::named_pipe::ServerOptions;
 
+    // The claim's first instance is the singleton / squatter guard, mirroring
+    // how the unix flock owns the filesystem socket path; it serves the first
+    // client, and fresh instances follow it.
+    let EndpointClaim {
+        socket_path,
+        first_instance: mut next,
+    } = claim;
     let pipe_name = socket_path.as_os_str().to_owned();
-    // `first_pipe_instance(true)` fails if another process already owns this
-    // name -- the singleton / squatter guard, mirroring how the unix bind owns
-    // its filesystem socket path.
-    let mut next = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_name)?;
 
     let handler = std::sync::Arc::new(handler);
     let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
@@ -903,6 +1037,21 @@ where
 
 #[cfg(not(any(unix, windows)))]
 pub fn start_listener<F, Fut>(_socket_path: PathBuf, _handler: F) -> std::io::Result<ListenerHandle>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Response> + Send + 'static,
+{
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "handoff listener requires unix-domain sockets or windows named pipes",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn start_claimed_listener<F, Fut>(
+    _claim: EndpointClaim,
+    _handler: F,
+) -> std::io::Result<ListenerHandle>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
@@ -1226,6 +1375,7 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
+        | Ok(Response::Activated { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1303,6 +1453,7 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
+        | Ok(Response::Activated { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1437,6 +1588,7 @@ fn map_close_response(line: &str) -> Outcome {
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
+        | Ok(Response::Activated { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1652,6 +1804,82 @@ pub async fn try_open_terminal(cwd: &str) -> bool {
     )
 }
 
+/// What the desktop serving an endpoint answered to an `Activate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivateReply {
+    /// It is coming forward.
+    Activated { desktop_version: String },
+    /// It answered without coming forward; `reply` is its answer line. A
+    /// desktop that predates `Activate` answers `Error` for an unknown type,
+    /// one on another protocol `VersionSkew`, and one shutting down `Error`.
+    Refused { reply: String },
+    /// Nothing answered: no endpoint to connect to, a connection closed
+    /// without a reply, or no reply within the budget.
+    NoReply,
+}
+
+/// Ask the desktop serving the endpoint at `socket_path` to come forward.
+/// Unlike the CLI's requests this ignores `CHAN_NO_DESKTOP_HANDOFF` and the
+/// GUI-session check: the sender is itself a desktop, and one desktop per
+/// endpoint is not something automation opts out of.
+#[cfg(unix)]
+pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
+    match request_endpoint(socket_path, &activate_request(), budget).await {
+        Ok(line) => map_activate_response(&line),
+        Err(EndpointError::NoDesktop | EndpointError::NoReply) => ActivateReply::NoReply,
+    }
+}
+
+/// Windows: the same request over the named pipe. A busy or missing pipe is
+/// `NoReply`, which the caller retries within its own bound.
+#[cfg(windows)]
+pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let Ok(client) = ClientOptions::new().open(socket_path) else {
+        return ActivateReply::NoReply;
+    };
+    let Ok(mut payload) = serde_json::to_vec(&activate_request()) else {
+        return ActivateReply::NoReply;
+    };
+    payload.push(b'\n');
+    let (read, mut write) = tokio::io::split(client);
+    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
+    match tokio::time::timeout(budget, io).await {
+        Ok(Ok(line)) if !line.trim().is_empty() => map_activate_response(&line),
+        _ => ActivateReply::NoReply,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_activate_at(
+    _socket_path: &std::path::Path,
+    _budget: std::time::Duration,
+) -> ActivateReply {
+    ActivateReply::NoReply
+}
+
+#[cfg(any(unix, windows))]
+fn activate_request() -> Request {
+    Request::Activate {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+    }
+}
+
+/// Any line is an answer from a live desktop, so only `Activated` comes
+/// forward and everything else, an unreadable line included, is a refusal.
+#[cfg(any(unix, windows))]
+fn map_activate_response(line: &str) -> ActivateReply {
+    let line = line.trim();
+    match serde_json::from_str::<Response>(line) {
+        Ok(Response::Activated { desktop_version }) => ActivateReply::Activated { desktop_version },
+        _ => ActivateReply::Refused {
+            reply: line.to_string(),
+        },
+    }
+}
+
 /// Map an `OpenDevserver` reply line to an [`Outcome`]. Shared by the unix +
 /// windows arms so the response handling stays in one place: only
 /// `DevserverRegistered` is a success; a workspace/upgrade reply to a
@@ -1683,6 +1911,7 @@ fn map_devserver_response(line: &str) -> Outcome {
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
+        | Ok(Response::Activated { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1843,6 +2072,7 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
         | Ok(Response::RemoteWorkspaceClosed { .. })
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
+        | Ok(Response::Activated { .. })
         | Err(_) => UpgradeOutcome::NoDesktop,
     }
 }
@@ -2882,7 +3112,7 @@ mod tests {
         let resolved_cb = resolved.clone();
         let wrong_uid = rustix::process::geteuid().as_raw().wrapping_add(1);
         let _handle = start_listener_with_peer_uid(
-            sock.clone(),
+            claim_endpoint_at(&sock).unwrap(),
             move |_req| {
                 let handled_cb = handled_cb.clone();
                 async move {
@@ -3122,6 +3352,9 @@ mod tests {
                     Request::OpenTerminal { .. } => Response::Error {
                         message: "unexpected open_terminal".into(),
                     },
+                    Request::Activate { .. } => Response::Error {
+                        message: "unexpected activate".into(),
+                    },
                 }
             }
         })
@@ -3184,6 +3417,153 @@ mod tests {
             Response::Error { message } => assert_eq!(message, "no such workspace"),
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    /// The listener answers what its handler says for an `Activate`, which
+    /// travels as the additive `activate` tag (PROTOCOL_VERSION stays 1), and
+    /// the client reads `Activated` as coming forward.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listener_round_trip_activated() {
+        let json = serde_json::to_string(&activate_request()).unwrap();
+        assert!(json.contains("\"type\":\"activate\""), "{json}");
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let _handle = start_listener(sock.clone(), move |req| async move {
+            match req {
+                Request::Activate { protocol, .. } => {
+                    assert_eq!(protocol, PROTOCOL_VERSION);
+                    Response::Activated {
+                        desktop_version: "9.9.9".into(),
+                    }
+                }
+                other => Response::Error {
+                    message: format!("unexpected {other:?}"),
+                },
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            try_activate_at(&sock, Duration::from_secs(3)).await,
+            ActivateReply::Activated {
+                desktop_version: "9.9.9".into()
+            }
+        );
+    }
+
+    /// A desktop that predates `Activate` answers it the way every listener
+    /// answers a type it does not know. That answer is a refusal from a live
+    /// desktop, not the absence of one, so a second launch beside an older
+    /// desktop still exits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unknown_request_type_is_refused_not_unanswered() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // What a listener answers a type it does not know.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let _handle = start_listener(sock.clone(), |_req| async {
+            Response::Error {
+                message: "the handler must not run".into(),
+            }
+        })
+        .unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        stream
+            .write_all(
+                b"{\"type\":\"from_a_later_release\",\"protocol\":1,\"cli_version\":\"9.9.9\"}\n",
+            )
+            .await
+            .unwrap();
+        let mut unknown_reply = String::new();
+        BufReader::new(stream)
+            .read_line(&mut unknown_reply)
+            .await
+            .unwrap();
+        assert!(
+            unknown_reply.contains("invalid handoff request: unknown variant"),
+            "{unknown_reply}"
+        );
+
+        // An older desktop sends that same line for `activate`.
+        let old = dir.path().join("old.sock");
+        let _old = claim_endpoint_at(&old).unwrap();
+        let server = tokio::net::UnixListener::bind(&old).unwrap();
+        let reply = unknown_reply.clone();
+        tokio::spawn(async move {
+            let (stream, _) = server.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"type\":\"activate\""), "{line}");
+            write.write_all(reply.as_bytes()).await.unwrap();
+        });
+        assert_eq!(
+            try_activate_at(&old, Duration::from_secs(3)).await,
+            ActivateReply::Refused {
+                reply: unknown_reply.trim().to_string()
+            }
+        );
+    }
+
+    /// No socket, or a claim whose listener is not bound yet, answers
+    /// nothing; the caller decides how long to keep asking.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_endpoint_without_a_listener_does_not_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        assert_eq!(
+            try_activate_at(&sock, Duration::from_millis(500)).await,
+            ActivateReply::NoReply
+        );
+        let _claim = claim_endpoint_at(&sock).unwrap();
+        assert_eq!(
+            try_activate_at(&sock, Duration::from_millis(500)).await,
+            ActivateReply::NoReply
+        );
+    }
+
+    /// The claim is the listener's lock taken on its own: a second claim, or
+    /// a listener, meets it held until it is dropped, a listener started on
+    /// it keeps holding it, and a missing directory is not a held endpoint.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_endpoint_claim_is_held_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let first = claim_endpoint_at(&sock).unwrap();
+        assert!(matches!(claim_endpoint_at(&sock), Err(ClaimError::Held(_))));
+        let refused = match start_listener(sock.clone(), |_req| async {
+            Response::Error {
+                message: "second".into(),
+            }
+        }) {
+            Ok(_) => panic!("a listener must not start on a claimed endpoint"),
+            Err(error) => error,
+        };
+        assert_eq!(refused.kind(), std::io::ErrorKind::AddrInUse);
+        drop(first);
+
+        let claim = claim_endpoint_at(&sock).unwrap();
+        let _handle = start_claimed_listener(claim, |_req| async {
+            Response::Activated {
+                desktop_version: CHAN_VERSION.into(),
+            }
+        })
+        .unwrap();
+        assert!(matches!(claim_endpoint_at(&sock), Err(ClaimError::Held(_))));
+        assert!(matches!(
+            try_activate_at(&sock, Duration::from_secs(3)).await,
+            ActivateReply::Activated { .. }
+        ));
+
+        let missing = dir.path().join("missing").join("hand.sock");
+        assert!(matches!(
+            claim_endpoint_at(&missing),
+            Err(ClaimError::Unavailable(_))
+        ));
     }
 
     #[test]
@@ -3359,6 +3739,9 @@ mod tests {
                 Request::OpenTerminal { .. } => Response::Error {
                     message: "unexpected open_terminal".into(),
                 },
+                Request::Activate { .. } => Response::Error {
+                    message: "unexpected activate".into(),
+                },
             }
         })
         .unwrap();
@@ -3402,6 +3785,45 @@ mod tests {
             }
             other => panic!("expected Checked, got {other:?}"),
         }
+    }
+
+    /// The Windows twin of `listener_round_trip_activated` and
+    /// `an_endpoint_claim_is_held_until_dropped`: the claim is the pipe's
+    /// first instance, and the listener serves the client from it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn listener_round_trip_activated_pipe() {
+        let pipe = PathBuf::from(format!(
+            r"\\.\pipe\chan-test-activate-{}",
+            std::process::id()
+        ));
+        let claim = claim_endpoint_at(&pipe).unwrap();
+        assert!(matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))));
+        let _handle = start_claimed_listener(claim, move |req| async move {
+            match req {
+                Request::Activate { .. } => Response::Activated {
+                    desktop_version: "9.9.9".into(),
+                },
+                other => Response::Error {
+                    message: format!("unexpected {other:?}"),
+                },
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            try_activate_at(&pipe, Duration::from_secs(3)).await,
+            ActivateReply::Activated {
+                desktop_version: "9.9.9".into()
+            }
+        );
+        let absent = PathBuf::from(format!(
+            r"\\.\pipe\chan-test-activate-absent-{}",
+            std::process::id()
+        ));
+        assert_eq!(
+            try_activate_at(&absent, Duration::from_millis(500)).await,
+            ActivateReply::NoReply
+        );
     }
 
     /// A pipe nobody serves is the no-desktop case, never a hang or a guess.
@@ -3455,6 +3877,9 @@ mod tests {
                 },
                 Request::OpenTerminal { .. } => Response::Error {
                     message: "unexpected open_terminal".into(),
+                },
+                Request::Activate { .. } => Response::Error {
+                    message: "unexpected activate".into(),
                 },
             }
         })
