@@ -9,7 +9,7 @@ Kubernetes manifests for the gateway stack you run yourself, plus the local sdme
 
 The service env-var contract is `gateway/crates/*/packaging/*.env` and `gateway/README.md`. The inter-service trust model (which token each service shares) is in `.agents/gateway.md`, "Service-to-service bearers".
 
-The manifests carry no WireGuard agent: it needs a proxy host's own kernel WireGuard interface and `CAP_NET_ADMIN` in that host's network namespace, so it runs on the host from its deb, outside the cluster, and reaches identity's internal listener the way a proxy node does.
+The manifests carry no WireGuard agent: it needs a proxy host's own kernel WireGuard interface and `CAP_NET_ADMIN` in that host's network namespace, so it runs on the host from its deb, outside the cluster, and reaches identity's internal listener the way a proxy node does. The manifests also set no `WIREGUARD_*` variable, neither identity's ingress list and agent bearer nor profile's pool, so a cluster deployment offers no WireGuard enrollment as shipped; the variables are in [`gateway/README.md`](../../gateway/README.md#wireguard-ingress).
 
 ## Inter-service wiring
 
