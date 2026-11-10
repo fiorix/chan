@@ -1315,13 +1315,15 @@ async fn tokens_revoke(
 
 /// Best-effort first cut of an owner's whole live surface after one of
 /// their PATs is revoked: every tunnel they own and every proxy session
-/// they are the subject of. The scope is the owner and not the one PAT
-/// because the revoke paths have the token id and profile's revoke returns
-/// nothing that maps it to the token's devserver id; devserver-control's
-/// exact per-tunnel kill is open to identity, and identity does not call
-/// it. A devserver on another PAT is cut here too and comes back on its
-/// next dial; one on the revoked PAT redials and fails validation every
-/// time.
+/// they are the subject of. The scope is the owner and not the one PAT.
+/// The owner's revoke ([`tokens_revoke`]) has only the token id, and
+/// profile's revoke returns nothing that maps it to the token's devserver
+/// id. The desktop give-back ([`cut_given_back_token`]) was handed the
+/// token itself and makes the same owner-wide cut by choice: it is the cut
+/// the owner's revoke of that token makes. devserver-control's exact
+/// per-tunnel kill is open to identity, and identity does not call it. A
+/// devserver on another PAT is cut here too and comes back on its next
+/// dial; one on the revoked PAT redials and fails validation every time.
 async fn first_cut(state: &AppState, user_id: Uuid, username: &str) {
     let (kill, revoke) = tokio::join!(
         state.cfg.workspace_admin.kill_owner_tunnels(user_id),
@@ -3047,9 +3049,12 @@ async fn validate_token(
     // The admission arm always ensures it: a redial mints nothing and
     // profile derives no devserver id of its own, so a row the sweeper
     // took comes back on this exchange, which a live tunnel drives on
-    // every dial and every lease refresh. profile's `devserver_access`
-    // selects from `devservers` for the owner as well as for grantees,
-    // so a devserver whose row is gone refuses even its owner. A dial
+    // every dial and every lease refresh. Access never reads the row:
+    // profile's `devserver_access` passes the owner for being the owner
+    // and a grantee on a grant row. The row is what profile lists as the
+    // owner's devservers, so it gives the devserver its label on the
+    // account page and the desktop roster and keeps it listed while it
+    // is offline, and it is what the sweeper stamps as last seen. A dial
     // that announces no name therefore gets a label-less row, the same
     // shape the grant-create bootstrap inserts.
     let (v, row_label) = match (body.proxy_id, body.registration_id) {

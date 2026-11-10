@@ -9,6 +9,7 @@ sdme_stub_refuse() {
 sdme_stub_parse() {
     SDME_STUB_COMMAND=
     SDME_STUB_NAME=
+    SDME_STUB_USER=
     SDME_STUB_PAYLOAD=()
     SDME_STUB_OPTIONS=()
     local command storage='' disk='' boundary=0 option
@@ -43,6 +44,10 @@ sdme_stub_parse() {
                         SDME_STUB_OPTIONS+=("$1")
                         shift
                         ;;
+                    --private-network)
+                        SDME_STUB_OPTIONS+=("$1")
+                        shift
+                        ;;
                     --)
                         [ "$command" = new ] || { sdme_stub_refuse 'create has no payload'; return 2; }
                         boundary=1
@@ -60,8 +65,10 @@ sdme_stub_parse() {
             fi
             ;;
         exec)
-            while [ "${1:-}" = --config ]; do
-                [ "$#" -ge 2 ] && [ -n "$2" ] || { sdme_stub_refuse '--config needs a value'; return 2; }
+            while [ "${1:-}" = --config ] || [ "${1:-}" = --user ]; do
+                [ "$#" -ge 2 ] && [ -n "$2" ] || { sdme_stub_refuse "$1 needs a value"; return 2; }
+                # shellcheck disable=SC2034  # consumed by the stand-in after sourcing
+                [ "$1" != --user ] || SDME_STUB_USER="$2"
                 shift 2
             done
             [ "$#" -ge 2 ] || { sdme_stub_refuse 'exec needs name and payload'; return 2; }

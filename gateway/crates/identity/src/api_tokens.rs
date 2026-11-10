@@ -416,17 +416,6 @@ impl ApiTokenService {
         Ok(Some(used))
     }
 
-    /// Ownership probe used to distinguish an idempotent revoke retry from a
-    /// guessed or cross-account token id after the local denial is in place.
-    pub async fn owns(&self, user_id: Uuid, token_id: Uuid) -> Result<bool> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_tokens WHERE id = $1 AND user_id = $2)")
-            .bind(token_id)
-            .bind(user_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(Error::from)
-    }
-
     pub async fn audit(
         &self,
         user_id: Uuid,

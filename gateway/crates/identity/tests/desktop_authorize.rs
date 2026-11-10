@@ -22,6 +22,8 @@
 
 #[path = "../../../tests-shared/identity_config.rs"]
 mod identity_config;
+#[path = "../../../tests-shared/log_capture.rs"]
+mod log_capture;
 #[path = "../../../tests-shared/identity_db.rs"]
 mod test_db;
 
@@ -45,6 +47,8 @@ use identity::devserver_control_client::DevserverControlClient;
 use identity::http;
 use identity::profile_client::ProfileClient;
 use identity::providers::github::{GitHubEndpoints, GitHubProvider};
+
+use log_capture::capture_logs;
 
 const PROFILE_TOKEN: &str = "test-profile-token";
 
@@ -1486,34 +1490,6 @@ impl OwnerCut {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
-}
-
-/// A subscriber that keeps every formatted line, and the lines it kept.
-fn capture_logs() -> (
-    impl tracing::Subscriber + Send + Sync,
-    Arc<std::sync::Mutex<Vec<u8>>>,
-) {
-    use std::io::Write;
-    use std::sync::Mutex;
-    #[derive(Clone)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-    impl Write for Capture {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let writer = Capture(output.clone());
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    (subscriber, output)
 }
 
 /// Sign `uid` in and run the account-mode authorize, consent, confirm and
