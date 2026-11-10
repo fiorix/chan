@@ -1,6 +1,6 @@
 # A window with tabs in its title bar shows its name nowhere
 
-Status: raised and built by the owner directly with an agent on 2026-11-10 (`feat/pane-window-title`, `d7f710826`, over `e23f4cdbf`); accepted for v0.127.0 by the owner the same day, when it was merged into the integration branch as `2cd4b310e` with its review's fixes on top (`6a0cf5218`, four commits). A read-only review found that the desktop never followed a rename made in Computers, because the page dropped the rename frame on the desktop before recording it although the server sends it to each window's own socket, and that the desktop's document title had started to change; both are fixed, each pinned by a test shown red without its fix, and the design notes and three comments now say what is true. Acceptance 1 holds at the merge (the web gate green); 2 is the owner's.
+Status: raised and built by the owner directly with an agent on 2026-11-10 (`feat/pane-window-title`, `d7f710826`, over `e23f4cdbf`); accepted for v0.127.0 by the owner the same day, when it was merged into the integration branch as `2cd4b310e` with its review's fixes on top (`6a0cf5218`, four commits). A read-only review found that the desktop never followed a rename made in Computers, because the page dropped the rename frame on the desktop before recording it although the server sends it to each window's own socket, and that the desktop's document title had started to change; both are fixed, each pinned by a test shown red without its fix, and the design notes and three comments now say what is true. Acceptance 1 holds at the merge (the web gate green); 2 is the owner's. The owner then found that in a tmux window the popup's heading kept the name the window had when it was made while the band followed tmux; the server now relabels a tmux window's record on every tmux rename and tells its page (`48f47be29`, merged as `5d39fee1d`), each case pinned by a test shown red without it.
 
 ## What is there now
 
@@ -18,7 +18,7 @@ With tabs in the title bar (Settings, Global, "Title bar tabs", v0.126.0; macOS 
 
 - Title-bar-tab mode only; with tabs below the title bar the window's own title is visible and the popup is unchanged.
 - No new way to name windows: the name is the Computers window's.
-- A tmux window's band names its active pane (the tmux title bar item); the popup names the window record, as Computers does, so after `tmux rename-window` the two can differ.
+- A tmux window's record takes tmux's window name on every rename (`5d39fee1d`), so its band, the popup's heading and Computers agree; a label given to a tmux window in Computers lasts until tmux next renames it (owner's call open).
 
 ## Acceptance
 

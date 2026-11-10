@@ -1,6 +1,6 @@
 # The macOS Window menu piles up stale sections
 
-Status: raised by the owner on 2026-11-10 from his Mac after turning privacy mode on and off, with a screenshot of the Window menu; investigated and fixed the same day on `fix/window-menu-stale-sections` (`ac82df82e`, three commits over `3d6266fc6`) and merged into the integration branch as `465892a7d`; accepted for v0.127.0 by the owner. Each defect is reproduced by a test shown red without its fix; the AppKit side of the menu could not be run on the integrator's Linux host, so what macOS adds to the menu, and where, is reasoned from muda's and Tauri's code and the owner's screenshot. Acceptance 1 holds at the merge; 2 is the owner's.
+Status: raised by the owner on 2026-11-10 from his Mac after turning privacy mode on and off, with a screenshot of the Window menu; investigated and fixed the same day on `fix/window-menu-stale-sections` (`ac82df82e`, three commits over `3d6266fc6`) and merged into the integration branch as `465892a7d`; accepted for v0.127.0 by the owner. Each defect is reproduced by a test shown red without its fix; the AppKit side of the menu could not be run on the integrator's Linux host, so what macOS adds to the menu, and where, is reasoned from muda's and Tauri's code and the owner's screenshot. A review of the fix found that the open section, filtered on the OS's visibility, dropped minimized windows and every window of a hidden app, which the rebuild on every close made frequent; a follow-up (`80cf63de6`, merged as `aaef6a46d`) lists every window the desktop has not hidden itself, pinned by a test shown red with the old filter. Acceptance 1 holds at the merges; 2 is the owner's.
 
 ## What is there now
 
@@ -15,7 +15,8 @@ On macOS the app's Window menu showed four groups of "Open Windows (N)" and "Hid
 1. On macOS the Window menu holds exactly one open section and one hidden section, whatever sequence of opens, closes, hides, privacy toggles and devserver feed changes came before; a rebuild replaces them and leaves AppKit's own items alone.
 2. With privacy mode on every row is masked; with it off every row carries the window's own title, hidden windows included.
 3. Building or destroying a window rebuilds the menu on every platform.
-4. Off macOS the launcher's menu bar is unchanged.
+4. The open section lists every window the desktop has not hidden itself, minimized ones and those of a hidden app included; the hidden section lists the ones it has.
+5. Off macOS the launcher's menu bar is unchanged.
 
 ## Boundaries
 
