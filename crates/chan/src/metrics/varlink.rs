@@ -280,6 +280,110 @@ mod tests {
         );
     }
 
+    /// Each type an interface description declares, with its fields' names
+    /// and types in order.
+    fn idl_types(idl: &str) -> std::collections::HashMap<String, Vec<(String, String)>> {
+        let code: Vec<&str> = idl
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect();
+        let code = code.join("\n");
+        code.split("\ntype ")
+            .skip(1)
+            .map(|declaration| {
+                let (head, _) = declaration.split_once(')').expect("a closed field list");
+                let (name, fields) = head.split_once('(').expect("an opened field list");
+                let fields = fields
+                    .split(',')
+                    .map(|field| {
+                        let (name, kind) = field.split_once(':').expect("name: type");
+                        (name.trim().to_string(), kind.trim().to_string())
+                    })
+                    .collect();
+                (name.trim().to_string(), fields)
+            })
+            .collect()
+    }
+
+    /// Where `value`, serialized by the server, and the type `name` the
+    /// description declares for it differ, through every nested type.
+    fn differences(
+        types: &std::collections::HashMap<String, Vec<(String, String)>>,
+        name: &str,
+        value: &Value,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        let fields = &types[name];
+        let object = value.as_object().expect("a serialized struct");
+        for key in object.keys() {
+            if !fields.iter().any(|(field, _)| field == key) {
+                out.insert(format!("{name}.{key} is serialized but not declared"));
+            }
+        }
+        for (field, kind) in fields {
+            let Some(value) = object.get(field) else {
+                out.insert(format!("{name}.{field} is declared but not serialized"));
+                continue;
+            };
+            let inner = kind.trim_start_matches('?').trim_start_matches("[]");
+            let fits = match (inner, value) {
+                (_, Value::Null) => {
+                    out.insert(format!("{name}.{field} is null in the fixture"));
+                    continue;
+                }
+                (_, Value::Array(items)) if kind.starts_with("[]") => {
+                    assert!(!items.is_empty(), "{name}.{field} is empty in the fixture");
+                    for item in items {
+                        differences(types, inner, item, out);
+                    }
+                    continue;
+                }
+                (inner, value) if types.contains_key(inner) => {
+                    differences(types, inner, value, out);
+                    continue;
+                }
+                ("int", value) => value.is_u64() || value.is_i64(),
+                ("float", value) => value.is_number(),
+                ("string", value) => value.is_string(),
+                ("bool", value) => value.is_boolean(),
+                _ => false,
+            };
+            if !fits {
+                out.insert(format!("{name}.{field} is declared {kind} but is {value}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_interface_description_declares_what_the_server_serializes() {
+        // Every optional part present, so every value is on the wire.
+        let mut view = super::super::full_view();
+        view.storage.error = Some("storage scan exceeded its bound".into());
+        let view = serde_json::to_value(view).unwrap();
+        let against = |idl: &str| {
+            let mut out = std::collections::BTreeSet::new();
+            differences(&idl_types(idl), "View", &view, &mut out);
+            out.into_iter().collect::<Vec<_>>()
+        };
+        assert_eq!(against(IDL), Vec::<String>::new());
+        // The comparison sees a field the description lacks, one it has and
+        // the server does not send, and one declared as another type.
+        let lacking = IDL.replace("tunnelDialFailures: int, ", "");
+        let renamed = IDL.replace("scanMs: ?int", "scanMillis: ?int");
+        let retyped = IDL.replace("cpuPercent: ?float", "cpuPercent: ?int");
+        assert_eq!(
+            [against(&lacking), against(&renamed), against(&retyped)],
+            [
+                vec!["Sample.tunnelDialFailures is serialized but not declared".to_string()],
+                vec![
+                    "Storage.scanMillis is declared but not serialized".to_string(),
+                    "Storage.scanMs is serialized but not declared".to_string(),
+                ],
+                vec!["Process.cpuPercent is declared ?int but is 1.5".to_string()],
+            ]
+        );
+    }
+
     /// A source for connections that end before any read.
     struct Unread;
 

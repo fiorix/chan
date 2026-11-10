@@ -679,12 +679,6 @@ pub struct EndpointClaim {
     first_instance: tokio::net::windows::named_pipe::NamedPipeServer,
 }
 
-impl EndpointClaim {
-    pub fn socket_path(&self) -> &std::path::Path {
-        &self.socket_path
-    }
-}
-
 /// Why [`claim_endpoint_at`] did not claim the endpoint.
 #[derive(Debug)]
 pub enum ClaimError {
@@ -860,8 +854,10 @@ impl Drop for ListenerHandle {
 /// can connect (defense in depth on top of the per-user directory). Must be
 /// called from within a tokio runtime.
 ///
-/// Claims the endpoint first and fails `AddrInUse` while a live process
-/// holds it; [`start_claimed_listener`] serves a claim taken earlier.
+/// Claims the endpoint first and fails while a live process holds it, with
+/// the error the claim met: `AddrInUse` on unix, the pipe's access-denied
+/// error on Windows. [`start_claimed_listener`] serves a claim taken
+/// earlier.
 #[cfg(any(unix, windows))]
 pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
 where

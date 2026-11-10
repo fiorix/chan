@@ -25,7 +25,7 @@ pub use storage::Storage;
 /// version.
 pub const SCHEMA_VERSION: u32 = 1;
 /// One second per aggregate sample, with ten minutes retained in memory.
-pub const HISTORY_CAPACITY: usize = 600;
+const HISTORY_CAPACITY: usize = 600;
 const INTERVAL: Duration = Duration::from_secs(1);
 /// The chan-home walker rescans once a minute while reads arrive, and rests
 /// once five minutes pass with no read: a dashboard polls every second, so a
@@ -129,7 +129,10 @@ struct Cached {
     storage: Storage,
 }
 
-/// The runtime's owned stop signal also wakes workers sleeping between scans.
+/// The stop flag both workers read, and the sampler's sleep between
+/// samples, which a stop ends at once. The chan-home walker reads the flag
+/// between filesystem calls but sleeps on [`Demand`], which carries a stop
+/// of its own; the runtime's `Drop` sets both.
 #[derive(Default)]
 struct Stop {
     stopped: Mutex<bool>,

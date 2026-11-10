@@ -53,7 +53,8 @@ fn first_owned(tables: &[&str], candidates: &[SocketAddr], uid: u32) -> Result<S
     }
     Err(match foreign {
         Some((addr, other)) => format!(
-            "{addr} is held by uid {other}, not this user's devserver; not sending the devserver token"
+            "{addr} is held by uid {other}, not this user's devserver; \
+             not sending the devserver token"
         ),
         None => {
             let tried: Vec<String> = candidates.iter().map(SocketAddr::to_string).collect();

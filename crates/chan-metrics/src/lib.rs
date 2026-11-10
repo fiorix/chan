@@ -69,7 +69,9 @@ impl Counter {
     }
 }
 
-/// An active resource. Dropping it removes exactly one active count.
+/// An active resource. Dropping it removes the active counts it holds: one
+/// from [`Counter::enter`], as many as were asked from
+/// [`Counter::enter_many`].
 #[derive(Debug)]
 pub struct Guard<'a>(&'a Counter, u64);
 
