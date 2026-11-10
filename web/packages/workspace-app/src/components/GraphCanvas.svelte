@@ -254,8 +254,9 @@
   /// back to fit-content. A new scope clears the flag so its nodes fit.
   let userInteracted = false;
   /// When `start()` runs before the host has been measured
-  /// (carousel mounts GraphCanvas before slide 2 is visible, so
-  /// the first `resize()` clamps the canvas to 0x0), the initial
+  /// (the Dashboard carousel mounts GraphCanvas before its indexing
+  /// slide, slot id 1, is visible, so the first `resize()` clamps
+  /// the canvas to 0x0), the initial
   /// `fitToContent` returns null and the view stays at the
   /// origin-zoom-1 placeholder. `resize()` flips this flag back
   /// off the moment the container reports nonzero dimensions and

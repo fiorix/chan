@@ -73,6 +73,7 @@
     <li>Each devserver you add gets its own card, and <strong>Add devserver</strong> is the last card. See <a href="/manual/devserver/#connect">Connect from the main window</a>.</li>
   </ul>
   <p>The screen works from the keyboard too; see <a href="/manual/navigation/#windows">Windows and the Computers screen</a>.</p>
+  <p>Chan Desktop runs once per user: starting it again while it is running opens no second copy. On Windows and Linux, a second start from the app menu, or <code>chan-desktop</code> with no options in a shell, opens a new terminal window in the running app, one that is not restored at its next launch. A start the running app does not take as a terminal brings it forward instead: its last focused window is raised, or a terminal window opens when no window is shown or about to be. On macOS, the Dock icon of the running app brings it forward, and opens a terminal window when no window is shown. A start while the running app is quitting waits for it to exit and then starts normally; after twenty seconds of waiting it gives up and opens nothing. If the running app does not respond at all, a second start opens nothing either.</p>
   <figure class="launcher-manual">
     <div class="launcher-demo-wrap">
       <div id="launcher-demo" class="launcher-demo-mount" data-variant="empty" data-hints="true" aria-label="Interactive Computers screen demo"></div>

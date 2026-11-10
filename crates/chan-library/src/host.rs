@@ -7155,9 +7155,6 @@ impl TmuxWindowDelivery {
 /// out when the connection ends.
 type TmuxControls = Arc<Mutex<HashMap<String, TmuxControl>>>;
 
-/// One tenant's [`TmuxWindowHook`]: the windows a tmux connection in that
-/// tenant's terminals gets are rows of `kind` for `workspace_path`, and
-/// its records and control handle go to the host's shared stores.
 /// The connection whose last shown window is `window_id`, once it is hidden:
 /// a tmux window's row (not the control's) with no other shown, non-control
 /// row of the same connection left. `None` for any other row.
@@ -7225,6 +7222,9 @@ mod last_tmux_window_hidden_tests {
     }
 }
 
+/// One tenant's [`TmuxWindowHook`]: the windows a tmux connection in that
+/// tenant's terminals gets are rows of `kind` for `workspace_path`, and
+/// its records and control handle go to the host's shared stores.
 struct HostTmuxWindows {
     registry: Arc<WindowRegistry>,
     notify: Arc<Notify>,

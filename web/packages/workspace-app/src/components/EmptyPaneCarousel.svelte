@@ -391,10 +391,12 @@
   onfocusout={() => (focused = false)}
   onkeydown={onKeyDown}
 >
-  <!-- The indexing slide drops the 720px stage cap so the graph
-       fills the tab width/height (minus a 10px breathing border).
-       The About + Workspace slides keep the centered column: their
-       content is text-shaped and centered reads better there. -->
+  <!-- The indexing and Metrics slides drop the 720px stage cap: the
+       graph fills the tab width/height (minus a 10px breathing
+       border), and the Metrics cards lay out in a grid under the
+       slide's own, wider cap. The About + Workspace slides keep the
+       centered column: their content is text-shaped and centered
+       reads better there. -->
   <div class="slide-stage" class:slide-stage-wide={slideIndex === 1 || slideIndex === DASHBOARD_METRICS_SLIDE}>
     {#if slideIndex === DASHBOARD_METRICS_SLIDE}
       <MetricsSlide {active} />
@@ -689,10 +691,11 @@
     width: 100%;
     max-width: 720px;
   }
-  /* Indexing slide variant. The graph slide needs the full tab
-     width/height to read; the column cap that suits About +
-     Workspace text content makes the spine look constrained to a
-     vertical band. `max-width: none` drops the 720px cap; the
+  /* Wide variant, for the indexing and Metrics slides. The graph
+     slide needs the full tab width/height to read; the column cap
+     that suits About + Workspace text content makes the spine look
+     constrained to a vertical band, and the Metrics slide caps its
+     own width. `max-width: none` drops the 720px cap; the
      carousel-wide variant tightens the carousel's own padding so the
      breathing border around the canvas reads as ~10px instead of the
      16-32px the About/Workspace slides want. */

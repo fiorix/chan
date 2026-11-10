@@ -27,4 +27,4 @@ On macOS the app's Window menu showed four groups of "Open Windows (N)" and "Hid
 ## Acceptance
 
 1. Tests at the merge: a model of muda's index-based edits on a native menu AppKit also fills keeps one tail across rebuilds; the tail sits after "Open in Browser"; a window hidden in privacy mode keeps its own title; building and destroying a window each rebuild the menu. The chan-desktop suite, workspace clippy and rustdoc green.
-2. On chan-desktop on macOS (owner): turning privacy mode on and off, opening, closing and hiding windows leaves one open and one hidden section with the windows' real titles, and the system's window list stays below Zoom.
+2. On chan-desktop on macOS (owner): turning privacy mode on and off, opening, closing and hiding windows leaves one open and one hidden section with the windows' real titles, and the system's window list stays below Zoom; a minimized window's row restores the window (`58bea7d21`, merged as `aa031e0a1`).

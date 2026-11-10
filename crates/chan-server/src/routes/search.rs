@@ -363,7 +363,7 @@ struct DirectoryStateAccum {
     indexing: bool,
 }
 
-/// Dir-only indexing state for the empty-pane carousel. The server
+/// Dir-only indexing state for the Dashboard's Search slide. The server
 /// derives the view from the same filtered tree used by reindexing
 /// plus the persisted BM25 path snapshot, avoiding any parse/embed
 /// work on the request path.
