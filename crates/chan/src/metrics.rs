@@ -266,26 +266,39 @@ pub(crate) async fn cmd_metrics(args: MetricsArgs) -> Result<()> {
         print(&client.read(args.history, None).await?)?;
         return Ok(());
     }
-    watch(&client, args.history, print).await
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    watch(&client, args.history, ctrl_c, print).await
 }
 
 /// `--watch`: print each view the stream sends, about once per second, until
-/// Ctrl-C or until `print` reports that nobody reads the output any more. A
-/// failed read ends it with the error.
+/// `cancel` (Ctrl-C) or until `print` reports that nobody reads the output
+/// any more. A failed read ends it with the error.
 async fn watch(
     source: &impl Source,
     history: bool,
+    cancel: impl std::future::Future<Output = ()>,
     mut print: impl FnMut(&View) -> Result<bool>,
 ) -> Result<()> {
+    // One future for the whole watch, polled around the read as well as the
+    // wait. tokio delivers a signal only to a listener that exists when it
+    // arrives, so a listener made anew for each wait would miss a Ctrl-C
+    // that lands while a read is in flight.
+    tokio::pin!(cancel);
     let mut stream = Subscription::new(history, None);
     loop {
-        if let Some(view) = stream.next(source).await? {
+        let view = tokio::select! {
+            _ = &mut cancel => return Ok(()),
+            view = stream.next(source) => view?,
+        };
+        if let Some(view) = view {
             if !print(&view)? {
                 return Ok(());
             }
         }
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = &mut cancel => return Ok(()),
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
     }
@@ -830,7 +843,7 @@ mod tests {
             views: std::sync::Mutex::new([view_of(&base, "a", 1..=2)].into()),
             asked: Default::default(),
         };
-        let ended = watch(&script, true, |view| {
+        let ended = watch(&script, true, std::future::pending(), |view| {
             write_output(&mut ClosedPipe, &output(view, true, true)?)
         })
         .await;
@@ -843,6 +856,65 @@ mod tests {
         // A single read is printed the same way.
         let single = output(&view_of(&base, "a", 1..=2), true, false).unwrap();
         assert!(matches!(write_output(&mut ClosedPipe, &single), Ok(false)));
+    }
+
+    /// A source that answers its first read and never its later ones, and
+    /// says when one of those is in flight.
+    struct Parked {
+        first: std::sync::Mutex<Option<View>>,
+        reading: tokio::sync::Notify,
+    }
+
+    impl Source for Parked {
+        async fn read(&self, _history: bool, _since: Option<u64>) -> Result<View> {
+            let first = self.first.lock().unwrap().take();
+            match first {
+                Some(view) => Ok(view),
+                None => {
+                    self.reading.notify_one();
+                    std::future::pending().await
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_that_arrives_during_a_read_ends_the_watch() {
+        let home = tempfile::tempdir().unwrap();
+        let view = chan_server::metrics::Runtime::start(home.path().into())
+            .unwrap()
+            .view(false, None);
+        let source = Parked {
+            first: std::sync::Mutex::new(Some(view)),
+            reading: tokio::sync::Notify::new(),
+        };
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let printed = std::cell::Cell::new(0);
+        let watching = watch(
+            &source,
+            false,
+            async {
+                let _ = cancelled.await;
+            },
+            |_| {
+                printed.set(printed.get() + 1);
+                Ok(true)
+            },
+        );
+        tokio::pin!(watching);
+        // Run the watch through its first view and its wait, into the read
+        // that never answers.
+        tokio::select! {
+            ended = &mut watching => panic!("the watch ended before its second read: {ended:?}"),
+            _ = source.reading.notified() => {}
+        }
+        assert_eq!(printed.get(), 1);
+        cancel.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(3600), &mut watching).await;
+        assert!(
+            matches!(ended, Ok(Ok(()))),
+            "a cancel that arrived during a read did not end the watch: {ended:?}"
+        );
     }
 
     #[test]
