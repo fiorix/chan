@@ -12,6 +12,8 @@
   // keep the focus / Escape semantics inside App.svelte; this is
   // purely a passive informational panel.
 
+  import { dashboardOpenAllowed } from "../state/commands";
+  import { ui } from "../state/store.svelte";
   import { paneMode } from "../state/tabs.svelte";
   import { windowCaps } from "../state/windowCaps";
 
@@ -29,8 +31,10 @@
   /// clickable button, so an unfiltered row is an action the user can focus,
   /// hear announced, and press for nothing. `ownPanes` is a window whose
   /// panes are chan's: a tmux window's are tmux's, with no tile to swap, tab
-  /// to stage or side to flip.
-  type Needs = "files" | "drafts" | "workspace" | "ownPanes";
+  /// to stage or side to flip. `dashboard` is the launcher's rule for New
+  /// dashboard (`dashboardOpenAllowed`), which the `b` key reads too: the
+  /// window mode decides it, not a capability bit.
+  type Needs = "files" | "drafts" | "workspace" | "ownPanes" | "dashboard";
   type Row = {
     caps: Cap[];
     action: string;
@@ -85,7 +89,7 @@
         { caps: [{ label: "t", key: "t" }], action: "Stage Terminal" },
         { caps: [{ label: "f", key: "f" }], action: "Stage File Browser", needs: "files" },
         { caps: [{ label: "g", key: "g" }], action: "Stage Graph", needs: "workspace" },
-        { caps: [{ label: "b", key: "b" }], action: "Stage Dashboard", needs: "workspace" },
+        { caps: [{ label: "b", key: "b" }], action: "Stage Dashboard", needs: "dashboard" },
         { caps: [{ label: "n", key: "n" }], action: "Stage New Draft", needs: "drafts" },
         { caps: [{ label: "e", key: "e" }], action: "Stage Excalidraw", needs: "drafts" },
       ],
@@ -156,6 +160,8 @@
         return windowCaps.workspace;
       case "ownPanes":
         return !paneMode.tmux;
+      case "dashboard":
+        return dashboardOpenAllowed(ui);
     }
   }
 

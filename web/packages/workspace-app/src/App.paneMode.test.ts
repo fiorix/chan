@@ -4,17 +4,18 @@
 // leaves the live one alone until Enter commits it; Escape drops the draft.
 // Arrows move focus and WASD swaps tiles; brackets, minus and equals resize,
 // zero evens a split out, and Tab flips the focused pane's side. Letters stage
-// tabs into the draft, each only where its surface exists, and h shows the
-// help. A staged terminal takes the server's name, and settling it leaves the
-// draft fresh. The dock toggles commit first. A draft gone stale answers only
-// Escape and h. Outside it, the spawn commands and the new-terminal chord open
-// at the focused tab's folder, and the pane commands close tabs, panes and
-// empty sides. Cmd+W closes a tab the same way in a control-terminal window,
-// so a live terminal there asks first. While a dialog is open, the keys and
-// host commands meant for it stay with it: none of them enters, commits or
-// drops Hybrid Nav or acts on the layout under the dialog. In a tmux window
-// the draft stages what tmux is asked for on Enter, a divider drag's resize
-// included, and its panes have no sides.
+// tabs into the draft, each only where its surface exists, and a Dashboard
+// wherever the launcher offers one, a window with no workspace included and no
+// control terminal; h shows the help. A staged terminal takes the server's
+// name, and settling it leaves the draft fresh. The dock toggles commit first.
+// A draft gone stale answers only Escape and h. Outside it, the spawn commands
+// and the new-terminal chord open at the focused tab's folder, and the pane
+// commands close tabs, panes and empty sides. Cmd+W closes a tab the same way
+// in a control-terminal window, so a live terminal there asks first. While a
+// dialog is open, the keys and host commands meant for it stay with it: none
+// of them enters, commits or drops Hybrid Nav or acts on the layout under the
+// dialog. In a tmux window the draft stages what tmux is asked for on Enter, a
+// divider drag's resize included, and its panes have no sides.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -295,7 +296,6 @@ describe("staging tabs", () => {
   test.each([
     ["f", "files"],
     ["g", "workspace"],
-    ["b", "workspace"],
     ["n", "drafts"],
     ["e", "drafts"],
   ] as const)("%s stages nothing in a window without %s", async (key, surface) => {
@@ -307,6 +307,49 @@ describe("staging tabs", () => {
 
     expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["file"]);
     expect(paneMode.stagedDraftEditors).toEqual([]);
+  });
+
+  describe("in a window with no workspace", () => {
+    /// One pane holding one terminal in a window with no workspace, files or
+    /// drafts; `control` makes it a control terminal.
+    async function terminalsOnly(control: boolean): Promise<void> {
+      Object.assign(caps, { workspace: false, files: false, drafts: false });
+      ui.terminalOnly = true;
+      ui.terminalControl = control;
+      resetLayout([terminalTab({ id: "term" })]);
+      await settle();
+    }
+
+    afterEach(() => {
+      ui.terminalOnly = false;
+      ui.terminalControl = false;
+    });
+
+    test("b stages a Dashboard, and Enter commits it", async () => {
+      await terminalsOnly(false);
+      await enterHybridNav();
+
+      await keys("b");
+      expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["terminal", "dashboard"]);
+      expect(kinds(leaf(layout, "pane-test").tabs)).toEqual(["terminal"]);
+
+      await keys("Enter");
+      expect(paneMode.active).toBe(false);
+      const pane = leaf(layout, "pane-test");
+      expect(kinds(pane.tabs)).toEqual(["terminal", "dashboard"]);
+      expect(pane.tabs.find((tab) => tab.id === pane.activeTabId)?.kind).toBe("dashboard");
+    });
+
+    test("b stages nothing in a control terminal, whose hidden strip would leave no way back", async () => {
+      await terminalsOnly(true);
+      await enterHybridNav();
+
+      await keys("b");
+      expect(kinds(leaf(draft(), "pane-test").tabs)).toEqual(["terminal"]);
+
+      await keys("Enter");
+      expect(kinds(leaf(layout, "pane-test").tabs)).toEqual(["terminal"]);
+    });
   });
 
   test("keys with no binding leave the draft alone", async () => {
@@ -960,6 +1003,24 @@ describe("in a tmux window", () => {
 
     await keys("Enter");
     expect(asked(request)).toEqual([["s0", { request: "split", pane: "%0", horizontal: true }]]);
+  });
+
+  test("b stages no Dashboard, in a window with no workspace too", async () => {
+    Object.assign(caps, { workspace: false, files: false, drafts: false });
+    ui.terminalOnly = true;
+    try {
+      const request = await tmuxWindow();
+      await enterHybridNav();
+
+      await keys("b");
+      expect(leaf(draft(), "pane-test").tabs.map((tab) => tab.id)).toEqual(["t0"]);
+
+      await keys("Enter");
+      expect(leaf(layout, "pane-test").tabs.map((tab) => tab.id)).toEqual(["t0"]);
+      expect(asked(request)).toEqual([]);
+    } finally {
+      ui.terminalOnly = false;
+    }
   });
 
   test("tmux's layout and a rename during the transaction apply without making it stale", async () => {

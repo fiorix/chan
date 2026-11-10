@@ -17,7 +17,9 @@ import { setTransientStatus, ui } from "./store.svelte";
 import {
   activePane,
   activeTabInPane,
+  layout,
   paneActiveTabId,
+  paneShowsTmux,
   paneSide,
   type PaneSide,
 } from "./tabs.svelte";
@@ -253,6 +255,21 @@ export function commandContext(): CommandContext {
 /// through a runCommand id. Use for reuse-existing (chorded) commands.
 export function allowedInWindow(id: string, ctx: CommandContext): boolean {
   return windowModeAllowsCommand(id, ctx);
+}
+
+/// Whether a Dashboard may open here: the window mode allows
+/// `app.dashboard.open` (a control terminal draws no tab strip to switch back
+/// from one), and the focused pane draws its strip, which a pane showing a
+/// tmux pane does not, nor does any pane while Hybrid Nav stages a tmux
+/// window's layout. The launcher row, Hybrid Nav's `b` and its cheatsheet row
+/// all read this one rule, so the key is offered wherever the command is.
+export function dashboardOpenAllowed(
+  mode: Pick<CommandContext, "terminalOnly" | "terminalControl">,
+): boolean {
+  return (
+    windowModeAllowsCommand("app.dashboard.open", mode) &&
+    !paneShowsTmux(layout.activePaneId)
+  );
 }
 
 /// Visible only in a workspace window (never a standalone terminal).
