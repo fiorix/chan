@@ -188,6 +188,17 @@ impl Rig {
             .concat()
     }
 
+    /// How many panes the connection keeps a reported name for.
+    fn named_panes(&self) -> usize {
+        self.control
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .connection()
+            .map(|c| c.named_panes())
+            .unwrap_or(0)
+    }
+
     fn windows(&self) -> usize {
         self.control
             .tmux
@@ -1187,6 +1198,57 @@ fn a_window_opened_past_the_cap_finds_the_names_tmux_gave_its_panes() {
     rig.feed(&panes_reply);
     rig.work();
     assert_eq!(tab_name(&rig.pane(9)), "mutt");
+}
+
+/// tmux names every pane of the session and a peer can report any number, so
+/// the names kept are bounded. At the bound the names of panes no listed
+/// window holds go first; with every kept name a listed pane's, a name for
+/// another pane is dropped, and a pane already named still takes its next.
+#[test]
+fn the_names_kept_are_bounded_and_those_of_panes_no_window_holds_go_first() {
+    const BOUND: usize = 1024;
+    let mut rig = Rig::connected();
+    // Ten windows: the first holds pane %0, and the last, past the cap, as
+    // many panes as with %0 make the bound.
+    let wide: Vec<String> = (0..BOUND - 1)
+        .map(|i| format!("1x24,{},0,{}", 2 * i, 1000 + i))
+        .collect();
+    let wide = layout_with_checksum(&format!(
+        "{}x24,0,0{{{}}}",
+        2 * (BOUND - 1) - 1,
+        wide.join(",")
+    ));
+    let rows: Vec<Vec<u8>> = (0..10)
+        .map(|i| match i {
+            9 => format!("@9 {wide} {wide} - w9").into_bytes(),
+            _ => format!("@{i} b25d,80x24,0,0,{i} b25d,80x24,0,0,{i} - w{i}").into_bytes(),
+        })
+        .collect();
+    let refs: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+    let list = rig.reply(&refs);
+    rig.feed(&list);
+    rig.work();
+    let first = rig.pane(0);
+    // Names for panes no listed window holds fill the bound.
+    for pane in 0..BOUND as u32 {
+        rig.feed(&pane_name(5000 + pane, "sh", None));
+    }
+    assert_eq!(rig.named_panes(), BOUND);
+    // A listed pane's name is kept, and theirs make room for it.
+    rig.feed(&pane_name(0, "bash", None));
+    rig.work();
+    assert_eq!(tab_name(&first), "bash");
+    assert_eq!(rig.named_panes(), 1);
+    // Every listed pane is named: the bound is reached with nothing to drop.
+    for pane in 0..BOUND as u32 - 1 {
+        rig.feed(&pane_name(1000 + pane, "sh", None));
+    }
+    assert_eq!(rig.named_panes(), BOUND);
+    rig.feed(&pane_name(9000, "sh", None));
+    assert_eq!(rig.named_panes(), BOUND, "one name more is not kept");
+    rig.feed(&pane_name(0, "vim", None));
+    rig.work();
+    assert_eq!(tab_name(&first), "vim", "a pane already named is renamed");
 }
 
 #[test]

@@ -885,6 +885,12 @@ impl TmuxConnection {
         self.windows.len()
     }
 
+    /// How many panes a reported name is kept for.
+    #[cfg(test)]
+    pub(super) fn named_panes(&self) -> usize {
+        self.names.len()
+    }
+
     fn output(&mut self, pane_id: PaneId, data: &[u8], steps: &mut Vec<Step>) {
         let Some(pane) = self.panes.get_mut(&pane_id) else {
             // A pane tmux has not listed for us: it belongs to a window
