@@ -2857,10 +2857,16 @@
   // the launcher's active-surface gate and the acting terminal agree.
   //
   // The find family rides the same bus: on desktop the key bridge claims
-  // Mod+F/Mod+G before the webview sees the keydown and fires
-  // app.find.open / app.find.next as chan:command events. App.svelte
-  // serves those for file tabs only, so the focused terminal must serve
-  // itself here or the chord is dead on a terminal pane.
+  // the find chords before the webview sees the keydown and fires
+  // app.find.open / app.find.next / app.find.prev as chan:command events.
+  // While the keyboard is inside the active terminal tab the bridge
+  // releases Mod+F in both forms (onShellKeydown opens the bar on
+  // `terminal.find`, and Ctrl+F is the shell's) and Ctrl+G (BEL to a
+  // shell; the find input steps on it in onFindKeydown). What still
+  // arrives here is Cmd+G, the Shift+G form, and a find chord pressed with
+  // the keyboard outside the tab. App.svelte serves the family for file
+  // tabs only, so the focused terminal must serve itself here or those
+  // are dead on a terminal pane.
   $effect(() => {
     const onLauncherCommand = (e: Event) => {
       if (!active || !focused) return;
