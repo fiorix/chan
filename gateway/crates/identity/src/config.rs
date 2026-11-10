@@ -677,6 +677,10 @@ fn validate_wireguard_endpoint(raw: &str, position: usize) -> anyhow::Result<()>
         }
         (host, port)
     };
+    // The number parser also takes a leading `+`, which no port has.
+    if port.starts_with('+') {
+        anyhow::bail!(refusal("must have a numeric port"));
+    }
     let port = port
         .parse::<u16>()
         .with_context(|| refusal("must have a numeric port"))?;
@@ -1444,6 +1448,27 @@ mod wireguard_tests {
             "WIREGUARD_INGRESSES entry 1 id and DEVSERVER_PROXY_ORIGIN's host must form a node \
              name of at most 253 bytes"
         );
+    }
+
+    #[test]
+    fn wireguard_config_takes_only_digits_as_an_endpoint_port() {
+        let k = key(7);
+        for endpoint in ["wg.example.test:+51820", "[2001:db8::1]:+51820"] {
+            assert_eq!(
+                refusal("WIREGUARD_INGRESSES", &format!("p1={k}@{endpoint}")),
+                "WIREGUARD_INGRESSES entry 1 endpoint must have a numeric port",
+                "{endpoint}"
+            );
+        }
+        // A leading zero is a digit. The endpoint is published as written,
+        // and a desktop reads its port as a number.
+        let mut values = vars();
+        values.insert(
+            "WIREGUARD_INGRESSES".into(),
+            format!("p1={k}@wg.example.test:051820"),
+        );
+        let cfg = parse(&values).unwrap().unwrap();
+        assert_eq!(cfg.first().ingress.endpoint, "wg.example.test:051820");
     }
 
     #[test]
