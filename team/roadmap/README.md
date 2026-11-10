@@ -95,6 +95,8 @@ Four more came the same day from the second reading of v0.127.0's merged code ([
 
 Two more came from the fixes of the owner's Mac checks that day, found beside them and left alone: a desktop upload's cancel and error paths leave a failure line, a row and an open picker behind and name local paths to the page ([uploadpaths]); and moving a tmux window to another index may close its chan window, read from a probe of tmux and not yet run through chan ([tmuxmove]).
 
+The owner then closed v0.127.0 to new work ("just close off the current in-flight items and the rest moves to v128"), and the small findings of the reading and its fixes that had no row yet are collected in one: `ci.yml` without `permissions`, the gateway roles' `TEMPORARY` grant through `PUBLIC`, and the rest ([leftovers]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -116,6 +118,7 @@ Two more came from the fixes of the owner's Mac checks that day, found beside th
 | [the unused-token test reads too early][tokentest] | not started | build |
 | [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
+| [small findings of the second reading are open][leftovers] | not started | decision |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -136,6 +139,7 @@ Two more came from the fixes of the owner's Mac checks that day, found beside th
 [tokentest]: v0.128.0/the-unused-token-test-reads-its-counters-before-a-cut-could-run.md
 [uploadpaths]: v0.128.0/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md
 [tmuxmove]: v0.128.0/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md
+[leftovers]: v0.128.0/small-findings-of-the-v0127-second-reading-are-still-open.md
 
 ## Completed
 
