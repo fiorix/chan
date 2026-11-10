@@ -105,10 +105,12 @@ impl Client {
 }
 
 /// The local devserver's metrics URL and bearer. The address is the one the
-/// devserver unit pins, else the persisted port on loopback; the bearer is
-/// the devserver's own.
+/// devserver unit pins, else the persisted port on loopback, which Linux
+/// also reads when no listener of this user's is at the pinned one; the
+/// bearer is the devserver's own.
 fn local_target() -> Result<(reqwest::Url, Option<String>)> {
-    let addr = crate::devserver::persisted::local_devserver_dial_addr()
+    use crate::devserver::persisted;
+    let addr = persisted::local_devserver_dial_addr()
         .context("no local devserver port; start a devserver or use --url")?;
     // A wildcard bind is reached on loopback.
     let addr = match addr.ip() {
@@ -123,12 +125,20 @@ fn local_target() -> Result<(reqwest::Url, Option<String>)> {
     let token = chan_server::persisted_devserver_token()
         .context("no local devserver token; start a devserver or use --url")?;
     // The persisted port outlives the devserver, so before the bearer goes
-    // out, Linux checks the listener there is this user's. macOS, FreeBSD
-    // and Windows name socket owners only through binary sysctl records or
+    // out, Linux checks the listener there is this user's. The unit file
+    // outlives a stopped unit too, and a devserver started in a terminal
+    // afterwards listens on the port it recorded, so that port is the
+    // second address tried, under the same check. macOS, FreeBSD and
+    // Windows name socket owners only through binary sysctl records or
     // per-process handle walks, none of them a small and sound check, so
-    // there the bearer goes to the port unverified.
+    // there the bearer goes to the first address unverified.
     #[cfg(target_os = "linux")]
-    listener::ensure_caller_listens(addr)?;
+    let addr = {
+        let mut candidates = vec![addr];
+        candidates
+            .extend(persisted::recorded_devserver_addr().filter(|recorded| *recorded != addr));
+        listener::callers_listener(&candidates)?
+    };
     let url = reqwest::Url::parse(&format!("http://{addr}/"))?;
     Ok((metrics_url(url), Some(token)))
 }
@@ -527,6 +537,27 @@ mod tests {
         drop(listener);
         let error = local_target().unwrap_err().to_string();
         assert!(error.contains("no devserver is listening"), "{error}");
+        // The unit file outlives a stopped unit. A devserver started in a
+        // terminal afterwards records its own port, and that listener, this
+        // user's, is the one read.
+        let foreground = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let recorded = foreground.local_addr().unwrap().port();
+        std::fs::write(
+            state.join("config.json"),
+            format!(r#"{{"devserver_token":"tok","port":{recorded}}}"#),
+        )
+        .unwrap();
+        let target = local_target()
+            .map(|(url, token)| (url.to_string(), token))
+            .map_err(|error| error.to_string());
+        assert_eq!(
+            target,
+            Ok((
+                format!("http://127.0.0.1:{recorded}/api/metrics"),
+                Some("tok".to_string())
+            )),
+            "the unit pins closed port {pinned}"
+        );
     }
 
     #[test]
