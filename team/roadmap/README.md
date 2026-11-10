@@ -77,6 +77,8 @@ A fifth came from the v0.127.0 find follow-ups: libghostty-vt drops a search's s
 
 A sixth came from the owner on 2026-11-10: in windows that are not tmux windows, the pane tree shows beside each terminal what runs in it, read as tmux panes are, from the title the program sets, else its foreground command ([termcmd]). A seventh is the time-bound tests' follow-up: six tests that still go red under the heaviest CPU load, and one that flaked in the full gate's symlink arm ([loadres]).
 
+Two more came from the owner the same day: a `tmux -CC` connection's windows, and its hidden control terminal, show under All windows and on the connection's own card but not on the card of the machine they run on ([tmuxcard]); and Cmd+Shift+N in a devserver's `tmux -CC` window opens a plain devserver window, where a local tmux window gets a new tmux window ([tmuxnew]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -90,6 +92,8 @@ A sixth came from the owner on 2026-11-10: in windows that are not tmux windows,
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | not started | design |
 | [tests still red under the heaviest load][loadres] | not started | design |
+| [tmux windows not on their machine card][tmuxcard] | not started | design |
+| [New Window in a devserver tmux window][tmuxnew] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -102,6 +106,8 @@ A sixth came from the owner on 2026-11-10: in windows that are not tmux windows,
 [findresize]: v0.128.0/a-ghostty-find-loses-its-match-on-a-resize.md
 [termcmd]: v0.128.0/the-pane-tree-does-not-show-what-a-terminal-is-running.md
 [loadres]: v0.128.0/some-tests-still-go-red-under-the-heaviest-cpu-load.md
+[tmuxcard]: v0.128.0/a-tmux-connections-windows-are-missing-from-their-machines-card.md
+[tmuxnew]: v0.128.0/new-window-in-a-devservers-tmux-window-opens-a-plain-window.md
 
 ## Completed
 
