@@ -3919,14 +3919,16 @@ impl WorkspaceHost {
         let registry = self
             .window_registry()
             .ok_or_else(|| Error::Config("window registry not installed".into()))?;
-        let matched = registry.set_label(window_id, label.clone());
+        let (matched, shown) = registry.set_label_shown(window_id, label);
         // The window's own SPA names the window from this text (its browser tab
         // title, and its pane tree in title bar tab mode), and it has no view
         // of the window feed (its library access is the short-lived command
         // capability), so tell it directly. A native desktop window's OS title
-        // is retitled by the window watcher's reconcile instead.
-        if matched {
-            self.emit_window_command(window_id, "window_labeled", Some(&label));
+        // is retitled by the window watcher's reconcile instead. The page is
+        // told the label the row shows, which for a tmux window whose caption
+        // was cleared is tmux's name for it, and only when that changed.
+        if let Some(shown) = shown {
+            self.emit_window_command(window_id, "window_labeled", Some(&shown));
         }
         Ok(matched)
     }
@@ -7189,6 +7191,7 @@ mod last_tmux_window_hidden_tests {
             tmux: tmux.map(|(connection, control)| TmuxWindowMark {
                 connection: connection.into(),
                 control,
+                user_label: false,
             }),
             library_id: None,
             hidden,
@@ -7514,6 +7517,7 @@ mod tmux_window_hook_tests {
             Some(TmuxWindowMark {
                 connection: "term-1".into(),
                 control: false,
+                user_label: false,
             }),
             "marked as a tmux window of the connection"
         );
@@ -7591,6 +7595,38 @@ mod tmux_window_hook_tests {
         assert!(rig.events_rx.try_recv().is_err());
     }
 
+    /// A label the user gave a tmux window in Computers stands: tmux's
+    /// renames of the window reach neither the row nor its live page until
+    /// the user clears the label.
+    #[test]
+    fn a_tmux_rename_reaches_neither_the_row_nor_its_page_while_a_users_label_stands() {
+        let mut rig = rig(WindowKind::Terminal, None);
+        let id = rig.hook.mint("term-1", "bash").expect("a window id");
+        let _socket = rig.session_registry.join(&id, true, None).guard;
+        let frame = |label: &str| {
+            format!(
+                r#"{{"type":"window_command","window_id":"{id}","command":"window_labeled","label":"{label}"}}"#
+            )
+        };
+        // Unlabelled, the row follows tmux and the page hears each name.
+        rig.hook.label(&id, "top");
+        assert_eq!(rig.events_rx.try_recv().expect("a frame"), frame("top"));
+        assert!(rig.registry.set_label(&id, "deploy".into()));
+        for name in ["bash", "top", "vim"] {
+            rig.hook.label(&id, name);
+            assert_eq!(rig.registry.label(&id).as_deref(), Some("deploy"));
+            assert!(
+                rig.events_rx.try_recv().is_err(),
+                "tmux renamed the window {name}"
+            );
+        }
+        // Cleared, the next name tmux gives is the row's and the page's.
+        assert!(rig.registry.set_label(&id, String::new()));
+        rig.hook.label(&id, "zsh");
+        assert_eq!(rig.registry.label(&id).as_deref(), Some("zsh"));
+        assert_eq!(rig.events_rx.try_recv().expect("a frame"), frame("zsh"));
+    }
+
     #[test]
     fn the_control_window_is_hidden_the_record_rides_the_registry_and_the_end_releases_both() {
         let rig = rig(WindowKind::Terminal, None);
@@ -7616,6 +7652,7 @@ mod tmux_window_hook_tests {
             Some(TmuxWindowMark {
                 connection: "term-1".into(),
                 control: true,
+                user_label: false,
             })
         );
         rig.hook.attach(&id, "term-1");
@@ -7698,6 +7735,7 @@ mod tmux_window_hook_tests {
             Some(TmuxWindowMark {
                 connection: "term-1".into(),
                 control: true,
+                user_label: false,
             })
         );
         assert_eq!(rig.registry.snapshot().len(), 1, "no second window");

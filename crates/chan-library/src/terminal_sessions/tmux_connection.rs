@@ -220,9 +220,17 @@ struct Window {
     materialized: bool,
 }
 
+impl TmuxWindowStatus {
+    /// The label tmux's name for the window makes: what its chan window
+    /// carries while the user has given it no label of their own.
+    pub fn label(&self) -> String {
+        window_label(&self.id, &self.name)
+    }
+}
+
 /// The label a tmux window's chan window carries: the window's name, or
 /// `tmux @N` while tmux has not named it.
-fn window_label(window: WindowId, name: &str) -> String {
+fn window_label(window: impl std::fmt::Display, name: &str) -> String {
     if name.is_empty() {
         format!("tmux {window}")
     } else {
