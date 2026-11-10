@@ -1160,6 +1160,42 @@ fn a_name_reported_before_its_pane_is_listed_names_the_session_made_for_it() {
     assert_eq!(tab_name(&rig.pane(5)), "htop");
 }
 
+/// A pane joined to another window leaves the window it was in first, as
+/// tmux reports a join, which ends its session there. The session it gets in
+/// the window it joined is made with the name tmux gave the pane.
+#[test]
+fn a_pane_moved_to_another_window_keeps_its_name_in_the_session_it_gets_there() {
+    let (mut rig, _first, hook) = attached_with_hook();
+    let split = layout_with_checksum("80x24,0,0{40x24,0,0,0,39x24,41,0,1}");
+    rig.feed(format!("%layout-change @0 {split} {split} *\r\n").as_bytes());
+    rig.work();
+    let before = rig.pane(1);
+    let capture = rig.capture(1, 0, 24, &[b"$ "]);
+    rig.feed(&capture);
+    rig.feed(&pane_name(0, "bash", None));
+    rig.feed(&pane_name(1, "top", None));
+    rig.work();
+    assert_eq!(tab_name(&before), "top");
+    rig.inputs();
+    calls(&hook);
+    add_unnamed_window(&mut rig, &hook);
+    rig.work();
+    // The join: the window left is laid out without the pane, then the
+    // window joined with it.
+    let left = layout_with_checksum("80x24,0,0,0");
+    let joined = layout_with_checksum("80x24,0,0[80x12,0,0,5,80x11,0,13,1]");
+    rig.feed(format!("%layout-change @0 {left} {left} -\r\n").as_bytes());
+    rig.feed(format!("%layout-change @1 {joined} {joined} *\r\n").as_bytes());
+    rig.work();
+    rig.work();
+    let after = rig.pane(1);
+    assert_ne!(after.id, before.id, "a session of the window joined");
+    assert!(rig.registry.attach(&before.id, None).is_none());
+    assert_eq!(after.window_id().as_deref(), Some("w-2"));
+    assert_eq!(tab_name(&after), "top");
+    assert_eq!(rig.shown_name(&after), "top");
+}
+
 /// A window past the cap has no pane sessions, and tmux names its panes all
 /// the same; opened later, its panes' sessions are made with those names.
 #[test]
