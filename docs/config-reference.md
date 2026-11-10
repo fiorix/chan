@@ -175,7 +175,7 @@ The CLI prefixes every leaf below with `editor.`. Every scalar leaf is reachable
 | `graph_colors.light.tag` | `String` | unset | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
 | `graph_colors.light.language` | `String` | unset | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
 | `graph_colors.light.contact` | `String` | unset | CLI, API, Settings | Settings → Graph → custom graph colours; light-scheme override |
-| `empty_pane_carousel_cycling` | `bool` | `true` | CLI, API, Settings | Settings → Global → empty-pane carousel; whether the empty pane's animation rotates |
+| `empty_pane_carousel_cycling` | `bool` | `true` | CLI, API, Settings | Settings → Global → Dashboard carousel; whether the Dashboard tab's slides rotate by themselves; the carousel's play/pause button writes the same key |
 | `pane_strip_auto_hide` | `bool` | `false` | CLI, API, Settings | Settings → Global → pane strip; hide a pane's tab strip while the side it shows holds fewer than two tabs; the hidden strip takes its menu and side toggle with it, the keyboard and the launcher still reach everything, and a tab dropped in the pane's centre still lands in the pane, as does a file from the file tree outside an editor, where it types its path (tmux panes and the control terminal are unaffected; a Hybrid Nav side holding a staged row keeps its strip) |
 | `page_width_ratio` | `f64` | `0.8` | CLI, API, Settings | Settings → Editor → page width; editor page-width cap, `0.25..=1.0` |
 | `overlay_maximized` | `bool` | `false` | CLI, API, overlay control | Not surfaced as a Settings row (the overlay header's maximize button is its control); global overlay-maximize preference |
