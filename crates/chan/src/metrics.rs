@@ -132,14 +132,17 @@ fn local_target() -> Result<(reqwest::Url, Option<String>)> {
 /// The metrics route for a server URL as chan prints it: a launcher or
 /// unprefixed serve URL (`/?t=`) names the server root, and a tenant URL
 /// (`/<prefix>/index.html?t=`, or the prefix alone) names the tenant, whose
-/// routes are mounted under its prefix.
+/// routes are mounted under its prefix. A URL that already ends in the
+/// route names the same server or tenant, and is not appended to.
 fn metrics_url(mut url: reqwest::Url) -> reqwest::Url {
+    const ROUTE: &str = "/api/metrics";
     let path = url.path();
     let base = path
         .strip_suffix("/index.html")
         .unwrap_or(path)
         .trim_end_matches('/');
-    let path = format!("{base}/api/metrics");
+    let base = base.strip_suffix(ROUTE).unwrap_or(base);
+    let path = format!("{base}{ROUTE}");
     url.set_path(&path);
     url.set_query(None);
     url.set_fragment(None);
@@ -742,6 +745,16 @@ mod tests {
             ),
             (
                 "http://127.0.0.1:8787/workspace/",
+                "http://127.0.0.1:8787/workspace/api/metrics",
+            ),
+            // The route itself, as docs/metrics.md names it, on the server
+            // root and on a tenant: read as given, not appended to.
+            (
+                "http://127.0.0.1:8787/api/metrics",
+                "http://127.0.0.1:8787/api/metrics",
+            ),
+            (
+                "http://127.0.0.1:8787/workspace/api/metrics/?t=TOKEN",
                 "http://127.0.0.1:8787/workspace/api/metrics",
             ),
         ] {
