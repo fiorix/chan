@@ -403,8 +403,10 @@ pub struct ControlTerminalRun {
 pub struct BuriedWindow {
     /// Tauri window label. Also the Window-menu item id suffix.
     pub label: String,
-    /// OS display title at bury time ("🏠 /path Window 2",
-    /// "Terminal Window 1") -- shown verbatim in the Window menu.
+    /// The window's title at bury time ("🏠 /path Window 2",
+    /// "Terminal Window 1"), never privacy mode's mask
+    /// (`AppState::bury_window`) -- the Window menu's last resort for the
+    /// row's text.
     pub title: String,
     /// Wall-clock millis at bury time; diagnostics only (the Vec's
     /// push order is the recency authority).
@@ -573,12 +575,25 @@ impl AppState {
     /// Record `label` as buried (most recent). Re-burying a label
     /// drops its older entry first so the list holds one entry per
     /// window and recency stays truthful.
+    ///
+    /// `title` is what the title bar shows, which privacy mode masks. The
+    /// window's own title is kept instead when privacy mode holds one, so
+    /// the Window menu row reads right once privacy mode is off, even with
+    /// neither the window nor its record left to ask; while privacy mode is
+    /// on the menu masks every row itself.
     pub fn bury_window(&self, label: &str, title: &str) {
+        let title = self
+            .privacy_titles
+            .lock()
+            .unwrap()
+            .get(label)
+            .cloned()
+            .unwrap_or_else(|| title.to_string());
         let mut buried = self.buried_windows.lock().unwrap();
         buried.retain(|b| b.label != label);
         buried.push(BuriedWindow {
             label: label.to_string(),
-            title: title.to_string(),
+            title,
             buried_at: config::now_millis(),
         });
     }
@@ -6170,7 +6185,7 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         // no native window for it) so the browser tab holds its own window_id, then
         // opens the composed URL.
         let open_in_browser =
-            MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
+            MenuItemBuilder::with_id(OPEN_IN_BROWSER_MENU_ID, "Open in Browser").build(app)?;
         // File ▸ New Terminal, Cmd+T. ALWAYS enabled (no dynamic
         // enable/disable: a disabled menu item still swallows the accelerator,
         // so a chord with nothing to route to would dead-end). The single
@@ -6432,6 +6447,8 @@ const BURIED_MENU_HEADER_ID: &str = "buried-header";
 const OPEN_MENU_ID_PREFIX: &str = "open:";
 /// Disabled section header above all open-window entries.
 const OPEN_MENU_HEADER_ID: &str = "open-header";
+/// The Window submenu item the dynamic tail follows.
+const OPEN_IN_BROWSER_MENU_ID: &str = "app-open-in-browser";
 /// Linux/Windows Window-submenu id (macOS uses the system
 /// `WINDOW_SUBMENU_ID` from `Menu::default`). The launcher's menubar --
 /// the only off-mac bar -- uses this id for its Window submenu, so the
@@ -6482,7 +6499,7 @@ impl LauncherMenu {
 /// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
 /// implements on GTK), View (Toggle Launcher), Window (New Window, Open
-/// in Browser plus the dynamic tail `rebuild_window_menu` appends). A
+/// in Browser, then the dynamic tail `rebuild_window_menu` stamps). A
 /// window wears this bar only while its launcher shows (attached with
 /// `Window::set_menu` by launcher_panel.rs; there is no app-wide default),
 /// so its accelerators never shadow a terminal's chords. A window showing
@@ -6579,7 +6596,7 @@ pub(crate) fn launcher_submenu(
             // Open the FOCUSED workspace window's contents in the system
             // browser.
             let open_in_browser =
-                MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
+                MenuItemBuilder::with_id(OPEN_IN_BROWSER_MENU_ID, "Open in Browser").build(app)?;
             submenu.item(&new_window).item(&open_in_browser).build()
         }
     }
@@ -6609,11 +6626,11 @@ fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<
     }
 }
 
-/// Re-sync the Window submenu's dynamic tail: remove every
-/// previously-appended `buried:*` / `open:*` entry (and the section
-/// headers), then append the current snapshots. Off-mac
-/// the tail lands on the launcher's bar alone (the only menubar). Runs
-/// on the main thread -- muda requires menu mutation there on macOS --
+/// Re-sync the Window submenu's dynamic tail: drop every
+/// previously-stamped `buried:*` / `open:*` entry (and the section
+/// headers), then stamp the current snapshots ([`restamp_window_menu`]).
+/// Off-mac the tail lands on the launcher's bar alone (the only menubar).
+/// Runs on the main thread -- muda requires menu mutation there on macOS --
 /// and is best-effort throughout: a menu glitch must never take down a
 /// close/destroy handler.
 pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
@@ -6623,55 +6640,15 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
         if submenus.is_empty() {
             return;
         }
-        for submenu in &submenus {
-            if let Ok(items) = submenu.items() {
-                for item in items {
-                    let id = item.id().as_ref();
-                    // The single buried and open headers use exact ids; their
-                    // rows use the corresponding prefixes.
-                    if id.starts_with(BURIED_MENU_HEADER_ID)
-                        || id.starts_with(OPEN_MENU_HEADER_ID)
-                        || id.starts_with(BURIED_MENU_ID_PREFIX)
-                        || id.starts_with(OPEN_MENU_ID_PREFIX)
-                    {
-                        let _ = submenu.remove(&item);
-                    }
-                }
-            }
-        }
         let state = app.state::<Arc<AppState>>();
         let buried = state.buried_snapshot();
-        let privacy_enabled = privacy::enabled(&state);
-        // Sections are assembled as data first, then applied to every
-        // submenu at the end -- MenuItems can't be shared across menus, so
-        // each menubar gets freshly built ones.
-        struct MenuSection {
-            header_id: String,
-            header: String,
-            /// (window label, menu title) per row.
-            rows: Vec<(String, String)>,
-            id_prefix: &'static str,
-        }
-        let mut sections: Vec<MenuSection> = Vec::new();
-        let mut push_section =
-            |header_id: &str, header: &str, rows: Vec<(String, String)>, id_prefix: &'static str| {
-                if rows.is_empty() {
-                    return;
-                }
-                sections.push(MenuSection {
-                    header_id: header_id.to_string(),
-                    header: header.to_string(),
-                    rows,
-                    id_prefix,
-                });
-            };
         // Currently-OPEN (visible) windows, so the Window menu can RAISE a live
         // window in addition to reopening a hidden one. The embedded library's
         // assembled window records are the source of truth: the local rows
         // plus each connected devserver's rows merged in from its feed. A
         // row counts as open when its native webview is alive AND visible: a
         // buried window's webview is alive but hidden, so it shows under Hidden,
-        // not here. Appended first, the open windows head the dynamic tail.
+        // not here.
         let open_records = state
             .embedded()
             .map(|e| e.assemble_window_records())
@@ -6692,14 +6669,6 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
             }
             let title = window.title().unwrap_or_else(|_| record_menu_title(record));
             open_local.push((label, title));
-        }
-        if !open_local.is_empty() {
-            push_section(
-                OPEN_MENU_HEADER_ID,
-                &format!("Open Windows ({})", open_local.len()),
-                open_local,
-                OPEN_MENU_ID_PREFIX,
-            );
         }
         let mut local: Vec<(String, String)> = Vec::new();
         // Hidden = the in-session buried set UNION the server-persisted hidden
@@ -6745,41 +6714,175 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
         }
         local.extend(hidden_rows);
 
-        // Count + cost hint in the header: buried webviews stay live (warm
-        // layout, running terminals), which is memory the user can't see.
-        if !local.is_empty() {
-            push_section(
-                BURIED_MENU_HEADER_ID,
-                &format!("Hidden Windows ({}, kept warm in memory)", local.len()),
-                local,
-                BURIED_MENU_ID_PREFIX,
-            );
-        }
+        let tail = window_menu_tail(open_local, local, privacy::enabled(&state));
+        // MenuItems can't be shared across menus, so each menubar gets
+        // freshly built ones.
         for submenu in &submenus {
-            for section in &sections {
-                if let Ok(item) =
-                    MenuItemBuilder::with_id(section.header_id.as_str(), section.header.as_str())
-                        .enabled(false)
-                        .build(&app)
-                {
-                    let _ = submenu.append(&item);
-                }
-                let id_prefix = section.id_prefix;
-                for (label, title) in &section.rows {
-                    match MenuItemBuilder::with_id(format!("{id_prefix}{label}"), if privacy_enabled { "Chan (privacy mode)" } else { title })
-                        .build(&app)
-                    {
-                        Ok(item) => {
-                            let _ = submenu.append(&item);
-                        }
-                        Err(e) => {
-                            tracing::warn!(label, error = %e, "building dynamic window menu item failed");
-                        }
-                    }
-                }
-            }
+            restamp_window_menu(&NativeWindowMenu { app: &app, submenu }, &tail);
         }
     });
+}
+
+/// One item of the Window submenu's dynamic tail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WindowMenuEntry {
+    /// A section header's id, or a row's id prefix plus its window label.
+    id: String,
+    text: String,
+    /// Headers are disabled; a row raises or reopens its window.
+    enabled: bool,
+}
+
+/// The dynamic tail as data: the open windows, then the hidden ones, each
+/// section a disabled header over its (window label, title) rows and left
+/// out when it has none. While privacy mode is on every row reads as the
+/// privacy title, whatever title its window carries.
+fn window_menu_tail(
+    open: Vec<(String, String)>,
+    hidden: Vec<(String, String)>,
+    privacy_enabled: bool,
+) -> Vec<WindowMenuEntry> {
+    let sections = [
+        (
+            OPEN_MENU_HEADER_ID,
+            format!("Open Windows ({})", open.len()),
+            OPEN_MENU_ID_PREFIX,
+            open,
+        ),
+        // Count + cost hint in the header: buried webviews stay live (warm
+        // layout, running terminals), which is memory the user can't see.
+        (
+            BURIED_MENU_HEADER_ID,
+            format!("Hidden Windows ({}, kept warm in memory)", hidden.len()),
+            BURIED_MENU_ID_PREFIX,
+            hidden,
+        ),
+    ];
+    let mut tail = Vec::new();
+    for (header_id, header, id_prefix, rows) in sections {
+        if rows.is_empty() {
+            continue;
+        }
+        tail.push(WindowMenuEntry {
+            id: header_id.to_string(),
+            text: header,
+            enabled: false,
+        });
+        for (label, title) in rows {
+            tail.push(WindowMenuEntry {
+                id: format!("{id_prefix}{label}"),
+                text: if privacy_enabled {
+                    "Chan (privacy mode)".to_string()
+                } else {
+                    title
+                },
+                enabled: true,
+            });
+        }
+    }
+    tail
+}
+
+/// Whether a Window submenu item id belongs to the dynamic tail. The open
+/// and hidden headers use exact ids; their rows use the corresponding
+/// prefixes.
+fn is_window_menu_tail_id(id: &str) -> bool {
+    [
+        BURIED_MENU_HEADER_ID,
+        OPEN_MENU_HEADER_ID,
+        BURIED_MENU_ID_PREFIX,
+        OPEN_MENU_ID_PREFIX,
+    ]
+    .iter()
+    .any(|prefix| id.starts_with(prefix))
+}
+
+/// The calls [`restamp_window_menu`] makes on a Window submenu, so the
+/// tail's placement can be checked against a model of the native menu.
+trait WindowMenuSurface {
+    /// The submenu's item ids, in muda's order.
+    fn item_ids(&self) -> Vec<String>;
+    fn remove_at(&self, position: usize);
+    /// Insert `entry` at `position`, or append it with no position, and
+    /// say whether the item went in.
+    fn insert(&self, entry: &WindowMenuEntry, position: Option<usize>) -> bool;
+}
+
+/// Replace the submenu's dynamic tail with `tail`, stamped right after
+/// Open in Browser.
+///
+/// muda inserts and removes a macOS menu item by its index in muda's own
+/// item list, and that index is the item's place in the native menu only
+/// while nothing muda does not know sits before it. This submenu is the
+/// app's windows menu, which AppKit fills too: its window list at the
+/// bottom, and its other items after Zoom. A tail below them is removed by
+/// the wrong indices, which deletes AppKit's items and strands the old
+/// rows where no later pass can find them, so sections pile up with the
+/// titles they were stamped with. AppKit adds nothing above Minimize, so
+/// there the tail's indices hold. Off macOS the submenu ends at Open in
+/// Browser and the tail closes it.
+fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) {
+    // Back to front, so each removal leaves the positions still to come
+    // in place.
+    for (position, id) in menu.item_ids().iter().enumerate().rev() {
+        if is_window_menu_tail_id(id) {
+            menu.remove_at(position);
+        }
+    }
+    // Every Window submenu is built with Open in Browser; one without it
+    // would get the tail appended.
+    let mut position = menu
+        .item_ids()
+        .iter()
+        .position(|id| id == OPEN_IN_BROWSER_MENU_ID)
+        .map(|anchor| anchor + 1);
+    for entry in tail {
+        if menu.insert(entry, position) {
+            position = position.map(|p| p + 1);
+        }
+    }
+}
+
+/// A live Window submenu, with the app that builds its items.
+struct NativeWindowMenu<'a, R: tauri::Runtime> {
+    app: &'a tauri::AppHandle<R>,
+    submenu: &'a Submenu<R>,
+}
+
+impl<R: tauri::Runtime> WindowMenuSurface for NativeWindowMenu<'_, R> {
+    fn item_ids(&self) -> Vec<String> {
+        self.submenu
+            .items()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.id().as_ref().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn remove_at(&self, position: usize) {
+        let _ = self.submenu.remove_at(position);
+    }
+
+    fn insert(&self, entry: &WindowMenuEntry, position: Option<usize>) -> bool {
+        let item = match MenuItemBuilder::with_id(entry.id.as_str(), entry.text.as_str())
+            .enabled(entry.enabled)
+            .build(self.app)
+        {
+            Ok(item) => item,
+            Err(e) => {
+                tracing::warn!(id = %entry.id, error = %e, "building dynamic window menu item failed");
+                return false;
+            }
+        };
+        let inserted = match position {
+            Some(position) => self.submenu.insert(&item, position),
+            None => self.submenu.append(&item),
+        };
+        inserted.is_ok()
+    }
 }
 
 pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) -> bool {
@@ -7743,6 +7846,299 @@ mod tests {
             .find("launcher_panel::hide(app, window.label());")
             .expect("and hides that window's launcher");
         assert!(target < hide);
+    }
+
+    /// A Window submenu as muda keeps it on macOS, beside the native menu it
+    /// drives. muda inserts and removes an item at the index the item has in
+    /// muda's own list (`insertItem:atIndex:`, `removeItemAtIndex:`) and
+    /// appends with `addItem:`, while AppKit adds items of its own to the same
+    /// native menu once the submenu is the app's windows menu.
+    #[derive(Default)]
+    struct ModelWindowMenu {
+        /// muda's item ids.
+        items: std::cell::RefCell<Vec<String>>,
+        native: std::cell::RefCell<Vec<NativeMenuItem>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum NativeMenuItem {
+        Muda {
+            id: String,
+            text: String,
+        },
+        AppKit(String),
+        /// AppKit's window list, its separator included.
+        WindowList(String),
+    }
+
+    impl ModelWindowMenu {
+        fn with_items(items: &[&str]) -> Self {
+            let menu = Self::default();
+            for id in items {
+                menu.items.borrow_mut().push(id.to_string());
+                menu.native.borrow_mut().push(NativeMenuItem::Muda {
+                    id: id.to_string(),
+                    text: id.to_string(),
+                });
+            }
+            menu
+        }
+
+        /// The macOS Window submenu as `install_app_menu` leaves it.
+        fn macos() -> Self {
+            Self::with_items(&[
+                "app-new-window",
+                OPEN_IN_BROWSER_MENU_ID,
+                "separator",
+                "minimize",
+                "zoom",
+                "separator-after-zoom",
+            ])
+        }
+
+        /// AppKit (re)lists `windows` at the bottom, separated from the
+        /// items above, as its windows menu keeps them.
+        fn appkit_lists(&self, windows: &[&str]) {
+            let mut native = self.native.borrow_mut();
+            native.retain(|item| !matches!(item, NativeMenuItem::WindowList(_)));
+            native.push(NativeMenuItem::WindowList("separator".into()));
+            for window in windows {
+                native.push(NativeMenuItem::WindowList(window.to_string()));
+            }
+        }
+
+        /// AppKit adds `items` after the muda item `after`.
+        fn appkit_inserts_after(&self, after: &str, items: &[&str]) {
+            let mut native = self.native.borrow_mut();
+            let at = native
+                .iter()
+                .position(|item| matches!(item, NativeMenuItem::Muda { id, .. } if id == after))
+                .expect("the anchor item is in the menu")
+                + 1;
+            for (offset, item) in items.iter().enumerate() {
+                native.insert(at + offset, NativeMenuItem::AppKit(item.to_string()));
+            }
+        }
+
+        /// The muda items the native menu shows, in order.
+        fn shown(&self) -> Vec<(String, String)> {
+            self.native
+                .borrow()
+                .iter()
+                .filter_map(|item| match item {
+                    NativeMenuItem::Muda { id, text } => Some((id.clone(), text.clone())),
+                    NativeMenuItem::AppKit(_) | NativeMenuItem::WindowList(_) => None,
+                })
+                .collect()
+        }
+
+        fn appkit_items(&self) -> Vec<String> {
+            self.native
+                .borrow()
+                .iter()
+                .filter_map(|item| match item {
+                    NativeMenuItem::AppKit(text) | NativeMenuItem::WindowList(text) => {
+                        Some(text.clone())
+                    }
+                    NativeMenuItem::Muda { .. } => None,
+                })
+                .collect()
+        }
+
+        /// The native menu shows muda's items and nothing muda forgot,
+        /// holds `tail` once, and keeps every AppKit item.
+        fn assert_holds(&self, tail: &[WindowMenuEntry], appkit: &[&str]) {
+            let shown = self.shown();
+            let ids: Vec<String> = shown.iter().map(|(id, _)| id.clone()).collect();
+            assert_eq!(ids, *self.items.borrow(), "the native menu is muda's list");
+            let stamped: Vec<(String, String)> = shown
+                .into_iter()
+                .filter(|(id, _)| is_window_menu_tail_id(id))
+                .collect();
+            let want: Vec<(String, String)> = tail
+                .iter()
+                .map(|entry| (entry.id.clone(), entry.text.clone()))
+                .collect();
+            assert_eq!(stamped, want, "the latest tail, once");
+            assert_eq!(self.appkit_items(), appkit, "AppKit's items stay");
+        }
+    }
+
+    impl WindowMenuSurface for ModelWindowMenu {
+        fn item_ids(&self) -> Vec<String> {
+            self.items.borrow().clone()
+        }
+
+        fn remove_at(&self, position: usize) {
+            self.items.borrow_mut().remove(position);
+            let mut native = self.native.borrow_mut();
+            if position < native.len() {
+                native.remove(position);
+            }
+        }
+
+        fn insert(&self, entry: &WindowMenuEntry, position: Option<usize>) -> bool {
+            let item = NativeMenuItem::Muda {
+                id: entry.id.clone(),
+                text: entry.text.clone(),
+            };
+            let mut items = self.items.borrow_mut();
+            let mut native = self.native.borrow_mut();
+            match position {
+                Some(position) => {
+                    items.insert(position, entry.id.clone());
+                    native.insert(position, item);
+                }
+                None => {
+                    items.push(entry.id.clone());
+                    native.push(item);
+                }
+            }
+            true
+        }
+    }
+
+    fn menu_rows(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+        rows.iter()
+            .map(|(label, title)| (label.to_string(), title.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_window_menu_tail_lists_open_then_hidden_windows() {
+        let open = menu_rows(&[("local::w-1", "chan Window 1")]);
+        let hidden = menu_rows(&[
+            ("control-terminal-a", "Control Terminal"),
+            ("lib-b::w-2", "sdme Window 1"),
+        ]);
+        let entry = |id: &str, text: &str, enabled: bool| WindowMenuEntry {
+            id: id.to_string(),
+            text: text.to_string(),
+            enabled,
+        };
+        assert_eq!(
+            window_menu_tail(open.clone(), hidden.clone(), false),
+            vec![
+                entry("open-header", "Open Windows (1)", false),
+                entry("open:local::w-1", "chan Window 1", true),
+                entry(
+                    "buried-header",
+                    "Hidden Windows (2, kept warm in memory)",
+                    false
+                ),
+                entry("buried:control-terminal-a", "Control Terminal", true),
+                entry("buried:lib-b::w-2", "sdme Window 1", true),
+            ]
+        );
+        let private = window_menu_tail(open, hidden, true);
+        assert!(private
+            .iter()
+            .filter(|entry| entry.enabled)
+            .all(|entry| entry.text == "Chan (privacy mode)"));
+        assert_eq!(private[0].text, "Open Windows (1)");
+        assert!(window_menu_tail(Vec::new(), Vec::new(), false).is_empty());
+        assert_eq!(
+            window_menu_tail(Vec::new(), menu_rows(&[("local::w-3", "x")]), false)[0].id,
+            "buried-header"
+        );
+    }
+
+    /// The owner's menu after privacy mode went on and off: AppKit lists the
+    /// windows at the bottom of its windows menu and rebuilds stamp the tail
+    /// around it. Each rebuild leaves the latest tail alone, with the titles
+    /// it was stamped with, and every AppKit item.
+    #[test]
+    fn a_rebuild_replaces_the_window_menu_tail_beside_appkits_window_list() {
+        let menu = ModelWindowMenu::macos();
+        let windows = ["geekom / chan Window 1", "chan Window 1"];
+        let mut appkit = vec!["separator"];
+        appkit.extend(windows);
+        menu.appkit_lists(&windows);
+        let open = menu_rows(&[
+            ("lib-a::w-1", "geekom / chan Window 1"),
+            ("local::w-2", "chan Window 1"),
+        ]);
+        let hidden = menu_rows(&[
+            ("control-terminal-a", "Control Terminal - lima"),
+            ("control-terminal-b", "Control Terminal"),
+            ("lib-b::w-3", "sdme Window 1"),
+        ]);
+        let private = window_menu_tail(open.clone(), hidden.clone(), true);
+        for _ in 0..2 {
+            restamp_window_menu(&menu, &private);
+            menu.assert_holds(&private, &appkit);
+        }
+        let public = window_menu_tail(open, hidden, false);
+        for _ in 0..2 {
+            restamp_window_menu(&menu, &public);
+            menu.assert_holds(&public, &appkit);
+            menu.appkit_lists(&windows);
+        }
+        assert!(menu
+            .shown()
+            .iter()
+            .all(|(_, text)| text != "Chan (privacy mode)"));
+    }
+
+    /// AppKit adds items after Zoom too (window tiling, window tabs) and
+    /// relists its windows as they come and go; the tail stays right after
+    /// Open in Browser, above all of them.
+    #[test]
+    fn the_window_menu_tail_sits_after_open_in_browser_above_appkits_items() {
+        let menu = ModelWindowMenu::macos();
+        menu.appkit_inserts_after("zoom", &["Fill", "Center"]);
+        menu.appkit_lists(&["chan Window 1"]);
+        let mut open = vec![("local::w-1".to_string(), "chan Window 1".to_string())];
+        for n in 2..5 {
+            let tail = window_menu_tail(open.clone(), Vec::new(), false);
+            restamp_window_menu(&menu, &tail);
+            let titles: Vec<String> = open.iter().map(|(_, title)| title.clone()).collect();
+            let mut appkit = vec![
+                "Fill".to_string(),
+                "Center".to_string(),
+                "separator".to_string(),
+            ];
+            appkit.extend(titles.iter().cloned());
+            let appkit: Vec<&str> = appkit.iter().map(String::as_str).collect();
+            menu.assert_holds(&tail, &appkit);
+            let ids = menu.item_ids();
+            assert_eq!(ids[1], OPEN_IN_BROWSER_MENU_ID);
+            assert_eq!(
+                ids[2], OPEN_MENU_HEADER_ID,
+                "the tail follows Open in Browser"
+            );
+            assert_eq!(
+                ids[2 + tail.len()],
+                "separator",
+                "and the static items follow it"
+            );
+            open.push((format!("local::w-{n}"), format!("chan Window {n}")));
+            let titles: Vec<&str> = open.iter().map(|(_, title)| title.as_str()).collect();
+            menu.appkit_lists(&titles);
+        }
+    }
+
+    /// Off macOS the launcher bar's Window submenu ends at Open in Browser,
+    /// so the tail closes it, replaced whole on every rebuild.
+    #[test]
+    fn the_launcher_window_menu_ends_with_the_tail() {
+        let menu = ModelWindowMenu::with_items(&["app-new-window", OPEN_IN_BROWSER_MENU_ID]);
+        let first = window_menu_tail(
+            menu_rows(&[("local::w-1", "one"), ("local::w-2", "two")]),
+            Vec::new(),
+            false,
+        );
+        restamp_window_menu(&menu, &first);
+        menu.assert_holds(&first, &[]);
+        let second = window_menu_tail(Vec::new(), menu_rows(&[("local::w-1", "one")]), false);
+        restamp_window_menu(&menu, &second);
+        menu.assert_holds(&second, &[]);
+        let mut want = vec![
+            "app-new-window".to_string(),
+            OPEN_IN_BROWSER_MENU_ID.to_string(),
+        ];
+        want.extend(second.iter().map(|entry| entry.id.clone()));
+        assert_eq!(menu.item_ids(), want);
     }
 
     /// An item that acts on one window acts on the window its route names
