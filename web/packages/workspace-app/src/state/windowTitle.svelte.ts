@@ -17,7 +17,12 @@
 //
 // Only a browser's document title follows the naming fields. A chan-desktop
 // window's name is its OS titlebar, which the window watcher retitles, so its
-// document keeps the static title and the fields serve the pane tree alone.
+// document keeps the static title. In title bar tab mode the desktop also
+// sends the page that title (`windowTabBar.title`), which names the devserver
+// as no naming field can, so the pane tree heads itself with it there; the
+// fields give the pane tree its privacy form and stand in where no title has
+// arrived, from a desktop that predates it. A browser has no such title, so
+// its pane tree names the window as Computers does.
 //
 // A window with no reachable library record (a capability mint that fails, a
 // plain browser tab that never had a record) simply keeps the document's static
@@ -25,10 +30,11 @@
 // failure here is silent.
 
 import { rowLabel, windowDisplayName, type WindowKind } from "@chan/web-shared/window-label";
-import { privacy, privateText } from "@chan/web-shared/privacy";
+import { privacy } from "@chan/web-shared/privacy";
 import { sessionWindowId } from "../api/client";
 import { isTauriDesktop } from "../api/desktop";
 import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
+import { windowTabBar } from "./windowTabBar.svelte";
 
 interface WindowNaming {
   kind: WindowKind;
@@ -45,9 +51,19 @@ let pending: Promise<void> | null = null;
 let reading = $state(false);
 let latestLabel: string | undefined;
 
-/** The launcher's window name, including its privacy fallback; unknown until loaded. */
+/**
+ * The pane tree's name for this window: the title chan-desktop gives it when
+ * the desktop has sent one, else the launcher's name for it; unknown until
+ * one of them is. Privacy mode shows the generated name alone, as Computers
+ * does.
+ */
 export function windowName(): string | null {
-  return naming ? privateText(windowDisplayName(naming), rowLabel(naming.kind, naming.ordinal)) : null;
+  // The page's own setting decides rather than the desktop's mask: the title
+  // held from before privacy mode turned on is the full one until the masked
+  // one arrives.
+  if (privacy.enabled) return naming ? rowLabel(naming.kind, naming.ordinal) : null;
+  if (windowTabBar.title !== "") return windowTabBar.title;
+  return naming ? windowDisplayName(naming) : null;
 }
 
 /** Whether the naming fields are being read. */

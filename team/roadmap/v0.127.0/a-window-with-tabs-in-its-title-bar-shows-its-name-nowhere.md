@@ -8,16 +8,16 @@ With tabs in the title bar (Settings, Global, "Title bar tabs", v0.126.0; macOS 
 
 ## Desired contract
 
-1. With tabs in the title bar, the pane tree popup (Cmd+Shift+A, or the bar's pane-map button) names the window above its tab filter, spelled as the Computers window spells it.
-2. In privacy mode the name is the generated one without the user's label, by the same rule the Computers window uses, and the full name comes back as soon as privacy mode is off.
-3. The name follows a rename made in Computers on every surface, the desktop included. On the desktop it is read when the popup first opens and in a browser at load; simultaneous opens share one read, and a failed read is tried again at the next open.
+1. With tabs in the title bar, the pane tree popup (Cmd+Shift+A, or the bar's pane-map button) names the window above its tab filter. In chan-desktop the name is the window's own title, spelled as its title bar spells it while the Computers launcher covers the window, devserver included (the remote glyph, then "geekom / chan Window 1"): the desktop sends it to the page when the page asks for the mode and on every retitle, on macOS as on Windows. A browser, which has no such title and no way to learn the devserver's name, and a desktop that predates the event spell it as the Computers window spells its row.
+2. In privacy mode the name is the generated one without the devserver or the user's label, by the same rule the Computers window uses for its row, and the full name comes back as soon as privacy mode is off.
+3. The name follows a rename made in Computers on every surface, the desktop included. The naming fields are read on the desktop when the popup first opens and in a browser at load; simultaneous opens share one read, and a failed read is tried again at the next open.
 4. The desktop's document title is unchanged by this: "Chan", or "Chan (privacy mode)".
 5. The filter keeps the keyboard; a long name ends in an ellipsis with the whole name as a tooltip; the list does not move while the name loads; the dialog's accessible description carries the name, while its name stays "Panes and tabs".
 
 ## Boundaries
 
 - Title-bar-tab mode only; with tabs below the title bar the window's own title is visible and the popup is unchanged.
-- No new way to name windows: the name is the Computers window's.
+- No new way to name windows: the name is the desktop's title for the window, or the Computers window's where no such title reaches the page.
 - A tmux window's record takes tmux's window name on every rename (`5d39fee1d`), so its band, the popup's heading and Computers agree; a label given to a tmux window in Computers lasts until tmux next renames it (owner's call open).
 
 ## Acceptance

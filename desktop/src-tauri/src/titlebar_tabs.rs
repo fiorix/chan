@@ -54,6 +54,15 @@
 //! page hides its tab bar's contents and, on macOS, the title bar shows the
 //! window's title again ([`launcher_visibility_changed`]).
 //!
+//! With the title text hidden, the page is where a window in the mode is
+//! named, so it holds the window's title: the one the title bar shows, with
+//! the devserver's name and privacy mode's mask in it. The desktop sends it as
+//! [`TITLE_EVENT`] when the page asks for the mode, which the page does once
+//! it listens for the event, and again on every retitle ([`title_changed`]).
+//! The page's pane tree heads itself with it on both hosts, and on Windows,
+//! whose frameless window has no title of its own, the bar draws it while the
+//! Computers launcher covers the page.
+//!
 //! A frameless window has no room for a menubar, so on Windows the launcher's
 //! menubar stays off a window in the mode, and the page draws the launcher
 //! menubar's File, Edit and View in the bar while the launcher shows: the
@@ -91,14 +100,14 @@ struct PreferencePayload {
     on: bool,
 }
 
-/// The event a frameless window's page receives with the window's title
-/// while its Computers launcher shows, with a [`TitlePayload`]. A window with
-/// no frame has no title of its own to show, so the page draws it in the band.
-#[cfg(any(windows, test))]
+/// The event the page of a window in the mode receives with the window's
+/// title, with a [`TitlePayload`]: when the page asks for the mode and on
+/// every retitle.
+#[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const TITLE_EVENT: &str = "titlebar-window-title";
 
 /// The title event's payload.
-#[cfg(any(windows, test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct TitlePayload {
     title: String,
@@ -748,9 +757,11 @@ pub(crate) fn set_titlebar_tabs_preference(
 
 /// The window's Computers launcher was shown or hidden. The page hides its tab
 /// bar's contents while the launcher covers it (it reads the launcher's
-/// `data-launcher-shown` mark on its root), so a window in the mode shows its
-/// title in the title bar for as long as the launcher does, in AppKit's own
-/// place and look, and follows every retitle. Main thread.
+/// `data-launcher-shown` mark on its root), so on macOS a window in the mode
+/// shows its title in the title bar for as long as the launcher does, in
+/// AppKit's own place and look, and follows every retitle. On Windows the page
+/// draws the title it already holds (see the module docs), so nothing is sent
+/// here. Main thread.
 pub(crate) fn launcher_visibility_changed<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     #[cfg(target_os = "macos")]
     {
@@ -762,38 +773,34 @@ pub(crate) fn launcher_visibility_changed<R: tauri::Runtime>(window: &WebviewWin
             appkit::set_title_shown(window, shown);
         }
     }
-    #[cfg(windows)]
-    send_title_under_launcher(window);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(target_os = "macos"))]
     let _ = window;
 }
 
-/// The window's title changed. On Windows a window in the mode whose
-/// launcher shows has its page draw the title, so the page hears the new one;
-/// on macOS AppKit draws the title and follows the change itself.
+/// The window's title changed. The page of a window in the mode holds the
+/// title, so it hears the new one; on macOS AppKit also follows the change in
+/// the title bar itself.
 pub(crate) fn title_changed<R: tauri::Runtime>(window: &WebviewWindow<R>) {
-    #[cfg(windows)]
-    send_title_under_launcher(window);
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "macos", windows, test))]
+    send_title_in_mode(window);
+    #[cfg(not(any(target_os = "macos", windows, test)))]
     let _ = window;
 }
 
-/// Tell the page of a frameless window in the mode its title while the
-/// window's launcher shows. The page draws it only while the launcher covers
-/// it, so nothing is sent otherwise.
-#[cfg(any(windows, test))]
-fn send_title_under_launcher<R: tauri::Runtime>(window: &WebviewWindow<R>) {
-    let label = window.label();
+/// Tell the page of a window in the mode its title. Any other page draws no
+/// tab bar in the title bar and has the title in view, so nothing is sent.
+#[cfg(any(target_os = "macos", windows, test))]
+fn send_title_in_mode<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     let in_mode = window
         .try_state::<Arc<AppState>>()
-        .is_some_and(|state| state.titlebar_windows.is_active(label));
-    if in_mode && crate::launcher_panel::panel_is_visible(label) {
+        .is_some_and(|state| state.titlebar_windows.is_active(window.label()));
+    if in_mode {
         send_title(window);
     }
 }
 
 /// Send the window's own page its title.
-#[cfg(any(windows, test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn send_title<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     let title = window.title().unwrap_or_default();
     let target = tauri::EventTarget::webview_window(window.label());
@@ -935,6 +942,10 @@ fn switch(
                 appkit::set_title_shown(window, true);
             }
             crate::launcher_panel::title_bar_switched(window);
+            // The page listens before it asks, and a reload or a page
+            // restored from the back-forward cache asks again, so every page
+            // in the mode holds its window's title from here on.
+            send_title(window);
         } else if state.titlebar_windows.disable(label) {
             set_overlay(window, false);
             crate::launcher_panel::title_bar_switched(window);
@@ -1467,14 +1478,66 @@ mod tests {
     fn a_window_out_of_the_mode_is_sent_no_title() {
         let (app, window, _dir) = titled_window("Work Window 2");
         let seen = heard_titles(&app);
-        send_title_under_launcher(&window);
         title_changed(&window);
         assert!(seen.lock().unwrap().is_empty());
     }
 
+    /// The page of a window in the mode heads its pane tree with the window's
+    /// title, so it hears every retitle, whether or not the launcher shows.
+    /// The mock runtime keeps no title, so the payload is whatever the window
+    /// reports.
+    #[test]
+    fn a_window_in_the_mode_hears_every_retitle() {
+        use tauri::Manager;
+
+        let (app, window, _dir) = titled_window("\u{2197} geekom / chan Window 1");
+        let seen = heard_titles(&app);
+        app.state::<Arc<AppState>>()
+            .titlebar_windows
+            .enable(window.label(), record("http://127.0.0.1:4100/", 38.0, None));
+        assert!(!crate::launcher_panel::panel_is_visible(window.label()));
+        title_changed(&window);
+        title_changed(&window);
+        let expected = serde_json::json!({ "title": window.title().unwrap() }).to_string();
+        assert_eq!(*seen.lock().unwrap(), vec![expected.clone(), expected]);
+    }
+
+    /// A page asks for the mode once it listens for the title, and asks again
+    /// after a reload or a restore from the back-forward cache, so entering
+    /// the mode is where every such page first hears its window's title; on
+    /// macOS as on Windows, as every retitle after it. Pinned in the source
+    /// because the switch needs a live native window.
+    #[test]
+    fn a_page_asking_for_the_mode_hears_its_windows_title() {
+        const SELF_RS: &str = include_str!("titlebar_tabs.rs");
+        let module = production(SELF_RS);
+        let switch = function(module, "\nfn switch(");
+        let (entering, leaving) = switch
+            .split_once("} else if state.titlebar_windows.disable(label) {")
+            .expect("the switch goes both ways");
+        let (_, recorded) = entering
+            .split_once("state.titlebar_windows.enable(")
+            .expect("the switch records the window in the mode");
+        assert!(
+            recorded.contains("send_title(window);"),
+            "the page hears the title once its window is in the mode"
+        );
+        assert!(
+            !leaving.contains("send_title("),
+            "a page leaving it is sent none"
+        );
+        let changed = function(module, "\npub(crate) fn title_changed<");
+        assert!(
+            changed.contains(
+                "#[cfg(any(target_os = \"macos\", windows, test))]\n    send_title_in_mode(window);"
+            ),
+            "a retitle reaches the page on both hosts"
+        );
+    }
+
     /// The watcher's retitle is where a window's title changes after it is
     /// built (privacy mode's refresh re-applies the visible form of the same
-    /// titles, below), so the page under the launcher hears every rename.
+    /// titles, below), so the page of a window in the mode hears every rename.
     #[test]
     fn every_retitle_reaches_the_title_bar() {
         const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
@@ -1498,7 +1561,12 @@ mod tests {
     }
 
     /// Privacy mode re-applies every window's visible title when it turns on
-    /// or off, outside the watcher, so that retitle tells the title bar too.
+    /// or off, outside the watcher, so that retitle tells the title bar too,
+    /// before the new setting is announced: a page that hears privacy mode
+    /// turn off already holds the full title to head its pane tree with. The
+    /// refresh runs at once on the main thread, where the sync command runs,
+    /// and is otherwise queued ahead of the announcement's delivery
+    /// (tauri-runtime-wry's `send_user_message`).
     #[test]
     fn the_privacy_refresh_reaches_the_title_bar() {
         const PRIVACY_RS: &str = include_str!("privacy.rs");
@@ -1516,6 +1584,14 @@ mod tests {
             .expect("the privacy retitle tells the title bar");
         let next = after.find("rebuild_window_menu").unwrap_or(usize::MAX);
         assert!(hook < next, "told for the window just retitled");
+        let set = function(privacy, "\npub(crate) fn set_privacy_settings(");
+        let refresh = set
+            .find("refresh_titles(&app)")
+            .expect("the setter retitles every window");
+        let announce = set
+            .find("app.emit(EVENT, &settings)")
+            .expect("the setter announces the settings");
+        assert!(refresh < announce, "the retitle comes first");
     }
 
     /// The field names are the page's contract: `api/desktop.ts` reads these

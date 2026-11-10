@@ -13,8 +13,18 @@ import { fileTab, terminalTab } from "../__tests__/tabs";
 import { closePaneTree, openPaneTree, paneTree, PANE_TREE_ANCHOR_ATTR } from "../state/paneTree.svelte";
 import type { ProgramStatusRecord } from "../state/programStatus";
 import { layout, paneMode, tabFocusPulse, type LeafNode, type Node, type Tab } from "../state/tabs.svelte";
-import { windowTabBar } from "../state/windowTabBar.svelte";
-import { applyWindowLabel, __resetWindowTitle } from "../state/windowTitle.svelte";
+import {
+  NO_TITLEBAR_CHROME,
+  startWindowTabBar,
+  TITLEBAR_TABS_COMMAND,
+  TITLEBAR_WINDOW_TITLE_EVENT,
+  WINDOW_TAB_BAR_MIN_HEIGHT,
+  WINDOW_TAB_BAR_STORAGE_KEY,
+  windowTabBar,
+  type WindowTabBarStart,
+} from "../state/windowTabBar.svelte";
+import { applyWindowLabel, refreshWindowTitle, __resetWindowTitle } from "../state/windowTitle.svelte";
+import { resetHostVocabularyForTests } from "../api/nativeVocabulary";
 import { privacy } from "@chan/web-shared/privacy";
 import { loadScopedLibrarySnapshot, type ScopedLibrarySnapshot } from "../api/libraryCommand";
 import { sessionWindowId } from "../api/client";
@@ -510,6 +520,148 @@ describe("a tmux window", () => {
     await open();
     await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [build]"));
     expect(rowTitles()).toEqual(["build", "build-2"]);
+  });
+});
+
+// chan-desktop with tabs in the title bar sends the page its window's title
+// when the page asks for the mode and on every retitle (titlebar_tabs.rs):
+// the title its title bar shows, with the devserver's name the page has no
+// other way to know, and privacy mode's mask while that is on.
+describe("the desktop's title for the window", () => {
+  type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+  const SELF_LABEL = "lib-0a1b::w-2";
+  const TITLE = "\u2197 geekom Terminal Window 2 [deploy shell]";
+  let tabBar: WindowTabBarStart | null = null;
+  // Delivers a title event to this page's own window, once it listens.
+  let sendTitle: ((title: string) => void) | null = null;
+
+  /// chan-desktop on macOS whose app can put the tabs in the title bar and
+  /// prefers to, and which sends the page `title` as it enters the mode.
+  async function startOnDesktop(title: string): Promise<void> {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {
+        metadata: { currentWindow: { label: SELF_LABEL }, currentWebview: { label: SELF_LABEL } },
+        invoke: async (cmd: string, args?: { enabled?: boolean }) => {
+          if (cmd === "native_vocabulary") return { version: "1", build: "b", commands: [TITLEBAR_TABS_COMMAND] };
+          if (cmd === "titlebar_tabs_preference") return true;
+          if (cmd === "set_titlebar_tabs") {
+            if (args?.enabled === true) sendTitle?.(title);
+            return { ...NO_TITLEBAR_CHROME, active: args?.enabled === true, insetLeft: 78 };
+          }
+          throw new Error(`unexpected invoke ${cmd}`);
+        },
+      },
+    });
+    Object.defineProperty(window, "__TAURI__", {
+      configurable: true,
+      value: {
+        event: {
+          listen: async (
+            name: string,
+            handler: (event: { payload: unknown }) => void,
+            options?: { target?: { label: string } },
+          ) => {
+            if (name !== TITLEBAR_WINDOW_TITLE_EVENT || options?.target?.label !== SELF_LABEL) return () => {};
+            sendTitle = (next) => handler({ payload: { title: next } });
+            return () => {
+              sendTitle = null;
+            };
+          },
+        },
+      },
+    });
+    tabBar = startWindowTabBar();
+    await tabBar.pending;
+    expect(windowTabBar.on).toBe(true);
+  }
+
+  function heading(): HTMLElement | null {
+    return panel()?.querySelector<HTMLElement>(".window-title") ?? null;
+  }
+
+  function description(): string | null | undefined {
+    return document.getElementById(panel()!.getAttribute("aria-describedby") ?? "")?.textContent;
+  }
+
+  afterEach(() => {
+    tabBar?.stop();
+    tabBar = null;
+    sendTitle = null;
+    delete (window as W).__TAURI_INTERNALS__;
+    delete (window as W).__TAURI__;
+    resetHostVocabularyForTests();
+    localStorage.clear();
+    windowTabBar.title = "";
+    windowTabBar.available = false;
+    windowTabBar.preferred = false;
+    windowTabBar.chrome = NO_TITLEBAR_CHROME;
+    windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
+  });
+
+  test("heads the tree, devserver included, and leaves the document title alone", async () => {
+    await startOnDesktop(TITLE);
+    await open();
+    await vi.waitFor(() => expect(heading()?.textContent).toBe(TITLE));
+    expect(heading()!.getAttribute("title")).toBe(TITLE);
+    expect(heading()!.nextElementSibling).toBe(filter().parentElement);
+    expect(description()).toBe(TITLE);
+    expect(panel()!.getAttribute("aria-label")).toBe("Panes and tabs");
+    expect(document.activeElement).toBe(filter());
+    document.title = "Chan";
+    refreshWindowTitle();
+    expect(document.title).toBe("Chan");
+  });
+
+  test("follows a retitle, in the open tree and at the next open", async () => {
+    await startOnDesktop(TITLE);
+    await open();
+    await vi.waitFor(() => expect(heading()?.textContent).toBe(TITLE));
+    sendTitle!("\u2197 geekom Terminal Window 2 [release checks]");
+    await tick();
+    expect(heading()?.textContent).toBe("\u2197 geekom Terminal Window 2 [release checks]");
+    expect(description()).toBe("\u2197 geekom Terminal Window 2 [release checks]");
+    closePaneTree();
+    await tick();
+    sendTitle!("\u2197 geekom Terminal Window 2");
+    await open();
+    expect(heading()?.textContent).toBe("\u2197 geekom Terminal Window 2");
+  });
+
+  test("privacy mode shows the generated name alone, and the full title once it is off", async () => {
+    await startOnDesktop(TITLE);
+    await open();
+    await vi.waitFor(() => expect(heading()?.textContent).toBe(TITLE));
+    // The page still holds the full title when it hears privacy mode turn on.
+    privacy.enabled = true;
+    await vi.waitFor(() => expect(heading()?.textContent).toBe("Terminal Window 2"));
+    expect(heading()!.getAttribute("title")).toBe("Terminal Window 2");
+    expect(description()).toBe("Terminal Window 2");
+    // The desktop masks every window's title while privacy mode is on.
+    sendTitle!("Chan (privacy mode)");
+    await tick();
+    expect(heading()?.textContent).toBe("Terminal Window 2");
+    // Turning it off retitles every window before the setting is announced.
+    sendTitle!(TITLE);
+    await tick();
+    expect(heading()?.textContent).toBe("Terminal Window 2");
+    privacy.enabled = false;
+    await tick();
+    expect(heading()?.textContent).toBe(TITLE);
+    expect(description()).toBe(TITLE);
+  });
+
+  test("a browser, which no title reaches, heads the tree with the Computers name", async () => {
+    localStorage.setItem(WINDOW_TAB_BAR_STORAGE_KEY, "1");
+    tabBar = startWindowTabBar();
+    expect(tabBar.pending).toBeNull();
+    expect(windowTabBar.on).toBe(true);
+    await open();
+    await vi.waitFor(() => expect(heading()?.textContent).toBe("Terminal Window 2 [deploy shell]"));
+    expect(description()).toBe("Terminal Window 2 [deploy shell]");
+    privacy.enabled = true;
+    await tick();
+    expect(heading()?.textContent).toBe("Terminal Window 2");
   });
 });
 

@@ -63,9 +63,10 @@ export function titlebarTabsSupported(os: OS, vocabulary: ReadonlySet<string> | 
 /// Its payload is `{ on }`.
 export const TITLEBAR_TABS_PREFERENCE_EVENT = "titlebar-tabs-preference";
 
-/// The event chan-desktop sends a frameless window's page with the window's
-/// title while the window's Computers launcher shows, and again on a rename.
-/// Its payload is `{ title }`.
+/// The event chan-desktop sends the page of a window whose title bar holds
+/// the bar with the window's title, the one its title bar shows, devserver and
+/// privacy mask included: when the page asks for the mode and again on every
+/// retitle. Its payload is `{ title }`.
 export const TITLEBAR_WINDOW_TITLE_EVENT = "titlebar-window-title";
 
 /// The bar's height in CSS px where no window controls set it, in a browser:
@@ -112,8 +113,8 @@ export const NO_TITLEBAR_CHROME: TitlebarChrome = {
 /// about the title bar (all zero off the desktop); `height` the bar's height
 /// in CSS px; `slot` the bar element the active pane's strip moves into, null
 /// while no bar is mounted; `title` the window's title the desktop last sent,
-/// which the bar draws while the Computers launcher covers a window whose
-/// controls it draws, empty until then.
+/// which heads the pane tree and which the bar draws while the Computers
+/// launcher covers a window whose controls it draws, empty until then.
 export const windowTabBar = $state<{
   on: boolean;
   available: boolean;
@@ -373,8 +374,10 @@ export function startWindowTabBar(): WindowTabBarStart {
     );
     // The desktop sends the title to one window, and a listener without a
     // target hears what is sent to every window, so this one names its own:
-    // a covered window never draws another window's title. A page that cannot
-    // read its own label takes no title at all.
+    // a window never draws or names itself with another window's title. A
+    // page that cannot read its own label takes no title at all. It listens
+    // before it asks for the mode below, which is when the desktop first
+    // sends the title.
     const own = ownWebviewWindowTarget();
     const offTitle = own
       ? await onTauriEvent<{ title?: unknown } | null>(
