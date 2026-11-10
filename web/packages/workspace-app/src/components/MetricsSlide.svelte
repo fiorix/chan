@@ -69,7 +69,7 @@
         <p class="path"><PrivateField field="metrics:chan-home" label="chan home path"><span title={view?.storage.path}>{view?.storage.path}</span></PrivateField></p>
         <p>{bytes(view?.storage.allocatedBytes)} allocated · {view?.storage.files ?? "n/a"} files</p>
         <p>{view?.storage.sampledAtMs ? `Scanned ${new Date(view.storage.sampledAtMs).toLocaleTimeString()}` : "Scan pending"} · refreshes every minute</p>
-        {#if view?.storage.error}<p class="error">Storage scan failed; showing the last completed total.</p>{/if}
+        {#if view?.storage.error}<p class="error">Storage scan failed: {view.storage.error}{view.storage.logicalBytes == null ? "." : "; showing the last completed total."}</p>{/if}
         <h3 class="transfer-heading">Transfer payload</h3>
         <p>RX {rate(sample.transferPayload.receivedBytesPerSecond)} · TX {rate(sample.transferPayload.sentBytesPerSecond)}</p>
         <p>{sample.transfers.cancelled} cancelled · {sample.transfers.stalled} stalled · {sample.transfers.refused} refused</p>
