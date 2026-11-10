@@ -71,7 +71,13 @@ export async function initWindowTitle(): Promise<void> {
 /** Load the naming fields on demand, sharing an in-flight read and retrying a failed one. */
 export function loadWindowTitle(): Promise<void> {
   if (naming) return Promise.resolve();
-  if (!pending) pending = readWindowNaming().finally(() => { pending = null; });
+  if (!pending) {
+    // The server stores a caption before it sends the frame, so a read that
+    // starts after a frame sees that caption or a newer one: only a frame
+    // heard during this read outranks its snapshot.
+    latestLabel = undefined;
+    pending = readWindowNaming().finally(() => { pending = null; });
+  }
   return pending;
 }
 

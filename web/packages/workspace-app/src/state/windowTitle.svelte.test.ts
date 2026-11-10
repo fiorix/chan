@@ -125,6 +125,18 @@ describe("live caption updates", () => {
     expect(windowName()).toBe("Window 3 [latest]");
   });
 
+  // A frame missed while the socket was down leaves the held caption stale,
+  // so a caption heard before a read must not outrank that read's snapshot.
+  test("a later read's snapshot wins over a rename heard before it started", async () => {
+    loadSnapshot.mockRejectedValueOnce(new Error("no live presence"));
+    await initWindowTitle();
+    expect(windowName()).toBeNull();
+    applyWindowLabel("early");
+    loadSnapshot.mockResolvedValueOnce(snapshot([scopedWindow({ label: "current" })]));
+    await loadWindowTitle();
+    expect(windowName()).toBe("Window 3 [current]");
+  });
+
   test("the desktop loads a pane tree name on demand without changing the document title", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: { invoke: vi.fn() }, configurable: true,
