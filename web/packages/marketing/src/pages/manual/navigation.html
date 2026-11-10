@@ -25,11 +25,13 @@
     <li>Move to the previous or next pane with <code>Cmd+[</code> and <code>Cmd+]</code> on macOS, <code>Alt+[</code> and <code>Alt+]</code> on Windows, Linux, and web. They work with a terminal focused too; <code>Ctrl+[</code> and <code>Ctrl+]</code> stay with the shell.</li>
     <li>Drag tabs across panes to rearrange them.</li>
     <li>On the macOS and Windows desktop, <strong>Settings → Global → Title bar tabs</strong> puts the active pane's tabs in the window's title bar, beside the window buttons, and the other panes draw no tab strip. On Windows the minimize, maximize and close buttons sit at the right end of the bar. The button at the left of the bar, a small map of the window's panes, lists every pane, its sides and their tabs; pick one to go to it. <code>Cmd+Shift+A</code> on macOS, <code>Ctrl+Shift+A</code> on Windows and Linux, opens the same list in any window.</li>
+    <li>With tabs in the title bar, that list names the window above its filter: the title the window's title bar would otherwise show, with the devserver's name for a devserver's window, and it follows a rename. In a tmux window, whose panes have no tabs, the bar shows the active pane's name where the tabs would sit and a <code>tmux</code> badge in place of the A/B button.</li>
     <li>Every pane has two sides, A and B. The A/B button in the pane's top bar flips between them (<code>Ctrl+`</code>), so one pane can hold two sets of tabs. A tmux window's panes have no sides, since each shows one tmux pane (see <a href="/manual/terminal/#tmux-control-mode">tmux control mode</a>).</li>
     <li>Close a tab with <code>Cmd+W</code> on macOS, <code>Ctrl+Shift+W</code> on Windows and Linux, or <code>Ctrl+D</code> on any platform.</li>
     <li>Close a window with <code>Cmd+Shift+W</code> on macOS, <code>Ctrl+Alt+W</code> on Windows and Linux. On web, close the browser tab.</li>
     <li>If a window refuses to close, the hidden side of a pane still has tabs: the A/B button flashes to show you where they are. Flip and close them first.</li>
     <li>Clicking the [X] close button in your window manager offers to hide the window (everything keeps running) or close it.</li>
+    <li>Find text in a terminal's scrollback with <code>Cmd+F</code> on macOS, <code>Ctrl+Shift+F</code> on Windows and Linux, in a browser too. <code>Enter</code> and <code>Shift+Enter</code> step through the matches (see <a href="/manual/terminal/#find">Find in a terminal</a>).</li>
   </ul>
   <figure class="inline-shot">
     <img src="/assets/manual/terminal-panes.png" alt="A terminal window split into two panes; a cs terminal survey command in the left pane drives a Pick-your-choice prompt in the right pane" />
@@ -39,7 +41,7 @@
 
 <section class="manual-block" id="hybrid-nav">
   <h2><a class="heading-anchor" href="#hybrid-nav">Hybrid Nav</a></h2>
-  <p>Open <strong>Hybrid Nav</strong> from a pane menu or the command launcher, or press <code>Cmd+.</code> on macOS and <code>Ctrl+.</code> elsewhere. Use arrow keys to move focus, <code>/</code> to split right, <code>?</code> to split down, and <code>t</code> to add a terminal. Press <code>h</code> for the full key reference. Changes are staged until <code>Enter</code> commits them; <code>Esc</code> discards them.</p>
+  <p>Open <strong>Hybrid Nav</strong> from a pane menu or the command launcher, or press <code>Cmd+.</code> on macOS and <code>Ctrl+.</code> elsewhere. Use arrow keys to move focus, <code>/</code> to split right, <code>?</code> to split down, <code>t</code> to add a terminal, and <code>b</code> to add a Dashboard. Press <code>h</code> for the full key reference. Changes are staged until <code>Enter</code> commits them; <code>Esc</code> discards them.</p>
   <figure class="inline-shot">
     <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/hybrid-nav.jpg" aria-label="Arrange split panes and move between terminals with Hybrid Nav.">
       <source src="/assets/home/videos/hybrid-nav.mp4" type="video/mp4" />
