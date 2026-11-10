@@ -24,6 +24,18 @@ const LIST_SESSIONS_FORMAT: &str = "#{session_id}";
 const LIST_WINDOWS_FORMAT: &str =
     "#{window_id} #{window_layout} #{window_visible_layout} #{window_flags} #{window_name}";
 const LIST_PANES_FORMAT: &str = "#{pane_id} #{pane_active}";
+/// The name of the subscription [`Command::SubscribePaneNames`] adds, which
+/// tmux repeats in every `%subscription-changed` line it sends for it.
+pub(crate) const PANE_NAMES_SUBSCRIPTION: &str = "chan-pane-name";
+// Whether the title is the one tmux gives a new pane (its host's name), the
+// byte lengths of the command's name and of the title, then the two texts.
+// Only tmux can tell a default title, since the host is its own. The lengths
+// are what lets the parser refuse a line a text cut short: a tmux as old as
+// 3.2 prints a foreground command's name as the process gave it, line breaks
+// included, so nothing but the text's own length vouches that the line holds
+// all of it. The parser picks between the texts, because a format cannot
+// state the length of a conditional's result.
+const PANE_NAMES_FORMAT: &str = "#{==:#{pane_title},#{host}} #{n:pane_current_command} #{n:pane_title} #{pane_current_command} #{pane_title}";
 const PANE_STATE_FORMAT: &str = "#{pane_id} #{cursor_x} #{cursor_y} #{pane_in_mode} #{alternate_on} #{scroll_region_upper} #{scroll_region_lower} #{pane_width} #{pane_height} #{history_size}";
 
 /// The dimension `resize-pane` sets on one pane.
@@ -71,6 +83,14 @@ pub enum Command {
     ListSessions,
     ListWindows,
     ListPanes(WindowId),
+    /// Subscribe to the name of every pane in the attached session (tmux 3.2
+    /// and later). tmux looks at the panes once a second and reports each
+    /// one first and whenever its name is another, as a
+    /// [`Message::PaneName`](crate::Message::PaneName); a pane that joins a
+    /// window is reported again. No reply carries a name: a reply block ends
+    /// on a line a program in a pane could write, and a notification is one
+    /// line the parser checks whole.
+    SubscribePaneNames,
     PaneState(PaneId),
     /// The screen the pane shows, the alternate one while a program has it
     /// on, with up to `history_rows` rows of scrollback above it, answered
@@ -151,6 +171,9 @@ impl Command {
             Command::ListWindows => format!("list-windows -F '{LIST_WINDOWS_FORMAT}'"),
             Command::ListPanes(window) => {
                 format!("list-panes -t {window} -F '{LIST_PANES_FORMAT}'")
+            }
+            Command::SubscribePaneNames => {
+                format!("refresh-client -B '{PANE_NAMES_SUBSCRIPTION}:%*:{PANE_NAMES_FORMAT}'")
             }
             Command::PaneState(pane) => {
                 format!("display-message -p -t {pane} '{PANE_STATE_FORMAT}'")

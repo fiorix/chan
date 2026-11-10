@@ -1,6 +1,6 @@
 //! Streams built to confuse the framing.
 
-use chan_tmux::{Client, Command, Decoder, Error, Event, Expect, Frame, Limits, PaneId};
+use chan_tmux::{Client, Command, Decoder, Error, Event, Expect, Frame, Limits, Message, PaneId};
 
 fn control(expect: &[Expect]) -> Decoder {
     let mut d = Decoder::in_control(Limits::default());
@@ -237,6 +237,222 @@ fn a_known_notification_with_bad_fields_is_an_error_without_the_bytes() {
     assert!(!e.to_string().contains("notanid"));
 }
 
+/// A line of the pane names subscription for pane `%<pane>`, as tmux writes
+/// it: whether the title is its default, the byte lengths it counted, and
+/// the two texts.
+fn pane_name_line(pane: u32, default_title: bool, command: &[u8], title: &[u8]) -> Vec<u8> {
+    let mut line = format!(
+        "%subscription-changed chan-pane-name $0 @0 0 %{pane} : {} {} {} ",
+        u8::from(default_title),
+        command.len(),
+        title.len()
+    )
+    .into_bytes();
+    line.extend_from_slice(command);
+    line.push(b' ');
+    line.extend_from_slice(title);
+    line.extend_from_slice(b"\r\n");
+    line
+}
+
+/// The one message a client reads from `line`.
+fn pane_name(line: &[u8]) -> Message {
+    let mut c = Client::in_control(Limits::default());
+    match c.feed(line).expect("the line parses").as_slice() {
+        [Event::Message(message)] => message.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn named(pane: u32, name: &str) -> Message {
+    Message::PaneName {
+        pane: PaneId(pane),
+        name: name.into(),
+    }
+}
+
+#[test]
+fn a_pane_is_named_by_its_title_and_by_its_command_under_a_default_or_blank_title() {
+    // A title a program set names the pane, whatever it holds: spaces, the
+    // separator the line itself uses, format syntax, bytes past ASCII.
+    let title = "vim: notes.md : #{pane_id} #(id), caf\u{e9}";
+    assert_eq!(
+        pane_name(&pane_name_line(3, false, b"vim", title.as_bytes())),
+        named(3, title)
+    );
+    // The title tmux gives a new pane is its host's name, which names no
+    // pane: the foreground command does.
+    assert_eq!(
+        pane_name(&pane_name_line(0, true, b"bash", b"build-host")),
+        named(0, "bash")
+    );
+    // So does a title a program emptied or left blank.
+    assert_eq!(
+        pane_name(&pane_name_line(1, false, b"top", b"")),
+        named(1, "top")
+    );
+    assert_eq!(
+        pane_name(&pane_name_line(1, false, b"top", b"   ")),
+        named(1, "top")
+    );
+    // The ends are trimmed; nothing inside is.
+    assert_eq!(
+        pane_name(&pane_name_line(2, false, b"sh", b"  two  words  ")),
+        named(2, "two  words")
+    );
+    // tmux may have neither text: the name is empty, and the line still
+    // holds both separators.
+    assert_eq!(
+        pane_name(&pane_name_line(4, true, b"", b"build-host")),
+        named(4, "")
+    );
+    assert_eq!(pane_name(&pane_name_line(4, false, b"", b"")), named(4, ""));
+    // Two panes of one window are two lines with a name each.
+    let mut c = Client::in_control(Limits::default());
+    let mut both = pane_name_line(0, true, b"bash", b"build-host");
+    both.extend(pane_name_line(1, true, b"top", b"build-host"));
+    let ev = c.feed(&both).unwrap();
+    assert_eq!(
+        ev,
+        vec![
+            Event::Message(named(0, "bash")),
+            Event::Message(named(1, "top"))
+        ]
+    );
+}
+
+#[test]
+fn a_subscription_this_crate_did_not_add_is_kept_by_keyword() {
+    let mut line = pane_name_line(0, true, b"bash", b"build-host");
+    let at = line
+        .windows(14)
+        .position(|w| w == b"chan-pane-name")
+        .unwrap();
+    line.splice(at..at + 14, b"another".iter().copied());
+    assert_eq!(
+        pane_name(&line),
+        Message::Other {
+            keyword: "%subscription-changed".into()
+        }
+    );
+}
+
+/// tmux 3.2 prints a foreground command's name as the process gave it, so a
+/// program can put a line break in one and write the lines after it. The
+/// first line then holds less than the length tmux counted.
+#[test]
+fn a_pane_name_cut_by_a_line_break_ends_the_stream_before_the_lines_it_wrote() {
+    for (command, title) in [
+        (&b"x\n%exit"[..], &b"build-host"[..]),
+        (b"x\n%output %0 pwned", b"build-host"),
+        (b"sh", b"a title\n%exit"),
+        // The break is the command's last byte.
+        (b"x\n", b"t"),
+    ] {
+        let line = pane_name_line(0, false, command, title);
+        let mut c = Client::in_control(Limits::default());
+        let e = c.feed(&line).unwrap_err();
+        assert_eq!(
+            e,
+            Error::Malformed("subscription-changed"),
+            "{:?}",
+            String::from_utf8_lossy(&line)
+        );
+        assert_eq!(
+            c.feed(b"%output %0 later\r\n").unwrap_err(),
+            Error::Poisoned,
+            "nothing after the cut line is read"
+        );
+    }
+    // Read by read, the cut line is refused when its break arrives, before
+    // the forged exit is even in the buffer.
+    let line = pane_name_line(0, true, b"x\n%exit", b"build-host");
+    let cut = line.iter().position(|&b| b == b'\n').unwrap() + 1;
+    let mut c = Client::in_control(Limits::default());
+    assert_eq!(
+        c.feed(&line[..cut]).unwrap_err(),
+        Error::Malformed("subscription-changed")
+    );
+    assert_eq!(c.feed(&line[cut..]).unwrap_err(), Error::Poisoned);
+}
+
+#[test]
+fn a_pane_name_line_holds_exactly_what_its_lengths_say_or_is_an_error() {
+    let head = "%subscription-changed chan-pane-name";
+    for fields in [
+        // One byte more and one byte less than the lengths.
+        "$0 @0 0 %0 : 1 4 4 bash hostx",
+        "$0 @0 0 %0 : 1 4 4 bash hos",
+        // The lengths add up but the separator is not where they put it.
+        "$0 @0 0 %0 : 1 4 4 bashXhost",
+        "$0 @0 0 %0 : 1 3 5 bash host",
+        // No texts, no separator, a length that is no number or is signed.
+        "$0 @0 0 %0 : 1 4 4",
+        "$0 @0 0 %0 : 1 4 4 ",
+        "$0 @0 0 %0 : 1 0 0",
+        "$0 @0 0 %0 : 1 +4 4 bash host",
+        "$0 @0 0 %0 : 1 4 -4 bash host",
+        "$0 @0 0 %0 : 1 four 4 bash host",
+        "$0 @0 0 %0 : 1 99999999999999999999999 4 bash host",
+        "$0 @0 0 %0 : 1 18446744073709551615 4 bash host",
+        // A flag that is neither answer.
+        "$0 @0 0 %0 : 2 4 4 bash host",
+        "$0 @0 0 %0 :  4 4 bash host",
+        // Ids that are not ids, and the shape tmux gives a session's value.
+        "0 @0 0 %0 : 1 4 4 bash host",
+        "$0 0 0 %0 : 1 4 4 bash host",
+        "$0 @0 x %0 : 1 4 4 bash host",
+        "$0 @0 0 0 : 1 4 4 bash host",
+        "$0 @0 0 %0 1 4 4 bash host",
+        "$0 - - - : 1 4 4 bash host",
+        "",
+    ] {
+        let mut c = Client::in_control(Limits::default());
+        let fed = c.feed(format!("{head} {fields}\r\n").as_bytes());
+        assert_eq!(
+            fed,
+            Err(Error::Malformed("subscription-changed")),
+            "{fields:?}"
+        );
+        let shown = fed.unwrap_err().to_string();
+        assert!(!shown.contains("bash"), "none of the line: {shown}");
+    }
+    // The subscription's name alone, with no field after it.
+    let mut c = Client::in_control(Limits::default());
+    assert_eq!(
+        c.feed(format!("{head}\r\n").as_bytes()).unwrap_err(),
+        Error::Malformed("subscription-changed")
+    );
+}
+
+#[test]
+fn a_pane_name_carries_no_control_character_and_any_bytes_parse() {
+    // Bytes a line can hold without ending it: the texts keep their length,
+    // so the line parses, and none of them reaches the name.
+    let command = b"a\tb\x1b[31mc\x7fd\x00e\xc2\x9bf";
+    assert_eq!(
+        pane_name(&pane_name_line(0, true, command, b"build-host")),
+        named(0, "ab[31mcdef")
+    );
+    let title = b"\x1b]0;x\x07 t\x08 ";
+    assert_eq!(
+        pane_name(&pane_name_line(0, false, b"sh", title)),
+        named(0, "]0;x t")
+    );
+    // Bytes that are not UTF-8 are replaced, never refused: a name is shown,
+    // not obeyed.
+    assert_eq!(
+        pane_name(&pane_name_line(0, false, b"sh", b"\xff\xfe ok")),
+        named(0, "\u{fffd}\u{fffd} ok")
+    );
+    // A long title is a line like any other, inside the line bound.
+    let long = vec![b'n'; 100_000];
+    let Message::PaneName { name, .. } = pane_name(&pane_name_line(0, false, b"sh", &long)) else {
+        panic!("a pane name");
+    };
+    assert_eq!(name.len(), 100_000);
+}
+
 /// Deterministic noise: nothing may panic, and a poisoned decoder stays
 /// poisoned.
 #[test]
@@ -256,6 +472,9 @@ fn random_streams_never_panic() {
         b"%output ",
         b"%extended-output ",
         b"%layout-change ",
+        b"%subscription-changed chan-pane-name ",
+        b"$0 @0 0 %0 : ",
+        b"1 4 4 ",
         b"\x1bP1000p",
         b"\x1b\\",
         b"\r\n",

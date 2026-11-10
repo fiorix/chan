@@ -335,6 +335,10 @@ export type TerminalSpawnResponse = {
 export type TerminalRosterEntry = {
   id: string;
   tab_name: string | null;
+  /// What tmux calls the pane a tmux pane session shows; absent for any other
+  /// session. `tab_name` is unique among live sessions, so two panes tmux
+  /// calls the same differ there by a suffix. This is the name without it.
+  tmux_name?: string;
   tab_group: string;
   window_id: string | null;
   /// Whether a page holds the session's window. False for a window no page

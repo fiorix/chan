@@ -41,6 +41,14 @@ const CAPTURE_ROWS_MAX: u32 = 150_000;
 const REPLY_BYTES_MAX: usize = 64 << 20;
 /// Most recent error texts a connection keeps for its status.
 const ERRORS_MAX: usize = 8;
+/// Most characters of a pane's name kept, the bound the server's routes put
+/// on a terminal's name.
+const PANE_NAME_CHARS_MAX: usize = 128;
+/// Most panes a connection keeps a reported name for. tmux names every pane
+/// of the session, so the bound is on what a hostile peer can make the
+/// connection hold; at it, the names of panes no listed window holds go
+/// first.
+const PANE_NAMES_MAX: usize = 1024;
 
 /// Where a connection came from: the foreground the gate read when the
 /// marker arrived. It titles the connection's card and its control window.
@@ -122,8 +130,8 @@ pub(super) enum TmuxWork {
     },
     /// Record the pane's exit and close its session.
     EndPane { id: String, exit: TerminalExit },
-    /// Rename the pane sessions of a window after tmux renamed it.
-    RenamePanes { ids: Vec<String>, name: String },
+    /// Name a pane session `name`, what tmux calls its pane.
+    RenamePane { id: String, name: String },
     /// Ask the host for a chan window for a tmux window; answered with
     /// [`WorkDone::WindowMinted`].
     MintWindow { key: WindowId, title: String },
@@ -222,6 +230,15 @@ fn window_label(window: WindowId, name: &str) -> String {
     }
 }
 
+/// The name a pane's session carries: the one tmux reports for the pane, or
+/// `tmux %N` while it has reported none.
+fn pane_label(pane: PaneId, name: Option<&str>) -> String {
+    match name {
+        Some(name) => name.to_owned(),
+        None => format!("tmux {pane}"),
+    }
+}
+
 #[derive(Debug)]
 struct Pane {
     window: WindowId,
@@ -234,9 +251,9 @@ struct Pane {
     captured: bool,
     /// A session was asked for and not yet answered.
     requested: bool,
-    /// The window name the session was asked for with or last renamed to:
-    /// a name tmux reports while the registry makes the session is the
-    /// session's to take once it exists.
+    /// The name the session was asked for with or last renamed to: a name
+    /// tmux reports while the registry makes the session is the session's
+    /// to take once it exists.
     named: String,
 }
 
@@ -251,6 +268,11 @@ pub(super) struct TmuxConnection {
     scrollback_mb: u32,
     windows: BTreeMap<WindowId, Window>,
     panes: HashMap<PaneId, Pane>,
+    /// What tmux last called each pane, from the pane names subscription. A
+    /// pane with no session has one too: a report can come ahead of the
+    /// list that brings its pane, and a window past the cap may be opened
+    /// later.
+    names: HashMap<PaneId, String>,
     pending: HashMap<Token, Purpose>,
     /// Typed input the client's queue could not take yet, oldest first.
     input_backlog: VecDeque<(PaneId, Vec<u8>)>,
@@ -292,6 +314,7 @@ impl TmuxConnection {
                 scrollback_mb,
                 windows: BTreeMap::new(),
                 panes: HashMap::new(),
+                names: HashMap::new(),
                 pending: HashMap::new(),
                 input_backlog: VecDeque::new(),
                 backlog_bytes: 0,
@@ -485,8 +508,10 @@ impl TmuxConnection {
     }
 
     /// The first commands after the version is known: flow control, the
-    /// JSON layouts tmux 3.8 prints, and the window list that starts the
-    /// attach.
+    /// JSON layouts tmux 3.8 prints, the subscription that names the panes,
+    /// and the window list that starts the attach. The subscription needs
+    /// tmux 3.2, the oldest the gate connects to, so it is asked of every
+    /// connection with no version test.
     pub(super) fn start(&mut self) -> Vec<Step> {
         let mut steps = vec![Step::Submit(
             Command::PauseAfter {
@@ -497,6 +522,7 @@ impl TmuxConnection {
         if self.version >= (Version { major: 3, minor: 8 }) {
             steps.push(Step::Submit(Command::NewLayouts, Purpose::Fire));
         }
+        steps.push(Step::Submit(Command::SubscribePaneNames, Purpose::Fire));
         steps.push(Step::Submit(Command::ListWindows, Purpose::ListWindows));
         steps
     }
@@ -528,6 +554,9 @@ impl TmuxConnection {
             }
             Message::LayoutChange { window, layout, .. } => {
                 self.layout_changed(window, &layout, &mut steps);
+            }
+            Message::PaneName { pane, name } => {
+                self.pane_named(pane, &name, &mut steps);
             }
             Message::SessionChanged { session, name } => {
                 self.session = Some((session, name));
@@ -694,13 +723,13 @@ impl TmuxConnection {
                         })));
                     }
                 }
-                // tmux named the window while the registry made the session,
-                // as a window a notification added is named by its list.
-                if let Some(name) = window.map(|w| &w.name).filter(|name| **name != pane.named) {
-                    pane.named = name.clone();
-                    steps.push(Step::Action(Action::Work(TmuxWork::RenamePanes {
-                        ids: vec![session.id.clone()],
-                        name: name.clone(),
+                // tmux named the pane while the registry made the session.
+                let label = pane_label(pane_id, self.names.get(&pane_id).map(String::as_str));
+                if label != pane.named {
+                    pane.named = label.clone();
+                    steps.push(Step::Action(Action::Work(TmuxWork::RenamePane {
+                        id: session.id.clone(),
+                        name: label,
                     })));
                 }
                 let tmux_window = pane.window;
@@ -901,8 +930,8 @@ impl TmuxConnection {
     /// A window tmux has, by list or notification.
     fn window_seen(&mut self, window: WindowId, name: String, steps: &mut Vec<Step>) {
         if let Some(existing) = self.windows.get(&window) {
-            // A window a notification added was listed for its name after
-            // its panes, which took no name; the list's name is a rename.
+            // A window a notification added is listed for its name; the
+            // list's name is a rename.
             if !name.is_empty() && existing.name != name {
                 self.window_named(window, name, steps);
             }
@@ -948,34 +977,57 @@ impl TmuxConnection {
         }
     }
 
-    /// tmux named `window`: its pane sessions take the name as their tab
-    /// names, and its chan window the label the name makes, so the window's
-    /// title, its pane tree and the launcher read what tmux calls it.
+    /// tmux named `window`: its chan window takes the label the name makes,
+    /// so the window's title, its pane tree's heading and the launcher read
+    /// what tmux calls it. Its panes keep their own names: with automatic
+    /// renaming a window's name is its active pane's command, which is no
+    /// name for the panes beside it.
     fn window_named(&mut self, window: WindowId, name: String, steps: &mut Vec<Step>) {
         let Some(w) = self.windows.get_mut(&window) else {
             return;
         };
-        w.name = name.clone();
+        w.name = name;
         self.dirty = true;
-        let mut ids = Vec::new();
-        for pane in &w.panes {
-            // A pane whose session is still being made takes the name when
-            // the registry answers (`WorkDone::PaneAdded`).
-            let Some(pane) = self.panes.get_mut(pane) else {
-                continue;
-            };
-            if let Some(session) = &pane.session {
-                ids.push(session.id.clone());
-                pane.named = name.clone();
-            }
-        }
-        if !ids.is_empty() {
-            steps.push(Step::Action(Action::Work(TmuxWork::RenamePanes {
-                ids,
-                name,
-            })));
-        }
         self.push_label(window, steps);
+    }
+
+    /// tmux reported what `pane` is called: its title, or its command under
+    /// a title that names nothing. The pane's session takes the name as its
+    /// tab name; a session the registry is still making takes it when the
+    /// registry answers, and a pane with no session keeps it for when it has
+    /// one. An empty name is tmux having none, and reads as the pane's id.
+    fn pane_named(&mut self, pane_id: PaneId, name: &str, steps: &mut Vec<Step>) {
+        let name: String = name.chars().take(PANE_NAME_CHARS_MAX).collect();
+        let name = name.trim_end();
+        if name.is_empty() {
+            self.names.remove(&pane_id);
+        } else {
+            if self.names.len() >= PANE_NAMES_MAX && !self.names.contains_key(&pane_id) {
+                let windows = &self.windows;
+                self.names
+                    .retain(|pane, _| windows.values().any(|w| w.panes.contains(pane)));
+            }
+            if self.names.len() >= PANE_NAMES_MAX && !self.names.contains_key(&pane_id) {
+                tracing::debug!(connection = self.id.0, pane = %pane_id, "tmux pane names full; name dropped");
+                return;
+            }
+            self.names.insert(pane_id, name.to_owned());
+        }
+        let label = pane_label(pane_id, self.names.get(&pane_id).map(String::as_str));
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            return;
+        };
+        let Some(session) = &pane.session else {
+            return;
+        };
+        if pane.named == label {
+            return;
+        }
+        pane.named = label.clone();
+        steps.push(Step::Action(Action::Work(TmuxWork::RenamePane {
+            id: session.id.clone(),
+            name: label,
+        })));
     }
 
     /// Queue a relabel of `window`'s chan window when its name makes a label
@@ -1062,7 +1114,6 @@ impl TmuxConnection {
             return;
         };
         let materialized = w.materialized;
-        let name = w.name.clone();
         let chan_window = w.chan_window.clone();
         let sizes = w.sizes.clone();
         let gone: Vec<PaneId> = w
@@ -1094,6 +1145,7 @@ impl TmuxConnection {
                 ));
                 continue;
             }
+            let named = pane_label(pane_id, self.names.get(&pane_id).map(String::as_str));
             self.panes.insert(
                 pane_id,
                 Pane {
@@ -1101,7 +1153,7 @@ impl TmuxConnection {
                     session: None,
                     captured: false,
                     requested: true,
-                    named: name.clone(),
+                    named: named.clone(),
                 },
             );
             let (cols, rows) = sizes.get(&pane_id).copied().unwrap_or((80, 24));
@@ -1111,7 +1163,7 @@ impl TmuxConnection {
                         connection: self.id,
                         pane: pane_id,
                     },
-                    name: (!name.is_empty()).then(|| name.clone()),
+                    name: Some(named),
                     group: "tmux".to_owned(),
                     window_id: chan_window.clone(),
                     size: PtySize {

@@ -12,7 +12,15 @@ import PaneTreeOverlay from "./PaneTreeOverlay.svelte";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 import { closePaneTree, openPaneTree, paneTree, PANE_TREE_ANCHOR_ATTR } from "../state/paneTree.svelte";
 import type { ProgramStatusRecord } from "../state/programStatus";
-import { layout, paneMode, tabFocusPulse, type LeafNode, type Node, type Tab } from "../state/tabs.svelte";
+import {
+  applyTerminalRoster,
+  layout,
+  paneMode,
+  tabFocusPulse,
+  type LeafNode,
+  type Node,
+  type Tab,
+} from "../state/tabs.svelte";
 import {
   NO_TITLEBAR_CHROME,
   startWindowTabBar,
@@ -156,6 +164,7 @@ afterEach(async () => {
   windowTabBar.on = false;
   privacy.enabled = false;
   __resetWindowTitle();
+  applyTerminalRoster([]);
   vi.mocked(loadScopedLibrarySnapshot).mockReset();
   document.body.innerHTML = "";
   vi.restoreAllMocks();
@@ -455,15 +464,15 @@ describe("the pointer", () => {
 
 describe("a tmux window", () => {
   /// Two tmux panes side by side, as the server's tmux_layout lays them out:
-  /// each pane one terminal tab bound to its pane session and named after
-  /// the tmux window, the window's record labelled with that name.
+  /// each pane one terminal tab bound to its pane session, the window's
+  /// record labelled with the tmux window's name.
   function seedTmux(recordLabel: string): void {
     const tab = (id: string, title: string, session: string, pane: string) =>
       terminalTab({ id, title, terminalSessionId: session, tmuxPane: { connection: 1, pane } });
     layout.nodes = {
       root: { id: "root", kind: "split", direction: "row", a: "left", b: "right", ratio: 0.5 },
-      left: leaf("left", [tab("t0", "shell", "s0", "%0")]),
-      right: leaf("right", [tab("t1", "shell-2", "s1", "%1")]),
+      left: leaf("left", [tab("t0", "tmux %0", "s0", "%0")]),
+      right: leaf("right", [tab("t1", "tmux %1", "s1", "%1")]),
     };
     layout.rootId = "root";
     layout.activePaneId = "left";
@@ -472,13 +481,19 @@ describe("a tmux window", () => {
     vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(own);
   }
 
-  /// A tmux rename as the server sends it: the pane sessions' new names in
-  /// the roster, then the window's new label to its own socket.
-  function hearRename(name: string): void {
-    const entry = (id: string, tabName: string) => ({
-      id, tab_name: tabName, tab_group: "tmux", window_id: sessionWindowId(), broadcast: false,
+  /// The roster as the server sends it once tmux has named the panes: what
+  /// tmux calls each one, and the tab name the server settled from it, which
+  /// is unique, so the second of two alike carries a suffix.
+  function hearPanes(left: string, right: string, rightTabName = left === right ? `${right}-2` : right): void {
+    const entry = (id: string, tabName: string, tmuxName: string) => ({
+      id, tab_name: tabName, tmux_name: tmuxName, tab_group: "tmux", window_id: sessionWindowId(), broadcast: false,
     });
-    onWatchEvent({ type: "terminal_roster", sessions: [entry("s0", name), entry("s1", `${name}-2`)] });
+    onWatchEvent({ type: "terminal_roster", sessions: [entry("s0", left, left), entry("s1", rightTabName, right)] });
+  }
+
+  /// A tmux window rename as the server sends it: the window's new label to
+  /// its own socket, and nothing about the panes.
+  function hearWindowRename(name: string): void {
     onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "window_labeled", label: name });
   }
 
@@ -490,36 +505,67 @@ describe("a tmux window", () => {
     return [...document.querySelectorAll(".pane-label")].map((label) => label.textContent!.trim());
   }
 
-  test("a rename reaches the open tree's rows and heading, and a closed tree's next open", async () => {
-    seedTmux("shell");
+  test("each row shows what tmux calls its pane, and a window rename moves the heading alone", async () => {
+    // A shell beside top: tmux calls the window after its active pane's
+    // command, so every switch between the panes renames the window.
+    seedTmux("bash");
+    hearPanes("bash", "top");
     windowTabBar.on = true;
     await open();
-    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [shell]"));
-    expect(rowTitles()).toEqual(["shell", "shell-2"]);
+    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [bash]"));
+    expect(rowTitles()).toEqual(["bash", "top"]);
+    expect(paneLabels()).toEqual(["bash", "top"]);
 
-    hearRename("build");
-    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [build]"));
-    expect(rowTitles()).toEqual(["build", "build-2"]);
-    expect(paneLabels()).toEqual(["build", "build-2"]);
+    hearWindowRename("top");
+    await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [top]"));
+    expect(rowTitles()).toEqual(["bash", "top"]);
+    expect(paneLabels()).toEqual(["bash", "top"]);
 
+    // While the tree is closed the window is renamed back and the first pane
+    // starts another program: the next open shows both.
     closePaneTree();
     await tick();
-    hearRename("vim");
+    hearWindowRename("bash");
+    hearPanes("vim", "top");
     await open();
-    expect(heading()).toBe("Terminal Window 3 [vim]");
-    expect(rowTitles()).toEqual(["vim", "vim-2"]);
-    expect(loadScopedLibrarySnapshot, "the frames kept the name; nothing was read again").toHaveBeenCalledTimes(1);
+    expect(heading()).toBe("Terminal Window 3 [bash]");
+    expect(rowTitles()).toEqual(["vim", "top"]);
+    expect(loadScopedLibrarySnapshot, "the frames kept the names; nothing was read again").toHaveBeenCalledTimes(1);
   });
 
-  test("a rename before the first open shows at that open", async () => {
+  test("panes tmux calls the same show that name, without the suffix their tab names differ by", async () => {
+    seedTmux("bash");
+    hearPanes("bash", "bash");
+    windowTabBar.on = true;
+    await open();
+    expect(rowTitles()).toEqual(["bash", "bash"]);
+    expect(paneLabels()).toEqual(["bash", "bash"]);
+
+    // The first pane runs another program. The second keeps the tab name it
+    // was given, suffix and all, and still shows as what tmux calls it.
+    hearPanes("vim", "bash", "bash-2");
+    await tick();
+    expect(rowTitles()).toEqual(["vim", "bash"]);
+    expect(paneLabels()).toEqual(["vim", "bash"]);
+  });
+
+  test("a pane tmux has not named yet reads as its tab name", async () => {
+    seedTmux("bash");
+    windowTabBar.on = true;
+    await open();
+    expect(rowTitles()).toEqual(["tmux %0", "tmux %1"]);
+  });
+
+  test("a window rename before the first open shows at that open", async () => {
     // The server labels the record before it tells the page, so the read at
     // the first open carries the new name.
     seedTmux("build");
-    hearRename("build");
+    hearWindowRename("build");
+    hearPanes("bash", "top");
     windowTabBar.on = true;
     await open();
     await vi.waitFor(() => expect(heading()).toBe("Terminal Window 3 [build]"));
-    expect(rowTitles()).toEqual(["build", "build-2"]);
+    expect(rowTitles()).toEqual(["bash", "top"]);
   });
 });
 
