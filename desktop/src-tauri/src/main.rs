@@ -6642,35 +6642,13 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
         }
         let state = app.state::<Arc<AppState>>();
         let buried = state.buried_snapshot();
-        // Currently-OPEN (visible) windows, so the Window menu can RAISE a live
-        // window in addition to reopening a hidden one. The embedded library's
-        // assembled window records are the source of truth: the local rows
-        // plus each connected devserver's rows merged in from its feed. A
-        // row counts as open when its native webview is alive AND visible: a
-        // buried window's webview is alive but hidden, so it shows under Hidden,
-        // not here.
-        let open_records = state
+        // The embedded library's assembled window records are the source of
+        // truth for both sections: the local rows plus each connected
+        // devserver's rows merged in from its feed.
+        let records = state
             .embedded()
             .map(|e| e.assemble_window_records())
             .unwrap_or_default();
-        let mut open_local: Vec<(String, String)> = Vec::new();
-        for record in &open_records {
-            // A server-hidden window belongs under Hidden, never Open:
-            // group strictly by the persisted `hidden`, not just native visibility.
-            if record.hidden {
-                continue;
-            }
-            let label = window_watcher::native_label(record);
-            let Some(window) = app.get_webview_window(&label) else {
-                continue;
-            };
-            if !window.is_visible().unwrap_or(false) {
-                continue;
-            }
-            let title = window.title().unwrap_or_else(|_| record_menu_title(record));
-            open_local.push((label, title));
-        }
-        let mut local: Vec<(String, String)> = Vec::new();
         // Hidden = the in-session buried set UNION the server-persisted hidden
         // records: a window hidden in a PRIOR session (record.hidden)
         // isn't opened on connect (should_show false) and isn't in the local
@@ -6683,7 +6661,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
         // the caption as it was when the window was hidden, so a caption edited
         // while hidden would otherwise never show. Buried rows keep their
         // most-recent-first order; server-hidden records follow.
-        let records_by_label: HashMap<String, &chan_server::WindowRecord> = open_records
+        let records_by_label: HashMap<String, &chan_server::WindowRecord> = records
             .iter()
             .map(|record| (window_watcher::native_label(record), record))
             .collect();
@@ -6701,7 +6679,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
             let title = hidden_title(&label, Some(captured));
             hidden_rows.push((label, title));
         }
-        for record in &open_records {
+        for record in &records {
             if !record.hidden {
                 continue;
             }
@@ -6712,15 +6690,48 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
             let title = hidden_title(&label, None);
             hidden_rows.push((label, title));
         }
-        local.extend(hidden_rows);
+        // Open = every other window with a native window, so the menu can
+        // RAISE a live window as well as reopen a hidden one.
+        let open_rows = open_window_rows(&records, &hidden_rows, |label| {
+            app.get_webview_window(label).map(|window| window.title())
+        });
 
-        let tail = window_menu_tail(open_local, local, privacy::enabled(&state));
+        let tail = window_menu_tail(open_rows, hidden_rows, privacy::enabled(&state));
         // MenuItems can't be shared across menus, so each menubar gets
         // freshly built ones.
         for submenu in &submenus {
             restamp_window_menu(&NativeWindowMenu { app: &app, submenu }, &tail);
         }
     });
+}
+
+/// The Window menu's open section: every window record with a native
+/// window that the desktop has not hidden itself, titled by that window.
+/// What the desktop hid is a persisted `hidden` or a row under Hidden,
+/// which lists every window buried this session (each hide gesture goes
+/// through `AppState::bury_window`), so the sections never share a window.
+/// Whether the OS shows the window does not count: AppKit reports a
+/// minimized window, and every window of a hidden app, as not visible,
+/// and those are still the user's open windows, listed in AppKit's own
+/// window list below. Nothing rebuilds the menu on a minimize, a restore
+/// or an app hide, so a rebuild in that state must keep them.
+fn open_window_rows(
+    records: &[chan_server::WindowRecord],
+    hidden: &[(String, String)],
+    live_title: impl Fn(&str) -> Option<tauri::Result<String>>,
+) -> Vec<(String, String)> {
+    records
+        .iter()
+        .filter(|record| !record.hidden)
+        .filter_map(|record| {
+            let label = window_watcher::native_label(record);
+            if hidden.iter().any(|(hidden, _)| *hidden == label) {
+                return None;
+            }
+            let title = live_title(&label)?.unwrap_or_else(|_| record_menu_title(record));
+            Some((label, title))
+        })
+        .collect()
 }
 
 /// One item of the Window submenu's dynamic tail.
@@ -6818,9 +6829,13 @@ trait WindowMenuSurface {
 /// bottom, and its other items after Zoom. A tail below them is removed by
 /// the wrong indices, which deletes AppKit's items and strands the old
 /// rows where no later pass can find them, so sections pile up with the
-/// titles they were stamped with. AppKit adds nothing above Minimize, so
-/// there the tail's indices hold. Off macOS the submenu ends at Open in
-/// Browser and the tail closes it.
+/// titles they were stamped with. Above Minimize the tail's indices hold
+/// as long as AppKit adds nothing there, which is what Tauri's and muda's
+/// code and the owner's menu show: the items above Minimize are chan's
+/// own, Tauri builds Minimize and Zoom below them and has muda hand the
+/// submenu to AppKit as the windows menu (`setWindowsMenu:`), and the menu
+/// AppKit fills shows its items only after Zoom and at the bottom. Off
+/// macOS the submenu ends at Open in Browser and the tail closes it.
 fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) {
     // Back to front, so each removal leaves the positions still to come
     // in place.
@@ -8004,6 +8019,79 @@ mod tests {
             .collect()
     }
 
+    /// Window A is minimized and window B closed, so B's destroy rebuilds
+    /// the menu while AppKit reports A as not visible, as it reports every
+    /// window of a hidden app. A stays open: only the windows the desktop
+    /// hid itself leave the open section, a buried one whose webview lives
+    /// on hidden among them.
+    #[test]
+    fn the_open_windows_are_the_native_windows_the_desktop_has_not_hidden() {
+        let record = |library_id: &str, window_id: &str, hidden: bool| chan_server::WindowRecord {
+            window_id: window_id.into(),
+            library_id: library_id.into(),
+            kind: chan_server::WindowKind::Workspace,
+            title: "sdme".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/sdme".into(),
+            token: "test-token".into(),
+            persisted: true,
+            connected: true,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+        // A is minimized, B closed, C shown, D buried with its webview alive
+        // (a devserver window hidden mid-transfer), E hidden in an earlier
+        // session, and F's title cannot be read.
+        let records = [
+            record("lib-a", "w-a", false),
+            record("lib-a", "w-b", false),
+            record("lib-a", "w-c", false),
+            record("lib-a", "w-d", false),
+            record("lib-a", "w-e", true),
+            record("lib-a", "w-f", false),
+        ];
+        let hidden = menu_rows(&[("lib-a::w-d", "sdme Window 4"), ("lib-a::w-e", "sdme")]);
+        // The native windows, with whether the OS reports each as visible.
+        let native = [
+            ("lib-a::w-a", Ok("sdme Window 1"), false),
+            ("lib-a::w-c", Ok("sdme Window 3"), true),
+            ("lib-a::w-d", Ok("sdme Window 4"), false),
+            ("lib-a::w-f", Err(()), true),
+        ];
+        let open = open_window_rows(&records, &hidden, |label| {
+            native
+                .iter()
+                .find(|(native, _, _)| *native == label)
+                .map(|(_, title, _)| {
+                    title
+                        .map(str::to_string)
+                        .map_err(|()| tauri::Error::WindowNotFound)
+                })
+        });
+        assert_eq!(
+            open,
+            menu_rows(&[
+                ("lib-a::w-a", "sdme Window 1"),
+                ("lib-a::w-c", "sdme Window 3"),
+                ("lib-a::w-f", "sdme"),
+            ]),
+            "every native window but the hidden ones, the OS's invisible one included",
+        );
+        assert!(
+            native
+                .iter()
+                .any(|(label, _, visible)| !visible && open.iter().any(|(open, _)| open == label)),
+            "the open section holds a window the OS reports as not visible",
+        );
+    }
+
     #[test]
     fn the_window_menu_tail_lists_open_then_hidden_windows() {
         let open = menu_rows(&[("local::w-1", "chan Window 1")]);
@@ -8080,9 +8168,12 @@ mod tests {
             .all(|(_, text)| text != "Chan (privacy mode)"));
     }
 
-    /// AppKit adds items after Zoom too (window tiling, window tabs) and
+    /// AppKit may add items after Zoom too (the window tiling items) and
     /// relists its windows as they come and go; the tail stays right after
-    /// Open in Browser, above all of them.
+    /// Open in Browser, above all of them. No window tab items come: Tauri
+    /// turns automatic window tabbing off for a window built without a
+    /// tabbing identifier or a transparent one, chan builds none with an
+    /// identifier, and its workspace windows are transparent as well.
     #[test]
     fn the_window_menu_tail_sits_after_open_in_browser_above_appkits_items() {
         let menu = ModelWindowMenu::macos();
