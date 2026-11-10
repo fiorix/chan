@@ -185,44 +185,30 @@ origin_host() {
     python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$1"
 }
 
-read -rp "Gateway public origin (e.g. https://gw.example.com): " ID_URL || true
-require_origin "Gateway public origin" "$ID_URL"
-read -rp "Proxy namespace origin (e.g. https://proxy.example.com): " PROXY_ORIGIN || true
-require_origin "Proxy namespace origin" "$PROXY_ORIGIN"
-echo "The tunnel ingress host needs a DNS record and certificate. Its TLS edge"
-echo "routes /v1/tunnel to 127.0.0.1:7100 as h2c (nginx grpc_pass), and / to"
-echo "127.0.0.1:7002, where /healthz and /readyz answer only for that host."
-read -rp "Tunnel ingress origin [$PROXY_ORIGIN]: " TUNNEL_ORIGIN || true
-TUNNEL_ORIGIN=${TUNNEL_ORIGIN:-$PROXY_ORIGIN}
-require_origin "Tunnel ingress origin" "$TUNNEL_ORIGIN"
-read -rp "This proxy node id [p1]: " PROXY_ID
-PROXY_ID=${PROXY_ID:-p1}
-# The node origin must match the controller's template expansion for the
-# id, so the default prepends it to the namespace host.
-PROXY_BASE_URL_DEFAULT="${PROXY_ORIGIN%%://*}://${PROXY_ID}.${PROXY_ORIGIN#*://}"
-echo "The node origin's wildcard needs a DNS record, a wildcard certificate,"
-echo "and a TLS edge route to 127.0.0.1:7002 for tenant HTTP and WebSockets."
-read -rp "This proxy node origin [$PROXY_BASE_URL_DEFAULT]: " PROXY_BASE_URL || true
-PROXY_BASE_URL=${PROXY_BASE_URL:-$PROXY_BASE_URL_DEFAULT}
-require_origin "This proxy node origin" "$PROXY_BASE_URL"
-PROXY_BASE_URL_TEMPLATE="${PROXY_ORIGIN%%://*}://{proxy_id}.${PROXY_ORIGIN#*://}"
-if [[ $AGENT_INSTALLED == true ]]; then
-    read -rp "Kernel WireGuard interface for the agent [wg0]: " WG_INTERFACE
-    WG_INTERFACE=${WG_INTERFACE:-wg0}
-fi
-
-# WireGuard enrollment is identity's ingress list and profile's address
-# pool, written together or not at all: identity refuses a partial set, and
-# a list without a pool fails every desktop sign-in that enrolls a key. Both
-# answers are checked here by the rules identity and profile apply at
-# startup, so a value either would refuse stops this run before database
-# roles are prepared or a file is written.
+# Checks an answer by the rules the services apply to it at startup and
+# prints it as it is written, so a value a service would refuse stops this
+# run before database roles are prepared or a file is written. It is one
+# program so that the node id and the ids in the ingress list are held to
+# one rule, ProxyId's (devserver-control-proto), which devserver-proxy,
+# devserver-control, identity and the agent each parse the id with.
 #
-# Prints two lines: the list as it is written, one id=public_key@endpoint
-# per node with no spaces, and the ids. Identity builds each node's tenant
-# names from the id and the proxy namespace host and keeps its own host out
-# of them, so both origins take part in the check.
-wireguard_ingresses() {
+#   check_answer node-id ID
+#     Prints the id.
+#   check_answer ingresses LIST PROXY_HOST IDENTITY_HOST
+#     Prints two lines: the list as it is written, one id=public_key@endpoint
+#     per node with no spaces, and the ids. Identity builds each node's
+#     tenant names from the id and the proxy namespace host and keeps its own
+#     host out of them, so both origins take part in the check.
+#   check_answer pool POOL
+#     Prints four lines: the pool in canonical form; its first host address,
+#     which profile never allocates and every ingress interface answers on;
+#     that address as the /32 a desktop routes into its tunnels; and that
+#     address with the pool's prefix, as an interface carries it. A pool
+#     narrower than /30 has no address left to allocate. Profile and identity
+#     take any IPv4 network, so the other bounds are the script's own: a pool
+#     wider than /8, or one that reaches into a block no tunnel address can
+#     come from, would put that block on every node's interface.
+check_answer() {
     python3 - "$@" <<'PYTHON'
 import base64
 import binascii
@@ -230,7 +216,6 @@ import ipaddress
 import re
 import sys
 
-answer, proxy_host, identity_host = sys.argv[1:4]
 SHAPE = "WireGuard ingresses must be id=public_key@endpoint entries with ';' between them"
 
 
@@ -241,6 +226,15 @@ def refuse(message):
 
 def label(value):
     return re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", value) is not None
+
+
+def node_id(value):
+    if not label(value):
+        refuse(
+            "This proxy node id must be one lowercase DNS label, of letters a to z,"
+            " digits and inner hyphens and at most 63 long, such as p1"
+        )
+    print(value)
 
 
 def canonical_key(value):
@@ -274,59 +268,45 @@ def endpoint(value):
     return re.fullmatch(r"[0-9]{1,5}", port) is not None and 0 < int(port) < 65536
 
 
-# Every part of an entry is ASCII, and lowercasing below must not fold
-# another script's letter into one.
-if not answer.isascii():
-    refuse(SHAPE)
-# A host that ends in a number is an address to identity, with no names
-# below it.
-labels = proxy_host.split(".")
-if not all(label(part) for part in labels) or re.fullmatch(
-    r"[0-9]+|0x[0-9a-f]*", labels[-1]
-):
-    refuse("Proxy namespace origin needs a DNS name as its host to offer WireGuard enrollment")
-
-entries = []
-for number, entry in enumerate(answer.split(";"), start=1):
-    ingress_id, equals, peer = entry.partition("=")
-    key, at, target = peer.partition("@")
-    if not equals or not at:
+def ingress_list(answer, proxy_host, identity_host):
+    # Every part of an entry is ASCII, and lowercasing below must not fold
+    # another script's letter into one.
+    if not answer.isascii():
         refuse(SHAPE)
-    ingress_id, key, target = ingress_id.strip(), key.strip(), target.strip()
-    where = f"WireGuard ingress entry {number}"
-    if not label(ingress_id):
-        refuse(f"{where}: the id must be a proxy node id, one lowercase DNS label")
-    if not canonical_key(key):
-        refuse(f"{where}: the public key must be padded base64 for 32 bytes")
-    if not endpoint(target):
-        refuse(f"{where}: the endpoint must be host:port or [IPv6]:port with a port from 1 to 65535")
-    if any(ingress_id == listed for listed, _, _ in entries):
-        refuse(f"{where}: the id {ingress_id} is listed twice")
-    node = f"{ingress_id}.{proxy_host}"
-    if len(node) > 253:
-        refuse(f"{where}: the id does not form a DNS name under the proxy namespace host")
-    if identity_host == node or identity_host.endswith(f".{node}"):
-        refuse(f"{where}: Gateway public origin's host must not be the node's name or a name below it")
-    entries.append((ingress_id, key, target))
+    # A host that ends in a number is an address to identity, with no names
+    # below it.
+    labels = proxy_host.split(".")
+    if not all(label(part) for part in labels) or re.fullmatch(
+        r"[0-9]+|0x[0-9a-f]*", labels[-1]
+    ):
+        refuse("Proxy namespace origin needs a DNS name as its host to offer WireGuard enrollment")
 
-print(";".join(f"{ingress_id}={key}@{target}" for ingress_id, key, target in entries))
-print(" ".join(ingress_id for ingress_id, _, _ in entries))
-PYTHON
-}
+    entries = []
+    for number, entry in enumerate(answer.split(";"), start=1):
+        ingress_id, equals, peer = entry.partition("=")
+        key, at, target = peer.partition("@")
+        if not equals or not at:
+            refuse(SHAPE)
+        ingress_id, key, target = ingress_id.strip(), key.strip(), target.strip()
+        where = f"WireGuard ingress entry {number}"
+        if not label(ingress_id):
+            refuse(f"{where}: the id must be a proxy node id, one lowercase DNS label")
+        if not canonical_key(key):
+            refuse(f"{where}: the public key must be padded base64 for 32 bytes")
+        if not endpoint(target):
+            refuse(f"{where}: the endpoint must be host:port or [IPv6]:port with a port from 1 to 65535")
+        if any(ingress_id == listed for listed, _, _ in entries):
+            refuse(f"{where}: the id {ingress_id} is listed twice")
+        node = f"{ingress_id}.{proxy_host}"
+        if len(node) > 253:
+            refuse(f"{where}: the id does not form a DNS name under the proxy namespace host")
+        if identity_host == node or identity_host.endswith(f".{node}"):
+            refuse(f"{where}: Gateway public origin's host must not be the node's name or a name below it")
+        entries.append((ingress_id, key, target))
 
-# Prints four lines: the pool in canonical form; its first host address,
-# which profile never allocates and every ingress interface answers on; that
-# address as the /32 a desktop routes into its tunnels; and that address
-# with the pool's prefix, as an interface carries it. A pool narrower than
-# /30 has no address left to allocate. Profile and identity take any IPv4
-# network, so the other bounds are the script's own: a pool wider than /8,
-# or one that reaches into a block no tunnel address can come from, would
-# put that block on every node's interface.
-wireguard_pool() {
-    python3 - "$@" <<'PYTHON'
-import ipaddress
-import re
-import sys
+    print(";".join(f"{ingress_id}={key}@{target}" for ingress_id, key, target in entries))
+    print(" ".join(ingress_id for ingress_id, _, _ in entries))
+
 
 # The blocks where ipaddress's is_loopback, is_link_local, is_multicast and
 # is_reserved hold, and 0.0.0.0/8, which holds the unspecified address. A
@@ -340,31 +320,60 @@ UNUSABLE = (
     ("240.0.0.0/4", "the reserved addresses and the broadcast address"),
 )
 
-answer = sys.argv[1]
-try:
-    if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}/[0-9]{1,2}", answer):
-        raise ValueError(answer)
-    pool = ipaddress.IPv4Network(answer)
-    if not 8 <= pool.prefixlen <= 30:
-        raise ValueError(answer)
-except ValueError:
-    print(
-        "error: WireGuard address pool must be an IPv4 network from /8 to /30"
-        " with no host bits set, such as 10.7.0.0/24",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-for block, holds in UNUSABLE:
-    if pool.overlaps(ipaddress.IPv4Network(block)):
-        print(f"error: WireGuard address pool must not overlap {block}, {holds}", file=sys.stderr)
-        sys.exit(1)
-address = pool.network_address + 1
-print(pool)
-print(address)
-print(f"{address}/32")
-print(f"{address}/{pool.prefixlen}")
+
+def address_pool(answer):
+    try:
+        if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}/[0-9]{1,2}", answer):
+            raise ValueError(answer)
+        pool = ipaddress.IPv4Network(answer)
+        if not 8 <= pool.prefixlen <= 30:
+            raise ValueError(answer)
+    except ValueError:
+        refuse(
+            "WireGuard address pool must be an IPv4 network from /8 to /30"
+            " with no host bits set, such as 10.7.0.0/24"
+        )
+    for block, holds in UNUSABLE:
+        if pool.overlaps(ipaddress.IPv4Network(block)):
+            refuse(f"WireGuard address pool must not overlap {block}, {holds}")
+    address = pool.network_address + 1
+    print(pool)
+    print(address)
+    print(f"{address}/32")
+    print(f"{address}/{pool.prefixlen}")
+
+
+MODES = {"node-id": node_id, "ingresses": ingress_list, "pool": address_pool}
+MODES[sys.argv[1]](*sys.argv[2:])
 PYTHON
 }
+
+read -rp "Gateway public origin (e.g. https://gw.example.com): " ID_URL || true
+require_origin "Gateway public origin" "$ID_URL"
+read -rp "Proxy namespace origin (e.g. https://proxy.example.com): " PROXY_ORIGIN || true
+require_origin "Proxy namespace origin" "$PROXY_ORIGIN"
+echo "The tunnel ingress host needs a DNS record and certificate. Its TLS edge"
+echo "routes /v1/tunnel to 127.0.0.1:7100 as h2c (nginx grpc_pass), and / to"
+echo "127.0.0.1:7002, where /healthz and /readyz answer only for that host."
+read -rp "Tunnel ingress origin [$PROXY_ORIGIN]: " TUNNEL_ORIGIN || true
+TUNNEL_ORIGIN=${TUNNEL_ORIGIN:-$PROXY_ORIGIN}
+require_origin "Tunnel ingress origin" "$TUNNEL_ORIGIN"
+read -rp "This proxy node id [p1]: " PROXY_ID
+PROXY_ID=${PROXY_ID:-p1}
+check_answer node-id "$PROXY_ID" > /dev/null || exit 1
+# The node origin must match the controller's template expansion for the
+# id, so the default prepends it to the namespace host.
+PROXY_BASE_URL_DEFAULT="${PROXY_ORIGIN%%://*}://${PROXY_ID}.${PROXY_ORIGIN#*://}"
+echo "The node origin's wildcard needs a DNS record, a wildcard certificate,"
+echo "and a TLS edge route to 127.0.0.1:7002 for tenant HTTP and WebSockets."
+read -rp "This proxy node origin [$PROXY_BASE_URL_DEFAULT]: " PROXY_BASE_URL || true
+PROXY_BASE_URL=${PROXY_BASE_URL:-$PROXY_BASE_URL_DEFAULT}
+require_origin "This proxy node origin" "$PROXY_BASE_URL"
+PROXY_BASE_URL_TEMPLATE="${PROXY_ORIGIN%%://*}://{proxy_id}.${PROXY_ORIGIN#*://}"
+if [[ $AGENT_INSTALLED == true ]]; then
+    read -rp "Kernel WireGuard interface for the agent [wg0]: " WG_INTERFACE
+    WG_INTERFACE=${WG_INTERFACE:-wg0}
+fi
 
 # Every run replaces identity.env whole, so none of the four single-ingress
 # variables outlives a run; an existing file that sets one is shown before
@@ -388,7 +397,7 @@ fi
 WG_POOL_DEFAULT=10.7.0.0/24
 if [[ -n $REPLACED_POOL_V4 ]]; then
     WG_POOL_DEFAULT=
-    if WG_ANSWER=$(wireguard_pool "$REPLACED_POOL_V4" 2> /dev/null); then
+    if WG_ANSWER=$(check_answer pool "$REPLACED_POOL_V4" 2> /dev/null); then
         WG_POOL_DEFAULT=${WG_ANSWER%%$'\n'*}
     fi
 fi
@@ -400,7 +409,7 @@ fi
 # an answer the check takes.
 if [[ -n $REPLACED_INGRESSES ]]; then
     echo
-    if WG_ANSWER=$(wireguard_ingresses "$REPLACED_INGRESSES" \
+    if WG_ANSWER=$(check_answer ingresses "$REPLACED_INGRESSES" \
         "$(origin_host "$PROXY_ORIGIN")" "$(origin_host "$ID_URL")" 2>&1); then
         echo "The configuration this run replaces has WireGuard enrollment on. An empty"
         echo "answer to the list below turns it off. To keep it, answer with this line:"
@@ -425,7 +434,7 @@ fi
 # when there is no default pool to compare with.
 WG_DERIVED_ADDRESS=
 if [[ -n $WG_POOL_DEFAULT ]]; then
-    mapfile -t WG_POOL < <(wireguard_pool "$WG_POOL_DEFAULT")
+    mapfile -t WG_POOL < <(check_answer pool "$WG_POOL_DEFAULT")
     WG_DERIVED_ADDRESS=${WG_POOL[1]:-}
 fi
 REPLACED_ONLY_LINES=()
@@ -456,8 +465,11 @@ echo "prints on that node, and the endpoint is the host:port desktops reach its"
 echo "interface on. This node's entry is:"
 echo "    ${PROXY_ID}=<public key>@$(origin_host "$PROXY_BASE_URL"):51820"
 read -rp "WireGuard ingresses (empty to leave enrollment off): " WG_INGRESSES || true
+# WireGuard enrollment is identity's ingress list and profile's address
+# pool, written together or not at all: identity refuses a partial set, and
+# a list without a pool fails every desktop sign-in that enrolls a key.
 if [[ -n $WG_INGRESSES ]]; then
-    WG_ANSWER=$(wireguard_ingresses "$WG_INGRESSES" \
+    WG_ANSWER=$(check_answer ingresses "$WG_INGRESSES" \
         "$(origin_host "$PROXY_ORIGIN")" "$(origin_host "$ID_URL")") || exit 1
     mapfile -t WG_LIST <<< "$WG_ANSWER"
     [[ ${#WG_LIST[@]} -eq 2 ]] || { echo "WireGuard ingress check failed" >&2; exit 1; }
@@ -470,11 +482,11 @@ if [[ -n $WG_INGRESSES ]]; then
         read -rp "WireGuard address pool [$WG_POOL_DEFAULT]: " WG_POOL_V4 || true
     else
         echo "profile.env sets the pool $REPLACED_POOL_V4, which this run does not write:"
-        wireguard_pool "$REPLACED_POOL_V4" 2>&1 | sed 's/^error: /    /' || true
+        check_answer pool "$REPLACED_POOL_V4" 2>&1 | sed 's/^error: /    /' || true
         echo "This question has no default; an empty answer stops the run."
         read -rp "WireGuard address pool: " WG_POOL_V4 || true
     fi
-    WG_ANSWER=$(wireguard_pool "${WG_POOL_V4:-$WG_POOL_DEFAULT}") || exit 1
+    WG_ANSWER=$(check_answer pool "${WG_POOL_V4:-$WG_POOL_DEFAULT}") || exit 1
     mapfile -t WG_POOL <<< "$WG_ANSWER"
     [[ ${#WG_POOL[@]} -eq 4 ]] || { echo "WireGuard address pool check failed" >&2; exit 1; }
     WG_POOL_V4=${WG_POOL[0]}

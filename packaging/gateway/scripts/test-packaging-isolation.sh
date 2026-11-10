@@ -144,6 +144,13 @@ configure_refusal 'tunnel origin path' \
 configure_refusal 'node origin path' \
     "$pg_answers"$'https://gw.example.com\nhttps://proxy.example.com\n\np1\nhttps://p1.proxy.example.com/x\n' \
     'This proxy node origin' || configure_failures=$((configure_failures + 1))
+# The node id is a proxy id, the rule its consumers parse it with. The last
+# two are 64 bytes long and a fullwidth letter p.
+for invalid_id in P1 p_1 -p1 p1- p1.proxy 'p 1' 'p1;p2' "$(printf 'p%.0s' {1..64})" $'\xef\xbd\x901'; do
+    configure_refusal "node id [$invalid_id]" \
+        "$pg_answers"$'https://gw.example.com\nhttps://proxy.example.com\n\n'"$invalid_id"$'\n' \
+        'This proxy node id must be one lowercase DNS label' || configure_failures=$((configure_failures + 1))
+done
 [[ $configure_failures -eq 0 ]] || die "$configure_failures configure origin refusals failed"
 
 # Stop valid runs at the end of origin collection, before OAuth or secrets.
@@ -159,6 +166,19 @@ for scheme in https http; do
         "$WORK/configure.out" || die "configure derived the wrong $scheme origins"
 done
 printf 'PASS configure: explicit origins and derived defaults preserve scheme and port\n'
+# Any proxy id is taken as the node id, up to 63 bytes and one digit alone,
+# and the spaces around an answer are not part of it.
+long_id=$(printf 'a%.0s' {1..63})
+for node_id in p2 0 a-b "$long_id" ' n7 '; do
+    printf '%s' "$pg_answers"$'https://gw.example.test\nhttps://proxy.example.test\n\n'"$node_id"$'\n\n' \
+        | PATH="$WORK/postinst-bin:$PATH" bash "$WORK/configure-origins.sh" \
+        > "$WORK/configure.out" 2> "$WORK/configure.err" \
+        || die "configure refused the node id [$node_id]: $(cat "$WORK/configure.err")"
+    node_id=${node_id// /}
+    grep -Fqx "https://gw.example.test|https://proxy.example.test|https://proxy.example.test|https://$node_id.proxy.example.test" \
+        "$WORK/configure.out" || die "configure derived the wrong node origin for the node id $node_id"
+done
+printf 'PASS configure: every proxy id is taken as the node id\n'
 
 # WireGuard enrollment answers. The keys are canonical base64 for 32 bytes
 # and hold `+`, `/` and the `=` pad, the characters a written list carries
