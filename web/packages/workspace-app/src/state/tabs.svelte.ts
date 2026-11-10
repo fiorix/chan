@@ -5334,13 +5334,10 @@ export function paneModeOpenGraph(ctx?: SpawnContext): void {
   p.side = side;
 }
 
-export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
-  const draft = ownDraftLayout();
-  if (!draft) return;
-  const p = draft.nodes[draft.activePaneId];
-  if (!p || p.kind !== "leaf") return;
-  const side = paneSide(p);
-  const tabs = mutablePaneTabs(p, side);
+/// A new Dashboard tab, for the live layout and for Hybrid Nav's draft. It
+/// opens on the slide `opts` names when this window has that slide, and on
+/// Metrics otherwise.
+function newDashboardTab(opts?: OpenDashboardOptions): DashboardTab {
   const tab: DashboardTab = {
     kind: "dashboard",
     id: id("dashboard"),
@@ -5349,14 +5346,26 @@ export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
   tab.carouselSlide = opts?.slide !== undefined && dashboardSlotAvailable(opts.slide)
     ? opts.slide : DASHBOARD_METRICS_SLIDE;
   if (opts?.autoRotate !== undefined) tab.autoRotate = opts.autoRotate;
+  return tab;
+}
+
+export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
+  const draft = ownDraftLayout();
+  if (!draft) return;
+  const p = draft.nodes[draft.activePaneId];
+  if (!p || p.kind !== "leaf") return;
+  const side = paneSide(p);
+  const tabs = mutablePaneTabs(p, side);
+  const tab = newDashboardTab(opts);
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
   p.side = side;
 }
 
-/// Carousel slide index of the Search / Indexing graph. Matches the
-/// `slideIndex === 1` indexing-poll gate in EmptyPaneCarousel and the
-/// `DASHBOARD_SLOT_LABELS` order (0 Workspace, 1 Search, 2 About).
+/// Carousel slide id of the Search / Indexing graph. Matches the
+/// indexing poll's `slideIndex` gate in EmptyPaneCarousel and the slot's
+/// place in `DASHBOARD_SLOT_LABELS` (0 Workspace, 1 Search, 2 About,
+/// 3 Metrics).
 export const DASHBOARD_SEARCH_SLIDE = 1;
 
 /// Optional overrides applied to a freshly-spawned Dashboard tab: pre-select
@@ -5393,14 +5402,7 @@ export function openDashboardInPane(
   if (!node || node.kind !== "leaf" || paneShowsTmux(paneId)) return false;
   const side = opts?.side ?? paneSide(node);
   const tabs = mutablePaneTabs(node, side);
-  const tab: DashboardTab = {
-    kind: "dashboard",
-    id: id("dashboard"),
-    title: "Dashboard",
-  };
-  tab.carouselSlide = opts?.slide !== undefined && dashboardSlotAvailable(opts.slide)
-    ? opts.slide : DASHBOARD_METRICS_SLIDE;
-  if (opts?.autoRotate !== undefined) tab.autoRotate = opts.autoRotate;
+  const tab = newDashboardTab(opts);
   tabs.push(tab);
   setPaneActiveTabId(node, tab.id, side);
   node.side = side;

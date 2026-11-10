@@ -535,10 +535,6 @@ function applyHybridSurfaceThemes(raw: HybridSurfaceThemes | null | undefined): 
   }
 }
 
-function hybridSurfaceThemesSnapshot(): HybridSurfaceThemes {
-  return normalizeHybridSurfaceThemes(hybridSurfaceThemes);
-}
-
 export function surfaceThemeOverride(
   kind: HybridSurfaceKind,
 ): SurfaceThemeChoice | undefined {
@@ -552,9 +548,9 @@ export function effectiveHybridSurfaceTheme(kind: HybridSurfaceKind): SurfaceThe
 /// The one merge-versus-delete for a surface's body-theme override:
 /// light/dark sets the key, anything else (the Settings control's
 /// "Inherit") drops it so the surface follows the global theme again.
-/// The store setters apply it to the live state and the Settings
-/// buffer applies it to its optimistic slice, so both persist the
-/// same shape.
+/// The store setters apply it to the live state, their write applies it
+/// to the table the server holds, and the Settings buffer applies it to
+/// its optimistic slice, so all three take the same shape.
 export function withHybridSurfaceTheme(
   current: HybridSurfaceThemes | undefined,
   kind: HybridSurfaceKind,
@@ -567,9 +563,8 @@ export function withHybridSurfaceTheme(
 }
 
 /// The apply is optimistic so the surface repaints at once, and the
-/// rollback is what keeps that honest: the live table is what every
-/// write serialises from, so an override the server refused would be
-/// saved by the next write that succeeds. The rollback restores one
+/// rollback is what keeps that honest: without it this window would go
+/// on showing an override the server refused. The rollback restores one
 /// surface, not the whole table, because a write begun while this one
 /// was in flight has already applied its own and must keep it. The
 /// rejection still reaches the caller that reports it.
@@ -579,7 +574,7 @@ export function setHybridSurfaceTheme(
 ): Promise<void> {
   const confirmed = hybridSurfaceThemes[kind] ?? "inherit";
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
-  return persistHybridSurfaceThemes().catch((error: unknown) => {
+  return persistHybridSurfaceTheme(kind, choice).catch((error: unknown) => {
     applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, confirmed));
     throw error;
   });
@@ -591,7 +586,7 @@ export function setHybridSurfaceTheme(
 export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> {
   const confirmed = hybridSurfaceThemes[kind] ?? "inherit";
   applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, "inherit"));
-  return persistHybridSurfaceThemes().catch((error: unknown) => {
+  return persistHybridSurfaceTheme(kind, "inherit").catch((error: unknown) => {
     applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, confirmed));
     throw error;
   });
@@ -604,12 +599,20 @@ export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> 
 // the store barrel.
 export { updateGlobalConfigSerial };
 
-// The snapshot is taken inside the mutation, which the write chain runs
-// after its GET rather than when this is called, so a write queued behind
-// a refused one sends the table as the rollback left it.
-function persistHybridSurfaceThemes(): Promise<void> {
-  return updateGlobalConfigSerial(() => ({
-    hybrid_surface_themes: hybridSurfaceThemesSnapshot(),
+// The server stores the table it is sent whole, so the write sends the
+// table the write chain's GET returned with this one surface changed, and
+// never this window's own table: a window that has not taken the served
+// table, or one behind another window's write, would drop the surfaces it
+// does not hold, and a value the server refused would ride along with the
+// next write. The mutation runs after the GET and again on a conflict, so
+// the merge is always over what the server holds then.
+function persistHybridSurfaceTheme(kind: HybridSurfaceKind, choice: string): Promise<void> {
+  return updateGlobalConfigSerial((prefs) => ({
+    hybrid_surface_themes: withHybridSurfaceTheme(
+      normalizeHybridSurfaceThemes(prefs.hybrid_surface_themes),
+      kind,
+      choice,
+    ),
   }));
 }
 
@@ -944,9 +947,16 @@ export function __testSetStandalonePreferences(prefs: Preferences | null): void 
 /// tenant serves no `/api/fs`, and it would fight the launcher's
 /// `local-theme` choice that a standalone terminal follows instead of the
 /// config theme. The terminal reads what it needs through `currentPreferences`.
+/// The per-surface body themes are the one part of that mirror applied here:
+/// each is an override over the window's theme, whichever source that has,
+/// and the surfaces this window draws (a terminal, a Dashboard, an editor and
+/// a file browser where the tenant serves files) read them from the live
+/// table rather than from the preferences.
 async function refreshStandalonePreferences(): Promise<void> {
   try {
-    standalonePreferences.current = (await api.config()).preferences;
+    const prefs = (await api.config()).preferences;
+    standalonePreferences.current = prefs;
+    applyHybridSurfaceThemes(prefs.hybrid_surface_themes);
   } catch {
     // Left as-is rather than cleared: a failed refresh should not throw away
     // preferences that are already applied and still correct.

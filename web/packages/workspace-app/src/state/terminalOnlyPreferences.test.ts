@@ -108,6 +108,21 @@ describe("a standalone terminal loads its preferences at boot", () => {
     expect(prefs?.terminal.secret_masking).toBe(true);
     expect(apiWorkspace).not.toHaveBeenCalled();
   });
+
+  test("bootstrap applies the stored per-surface body themes", async () => {
+    // The surfaces read these from the store's live table, not from the
+    // preference source, so seeding the source alone leaves a terminal
+    // window's Dashboard and terminal on the window theme.
+    apiConfig.mockResolvedValue(
+      config(preferences({ hybrid_surface_themes: { dashboard: "dark", terminal: "light" } })),
+    );
+
+    await store.bootstrap();
+
+    expect(store.surfaceThemeOverride("dashboard")).toBe("dark");
+    expect(store.surfaceThemeOverride("terminal")).toBe("light");
+    expect(store.surfaceThemeOverride("editor")).toBeUndefined();
+  });
 });
 
 describe("a standalone terminal follows a live settings change", () => {
