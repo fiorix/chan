@@ -945,8 +945,9 @@ fn fixture_peer(
 /// Pins migration 18's dedupe against rows written at migration 17, where a
 /// key or an address could be held once per host: of each duplicate the row
 /// enrolled last stays, by `updated_at` and then `id`, whichever row was
-/// created first; unrelated rows are untouched, and the gateway-wide unique
-/// constraints hold afterwards.
+/// created first; each row that goes leaves one `wireguard_released` audit
+/// row; unrelated rows are untouched, and the gateway-wide unique constraints
+/// hold afterwards.
 #[tokio::test]
 async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
     let (url, schema, pool) = test_db::create_schema().await;
@@ -1054,6 +1055,31 @@ async fn wireguard_migration_18_keeps_the_later_row_of_each_duplicate() {
     };
     assert_eq!(names(&after), names(&expected));
     assert_eq!(after, expected, "a row that stays is not rewritten");
+
+    // Each deleted enrollment has the audit row a sweep writes on release,
+    // stamped with the time migration 18 was installed. A row two joins find
+    // (both-earlier) has one, and a row that stays has none.
+    let mut released: Vec<(String, String, bool)> = fixture
+        .iter()
+        .filter(|peer| !peer.stays)
+        .map(|peer| {
+            (
+                peer.name.to_string(),
+                "wireguard_released".to_string(),
+                true,
+            )
+        })
+        .collect();
+    released.sort();
+    let audited: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT t.label, a.action, a.ts = m.installed_on \
+         FROM api_token_audit a JOIN api_tokens t ON t.id = a.token_id \
+         JOIN _sqlx_migrations m ON m.version = 18 ORDER BY t.label COLLATE \"C\"",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, released);
 
     let host_columns: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() \

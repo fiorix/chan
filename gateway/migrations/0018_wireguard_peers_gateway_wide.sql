@@ -19,26 +19,37 @@ ALTER TABLE wireguard_peers DROP COLUMN host;
 -- the three equalities under OR would compare every pair of rows while the
 -- table is locked. The three joins read the table as it stood before the
 -- statement, and a row that more than one of them finds is deleted once.
-DELETE FROM wireguard_peers
-WHERE id IN (
-    SELECT older.id
-    FROM wireguard_peers older
-    JOIN wireguard_peers newer
-      ON newer.public_key = older.public_key
-     AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
-    UNION ALL
-    SELECT older.id
-    FROM wireguard_peers older
-    JOIN wireguard_peers newer
-      ON newer.address_v4 = older.address_v4
-     AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
-    UNION ALL
-    SELECT older.id
-    FROM wireguard_peers older
-    JOIN wireguard_peers newer
-      ON newer.address_v6 = older.address_v6
-     AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
-);
+--
+-- Each deleted enrollment gets the audit row the sweeper writes when it
+-- releases a peer, so the trail of a token whose tunnel stops does not end at
+-- wireguard_enrolled. The migrator applies this file and records the version
+-- in one transaction, so these rows carry the installed_on of version 18 in
+-- _sqlx_migrations as their ts, which tells them from a sweep's.
+WITH released AS (
+    DELETE FROM wireguard_peers
+    WHERE id IN (
+        SELECT older.id
+        FROM wireguard_peers older
+        JOIN wireguard_peers newer
+          ON newer.public_key = older.public_key
+         AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
+        UNION ALL
+        SELECT older.id
+        FROM wireguard_peers older
+        JOIN wireguard_peers newer
+          ON newer.address_v4 = older.address_v4
+         AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
+        UNION ALL
+        SELECT older.id
+        FROM wireguard_peers older
+        JOIN wireguard_peers newer
+          ON newer.address_v6 = older.address_v6
+         AND (newer.updated_at, newer.id) > (older.updated_at, older.id)
+    )
+    RETURNING token_id
+)
+INSERT INTO api_token_audit (token_id, action)
+SELECT token_id, 'wireguard_released' FROM released;
 
 ALTER TABLE wireguard_peers
     ADD UNIQUE (public_key),
