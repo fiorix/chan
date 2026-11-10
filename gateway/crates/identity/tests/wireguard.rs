@@ -370,33 +370,49 @@ async fn wireguard_peers_route_relays_each_configured_ingress_and_answers_404_fo
 }
 
 #[tokio::test]
-async fn wireguard_peers_route_answers_every_host_as_an_unknown_one_while_enrollment_is_off() {
+async fn wireguard_peers_route_relays_every_well_formed_host_while_enrollment_is_off() {
     let profile = MockServer::start().await;
-    mount_empty_lists(&profile).await;
-    let (_, on) = apps(&profile, Some(enrollment()), AGENT).await;
     let (_, off) = apps(&profile, None, AGENT).await;
-    let unknown = request(on.clone(), &peers_uri("p9"), Some(AGENT), None).await;
-    assert_eq!(unknown.0, StatusCode::NOT_FOUND);
-    let unauthorized = request(on.clone(), &peers_uri("p9"), None, None).await;
-    assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
-    for host in ["p1", "p2", "p9"] {
-        // Status, headers and body: nothing tells enrollment off from an
-        // unknown host, with the bearer or without it.
-        assert_eq!(
-            request(off.clone(), &peers_uri(host), Some(AGENT), None).await,
-            unknown,
-            "{host}"
-        );
-        for token in [None, Some("wrong")] {
+    let peer = key(1);
+    // No list names an ingress, so no host disagrees with one: a host is
+    // relayed whatever its id, with that id and the ETag its agent holds.
+    for (host, held, etag) in [
+        ("p1", "\"held-1\"", "\"e1\""),
+        ("p2", "\"held-2\"", "\"e2\""),
+        ("p9", "\"held-9\"", "\"e9\""),
+    ] {
+        let body = list_body(host, &[&peer]);
+        mount_list(&profile, host, etag, &body, Some(held)).await;
+        let (status, headers, actual) =
+            request(off.clone(), &peers_uri(host), Some(AGENT), Some(held)).await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+        assert_eq!(headers[header::ETAG], etag);
+        assert_eq!(actual, body.as_bytes());
+    }
+    profile.verify().await;
+    assert_eq!(profile.received_requests().await.unwrap().len(), 3);
+
+    // The bearer is still checked first, and an unset agent bearer still
+    // answers as an absent route.
+    for token in [None, Some("wrong")] {
+        for host in ["p1", "p9"] {
             assert_eq!(
-                request(off.clone(), &peers_uri(host), token, None).await,
-                unauthorized,
+                request(off.clone(), &peers_uri(host), token, None).await.0,
+                StatusCode::UNAUTHORIZED,
                 "{host}"
             );
         }
     }
-    // A host that is missing or is no label is a bad request before either
-    // answer, with enrollment on or off.
+    let (_, no_bearer) = apps(&profile, None, "").await;
+    assert_eq!(
+        request(no_bearer, &peers_uri("p1"), Some(AGENT), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    // A host that is missing or is no label is a bad request before any
+    // relay, with enrollment on or off.
+    let (_, on) = apps(&profile, Some(enrollment()), AGENT).await;
     for app in [on, off] {
         for uri in ["/internal/v1/wireguard/peers".to_owned(), peers_uri("P1")] {
             assert_eq!(
@@ -406,7 +422,100 @@ async fn wireguard_peers_route_answers_every_host_as_an_unknown_one_while_enroll
             );
         }
     }
-    assert!(profile.received_requests().await.unwrap().is_empty());
+    assert_eq!(profile.received_requests().await.unwrap().len(), 3);
+}
+
+/// Every line this test executable logs, whichever test logs it. The
+/// subscriber is the process's one default, not a per-thread one: a
+/// callsite's interest is cached process-wide, and a test on another thread
+/// that reached the callsite first would cache it as disabled.
+#[derive(Clone, Default)]
+struct Logged(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Logged {
+    fn install() -> &'static Self {
+        static LOGGED: std::sync::OnceLock<Logged> = std::sync::OnceLock::new();
+        LOGGED.get_or_init(|| {
+            let logged = Logged::default();
+            let writer = logged.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+            logged
+        })
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// The lines carrying the field `host=<host>`.
+    fn about(&self, host: &str) -> Vec<String> {
+        let field = format!("host={host}");
+        self.text()
+            .lines()
+            .filter(|line| line.split_whitespace().any(|word| word == field))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn an_unlisted_host_is_logged_once_at_warn_with_its_label_and_without_the_bearer() {
+    let logged = Logged::install();
+    let profile = MockServer::start().await;
+    mount_empty_lists(&profile).await;
+    // Ids and hosts no other test names, since the log is the process's.
+    let listed = enrollment_of(vec![ingress("n1", 7)], None);
+    let (_, on) = apps(&profile, Some(listed), AGENT).await;
+    let (_, off) = apps(&profile, None, AGENT).await;
+
+    let poll = |app: &Router, host: &str, token| {
+        let (app, uri) = (app.clone(), peers_uri(host));
+        async move { request(app, &uri, token, None).await.0 }
+    };
+    assert_eq!(poll(&on, "q7", Some(AGENT)).await, StatusCode::NOT_FOUND);
+    let lines = logged.about("q7");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert!(line.contains(" WARN "), "{line}");
+    assert!(line.contains("WIREGUARD_INGRESSES"), "{line}");
+    assert!(line.contains("polls=1"), "{line}");
+
+    // An agent polls again within seconds, and is answered without a line.
+    assert_eq!(poll(&on, "q7", Some(AGENT)).await, StatusCode::NOT_FOUND);
+    assert_eq!(logged.about("q7").len(), 1);
+
+    // Nothing else is logged about a host: not a caller without the
+    // bearer, a host that is no label, a listed host, or any host while
+    // enrollment is off.
+    for token in [None, Some("wrong")] {
+        assert_eq!(poll(&on, "q8", token).await, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(poll(&on, "Q8", Some(AGENT)).await, StatusCode::BAD_REQUEST);
+    assert_eq!(poll(&on, "n1", Some(AGENT)).await, StatusCode::OK);
+    assert_eq!(poll(&off, "q9", Some(AGENT)).await, StatusCode::OK);
+    for host in ["q8", "Q8", "n1", "q9"] {
+        assert_eq!(logged.about(host), Vec::<String>::new());
+    }
+    // No line of any test holds a bearer.
+    let text = logged.text();
+    for bearer in [AGENT, "test-profile"] {
+        assert!(!text.contains(bearer), "{text}");
+    }
 }
 
 #[tokio::test]
