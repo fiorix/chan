@@ -26,9 +26,11 @@ pub struct WireguardEnrollment {
     persistent_keepalive: Option<u16>,
 }
 
-/// One ingress and the gateway names its tunnel carries.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One ingress and the gateway names its tunnel carries. Serialized, it is
+/// one entry of discovery's list: the ingress's own fields and `hosts`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IngressRoutes {
+    #[serde(flatten)]
     pub ingress: Ingress,
     pub hosts: Vec<HostRoute>,
 }
@@ -38,6 +40,20 @@ pub struct IngressRoutes {
 pub struct HostRoute {
     pub name: String,
     pub addresses: Vec<IpAddr>,
+}
+
+/// The `wireguard` object of the discovery document: everything a desktop
+/// needs to start a tunnel to any ingress except its own key and address.
+#[derive(Debug, Serialize)]
+pub(crate) struct Discovery {
+    /// The first ingress's endpoint and key. A desktop that reads no list
+    /// reads these two and sees one ingress.
+    endpoint: String,
+    public_key: String,
+    allowed_ips: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persistent_keepalive: Option<u16>,
+    ingresses: Vec<IngressRoutes>,
 }
 
 /// Parameters returned with a PAT after profile accepts the desktop's key.
@@ -110,6 +126,17 @@ impl WireguardEnrollment {
     /// desktop that reads no ingress list enrolls against.
     pub(crate) fn first(&self) -> &IngressRoutes {
         &self.ingresses[0]
+    }
+
+    pub(crate) fn discovery(&self) -> Discovery {
+        let first = &self.first().ingress;
+        Discovery {
+            endpoint: first.endpoint.clone(),
+            public_key: first.public_key.clone(),
+            allowed_ips: self.allowed_ips.clone(),
+            persistent_keepalive: self.persistent_keepalive,
+            ingresses: self.ingresses.clone(),
+        }
     }
 
     pub(crate) fn parameters(&self, addresses: Vec<String>) -> Parameters {

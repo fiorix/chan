@@ -141,6 +141,8 @@ Every ingress interface answers on the same `WIREGUARD_INGRESS_ADDRESSES`, at mo
 
 `WIREGUARD_HOST_ID`, `WIREGUARD_ENDPOINT`, `WIREGUARD_PUBLIC_KEY` and `WIREGUARD_HOSTS` describe a single ingress and are refused: a non-empty value in any of them stops startup with a message naming what to set instead (`WIREGUARD_INGRESSES` for the first three; nothing for `WIREGUARD_HOSTS`, whose map is derived). A deployment that sets them therefore never starts with enrollment silently off.
 
+With enrollment configured, discovery's `wireguard` object carries `endpoint` and `public_key` (the first ingress's), `allowed_ips`, `persistent_keepalive` (left out when it is 0) and `ingresses`: one `{id, endpoint, public_key, hosts}` per ingress in the configured order, where `hosts` is that ingress's derived map as `[{name, addresses}]`. That is everything a desktop needs to start a tunnel to any ingress except its own key and address. A desktop that reads only `endpoint` and `public_key` sees one ingress, the first.
+
 Profile separately needs `WIREGUARD_POOL_V4` and may set `WIREGUARD_POOL_V6`, reservations and release grace. `configure.sh` generates the agent bearer and leaves the interface and pool values as commented examples.
 
 ## Routes

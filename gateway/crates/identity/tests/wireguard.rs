@@ -19,24 +19,37 @@ fn key(byte: u8) -> String {
     base64::engine::general_purpose::STANDARD.encode([byte; 32])
 }
 
-/// Two ingresses under the test config's proxy origin, `p1` first.
-fn enrollment() -> WireguardEnrollment {
-    let ingress = |id: &str, byte| Ingress {
+fn ingress(id: &str, byte: u8) -> Ingress {
+    Ingress {
         id: id.into(),
         endpoint: format!("{id}.proxy.example.test:51820"),
         public_key: key(byte),
-    };
+    }
+}
+
+/// An enrollment under the test config's proxy origin, its ingresses in
+/// the order given.
+fn enrollment_of(ingresses: Vec<Ingress>, keepalive: Option<u16>) -> WireguardEnrollment {
     WireguardEnrollment::new(
-        vec![ingress("p1", 7), ingress("p2", 8)],
+        ingresses,
         "proxy.example.test",
         &["10.7.0.1".parse().unwrap()],
         vec!["10.7.0.1/32".into()],
-        Some(25),
+        keepalive,
     )
     .unwrap()
 }
 
-async fn apps(profile: &MockServer, offered: bool, agent: &str) -> (Router, Router) {
+/// Two ingresses, `p1` first.
+fn enrollment() -> WireguardEnrollment {
+    enrollment_of(vec![ingress("p1", 7), ingress("p2", 8)], Some(25))
+}
+
+async fn apps(
+    profile: &MockServer,
+    wireguard: Option<WireguardEnrollment>,
+    agent: &str,
+) -> (Router, Router) {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
         .unwrap();
@@ -47,7 +60,7 @@ async fn apps(profile: &MockServer, offered: bool, agent: &str) -> (Router, Rout
     )
     .unwrap();
     let mut cfg = identity_config::test_config("unused", client);
-    cfg.wireguard = offered.then(enrollment);
+    cfg.wireguard = wireguard;
     cfg.wireguard_agent_token = agent.into();
     identity::http::routers(
         Arc::new(cfg),
@@ -86,33 +99,84 @@ async fn request(
 #[tokio::test]
 async fn discovery_advertises_wireguard_only_when_configured() {
     let profile = MockServer::start().await;
-    let (public, _) = apps(&profile, false, "").await;
+    let (public, _) = apps(&profile, None, "").await;
     let (status, _, baseline) = request(public, "/.well-known/chan-gateway", None, None).await;
     assert_eq!(status, StatusCode::OK);
     let expected = r#"{"kind":"chan-gateway","api_version":1,"identity_origin":"http://localhost:7000","desktop_authorize_url":"http://localhost:7000/desktop/authorize","desktop_entry_url":"http://localhost:7000/desktop/v1/devserver/entry","roster_url":"http://localhost:7000/desktop/v1/devservers","devserver_proxy_origin":"https://proxy.example.test","devserver_proxy_host_depth":2,"tunnel_url":"https://tunnel.example.test/v1/tunnel"}"#;
     assert_eq!(baseline, expected.as_bytes());
-    let (public, _) = apps(&profile, true, "").await;
+    let (public, _) = apps(&profile, Some(enrollment()), "").await;
     let (status, _, body) = request(public, "/.well-known/chan-gateway", None, None).await;
     assert_eq!(status, StatusCode::OK);
     let mut discovery: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        discovery
-            .as_object_mut()
-            .unwrap()
-            .remove("wireguard")
-            .unwrap(),
-        json!({"endpoint":"p1.proxy.example.test:51820", "public_key":key(7)})
-    );
+    assert!(discovery
+        .as_object_mut()
+        .unwrap()
+        .remove("wireguard")
+        .unwrap()
+        .is_object());
     assert_eq!(
         discovery,
         serde_json::from_slice::<Value>(&baseline).unwrap()
     );
 }
 
+/// The `wireguard` object of the discovery document `wireguard` configures.
+async fn discovered(wireguard: WireguardEnrollment) -> Value {
+    let profile = MockServer::start().await;
+    let (public, _) = apps(&profile, Some(wireguard), "").await;
+    let (status, _, body) = request(public, "/.well-known/chan-gateway", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice::<Value>(&body).unwrap()["wireguard"].take()
+}
+
+#[tokio::test]
+async fn discovery_lists_every_ingress_and_repeats_the_first_as_the_single_pair() {
+    assert_eq!(
+        discovered(enrollment()).await,
+        json!({
+            "endpoint": "p1.proxy.example.test:51820",
+            "public_key": key(7),
+            "allowed_ips": ["10.7.0.1/32"],
+            "persistent_keepalive": 25,
+            "ingresses": [
+                {
+                    "id": "p1",
+                    "endpoint": "p1.proxy.example.test:51820",
+                    "public_key": key(7),
+                    "hosts": [
+                        {"name": "p1.proxy.example.test", "addresses": ["10.7.0.1"]},
+                        {"name": "*.p1.proxy.example.test", "addresses": ["10.7.0.1"]},
+                    ],
+                },
+                {
+                    "id": "p2",
+                    "endpoint": "p2.proxy.example.test:51820",
+                    "public_key": key(8),
+                    "hosts": [
+                        {"name": "p2.proxy.example.test", "addresses": ["10.7.0.1"]},
+                        {"name": "*.p2.proxy.example.test", "addresses": ["10.7.0.1"]},
+                    ],
+                },
+            ],
+        })
+    );
+
+    // The single pair follows the list's first entry, not an id, and the
+    // keepalive is left out when it is off.
+    let reversed = enrollment_of(vec![ingress("p2", 8), ingress("p1", 7)], None);
+    let wireguard = discovered(reversed).await;
+    assert_eq!(wireguard["endpoint"], "p2.proxy.example.test:51820");
+    assert_eq!(wireguard["public_key"], key(8));
+    assert_eq!(wireguard["ingresses"][0]["id"], "p2");
+    assert_eq!(wireguard["ingresses"][1]["id"], "p1");
+    assert!(wireguard.get("persistent_keepalive").is_none());
+    assert_eq!(wireguard.as_object().unwrap().len(), 4);
+}
+
 #[tokio::test]
 async fn wireguard_peers_route_requires_its_own_bearer_and_relays_profile() {
     let profile = MockServer::start().await;
-    let (public, internal) = apps(&profile, true, "test-wireguard-agent").await;
+    let (public, internal) = apps(&profile, Some(enrollment()), "test-wireguard-agent").await;
     let uri = "/internal/v1/wireguard/peers?host=p1";
     for token in [
         None,
@@ -131,7 +195,7 @@ async fn wireguard_peers_route_requires_its_own_bearer_and_relays_profile() {
             .0,
         StatusCode::NOT_FOUND
     );
-    let (_, disabled) = apps(&profile, true, "").await;
+    let (_, disabled) = apps(&profile, Some(enrollment()), "").await;
     assert_eq!(
         request(disabled, uri, Some("test-wireguard-agent"), None)
             .await
