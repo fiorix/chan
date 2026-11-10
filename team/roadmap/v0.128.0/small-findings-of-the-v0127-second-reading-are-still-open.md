@@ -1,6 +1,6 @@
 # Small findings of the v0.127.0 second reading are still open
 
-Status: raised on 2026-11-10 by the second reading of v0.127.0's merged code ([its item](../v0.127.0/a-second-reading-of-the-releases-merged-code-finds-small-defects.md)) and by the fixes made from it, which listed what they saw nearby and left alone. The owner closed v0.127.0 to new work that day ("no more new features at this point, just close off the current in-flight items and the rest moves to v128"), so everything not already fixed or given a row of its own is collected here. Not started. Each line is a reading of the code unless it says it was run.
+Status: raised on 2026-11-10 by the second reading of v0.127.0's merged code ([its item](../done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md)) and by the fixes made from it, which listed what they saw nearby and left alone. The owner closed v0.127.0 to new work that day ("no more new features at this point, just close off the current in-flight items and the rest moves to v128"), so everything not already fixed or given a row of its own is collected here. Not started. Each line is a reading of the code unless it says it was run.
 
 ## What is there now
 

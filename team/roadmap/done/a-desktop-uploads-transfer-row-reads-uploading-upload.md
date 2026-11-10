@@ -1,6 +1,8 @@
 # A desktop upload's transfer row reads "Uploading Upload"
 
-Status: raised by the owner on 2026-11-10 from chan-desktop on his Mac, with a screenshot of the Transfers bubble reading "Uploading Upload to dev (100%)", and placed in v0.127.0 the same day ("it's ok to fix in v127"). Built on `fix/desktop-upload-transfer-label` (`f39b43549`, one commit over `40959b57e`) and merged into the integration branch as `a61073bf8`. The text dated from the native transfer work of v0.76.0 (`81f9b9fbe`).
+Status: shipped in [v0.127.0](../../release/release-v0.127.0.md).
+
+Record before the release: raised by the owner on 2026-11-10 from chan-desktop on his Mac, with a screenshot of the Transfers bubble reading "Uploading Upload to dev (100%)", and placed in v0.127.0 the same day ("it's ok to fix in v127"). Built on `fix/desktop-upload-transfer-label` (`f39b43549`, one commit over `40959b57e`) and merged into the integration branch as `a61073bf8`. The text dated from the native transfer work of v0.76.0 (`81f9b9fbe`).
 
 ## What was there
 

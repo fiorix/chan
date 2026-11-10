@@ -21,60 +21,6 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.127.0
-
-Opened 2026-11-08 with the five items the owner moved from v0.126.0 the same day, each sized medium or larger; v0.126.0's text above records why each was raised. In size order: one WireGuard ingress per proxy node, gateway and desktop both ([wgnode]); the time-bound tests a loaded host breaks ([timebound]); the system CA store for the Rust TLS clients, read on three platforms ([systemca]); the PAT the redeem orphans, which shares the redeem's completion with [wgnode] ([patrevoke]); and the gateway packaging and roles suites in CI ([gwci]).
-
-The reading behind [docsdrift] added a sixth, placed here by the owner the same day: identity serves a shared devserver's root link to its owner alone, so the account page's Copy link refuses the people the devserver is shared with, though the per-workspace landing and the desktop admit them ([grantroot]).
-
-At the v0.126.0 cut on 2026-11-08 the owner released on his word before the wake-visibility reading had run on his Mac, so that row moves here with its reading procedure shipped: the terminal tab's comment says WKWebView fires no `visibilitychange` across a sleep, while the owner's Mac log shows WebKit's visibility change at each wake ([wakevis]). On 2026-11-10 he closed the row without the reading or a fix: the terminals come back on his Mac as the code stands, and he reports if that changes.
-
-On 2026-11-09 the owner added live process metrics, built directly with an agent outside the round's seats and merged into the integration branch the same day: the Dashboard's Metrics slide, `chan metrics`, and an optional Linux Varlink socket ([metrics]).
-
-The owner added another the same day: the ghostty terminals re-pinned from a pre-1.0 `tip` build of libghostty-vt to the signed 1.0.0 release, with find on ghostty terminals and xterm's find aligned to it, ordered on 2026-11-08 and merged with this row ([ghostty1]).
-
-On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]). The same day he added one he had built directly with an agent: with tabs in the title bar the window's own title is hidden, so the pane tree popup names the window, as Computers does ([panetitle]). He also raised a bug from his Mac: after privacy mode went on and off, the Window menu held four stale sections with masked titles, fixed the same day ([winmenu]). And a `tmux -CC` window on a devserver that opened twice turned out to be two desktop processes; he ruled the fix into this release, and a second launch now hands over to the running desktop and exits ([single]).
-
-His checks on his Mac the same day raised three more, each fixed that day: every pane of a `tmux -CC` window took the active pane's name, so each pane is named by its own title or command ([panenames]); a label given to a tmux window in Computers lasted only until tmux's next rename, and it stays ([tmuxlabel]); and a desktop upload's row in the Transfers bubble read "Uploading Upload to dev" ([uploadrow]). Before the GA he asked for a second reading of everything merged: three readers found no defect that blocks the release, twelve small ones and documents behind the code, fixed and merged the same day ([reread]). With the release closed to new work, his last Mac checks found the Dashboard's Metrics slide at the top left of a wide window; he pulled the fix in before the cut, and the slide sits in the middle of its tab ([dashcenter]).
-
-On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
-
-| Item | State | Next |
-| --- | --- | --- |
-| [time-bound tests go red on a loaded host][timebound] | built | GA |
-| [a PAT minted by the redeem is orphaned on a refused answer][patrevoke] | built | gateway run |
-| [no CI job runs the gateway packaging and roles suites][gwci] | built | owner |
-| [a shared devserver's root link refuses its grantees][grantroot] | built | guest run |
-| [the terminal tab assumes no visibilitychange across a sleep][wakevis] | closed | GA |
-| [a running chan shows no live process metrics][metrics] | built | guest run |
-| [ghostty terminals run on a pre-1.0 core][ghostty1] | built | owner |
-| [a tmux window's title bar is empty][tmuxbar] | built | owner |
-| [a title-bar-tab window shows no name][panetitle] | built | owner |
-| [the macOS Window menu piles up stale sections][winmenu] | built | owner |
-| [a second desktop launch runs beside the first][single] | built | owner |
-| [every tmux pane takes the active pane's name][panenames] | built | owner |
-| [a Computers label on a tmux window is lost][tmuxlabel] | built | owner |
-| [a desktop upload's row reads "Uploading Upload"][uploadrow] | built | owner |
-| [a second reading finds small defects][reread] | built | owner |
-| [the Metrics slide sits at the top left][dashcenter] | built | owner |
-
-[timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
-[patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
-[gwci]: v0.127.0/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md
-[grantroot]: v0.127.0/a-shared-devservers-root-link-refuses-the-people-it-is-shared-with.md
-[wakevis]: v0.127.0/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md
-[metrics]: v0.127.0/a-running-chan-shows-no-live-process-metrics.md
-[ghostty1]: v0.127.0/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md
-[tmuxbar]: v0.127.0/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
-[panetitle]: v0.127.0/a-window-with-tabs-in-its-title-bar-shows-its-name-nowhere.md
-[winmenu]: v0.127.0/the-macos-window-menu-piles-up-stale-sections.md
-[single]: v0.127.0/a-second-desktop-launch-runs-beside-the-first.md
-[panenames]: v0.127.0/every-pane-of-a-tmux-window-takes-the-active-panes-name.md
-[tmuxlabel]: v0.127.0/a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it.md
-[uploadrow]: v0.127.0/a-desktop-uploads-transfer-row-reads-uploading-upload.md
-[reread]: v0.127.0/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
-[dashcenter]: v0.127.0/the-dashboards-metrics-slide-sits-at-the-top-left-of-a-wide-window.md
-
 ### v0.128.0
 
 Opened 2026-11-09 by the owner with one item taken in parts over this and the following releases: the ghostty terminals render through ghostty-web, a package with no release since v0.4.0 that chan drives from outside through its private internals, so chan forks the parts it uses into `web/packages/ghostty-web-ng`, a widget over libghostty-vt 1.0 with public hooks for highlights, painting, focus and events, decides later whether to extract it to its own repository, and folds in the find gaps the v0.127.0 follow-ups left ([ghosttyng]). v0.127.0 keeps its ghostty work as tested.
@@ -142,8 +88,31 @@ The owner then closed v0.127.0 to new work ("just close off the current in-fligh
 [uploadpaths]: v0.128.0/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md
 [tmuxmove]: v0.128.0/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md
 [leftovers]: v0.128.0/small-findings-of-the-v0127-second-reading-are-still-open.md
+[reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
+[tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 
 ## Completed
+
+### v0.127.0
+
+Shipped 2026-11-10; see [release-v0.127.0](../release/release-v0.127.0.md). A no-rc release by the owner's word ("if these all work (including the Window menu fixes), and no items pending any decision, we should mark this as ga v127"): twenty-nine `--no-ff` merges from twenty-six branches into the integration branch `v0127/int` over the v0.126.0 release commit `028f179b7`, with the lead's documents commits between them, under sixteen rows, fifteen shipped; the rows are in [`done/`](done/). The sixteenth, the wake-visibility reading, was closed by the owner without its reading or a fix, and nothing shipped for it.
+
+- [a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it](done/a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it.md) - A Computers label on a tmux window lasts until tmux renames it.
+- [a-desktop-uploads-transfer-row-reads-uploading-upload](done/a-desktop-uploads-transfer-row-reads-uploading-upload.md) - A desktop upload's transfer row reads "Uploading Upload".
+- [a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer](done/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md) - A PAT minted by the redeem is orphaned when the desktop refuses the answer.
+- [a-running-chan-shows-no-live-process-metrics](done/a-running-chan-shows-no-live-process-metrics.md) - A running chan shows no live process metrics.
+- [a-second-desktop-launch-runs-beside-the-first](done/a-second-desktop-launch-runs-beside-the-first.md) - A second desktop launch runs beside the first.
+- [a-second-reading-of-the-releases-merged-code-finds-small-defects](done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md) - A second reading of the release's merged code finds small defects.
+- [a-shared-devservers-root-link-refuses-the-people-it-is-shared-with](done/a-shared-devservers-root-link-refuses-the-people-it-is-shared-with.md) - A shared devserver's root link refuses the people it is shared with.
+- [a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it](done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md) - A tmux window's title bar is empty when tabs sit in it.
+- [a-window-with-tabs-in-its-title-bar-shows-its-name-nowhere](done/a-window-with-tabs-in-its-title-bar-shows-its-name-nowhere.md) - A window with tabs in its title bar shows its name nowhere.
+- [every-pane-of-a-tmux-window-takes-the-active-panes-name](done/every-pane-of-a-tmux-window-takes-the-active-panes-name.md) - Every pane of a tmux window takes the active pane's name.
+- [no-ci-job-runs-the-gateway-packaging-and-roles-suites](done/no-ci-job-runs-the-gateway-packaging-and-roles-suites.md) - No CI job runs the gateway packaging and roles suites.
+- [the-dashboards-metrics-slide-sits-at-the-top-left-of-a-wide-window](done/the-dashboards-metrics-slide-sits-at-the-top-left-of-a-wide-window.md) - The Dashboard's Metrics slide sits at the top left of a wide window.
+- [the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build](done/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md) - The ghostty terminals run on a pre-1.0 libghostty-vt build.
+- [the-macos-window-menu-piles-up-stale-sections](done/the-macos-window-menu-piles-up-stale-sections.md) - The macOS Window menu piles up stale sections.
+- [the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep](done/the-terminal-tab-assumes-wkwebview-fires-no-visibilitychange-across-a-sleep.md) - The terminal tab assumes WKWebView fires no visibilitychange across a sleep (closed without a change).
+- [time-bound-tests-go-red-on-a-loaded-host](done/time-bound-tests-go-red-on-a-loaded-host.md) - Time-bound tests go red on a loaded host.
 
 ### v0.126.0
 

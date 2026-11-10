@@ -1,6 +1,8 @@
 # The Dashboard's Metrics slide sits at the top left of a wide window
 
-Status: raised by the owner on 2026-11-10 from his Mac checks of the release ("the dashboard seems to be aligned to the top left, rather than the center of the tab; for example when we have a window taking the whole screen i'd like to see the dashboard centered horizontally and vertically as well when possible"). The release was closed to new work by then; he first left it for v0.128.0 and then pulled it in before the cut ("do include dashboard fix"). Built the same day on `fix/dashboard-metrics-centered` (`b9d83dcb7`, three commits over `8c7863e9a`: the browser check, the fix and a comment) and merged into the integration branch as `72fc72501`.
+Status: shipped in [v0.127.0](../../release/release-v0.127.0.md).
+
+Record before the release: raised by the owner on 2026-11-10 from his Mac checks of the release ("the dashboard seems to be aligned to the top left, rather than the center of the tab; for example when we have a window taking the whole screen i'd like to see the dashboard centered horizontally and vertically as well when possible"). The release was closed to new work by then; he first left it for v0.128.0 and then pulled it in before the cut ("do include dashboard fix"). Built the same day on `fix/dashboard-metrics-centered` (`b9d83dcb7`, three commits over `8c7863e9a`: the browser check, the fix and a comment) and merged into the integration branch as `72fc72501`.
 
 ## What was there
 

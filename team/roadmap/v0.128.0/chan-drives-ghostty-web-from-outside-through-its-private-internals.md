@@ -1,6 +1,6 @@
 # chan drives ghostty-web from outside, through its private internals
 
-Status: accepted by the owner on 2026-11-09 as scope taken in parts over the next releases, starting in v0.128.0; nothing is built. v0.127.0 ships the libghostty-vt 1.0 core, find on ghostty terminals and the find follow-ups as they were tested ([the libghostty-vt 1.0 item](../v0.127.0/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md)); this item does not reopen them.
+Status: accepted by the owner on 2026-11-09 as scope taken in parts over the next releases, starting in v0.128.0; nothing is built. v0.127.0 ships the libghostty-vt 1.0 core, find on ghostty terminals and the find follow-ups as they were tested ([the libghostty-vt 1.0 item](../done/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md)); this item does not reopen them.
 
 ## What is there now
 

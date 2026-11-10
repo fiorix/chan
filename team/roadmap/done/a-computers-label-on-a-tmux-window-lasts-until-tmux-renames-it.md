@@ -1,6 +1,8 @@
 # A Computers label on a tmux window lasts until tmux renames it
 
-Status: left open by the tmux pane tree fix earlier in v0.127.0 (`48f47be29`), which made a tmux window's label follow the name tmux gives it; asked on 2026-11-10 whether a label given in Computers should stick, the owner ruled the same day: "the window i want to stick to our value, yes; the panes can have their own titles, equivalent to how our chan tabs have their names separate from the windows". Built on `fix/tmux-pane-names` (`7fba5fc90`) and merged into the integration branch as `7898f4fe3`. Each property is pinned by a test shown red without its fix.
+Status: shipped in [v0.127.0](../../release/release-v0.127.0.md).
+
+Record before the release: left open by the tmux pane tree fix earlier in v0.127.0 (`48f47be29`), which made a tmux window's label follow the name tmux gives it; asked on 2026-11-10 whether a label given in Computers should stick, the owner ruled the same day: "the window i want to stick to our value, yes; the panes can have their own titles, equivalent to how our chan tabs have their names separate from the windows". Built on `fix/tmux-pane-names` (`7fba5fc90`) and merged into the integration branch as `7898f4fe3`. Each property is pinned by a test shown red without its fix.
 
 ## What was there
 

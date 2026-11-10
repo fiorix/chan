@@ -1,6 +1,8 @@
 # Every pane of a tmux window takes the active pane's name
 
-Status: raised by the owner on 2026-11-10 from his Mac, with two screenshots ("every time we switch panes, we change the name of all processes in the tree to the current process"), and ruled into v0.127.0 the same day: each pane is named by its own `#{pane_title}`, falling back to `#{pane_current_command}` while the title is still tmux's default. Built on `fix/tmux-pane-names` (`e85016cee`, six commits over `40959b57e`, with the label ruling of [the Computers label item](a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it.md) among them) and merged into the integration branch as `7898f4fe3`; a live-test fix followed on the integration branch (`4a326966d`). Each property is pinned by a test shown red without its fix.
+Status: shipped in [v0.127.0](../../release/release-v0.127.0.md).
+
+Record before the release: raised by the owner on 2026-11-10 from his Mac, with two screenshots ("every time we switch panes, we change the name of all processes in the tree to the current process"), and ruled into v0.127.0 the same day: each pane is named by its own `#{pane_title}`, falling back to `#{pane_current_command}` while the title is still tmux's default. Built on `fix/tmux-pane-names` (`e85016cee`, six commits over `40959b57e`, with the label ruling of [the Computers label item](a-computers-label-on-a-tmux-window-lasts-until-tmux-renames-it.md) among them) and merged into the integration branch as `7898f4fe3`; a live-test fix followed on the integration branch (`4a326966d`). Each property is pinned by a test shown red without its fix.
 
 ## What was there
 
