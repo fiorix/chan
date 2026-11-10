@@ -639,7 +639,7 @@ async fn complete(
         match state
             .cfg
             .profile_client
-            .enroll_wireguard_peer(user.id, token.id, key, &config.host_id)
+            .enroll_wireguard_peer(user.id, token.id, key, &config.first().ingress.id)
             .await
         {
             Ok(peer) => Some(config.parameters(peer.addresses)),
@@ -790,7 +790,7 @@ pub async fn consent(State(state): State<AppState>, session: Session) -> Result<
         .cfg
         .wireguard
         .as_ref()
-        .map(|config| config.endpoint.as_str());
+        .map(|config| config.first().ingress.endpoint.as_str());
     let html = render_consent_html(&params, &user, &csrf, endpoint);
     Ok((pages::security_headers(), Html(html)).into_response())
 }

@@ -6,26 +6,35 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use gateway_common::wireguard::{valid_host, PeerListResponse};
+use gateway_common::wireguard::{valid_host, Ingress, PeerListResponse};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::http::{bearer_token, AppState};
 use crate::{Error, Result};
 
-/// The kernel ingress and routing policy offered to enrolling desktops.
+/// The WireGuard ingresses and the routing policy offered to enrolling
+/// desktops. Every ingress answers on the same tunnel addresses and lists
+/// every enrolled peer, so one enrollment is valid on all of them.
 #[derive(Clone, Debug)]
 pub struct WireguardEnrollment {
-    pub host_id: String,
-    pub endpoint: String,
-    pub public_key: String,
-    pub allowed_ips: Vec<String>,
-    pub persistent_keepalive: Option<u16>,
+    /// One entry per proxy node that terminates WireGuard, in the order
+    /// the operator listed them. Never empty: [`Self::new`] refuses an
+    /// empty list.
+    ingresses: Vec<IngressRoutes>,
+    allowed_ips: Vec<String>,
+    persistent_keepalive: Option<u16>,
+}
+
+/// One ingress and the gateway names its tunnel carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IngressRoutes {
+    pub ingress: Ingress,
     pub hosts: Vec<HostRoute>,
 }
 
 /// A gateway DNS name and the tunnel addresses that serve it.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostRoute {
     pub name: String,
     pub addresses: Vec<IpAddr>,
@@ -44,14 +53,74 @@ pub struct Parameters {
 }
 
 impl WireguardEnrollment {
+    /// Build the enrollment offer for `ingresses`, kept in the order given,
+    /// or `None` for an empty list. Each ingress's host map is derived, not
+    /// configured: its node name `{id}.{proxy_host}` and every name below
+    /// it, which are the node base and the tenant names identity mints for
+    /// that proxy id, each mapped to `addresses`, the tunnel addresses
+    /// every ingress interface answers on.
+    pub fn new(
+        ingresses: Vec<Ingress>,
+        proxy_host: &str,
+        addresses: &[IpAddr],
+        allowed_ips: Vec<String>,
+        persistent_keepalive: Option<u16>,
+    ) -> Option<Self> {
+        if ingresses.is_empty() {
+            return None;
+        }
+        let ingresses = ingresses
+            .into_iter()
+            .map(|ingress| {
+                let node = format!("{}.{proxy_host}", ingress.id);
+                let wildcard = format!("*.{node}");
+                let hosts = [node, wildcard]
+                    .into_iter()
+                    .map(|name| HostRoute {
+                        name,
+                        addresses: addresses.to_vec(),
+                    })
+                    .collect();
+                IngressRoutes { ingress, hosts }
+            })
+            .collect();
+        Some(Self {
+            ingresses,
+            allowed_ips,
+            persistent_keepalive,
+        })
+    }
+
+    /// Every ingress, in the operator's order.
+    pub fn ingresses(&self) -> &[IngressRoutes] {
+        &self.ingresses
+    }
+
+    /// The CIDRs a desktop routes through each ingress's tunnel.
+    pub fn allowed_ips(&self) -> &[String] {
+        &self.allowed_ips
+    }
+
+    /// The keepalive interval desktops use, `None` when it is off.
+    pub fn persistent_keepalive(&self) -> Option<u16> {
+        self.persistent_keepalive
+    }
+
+    /// The ingress the single-ingress wire fields describe, which is all a
+    /// desktop that reads no ingress list enrolls against.
+    pub(crate) fn first(&self) -> &IngressRoutes {
+        &self.ingresses[0]
+    }
+
     pub(crate) fn parameters(&self, addresses: Vec<String>) -> Parameters {
+        let first = self.first();
         Parameters {
-            server_public_key: self.public_key.clone(),
-            endpoint: self.endpoint.clone(),
+            server_public_key: first.ingress.public_key.clone(),
+            endpoint: first.ingress.endpoint.clone(),
             addresses,
             allowed_ips: self.allowed_ips.clone(),
             persistent_keepalive: self.persistent_keepalive,
-            hosts: self.hosts.clone(),
+            hosts: first.hosts.clone(),
         }
     }
 }

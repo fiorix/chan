@@ -7,25 +7,33 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use base64::Engine;
-use identity::wireguard::{HostRoute, WireguardEnrollment};
+use gateway_common::wireguard::Ingress;
+use identity::wireguard::WireguardEnrollment;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
 use wiremock::matchers::{header as has_header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn key(byte: u8) -> String {
+    base64::engine::general_purpose::STANDARD.encode([byte; 32])
+}
+
+/// Two ingresses under the test config's proxy origin, `p1` first.
 fn enrollment() -> WireguardEnrollment {
-    WireguardEnrollment {
-        host_id: "p1".into(),
-        endpoint: "wg.example.test:51820".into(),
-        public_key: base64::engine::general_purpose::STANDARD.encode([7; 32]),
-        allowed_ips: vec!["10.7.0.0/24".into()],
-        persistent_keepalive: Some(25),
-        hosts: vec![HostRoute {
-            name: "proxy.example.test".into(),
-            addresses: vec!["10.7.0.1".parse().unwrap()],
-        }],
-    }
+    let ingress = |id: &str, byte| Ingress {
+        id: id.into(),
+        endpoint: format!("{id}.proxy.example.test:51820"),
+        public_key: key(byte),
+    };
+    WireguardEnrollment::new(
+        vec![ingress("p1", 7), ingress("p2", 8)],
+        "proxy.example.test",
+        &["10.7.0.1".parse().unwrap()],
+        vec!["10.7.0.1/32".into()],
+        Some(25),
+    )
+    .unwrap()
 }
 
 async fn apps(profile: &MockServer, offered: bool, agent: &str) -> (Router, Router) {
@@ -93,7 +101,7 @@ async fn discovery_advertises_wireguard_only_when_configured() {
             .unwrap()
             .remove("wireguard")
             .unwrap(),
-        json!({"endpoint":"wg.example.test:51820", "public_key":enrollment().public_key})
+        json!({"endpoint":"p1.proxy.example.test:51820", "public_key":key(7)})
     );
     assert_eq!(
         discovery,

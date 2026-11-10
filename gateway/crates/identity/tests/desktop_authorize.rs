@@ -1110,19 +1110,23 @@ async fn wireguard_authorize_requires_valid_keys_and_an_enrollment_offer() {
     app.cleanup().await;
 }
 
+/// Two ingresses under the test config's proxy origin, `p1` first, on one
+/// shared pair of tunnel addresses.
 fn wireguard_enrollment() -> identity::wireguard::WireguardEnrollment {
     use base64::Engine;
-    identity::wireguard::WireguardEnrollment {
-        host_id: "p1".into(),
-        endpoint: "wg.example.test:51820".into(),
-        public_key: base64::engine::general_purpose::STANDARD.encode([9; 32]),
-        allowed_ips: vec!["10.7.0.1/32".into(), "fd00:7::1/128".into()],
-        persistent_keepalive: Some(25),
-        hosts: vec![identity::wireguard::HostRoute {
-            name: "*.proxy.example.test".into(),
-            addresses: vec!["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
-        }],
-    }
+    let ingress = |id: &str, byte| gateway_common::wireguard::Ingress {
+        id: id.into(),
+        endpoint: format!("{id}.proxy.example.test:51820"),
+        public_key: base64::engine::general_purpose::STANDARD.encode([byte; 32]),
+    };
+    identity::wireguard::WireguardEnrollment::new(
+        vec![ingress("p1", 9), ingress("p2", 10)],
+        "proxy.example.test",
+        &["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+        vec!["10.7.0.1/32".into(), "fd00:7::1/128".into()],
+        Some(25),
+    )
+    .unwrap()
 }
 
 async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uuid) -> String {
@@ -1148,7 +1152,7 @@ async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uui
     let response = client.get("/desktop/authorize/consent").await;
     assert_eq!(response.status, StatusCode::OK);
     assert!(response.body_str().contains("WireGuard key"));
-    assert!(response.body_str().contains("wg.example.test:51820"));
+    assert!(response.body_str().contains("p1.proxy.example.test:51820"));
     extract_csrf(response.body_str())
 }
 
@@ -1205,9 +1209,14 @@ async fn full_flow_with_a_wireguard_key_enrolls_the_peer_and_returns_its_paramet
     assert_eq!(
         payload["wireguard"],
         json!({
-            "server_public_key":config.public_key, "endpoint":"wg.example.test:51820",
+            "server_public_key":config.ingresses()[0].ingress.public_key,
+            "endpoint":"p1.proxy.example.test:51820",
             "addresses":["10.7.0.23/32", "fd00:7::23/128"], "allowed_ips":["10.7.0.1/32", "fd00:7::1/128"],
-            "persistent_keepalive":25, "hosts":[{"name":"*.proxy.example.test", "addresses":["10.7.0.1", "fd00:7::1"]}],
+            "persistent_keepalive":25,
+            "hosts":[
+                {"name":"p1.proxy.example.test", "addresses":["10.7.0.1", "fd00:7::1"]},
+                {"name":"*.p1.proxy.example.test", "addresses":["10.7.0.1", "fd00:7::1"]},
+            ],
         })
     );
     let token: Uuid = payload["id"].as_str().unwrap().parse().unwrap();

@@ -118,18 +118,30 @@ Every configured identity bearer must be distinct or startup fails. An unset nar
 
 ### WireGuard enrollment
 
-Set all five enrollment values together; a partial set refuses startup. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
+Identity offers one WireGuard ingress per proxy node that terminates WireGuard: that node's kernel interface. Set `WIREGUARD_INGRESSES`, `WIREGUARD_INGRESS_ADDRESSES` and `WIREGUARD_ALLOWED_IPS` together; a partial set refuses startup, and a value that is empty or only whitespace counts as unset. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
 
 | Name | Value |
 | --- | --- |
-| `WIREGUARD_HOST_ID` | One lowercase ingress-host label |
-| `WIREGUARD_ENDPOINT` | Kernel interface `host:port`, IPv6 in brackets |
-| `WIREGUARD_PUBLIC_KEY` | Padded base64 for the interface's 32-byte key |
-| `WIREGUARD_ALLOWED_IPS` | Comma-separated CIDRs routed through the tunnel |
-| `WIREGUARD_HOSTS` | Semicolon-separated `name=addr[,addr]` mappings |
+| `WIREGUARD_INGRESSES` | Semicolon-separated `id=public_key@endpoint`, one per node |
+| `WIREGUARD_INGRESS_ADDRESSES` | Tunnel address of every ingress interface: one IPv4, one IPv6 or both, comma-separated |
+| `WIREGUARD_ALLOWED_IPS` | Comma-separated CIDRs routed through each tunnel |
 | `WIREGUARD_PERSISTENT_KEEPALIVE` | Optional seconds, default 25; 0 omits it |
 
-Host-map addresses must be inside the allowed CIDRs. Names are the proxy or tunnel origin's host, or `*.` followed by the proxy apex; they are lowercase, and the identity origin's host is refused. Profile separately needs `WIREGUARD_POOL_V4` and may set `WIREGUARD_POOL_V6`, reservations and release grace. `configure.sh` generates the agent bearer and leaves the interface and pool values as commented examples.
+```sh
+WIREGUARD_INGRESSES=p1=<p1 key>@p1.proxy.example.com:51820;p2=<p2 key>@p2.proxy.example.com:51820
+WIREGUARD_INGRESS_ADDRESSES=10.7.0.1
+WIREGUARD_ALLOWED_IPS=10.7.0.1/32
+```
+
+In a `WIREGUARD_INGRESSES` entry, `id` is the node's `DEVSERVER_PROXY_ID`, one lowercase DNS label, which is also the `WIREGUARD_AGENT_HOST_ID` of the agent on that node. `public_key` is the node interface's key, padded base64 for 32 bytes. `endpoint` is the interface's `host:port`, with an IPv6 literal in brackets; it may be the node's own name, since a desktop resolves an endpoint on its host and not through a tunnel's host map. An entry is split once on its first `=` and once on `@`, so the `=` that pads the key needs no escaping. Ids are unique; keys and endpoints may repeat. An empty entry, which a trailing or doubled `;` makes, is refused. The order of the list is kept: its first entry is the ingress the single-ingress fields of discovery and of the redeem describe.
+
+Every ingress interface answers on the same `WIREGUARD_INGRESS_ADDRESSES`, at most one address per family, each inside `WIREGUARD_ALLOWED_IPS`. No host map is configured: identity derives one per ingress, `{id}.{proxy host}` and `*.{id}.{proxy host}` mapped to the ingress addresses, where `{proxy host}` is the host of `DEVSERVER_PROXY_ORIGIN` without its port. Those are the node's base name and its tenant names, so a tenant name is carried only by its own node's tunnel. With enrollment configured, `DEVSERVER_PROXY_ORIGIN` must have a DNS name as its host, every derived name must be a lowercase DNS name of at most 253 bytes, and `BASE_URL`'s host must be neither a derived node name nor a name below one.
+
+`WIREGUARD_ALLOWED_IPS` and `WIREGUARD_PERSISTENT_KEEPALIVE` apply to every ingress. The ingress addresses must stay out of profile's allocation: profile never allocates a pool's network address or its first host address, and any other ingress address belongs in profile's `WIREGUARD_POOL_RESERVED`. Identity cannot read profile's pool, so it does not check this.
+
+`WIREGUARD_HOST_ID`, `WIREGUARD_ENDPOINT`, `WIREGUARD_PUBLIC_KEY` and `WIREGUARD_HOSTS` describe a single ingress and are refused: a non-empty value in any of them stops startup with a message naming what to set instead (`WIREGUARD_INGRESSES` for the first three; nothing for `WIREGUARD_HOSTS`, whose map is derived). A deployment that sets them therefore never starts with enrollment silently off.
+
+Profile separately needs `WIREGUARD_POOL_V4` and may set `WIREGUARD_POOL_V6`, reservations and release grace. `configure.sh` generates the agent bearer and leaves the interface and pool values as commented examples.
 
 ## Routes
 

@@ -394,14 +394,13 @@ async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<Gateway
         devserver_proxy_origin,
         devserver_proxy_host_depth: 2,
         tunnel_url: format!("{tunnel_origin}{}", chan_tunnel_proto::TUNNEL_PATH),
-        wireguard: state
-            .cfg
-            .wireguard
-            .as_ref()
-            .map(|config| GatewayWireguardDiscovery {
-                endpoint: config.endpoint.clone(),
-                public_key: config.public_key.clone(),
-            }),
+        wireguard: state.cfg.wireguard.as_ref().map(|config| {
+            let first = &config.first().ingress;
+            GatewayWireguardDiscovery {
+                endpoint: first.endpoint.clone(),
+                public_key: first.public_key.clone(),
+            }
+        }),
     }))
 }
 
