@@ -78,7 +78,12 @@
   {/if}
 </section>
 <style>
-  .metrics-slide { width: 100%; max-width: 1120px; min-height: 0; overflow: auto; padding: 8px 18px 18px; box-sizing: border-box; }
+  /* Auto margins put the slide in the middle of the carousel's stage, a flex
+     column, on both axes. They take only the room the stage has to spare: in
+     a stage narrower or shorter than the slide they are zero, so the slide
+     fills the width or shrinks to the height and its scroll starts at the
+     first row. */
+  .metrics-slide { width: 100%; max-width: 1120px; min-height: 0; margin: auto; overflow: auto; padding: 8px 18px 18px; box-sizing: border-box; }
   header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding-bottom: 18px; }
   h2 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
   h3 { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 12px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
