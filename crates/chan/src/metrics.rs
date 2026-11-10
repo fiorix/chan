@@ -523,7 +523,7 @@ pub(crate) fn full_view() -> View {
             allocated_bytes: Some(4096),
             files: Some(3),
             sampled_at_ms: Some(1_700_000_000_000),
-            scan_millis: Some(12),
+            scan_ms: Some(12),
             error: None,
         },
     }

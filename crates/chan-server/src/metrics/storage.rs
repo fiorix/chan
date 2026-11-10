@@ -16,7 +16,7 @@ pub struct Storage {
     pub allocated_bytes: Option<u64>,
     pub files: Option<u64>,
     pub sampled_at_ms: Option<u64>,
-    pub scan_millis: Option<u64>,
+    pub scan_ms: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -28,7 +28,7 @@ impl Storage {
             allocated_bytes: None,
             files: None,
             sampled_at_ms: None,
-            scan_millis: None,
+            scan_ms: None,
             error: None,
         }
     }
@@ -129,7 +129,7 @@ fn scan_with(
         allocated_bytes: None,
         files: Some(files),
         sampled_at_ms: Some(now_ms()),
-        scan_millis: Some(started.elapsed().as_millis() as u64),
+        scan_ms: Some(started.elapsed().as_millis() as u64),
         error: None,
     })
 }
@@ -137,6 +137,21 @@ fn scan_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn millisecond_fields_share_one_spelling_on_the_wire() {
+        let storage = serde_json::to_value(Storage::pending(Path::new("/home"))).unwrap();
+        let keys: Vec<&str> = storage
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in ["sampledAtMs", "scanMs"] {
+            assert!(keys.contains(&key), "no {key} in {keys:?}");
+        }
+    }
+
     #[test]
     fn scan_skips_links_counts_files_and_refuses_incomplete_results() {
         let root = tempfile::tempdir().unwrap();

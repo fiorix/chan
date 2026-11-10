@@ -46,7 +46,7 @@ test("unavailable process I/O is labelled and leaves gaps instead of plotting ze
   metrics.view = {
     schemaVersion: 1, identity: { instanceId: "bsd", version: "1", build: "abc", pid: 42, hostname: "bsd.example" },
     latest: sample, history: [sample],
-    storage: { path: "/home/test/.chan", logicalBytes: null, allocatedBytes: null, files: null, sampledAtMs: null, scanMillis: null, error: null },
+    storage: { path: "/home/test/.chan", logicalBytes: null, allocatedBytes: null, files: null, sampledAtMs: null, scanMs: null, error: null },
   };
   metrics.samples = [sample];
   const target = document.createElement("div"); document.body.append(target);
