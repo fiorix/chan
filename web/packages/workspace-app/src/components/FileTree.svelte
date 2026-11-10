@@ -626,7 +626,8 @@
   /// Single-click selects an entry; the file browser's inspector
   /// then renders its details. Files do not open on click;
   /// double-click (or the Open button in the panel) is the path
-  /// to actually opening a file.
+  /// to actually opening a file. A plain tap from a touch screen selects
+  /// and then runs `opens`: the file opens, the folder is entered.
   ///
   /// A click also forces the inspector open: the user expects the
   /// metadata pane to surface the selection. If they explicitly
@@ -635,7 +636,12 @@
   /// URL hash). The inspector-open call sits behind `onClickRow` so
   /// the surface can gate it per variant (tab + overlay auto-open;
   /// dock doesn't).
-  function selectPath(path: string, ev?: MouseEvent): void {
+  // Whether the gesture now ending began with a finger. A touch screen has
+  // no double click to open with, and a phone's browser no room for the
+  // inspector a selection fills, so a plain tap there also opens the row.
+  let touchGesture = false;
+
+  function selectPath(path: string, ev?: MouseEvent, opens?: () => void): void {
     activate();
     ev?.stopPropagation();
     treeRootEl?.focus({ preventScroll: true });
@@ -652,6 +658,7 @@
       fbSelectRange(path, visibleRows.map((r) => r.path));
     } else {
       fbSelectSingle(path);
+      if (touchGesture) opens?.();
     }
     onClickRow?.(path);
   }
@@ -1365,6 +1372,7 @@
   bind:this={treeRootEl}
   onkeydown={onTreeKeydown}
   onmousedown={onTreeMouseDown}
+  onpointerdowncapture={(e) => { touchGesture = e.pointerType === "touch"; }}
   ondragover={(e) => onRowDragOver(e, view === "list" ? directory : "")}
   ondragleave={() => onRowDragLeave(view === "list" ? directory : "")}
   ondrop={(e) => onRowDrop(e, view === "list" ? directory : "")}
@@ -1418,7 +1426,7 @@
         style={rightDock
           ? `padding-right: ${depth * 12}px`
           : `padding-left: ${depth * 12}px`}
-        onclick={(e) => selectPath(node.path, e)}
+        onclick={(e) => selectPath(node.path, e, () => { if (view === "list") onNavigate?.(node.path); else toggle(node.path); })}
         ondblclick={() => { if (view === "list") onNavigate?.(node.path); }}
         oncontextmenu={(e) => showMenu(e, node.path, true)}
         role={view === "list" ? "option" : "treeitem"}
@@ -1478,7 +1486,7 @@
           class="name"
           onclick={(e) => {
             if (view === "tree" && !(e.shiftKey || e.metaKey || e.ctrlKey || selectionMode)) toggle(node.path);
-            selectPath(node.path, e);
+            selectPath(node.path, e, () => { if (view === "list") onNavigate?.(node.path); });
           }}
           onkeydown={() => {}}
           role="button"
@@ -1530,7 +1538,7 @@
         style={rightDock
           ? `padding-right: ${depth * 12 + 16}px`
           : `padding-left: ${depth * 12 + 16}px`}
-        onclick={(e) => selectPath(node.path, e)}
+        onclick={(e) => selectPath(node.path, e, () => openFileRow(node.path))}
         ondblclick={() => openFileRow(node.path)}
         oncontextmenu={(e) => showMenu(e, node.path, false)}
         role={view === "list" ? "option" : "treeitem"}
@@ -1564,7 +1572,7 @@
         <button
           class="name"
           tabindex="-1"
-          onclick={(e) => selectPath(node.path, e)}
+          onclick={(e) => selectPath(node.path, e, () => openFileRow(node.path))}
           ondblclick={(e) => { e.stopPropagation(); openFileRow(node.path); }}
         >{node.name}</button>
         {@render metadata(node)}
