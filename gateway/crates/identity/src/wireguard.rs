@@ -57,6 +57,9 @@ pub(crate) struct Discovery {
 }
 
 /// Parameters returned with a PAT after profile accepts the desktop's key.
+/// `addresses` is the peer's one address set, valid on every ingress.
+/// `server_public_key`, `endpoint` and `hosts` describe the first ingress,
+/// for a desktop that reads no list; `ingresses` is discovery's list.
 #[derive(Clone, Debug, Serialize)]
 pub struct Parameters {
     pub server_public_key: String,
@@ -65,6 +68,17 @@ pub struct Parameters {
     pub allowed_ips: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persistent_keepalive: Option<u16>,
+    pub hosts: Vec<HostRoute>,
+    pub ingresses: Vec<IngressParameters>,
+}
+
+/// One ingress as the redeem lists it: discovery's entry, with the key
+/// under the name the redeem gives a peer's key.
+#[derive(Clone, Debug, Serialize)]
+pub struct IngressParameters {
+    pub id: String,
+    pub endpoint: String,
+    pub server_public_key: String,
     pub hosts: Vec<HostRoute>,
 }
 
@@ -148,6 +162,16 @@ impl WireguardEnrollment {
             allowed_ips: self.allowed_ips.clone(),
             persistent_keepalive: self.persistent_keepalive,
             hosts: first.hosts.clone(),
+            ingresses: self
+                .ingresses
+                .iter()
+                .map(|route| IngressParameters {
+                    id: route.ingress.id.clone(),
+                    endpoint: route.ingress.endpoint.clone(),
+                    server_public_key: route.ingress.public_key.clone(),
+                    hosts: route.hosts.clone(),
+                })
+                .collect(),
         }
     }
 }

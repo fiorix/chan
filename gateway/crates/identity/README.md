@@ -194,7 +194,7 @@ Desktop authorize (PAT mint for chan-desktop):
 | POST   | `/desktop/authorize/confirm` | allow or deny, then loopback      |
 | POST   | `/desktop/authorize/redeem`  | one-time code to PAT              |
 
-The optional `wireguard_public_key` authorize query carries a padded base64 32-byte key, shown on the consent page. Allow enrolls it in profile against the minted PAT before issuing the redemption code. Enrollment failure soft-revokes that undelivered PAT and hands back `error=wireguard_enroll_failed`. Successful redemption adds `wireguard` with `server_public_key`, `endpoint`, assigned `addresses`, `allowed_ips`, optional `persistent_keepalive` and the `hosts` map. Without a key the response shape is unchanged.
+The optional `wireguard_public_key` authorize query carries a padded base64 32-byte key, shown on the consent page. Allow enrolls it in profile once, against the minted PAT, before issuing the redemption code; the one enrollment covers every ingress. Enrollment failure soft-revokes that undelivered PAT and hands back `error=wireguard_enroll_failed`. Successful redemption adds `wireguard`: the peer's one assigned `addresses` set, valid on every ingress, `allowed_ips`, optional `persistent_keepalive`, and `ingresses`, which is discovery's list with each key named `server_public_key`. The object's own `server_public_key`, `endpoint` and `hosts` are the first ingress's, so a desktop that reads no list enrolls against the first ingress and reaches the other nodes over their public path. Without a key the response shape is unchanged.
 
 Desktop API (Bearer PAT):
 

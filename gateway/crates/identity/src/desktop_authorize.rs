@@ -1577,21 +1577,35 @@ mod tests {
         let mut value = payload("test-pat");
         let expected = serde_json::json!({"id":Uuid::nil(), "secret":"test-pat", "label":"box", "expires_at":null});
         assert_eq!(serde_json::to_value(&value).unwrap(), expected);
+        let hosts = || {
+            vec![crate::wireguard::HostRoute {
+                name: "p1.proxy.example.test".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }]
+        };
         value.wireguard = Some(crate::wireguard::Parameters {
             server_public_key: "server-key".into(),
             endpoint: "wg.example.test:51820".into(),
             addresses: vec!["10.7.0.23/32".into()],
             allowed_ips: vec!["10.7.0.1/32".into()],
             persistent_keepalive: None,
-            hosts: vec![crate::wireguard::HostRoute {
-                name: "proxy.example.test".into(),
-                addresses: vec!["10.7.0.1".parse().unwrap()],
+            hosts: hosts(),
+            ingresses: vec![crate::wireguard::IngressParameters {
+                id: "p1".into(),
+                endpoint: "wg.example.test:51820".into(),
+                server_public_key: "server-key".into(),
+                hosts: hosts(),
             }],
         });
         let actual = serde_json::to_value(&value).unwrap();
+        let hosts = serde_json::json!([{"name":"p1.proxy.example.test", "addresses":["10.7.0.1"]}]);
         assert_eq!(
             actual["wireguard"],
-            serde_json::json!({"server_public_key":"server-key", "endpoint":"wg.example.test:51820", "addresses":["10.7.0.23/32"], "allowed_ips":["10.7.0.1/32"], "hosts":[{"name":"proxy.example.test", "addresses":["10.7.0.1"]}]})
+            serde_json::json!({
+                "server_public_key":"server-key", "endpoint":"wg.example.test:51820",
+                "addresses":["10.7.0.23/32"], "allowed_ips":["10.7.0.1/32"], "hosts":hosts,
+                "ingresses":[{"id":"p1", "endpoint":"wg.example.test:51820", "server_public_key":"server-key", "hosts":hosts}],
+            })
         );
     }
 }
