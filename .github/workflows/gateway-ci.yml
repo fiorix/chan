@@ -10,8 +10,9 @@ name: Gateway CI
 #
 # The path filter is the gateway's build input set, not gateway/ alone.
 # gateway/Cargo.toml consumes crates/chan-tunnel-{client,proto,server}
-# from the root workspace by path, and those crates take their version
-# and their dependency pins from the root Cargo.toml through
+# from the root workspace by path, the client and proto crates compile
+# crates/chan-metrics in turn, and all four take their version and
+# their dependency pins from the root Cargo.toml through
 # `workspace = true`, so a change to any of them changes what this
 # workspace compiles and what its integration tests exercise.
 # scripts/check-build-matrix.py derives that closure from the manifests
@@ -68,6 +69,13 @@ on:
       - 'packaging/sdme/chan-devserver-provision.sh'
       - '.github/workflows/gateway-ci.yml'
   workflow_dispatch:
+
+# Every job reads the repository and nothing else. The Rust and npm caches
+# go through the runner's cache service, which no token scope gates, the
+# Postgres service image is public, and the container job builds its
+# images without pushing them.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
