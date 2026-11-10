@@ -118,7 +118,7 @@ Every configured identity bearer must be distinct or startup fails. An unset nar
 
 ### WireGuard enrollment
 
-Identity offers one WireGuard ingress per proxy node that terminates WireGuard: that node's kernel interface. Set `WIREGUARD_INGRESSES`, `WIREGUARD_INGRESS_ADDRESSES` and `WIREGUARD_ALLOWED_IPS` together; a partial set refuses startup, and a value that is empty or only whitespace counts as unset. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
+Identity offers one WireGuard ingress per proxy node that terminates WireGuard: that node's kernel interface. Set `WIREGUARD_INGRESSES`, `WIREGUARD_INGRESS_ADDRESSES` and `WIREGUARD_ALLOWED_IPS` together; a partial set refuses startup, and a value that is empty or only whitespace counts as unset. `WIREGUARD_PERSISTENT_KEEPALIVE` set without the three is a partial set as well: it stops startup with a message naming `WIREGUARD_INGRESSES`, so a deployment that turns enrollment off removes the keepalive line too. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
 
 | Name | Value |
 | --- | --- |
