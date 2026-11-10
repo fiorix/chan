@@ -135,16 +135,6 @@ impl WireguardEnrollment {
         &self.ingresses
     }
 
-    /// The CIDRs a desktop routes through each ingress's tunnel.
-    pub fn allowed_ips(&self) -> &[String] {
-        &self.allowed_ips
-    }
-
-    /// The keepalive interval desktops use, `None` when it is off.
-    pub fn persistent_keepalive(&self) -> Option<u16> {
-        self.persistent_keepalive
-    }
-
     /// Whether `id` names a configured ingress.
     pub(crate) fn has_ingress(&self, id: &str) -> bool {
         self.ingresses.iter().any(|route| route.ingress.id == id)

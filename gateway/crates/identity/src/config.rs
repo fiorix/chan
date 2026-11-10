@@ -644,7 +644,7 @@ fn wireguard_from_vars(
         networks.iter().map(ToString::to_string).collect(),
         (persistent_keepalive != 0).then_some(persistent_keepalive),
     )
-    .context("WIREGUARD_INGRESSES must name at least one ingress")?;
+    .expect("a split yields at least one entry, and each entry is an ingress or a refusal");
     Ok(Some(enrollment))
 }
 
@@ -1215,6 +1215,7 @@ mod wireguard_tests {
     use crate::wireguard::{HostRoute, WireguardEnrollment};
     use base64::Engine;
     use gateway_common::wireguard::Ingress;
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     /// A canonical public key. Every one ends in the `=` base64 pads a
@@ -1286,6 +1287,16 @@ mod wireguard_tests {
             .collect()
     }
 
+    /// The routing policy as discovery publishes it: the allowed CIDRs,
+    /// and the keepalive when it is on.
+    fn policy(cfg: &WireguardEnrollment) -> (serde_json::Value, Option<serde_json::Value>) {
+        let discovery = serde_json::to_value(cfg.discovery()).unwrap();
+        (
+            discovery["allowed_ips"].clone(),
+            discovery.get("persistent_keepalive").cloned(),
+        )
+    }
+
     fn host(name: &str, addresses: &[&str]) -> HostRoute {
         HostRoute {
             name: name.into(),
@@ -1340,8 +1351,10 @@ mod wireguard_tests {
                 ]
             );
         }
-        assert_eq!(cfg.allowed_ips(), ["10.7.0.0/24", "fd00:7::/64"]);
-        assert_eq!(cfg.persistent_keepalive(), Some(25));
+        assert_eq!(
+            policy(&cfg),
+            (json!(["10.7.0.0/24", "fd00:7::/64"]), Some(json!(25)))
+        );
 
         // The operator's order is kept, whatever the ids sort to: the
         // first entry is the one the single-ingress wire fields describe.
@@ -1384,13 +1397,12 @@ mod wireguard_tests {
                 ["10.7.0.1".parse::<std::net::IpAddr>().unwrap()]
             );
         }
-        assert_eq!(cfg.allowed_ips(), ["10.7.0.1/32"]);
-        assert_eq!(cfg.persistent_keepalive(), None);
+        assert_eq!(policy(&cfg), (json!(["10.7.0.1/32"]), None));
         values.insert("WIREGUARD_PERSISTENT_KEEPALIVE".into(), "40".into());
         values.insert("WIREGUARD_INGRESS_ADDRESSES".into(), "fd00:7::1".into());
         values.insert("WIREGUARD_ALLOWED_IPS".into(), "fd00:7::/64".into());
         let cfg = parse(&values).unwrap().unwrap();
-        assert_eq!(cfg.persistent_keepalive(), Some(40));
+        assert_eq!(policy(&cfg), (json!(["fd00:7::/64"]), Some(json!(40))));
     }
 
     #[test]
