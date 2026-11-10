@@ -260,7 +260,7 @@ test_token_id=00000000-0000-0000-0000-000000000002
 "${identity_psql[@]}" -v ON_ERROR_STOP=1 \
     -c "INSERT INTO public.api_tokens (id, user_id, label, token_hash) VALUES ('$test_token_id', '$test_user_id', 'wireguard', 'role-test-token-digest')"
 "${profile_psql[@]}" -v ON_ERROR_STOP=1 \
-    -c "INSERT INTO public.wireguard_peers (user_id, token_id, host, public_key, address_v4) VALUES ('$test_user_id', '$test_token_id', 'p1', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', '10.7.0.2')" \
+    -c "INSERT INTO public.wireguard_peers (user_id, token_id, public_key, address_v4) VALUES ('$test_user_id', '$test_token_id', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', '10.7.0.2')" \
     -c "UPDATE public.wireguard_peers SET address_v4 = '10.7.0.3' WHERE token_id = '$test_token_id'"
 "${profile_psql[@]}" -Atqc \
     "SELECT address_v4 FROM public.wireguard_peers WHERE token_id = '$test_token_id'" \

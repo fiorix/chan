@@ -789,6 +789,9 @@ impl ProfileClient {
     }
 
     /// Enroll a public key, retaining its addresses when the owner replaces its token.
+    /// A key has one peer across the gateway whatever `host` is. The body
+    /// carries `host` for a profile one release behind, which requires it and
+    /// keeps the peer on that host; the current profile only echoes it.
     pub async fn enroll_wireguard_peer(
         &self,
         user_id: Uuid,
@@ -815,7 +818,9 @@ impl ProfileClient {
         }
     }
 
-    /// Read the active peer set, preserving the response body and its validator.
+    /// Read the gateway's active peer set as `host` reads it, preserving the
+    /// response body and its validator. The body echoes `host` and the
+    /// validator covers it, so each host id has its own.
     pub async fn list_wireguard_peers(
         &self,
         host: &str,

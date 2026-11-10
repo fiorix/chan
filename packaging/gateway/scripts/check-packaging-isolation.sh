@@ -108,7 +108,7 @@ for service in profile identity; do
     assert_contains "$REPO/gateway/crates/$service/packaging/chan-gateway-$service.service" \
         "ExecStartPre=/usr/lib/chan-gateway/check-database-ready"
     assert_contains "$REPO/gateway/crates/$service/packaging/$service.env" \
-        "EXPECTED_SQLX_MIGRATION=17"
+        "EXPECTED_SQLX_MIGRATION=18"
     assert_contains "$REPO/gateway/crates/$service/packaging/$service.env" \
         "DATABASE_ROLE_POLICY_VERSION=2"
     if grep -Fq 'postgres://chan:chan@' \
@@ -117,7 +117,7 @@ for service in profile identity; do
     fi
 done
 assert_contains "$migrate_packaging/migrate.env" "CHAN_GATEWAY_MIGRATIONS=only"
-assert_contains "$migrate_packaging/migrate.env" "EXPECTED_SQLX_MIGRATION=17"
+assert_contains "$migrate_packaging/migrate.env" "EXPECTED_SQLX_MIGRATION=18"
 assert_contains "$migrate_packaging/migrate.env" "DATABASE_ROLE_POLICY_VERSION=2"
 assert_contains "$migrate_packaging/postinst" \
     "      chown root:chan-gateway-migrate /etc/chan-gateway/migrate.env"
