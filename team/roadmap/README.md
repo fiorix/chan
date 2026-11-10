@@ -33,7 +33,7 @@ On 2026-11-09 the owner added live process metrics, built directly with an agent
 
 The owner added another the same day: the ghostty terminals re-pinned from a pre-1.0 `tip` build of libghostty-vt to the signed 1.0.0 release, with find on ghostty terminals and xterm's find aligned to it, ordered on 2026-11-08 and merged with this row ([ghostty1]).
 
-On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]).
+On 2026-11-10 the owner pulled one item in from v0.128.0 once it was built and reviewed: a tmux window's title bar names the active pane and badges tmux when tabs sit in it ([tmuxbar]). The same day he added one he had built directly with an agent: with tabs in the title bar the window's own title is hidden, so the pane tree popup names the window, as Computers does ([panetitle]).
 
 On 2026-11-09 the owner moved the two largest of the first five, the per-node WireGuard ingress and the system CA store, to v0.128.0, where they keep their text and their state.
 
@@ -47,6 +47,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 | [a running chan shows no live process metrics][metrics] | built | guest run |
 | [ghostty terminals run on a pre-1.0 core][ghostty1] | built | owner |
 | [a tmux window's title bar is empty][tmuxbar] | built | owner |
+| [a title-bar-tab window shows no name][panetitle] | built | owner |
 
 [timebound]: v0.127.0/time-bound-tests-go-red-on-a-loaded-host.md
 [patrevoke]: v0.127.0/a-pat-minted-by-the-redeem-is-orphaned-when-the-desktop-refuses-the-answer.md
@@ -56,6 +57,7 @@ On 2026-11-09 the owner moved the two largest of the first five, the per-node Wi
 [metrics]: v0.127.0/a-running-chan-shows-no-live-process-metrics.md
 [ghostty1]: v0.127.0/the-ghostty-terminals-run-on-a-pre-1-0-libghostty-vt-build.md
 [tmuxbar]: v0.127.0/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
+[panetitle]: v0.127.0/a-window-with-tabs-in-its-title-bar-shows-its-name-nowhere.md
 
 ### v0.128.0
 
