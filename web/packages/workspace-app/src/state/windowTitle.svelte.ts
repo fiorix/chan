@@ -39,11 +39,20 @@ interface WindowNaming {
 
 let naming = $state<WindowNaming | null>(null);
 let pending: Promise<void> | null = null;
+// Whether a read is in flight, for the pane tree to hold its heading's row.
+// Kept apart from `pending`, which stays plain so a caller inside an effect
+// does not track the read it starts.
+let reading = $state(false);
 let latestLabel: string | undefined;
 
 /** The launcher's window name, including its privacy fallback; unknown until loaded. */
 export function windowName(): string | null {
   return naming ? privateText(windowDisplayName(naming), rowLabel(naming.kind, naming.ordinal)) : null;
+}
+
+/** Whether the naming fields are being read. */
+export function windowNameReading(): boolean {
+  return reading;
 }
 
 export function refreshWindowTitle(): void {
@@ -76,7 +85,11 @@ export function loadWindowTitle(): Promise<void> {
     // starts after a frame sees that caption or a newer one: only a frame
     // heard during this read outranks its snapshot.
     latestLabel = undefined;
-    pending = readWindowNaming().finally(() => { pending = null; });
+    reading = true;
+    pending = readWindowNaming().finally(() => {
+      pending = null;
+      reading = false;
+    });
   }
   return pending;
 }
@@ -111,5 +124,6 @@ export function applyWindowLabel(label: string): void {
 export function __resetWindowTitle(): void {
   naming = null;
   pending = null;
+  reading = false;
   latestLabel = undefined;
 }

@@ -16,7 +16,7 @@ import { layout, paneMode, tabFocusPulse, type LeafNode, type Node, type Tab } f
 import { windowTabBar } from "../state/windowTabBar.svelte";
 import { applyWindowLabel, __resetWindowTitle } from "../state/windowTitle.svelte";
 import { privacy } from "@chan/web-shared/privacy";
-import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
+import { loadScopedLibrarySnapshot, type ScopedLibrarySnapshot } from "../api/libraryCommand";
 import { sessionWindowId } from "../api/client";
 
 vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }));
@@ -117,9 +117,8 @@ async function type(text: string): Promise<void> {
   await tick();
 }
 
-beforeEach(async () => {
-  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC);
-  vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue({
+function ownSnapshot(): ScopedLibrarySnapshot {
+  return {
     library_id: "local",
     workspaces: [],
     windows: [{
@@ -128,7 +127,12 @@ beforeEach(async () => {
       control: false, tmux: false, workspace_path: null,
       connected: true, hidden: false, launch_path: "/terminal/",
     }],
-  });
+  };
+}
+
+beforeEach(async () => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC);
+  vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(ownSnapshot());
   seedLayout();
   closePaneTree();
   await mountOverlay();
@@ -199,13 +203,56 @@ describe("rendering", () => {
     vi.mocked(loadScopedLibrarySnapshot).mockRejectedValueOnce(new Error("offline"));
     windowTabBar.on = true;
     await open();
-    expect(panel()!.querySelector(".window-title")).toBeNull();
+    await vi.waitFor(() => expect(panel()!.querySelector(".window-title")).toBeNull());
+    expect(panel()!.hasAttribute("aria-describedby")).toBe(false);
     expect(document.activeElement).toBe(filter());
     expect(rowTitles()).toEqual(["Shell", "plan.md", "Logs", "Build"]);
     closePaneTree();
     await tick();
     await open();
     await vi.waitFor(() => expect(panel()?.querySelector(".window-title")?.textContent).toBe("Terminal Window 2 [deploy shell]"));
+  });
+
+  // jsdom lays nothing out, so the pin is structural: the same two elements
+  // sit above the list before and after the name arrives, the first holding
+  // a line of text either way.
+  test("holds the heading's row while the name is read, so the filter and the list stay put", async () => {
+    let resolve!: (value: ScopedLibrarySnapshot) => void;
+    vi.mocked(loadScopedLibrarySnapshot).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    windowTabBar.on = true;
+    await open();
+    const list = panel()!.querySelector('[role="listbox"]')!;
+    const aboveList = (): Element[] => {
+      const children = [...panel()!.children];
+      return children.slice(0, children.indexOf(list));
+    };
+    const held = aboveList();
+    expect(held).toHaveLength(2);
+    expect(held[0]!.classList.contains("window-title")).toBe(true);
+    expect(held[0]!.textContent).toBe("\u00a0");
+    expect(held[1]).toBe(filter().parentElement);
+    expect(panel()!.hasAttribute("aria-describedby")).toBe(false);
+
+    resolve(ownSnapshot());
+    await vi.waitFor(() => expect(held[0]!.textContent).toBe("Terminal Window 2 [deploy shell]"));
+    const after = aboveList();
+    expect(after).toHaveLength(2);
+    expect(after[0]).toBe(held[0]);
+    expect(after[1]).toBe(held[1]);
+    expect(document.activeElement).toBe(filter());
+  });
+
+  test("describes the dialog with the window name and keeps its accessible name", async () => {
+    windowTabBar.on = true;
+    await open();
+    await vi.waitFor(() => expect(panel()?.querySelector(".window-title")?.textContent).toBe("Terminal Window 2 [deploy shell]"));
+    expect(panel()!.getAttribute("aria-label")).toBe("Panes and tabs");
+    const description = (): string | null | undefined =>
+      document.getElementById(panel()!.getAttribute("aria-describedby") ?? "")?.textContent;
+    expect(description()).toBe("Terminal Window 2 [deploy shell]");
+    privacy.enabled = true;
+    await tick();
+    expect(description()).toBe("Terminal Window 2");
   });
 
   test("draws nothing while closed", () => {
