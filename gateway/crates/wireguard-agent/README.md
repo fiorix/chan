@@ -1,10 +1,10 @@
 # wireguard-agent
 
-The proxy host's peer-sync agent. It keeps one kernel WireGuard interface's peers equal to the gateway's peer table for this host: every few seconds it reads the list identity serves, adds the peers that are missing and removes the ones the gateway no longer lists, through `wg` from wireguard-tools. It touches only the peers it added itself; a peer an operator configured on the same interface is never changed or removed. No listener, no database, no metrics endpoint: the journal is its surface.
+A proxy node's peer-sync agent. It keeps one kernel WireGuard interface's peers equal to the gateway's active peers: every few seconds it reads the list identity serves, adds the peers that are missing and removes the ones the gateway no longer lists, through `wg` from wireguard-tools. It touches only the peers it added itself; a peer an operator configured on the same interface is never changed or removed. No listener, no database, no metrics endpoint: the journal is its surface.
 
 ## Role in the system
 
-A desktop that enrolls a WireGuard key at sign-in gets a row in profile's peer table, keyed by the proxy host it reaches through (`host`) and holding its public key and tunnel addresses. The row is active while its PAT is live and its user is not blocked, so a revoke, an expiry or a block drops it from the list at once. A proxy host terminates the tunnel in the kernel; this agent is what turns the table into that kernel's peer list. It reads identity's internal listener, which relays profile's list, because a proxy node reaches only identity's internal listener and devserver-control's proxy-control listener in the account plane. Revocation reaches the interface at the agent's next poll; there is no push. The reconcile rule and its failure posture are in [`design.md`](design.md).
+A gateway offers one WireGuard ingress per proxy node: each node that terminates WireGuard does so in a kernel interface of its own, under its own key, and runs one agent for it. A desktop that enrolls a WireGuard key at sign-in gets one row in profile's peer table, holding its public key and its tunnel addresses, and that one peer is valid on every ingress. Every node's agent therefore reads the same list and installs the same peers; the list is the gateway's, not the node's. A row is active while its PAT is live and its user is not blocked, so a revoke, an expiry or a block drops it from the list at once, for every node. The agent is what turns that list into its node's kernel peer list. It reads identity's internal listener, which relays profile's list, because a proxy node reaches only identity's internal listener and devserver-control's proxy-control listener in the account plane. Revocation reaches an interface at its agent's next poll; there is no push. The reconcile rule and its failure posture are in [`design.md`](design.md).
 
 ## Build
 
@@ -21,7 +21,7 @@ The release ships the deb `chan-gateway-wireguard-agent`. It installs `/usr/bin/
 
 ## Bring up the interface first
 
-The agent never creates, configures or deletes the interface: it does not set its private key, listen port, fwmark or addresses, and installs no route or firewall rule. The operator brings it up once, for example:
+The agent never creates, configures or deletes the interface: it does not set its private key, listen port, fwmark or addresses, and installs no route or firewall rule. The operator brings it up once on each node, for example:
 
 ```sh
 umask 077
@@ -33,21 +33,38 @@ ip address add fd00:7::1/64 dev wg0
 ip link set wg0 up
 ```
 
-The interface's public key (`wg pubkey < /etc/wireguard/chan-tunnel.key`), its endpoint and its addresses are what identity's enrollment settings (`WIREGUARD_PUBLIC_KEY`, `WIREGUARD_ENDPOINT`, `WIREGUARD_HOSTS`) hand to desktops; the pool profile assigns tunnel addresses from must fall inside the interface's network.
+Each node generates a private key of its own, and every node gives its interface the same tunnel addresses. identity hands desktops what the operator lists for the node, one `id=public_key@endpoint` entry of its `WIREGUARD_INGRESSES`: the node's `DEVSERVER_PROXY_ID`, the interface's public key (`wg pubkey < /etc/wireguard/chan-tunnel.key`) and the `host:port` at which desktops reach its listen port. The addresses are identity's `WIREGUARD_INGRESS_ADDRESSES`, the same value for every node. The pool profile assigns peers' addresses from must fall inside the interface's network and must not hand out the interface's own address: profile never allocates a pool's network address or its first host address, which is why `10.7.0.1` in a `10.7.0.0/24` pool is safe, and any other address is listed in profile's `WIREGUARD_POOL_RESERVED`. A desktop reaches the node's names at the tunnel address, so the node's TLS edge must answer there as it does on the node's public address. The grammar of identity's variables is in [`../identity/README.md`](../identity/README.md#wireguard-enrollment).
 
 ## Env vars
 
-| Var | Required | Meaning |
-|---|---|---|
-| `IDENTITY_URL` | yes | identity's internal listener, e.g. `http://127.0.0.1:7004`; cleartext only to a loopback IP literal or with `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay` |
-| `WIREGUARD_AGENT_TOKEN` | yes | the bearer identity checks on `/internal/v1/wireguard/peers`; equal to identity's `WIREGUARD_AGENT_TOKEN`, `openssl rand -hex 32` |
-| `WIREGUARD_AGENT_HOST_ID` | yes | this host's `host` in the peer table, one lowercase DNS label (the grammar of `DEVSERVER_PROXY_ID`) |
-| `WIREGUARD_INTERFACE` | yes | the kernel interface the agent changes peers on; not `all` or `interfaces`, which `wg show` reads as words |
-| `WIREGUARD_AGENT_POLL_SECS` | no | seconds between polls, 1 to 60, default 5 |
-| `WIREGUARD_WG_BIN` | no | the `wg` executable, default `wg` from `PATH` |
-| `STATE_DIRECTORY` | yes | where `peers.json` is kept; systemd sets it from the unit's `StateDirectory=` |
+| Var                         | Required | Meaning                           |
+|-----------------------------|----------|-----------------------------------|
+| `IDENTITY_URL`              | yes      | identity's internal listener      |
+| `WIREGUARD_AGENT_TOKEN`     | yes      | bearer for identity's peers route |
+| `WIREGUARD_AGENT_HOST_ID`   | yes      | this node's ingress id            |
+| `WIREGUARD_INTERFACE`       | yes      | the interface to change peers on  |
+| `WIREGUARD_AGENT_POLL_SECS` | no       | seconds between polls; default 5  |
+| `WIREGUARD_WG_BIN`          | no       | the `wg` executable               |
+| `STATE_DIRECTORY`           | yes      | where `peers.json` is kept        |
+
+- `IDENTITY_URL` is, for example, `http://127.0.0.1:7004`. Cleartext is accepted only to a loopback IP literal or with `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`.
+- `WIREGUARD_AGENT_TOKEN` is the bearer identity checks on `/internal/v1/wireguard/peers`, equal to identity's `WIREGUARD_AGENT_TOKEN` (`openssl rand -hex 32`). Every node's agent presents the same value: the lists are the same, so one bearer per node would protect nothing more.
+- `WIREGUARD_AGENT_HOST_ID` is the node's `DEVSERVER_PROXY_ID`, one lowercase DNS label, which is the id of the node's entry in identity's `WIREGUARD_INGRESSES`. identity serves the list only to an id in that list; [A host id identity does not list](#a-host-id-identity-does-not-list) says what the agent does with any other.
+- `WIREGUARD_INTERFACE` is the kernel interface the agent changes peers on. It is not `all` or `interfaces`, which `wg show` reads as words.
+- `WIREGUARD_AGENT_POLL_SECS` is a whole number from 1 to 60.
+- `WIREGUARD_WG_BIN` defaults to `wg` from `PATH`.
+- `STATE_DIRECTORY` is set by systemd from the unit's `StateDirectory=`.
 
 A missing required value, a poll outside 1 to 60 or a malformed value refuses startup naming the variable.
+
+## A host id identity does not list
+
+identity serves the peer list only to a host id that is an id in its `WIREGUARD_INGRESSES`. For any other id, and for every id while it has no enrollment configured, it answers 404. The agent handles a 404 as it handles every failed poll but a refused bearer: it logs `identity does not serve the peer list; keeping the last one` with the status, once at warn and then at debug while it repeats, and keeps polling. It does not exit. What that leaves on the interface depends on whether identity ever served this process a list:
+
+- an agent that was following a list keeps its last one in force: the peers it added stay, no newly enrolled peer is added and no revoked peer is removed;
+- an agent started with such an id never reconciles, so the interface keeps the peers it has, those an earlier run added among them.
+
+A mistyped id, or a node missing from identity's list, therefore never empties the interface, and it also keeps revocations from reaching this node until the id is one identity lists. The warn line in the journal (`journalctl -u chan-gateway-wireguard-agent`) is the sign of it.
 
 ## What the agent never touches
 
