@@ -318,27 +318,46 @@ PYTHON
 # which profile never allocates and every ingress interface answers on; that
 # address as the /32 a desktop routes into its tunnels; and that address
 # with the pool's prefix, as an interface carries it. A pool narrower than
-# /30 has no address left to allocate.
+# /30 has no address left to allocate. Profile and identity take any IPv4
+# network, so the other bounds are the script's own: a pool wider than /8,
+# or one that reaches into a block no tunnel address can come from, would
+# put that block on every node's interface.
 wireguard_pool() {
     python3 - "$@" <<'PYTHON'
 import ipaddress
 import re
 import sys
 
+# The blocks where ipaddress's is_loopback, is_link_local, is_multicast and
+# is_reserved hold, and 0.0.0.0/8, which holds the unspecified address. A
+# pool is refused when it overlaps one, which a network's own predicates
+# miss: they hold only when the whole network is inside the block.
+UNUSABLE = (
+    ("0.0.0.0/8", "this network and the unspecified address"),
+    ("127.0.0.0/8", "the loopback addresses"),
+    ("169.254.0.0/16", "the link-local addresses"),
+    ("224.0.0.0/4", "the multicast addresses"),
+    ("240.0.0.0/4", "the reserved addresses and the broadcast address"),
+)
+
 answer = sys.argv[1]
 try:
     if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}/[0-9]{1,2}", answer):
         raise ValueError(answer)
     pool = ipaddress.IPv4Network(answer)
-    if pool.prefixlen > 30:
+    if not 8 <= pool.prefixlen <= 30:
         raise ValueError(answer)
 except ValueError:
     print(
-        "error: WireGuard address pool must be an IPv4 network of /30 or wider"
+        "error: WireGuard address pool must be an IPv4 network from /8 to /30"
         " with no host bits set, such as 10.7.0.0/24",
         file=sys.stderr,
     )
     sys.exit(1)
+for block, holds in UNUSABLE:
+    if pool.overlaps(ipaddress.IPv4Network(block)):
+        print(f"error: WireGuard address pool must not overlap {block}, {holds}", file=sys.stderr)
+        sys.exit(1)
 address = pool.network_address + 1
 print(pool)
 print(address)

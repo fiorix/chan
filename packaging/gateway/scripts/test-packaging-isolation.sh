@@ -202,12 +202,52 @@ configure_refusal 'WireGuard ingresses under an address-literal proxy namespace'
 configure_refusal 'WireGuard ingress that carries the gateway host' \
     "$pg_answers"$'https://gw.p1.proxy.example.test\nhttps://proxy.example.test\n\np1\n\n\n'"$p1_entry"$'\n' \
     "entry 1: Gateway public origin's host must not be" || configure_failures=$((configure_failures + 1))
-for invalid_pool in 10.7.0.0/31 10.7.0.5/24 10.7.0.0 10.7.0.0/255.255.255.0 fd00:7::/64 pool; do
+for invalid_pool in 10.7.0.0/31 10.7.0.5/24 10.7.0.0 10.7.0.0/255.255.255.0 fd00:7::/64 pool \
+    0.0.0.0/0 10.0.0.0/7 224.0.0.0/4; do
     configure_refusal "WireGuard address pool [$invalid_pool]" \
         "$wg_answers$p1_entry"$'\n'"$invalid_pool"$'\n' \
-        'WireGuard address pool must be an IPv4 network' || configure_failures=$((configure_failures + 1))
+        'WireGuard address pool must be an IPv4 network from /8 to /30' \
+        || configure_failures=$((configure_failures + 1))
 done
+# A pool that reaches into a block no tunnel address comes from, whole or in
+# part, at both ends of each block.
+while read -r invalid_pool block; do
+    configure_refusal "WireGuard address pool [$invalid_pool]" \
+        "$wg_answers$p1_entry"$'\n'"$invalid_pool"$'\n' \
+        "WireGuard address pool must not overlap $block" \
+        || configure_failures=$((configure_failures + 1))
+done <<'EOF'
+0.0.0.0/24 0.0.0.0/8, this network and the unspecified address
+0.255.255.252/30 0.0.0.0/8, this network and the unspecified address
+127.0.0.0/8 127.0.0.0/8, the loopback addresses
+127.255.255.252/30 127.0.0.0/8, the loopback addresses
+169.254.0.0/16 169.254.0.0/16, the link-local addresses
+169.0.0.0/8 169.254.0.0/16, the link-local addresses
+224.0.0.0/24 224.0.0.0/4, the multicast addresses
+239.255.255.252/30 224.0.0.0/4, the multicast addresses
+240.0.0.0/24 240.0.0.0/4, the reserved addresses and the broadcast address
+255.255.255.252/30 240.0.0.0/4, the reserved addresses and the broadcast address
+EOF
 [[ $configure_failures -eq 0 ]] || die "$configure_failures configure WireGuard refusals failed"
+
+# The pools beside those blocks and at the /8 bound are taken, and give the
+# tunnel address, its /32 and the interface address. The copy stops after
+# the pool check.
+sed '/^    WG_INTERFACE_ADDRESS=\${WG_POOL\[3\]}$/a\
+    printf "%s|%s|%s|%s\\n" "$WG_POOL_V4" "$WG_INGRESS_ADDRESS" "$WG_ALLOWED_IPS" "$WG_INTERFACE_ADDRESS"\
+    exit 0' "$WORK/configure.sh" > "$WORK/configure-pool.sh"
+grep -Fq 'exit 0' "$WORK/configure-pool.sh" || die "the pool check copy does not stop after the pool"
+for valid_pool in 10.0.0.0/8 1.0.0.0/8 126.255.255.252/30 128.0.0.0/8 169.253.0.0/16 \
+    169.255.0.0/16 223.255.255.252/30 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 10.7.0.0/24; do
+    address=$(python3 -c 'import ipaddress, sys; print(ipaddress.IPv4Network(sys.argv[1]).network_address + 1)' "$valid_pool")
+    printf '%s' "$wg_answers$p1_entry"$'\n'"$valid_pool"$'\n' \
+        | PATH="$WORK/postinst-bin:$PATH" bash "$WORK/configure-pool.sh" \
+        > "$WORK/configure.out" 2> "$WORK/configure.err" \
+        || die "configure refused the WireGuard address pool $valid_pool: $(cat "$WORK/configure.err")"
+    grep -Fqx "$valid_pool|$address|$address/32|$address/${valid_pool#*/}" "$WORK/configure.out" \
+        || die "configure derived the wrong addresses from $valid_pool: $(tail -n 1 "$WORK/configure.out")"
+done
+printf 'PASS configure: pools beside the refused blocks and at the /8 bound are taken\n'
 
 # Whole runs, against a scratch root of their own so the refusals above keep
 # proving they wrote nothing. Database role preparation is a stand-in that
