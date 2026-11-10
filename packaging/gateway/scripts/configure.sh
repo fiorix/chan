@@ -48,6 +48,47 @@ if getent passwd chan-gateway-wireguard-agent >/dev/null; then
     AGENT_INSTALLED=true
 fi
 
+# Every existing env file this run reads, or copies to a backup before it
+# replaces it, is read before the first question. A file found unreadable
+# later would end the run after its answers were typed, and at the backup
+# after database roles were prepared for files it never writes.
+EXISTING_ENV_FILES=(domain migrate profile identity devserver-control devserver-proxy admin)
+if [[ $AGENT_INSTALLED == true ]]; then
+    EXISTING_ENV_FILES+=(wireguard-agent)
+fi
+for env_name in "${EXISTING_ENV_FILES[@]}"; do
+    env_file=/etc/chan-gateway/$env_name.env
+    if [[ -f $env_file ]] && ! cat -- "$env_file" > /dev/null 2>&1; then
+        echo "error: cannot read $env_file" >&2
+        exit 1
+    fi
+done
+
+# Prints the lines of an existing env file that set one of the named
+# variables to a value, indented for the notices below; nothing for a file
+# that does not exist, a commented line or an empty value. The names are an
+# extended regular expression.
+set_lines() {
+    local file=$1 names=$2
+    [[ -f $file ]] || return 0
+    # sed fails only when it cannot read the file, which must not pass for a
+    # file that sets none of them.
+    sed -n -E "s/^[[:space:]]*((${names})=[[:space:]]*[^[:space:]].*)\$/    \\1/p" "$file" \
+        && return
+    echo "error: cannot read $file" >&2
+    return 1
+}
+
+# What the replaced files set for WireGuard enrollment, shown before the
+# WireGuard prompt below. Identity refuses to start while one of the four
+# variables that describe a single ingress is set.
+SINGLE_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
+    'WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)') || exit 1
+REPLACED_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
+    'WIREGUARD_INGRESSES') || exit 1
+REPLACED_POOL_LINES=$(set_lines /etc/chan-gateway/profile.env \
+    'WIREGUARD_POOL_V4') || exit 1
+
 read -rp "Postgres user [chan]: " PG_USER
 PG_USER=${PG_USER:-chan}
 
@@ -249,27 +290,9 @@ print(f"{address}/{pool.prefixlen}")
 PYTHON
 }
 
-# Prints the lines of an existing env file that set one of the named
-# variables to a value, indented for the notices below; nothing for a file
-# that does not exist, a commented line or an empty value. The names are an
-# extended regular expression.
-set_lines() {
-    local file=$1 names=$2
-    [[ -f $file ]] || return 0
-    # sed fails only when it cannot read the file, which must not pass for a
-    # file that sets none of them.
-    sed -n -E "s/^[[:space:]]*((${names})=[[:space:]]*[^[:space:]].*)\$/    \\1/p" "$file" \
-        && return
-    echo "error: cannot read $file" >&2
-    return 1
-}
-
-# Identity refuses to start while one of the four variables that describe a
-# single ingress is set. Every run replaces identity.env whole, so none of
-# them outlives a run; an existing file that sets one is shown before the
-# prompt, where the same ingress can still be given in the list's form.
-SINGLE_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
-    'WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)') || exit 1
+# Every run replaces identity.env whole, so none of the four single-ingress
+# variables outlives a run; an existing file that sets one is shown before
+# the prompt, where the same ingress can still be given in the list's form.
 if [[ -n $SINGLE_INGRESS_LINES ]]; then
     echo
     echo "/etc/chan-gateway/identity.env configures WireGuard enrollment for one ingress:"
@@ -285,11 +308,7 @@ fi
 # Neither becomes an answer's default: a run carries nothing over from the
 # files it replaces, and a default here would keep a node the operator is
 # retiring.
-REPLACED_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
-    'WIREGUARD_INGRESSES') || exit 1
 if [[ -n $REPLACED_INGRESS_LINES ]]; then
-    REPLACED_POOL_LINES=$(set_lines /etc/chan-gateway/profile.env \
-        'WIREGUARD_POOL_V4') || exit 1
     echo
     echo "The configuration this run replaces has WireGuard enrollment on:"
     printf '%s\n' "$REPLACED_INGRESS_LINES"

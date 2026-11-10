@@ -239,6 +239,62 @@ configure_run() {
         || die "configure run failed ($name): $(cat "$WORK/configure-full.err")"
 }
 
+# bash prints a read prompt only when its input is a terminal, so a run whose
+# prompts are asserted runs on a pseudo-terminal, which input is not echoed
+# to. Its output and its errors arrive as one stream. A run that waits ten
+# seconds for an answer it was not given is stopped and exits 124.
+cat > "$WORK/tty-run.py" <<'EOF'
+import os
+import select
+import subprocess
+import sys
+import termios
+
+answers = sys.stdin.buffer.read()
+primary, secondary = os.openpty()
+attrs = termios.tcgetattr(secondary)
+attrs[3] &= ~termios.ECHO
+termios.tcsetattr(secondary, termios.TCSANOW, attrs)
+child = subprocess.Popen(
+    sys.argv[1:], stdin=secondary, stdout=secondary, stderr=secondary, start_new_session=True
+)
+os.close(secondary)
+output = bytearray()
+stalled = False
+while True:
+    readable, writable, _ = select.select([primary], [primary] if answers else [], [], 10)
+    if not readable and not writable:
+        stalled = True
+        child.kill()
+        break
+    if writable:
+        try:
+            answers = answers[os.write(primary, answers[:256]):]
+        except OSError:
+            answers = b""
+    if readable:
+        try:
+            chunk = os.read(primary, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output += chunk
+status = child.wait()
+sys.stdout.buffer.write(bytes(output).replace(b"\r\n", b"\n"))
+if stalled:
+    print("tty-run: the run waited for an answer", file=sys.stderr)
+    sys.exit(124)
+sys.exit(status if status >= 0 else 128 - status)
+EOF
+
+configure_tty_run() {
+    local bin=$1 answers=$2
+    printf '%s' "$answers" | PATH="$bin:$PATH" \
+        python3 "$WORK/tty-run.py" bash "$WORK/configure-full/configure.sh" \
+        > "$WORK/configure-full.out" 2> "$WORK/configure-full.err"
+}
+
 # The value an env file assigns to a name; every line that assigns it.
 env_value() {
     sed -n "s/^[[:space:]]*$2=//p" "$1"
@@ -445,30 +501,29 @@ require_output 'Address = 10.7.0.1/24'
 refute_output 'is not one of them'
 printf 'PASS configure: one ingress and the default pool, without the agent package\n'
 
-# An existing identity.env that cannot be read is not taken for one without
-# the single-ingress variables or without a list, and an existing
-# profile.env that cannot be read is not taken for one without a pool: the
-# last run left a list in identity.env, so this one reads the pool. Root
-# reads any file, so the case exists only for another user.
+# An existing env file that cannot be read stops the run before its first
+# question, whichever file it is: identity.env and profile.env, which the
+# run reads for its notices, and every file it copies to a backup. The run
+# is on a terminal, where every question prints its prompt, and given the
+# answers to the questions before the WireGuard ones: its whole output is
+# the one error line. Root reads any file, so the case exists only for
+# another user.
 if [[ $EUID -ne 0 ]]; then
-    for unreadable in identity.env profile.env; do
-        chmod 000 "$full_root/$unreadable"
-        if printf '%s' "$full_answers" | PATH="$WORK/no-agent-bin:$PATH" \
-            bash "$WORK/configure-full/configure.sh" \
-            > "$WORK/configure-full.out" 2> "$WORK/configure-full.err"; then
-            die "configure accepted an unreadable $unreadable"
+    printf '%s\n' 'WIREGUARD_INTERFACE=wg0' > "$full_root/wireguard-agent.env"
+    for unreadable in domain migrate profile identity devserver-control devserver-proxy \
+        wireguard-agent admin; do
+        chmod 000 "$full_root/$unreadable.env"
+        if configure_tty_run "$WORK/postinst-bin" "$full_answers"$'wg0\n'; then
+            die "configure accepted an unreadable $unreadable.env"
         fi
-        grep -Fqx "error: cannot read $full_root/$unreadable" "$WORK/configure-full.err" \
-            || die "unreadable $unreadable refusal returned the wrong error"
-        # The answers end before the provider questions, so a run that went
-        # on fails there too: it was refused only if nothing was asked after
-        # the read.
-        refute_output 'WireGuard enrollment is optional'
-        chmod 0640 "$full_root/$unreadable"
-        printf 'PASS configure: an unreadable %s is refused\n' "$unreadable"
+        printed=$(cat "$WORK/configure-full.out")
+        [[ $printed == "error: cannot read $full_root/$unreadable.env" ]] \
+            || die "an unreadable $unreadable.env printed [$printed]$(cat "$WORK/configure-full.err")"
+        chmod 0640 "$full_root/$unreadable.env"
+        printf 'PASS configure: an unreadable %s.env is refused before the first question\n' "$unreadable"
     done
 else
-    printf 'SKIP configure: unreadable identity.env and profile.env (root reads every file)\n'
+    printf 'SKIP configure: unreadable env files (root reads every file)\n'
 fi
 
 assert_mode() {
