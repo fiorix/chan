@@ -1,6 +1,9 @@
 //! Enrollment parameters and the bearer-gated peer-list relay.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -199,6 +202,68 @@ pub(crate) async fn authenticate(
     }
 }
 
+/// How long a host that keeps polling into the 404 goes unlogged after a
+/// line about it.
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(600);
+
+/// How many refused hosts are tracked at once. The label comes from the
+/// caller, so the map is bounded: a holder of the agent bearer cannot grow
+/// it, or the log, by polling for invented hosts.
+const REFUSAL_LOG_HOSTS: usize = 64;
+
+/// When each refused host was last logged. An agent polls every few
+/// seconds for as long as it runs, so a line per refused poll would bury
+/// the rest of the log, and one line per host would leave nothing in a
+/// recent window for a state that can last for days. A refusal is logged
+/// when it starts and once per `REFUSAL_LOG_INTERVAL` while it lasts, each
+/// line carrying the number of polls it stands for.
+#[derive(Clone, Default)]
+pub struct RefusedPolls {
+    hosts: Arc<Mutex<HashMap<String, RefusedHost>>>,
+}
+
+struct RefusedHost {
+    logged_at: Instant,
+    /// Refused polls since that line.
+    unlogged: u64,
+}
+
+impl RefusedPolls {
+    /// Count one refused poll for `host` at `now`. `Some(polls)` when a
+    /// line is due, `polls` being the refused polls it stands for: this
+    /// one and those since the previous line. A host met while
+    /// [`REFUSAL_LOG_HOSTS`] others are inside their interval is not
+    /// tracked and gets no line until one of them leaves it.
+    fn note(&self, host: &str, now: Instant) -> Option<u64> {
+        let recent = |entry: &RefusedHost| {
+            now.saturating_duration_since(entry.logged_at) < REFUSAL_LOG_INTERVAL
+        };
+        let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = hosts.get_mut(host) {
+            entry.unlogged += 1;
+            if recent(entry) {
+                return None;
+            }
+            entry.logged_at = now;
+            return Some(std::mem::take(&mut entry.unlogged));
+        }
+        if hosts.len() >= REFUSAL_LOG_HOSTS {
+            hosts.retain(|_, entry| recent(entry));
+            if hosts.len() >= REFUSAL_LOG_HOSTS {
+                return None;
+            }
+        }
+        hosts.insert(
+            host.to_owned(),
+            RefusedHost {
+                logged_at: now,
+                unlogged: 0,
+            },
+        );
+        Some(1)
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
     host: String,
@@ -227,6 +292,18 @@ pub(crate) async fn peers(
         .as_ref()
         .is_some_and(|enrollment| !enrollment.has_ingress(&query.host));
     if unlisted {
+        // The host is a validated label, and the bearer was checked before
+        // this handler ran: the line names the first and never the second.
+        if let Some(polls) = state.wireguard_refusals.note(&query.host, Instant::now()) {
+            tracing::warn!(
+                host = %query.host,
+                polls,
+                "a WireGuard peer agent polls for a host that is not an id in \
+                 WIREGUARD_INGRESSES and is answered 404: it keeps its last peer list, so \
+                 revocations do not reach that node until the id is listed or the node's \
+                 interface is taken down"
+            );
+        }
         return Err(Error::NotFound);
     }
     let condition = headers
@@ -250,4 +327,48 @@ pub(crate) async fn peers(
         )
             .into_response(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_host_is_logged_when_it_starts_and_once_per_interval() {
+        let refused = RefusedPolls::default();
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        assert_eq!(refused.note("p9", at(0)), Some(1));
+        // An agent polling every five seconds is quiet for the interval,
+        // and the line that ends it counts the polls it stands for.
+        for poll in 1..120 {
+            assert_eq!(refused.note("p9", at(poll * 5)), None, "poll {poll}");
+        }
+        assert_eq!(refused.note("p9", at(600)), Some(120));
+        assert_eq!(refused.note("p9", at(605)), None);
+        assert_eq!(refused.note("p9", at(1200)), Some(2));
+        // Each host has its own line.
+        assert_eq!(refused.note("p8", at(1201)), Some(1));
+        assert_eq!(refused.note("p9", at(1202)), None);
+    }
+
+    #[test]
+    fn refused_hosts_are_tracked_up_to_a_bound() {
+        let refused = RefusedPolls::default();
+        let tracked = || refused.hosts.lock().unwrap().len();
+        let start = Instant::now();
+        for host in 0..REFUSAL_LOG_HOSTS {
+            assert_eq!(refused.note(&format!("h{host}"), start), Some(1));
+        }
+        // With every tracked host inside its interval, one more is neither
+        // tracked nor logged, and the tracked ones keep their state.
+        let later = start + Duration::from_secs(1);
+        assert_eq!(refused.note("one-more", later), None);
+        assert_eq!(tracked(), REFUSAL_LOG_HOSTS);
+        assert_eq!(refused.note("h0", later), None);
+        // It takes the place of the hosts whose interval has passed.
+        let expired = start + REFUSAL_LOG_INTERVAL;
+        assert_eq!(refused.note("one-more", expired), Some(1));
+        assert_eq!(tracked(), 1);
+    }
 }

@@ -77,6 +77,9 @@ pub struct AppState {
     /// One-time desktop-authorize redemption codes; written by the
     /// confirm handler, consumed by `/desktop/authorize/redeem`.
     pub desktop_redemptions: crate::desktop_authorize::RedemptionStore,
+    /// Which hosts the peer-list route refused and when it last said so,
+    /// so an agent polling into the refusal is logged at a bounded rate.
+    pub wireguard_refusals: crate::wireguard::RefusedPolls,
     pub pool: PgPool,
     pub session_store: PostgresStore,
 }
@@ -178,6 +181,7 @@ pub fn routers(
         api_tokens,
         token_throttle,
         desktop_redemptions: Default::default(),
+        wireguard_refusals: Default::default(),
         pool,
         session_store: store,
     };

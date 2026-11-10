@@ -425,6 +425,99 @@ async fn wireguard_peers_route_relays_every_well_formed_host_while_enrollment_is
     assert_eq!(profile.received_requests().await.unwrap().len(), 3);
 }
 
+/// Every line this test executable logs, whichever test logs it. The
+/// subscriber is the process's one default, not a per-thread one: a
+/// callsite's interest is cached process-wide, and a test on another thread
+/// that reached the callsite first would cache it as disabled.
+#[derive(Clone, Default)]
+struct Logged(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Logged {
+    fn install() -> &'static Self {
+        static LOGGED: std::sync::OnceLock<Logged> = std::sync::OnceLock::new();
+        LOGGED.get_or_init(|| {
+            let logged = Logged::default();
+            let writer = logged.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+            logged
+        })
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// The lines carrying the field `host=<host>`.
+    fn about(&self, host: &str) -> Vec<String> {
+        let field = format!("host={host}");
+        self.text()
+            .lines()
+            .filter(|line| line.split_whitespace().any(|word| word == field))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn an_unlisted_host_is_logged_once_at_warn_with_its_label_and_without_the_bearer() {
+    let logged = Logged::install();
+    let profile = MockServer::start().await;
+    mount_empty_lists(&profile).await;
+    // Ids and hosts no other test names, since the log is the process's.
+    let listed = enrollment_of(vec![ingress("n1", 7)], None);
+    let (_, on) = apps(&profile, Some(listed), AGENT).await;
+    let (_, off) = apps(&profile, None, AGENT).await;
+
+    let poll = |app: &Router, host: &str, token| {
+        let (app, uri) = (app.clone(), peers_uri(host));
+        async move { request(app, &uri, token, None).await.0 }
+    };
+    assert_eq!(poll(&on, "q7", Some(AGENT)).await, StatusCode::NOT_FOUND);
+    let lines = logged.about("q7");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert!(line.contains(" WARN "), "{line}");
+    assert!(line.contains("WIREGUARD_INGRESSES"), "{line}");
+    assert!(line.contains("polls=1"), "{line}");
+
+    // An agent polls again within seconds, and is answered without a line.
+    assert_eq!(poll(&on, "q7", Some(AGENT)).await, StatusCode::NOT_FOUND);
+    assert_eq!(logged.about("q7").len(), 1);
+
+    // Nothing else is logged about a host: not a caller without the
+    // bearer, a host that is no label, a listed host, or any host while
+    // enrollment is off.
+    for token in [None, Some("wrong")] {
+        assert_eq!(poll(&on, "q8", token).await, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(poll(&on, "Q8", Some(AGENT)).await, StatusCode::BAD_REQUEST);
+    assert_eq!(poll(&on, "n1", Some(AGENT)).await, StatusCode::OK);
+    assert_eq!(poll(&off, "q9", Some(AGENT)).await, StatusCode::OK);
+    for host in ["q8", "Q8", "n1", "q9"] {
+        assert_eq!(logged.about(host), Vec::<String>::new());
+    }
+    // No line of any test holds a bearer.
+    let text = logged.text();
+    for bearer in [AGENT, "test-profile"] {
+        assert!(!text.contains(bearer), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_peer_profile_drops_leaves_each_hosts_list_at_that_hosts_next_poll() {
     let profile = MockServer::start().await;
