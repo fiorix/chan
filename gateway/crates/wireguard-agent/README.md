@@ -64,7 +64,7 @@ identity serves the peer list only to a host id that is an id in its `WIREGUARD_
 - an agent that was following a list keeps its last one in force: the peers it added stay, no newly enrolled peer is added and no revoked peer is removed;
 - an agent started with such an id never reconciles, so the interface keeps the peers it has, those an earlier run added among them.
 
-A mistyped id, or a node missing from identity's list, therefore never empties the interface, and it also keeps revocations from reaching this node until the id is one identity lists. The warn line in the journal (`journalctl -u chan-gateway-wireguard-agent`) is the sign of it.
+A mistyped id, a node missing from identity's list or an identity with no enrollment configured therefore never empties the interface. It also keeps revocations from this node: a PAT revoked, expired or blocked meanwhile stays a kernel peer here until identity serves the agent again or the interface is taken down. So a node taken out of identity's list has its agent stopped and its interface taken down, and identity keeps enrollment configured for as long as any agent runs. The warn line in the journal (`journalctl -u chan-gateway-wireguard-agent`) is the sign of it.
 
 ## What the agent never touches
 
