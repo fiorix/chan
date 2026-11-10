@@ -201,9 +201,12 @@ done
 
 # Identity refuses to start with one of the single-ingress variables set, so
 # no template, generator or manifest assigns one, as a commented example
-# either: an example is what an operator uncomments.
+# either: an example is what an operator uncomments. A manifest names one as
+# a ConfigMap key (NAME: value) or in a container's env list (- name: NAME,
+# in block or flow style), the name quoted or not.
+single_ingress_name='["'\'']?WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)["'\'']?'
 refute_pattern "packaging assigns a single-ingress WireGuard variable, which identity refuses" \
-    '^[#[:space:]-]*WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)[[:space:]]*[=:]' \
+    "^[#[:space:]-]*(${single_ingress_name}[[:space:]]*[=:]|\\{?[[:space:]]*name:[[:space:]]*${single_ingress_name}[[:space:]]*([,}#]|\$))" \
     "$REPO"/gateway/crates/*/packaging/*.env \
     "$REPO/packaging/gateway/scripts/configure.sh" \
     "$REPO/packaging/gateway/scripts/dev/setup.sh" \
