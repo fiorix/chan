@@ -59,7 +59,7 @@ import { docSyncRosterChanged } from "./docSync.svelte";
 import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
 import { clearWindowHidden, isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
-import { applyWindowLabel } from "./windowTitle";
+import { applyWindowLabel } from "./windowTitle.svelte";
 import {
   activeLayout,
   activeTabInPane,
@@ -2155,10 +2155,10 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "window_labeled" && typeof frame.label === "string") {
-    // The caption changed from the launcher; retitle the browser tab. A desktop
-    // webview has no visible tab title (the OS titlebar is the window's name,
-    // and the window watcher retitles it), so there is nothing to do there.
-    if (isTauriDesktop()) return;
+    // The caption changed from the launcher. Every surface keeps it for the
+    // pane tree's window name; only a browser retitles its document, since a
+    // desktop window's name is its OS titlebar, which the window watcher
+    // retitles.
     applyWindowLabel(frame.label);
     return;
   }

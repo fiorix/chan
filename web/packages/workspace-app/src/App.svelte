@@ -101,7 +101,7 @@
     watchSystemTheme,
   } from "./state/store.svelte";
   import { windowModeAllowsCommand } from "./state/windowMode";
-  import { initWindowTitle, refreshWindowTitle } from "./state/windowTitle";
+  import { initWindowTitle, refreshWindowTitle } from "./state/windowTitle.svelte";
   import {
     activeFileTab,
     activePane,

@@ -1,6 +1,7 @@
+import { flushSync } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { applyWindowLabel, initWindowTitle, refreshWindowTitle, __resetWindowTitle } from "./windowTitle";
+import { applyWindowLabel, initWindowTitle, loadWindowTitle, refreshWindowTitle, windowName, __resetWindowTitle } from "./windowTitle.svelte";
 import { privacy } from "@chan/web-shared/privacy";
 import { loadScopedLibrarySnapshot } from "../api/libraryCommand";
 import type { ScopedLibraryWindow, ScopedLibrarySnapshot } from "../api/libraryCommand";
@@ -112,6 +113,46 @@ describe("browser tab title", () => {
 });
 
 describe("live caption updates", () => {
+  test("a rename received during the initial snapshot wins over its stale label", async () => {
+    let resolve!: (value: ScopedLibrarySnapshot) => void;
+    loadSnapshot.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const first = loadWindowTitle();
+    const second = loadWindowTitle();
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    applyWindowLabel("latest");
+    resolve(snapshot([scopedWindow({ label: "stale" })]));
+    await Promise.all([first, second]);
+    expect(windowName()).toBe("Window 3 [latest]");
+  });
+
+  // A frame missed while the socket was down leaves the held caption stale,
+  // so a caption heard before a read must not outrank that read's snapshot.
+  test("a later read's snapshot wins over a rename heard before it started", async () => {
+    loadSnapshot.mockRejectedValueOnce(new Error("no live presence"));
+    await initWindowTitle();
+    expect(windowName()).toBeNull();
+    applyWindowLabel("early");
+    loadSnapshot.mockResolvedValueOnce(snapshot([scopedWindow({ label: "current" })]));
+    await loadWindowTitle();
+    expect(windowName()).toBe("Window 3 [current]");
+  });
+
+  test("the desktop loads a pane tree name on demand without changing the document title", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: { invoke: vi.fn() }, configurable: true,
+    });
+    try {
+      loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ control: true })]));
+      await loadWindowTitle();
+      expect(windowName()).toBe("Control terminal");
+      expect(document.title).toBe("Chan");
+      await loadWindowTitle();
+      expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    }
+  });
+
   test("privacy conceals captions live and restores the latest caption", async () => {
     loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "private.example" })]));
     privacy.enabled = true;
@@ -143,5 +184,58 @@ describe("live caption updates", () => {
   test("is inert before the naming fields are known", () => {
     applyWindowLabel("release checks");
     expect(document.title).toBe("Chan");
+  });
+});
+
+// App.svelte runs `$effect(refreshWindowTitle)`, and the naming fields are
+// reactive state, so the effect is where a loaded name would reach the
+// document. These run the same effect.
+describe("the document title effect", () => {
+  function titleEffect(): () => void {
+    const stop = $effect.root(() => {
+      $effect(refreshWindowTitle);
+    });
+    flushSync();
+    return stop;
+  }
+
+  test("follows the name in a browser as it loads and changes", async () => {
+    loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "release checks" })]));
+    const stop = titleEffect();
+    try {
+      expect(document.title).toBe("Chan");
+      await loadWindowTitle();
+      flushSync();
+      expect(document.title).toBe("Window 3 [release checks]");
+      applyWindowLabel("deploy");
+      flushSync();
+      expect(document.title).toBe("Window 3 [deploy]");
+    } finally {
+      stop();
+    }
+  });
+
+  test("keeps the desktop's static title once the pane tree loads the name", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: { invoke: vi.fn() }, configurable: true,
+    });
+    loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "release checks" })]));
+    const stop = titleEffect();
+    try {
+      await loadWindowTitle();
+      flushSync();
+      expect(windowName()).toBe("Window 3 [release checks]");
+      expect(document.title).toBe("Chan");
+      applyWindowLabel("deploy");
+      flushSync();
+      expect(windowName()).toBe("Window 3 [deploy]");
+      expect(document.title).toBe("Chan");
+      privacy.enabled = true;
+      flushSync();
+      expect(document.title).toBe("Chan (privacy mode)");
+    } finally {
+      stop();
+      Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    }
   });
 });
