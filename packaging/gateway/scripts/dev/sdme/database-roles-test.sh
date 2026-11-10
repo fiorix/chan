@@ -6,8 +6,10 @@
 # the cluster-wide chan_gateway_identity and chan_gateway_profile roles (their
 # passwords, memberships and attributes), so it never runs against a
 # PostgreSQL that holds anything else, and the machine that runs it needs no
-# PostgreSQL installed. CI runs the same suite against a postgres:16 service
-# container (the packaging job in .github/workflows/gateway-ci.yml).
+# PostgreSQL installed. The guest runs PostgreSQL 18, the major chan-psql.sdme
+# installs. CI runs the same suite against a postgres:16 service container
+# (the packaging job in .github/workflows/gateway-ci.yml), the major the
+# Kubernetes manifests deploy, so a green here certifies 18 and not 16.
 #
 # Invoked through `make gateway-database-roles-test`. Standalone:
 #
