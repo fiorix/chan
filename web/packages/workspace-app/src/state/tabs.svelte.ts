@@ -5354,9 +5354,10 @@ export function paneModeOpenDashboard(opts?: OpenDashboardOptions): void {
   p.side = side;
 }
 
-/// Carousel slide index of the Search / Indexing graph. Matches the
-/// `slideIndex === 1` indexing-poll gate in EmptyPaneCarousel and the
-/// `DASHBOARD_SLOT_LABELS` order (0 Workspace, 1 Search, 2 About).
+/// Carousel slide id of the Search / Indexing graph. Matches the
+/// indexing poll's `slideIndex` gate in EmptyPaneCarousel and the slot's
+/// place in `DASHBOARD_SLOT_LABELS` (0 Workspace, 1 Search, 2 About,
+/// 3 Metrics).
 export const DASHBOARD_SEARCH_SLIDE = 1;
 
 /// Optional overrides applied to a freshly-spawned Dashboard tab: pre-select

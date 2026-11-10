@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// Terminal find (issue #6). The contracts pinned here:
+// Terminal find. The contracts pinned here:
 //
 // 1. The xterm Terminal is constructed with `allowProposedApi: true`.
 //    xterm gates registerDecoration behind that flag, and the search
