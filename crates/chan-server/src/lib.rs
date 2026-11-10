@@ -2485,6 +2485,7 @@ mod reindex_cancel_at_shutdown_tests {
     /// read mounted, the open handed the mount back), and how long they and
     /// the timer behind them took from the spawn. A call that waits on the
     /// worker holds the timer back with it.
+    #[cfg(unix)]
     async fn the_hosts_calls_and_a_timer(
         host: &Arc<chan_library::WorkspaceHost>,
         stored: &std::path::Path,
