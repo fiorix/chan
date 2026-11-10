@@ -807,6 +807,156 @@ async fn wireguard_sweeper_releases_without_registry_retention_or_control() {
     app.cleanup().await;
 }
 
+/// Wait until `waiting` of the backends in `pids` wait on a lock, at least
+/// one of them on a lock `holder` holds.
+async fn lock_waiters(pool: &PgPool, pids: &[i32], holder: i32, waiting: i64) {
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (all, behind_holder): (i64, i64) = sqlx::query_as(
+                "SELECT count(*), count(*) FILTER (WHERE $2 = ANY(pg_blocking_pids(pid))) \
+                 FROM pg_stat_activity WHERE pid = ANY($1) AND wait_event_type = 'Lock'",
+            )
+            .bind(pids)
+            .bind(holder)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if all == waiting && behind_holder >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "{waiting} backend(s) never waited on a lock"
+    );
+}
+
+/// Runs a release against an enrollment that moves the same denied peer to a
+/// new token, both in flight at once, in each order. The test holds the
+/// peer's row lock until both wait, then lets them go. Either way one peer is
+/// left and the new token holds it: a release that comes second spares the
+/// moved row, and an enrollment that comes second finds no row and allocates
+/// again.
+#[tokio::test]
+async fn wireguard_release_racing_a_replacement_leaves_the_new_tokens_peer() {
+    for release_first in [false, true] {
+        let app = wireguard_app("10.7.0.0/30", None, None).await;
+        let owner = mk_user(&app, "race@example.com").await;
+        let (status, row) = enroll_peer(&app, &owner, 0).await;
+        assert_eq!(status, StatusCode::CREATED, "{row}");
+        let peer: Uuid = row["id"].as_str().unwrap().parse().unwrap();
+        let denied: Uuid = row["token_id"].as_str().unwrap().parse().unwrap();
+        // Past its grace, so a release deletes the peer unless it has moved.
+        sqlx::query("UPDATE wireguard_peers SET updated_at = now() - interval '1 day'")
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE api_tokens SET revoked_at = now() - interval '6 minutes' WHERE id = $1",
+        )
+        .bind(denied)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+        let replacement = insert_api_token(&app.pool, owner.parse().unwrap(), "replacement").await;
+
+        // The pool's own backends, to tell their lock waits from another
+        // test's: the pool lock is one per database.
+        let mut connections = Vec::new();
+        for _ in 0..app.pool.options().get_max_connections() {
+            connections.push(app.pool.acquire().await.unwrap());
+        }
+        let mut pids = Vec::new();
+        for connection in &mut connections {
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            pids.push(pid);
+        }
+        drop(connections);
+
+        let mut hold = app.pool.begin().await.unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *hold)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM wireguard_peers WHERE id = $1 FOR UPDATE")
+            .bind(peer)
+            .execute(&mut *hold)
+            .await
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/users/{owner}/wireguard/peers"))
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"token_id": replacement, "public_key": wireguard_key(0)}).to_string(),
+            ))
+            .unwrap();
+        let router = app.router.clone();
+        let enroll = async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        };
+        let pool = app.pool.clone();
+        let release = async move {
+            profile::wireguard::release_once(&pool, std::time::Duration::from_secs(300))
+                .await
+                .unwrap()
+        };
+        // The first to start waits for the held row; the second waits behind it.
+        let (enrollment, released) = if release_first {
+            let released = tokio::spawn(release);
+            lock_waiters(&app.pool, &pids, holder, 1).await;
+            (tokio::spawn(enroll), released)
+        } else {
+            let enrollment = tokio::spawn(enroll);
+            lock_waiters(&app.pool, &pids, holder, 1).await;
+            (enrollment, tokio::spawn(release))
+        };
+        lock_waiters(&app.pool, &pids, holder, 2).await;
+        hold.commit().await.unwrap();
+        let (status, answer) = enrollment.await.unwrap();
+        let released = released.await.unwrap();
+
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM api_token_audit \
+             WHERE token_id = $1 AND action = 'wireguard_released'",
+        )
+        .bind(denied)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        if release_first {
+            assert_eq!(released, 1);
+            assert_eq!(audits, 1);
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            assert_ne!(answer["id"], row["id"]);
+        } else {
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            assert_eq!(answer["id"], row["id"]);
+            assert_eq!(released, 0, "the release deleted a moved peer");
+            assert_eq!(audits, 0);
+        }
+        assert_eq!(answer["addresses"], row["addresses"]);
+        let left: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT id, token_id FROM wireguard_peers")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+        let id: Uuid = answer["id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(left, [(id, replacement)]);
+        app.cleanup().await;
+    }
+}
+
 #[tokio::test]
 async fn wireguard_profile_client_preserves_conditional_responses() {
     use gateway_common::profile_client::{ProfileClient, ProfileError};

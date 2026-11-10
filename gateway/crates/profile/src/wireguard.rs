@@ -335,8 +335,12 @@ pub(crate) async fn list(
 /// Release denied peers after their grace, auditing every deletion atomically.
 pub async fn release_once(pool: &PgPool, grace: Duration) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
-    // Allocation and release agree on the pool lock, so a concurrent
-    // replacement cannot lose its row to an older token's denial.
+    // Release takes the pool lock so a sweep and an enrollment never interleave:
+    // a sweep commits before an enrollment reads the peers, or deletes after
+    // that enrollment commits. The delete does not rest on the lock. It joins
+    // each peer to its token in one statement, and PostgreSQL rechecks that
+    // join on a row that changed while the delete waited for it (READ
+    // COMMITTED), so a peer an enrollment moved to a new token is skipped.
     sqlx::query(POOL_LOCK).execute(&mut *tx).await?;
     let released = sqlx::query(
         "WITH released AS (DELETE FROM wireguard_peers p USING api_tokens t, users u \
