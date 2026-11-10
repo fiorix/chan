@@ -59,14 +59,15 @@ fn refresh_titles(app: &tauri::AppHandle) -> Result<(), String> {
         let titles = state.privacy_titles.lock().unwrap().clone();
         for (label, title) in titles {
             if let Some(window) = handle.get_webview_window(&label) {
-                let _ = window.set_title(if hidden {
+                let visible = if hidden {
                     "Chan (privacy mode)"
                 } else {
                     &title
-                });
+                };
+                let _ = window.set_title(visible);
                 // A frameless window in the title bar mode draws its title
                 // itself while its launcher shows (`titlebar_tabs.rs`).
-                crate::titlebar_tabs::title_changed(&window);
+                crate::titlebar_tabs::title_changed(&window, visible);
             }
         }
         crate::rebuild_window_menu(&handle);
