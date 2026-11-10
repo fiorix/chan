@@ -275,6 +275,56 @@ chan devserver start --port 8787 \
   <p>To take access away, click <strong>Revoke</strong> on the share. Their sessions on that devserver end.</p>
 </section>
 
+<section class="manual-block" id="wireguard">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#wireguard">Reach it through WireGuard</a></h2>
+  </div>
+  <p>A gateway can also carry Chan Desktop's connections to a proxy node inside WireGuard. The desktop runs the tunnel in its own process, and the gateway enrolls the desktop's key when it signs in, so there is no key to hand over and no VPN client to install. This is optional, and off until you set up its three parts: a WireGuard interface and an agent on each proxy node, the list of nodes in identity, and an address pool in profile.</p>
+  <p>Each proxy node terminates WireGuard itself, in a kernel interface with a key of its own; no node forwards for another. On the node, here the one server, install the agent package, which brings in <code>wireguard-tools</code>, and bring the interface up:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo apt install ./chan-gateway-wireguard-agent_*.deb
+sudo install -d -m 700 /etc/wireguard
+sudo sh -c 'umask 077; wg genkey &gt; /etc/wireguard/chan-tunnel.key'
+sudo ip link add wg0 type wireguard
+sudo wg set wg0 listen-port 51820 private-key /etc/wireguard/chan-tunnel.key
+sudo ip address add 10.7.0.1/24 dev wg0
+sudo ip link set wg0 up
+sudo wg show wg0 public-key</b></code>
+    {{copyButton}}
+  </div>
+  <p>The last command prints the interface's public key, for the list below. Open UDP port 51820 to the desktops. <code>10.7.0.1</code> is the tunnel address, where the node answers inside the tunnel: every node uses the same one, and each node has its own key. The nginx configuration above listens on every address of the server, this one included; an edge that names its listen addresses needs this one added. These commands last until a reboot, so make the interface part of the server's network configuration to keep it. The agent puts the enrolled desktops back on it.</p>
+  <p>Next, tell the gateway. In <code>/etc/chan-gateway/profile.env</code>, set the pool that enrolled desktops get their tunnel addresses from, and in <code>/etc/chan-gateway/identity.env</code>, list the nodes:</p>
+<pre><code># /etc/chan-gateway/profile.env
+WIREGUARD_POOL_V4=10.7.0.0/24
+
+# /etc/chan-gateway/identity.env
+WIREGUARD_INGRESSES=p1=&lt;public key&gt;@p1.proxy.example.com:51820
+WIREGUARD_INGRESS_ADDRESSES=10.7.0.1
+WIREGUARD_ALLOWED_IPS=10.7.0.1/32</code></pre>
+  <ul>
+    <li><code>WIREGUARD_INGRESSES</code> has one <code>id=public_key@endpoint</code> entry per node, with <code>;</code> between entries. The id is the node id you gave the setup script, <code>p1</code>. The endpoint is the name, or address, and the UDP port where desktops reach the interface. <code>p1.proxy.example.com</code> needs a DNS record of its own for that: the wildcard record does not cover the name itself.</li>
+    <li>The tunnel to a node carries that node's own names: <code>p1.proxy.example.com</code> and every name under it, which are the addresses of the devservers on that node. identity works them out from the id in the entry, so there is no list of names to write, and the id must be the node's real id. <code>gw.example.com</code> stays outside the tunnel.</li>
+    <li><code>WIREGUARD_INGRESS_ADDRESSES</code> is the tunnel address, and <code>WIREGUARD_ALLOWED_IPS</code> is what a desktop sends into the tunnel: that address alone.</li>
+    <li>The three identity lines go together: identity does not start with only some of them. It also does not start while <code>WIREGUARD_HOST_ID</code>, <code>WIREGUARD_ENDPOINT</code>, <code>WIREGUARD_PUBLIC_KEY</code>, or <code>WIREGUARD_HOSTS</code> is set; the list replaces all four.</li>
+    <li>The tunnel address must not be one the pool hands out. profile never hands out a pool's first two addresses, here <code>10.7.0.0</code> and <code>10.7.0.1</code>; list any other tunnel address in <code>WIREGUARD_POOL_RESERVED</code>. Nothing checks this for you.</li>
+    <li>Each enrolled key takes one address from the pool for the whole gateway, whatever the number of nodes, so a <code>/24</code> holds 253 keys.</li>
+  </ul>
+  <p>Then point the agent at identity. In <code>/etc/chan-gateway/wireguard-agent.env</code>, <code>IDENTITY_URL</code> is identity's internal port, <code>http://127.0.0.1:7004</code> on this server. Set <code>WIREGUARD_AGENT_TOKEN</code> to the value of the same name in <code>identity.env</code>, <code>WIREGUARD_AGENT_HOST_ID</code> to the node id, <code>p1</code>, and <code>WIREGUARD_INTERFACE</code> to <code>wg0</code>. Restart profile and identity so they read the new settings, and start the agent:</p>
+  <div class="command-copy multiline" data-copy-block>
+    <code><span>$</span><b data-copy-value>sudo systemctl restart chan-gateway-profile chan-gateway-identity
+sudo systemctl enable --now chan-gateway-wireguard-agent</b></code>
+    {{copyButton}}
+  </div>
+  <aside class="doc-note">
+    <strong>Edit the files; do not rerun the setup script</strong>
+    <p>Every run of <code>configure.sh</code> writes all the configuration files again, with new credentials and signing keys. On a gateway that is already running, add these lines by hand.</p>
+  </aside>
+  <p>The gateway's discovery document, <code>https://gw.example.com/.well-known/chan-gateway</code>, now has a <code>wireguard</code> entry, which is how a desktop learns that it can enroll. In Chan Desktop, edit the gateway with the pencil on its card in <strong>Gateways</strong>, choose <strong>Generate WireGuard key</strong>, and connect the gateway, turning it off first if it is on. The browser's approval page shows the key and the node it is enrolled with. After you approve, the gateway's card reads <em>enrolled</em> and shows the tunnel's state, and on the server <code>sudo wg show wg0</code> lists the desktop as a peer within a few seconds. Follow the agent with <code>journalctl -u chan-gateway-wireguard-agent -f</code>.</p>
+  <p>An enrolled key lives as long as the sign-in that enrolled it. When that token is revoked or expires, or the account is blocked, the key leaves every node at its agent's next check, five seconds apart by default, and the desktop's tunnel stops carrying traffic. An agent whose <code>WIREGUARD_AGENT_HOST_ID</code> is not an id in identity's list is refused by identity: it keeps the keys it has, and revoked ones stay on that node until the id is in the list or the interface is taken down. To retire a node, remove its entry from the list, stop its agent, and take its interface down.</p>
+  <p>With more proxy nodes, give each one its own interface and agent: a key of its own, the same tunnel address, the node's own id, and the same <code>WIREGUARD_AGENT_TOKEN</code>, with <code>IDENTITY_URL</code> pointing at identity's internal port the way that node's proxy reaches it. Add each node's entry to <code>WIREGUARD_INGRESSES</code> and restart identity. Every node accepts every enrolled key. The order of the list matters: Chan Desktop enrolls with the first node in it and reaches that node through WireGuard, and it reaches the other nodes as it does without WireGuard.</p>
+  <p class="minor">Enrollment writes the desktop's WireGuard file for you. A file you write yourself, as in the <a href="/gateway/#wireguard">gateway guide</a>, remains the way for a gateway that does not enroll, and for a devserver's own tunnel.</p>
+</section>
+
 <section class="manual-block" id="operate">
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#operate">Run the gateway</a></h2>
@@ -289,5 +339,5 @@ chan devserver start --port 8787 \
   </ul>
   <p>With more proxy nodes, point <code>proxy.example.com</code> at each node through DNS or a TCP pass-through balancer, keeping the same tunnel URL for every devserver. A balancer that terminates TLS carries every tunnel byte. Each node still needs DNS and a certificate for its own tenant wildcard, such as <code>*.p2.proxy.example.com</code>.</p>
   <p>Add <code>--json</code> to any command for scripts. To publish more machines, give each one its own token and run the same <code>chan devserver start</code> on it: build hosts, GPU boxes, or a VM per person, each with your team's tools installed.</p>
-  <p class="minor">The <a href="/gateway/">gateway guide</a> shows the architecture and the WireGuard option. <a href="https://github.com/fiorix/chan/blob/main/gateway/README.md">gateway/README.md</a> covers every service, the admin CLI, and Kubernetes deployment, and <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway/design.md</a> the design.</p>
+  <p class="minor">The <a href="/gateway/">gateway guide</a> shows the architecture and WireGuard with a file you write yourself. <a href="https://github.com/fiorix/chan/blob/main/gateway/README.md">gateway/README.md</a> covers every service, the admin CLI, and Kubernetes deployment, and <a href="https://github.com/fiorix/chan/blob/main/gateway/design.md">gateway/design.md</a> the design.</p>
 </section>
