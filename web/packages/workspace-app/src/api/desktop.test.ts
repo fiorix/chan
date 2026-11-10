@@ -363,7 +363,7 @@ describe("native streaming transfers", () => {
 
     const uploaded = await runDesktopUpload(
       { dir: "docs", multiple: true },
-      "Upload files",
+      null,
       "filesystem",
     );
 
@@ -401,7 +401,7 @@ describe("native streaming transfers", () => {
       });
 
       await runDesktopUpload({ path: "home/me/a.txt", multiple: false }, "a.txt");
-      await runDesktopUpload({ dir: "/srv/in", multiple: true }, "Upload files", "filesystem");
+      await runDesktopUpload({ dir: "/srv/in", multiple: true }, null, "filesystem");
 
       const queries = urls.map((url) => new URL(url).searchParams);
       expect(queries.map((q) => [q.get("app"), q.get("w"), q.get("root")]), "the Files lane, this window").toEqual([

@@ -13,9 +13,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, sessionWindowId, UploadAbortError, type TransferCancelOutcome } from "../api/client";
 import { setXhrFactory } from "../api/transport";
 import AppStatusBar from "../components/AppStatusBar.svelte";
+import TransferBubble from "../components/TransferBubble.svelte";
 import { demoData } from "../__tests__/app";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { browserSelection, fileOps, loadTreeDir, raiseUploadPicker, tree, ui } from "./store.svelte";
+import { browserSelection, fileOps, loadTreeDir, raiseReplacePicker, raiseUploadPicker, tree, ui } from "./store.svelte";
 import { transfers, restoreTransfers } from "./transfers.svelte";
 
 beforeEach(async () => {
@@ -261,6 +262,53 @@ describe("an upload lists its destination once, when it ends", () => {
       await vi.waitFor(() => expect(ui.status).toBe("upload failed: disk full"));
 
       expect(list.mock.calls.map(([dir]) => dir)).toEqual(["docs"]);
+    });
+
+    /// Native pickers that stay open until the test answers each, in order.
+    function heldNativeUploads(): ((files: { path: string; size: number }[]) => void)[] {
+      const answers: ((files: { path: string; size: number }[]) => void)[] = [];
+      nativeUpload(() => new Promise((resolve) => answers.push(resolve)));
+      return answers;
+    }
+
+    test("an upload picker's row is named by the picked files, not by its destination", async () => {
+      const answers = heldNativeUploads();
+      const target = document.body.appendChild(document.createElement("div"));
+      const bubble = mount(TransferBubble, { target });
+      transfers.shown = true;
+      const lines = (): (string | null)[] => {
+        flushSync();
+        return [...target.querySelectorAll(".tb-line")].map((line) => line.textContent);
+      };
+      try {
+        raiseUploadPicker("docs");
+        raiseUploadPicker("");
+        await vi.waitFor(() => expect(answers).toHaveLength(2));
+        expect(lines(), "into a folder and into the root, while the pickers are open").toEqual([
+          "Waiting for file selection",
+          "Waiting for file selection",
+        ]);
+        expect(transfers.items.map((t) => t.filename), "no name of the row's own").toEqual([null, null]);
+
+        answers[0]!([{ path: "docs/n0.bin", size: 1 }]);
+        answers[1]!([0, 1].map((i) => ({ path: `n${i}.bin`, size: 1 })));
+        await vi.waitFor(() => expect(lines()).toEqual(["Uploaded n0.bin", "Uploaded 2 files"]));
+      } finally {
+        unmount(bubble);
+        target.remove();
+      }
+    });
+
+    test("a replace picker's row is named after the file being replaced", async () => {
+      const answers = heldNativeUploads();
+
+      raiseReplacePicker("docs/b.md");
+      await vi.waitFor(() => expect(answers).toHaveLength(1));
+      expect(transfers.items.map((t) => t.filename)).toEqual(["b.md"]);
+
+      answers[0]!([{ path: "docs/b.md", size: 5 }]);
+      await vi.waitFor(() => expect(ui.status).toBe("Replaced 'docs/b.md'"));
+      expect(transfers.items.map((t) => [t.filename, t.state])).toEqual([["b.md", "done"]]);
     });
   });
 });

@@ -139,6 +139,7 @@ import {
   setTransferSignalSink,
   transferFinishedBeforeCancel,
   type TransferSource,
+  uploadTransferName,
   waitForTransferSlot,
 } from "./transfers.svelte";
 import {
@@ -2067,9 +2068,10 @@ export function raiseReplacePicker(targetPath: string): void {
 async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | undefined, filesApp: boolean): Promise<void> {
   const selection = activeBrowserSelection();
   try {
+    // The picked files name the transfer's row, as a browser upload's do.
     const uploaded = await runDesktopUpload(
       { dir: destDir, multiple: true },
-      destDir ? `Upload to ${destDir}` : "Upload files",
+      null,
       root,
       filesApp,
     );
@@ -6955,7 +6957,7 @@ export const fileOps = {
     };
     // The transfer bubble (the single transfer surface) carries one aggregate
     // row for this upload op.
-    const transferLabel = files.length === 1 ? files[0]!.name : `${files.length} files`;
+    const transferLabel = uploadTransferName(files[0]!.name, files.length);
     const xferId = beginTransfer({ kind: "upload", filename: transferLabel, cancel });
     const reportProgress = (file: File, loaded: number): void => {
       const currentLoaded = Math.min(Math.max(loaded, 0), file.size);

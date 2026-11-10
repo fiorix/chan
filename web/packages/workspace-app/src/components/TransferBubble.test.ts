@@ -215,6 +215,66 @@ describe("TransferBubble", () => {
     expect(el.querySelector(".tb-bar.done"), "the landed upload's bar is done").toBeTruthy();
   });
 
+  function lines(el: HTMLElement): (string | null)[] {
+    return [...el.querySelectorAll(".tb-line")].map((line) => line.textContent);
+  }
+
+  test("a desktop upload whose picker is open waits for a selection, with a still bar and a Cancel", () => {
+    const cancel = vi.fn();
+    beginTransfer({ kind: "upload", filename: null, cancel, picking: true });
+    // A replace is named after its target from the start, and nothing of it
+    // is uploading while its picker is open either.
+    beginTransfer({ kind: "upload", filename: "a.md", cancel: vi.fn(), picking: true });
+    transfers.shown = true;
+    const el = render();
+    flushSync();
+
+    expect(lines(el)).toEqual(["Waiting for file selection", "Waiting for file selection"]);
+    expect(el.querySelector(".tb-bar.indeterminate"), "no bytes move, so no bar slides").toBeNull();
+    const buttons = actions(el);
+    expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Cancel"]);
+    buttons[0]!.click();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  test("an upload with no name reads as a verb and one thing in every state", () => {
+    const unnamed = () => beginTransfer({ kind: "upload", filename: null, cancel: vi.fn() });
+    unnamed();
+    setTransferProgress(unnamed(), 0.42);
+    applyTransferQueueFrame({ transfer_id: unnamed(), state: "waiting", position: 2 });
+    finishTransfer(unnamed());
+    cancelTransfer(unnamed());
+    failTransfer(unnamed(), "disk full");
+    transfers.shown = true;
+    const el = render();
+    flushSync();
+
+    expect(lines(el)).toEqual([
+      "Uploading files...",
+      "Uploading files (42%)",
+      "Waiting to start upload (#2 in your queue)",
+      "Uploaded files",
+      "Cancelled upload",
+      "Failed upload: disk full",
+    ]);
+  });
+
+  test("a reload turns a picking upload into an interrupted one that names what it can", () => {
+    beginTransfer({ kind: "upload", filename: null, cancel: vi.fn(), picking: true });
+    beginTransfer({ kind: "upload", filename: "a.md", cancel: vi.fn(), picking: true });
+    showTransfers();
+
+    transfers.items = [];
+    restoreTransfers(() => vi.fn());
+    const el = render();
+    flushSync();
+
+    expect(lines(el)).toEqual([
+      "Interrupted upload (window reloaded)",
+      "Interrupted a.md (window reloaded)",
+    ]);
+  });
+
   test("cancelTransfer marks the row cancelled (terminal, inactive)", () => {
     const id = beginTransfer({ kind: "upload", filename: "x.md", cancel: vi.fn() });
     cancelTransfer(id);
