@@ -7,12 +7,17 @@
 //
 // The workspace app has no view of the window feed: its only library access is
 // the short-lived, presence-bound command capability. So the naming fields are
-// read once from that snapshot (at boot in a browser, when the pane tree
-// needs its heading on desktop), and the caption is kept current
-// afterwards by the targeted `window_labeled` frame the server pushes to this
-// window's own socket (store.svelte.ts routes it here). `kind` and `ordinal` are
-// library-owned and fixed for a window's life, so the boot read is enough for
-// them.
+// read from that snapshot when first needed (at boot in a browser, at the pane
+// tree's first open in title bar tab mode on the desktop; a failed read is
+// tried again at the next open), and the caption is kept current afterwards by
+// the targeted `window_labeled` frame the server pushes to this window's own
+// socket on every surface (store.svelte.ts routes it here). `kind` and
+// `ordinal` are library-owned and fixed for a window's life, so one read is
+// enough for them.
+//
+// Only a browser's document title follows the naming fields. A chan-desktop
+// window's name is its OS titlebar, which the window watcher retitles, so its
+// document keeps the static title and the fields serve the pane tree alone.
 //
 // A window with no reachable library record (a capability mint that fails, a
 // plain browser tab that never had a record) simply keeps the document's static
@@ -44,7 +49,9 @@ export function windowName(): string | null {
 export function refreshWindowTitle(): void {
   if (typeof document === "undefined") return;
   if (privacy.enabled) document.title = "Chan (privacy mode)";
-  else if (naming) document.title = windowDisplayName(naming);
+  // A desktop document keeps the static title even once the pane tree has
+  // loaded the naming fields (see above).
+  else if (!isTauriDesktop() && naming) document.title = windowDisplayName(naming);
   else document.title = "Chan";
 }
 

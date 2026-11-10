@@ -3920,10 +3920,11 @@ impl WorkspaceHost {
             .window_registry()
             .ok_or_else(|| Error::Config("window registry not installed".into()))?;
         let matched = registry.set_label(window_id, label.clone());
-        // The window's own SPA titles its browser tab from this text, and it has
-        // no view of the window feed (its library access is the short-lived
-        // command capability), so tell it directly. Native desktop windows are
-        // retitled by the window watcher's reconcile instead and ignore this.
+        // The window's own SPA names the window from this text (its browser tab
+        // title, and its pane tree in title bar tab mode), and it has no view
+        // of the window feed (its library access is the short-lived command
+        // capability), so tell it directly. A native desktop window's OS title
+        // is retitled by the window watcher's reconcile instead.
         if matched {
             self.emit_window_command(window_id, "window_labeled", Some(&label));
         }
@@ -4299,8 +4300,9 @@ impl WorkspaceHost {
     /// about its own window without the host resolving which tenant serves it
     /// (which matters for a discard, where the record is already gone). This is
     /// honest-client courtesy, not enforcement: a native desktop window is torn
-    /// down (and retitled) by the window watcher's reconcile instead and ignores
-    /// the frame.
+    /// down and retitled by the window watcher's reconcile instead, so its page
+    /// ignores the teardown frames and takes a caption only to name the window
+    /// in its pane tree.
     fn emit_window_command(&self, window_id: &str, command: &'static str, label: Option<&str>) {
         let Some(frame) = window_command_frame(window_id, command, label) else {
             return;

@@ -1,3 +1,4 @@
+import { flushSync } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { applyWindowLabel, initWindowTitle, loadWindowTitle, refreshWindowTitle, windowName, __resetWindowTitle } from "./windowTitle.svelte";
@@ -171,5 +172,58 @@ describe("live caption updates", () => {
   test("is inert before the naming fields are known", () => {
     applyWindowLabel("release checks");
     expect(document.title).toBe("Chan");
+  });
+});
+
+// App.svelte runs `$effect(refreshWindowTitle)`, and the naming fields are
+// reactive state, so the effect is where a loaded name would reach the
+// document. These run the same effect.
+describe("the document title effect", () => {
+  function titleEffect(): () => void {
+    const stop = $effect.root(() => {
+      $effect(refreshWindowTitle);
+    });
+    flushSync();
+    return stop;
+  }
+
+  test("follows the name in a browser as it loads and changes", async () => {
+    loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "release checks" })]));
+    const stop = titleEffect();
+    try {
+      expect(document.title).toBe("Chan");
+      await loadWindowTitle();
+      flushSync();
+      expect(document.title).toBe("Window 3 [release checks]");
+      applyWindowLabel("deploy");
+      flushSync();
+      expect(document.title).toBe("Window 3 [deploy]");
+    } finally {
+      stop();
+    }
+  });
+
+  test("keeps the desktop's static title once the pane tree loads the name", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: { invoke: vi.fn() }, configurable: true,
+    });
+    loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ label: "release checks" })]));
+    const stop = titleEffect();
+    try {
+      await loadWindowTitle();
+      flushSync();
+      expect(windowName()).toBe("Window 3 [release checks]");
+      expect(document.title).toBe("Chan");
+      applyWindowLabel("deploy");
+      flushSync();
+      expect(windowName()).toBe("Window 3 [deploy]");
+      expect(document.title).toBe("Chan");
+      privacy.enabled = true;
+      flushSync();
+      expect(document.title).toBe("Chan (privacy mode)");
+    } finally {
+      stop();
+      Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    }
   });
 });
