@@ -249,27 +249,53 @@ print(f"{address}/{pool.prefixlen}")
 PYTHON
 }
 
+# Prints the lines of an existing env file that set one of the named
+# variables to a value, indented for the notices below; nothing for a file
+# that does not exist, a commented line or an empty value. The names are an
+# extended regular expression.
+set_lines() {
+    local file=$1 names=$2
+    [[ -f $file ]] || return 0
+    # sed fails only when it cannot read the file, which must not pass for a
+    # file that sets none of them.
+    sed -n -E "s/^[[:space:]]*((${names})=[[:space:]]*[^[:space:]].*)\$/    \\1/p" "$file" \
+        && return
+    echo "error: cannot read $file" >&2
+    return 1
+}
+
 # Identity refuses to start while one of the four variables that describe a
 # single ingress is set. Every run replaces identity.env whole, so none of
 # them outlives a run; an existing file that sets one is shown before the
 # prompt, where the same ingress can still be given in the list's form.
-if [[ -f /etc/chan-gateway/identity.env ]]; then
-    # sed fails only when it cannot read the file, which must not pass for a
-    # file that sets none of them.
-    if ! SINGLE_INGRESS_LINES=$(sed -n -E \
-        's/^[[:space:]]*(WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)=[[:space:]]*[^[:space:]].*)$/    \1/p' \
-        /etc/chan-gateway/identity.env); then
-        echo "error: cannot read /etc/chan-gateway/identity.env" >&2
-        exit 1
-    fi
-    if [[ -n $SINGLE_INGRESS_LINES ]]; then
-        echo
-        echo "/etc/chan-gateway/identity.env configures WireGuard enrollment for one ingress:"
-        printf '%s\n' "$SINGLE_INGRESS_LINES"
-        echo "Identity does not start with these variables set, and this run writes none"
-        echo "of them. To keep enrollment, list that ingress below as"
-        echo "<its node's proxy id>=<WIREGUARD_PUBLIC_KEY>@<WIREGUARD_ENDPOINT>."
-    fi
+SINGLE_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
+    'WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)') || exit 1
+if [[ -n $SINGLE_INGRESS_LINES ]]; then
+    echo
+    echo "/etc/chan-gateway/identity.env configures WireGuard enrollment for one ingress:"
+    printf '%s\n' "$SINGLE_INGRESS_LINES"
+    echo "Identity does not start with these variables set, and this run writes none"
+    echo "of them. To keep enrollment, list that ingress below as"
+    echo "<its node's proxy id>=<WIREGUARD_PUBLIC_KEY>@<WIREGUARD_ENDPOINT>."
+fi
+
+# The list and the pool are this run's answers like every other value, so an
+# empty answer below turns enrollment off where the replaced files have it
+# on. They are shown first, as those files set them, to be given again.
+# Neither becomes an answer's default: a run carries nothing over from the
+# files it replaces, and a default here would keep a node the operator is
+# retiring.
+REPLACED_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
+    'WIREGUARD_INGRESSES') || exit 1
+if [[ -n $REPLACED_INGRESS_LINES ]]; then
+    REPLACED_POOL_LINES=$(set_lines /etc/chan-gateway/profile.env \
+        'WIREGUARD_POOL_V4') || exit 1
+    echo
+    echo "The configuration this run replaces has WireGuard enrollment on:"
+    printf '%s\n' "$REPLACED_INGRESS_LINES"
+    [[ -z $REPLACED_POOL_LINES ]] || printf '%s\n' "$REPLACED_POOL_LINES"
+    echo "This run carries nothing over: an empty answer below leaves enrollment off."
+    echo "To keep it, answer the next questions with the values shown here."
 fi
 
 echo

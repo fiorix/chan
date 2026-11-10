@@ -296,6 +296,8 @@ require_one_agent_token() {
 
 full_answers="$pg_answers"$'https://gw.example.test\nhttps://proxy.example.test:8443\n\np1\n\n'
 oauth_answers=$'github-client\ngithub-secret\n\n\n'
+# How a run announces that the files it replaces have enrollment on.
+replaced_enrollment='The configuration this run replaces has WireGuard enrollment on'
 
 # Two nodes, typed with spaces, an uppercase host and a bracketed IPv6
 # endpoint, and a pool of the operator's own. The list is written without
@@ -321,6 +323,7 @@ require_output 'WireGuard enrollment is on for these nodes: p1 p2'
 require_output 'Address = 10.9.8.1/22'
 refute_output 'is not one of them'
 refute_output 'configures WireGuard enrollment for one ingress'
+refute_output "$replaced_enrollment"
 printf 'PASS configure: an ingress list enables identity and profile together, as typed less its spaces\n'
 
 # A second run over a configuration that names one ingress in the four
@@ -328,6 +331,8 @@ printf 'PASS configure: an ingress list enables identity and profile together, a
 # lines it will not carry over, leaves enrollment off in both files, names
 # none of the four, and keeps the replaced file as a backup. Its secrets are
 # its own: the agent's bearer is a new value, again the same in both files.
+# The first run's pool is still in profile.env, and a pool without a list is
+# not enrollment: the run does not announce it as such.
 cat > "$full_root/identity.env" <<EOF
 WIREGUARD_AGENT_TOKEN=$first_agent_token
 WIREGUARD_HOST_ID=wg1
@@ -349,6 +354,7 @@ require_wireguard_names "$full_root/identity.env" 'WIREGUARD_AGENT_TOKEN '
 require_wireguard_names "$full_root/profile.env" ''
 refute_single_ingress_names
 refute_output 'WireGuard enrollment is on'
+refute_output "$replaced_enrollment"
 backups=("$full_root"/identity.env.bak.*)
 [[ ${#backups[@]} -eq 1 ]] && grep -Fqx 'WIREGUARD_HOST_ID=wg1' "${backups[0]}" \
     || die "the replaced identity.env was not kept as one backup"
@@ -358,17 +364,66 @@ require_one_agent_token
 printf 'PASS configure: an empty list leaves enrollment off and no single-ingress variable behind\n'
 
 # An existing file that only comments those variables out, or leaves one
-# empty, configures nothing and is not announced. This node's agent is
-# installed but its id is not in the list, which the run points out.
+# empty, configures nothing and is not announced. The same holds for the
+# list: the file the last run wrote shows it as a commented example, and an
+# empty value sets none. This node's agent is installed but its id is not in
+# the list, which the run points out.
 printf '%s\n' '# WIREGUARD_HOST_ID=p1' 'WIREGUARD_ENDPOINT=' 'WIREGUARD_HOSTS= ' \
-    >> "$full_root/identity.env"
+    'WIREGUARD_INGRESSES= ' >> "$full_root/identity.env"
+grep -q '^# WIREGUARD_INGRESSES=p1=' "$full_root/identity.env" \
+    || die "the empty-list run left no commented WIREGUARD_INGRESSES example"
 configure_run 'list without this node' "$WORK/postinst-bin" \
     "$full_answers"$'wg0\n'"$p2_entry"$'\n\n'"$oauth_answers"
 refute_output 'configures WireGuard enrollment for one ingress'
+refute_output "$replaced_enrollment"
 require_output 'WireGuard enrollment is on for these nodes: p2'
 require_output "This node's id, p1, is not one of them"
 refute_single_ingress_names
 printf 'PASS configure: a list without this node says its agent is refused\n'
+
+# A run over a configuration that has enrollment on. Every run writes the
+# files whole from its own answers, so an empty answer would turn enrollment
+# off: the run shows the list and the pool it replaces before it asks, each
+# as its file sets it and without a hand-edited line's indentation. What is
+# shown is no default. The list given again is written as it was, and the
+# pool, answered with Enter, is the script's own default and not the one
+# shown.
+kept_list="$p1_entry;p2=$key_b@[2001:db8::2]:51821"
+require_replaced_enrollment() {
+    local shown
+    require_output "$replaced_enrollment"
+    for shown in "WIREGUARD_INGRESSES=$kept_list" "WIREGUARD_POOL_V4=$1"; do
+        grep -Fqx -- "    $shown" "$WORK/configure-full.out" \
+            || die "configure run did not show the replaced line: $shown"
+    done
+    require_output 'an empty answer below leaves enrollment off'
+}
+cat > "$full_root/identity.env" <<EOF
+WIREGUARD_AGENT_TOKEN=$agent_token
+  WIREGUARD_INGRESSES=$kept_list
+WIREGUARD_INGRESS_ADDRESSES=10.9.8.1
+WIREGUARD_ALLOWED_IPS=10.9.8.1/32
+EOF
+printf '%s\n' 'WIREGUARD_POOL_V4=10.9.8.0/22' > "$full_root/profile.env"
+configure_run 'the replaced list given again' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n'"$kept_list"$'\n\n'"$oauth_answers"
+require_replaced_enrollment 10.9.8.0/22
+require_env "$full_root/identity.env" WIREGUARD_INGRESSES "$kept_list"
+require_env "$full_root/identity.env" WIREGUARD_INGRESS_ADDRESSES 10.7.0.1
+require_env "$full_root/profile.env" WIREGUARD_POOL_V4 10.7.0.0/24
+require_output 'WireGuard enrollment is on for these nodes: p1 p2'
+printf 'PASS configure: the enrollment a run replaces is shown, and only what is given again is kept\n'
+
+# The same list, now as the last run wrote it, answered with an empty one.
+# The run says what the answer costs before it takes it, and the answer
+# still turns enrollment off.
+configure_run 'empty list over an ingress list' "$WORK/postinst-bin" \
+    "$full_answers"$'wg0\n\n'"$oauth_answers"
+require_replaced_enrollment 10.7.0.0/24
+require_wireguard_names "$full_root/identity.env" 'WIREGUARD_AGENT_TOKEN '
+require_wireguard_names "$full_root/profile.env" ''
+refute_output 'WireGuard enrollment is on for these nodes'
+printf 'PASS configure: an empty list over a configured one is announced and leaves enrollment off\n'
 
 # A host without the agent's package, whose own node terminates no
 # WireGuard: another node is the one ingress, on the default pool. No agent
@@ -391,21 +446,29 @@ refute_output 'is not one of them'
 printf 'PASS configure: one ingress and the default pool, without the agent package\n'
 
 # An existing identity.env that cannot be read is not taken for one without
-# the single-ingress variables. Root reads any file, so the case exists only
-# for another user.
+# the single-ingress variables or without a list, and an existing
+# profile.env that cannot be read is not taken for one without a pool: the
+# last run left a list in identity.env, so this one reads the pool. Root
+# reads any file, so the case exists only for another user.
 if [[ $EUID -ne 0 ]]; then
-    chmod 000 "$full_root/identity.env"
-    if printf '%s' "$full_answers" | PATH="$WORK/no-agent-bin:$PATH" \
-        bash "$WORK/configure-full/configure.sh" \
-        > "$WORK/configure-full.out" 2> "$WORK/configure-full.err"; then
-        die "configure accepted an unreadable identity.env"
-    fi
-    grep -Fq 'error: cannot read' "$WORK/configure-full.err" \
-        || die "unreadable identity.env refusal returned the wrong error"
-    chmod 0640 "$full_root/identity.env"
-    printf 'PASS configure: an unreadable identity.env is refused\n'
+    for unreadable in identity.env profile.env; do
+        chmod 000 "$full_root/$unreadable"
+        if printf '%s' "$full_answers" | PATH="$WORK/no-agent-bin:$PATH" \
+            bash "$WORK/configure-full/configure.sh" \
+            > "$WORK/configure-full.out" 2> "$WORK/configure-full.err"; then
+            die "configure accepted an unreadable $unreadable"
+        fi
+        grep -Fqx "error: cannot read $full_root/$unreadable" "$WORK/configure-full.err" \
+            || die "unreadable $unreadable refusal returned the wrong error"
+        # The answers end before the provider questions, so a run that went
+        # on fails there too: it was refused only if nothing was asked after
+        # the read.
+        refute_output 'WireGuard enrollment is optional'
+        chmod 0640 "$full_root/$unreadable"
+        printf 'PASS configure: an unreadable %s is refused\n' "$unreadable"
+    done
 else
-    printf 'SKIP configure: unreadable identity.env (root reads every file)\n'
+    printf 'SKIP configure: unreadable identity.env and profile.env (root reads every file)\n'
 fi
 
 assert_mode() {
