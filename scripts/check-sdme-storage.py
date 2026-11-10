@@ -30,23 +30,21 @@ EXPECTED_COMMAND_FILES = {
     "scripts/e2e/README.md",
     "scripts/windows-cross-check.sh",
 }
-BUILD_DRIVER_FILES = {
-    "packaging/distros/arch/build-with-sdme.sh",
-    "packaging/distros/copr/build-with-sdme.sh",
-    "packaging/nix/build-with-sdme.sh",
-    "packaging/sdme/build-chan-desktop.sh",
-}
 # Only the one-CPU test series keeps a disk cap: its instrument reads the cap
 # back from the guest it measures. Every other guest is removed after its run
 # or kept only as a build cache, so a cap saves nothing, and sdme refuses --disk
 # on a host whose btrfs already has quotas enabled by something else.
 CAPPED_COMMAND_FILES = {"scripts/e2e/README.md"}
-# The kept gateway builders take their limits from the same policy array.
-GATEWAY_DRIVER_FILES = {
+# The build drivers take their CPU and memory limits from the array that
+# packaging/sdme-build-policy.sh fills; each creating call must carry it.
+POLICY_DRIVER_FILES = {
+    "packaging/distros/arch/build-with-sdme.sh",
+    "packaging/distros/copr/build-with-sdme.sh",
     "packaging/gateway/scripts/dev/sdme/build-gateway.sh",
     "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh",
+    "packaging/nix/build-with-sdme.sh",
+    "packaging/sdme/build-chan-desktop.sh",
 }
-POLICY_DRIVER_FILES = BUILD_DRIVER_FILES | GATEWAY_DRIVER_FILES
 POLICY_FLAGS = '"${SDME_BUILD_LIMIT_ARGS[@]}"'
 DOCUMENTED_COMMANDS = {
     "packaging/sdme/chan-devserver.sdme": (

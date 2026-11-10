@@ -64,7 +64,8 @@ for key in AUR COPR NIX DESKTOP GATEWAY E2E_BINS; do
         expect_count 'has no measured default' "$work/err" 1 "$key cleared $kind gap count"
     done
 
-    # Disk variables exported for an older policy neither cap nor fail a build.
+    # The policy has no disk dimension: a disk variable in the caller's
+    # environment adds no flag and no log field, and does not fail the build.
     probe "$key" SDME_BUILD_DISK=1T "SDME_BUILD_${key}_DISK=13G"
     expect_status 0 "$key ignores disk variables"
     expect_line 'arg_count=4' "$work/out" "$key disk variables add no flag"
