@@ -6829,9 +6829,13 @@ trait WindowMenuSurface {
 /// bottom, and its other items after Zoom. A tail below them is removed by
 /// the wrong indices, which deletes AppKit's items and strands the old
 /// rows where no later pass can find them, so sections pile up with the
-/// titles they were stamped with. AppKit adds nothing above Minimize, so
-/// there the tail's indices hold. Off macOS the submenu ends at Open in
-/// Browser and the tail closes it.
+/// titles they were stamped with. Above Minimize the tail's indices hold
+/// as long as AppKit adds nothing there, which is what Tauri's and muda's
+/// code and the owner's menu show: the items above Minimize are chan's
+/// own, Tauri builds Minimize and Zoom below them and has muda hand the
+/// submenu to AppKit as the windows menu (`setWindowsMenu:`), and the menu
+/// AppKit fills shows its items only after Zoom and at the bottom. Off
+/// macOS the submenu ends at Open in Browser and the tail closes it.
 fn restamp_window_menu(menu: &impl WindowMenuSurface, tail: &[WindowMenuEntry]) {
     // Back to front, so each removal leaves the positions still to come
     // in place.
@@ -8164,9 +8168,12 @@ mod tests {
             .all(|(_, text)| text != "Chan (privacy mode)"));
     }
 
-    /// AppKit adds items after Zoom too (window tiling, window tabs) and
+    /// AppKit may add items after Zoom too (the window tiling items) and
     /// relists its windows as they come and go; the tail stays right after
-    /// Open in Browser, above all of them.
+    /// Open in Browser, above all of them. No window tab items come: Tauri
+    /// turns automatic window tabbing off for a window built without a
+    /// tabbing identifier or a transparent one, chan builds none with an
+    /// identifier, and its workspace windows are transparent as well.
     #[test]
     fn the_window_menu_tail_sits_after_open_in_browser_above_appkits_items() {
         let menu = ModelWindowMenu::macos();
