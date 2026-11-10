@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Keeps a proxy host's kernel WireGuard peers equal to the gateway's peer table."
+description = "Keeps a proxy node's kernel WireGuard peers equal to the gateway's active peers."
 
 [[bin]]
 name = "wireguard-agent-service"
@@ -34,10 +34,10 @@ maintainer = "fiorix <fiorix@gmail.com>"
 copyright = "2026, fiorix <fiorix@gmail.com>"
 license-file = ["../../LICENSE", "0"]
 extended-description = """\
-Proxy-host agent for the chan-gateway suite. It keeps one kernel WireGuard
-interface's peers equal to the gateway's peer table for this host, read
-from identity's internal listener and applied with wg from
-wireguard-tools, and adds and removes only the peers it added itself.
+Proxy-node agent for the chan-gateway suite. It keeps one kernel WireGuard
+interface's peers equal to the gateway's active peers, the same list on
+every node, read from identity's internal listener and applied with wg
+from wireguard-tools, and adds and removes only the peers it added itself.
 The interface is the operator's; no listener, database or metrics
 endpoint lives in this binary."""
 section = "net"

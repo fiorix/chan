@@ -1,6 +1,6 @@
 //! `chan-gateway-wireguard-agent`: keeps one kernel WireGuard interface's
-//! peers equal to the gateway's peer table for this host. See README.md
-//! and design.md.
+//! peers equal to the gateway's active peers, which are the same for every
+//! node. See README.md and design.md.
 
 mod config;
 mod identity;

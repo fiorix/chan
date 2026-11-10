@@ -27,7 +27,9 @@ pub struct Config {
     pub identity_url: Url,
     /// The bearer identity checks on that route (`WIREGUARD_AGENT_TOKEN`).
     pub token: String,
-    /// The `host` of the gateway's peer rows this agent applies.
+    /// This node's ingress id (`WIREGUARD_AGENT_HOST_ID`): the `host` the
+    /// agent polls identity with and requires back in the list it accepts.
+    /// It selects no peers, since the list is the same for every node.
     pub host_id: ProxyId,
     /// The one kernel interface this agent changes peers on.
     pub interface: String,
