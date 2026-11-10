@@ -148,28 +148,30 @@ SQL
 }
 
 # Compare the granted privileges with the matrix and name every difference.
-# It returns instead of relying on errexit, which is off when the caller tests
-# its status.
+# The verdict goes to standard output and psql's own messages stay on standard
+# error, so neither the comparison nor a caller that captures the differences
+# can take a server notice for a privilege. It returns instead of relying on
+# errexit, which is off when the caller tests its status.
 check_role_matrix() {
     local expected granted grantee kind object privilege failed=0
     expected=$(role_matrix \
         | awk '{ count = split($4, names, ","); for (i = 1; i <= count; i++) print $1, $2, $3, names[i] }' \
         | LC_ALL=C sort) || return 1
-    if ! granted=$(granted_privileges 2>&1); then
-        printf 'FAIL: the granted privileges could not be read\n%s\n' "$granted" >&2
+    if ! granted=$(granted_privileges); then
+        printf 'FAIL: the granted privileges could not be read\n'
         return 1
     fi
     granted=$(LC_ALL=C sort -u <<< "$granted") || return 1
     while read -r grantee kind object privilege; do
         [[ -n $grantee ]] || continue
         printf 'FAIL: %s lacks %s on %s %s\n' \
-            "$grantee" "$privilege" "$kind" "$object" >&2
+            "$grantee" "$privilege" "$kind" "$object"
         failed=1
     done < <(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$granted"))
     while read -r grantee kind object privilege; do
         [[ -n $grantee ]] || continue
         printf 'FAIL: %s holds %s on %s %s, which the role matrix does not grant\n' \
-            "$grantee" "$privilege" "$kind" "$object" >&2
+            "$grantee" "$privilege" "$kind" "$object"
         failed=1
     done < <(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$granted"))
     [[ $failed == 0 ]] || return 1
@@ -421,7 +423,7 @@ FAIL: chan_gateway_identity holds UPDATE on column public.devserver_fleet_policy
 FAIL: chan_gateway_identity holds UPDATE on column public.users.blocked_at, which the role matrix does not grant
 FAIL: chan_gateway_identity holds DELETE on table public.api_tokens, which the role matrix does not grant
 FAIL: chan_gateway_profile holds CREATE on schema public, which the role matrix does not grant'
-if drift=$(check_role_matrix 2>&1); then
+if drift=$(check_role_matrix); then
     printf 'FAIL: the role matrix check passed over drifted grants\n%s\n' "$drift" >&2
     exit 1
 fi
