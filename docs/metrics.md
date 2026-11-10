@@ -1,6 +1,6 @@
 # Metrics
 
-The Dashboard's first page shows the serving chan process: hostname, version, build hash, PID, uptime, CPU, resident memory, I/O, chan-home storage, service traffic, tunnels, transfers, and HTTP/2 and yamux channels. The graphs use the window's focus-border colour, including the neutral grey preset that works in light and dark mode. Standalone windows have Metrics and About; workspace windows also have Workspace and Search. The carousel rotates every five seconds by default; hovering, focus, or its play/pause button pauses it. The Dashboard carousel setting controls autoplay and shares its state with the carousel's play/pause button.
+The Dashboard's first page shows the serving chan process: hostname, version, build hash, PID, uptime, CPU, resident memory, I/O, chan-home storage, service traffic, tunnels, transfers, and HTTP/2 and yamux channels. The graphs use the window's focus-border colour, including the neutral grey preset that works in light and dark mode. Standalone windows have Metrics and About; workspace windows also have Workspace and Search. The carousel rotates every five seconds by default; hovering, focus, or its play/pause button pauses it. The Dashboard carousel setting controls autoplay and shares its state with the carousel's play/pause button. With privacy mode on, the page conceals the hostname and the chan-home path, each behind its own reveal button; `chan metrics` and `/api/metrics` are not affected, since privacy mode is a setting of the viewing client.
 
 ## Collection
 
