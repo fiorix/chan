@@ -214,7 +214,7 @@ Internal listener (route-scoped bearers):
 | POST   | `/internal/v1/sessions/whoami` | `IDENTITY_SESSION_INTERNAL_TOKEN` |
 | GET    | `/internal/v1/wireguard/peers` | `WIREGUARD_AGENT_TOKEN`           |
 
-The peer-list route requires `?host=<label>` and relays profile's JSON bytes, quoted ETag and conditional 304 unchanged. Missing or wrong bearer answers 401, an empty configured bearer 404, malformed host 400, and profile failure 502.
+The peer-list route requires `?host=<id>`, the polling agent's `WIREGUARD_AGENT_HOST_ID`, and relays profile's JSON bytes, quoted ETag and conditional 304 unchanged. Every agent presents the same `WIREGUARD_AGENT_TOKEN`. The bearer is checked first: a missing or wrong one answers 401, and an empty configured bearer 404. After it, a missing or malformed host answers 400, a host that is not an id in `WIREGUARD_INGRESSES` answers 404 with no call to profile, which is every host while enrollment is off, and a profile failure answers 502. An agent keeps the list it has on every answer but a served one, so an agent whose host id is mistyped, or whose node the list does not name, leaves its interface as it is.
 
 The validate route serves PAT validation, Hello-name announcement and lease refresh for devserver-proxy; with `proxy_id` and `registration_id` present the response also carries the signed admission lease. See [Devserver publication](../../design.md#devserver-publication) for the contact inventory.
 

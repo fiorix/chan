@@ -136,6 +136,11 @@ impl WireguardEnrollment {
         self.persistent_keepalive
     }
 
+    /// Whether `id` names a configured ingress.
+    pub(crate) fn has_ingress(&self, id: &str) -> bool {
+        self.ingresses.iter().any(|route| route.ingress.id == id)
+    }
+
     /// The ingress the single-ingress wire fields describe, which is all a
     /// desktop that reads no ingress list enrolls against.
     pub(crate) fn first(&self) -> &IngressRoutes {
@@ -206,6 +211,19 @@ pub(crate) async fn peers(
 ) -> Result<Response> {
     if !valid_host(&query.host) {
         return Err(Error::BadRequest("invalid wireguard host".into()));
+    }
+    // An agent polls for its own node. A host that is no configured
+    // ingress is a mistyped id or a node the list does not name, and with
+    // enrollment off no host is one: both get the answer of an absent
+    // route, with no call to profile. An agent keeps the list it has on
+    // anything but a served one, so it leaves its interface as it is.
+    let configured = state
+        .cfg
+        .wireguard
+        .as_ref()
+        .is_some_and(|enrollment| enrollment.has_ingress(&query.host));
+    if !configured {
+        return Err(Error::NotFound);
     }
     let condition = headers
         .get(header::IF_NONE_MATCH)

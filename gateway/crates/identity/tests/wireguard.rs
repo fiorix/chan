@@ -274,3 +274,175 @@ async fn wireguard_peers_route_requires_its_own_bearer_and_relays_profile() {
         profile.reset().await;
     }
 }
+
+const AGENT: &str = "test-wireguard-agent";
+
+fn peers_uri(host: &str) -> String {
+    format!("/internal/v1/wireguard/peers?host={host}")
+}
+
+/// A peer list as profile answers it for `host`: the host echoed, and one
+/// entry per key.
+fn list_body(host: &str, keys: &[&str]) -> String {
+    let peers: Vec<Value> = keys
+        .iter()
+        .map(|key| json!({"public_key": key, "allowed_ips": ["10.7.0.23/32"]}))
+        .collect();
+    json!({"host": host, "peers": peers}).to_string()
+}
+
+/// Have profile answer one list read for `host` with `body` under `etag`,
+/// only for a request carrying `condition` when one is given.
+async fn mount_list(
+    profile: &MockServer,
+    host: &str,
+    etag: &str,
+    body: &str,
+    condition: Option<&str>,
+) {
+    let mock = Mock::given(method("GET"))
+        .and(path("/v1/wireguard/peers"))
+        .and(query_param("host", host));
+    let mock = match condition {
+        Some(condition) => mock.and(has_header("if-none-match", condition)),
+        None => mock,
+    };
+    mock.respond_with(
+        ResponseTemplate::new(200)
+            .insert_header("etag", etag)
+            .set_body_raw(body.to_owned(), "application/json"),
+    )
+    .expect(1)
+    .mount(profile)
+    .await;
+}
+
+/// Have profile answer every other list read with an empty list, so a read
+/// identity should not have relayed is answered, and counted, instead of
+/// failing for want of a mock.
+async fn mount_empty_lists(profile: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/v1/wireguard/peers"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", "\"empty\"")
+                .set_body_raw(r#"{"host":"any","peers":[]}"#, "application/json"),
+        )
+        .with_priority(10)
+        .mount(profile)
+        .await;
+}
+
+#[tokio::test]
+async fn wireguard_peers_route_relays_each_configured_ingress_and_answers_404_for_another_host() {
+    let profile = MockServer::start().await;
+    mount_empty_lists(&profile).await;
+    let (_, internal) = apps(&profile, Some(enrollment()), AGENT).await;
+    let peer = key(1);
+    for (host, etag) in [("p1", "\"e1\""), ("p2", "\"e2\"")] {
+        let body = list_body(host, &[&peer]);
+        mount_list(&profile, host, etag, &body, None).await;
+        let (status, headers, actual) =
+            request(internal.clone(), &peers_uri(host), Some(AGENT), None).await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+        assert_eq!(headers[header::ETAG], etag);
+        assert_eq!(actual, body.as_bytes());
+    }
+    profile.verify().await;
+    assert_eq!(profile.received_requests().await.unwrap().len(), 2);
+
+    // A host that is no configured ingress is not found, and profile, which
+    // would answer it, is not asked.
+    let (status, _, body) = request(internal.clone(), &peers_uri("p9"), Some(AGENT), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, br#"{"error":"not found"}"#);
+    // The bearer is checked first, so a caller without it learns nothing
+    // of which hosts are configured.
+    for token in [None, Some("wrong")] {
+        let unknown = request(internal.clone(), &peers_uri("p9"), token, None).await;
+        assert_eq!(unknown.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unknown,
+            request(internal.clone(), &peers_uri("p1"), token, None).await
+        );
+    }
+    assert_eq!(profile.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn wireguard_peers_route_answers_every_host_as_an_unknown_one_while_enrollment_is_off() {
+    let profile = MockServer::start().await;
+    mount_empty_lists(&profile).await;
+    let (_, on) = apps(&profile, Some(enrollment()), AGENT).await;
+    let (_, off) = apps(&profile, None, AGENT).await;
+    let unknown = request(on.clone(), &peers_uri("p9"), Some(AGENT), None).await;
+    assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+    let unauthorized = request(on.clone(), &peers_uri("p9"), None, None).await;
+    assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
+    for host in ["p1", "p2", "p9"] {
+        // Status, headers and body: nothing tells enrollment off from an
+        // unknown host, with the bearer or without it.
+        assert_eq!(
+            request(off.clone(), &peers_uri(host), Some(AGENT), None).await,
+            unknown,
+            "{host}"
+        );
+        for token in [None, Some("wrong")] {
+            assert_eq!(
+                request(off.clone(), &peers_uri(host), token, None).await,
+                unauthorized,
+                "{host}"
+            );
+        }
+    }
+    // A host that is missing or is no label is a bad request before either
+    // answer, with enrollment on or off.
+    for app in [on, off] {
+        for uri in ["/internal/v1/wireguard/peers".to_owned(), peers_uri("P1")] {
+            assert_eq!(
+                request(app.clone(), &uri, Some(AGENT), None).await.0,
+                StatusCode::BAD_REQUEST,
+                "{uri}"
+            );
+        }
+    }
+    assert!(profile.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_peer_profile_drops_leaves_each_hosts_list_at_that_hosts_next_poll() {
+    let profile = MockServer::start().await;
+    let (_, internal) = apps(&profile, Some(enrollment()), AGENT).await;
+    let (peer, with_peer, without_peer) = (key(1), "\"with-peer\"", "\"without-peer\"");
+    for host in ["p1", "p2"] {
+        let body = list_body(host, &[&peer]);
+        mount_list(&profile, host, with_peer, &body, None).await;
+        let (status, headers, actual) =
+            request(internal.clone(), &peers_uri(host), Some(AGENT), None).await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+        assert_eq!(headers[header::ETAG], with_peer);
+        assert_eq!(actual, body.as_bytes());
+    }
+    profile.verify().await;
+
+    // The peer's token is revoked, so profile's list no longer holds it.
+    // Each agent polls with the ETag of the list it has. Identity keeps no
+    // list of its own: the poll reaches profile with that ETag, and
+    // profile's answer is the agent's, on one host as on the other.
+    profile.reset().await;
+    for host in ["p1", "p2"] {
+        let body = list_body(host, &[]);
+        mount_list(&profile, host, without_peer, &body, Some(with_peer)).await;
+        let (status, headers, actual) = request(
+            internal.clone(),
+            &peers_uri(host),
+            Some(AGENT),
+            Some(with_peer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{host}");
+        assert_eq!(headers[header::ETAG], without_peer);
+        assert_eq!(actual, body.as_bytes());
+    }
+    profile.verify().await;
+}
