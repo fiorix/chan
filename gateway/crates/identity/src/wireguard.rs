@@ -85,6 +85,12 @@ pub struct IngressParameters {
     pub hosts: Vec<HostRoute>,
 }
 
+/// The DNS name of the proxy node `id` under the proxy apex's host: the
+/// host of the node's base origin, one label above its tenant names.
+pub(crate) fn node_name(id: &str, proxy_host: &str) -> String {
+    format!("{id}.{proxy_host}")
+}
+
 impl WireguardEnrollment {
     /// Build the enrollment offer for `ingresses`, kept in the order given,
     /// or `None` for an empty list. Each ingress's host map is derived, not
@@ -105,7 +111,7 @@ impl WireguardEnrollment {
         let ingresses = ingresses
             .into_iter()
             .map(|ingress| {
-                let node = format!("{}.{proxy_host}", ingress.id);
+                let node = node_name(&ingress.id, proxy_host);
                 let wildcard = format!("*.{node}");
                 let hosts = [node, wildcard]
                     .into_iter()

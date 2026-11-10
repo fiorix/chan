@@ -594,7 +594,7 @@ fn wireguard_from_vars(
         if list.iter().any(|ingress| ingress.id == id) {
             anyhow::bail!("WIREGUARD_INGRESSES contains a duplicate id");
         }
-        let node = format!("{id}.{proxy_host}");
+        let node = crate::wireguard::node_name(id, proxy_host);
         if node.len() > 253 || !node.split('.').all(valid_host) {
             anyhow::bail!(
                 "WIREGUARD_INGRESSES ids must form lowercase DNS names under \
@@ -1562,6 +1562,52 @@ mod wireguard_tests {
             }
         }
         assert_eq!(SINGLE_INGRESS_VARS.len(), 4);
+    }
+
+    #[test]
+    fn derived_host_names_are_the_node_base_and_tenant_names_identity_mints() {
+        for apex in [
+            "https://proxy.example.test",
+            "https://proxy.example.test:8443",
+            "http://proxy.localtest.me:7002",
+        ] {
+            let cfg = test_config(apex);
+            let enrollment = parse_at(&vars(), "https://gw.example.test", apex)
+                .unwrap()
+                .unwrap();
+            // The base origin a node reports: the apex's scheme and port
+            // around a host one label below the apex's.
+            let base_at = |host: &str| {
+                let mut base = cfg.devserver_proxy_origin.clone();
+                base.set_host(Some(host)).unwrap();
+                base.to_string()
+            };
+            for route in enrollment.ingresses() {
+                let id = &route.ingress.id;
+                let [node, wildcard] = &route.hosts[..] else {
+                    panic!("{id}: {:?}", route.hosts);
+                };
+                // The derived node name is the host of the one base origin
+                // identity accepts for this proxy id, and the map holds no
+                // name but it and the names below it.
+                let base = base_at(&node.name);
+                let accepted = cfg
+                    .validate_node_base(&base, id)
+                    .unwrap_or_else(|error| panic!("{apex} {id}: {error}"));
+                assert_eq!(accepted.host_str(), Some(node.name.as_str()));
+                // A tenant origin minted from that base is one label below
+                // it, which is the name the wildcard entry carries.
+                let tenant = cfg
+                    .tenant_origin_for("Alice", "0123456789ABCDEF", id, &base)
+                    .unwrap();
+                let tenant_host = tenant.authority.split(':').next().unwrap();
+                assert_eq!(
+                    tenant_host.split_once('.'),
+                    Some(("alice--0123456789ab", node.name.as_str()))
+                );
+                assert_eq!(wildcard.name, format!("*.{}", node.name));
+            }
+        }
     }
 
     #[test]
