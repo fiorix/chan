@@ -1390,6 +1390,63 @@ mod wireguard_tests {
     }
 
     #[test]
+    fn wireguard_config_accepts_an_ipv4_endpoint_and_the_longest_id_and_node_name() {
+        let k = key(7);
+        // An IPv4 literal is the commonest endpoint. It passes as a host
+        // whose labels are digits, which a DNS label may be.
+        let mut values = vars();
+        values.insert(
+            "WIREGUARD_INGRESSES".into(),
+            format!("p1={k}@198.51.100.7:51820"),
+        );
+        let cfg = parse(&values).unwrap().unwrap();
+        assert_eq!(cfg.first().ingress.endpoint, "198.51.100.7:51820");
+
+        // An id is one DNS label: 63 bytes are accepted and 64 are the
+        // first refused.
+        let id = "a".repeat(63);
+        values.insert(
+            "WIREGUARD_INGRESSES".into(),
+            format!("{id}={k}@a.example.test:1"),
+        );
+        let cfg = parse(&values).unwrap().unwrap();
+        assert_eq!(ids(&cfg), [id.as_str()]);
+        assert_eq!(
+            cfg.first().hosts[0].name,
+            format!("{id}.proxy.example.test")
+        );
+        assert_eq!(
+            refusal(
+                "WIREGUARD_INGRESSES",
+                &format!("a{id}={k}@a.example.test:1")
+            ),
+            "WIREGUARD_INGRESSES entry 1 id must be a proxy id, one lowercase DNS label"
+        );
+
+        // A node name is a DNS name: 253 bytes are accepted and 254 are
+        // the first refused. The ids are two bytes, so an apex host of 250
+        // makes names of exactly 253, a bound the id and the host share.
+        let apex = |last_label: usize| {
+            let labels = ["a".repeat(63), "a".repeat(63), "a".repeat(63)];
+            format!("https://{}.{}", labels.join("."), "a".repeat(last_label))
+        };
+        let cfg = parse_at(&vars(), "https://gw.example.test", &apex(58))
+            .unwrap()
+            .unwrap();
+        for route in cfg.ingresses() {
+            assert_eq!(route.hosts[0].name.len(), 253);
+        }
+        let error = parse_at(&vars(), "https://gw.example.test", &apex(59))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "WIREGUARD_INGRESSES entry 1 id and DEVSERVER_PROXY_ORIGIN's host must form a node \
+             name of at most 253 bytes"
+        );
+    }
+
+    #[test]
     fn wireguard_config_refuses_a_partial_set() {
         for name in vars().keys() {
             let mut values = vars();
@@ -1774,21 +1831,6 @@ mod wireguard_tests {
                 "{proxy}"
             );
         }
-        // A node name is at most 253 bytes, a bound the id and the apex's
-        // host share.
-        let long = format!(
-            "https://{}.test",
-            ["a".repeat(63).as_str(); 4].join(".")[..247].to_owned()
-        );
-        let error = parse_at(&vars(), "https://gw.example.test", &long)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            error,
-            "WIREGUARD_INGRESSES entry 1 id and DEVSERVER_PROXY_ORIGIN's host must form a node \
-             name of at most 253 bytes"
-        );
-
         // Identity's own name is never one an ingress carries, and the
         // refusal says which entry's node it is at or below.
         for (identity, entry) in [
