@@ -3,20 +3,25 @@
 // The per-surface body-theme row in Settings: one radio group per surface,
 // whose choice pins that surface to Light or Dark or lets it inherit the app
 // theme. The field is mounted with a commit that runs its persist step, and
-// the config write is stubbed; the assertions read the live surface themes
-// and what the commit asked the settings buffer to become.
+// the config write is stubbed over a served table, the one the write chain's
+// read hands each write; the assertions read the live surface themes, what
+// the commit asked the settings buffer to become and the table the write
+// sent.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-const writes = vi.hoisted(() => ({ patches: [] as unknown[] }));
+const writes = vi.hoisted(() => ({
+  served: {} as Record<string, string>,
+  patches: [] as unknown[],
+}));
 
 vi.mock("../../api/preferenceWrite", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/preferenceWrite")>();
   return {
     ...actual,
-    updateGlobalConfigSerial: vi.fn(async (patch: () => unknown) => {
-      writes.patches.push(patch());
+    updateGlobalConfigSerial: vi.fn(async (patch: (preferences: unknown) => unknown) => {
+      writes.patches.push(patch({ hybrid_surface_themes: writes.served }));
     }),
   };
 });
@@ -31,6 +36,7 @@ afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
   document.body.innerHTML = "";
   for (const kind of Object.keys(hybridSurfaceThemes) as HybridSurfaceKind[]) delete hybridSurfaceThemes[kind];
+  writes.served = {};
   writes.patches = [];
 });
 
@@ -71,6 +77,7 @@ describe("the surface theme row", () => {
   });
 
   test("Dark pins that surface only, in the buffer and live, and persists the table", async () => {
+    writes.served = { editor: "light" };
     hybridSurfaceThemes.editor = "light";
     const { choose, buffers } = render("graph");
     await choose("Dark");
@@ -81,6 +88,7 @@ describe("the surface theme row", () => {
   });
 
   test("Inherit drops the surface's pin", async () => {
+    writes.served = { graph: "dark" };
     hybridSurfaceThemes.graph = "dark";
     const { choose, buffers } = render("graph", { graph: "dark" });
     await choose("Inherit");
