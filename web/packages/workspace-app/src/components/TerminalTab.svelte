@@ -2973,6 +2973,24 @@
     if (e.key === "Enter") {
       e.preventDefault();
       stepFind(e.shiftKey ? "newer" : "older");
+      return;
+    }
+    // Find next and Find previous, as the shortcut registry resolves them on
+    // this client, a user's assignment included. The desktop's key bridge
+    // claims those chords ahead of the page and they arrive as commands,
+    // except the one it leaves to a focused terminal tab: Ctrl+G, BEL to a
+    // shell. The find input sits in that tab but is not the shell, so the
+    // chord steps here and goes no further. A key the bridge did claim never
+    // reaches this handler, and a browser has neither chord unless the user
+    // assigned one.
+    const direction = eventMatchesShortcut(e, "app.find.next")
+      ? "older"
+      : eventMatchesShortcut(e, "app.find.prev")
+        ? "newer"
+        : null;
+    if (direction) {
+      consumeKey(e);
+      stepFind(direction);
     }
   }
 

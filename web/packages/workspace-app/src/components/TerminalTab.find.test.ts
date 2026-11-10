@@ -49,6 +49,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vi
 
 import TerminalTab from "./TerminalTab.svelte";
 import terminalTabSource from "./TerminalTab.svelte?raw";
+import { hydrateOverrides } from "../state/keymapOverrides.svelte";
 import type { TerminalTab as TerminalTabState } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 import { terminalPreferences } from "../__tests__/standalone";
@@ -667,6 +668,149 @@ describe("terminal find count", () => {
     await tick();
     expect(findInput()?.value).toBe("needle");
     expect(countElement()?.textContent).toBe("");
+  });
+});
+
+// Find next and Find previous are the desktop's chords (Cmd+G and Cmd+Shift+G
+// on macOS, Ctrl+G and Ctrl+Shift+G elsewhere), and its key bridge claims
+// them ahead of the page and sends the command. Ctrl+G is the exception: it
+// is BEL to a shell, so the bridge leaves it to a focused terminal tab, and
+// the find input is inside that tab. The input therefore steps on the chord
+// itself. Each desktop case runs chan-desktop's own bridge script over this
+// window, so a key the bridge claims and a key the input takes are counted
+// together: one press, one step.
+describe("the find stepping chords in the find input", () => {
+  const AGENTS = {
+    mac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)",
+    linux: "Mozilla/5.0 (X11; Linux x86_64)",
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  } as const;
+  const KEY_BRIDGE = readFileSync("../../../desktop/src-tauri/src/key_bridge.js", "utf8");
+  const tauri = window as unknown as { __TAURI_INTERNALS__?: unknown };
+  let removeBridge: (() => void) | null = null;
+
+  afterEach(() => {
+    removeBridge?.();
+    removeBridge = null;
+    delete tauri.__TAURI_INTERNALS__;
+    hydrateOverrides(null);
+  });
+
+  /// The rest of the case runs in a browser on `os`.
+  function inBrowser(os: keyof typeof AGENTS): void {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(AGENTS[os]);
+  }
+
+  /// The rest of the case runs in the desktop app on `os`, with its key
+  /// bridge listening on the window in the capture phase unless `bridge` is
+  /// false, the state of a window whose bridge did not survive a navigation.
+  function onDesktop(os: keyof typeof AGENTS, bridge = true): void {
+    inBrowser(os);
+    tauri.__TAURI_INTERNALS__ = {};
+    if (!bridge) return;
+    const added: Array<[string, EventListener, boolean]> = [];
+    const host = {
+      addEventListener(type: string, listener: EventListener, capture: boolean) {
+        added.push([type, listener, capture]);
+        window.addEventListener(type, listener, capture);
+      },
+      dispatchEvent: (event: Event) => window.dispatchEvent(event),
+    };
+    new Function("window", "location", "CustomEvent", "navigator", KEY_BRIDGE)(
+      host,
+      { pathname: "/" },
+      CustomEvent,
+      { userAgent: AGENTS[os] },
+    );
+    expect(added.map(([type, , capture]) => [type, capture]), "the bridge listens for keys").toEqual([["keydown", true]]);
+    removeBridge = () => {
+      for (const [type, listener, capture] of added) window.removeEventListener(type, listener, capture);
+    };
+  }
+
+  /// A bar open on "needle" in a mounted xterm terminal, the input focused,
+  /// as the bridge reads focus to tell a terminal tab from the page.
+  async function openBar(): Promise<HTMLInputElement> {
+    await renderTerminal(terminalTab(), true);
+    const input = await openFindWithQuery("needle");
+    expect(document.activeElement, "the find input holds the keyboard").toBe(input);
+    expect(input.closest(".terminal-tab.active"), "inside the active terminal tab").not.toBeNull();
+    calls.splice(0);
+    return input;
+  }
+
+  /// Press a key in the input and return the steps it made, in order.
+  function press(input: HTMLInputElement, init: KeyboardEventInit): { steps: string[]; event: KeyboardEvent } {
+    calls.splice(0);
+    const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    input.dispatchEvent(event);
+    return { steps: callNames(), event };
+  }
+
+  const G = { key: "g", code: "KeyG" };
+  const SHIFT_G = { key: "G", code: "KeyG", shiftKey: true };
+
+  test.each(["linux", "windows"] as const)("on the %s desktop Ctrl+G steps to older output once", async (os) => {
+    const input = await openBar();
+    onDesktop(os);
+
+    const next = press(input, { ...G, ctrlKey: true });
+    expect(next.steps).toEqual(["findPrevious"]);
+    expect(calls[0]!.query).toBe("needle");
+    expect(next.event.defaultPrevented).toBe(true);
+
+    // Ctrl+Shift+G is the bridge's: its command steps to newer output, and
+    // the key never reaches the input to step again.
+    expect(press(input, { ...SHIFT_G, ctrlKey: true }).steps).toEqual(["findNext"]);
+  });
+
+  test("on the macOS desktop Cmd+G steps once, through the bridge's command, and Ctrl+G is no find chord", async () => {
+    const input = await openBar();
+    onDesktop("mac");
+
+    expect(press(input, { ...G, metaKey: true }).steps).toEqual(["findPrevious"]);
+    expect(press(input, { ...SHIFT_G, metaKey: true }).steps).toEqual(["findNext"]);
+    // The bridge leaves Ctrl+G to the tab on macOS too, where it is not the
+    // Find next chord.
+    const control = press(input, { ...G, ctrlKey: true });
+    expect(control.steps).toEqual([]);
+    expect(control.event.defaultPrevented).toBe(false);
+  });
+
+  // The pair to the case above: the input does answer Cmd+G on the macOS
+  // desktop, so the single step there is the bridge taking the key first.
+  test.each([
+    ["mac", { metaKey: true }],
+    ["linux", { ctrlKey: true }],
+  ] as const)("on the %s desktop without its bridge both chords step from the input", async (os, mod) => {
+    const input = await openBar();
+    onDesktop(os, false);
+
+    expect(press(input, { ...G, ...mod }).steps).toEqual(["findPrevious"]);
+    expect(press(input, { ...SHIFT_G, ...mod }).steps).toEqual(["findNext"]);
+  });
+
+  test.each([
+    ["linux", { ctrlKey: true }],
+    ["mac", { metaKey: true }],
+  ] as const)("in a browser on %s the keys are left alone", async (os, mod) => {
+    const input = await openBar();
+    inBrowser(os);
+
+    for (const key of [G, SHIFT_G]) {
+      const pressed = press(input, { ...key, ...mod });
+      expect(pressed.steps).toEqual([]);
+      expect(pressed.event.defaultPrevented, "the browser keeps its own find keys").toBe(false);
+    }
+  });
+
+  test("a remapped Find next is the chord the input steps on", async () => {
+    const input = await openBar();
+    onDesktop("linux");
+    hydrateOverrides({ "app.find.next": { linux: "Mod+Alt+N" } });
+
+    expect(press(input, { key: "n", code: "KeyN", ctrlKey: true, altKey: true }).steps).toEqual(["findPrevious"]);
+    expect(press(input, { ...G, ctrlKey: true }).steps, "the chord it replaced").toEqual([]);
   });
 });
 
