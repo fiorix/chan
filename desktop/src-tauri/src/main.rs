@@ -277,6 +277,12 @@ pub struct AppState {
     /// The workspace window that took focus last, the one a second launch
     /// brings forward (`single_instance::come_forward`).
     pub(crate) last_focused_window: Mutex<Option<String>>,
+    /// Set once the boot's restore task has ended, by which time every window
+    /// the boot opens is a shown record of the library
+    /// (`single_instance::BootSettled`). Until then a second launch's
+    /// `Activate` opens no terminal, since the boot's own windows are on
+    /// their way.
+    pub(crate) boot_settled: std::sync::atomic::AtomicBool,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -349,6 +355,7 @@ impl AppState {
             handoff_registrations: HandoffRegistrations::default(),
             handoff_listener: Mutex::new(None),
             last_focused_window: Mutex::new(None),
+            boot_settled: std::sync::atomic::AtomicBool::new(false),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
@@ -6046,6 +6053,10 @@ fn main() {
             // off.
             let queued = queue_boot_restore(&state_for_restore);
             tauri::async_runtime::spawn(async move {
+                // Held to the end of this task, however it ends: until it
+                // drops, a second launch's `Activate` opens no terminal
+                // beside the windows this boot is about to open.
+                let _boot_settled = single_instance::BootSettled::when_dropped(&state_for_restore);
                 // Mount the shared terminal tenant FIRST so persisted terminal
                 // windows resolve and the watcher reopens them on relaunch.
                 if let Some(embedded) = state_for_restore.embedded() {
@@ -8771,6 +8782,53 @@ mod tests {
                 "a relaunch must release the endpoint right before it"
             );
         }
+    }
+
+    /// The boot's restore task takes its settled-guard inside the task and
+    /// before its first await, so every way out of the task, its end, an
+    /// early return or a panic, marks the boot settled; a boot left pending
+    /// would have every later `Activate` open nothing. The guard's drop is
+    /// the mark's one writer.
+    #[test]
+    fn the_boot_restore_task_settles_the_boot_on_every_way_out() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let boot = source_region(
+            production,
+            "let queued = queue_boot_restore(&state_for_restore);",
+            "spawn_launch_update_check(app.handle().clone());",
+        );
+        let task = boot
+            .find("tauri::async_runtime::spawn(async move {")
+            .expect("the boot restore runs as a task");
+        let first_await = boot
+            .find(".await")
+            .expect("the restore task awaits its mounts");
+        let guard = boot.find(
+            "let _boot_settled = single_instance::BootSettled::when_dropped(&state_for_restore);",
+        );
+        assert!(
+            guard.is_some_and(|guard| task < guard && guard < first_await),
+            "the restore task must hold the boot's settled-guard from before its first await"
+        );
+        assert!(boot.contains("ensure_boot_window(Arc::clone(&state_for_restore)).await"));
+        const SINGLE_INSTANCE_RS: &str = include_str!("single_instance.rs");
+        let (guard_source, _) = SINGLE_INSTANCE_RS
+            .split_once(boundary)
+            .expect("the test module separates the production code");
+        let mark = concat!("boot_settled", ".store(");
+        assert_eq!(
+            production.matches(mark).count() + guard_source.matches(mark).count(),
+            1,
+            "only the guard's drop marks the boot settled"
+        );
+        let drop_body = source_region(
+            guard_source,
+            "\nimpl Drop for BootSettled {",
+            "\n/// Answer a second launch's `Activate`",
+        );
+        assert!(drop_body.contains("self.0.boot_settled.store(true, Ordering::SeqCst);"));
     }
 
     #[test]

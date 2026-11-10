@@ -15,15 +15,16 @@
 //! The endpoint is per user (the runtime directory on unix, the user name in
 //! the pipe name on Windows), not per `CHAN_HOME`.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chan_server::handoff::{self, ActivateReply, ClaimError, EndpointClaim, Response};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
-use crate::{serve, AppState};
+use crate::{serve, window_watcher, AppState};
 
 /// How long a launch that found the endpoint held keeps asking the holder to
 /// come forward. The holder may still be booting: it claims the endpoint
@@ -234,10 +235,29 @@ pub(crate) fn note_focused(app: &AppHandle, label: &str) {
         .unwrap_or_else(|e| e.into_inner()) = Some(label.to_string());
 }
 
+/// Marks the boot settled when dropped. The boot's restore task holds one
+/// from its first statement, so the mark is set however the task ends, by a
+/// panic too: a boot left pending would have every later `Activate` open
+/// nothing.
+pub(crate) struct BootSettled(Arc<AppState>);
+
+impl BootSettled {
+    pub(crate) fn when_dropped(state: &Arc<AppState>) -> Self {
+        Self(Arc::clone(state))
+    }
+}
+
+impl Drop for BootSettled {
+    fn drop(&mut self) {
+        self.0.boot_settled.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Answer a second launch's `Activate` as a Dock click does: raise the last
 /// focused window that still shows, or open a standalone terminal when no
-/// window shows. A desktop shutting down refuses, so the launch waits for the
-/// endpoint instead of exiting beside a desktop about to go.
+/// window shows and none is on its way. A desktop shutting down refuses, so
+/// the launch waits for the endpoint instead of exiting beside a desktop
+/// about to go.
 pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     if state.shutdown_started.load(Ordering::SeqCst) {
         return Response::Error {
@@ -250,6 +270,47 @@ pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
     if let Err(e) = app.show() {
         tracing::warn!(error = %e, "unhiding the app to come forward failed");
     }
+    match forward_for(app, state) {
+        Forward::Raise(label) => {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.unminimize();
+                if let Err(e) = window.show() {
+                    tracing::warn!(label = %window.label(), error = %e, "showing the window to come forward failed");
+                }
+                if let Err(e) = window.set_focus() {
+                    tracing::warn!(label = %window.label(), error = %e, "focusing the window to come forward failed");
+                }
+            }
+        }
+        Forward::OpenTerminal => crate::spawn_terminal_window(app),
+        Forward::WindowOnItsWay => {
+            tracing::info!("asked to come forward while a window is on its way; opening none")
+        }
+    }
+    Response::Activated {
+        desktop_version: handoff::CHAN_VERSION.into(),
+    }
+}
+
+/// What coming forward does.
+#[derive(Debug, PartialEq, Eq)]
+enum Forward {
+    /// Raise this window.
+    Raise(String),
+    /// No window shows and none is on its way: open a standalone terminal.
+    OpenTerminal,
+    /// No window shows yet and one is on its way. A terminal opened now
+    /// would be one more saved window beside those about to show.
+    WindowOnItsWay,
+}
+
+/// Read the desktop's windows and choose ([`forward_choice`]).
+fn forward_for<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> Forward {
+    // Read before the windows. A window the watcher builds between the two
+    // reads was on its way at the first, so no terminal opens beside it; in
+    // the other order it could be missing from the windows and then no
+    // longer on its way.
+    let on_its_way = local_window_on_its_way(app, state);
     let windows = app.webview_windows();
     let shown: Vec<String> = windows
         .iter()
@@ -264,20 +325,45 @@ pub(crate) fn come_forward(app: &AppHandle, state: &AppState) -> Response {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    match forward_target(last.as_deref(), &shown).and_then(|label| windows.get(&label)) {
-        Some(window) => {
-            let _ = window.unminimize();
-            if let Err(e) = window.show() {
-                tracing::warn!(label = %window.label(), error = %e, "showing the window to come forward failed");
-            }
-            if let Err(e) = window.set_focus() {
-                tracing::warn!(label = %window.label(), error = %e, "focusing the window to come forward failed");
-            }
-        }
-        None => crate::spawn_terminal_window(app),
+    forward_choice(last.as_deref(), &shown, on_its_way)
+}
+
+/// Whether a window of this desktop's own library is about to show: the boot
+/// has not settled, so its restored windows or its terminal are still to
+/// come, or the library holds a shown record whose native window the watcher
+/// has not built yet ([`window_watcher::awaiting_native_window`]). Devserver
+/// records are left out, where `window_on_its_way` in `main.rs` counts them
+/// for an exit it rechecks: a closed devserver window stays in its feed until
+/// the devserver has deleted it, nothing opens for it, and an `Activate`
+/// answered with no window in that time has no recheck to open one.
+fn local_window_on_its_way<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> bool {
+    if !state.boot_settled.load(Ordering::SeqCst) {
+        return true;
     }
-    Response::Activated {
-        desktop_version: handoff::CHAN_VERSION.into(),
+    let Some(embedded) = state.embedded() else {
+        return false;
+    };
+    let open: HashSet<String> = app.webview_windows().into_keys().collect();
+    let buried: HashSet<String> = state
+        .buried_snapshot()
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    window_watcher::awaiting_native_window(&embedded.local_window_records(), &open, &buried)
+}
+
+/// The choice as a function of what was read: a window that shows is raised
+/// whatever else is due, and a terminal opens only when no window shows and
+/// none is on its way.
+fn forward_choice(
+    last_focused: Option<&str>,
+    shown: &[String],
+    window_on_its_way: bool,
+) -> Forward {
+    match forward_target(last_focused, shown) {
+        Some(label) => Forward::Raise(label),
+        None if window_on_its_way => Forward::WindowOnItsWay,
+        None => Forward::OpenTerminal,
     }
 }
 
@@ -409,6 +495,120 @@ mod tests {
         );
         assert_eq!(forward_target(None, &shown).as_deref(), Some("local::a"));
         assert_eq!(forward_target(Some("local::a"), &[]), None);
+    }
+
+    /// A desktop still booting shows no window yet and is about to open its
+    /// own: a terminal opened for the second launch would be one more saved
+    /// window beside them.
+    #[test]
+    fn come_forward_opens_nothing_while_a_window_is_on_its_way_and_none_shows() {
+        assert_eq!(forward_choice(None, &[], true), Forward::WindowOnItsWay);
+        assert_eq!(
+            forward_choice(Some("local::gone"), &[], true),
+            Forward::WindowOnItsWay
+        );
+    }
+
+    #[test]
+    fn come_forward_opens_a_terminal_when_no_window_shows_and_none_is_on_its_way() {
+        assert_eq!(forward_choice(None, &[], false), Forward::OpenTerminal);
+        assert_eq!(
+            forward_choice(Some("local::gone"), &[], false),
+            Forward::OpenTerminal
+        );
+    }
+
+    #[test]
+    fn come_forward_raises_a_shown_window_whatever_is_on_its_way() {
+        let shown = vec!["local::b".to_string(), "local::a".to_string()];
+        for on_its_way in [false, true] {
+            assert_eq!(
+                forward_choice(Some("local::b"), &shown, on_its_way),
+                Forward::Raise("local::b".into())
+            );
+            assert_eq!(
+                forward_choice(Some("local::gone"), &shown, on_its_way),
+                Forward::Raise("local::a".into())
+            );
+            assert_eq!(
+                forward_choice(None, &shown, on_its_way),
+                Forward::Raise("local::a".into())
+            );
+        }
+    }
+
+    /// The restore task's guard marks the boot settled when the task ends,
+    /// and when it panics instead: the unwind drops the guard.
+    #[test]
+    fn the_boot_settles_when_its_restore_task_ends_or_panics() {
+        for panics in [false, true] {
+            let config = tempfile::tempdir().unwrap();
+            let store = Arc::new(std::sync::Mutex::new(crate::config::ConfigStore::at_path(
+                config.path().join("config.json"),
+            )));
+            let state = Arc::new(AppState::with_store(store));
+            assert!(
+                !state.boot_settled.load(Ordering::SeqCst),
+                "a desktop starts with its boot pending"
+            );
+            let guard = BootSettled::when_dropped(&state);
+            assert!(
+                !state.boot_settled.load(Ordering::SeqCst),
+                "the boot stays pending while the restore task runs"
+            );
+            let task = std::thread::spawn(move || {
+                let _boot_settled = guard;
+                assert!(!panics, "the restore task panics");
+            });
+            assert_eq!(task.join().is_err(), panics);
+            assert!(
+                state.boot_settled.load(Ordering::SeqCst),
+                "the boot is settled once the restore task is over (panicked: {panics})"
+            );
+        }
+    }
+
+    /// The reads behind the choice, against a desktop with a window registry.
+    /// While the boot is pending a second launch opens nothing. A boot that
+    /// ended with no window leaves the terminal to the launch. A minted
+    /// terminal's record is on its way until the watcher builds its native
+    /// window, which is then the window raised.
+    #[test]
+    fn a_second_launch_opens_nothing_while_the_boot_or_a_window_is_on_its_way() {
+        if !crate::embedded::in_own_chan_home(
+            "single_instance::tests::a_second_launch_opens_nothing_while_the_boot_or_a_window_is_on_its_way",
+        ) {
+            return;
+        }
+        let desktop = crate::tests::handoff_row::Desktop::new();
+        let app = desktop.app.handle();
+        assert_eq!(
+            forward_for(app, &desktop.state),
+            Forward::WindowOnItsWay,
+            "a pending boot opens its own windows"
+        );
+        drop(BootSettled::when_dropped(&desktop.state));
+        assert_eq!(
+            forward_for(app, &desktop.state),
+            Forward::OpenTerminal,
+            "a settled boot with no window and none on its way"
+        );
+        desktop
+            .runtime
+            .block_on(crate::ensure_boot_window(Arc::clone(&desktop.state)))
+            .expect("the boot window rule mints a terminal");
+        let records = desktop.embedded().local_window_records();
+        assert_eq!(records.len(), 1, "the boot window rule minted one terminal");
+        assert_eq!(
+            forward_for(app, &desktop.state),
+            Forward::WindowOnItsWay,
+            "the terminal has a record and no native window yet"
+        );
+        let label = window_watcher::native_label(&records[0]);
+        tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
+            .build()
+            .expect("mock webview window");
+        assert_eq!(forward_for(app, &desktop.state), Forward::Raise(label));
     }
 
     /// The I/O half against a real listener on a temporary endpoint: a launch
