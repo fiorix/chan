@@ -49,7 +49,7 @@ Each node generates a private key of its own, and every node gives its interface
 
 - `IDENTITY_URL` is, for example, `http://127.0.0.1:7004`. Cleartext is accepted only to a loopback IP literal or with `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`.
 - `WIREGUARD_AGENT_TOKEN` is the bearer identity checks on `/internal/v1/wireguard/peers`, equal to identity's `WIREGUARD_AGENT_TOKEN` (`openssl rand -hex 32`). Every node's agent presents the same value: the lists are the same, so one bearer per node would protect nothing more.
-- `WIREGUARD_AGENT_HOST_ID` is the node's `DEVSERVER_PROXY_ID`, one lowercase DNS label, which is the id of the node's entry in identity's `WIREGUARD_INGRESSES`. identity serves the list only to an id in that list; [A host id identity does not list](#a-host-id-identity-does-not-list) says what the agent does with any other.
+- `WIREGUARD_AGENT_HOST_ID` is the node's `DEVSERVER_PROXY_ID`, one lowercase DNS label, which is the id of the node's entry in identity's `WIREGUARD_INGRESSES`. identity answers 404 to an id that is not in that list; [A host id identity does not list](#a-host-id-identity-does-not-list) says what the agent does then.
 - `WIREGUARD_INTERFACE` is the kernel interface the agent changes peers on. It is not `all` or `interfaces`, which `wg show` reads as words.
 - `WIREGUARD_AGENT_POLL_SECS` is a whole number from 1 to 60.
 - `WIREGUARD_WG_BIN` defaults to `wg` from `PATH`.
@@ -59,12 +59,12 @@ A missing required value, a poll outside 1 to 60 or a malformed value refuses st
 
 ## A host id identity does not list
 
-identity serves the peer list only to a host id that is an id in its `WIREGUARD_INGRESSES`. For any other id, and for every id while it has no enrollment configured, it answers 404. The agent handles a 404 as it handles every failed poll but a refused bearer: it logs `identity does not serve the peer list; keeping the last one` with the status, once at warn and then at debug while it repeats, and keeps polling. It does not exit. What that leaves on the interface depends on whether identity ever served this process a list:
+identity answers 404 to a host id that is not an id in its `WIREGUARD_INGRESSES`. The list is the same for every host, so serving it to an unknown one could not wipe or misplace a peer; the 404 flags that the agent's host id and identity's list disagree. An identity with no enrollment configured has no list to disagree with and relays profile's list to any well-formed host id. The agent handles a 404 as it handles every failed poll but a refused bearer: it logs `identity does not serve the peer list; keeping the last one` with the status, once at warn and then at debug while it repeats, and keeps polling. It does not exit. What that leaves on the interface depends on whether identity ever served this process a list:
 
 - an agent that was following a list keeps its last one in force: the peers it added stay, no newly enrolled peer is added and no revoked peer is removed;
 - an agent started with such an id never reconciles, so the interface keeps the peers it has, those an earlier run added among them.
 
-A mistyped id, a node missing from identity's list or an identity with no enrollment configured therefore never empties the interface. It also keeps revocations from this node: a PAT revoked, expired or blocked meanwhile stays a kernel peer here until identity serves the agent again or the interface is taken down. So a node taken out of identity's list has its agent stopped and its interface taken down, and identity keeps enrollment configured for as long as any agent runs. The warn line in the journal (`journalctl -u chan-gateway-wireguard-agent`) is the sign of it.
+A mistyped id, or a node missing from identity's list, therefore never empties the interface. It also keeps revocations from this node: a PAT revoked, expired or blocked meanwhile stays a kernel peer here until the host id is configured on identity or the interface is taken down. So a node taken out of identity's list has its agent stopped and its interface taken down. The warn line in the journal (`journalctl -u chan-gateway-wireguard-agent`) is the sign of it.
 
 ## What the agent never touches
 
