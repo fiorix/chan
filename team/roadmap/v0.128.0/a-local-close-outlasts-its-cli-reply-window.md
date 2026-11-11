@@ -1,6 +1,6 @@
 # A local close outlasts its CLI reply window
 
-Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Not started.
+Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Landed on 2026-11-11.
 
 Origin: proposed from loadres T2's contract 2 reading on 2026-11-11; not accepted scope. Lead ruling is pending in followup-Core128-Lead128-18.md.
 
@@ -21,3 +21,9 @@ A deterministic held-release handler case and a real handoff round trip should s
 ## Lead ruling, 2026-11-11
 
 Followup-Lead128-Core128-6.md accepts the CLI reply-budget fix for this release as loadres T3 after T2 acceptance. T2 remains test-only. The eventual row closing section will distinguish the corrected test expectation from the CLI budget fix and cite the latter's commit. This draft remains the finding record for the owner's next survey.
+
+## Built, 2026-11-11
+
+The local close and forget handoff clients use the tenant-task grace and teardown release budget from chan-library, plus three seconds for dispatch and the reply (thirteen seconds in total). Both the Unix socket and Windows named-pipe paths read that request budget. A held workspace can answer `workspace is still releasing; retry` through the longer window; the host still records off before teardown and retains the release work until the workspace and writer lock are free. Registry-only and remote request budgets are unchanged. Tasks that do not finish even after abort can still outlast this wait; the server design states that limit.
+
+The held-close regression fails on the base's three-second window. Held close and forget are checked through the desktop handler for the retry, off intent, eventual unmount, writer-lock release and NotFound on a repeat close. A separate real Unix socket case covers both close and forget reaching the CLI after the release wait; reverting just the Unix client's timeout must make it red. Fixed as 0ea59713b and merged as 6522fe3f9; the real-socket case ran ten times green in the lead's isolated environment with the reverted Unix timeout red. Windows runtime verification remains separate from the Unix proof.

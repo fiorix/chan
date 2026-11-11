@@ -65,7 +65,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | built | owner |
-| [tests still red under the heaviest load][loadres] | not started | design |
+| [tests still red under the heaviest load][loadres] | built | gate |
 | [tmux windows not on their machine card][tmuxcard] | built | owner |
 | [New Window in a devserver tmux window][tmuxnew] | built | owner |
 | [a launch beside a silent desktop shows nothing][silentlaunch] | partly built | build |
@@ -84,7 +84,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [a save that meets its file gone opens the external edit dialog][savegone] | not started | design |
 | [the tag-scoped graph never refits its nodes][taglens] | not started | design |
 | [ghostty sends a pasted line break as LF][ghosttylf] | not started | design |
-| [a local close outlasts its CLI reply window][closebudget] | not started | design |
+| [a local close outlasts its CLI reply window][closebudget] | landed | GA |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
