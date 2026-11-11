@@ -449,6 +449,10 @@ export interface GatewayEntry {
   /** Live tunnel state (connecting, up, lost with handshake age, or lookup
    * failure); absent on an older desktop, null without a tunnel. */
   wireguard_status?: string | null;
+  /** Each adopted enrolled ingress's live state or start refusal, in
+   * discovery order. Absent on older desktops; empty for manual files and
+   * unadopted enrollments. Enrollment-wide refusals use last_error. */
+  wireguard_ingresses?: { id: string; status: string }[];
   /** The public half of the WireGuard key the desktop generated for this
    * gateway, base64; absent on an older desktop, null when none was
    * generated. */

@@ -70,7 +70,7 @@ pub enum SetWorkspaceOnOutcome {
 pub enum WireguardKeyOutcome {
     /// A key pair was generated and its public half stored on the row; the
     /// row as the launcher lists it.
-    Generated(GatewayEntry),
+    Generated(Box<GatewayEntry>),
     /// No gateway has the id.
     NotFound,
     /// The gateway's discovery carries no `wireguard` entry, so it enrolls

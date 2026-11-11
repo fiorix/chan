@@ -114,8 +114,8 @@ pub(crate) use chan_library::{
 pub use chan_library::{
     DevserverEntry, DevserverFeedSource, DevserverInput, DevserverRegistry, DevserverStatus,
     GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, HostedWorkspace, LauncherWorkspace,
-    LocalColorStore, LocalThemeStore, PersistedWorkspace, WorkspaceHost, WorkspaceLifecycleOutcome,
-    WorkspaceOverlay, WorkspaceStatus, WIREGUARD_NOT_OFFERED,
+    LocalColorStore, LocalThemeStore, PersistedWorkspace, WireguardIngressStatus, WorkspaceHost,
+    WorkspaceLifecycleOutcome, WorkspaceOverlay, WorkspaceStatus, WIREGUARD_NOT_OFFERED,
 };
 pub use devserver::{
     persisted_devserver_port, persisted_devserver_token, rotate_persisted_devserver_token,
