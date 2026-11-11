@@ -285,6 +285,7 @@ const FUNCTIONS = [
   "ghostty_search_get",
   "ghostty_search_select_next",
   "ghostty_search_select_prev",
+  "ghostty_paste_encode",
 ] as const;
 
 type Fns = Record<(typeof FUNCTIONS)[number], Fn> & {
@@ -840,6 +841,37 @@ export class VtTerminal {
 
   hasBracketedPaste(): boolean {
     return this.getMode(2004);
+  }
+
+  /// What a paste of `text` sends the program, by the core's own paste
+  /// encoder, the one native Ghostty pastes with: NUL, BS, ENQ, EOT, ESC, DEL
+  /// and the tty's control characters (Ctrl+C, Ctrl+\, Ctrl+U, Ctrl+Z,
+  /// Ctrl+Q, Ctrl+S, Ctrl+W, Ctrl+V, Ctrl+R, Ctrl+O) each become a space, so a
+  /// pasted ESC[201~ cannot end the bracket early and no pasted byte acts as a
+  /// key; under bracketed paste (mode 2004) the text is framed in ESC[200~ and
+  /// ESC[201~, and without it each line feed becomes a carriage return. An
+  /// empty text without bracketed paste sends nothing.
+  encodePaste(text: string): string {
+    const data = new TextEncoder().encode(text);
+    // The frame adds ESC[200~ and ESC[201~ at most.
+    const cap = data.length + 12;
+    const src = this.wasm.alloc(Math.max(data.length, 1));
+    const buf = this.wasm.alloc(cap);
+    const written = this.wasm.alloc(8);
+    try {
+      this.wasm.bytes().set(data, src);
+      const bracketed = this.hasBracketedPaste() ? 1 : 0;
+      const result = this.wasm.fn.ghostty_paste_encode(src, data.length, bracketed, buf, cap, written);
+      if (result !== ABI.GhosttyResult.SUCCESS) throw new Error(`ghostty-vt: encoding a paste failed (${result})`);
+      const len = this.wasm.view().getUint32(written, true);
+      // The encoder replaces ASCII bytes with ASCII ones, so the UTF-8 it
+      // returns decodes whole.
+      return new TextDecoder().decode(this.wasm.bytes().slice(buf, buf + len));
+    } finally {
+      this.wasm.free(src, Math.max(data.length, 1));
+      this.wasm.free(buf, cap);
+      this.wasm.free(written, 8);
+    }
   }
 
   hasFocusEvents(): boolean {

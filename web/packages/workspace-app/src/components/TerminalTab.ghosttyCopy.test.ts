@@ -1,17 +1,21 @@
 // @vitest-environment jsdom
 //
-// Copying from a ghostty terminal. Every copy path of a mounted TerminalTab
-// on the ghostty backend writes the same text through chan's writer,
-// `writeClipboardText`: the copy chord, the menu's Copy and Copy Scrollback,
-// and ghostty-web's own copies on mouse release and double click. A command
-// longer than the terminal is wide copies as one line. Each case runs in a
-// browser, where the writer is `navigator.clipboard.writeText`, and on
-// chan-desktop, where it is the native `write_clipboard_text` and any write
-// to the web clipboard went around it. ClipboardItem exists, as in Chrome and
-// WebKit, so a copy that writes the clipboard itself, the way ghostty-web's
-// does, shows as a `write`. The terminal is a stand-in for ghostty-web's
-// Terminal over the binding on the vendored core, carrying ghostty-web's own
-// SelectionManager and its mouse handling, as the find tests' stand-in does.
+// Copying from and pasting into a ghostty terminal. Every copy path of a
+// mounted TerminalTab on the ghostty backend writes the same text through
+// chan's writer, `writeClipboardText`: the copy chord, the menu's Copy and Copy
+// Scrollback, and ghostty-web's own copies on mouse release and double click. A
+// command longer than the terminal is wide copies as one line. Every paste path
+// sends the program the same cleaned bytes. Each copy case runs in a browser,
+// where the writer is `navigator.clipboard.writeText`, and on chan-desktop,
+// where it is the native `write_clipboard_text` and any write to the web
+// clipboard went around it. ClipboardItem exists, as in Chrome and WebKit, so a
+// copy that writes the clipboard itself, the way ghostty-web's does, shows as a
+// `write`. The terminal is a stand-in for ghostty-web's Terminal over the
+// binding on the vendored core, carrying ghostty-web's own SelectionManager and
+// its mouse handling, as the find tests' stand-in does, and ghostty-web's
+// paste: its listeners on the element frame a native paste and an
+// `insertFromPaste` input as the clipboard holds them, as does its `paste`, and
+// `input` hands the program what it is given.
 
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
@@ -36,6 +40,7 @@ import {
   openBodyMenu,
   output,
   seatTerminals,
+  sentFrames,
   TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
@@ -81,10 +86,24 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       this.options = options;
       ghostty.terminals.push(this as unknown as GhosttyStandIn);
     }
+    dataHandlers: Array<(data: string) => void> = [];
     open(element: HTMLElement) {
       this.element = element;
       if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "0");
       element.append(this.canvas);
+      element.addEventListener("paste", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const text = (event as ClipboardEvent).clipboardData?.getData("text/plain");
+        if (text) this.paste(text);
+      });
+      element.addEventListener("beforeinput", (event) => {
+        const input = event as InputEvent;
+        if (input.inputType !== "insertFromPaste" || !input.data) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.paste(input.data);
+      });
       this.wasmTerm = this.options.ghostty.createTerminal(this.cols, this.rows, {
         scrollbackLimit: this.options.scrollback,
       });
@@ -97,8 +116,12 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     }
     attachCustomKeyEventHandler() {}
     attachCustomWheelEventHandler() {}
-    onData() {
-      return { dispose() {} };
+    onData(handler: (data: string) => void) {
+      this.dataHandlers.push(handler);
+      return { dispose: () => void this.dataHandlers.splice(this.dataHandlers.indexOf(handler), 1) };
+    }
+    fire(data: string) {
+      for (const handler of [...this.dataHandlers]) handler(data);
     }
     onResize() {
       return { dispose() {} };
@@ -113,7 +136,7 @@ vi.mock("../terminal/backend", async (importOriginal) => {
       return false;
     }
     hasBracketedPaste() {
-      return false;
+      return this.wasmTerm.hasBracketedPaste();
     }
     write(data: string | Uint8Array) {
       this.wasmTerm.write(data);
@@ -121,7 +144,13 @@ vi.mock("../terminal/backend", async (importOriginal) => {
     writeln(data: string) {
       this.write(`${data}\r\n`);
     }
-    paste() {}
+    paste(text: string) {
+      this.fire(this.hasBracketedPaste() ? `\x1b[200~${text}\x1b[201~` : text);
+    }
+    input(data: string, wasUserInput = false) {
+      if (wasUserInput) this.fire(data);
+      else this.write(data);
+    }
     resize(cols: number, rows: number) {
       this.cols = cols;
       this.rows = rows;
@@ -181,7 +210,11 @@ const COMMAND =
   "$ curl -fsSL https://downloads.example.test/tools/install.sh | sh -s -- --prefix /opt/tools --yes";
 
 const mounted: Array<Record<string, unknown>> = [];
-let clipboard: { write: ReturnType<typeof vi.fn>; writeText: ReturnType<typeof vi.fn> };
+let clipboard: {
+  write: ReturnType<typeof vi.fn>;
+  writeText: ReturnType<typeof vi.fn>;
+  readText: ReturnType<typeof vi.fn>;
+};
 const tauri = window as unknown as { __TAURI_INTERNALS__?: { invoke: ReturnType<typeof vi.fn> } };
 
 beforeAll(() => {
@@ -194,7 +227,11 @@ beforeEach(() => {
   vi.stubGlobal("ClipboardItem", class {
     constructor(readonly items: Record<string, Blob>) {}
   });
-  clipboard = { write: vi.fn(async () => {}), writeText: vi.fn(async (_text: string) => {}) };
+  clipboard = {
+    write: vi.fn(async () => {}),
+    writeText: vi.fn(async (_text: string) => {}),
+    readText: vi.fn(async () => ""),
+  };
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
 });
 
@@ -316,5 +353,46 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
     await tick();
     expect(platform.takeWrites()).toEqual(["curl"]);
     platform.expectNoBypass();
+  });
+});
+
+describe("pasting into a ghostty terminal", () => {
+  /// A text that would end its own bracket and colour the screen, with CRLF
+  /// and LF line ends, and the same text as chan pastes it under bracketed
+  /// paste.
+  const HOSTILE = "echo one\x1b[201~; echo two\r\nprintf '\x1b[31mred'\x03\nlast";
+  const CLEANED = "\x1b[200~echo one [201~; echo two\rprintf ' [31mred' \rlast\x1b[201~";
+
+  function inputs(): string[] {
+    return sentFrames(TerminalSocket.all[0]!)
+      .filter((frame) => frame.type === "input")
+      .map((frame) => frame.data as string);
+  }
+
+  test("the paste chord and the menu's Paste row send the same cleaned bytes, once each", async () => {
+    const { target, term } = await renderGhostty();
+    await output(TerminalSocket.all[0]!, "\x1b[?2004h");
+    expect(term.wasmTerm.hasBracketedPaste()).toBe(true);
+    const before = inputs().length;
+
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { getData: (type: string) => (type === "text/plain" ? HOSTILE : "") },
+    });
+    term.element!.dispatchEvent(paste);
+    await tick();
+    expect(inputs().slice(before), "the chord's native paste").toEqual([CLEANED]);
+
+    clipboard.readText.mockResolvedValue(HOSTILE);
+    await openBodyMenu(target);
+    menuRow("Paste").click();
+    await vi.waitFor(() => expect(inputs().length).toBe(before + 2));
+    expect(inputs().slice(before + 1), "the menu's Paste row").toEqual([CLEANED]);
+
+    term.element!.dispatchEvent(
+      new InputEvent("beforeinput", { inputType: "insertFromPaste", data: HOSTILE, bubbles: true, cancelable: true }),
+    );
+    await tick();
+    expect(inputs().slice(before + 2), "an insertFromPaste input").toEqual([CLEANED]);
   });
 });

@@ -205,7 +205,7 @@
     windowIsTransparent,
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
-  import { handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
+  import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
   import { installGhosttySelection } from "../terminal/ghosttySelection";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import { ghosttyScrollbackText } from "../terminal/ghosttyVt";
@@ -2488,15 +2488,25 @@
   }
 
   /// The tab's capture-phase paste: the PTY size reclaim on both backends,
-  /// then, under ghostty, a paste with no text on the clipboard (an image),
-  /// which ghostty-web would drop and xterm.js hands to the program
-  /// (ghosttyPaste.ts). Only a paste aimed at the renderer host: the composer
-  /// inside the tab takes its own pastes, images included.
+  /// then, under ghostty, the paste itself, cleaned before ghostty-web would
+  /// frame it as the clipboard holds it, and an empty one (an image) that
+  /// ghostty-web would drop (ghosttyPaste.ts). Only a paste aimed at the
+  /// renderer host: the composer inside the tab takes its own pastes, images
+  /// included.
   function onTerminalPasteCapture(event: ClipboardEvent): void {
     reclaimPtySize(event);
     if (backend !== "ghostty" || !host) return;
     if (!(event.target instanceof Node) || !host.contains(event.target)) return;
-    handleGhosttyEmptyPaste(event, term as GhosttyTerminal | null);
+    handleGhosttyPaste(event, term as GhosttyTerminal | null);
+  }
+
+  /// Under ghostty, a paste delivered as an input with no paste event before
+  /// it, which ghostty-web's textarea would send unclean; the same cleaned
+  /// paste. Only on the renderer host, as for the paste event.
+  function onTerminalBeforeInputCapture(event: InputEvent): void {
+    if (backend !== "ghostty" || !host) return;
+    if (!(event.target instanceof Node) || !host.contains(event.target)) return;
+    handleGhosttyPasteInput(event, term as GhosttyTerminal | null);
   }
 
   /// Measure what a tmux pane's host can show without fitting the renderer
@@ -2769,11 +2779,15 @@
   // read the clipboard programmatically. `readClipboardText` does that natively
   // in Rust under chan-desktop so it bypasses WKWebView's DOM-paste "Paste"
   // button; on web it falls back to the gesture-permitted navigator.clipboard.
-  // Routing through `term.paste` keeps the menu path bracketed, matching Cmd+V.
+  // The text goes the way Cmd+V's does: `term.paste` under xterm.js, chan's
+  // cleaned paste under ghostty.
   async function pasteClipboard(): Promise<void> {
     closeTabMenu();
     const text = await readClipboardText();
-    if (text) term?.paste(text);
+    if (text && term) {
+      if (backend === "ghostty") pasteIntoGhostty(term as GhosttyTerminal, text);
+      else term.paste(text);
+    }
     focusTerminal();
   }
 
@@ -3065,9 +3079,10 @@
     // the PTY. Resolve them here (the custom handler runs before xterm
     // processes the key) so no bytes reach the shell and Ctrl+Shift+C does not
     // raise SIGINT. `false` tells xterm to skip the keystroke. Paste leaves the
-    // browser's native event to each backend's own `paste` listener; Ghostty's
-    // pre-inversion result is true so its wrapper also passes the key through
-    // without suppressing that native event.
+    // browser's native event to travel: xterm.js's own `paste` listener takes
+    // it, and under ghostty the tab's capture listener (onTerminalPasteCapture);
+    // Ghostty's pre-inversion result is true so its wrapper also passes the key
+    // through without suppressing that native event.
     if (
       handleTerminalClipboardChord(e, {
         os: currentOS(),
@@ -3078,7 +3093,7 @@
       // for a terminal whose renderer does NOT have focus. Neither renderer
       // stops propagation on its own, so without this the event reaches the
       // root and copies a second time. Paste is only MATCHED here, never
-      // acted on, and its work is the backend's native paste listener, so it
+      // acted on, and its work is the native paste event's listener, so it
       // keeps travelling.
       if (isTerminalCopyChord(e, currentOS())) e.stopPropagation();
       return terminalClipboardKeyHandlerResult(e, currentOS(), backend);
@@ -3197,6 +3212,7 @@
   onkeydowncapture={reclaimPtySize}
   onpointerdowncapture={reclaimPtySize}
   onpastecapture={onTerminalPasteCapture}
+  onbeforeinputcapture={onTerminalBeforeInputCapture}
   onfocusin={noteKeyboardSurface}
   oncontextmenu={onTerminalContextMenu}
 >
