@@ -45,6 +45,8 @@ mod redraw;
 mod request_status;
 mod ring;
 pub mod shell_profiles;
+#[allow(dead_code)]
+mod terminal_program;
 mod tmux_connection;
 mod tmux_gate;
 
