@@ -27,6 +27,12 @@ const EXT_MIME: Record<string, string> = {
   svg: "image/svg+xml",
 };
 
+/// The image MIME type a file extension names (without its dot, any case),
+/// or null for an extension that names no image chan copies or embeds.
+export function imageMimeForExtension(ext: string): string | null {
+  return EXT_MIME[ext.toLowerCase()] ?? null;
+}
+
 /// Whether a markdown-form image src points at an SVG file. The
 /// `#w=`/alignment fragment grammar is parsed off first; a query string
 /// (pre-resolved `/api/fs/...?token=...` srcs) is ignored too.

@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   isTauriDesktop,
   openWebInspector,
+  listDroppedFiles,
   readClipboardText,
+  readDroppedFile,
   readGatewayCsrfToken,
   reloadWindow,
   runDesktopDownload,
@@ -219,6 +221,32 @@ describe("gateway CSRF refusal diagnostics", () => {
     const message = desktop.blockedWindowMessage("The browser blocked the new Chan window");
     expect(message).not.toContain("browser blocked");
     expect(message).toContain("chan-desktop could not open this Chan window natively");
+  });
+});
+
+describe("dropped files", () => {
+  test("lists the drop's files by name", async () => {
+    const invoke = vi.fn().mockResolvedValue(["a.png", "b c.jpg"]);
+    setTauriInternals(invoke);
+    await expect(listDroppedFiles()).resolves.toEqual(["a.png", "b c.jpg"]);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("dropped_files", undefined);
+  });
+
+  test("reads a file by its place in the list and answers its raw bytes", async () => {
+    const invoke = vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+    setTauriInternals(invoke);
+    await expect(readDroppedFile(1)).resolves.toEqual(new Uint8Array([1, 2, 3]));
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("read_dropped_file", { index: 1 });
+  });
+
+  test("takes the bytes as a number array too", async () => {
+    setTauriInternals(vi.fn().mockResolvedValue([4, 5]));
+    await expect(readDroppedFile(0)).resolves.toEqual(new Uint8Array([4, 5]));
+  });
+
+  test("rejects with the desktop's refusal", async () => {
+    setTauriInternals(vi.fn().mockRejectedValue("no such file was just dropped on this window"));
+    await expect(readDroppedFile(0)).rejects.toBe("no such file was just dropped on this window");
   });
 });
 
