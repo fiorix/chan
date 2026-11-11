@@ -3,15 +3,21 @@
 // Without it, dropping an OS file anywhere the SPA doesn't intercept
 // makes the webview navigate into a bare file view with no way back
 // (chan-desktop builds with Tauri's drag-drop handler DISABLED so DOM
-// DnD keeps working; WKWebView's default drop-navigation then fires on
-// any unhandled drop -- and a plain browser tab behaves the same).
+// DnD keeps working; WKWebView's and WebKitGTK's default drop-navigation
+// then fires on any unhandled drop -- and a plain browser tab behaves
+// the same).
 //
-// Design: the guard acts ONLY on OS file drags (`dataTransfer.types`
-// includes "Files"). In-page HTML5 drags -- pane tab moves, the file
-// tree's row moves, the editor's image-atom move -- never carry the
-// Files type, so their dragover/dropEffect semantics are untouched.
+// Design: the guard acts ONLY on OS file drags, in the two shapes an
+// engine hands a page: `dataTransfer.types` includes "Files" (Chrome,
+// WKWebView, WebView2), or, on the desktop, it includes "text/uri-list"
+// for a drag this document did not start (WebKitGTK hands a file dragged
+// in from another application as its `file:` URI and no Files). In-page
+// HTML5 drags -- pane tab moves, the file tree's row moves, the editor's
+// image-atom move, a link or image the engine drags itself -- never
+// carry the Files type and always start in this document, so their
+// dragover/dropEffect semantics are untouched.
 //
-// For Files drags:
+// For OS file drags:
 //   - window `dragover` (capture): always preventDefault (an
 //     uncancelled dragover makes the release navigate); outside the
 //     allowlisted drop zones additionally set `dropEffect = "none"` so
@@ -33,6 +39,8 @@
 // handles file drops natively; read-only ones fall through to the
 // bubble net).
 
+import { isTauriDesktop } from "../api/desktop";
+
 const DROP_ZONE_SELECTOR = "[data-file-drop-zone], .cm-editor";
 
 /// True when the drag carries OS files. In-page drags (tab moves,
@@ -46,13 +54,67 @@ export function isOsFileDrag(e: DragEvent): boolean {
   return Array.from(types).includes("Files");
 }
 
+/// A drag this document started: set at its `dragstart` and cleared when
+/// it ends here. A drag from another application never starts in this
+/// document. The drop clears it after its dispatch as well, since a source
+/// that the drop removes from the document never receives its `dragend`.
+let pageDrag = false;
+
+/// True when the drag carries OS files as WebKitGTK hands them to a page
+/// on the Linux desktop: `text/uri-list` and no Files, from a drag this
+/// document did not start. The URIs are readable only at the drop, so at
+/// dragover the type is all there is to key on, and a link dragged in from
+/// another application counts too: the guard keeps either from navigating
+/// the window.
+export function isDesktopUriDrag(e: DragEvent): boolean {
+  if (pageDrag || !isTauriDesktop()) return false;
+  const types = e.dataTransfer?.types;
+  if (!types) return false;
+  return Array.from(types).includes("text/uri-list");
+}
+
+/// The `file:` URIs a drop's `text/uri-list` carries, in order. Comment
+/// lines and other schemes are left out. Readable only during the drop.
+export function droppedFileUris(dataTransfer: DataTransfer | null | undefined): string[] {
+  const list = dataTransfer?.getData("text/uri-list") ?? "";
+  return list
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#") && /^file:/i.test(line));
+}
+
+/// True when a drop on the desktop carries files from another application
+/// that the page cannot read: it lists `text/uri-list` and no Files, did not
+/// start in this document, and either keeps the list from the page (WebKitGTK
+/// answers empty for a drag carrying files, so a page learns no path) or names
+/// `file:` URIs. A link dragged in from a browser shows its URL and is not one.
+/// Readable only during the drop.
+export function isDesktopFileDrop(dataTransfer: DataTransfer | null | undefined): boolean {
+  if (!dataTransfer || pageDrag || !isTauriDesktop()) return false;
+  const types = Array.from(dataTransfer.types ?? []);
+  if (types.includes("Files") || !types.includes("text/uri-list")) return false;
+  return dataTransfer.getData("text/uri-list") === "" || droppedFileUris(dataTransfer).length > 0;
+}
+
+function isGuardedDrag(e: DragEvent): boolean {
+  return isOsFileDrag(e) || isDesktopUriDrag(e);
+}
+
 /// True when the event target sits inside an allowlisted drop zone.
 export function inFileDropZone(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest(DROP_ZONE_SELECTOR) !== null;
 }
 
+function onWindowDragStartCapture(): void {
+  pageDrag = true;
+}
+
+function onWindowDragEndCapture(): void {
+  pageDrag = false;
+}
+
 function onWindowDragOverCapture(e: DragEvent): void {
-  if (!isOsFileDrag(e)) return;
+  if (!isGuardedDrag(e)) return;
   e.preventDefault();
   if (!inFileDropZone(e.target) && e.dataTransfer) {
     e.dataTransfer.dropEffect = "none";
@@ -60,25 +122,32 @@ function onWindowDragOverCapture(e: DragEvent): void {
 }
 
 function onWindowDropCapture(e: DragEvent): void {
-  if (!isOsFileDrag(e)) return;
+  // Once this drop's dispatch has run, the drag is over.
+  if (pageDrag) setTimeout(onWindowDragEndCapture, 0);
+  if (!isGuardedDrag(e)) return;
   if (!inFileDropZone(e.target)) e.preventDefault();
 }
 
 function onWindowDropBubble(e: DragEvent): void {
-  if (!isOsFileDrag(e)) return;
+  if (!isGuardedDrag(e)) return;
   if (!e.defaultPrevented) e.preventDefault();
 }
 
 /// Install the guard once at App boot. Returns a disposer (tests use
 /// it; the App-lifetime install never tears down).
 export function installFileDropGuard(win: Window = window): () => void {
+  win.addEventListener("dragstart", onWindowDragStartCapture, true);
+  win.addEventListener("dragend", onWindowDragEndCapture, true);
   win.addEventListener("dragover", onWindowDragOverCapture, true);
   win.addEventListener("drop", onWindowDropCapture, true);
   win.addEventListener("drop", onWindowDropBubble, false);
   return () => {
+    win.removeEventListener("dragstart", onWindowDragStartCapture, true);
+    win.removeEventListener("dragend", onWindowDragEndCapture, true);
     win.removeEventListener("dragover", onWindowDragOverCapture, true);
     win.removeEventListener("drop", onWindowDropCapture, true);
     win.removeEventListener("drop", onWindowDropBubble, false);
+    pageDrag = false;
   };
 }
 

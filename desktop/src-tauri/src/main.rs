@@ -5,6 +5,7 @@ mod config;
 mod cs_install;
 mod devserver;
 mod download;
+mod dropped_files;
 mod dropped_paths;
 mod embedded;
 mod gateway;
@@ -5436,6 +5437,10 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // ACL-scoped to locally-served windows (capabilities/
         // local-drop.json) -- the drag pasteboard is system-wide.
         dropped_paths::read_dropped_paths,
+        // The files just dropped on the window from another application, which
+        // WebKitGTK keeps from the page: listed by name, read once each.
+        dropped_files::dropped_files,
+        dropped_files::read_dropped_file,
         // Native upload picker + HTTP stream. Paths and bytes stay in Rust.
         upload::upload_files_native,
         // `cs tunnel` trigger: the SPA forwards the tunnel_open
@@ -8524,6 +8529,38 @@ mod tests {
             optional_content::<u32>(Err(arboard::Error::ClipboardNotSupported)),
             Err(arboard::Error::ClipboardNotSupported)
         ));
+    }
+
+    /// The read behind the editor's and the Rich Prompt's paste recovery on the
+    /// X11 desktop: a PNG another program holds on the CLIPBOARD comes back as
+    /// the same pixels. It needs a display and an owner, so it runs on demand
+    /// (in the desktop guest, under Xvfb, with the basic-flows clipboard owner
+    /// or xclip serving the file `CHAN_DESKTOP_CLIPBOARD_PNG` names), and
+    /// without them it fails rather than passing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs an X display and an owner serving CHAN_DESKTOP_CLIPBOARD_PNG"]
+    fn clipboard_read_image_returns_the_pixels_another_program_holds() {
+        let fixture = std::env::var_os("CHAN_DESKTOP_CLIPBOARD_PNG")
+            .expect("CHAN_DESKTOP_CLIPBOARD_PNG names the PNG the owner serves");
+        assert!(
+            std::env::var_os("DISPLAY").is_some(),
+            "the read needs an X display"
+        );
+        let expected = image::open(&fixture)
+            .expect("the fixture decodes")
+            .to_rgba8();
+        let png = clipboard_read_image()
+            .expect("the clipboard read succeeds")
+            .expect("the clipboard holds an image");
+        let read = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("the read returns a PNG")
+            .to_rgba8();
+        assert_eq!(read.dimensions(), expected.dimensions());
+        assert!(
+            read.as_raw() == expected.as_raw(),
+            "the clipboard's pixels differ from the fixture's"
+        );
     }
 
     /// An absent representation is a successful read, so the cached Linux

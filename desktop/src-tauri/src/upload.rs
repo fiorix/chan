@@ -249,7 +249,7 @@ struct PickedFile {
 /// directory it was picked in, with anything that is not UTF-8 replaced and
 /// control characters escaped. A path with no file name shows its last
 /// component.
-fn shown_name(path: &Path) -> String {
+pub(crate) fn shown_name(path: &Path) -> String {
     let name = path
         .file_name()
         .or_else(|| path.components().next_back().map(|last| last.as_os_str()))

@@ -11,14 +11,16 @@
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { StateEffect, type Extension } from "@codemirror/state";
 import { api } from "../../api/client";
-import { isTauriDesktop, readClipboardImage } from "../../api/desktop";
+import { isTauriDesktop, listDroppedFiles, readClipboardImage, readDroppedFile } from "../../api/desktop";
 import { NO_DOCUMENT_MESSAGE } from "../../api/errors";
+import { isDesktopFileDrop } from "../../state/fileDropGuard";
 import { notify } from "../../state/notify.svelte";
 import { convertHeicForUpload, isHeicFile } from "./heic";
 import { invalidateImageCatalog } from "./image";
 import { encodeRelPath, relativizePath } from "../links";
 import { listLineAt } from "../commands/list";
 import { IMAGE_MOVE_MIME } from "../widgets/image";
+import { imageMimeForExtension } from "../widgets/image_copy";
 import {
   clearImageDragIndicator,
   imageDragSource,
@@ -101,17 +103,25 @@ export function imageDropHandlers(opts: ImageDropOptions): Extension {
         return true;
       }
       const files = event.dataTransfer?.files;
-      if (!files || files.length === 0) return false;
-      // HEIC drops from Chrome / Firefox on non-Apple OSes often
-      // arrive with empty `File.type`. `isHeicFile` peeks at the
-      // extension so those files don't slip through the MIME check.
-      const images = Array.from(files).filter(
-        (f) => f.type.startsWith("image/") || isHeicFile(f),
-      );
-      if (images.length === 0) return false;
+      if (files && files.length > 0) {
+        // HEIC drops from Chrome / Firefox on non-Apple OSes often
+        // arrive with empty `File.type`. `isHeicFile` peeks at the
+        // extension so those files don't slip through the MIME check.
+        const images = Array.from(files).filter(isImageFile);
+        if (images.length === 0) return false;
+        event.preventDefault();
+        const pos = posFromEvent(view, event);
+        uploadAndInsertAll(view, images, pos, resolveInsertCtx(opts));
+        return true;
+      }
+      // WebKitGTK hands a file dropped from another application with no Files
+      // and keeps its URI from the page, which could not read the file anyway:
+      // the desktop, which saw the drop, reads its image files for the page.
+      // Its other files land nothing.
+      if (!isDesktopFileDrop(event.dataTransfer)) return false;
       event.preventDefault();
       const pos = posFromEvent(view, event);
-      uploadAndInsertAll(view, images, pos, resolveInsertCtx(opts));
+      uploadAndInsertAll(view, readDroppedImages, pos, resolveInsertCtx(opts));
       return true;
     },
     paste(event, view) {
@@ -131,30 +141,74 @@ export function imageDropHandlers(opts: ImageDropOptions): Extension {
         const f = item.getAsFile();
         if (f && isHeicFile(f)) images.push(f);
       }
-      // WKWebView can advertise Files while exposing neither items nor files.
-      // Only recover that shape natively; text and accessible files keep their
-      // normal paste behavior, without a second read of the OS clipboard.
-      const types = Array.from(clipboard.types ?? []);
-      const nativePaste = images.length === 0
-        && types.includes("Files")
-        && !types.some((type) => type.startsWith("text/"))
-        && !clipboard.items?.length
-        && !clipboard.files?.length
-        && isTauriDesktop();
-      if (images.length === 0 && !nativePaste) return false;
+      const shape = images.length === 0 && isTauriDesktop() ? nativePasteShape(event, clipboard) : null;
+      if (images.length === 0 && shape === null) return false;
       event.preventDefault();
       const pos = pasteInsertPos(view);
-      uploadAndInsertAll(view, nativePaste ? readNativePasteImages : images, pos, resolveInsertCtx(opts));
+      uploadAndInsertAll(view, shape ? () => readNativePasteImages(shape) : images, pos, resolveInsertCtx(opts));
       return true;
     },
   });
 }
 
-async function readNativePasteImages(): Promise<File[]> {
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/") || isHeicFile(file);
+}
+
+/// Read the image files of the drop the desktop saw on this window, named and
+/// typed as a browser names and types a dropped File (the type from the
+/// extension). One the desktop cannot read is named in a notice and skipped;
+/// the others still land.
+async function readDroppedImages(): Promise<File[]> {
+  let names: string[];
+  try {
+    names = await listDroppedFiles();
+  } catch (err) {
+    console.error("[chan] dropped file list failed", err);
+    notify("Could not read the dropped files");
+    return [];
+  }
+  const files: File[] = [];
+  for (const [index, name] of names.entries()) {
+    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+    const type = imageMimeForExtension(ext) ?? "";
+    if (!isImageFile(new File([], name, { type }))) continue;
+    try {
+      const bytes = await readDroppedFile(index);
+      files.push(new File([new Uint8Array(bytes)], name, { type }));
+    } catch (err) {
+      console.error("[chan] dropped file read failed", err);
+      notify(`Could not read ${name}; skipped`);
+    }
+  }
+  return files;
+}
+
+/// How an engine hands the page a desktop image paste that carries no file the
+/// page can read, so the desktop reads the clipboard image instead. WKWebView
+/// advertises `Files` and exposes neither items nor files (`"files"`). WebKitGTK
+/// hands a trusted paste with no types, items or files at all (`"empty"`), which
+/// is also what it hands for a clipboard holding nothing it can expose. Anything
+/// else is null and keeps its normal paste behavior without a second read of the
+/// OS clipboard: text, an accessible file, and a paste a script dispatched,
+/// which is never trusted.
+export function nativePasteShape(
+  event: Pick<ClipboardEvent, "isTrusted">,
+  clipboard: Pick<DataTransfer, "types" | "items" | "files">,
+): "files" | "empty" | null {
+  if (clipboard.items?.length || clipboard.files?.length) return null;
+  const types = Array.from(clipboard.types ?? []);
+  if (types.includes("Files") && !types.some((type) => type.startsWith("text/"))) return "files";
+  if (types.length === 0 && event.isTrusted) return "empty";
+  return null;
+}
+
+async function readNativePasteImages(shape: "files" | "empty"): Promise<File[]> {
   try {
     const bytes = await readClipboardImage();
     if (!bytes?.length) {
-      notify("No image found on the clipboard");
+      // The empty shape is also an empty clipboard pasted, which says nothing.
+      if (shape === "files") notify("No image found on the clipboard");
       return [];
     }
     return [new File([new Uint8Array(bytes)], "pasted-image.png", { type: "image/png" })];

@@ -281,6 +281,24 @@ export async function readDroppedPaths(): Promise<string[]> {
   }
 }
 
+/// The base names of the files the user just dropped on this window from
+/// another application, in order (the `dropped_files` IPC). WebKitGTK hands
+/// such a drop to the page with no Files and keeps its URIs from the page, so
+/// the desktop, which saw the drop, says what it held; empty when nothing was
+/// dropped there just now, and always off the GTK desktops, where the drop
+/// hands the page Files.
+export async function listDroppedFiles(): Promise<string[]> {
+  return await tauriInvoke<string[]>("dropped_files");
+}
+
+/// Read the file at `index` of `listDroppedFiles`' answer (the
+/// `read_dropped_file` IPC). The desktop answers each file of the window's
+/// latest drop once and rejects anything else.
+export async function readDroppedFile(index: number): Promise<Uint8Array> {
+  const answer = await tauriInvoke<ArrayBuffer | number[]>("read_dropped_file", { index });
+  return answer instanceof ArrayBuffer ? new Uint8Array(answer) : Uint8Array.from(answer);
+}
+
 /// This page's own webview window as an event target, or null when the
 /// webview does not say its label.
 export function ownWebviewWindowTarget(): TauriEventTarget | null {
