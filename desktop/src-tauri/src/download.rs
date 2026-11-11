@@ -20,8 +20,8 @@ use tauri::WebviewWindow;
 use tokio::io::AsyncWriteExt;
 
 use crate::native_transfer::{
-    endpoint_for_window, fetch_transfer_cap, http_client, request_headers, EndpointKind,
-    TransferProgress, TransferRegistration,
+    endpoint_for_window, fetch_transfer_cap, http_client, reason_without_url, request_headers,
+    EndpointKind, TransferProgress, TransferRegistration,
 };
 
 /// Cooperative SPA/Rust wire limit for a generated-download JSON chunk.
@@ -148,7 +148,7 @@ pub async fn download_file_native(
         .send();
     let response = tokio::select! {
         _ = registration.progress.cancelled() => return Err("download cancelled".into()),
-        response = request => response.map_err(|error| format!("download request failed: {error}"))?,
+        response = request => response.map_err(|error| format!("download request failed: {}", reason_without_url(error)))?,
     };
     if response.status().is_redirection() {
         return Err("download refused an unexpected redirect".into());
@@ -174,7 +174,8 @@ pub async fn download_file_native(
         let Some(chunk) = chunk else {
             break;
         };
-        let chunk = chunk.map_err(|error| format!("reading download response: {error}"))?;
+        let chunk = chunk
+            .map_err(|error| format!("reading download response: {}", reason_without_url(error)))?;
         // Backstop against the bytes that actually arrive: Content-Length is a
         // claim, and a chunked or lying response carries none worth trusting.
         // Refusing here drops `target`, whose Drop removes the temp, so an
