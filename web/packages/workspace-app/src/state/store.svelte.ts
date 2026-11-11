@@ -562,34 +562,49 @@ export function withHybridSurfaceTheme(
   return next;
 }
 
-/// The apply is optimistic so the surface repaints at once, and the
-/// rollback is what keeps that honest: without it this window would go
-/// on showing an override the server refused. The rollback restores one
-/// surface, not the whole table, because a write begun while this one
-/// was in flight has already applied its own and must keep it. The
-/// rejection still reaches the caller that reports it.
+const surfaceThemeWrites = new Map<HybridSurfaceKind, {
+  confirmed: SurfaceThemeChoice | "inherit";
+  revision: number;
+}>();
+
+// Writes share a serial server chain, but each choice paints immediately.
+// Only the latest choice may roll back, to the last successful write rather
+// than an earlier optimistic choice that the server may also have refused.
+function writeHybridSurfaceTheme(
+  kind: HybridSurfaceKind,
+  choice: SurfaceThemeChoice | "inherit",
+): Promise<void> {
+  const pending = surfaceThemeWrites.get(kind) ?? {
+    confirmed: hybridSurfaceThemes[kind] ?? "inherit",
+    revision: 0,
+  };
+  const revision = ++pending.revision;
+  surfaceThemeWrites.set(kind, pending);
+  applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
+  return persistHybridSurfaceTheme(kind, choice).then(() => {
+    pending.confirmed = choice;
+  }, (error: unknown) => {
+    if (pending.revision === revision) {
+      applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, pending.confirmed));
+    }
+    throw error;
+  }).finally(() => {
+    if (pending.revision === revision) surfaceThemeWrites.delete(kind);
+  });
+}
+
 export function setHybridSurfaceTheme(
   kind: HybridSurfaceKind,
   choice: SurfaceThemeChoice,
 ): Promise<void> {
-  const confirmed = hybridSurfaceThemes[kind] ?? "inherit";
-  applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, choice));
-  return persistHybridSurfaceTheme(kind, choice).catch((error: unknown) => {
-    applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, confirmed));
-    throw error;
-  });
+  return writeHybridSurfaceTheme(kind, choice);
 }
 
 /// Drop a surface's body-theme override so it falls back to the global
 /// `theme`. The settings surface's per-surface control offers this as
 /// "Inherit".
 export function clearHybridSurfaceTheme(kind: HybridSurfaceKind): Promise<void> {
-  const confirmed = hybridSurfaceThemes[kind] ?? "inherit";
-  applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, "inherit"));
-  return persistHybridSurfaceTheme(kind, "inherit").catch((error: unknown) => {
-    applyHybridSurfaceThemes(withHybridSurfaceTheme(hybridSurfaceThemes, kind, confirmed));
-    throw error;
-  });
+  return writeHybridSurfaceTheme(kind, "inherit");
 }
 
 // updateGlobalConfigSerial lives in ./configWrite (a leaf module with no store

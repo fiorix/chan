@@ -331,6 +331,44 @@ describe("a refused theme write", () => {
 
     expect(bodies.at(-1)).toEqual({ hybrid_surface_themes: { graph: "light" } });
     expect(store.surfaceThemeOverride("editor")).toBeUndefined();
+    expect(store.surfaceThemeOverride("graph")).toBe("light");
+  });
+
+  test.each([
+    ["light", "dark"],
+    ["light", "inherit"],
+    ["inherit", "light"],
+  ] as const)("a refused %s write keeps the newer %s choice on the same surface", async (firstChoice, secondChoice) => {
+    patchLog(() => false);
+    const store = await freshStore();
+    if (firstChoice === "inherit" || secondChoice === "inherit") await store.setHybridSurfaceTheme("editor", "dark");
+    const bodies = patchLog((nth) => nth === 1);
+    const write = (choice: typeof firstChoice | typeof secondChoice) => choice === "inherit"
+      ? store.clearHybridSurfaceTheme("editor")
+      : store.setHybridSurfaceTheme("editor", choice);
+
+    const first = write(firstChoice);
+    const second = write(secondChoice);
+    const expected = secondChoice === "inherit" ? undefined : secondChoice;
+    expect(store.surfaceThemeOverride("editor")).toBe(expected);
+    await expect(first).rejects.toThrow(REFUSAL);
+    expect(store.surfaceThemeOverride("editor")).toBe(expected);
+    await second;
+    expect(store.surfaceThemeOverride("editor")).toBe(expected);
+    expect(bodies.at(-1)).toEqual({ hybrid_surface_themes: expected ? { editor: expected } : {} });
+  });
+
+  test.each([true, false])("the latest refusal restores the confirmed choice when the earlier write fails: %s", async (refuseEarlier) => {
+    patchLog(() => false);
+    const store = await freshStore();
+    await store.setHybridSurfaceTheme("editor", "dark");
+    patchLog((nth) => refuseEarlier || nth === 2);
+
+    const first = store.setHybridSurfaceTheme("editor", "light");
+    const second = store.clearHybridSurfaceTheme("editor");
+    const results = await Promise.allSettled([first, second]);
+    expect(results.map((result) => result.status)).toEqual([refuseEarlier ? "rejected" : "fulfilled", "rejected"]);
+    expect(store.surfaceThemeOverride("editor")).toBe(refuseEarlier ? "dark" : "light");
   });
 
   test("setThemeChoice leaves the choice the server confirmed", async () => {

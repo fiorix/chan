@@ -488,8 +488,9 @@ test-symlink-tmpdir: ## Run CLI, library, server and workspace tests with a nonc
 		TMPDIR="$$link" RUSTFLAGS="-D warnings" $(CARGO) test -p chan -p chan-library -p chan-server -p chan-workspace --no-fail-fast
 
 .PHONY: check-windows-test-target
-# Tauri validates the bundled CLI path even when clippy does not link it.
-check-windows-test-target: ## Lint the Windows arm's test crates for Windows GNU.
+# The desktop also lints production targets: test-only references can hide
+# dead platform-gated code. Tauri validates the bundled CLI without linking it.
+check-windows-test-target: ## Lint Windows tests and all desktop targets for Windows GNU.
 	@set -eu; \
 		if ! command -v rustup >/dev/null 2>&1 || \
 			! installed="$$(rustup target list --installed)" || \
@@ -510,7 +511,9 @@ check-windows-test-target: ## Lint the Windows arm's test crates for Windows GNU
 			created=1; \
 		fi; \
 		RUSTFLAGS="-D warnings" $(CARGO) clippy --tests --target x86_64-pc-windows-gnu \
-			$(foreach crate,$(CHAN_WINDOWS_TEST_CRATES),-p $(crate)) --no-deps -- -D warnings
+			$(foreach crate,$(filter-out chan-desktop,$(CHAN_WINDOWS_TEST_CRATES)),-p $(crate)) --no-deps -- -D warnings; \
+		RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets --target x86_64-pc-windows-gnu \
+			-p chan-desktop --no-deps -- -D warnings
 
 .PHONY: ci-macos
 ci-macos: ## Run the focused macOS CI validation target.

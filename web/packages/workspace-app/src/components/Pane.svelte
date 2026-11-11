@@ -47,6 +47,7 @@
     paneSideToggleFlash,
     paneWobble,
     paneSide,
+    paneShowsTmux,
     paneTabs,
     reorderTab,
     reopenClosedTab,
@@ -203,14 +204,8 @@
   const visibleActiveTabId = $derived(paneActiveTabId(pane, visibleSide));
   const active = $derived(activeTabInPane(pane, visibleSide));
   const everyTab = $derived(uniqueTabs(allPaneTabs(pane)));
-  // A pane showing a tmux pane is tmux's: its one tab is the pane, so the
-  // strip with its drag handle is hidden, nothing is dropped into it and
-  // nothing is dragged out of it; the window's splits are tmux's layout and
-  // its content stays in the window. So is a pane Hybrid Nav stages in a tmux
-  // window, which stands for the pane tmux adds on the commit.
-  const tmuxPaneHere = $derived(
-    paneMode.tmux !== null || everyTab.some((tab) => tab.kind === "terminal" && Boolean(tab.tmuxPane)),
-  );
+  // tmux owns its pane's content, so its strip and drag/drop are disabled.
+  const tmuxPaneHere = $derived(paneShowsTmux(pane));
   type PaneFlipAxis = "horizontal" | "vertical";
 
   function isVisibleTab(tab: Tab): boolean {

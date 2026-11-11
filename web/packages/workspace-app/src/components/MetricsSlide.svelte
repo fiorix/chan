@@ -1,7 +1,6 @@
 <script lang="ts">
-  // Privacy mode conceals the two readings that name the machine or its
-  // user: the host name and the chan home path. The rest are counts, rates
-  // and the build, which name nobody.
+  // Privacy mode conceals the host name, chan home path and scan errors,
+  // which may name files. The counts, rates and build name nobody.
   import PrivateField from "@chan/web-shared/PrivateField.svelte";
   import { metrics, watchMetrics } from "../state/metrics.svelte";
   import type { MetricSample } from "../api/metrics";
@@ -30,52 +29,50 @@
     return `${days ? `${days}d ` : ""}${Math.floor(value % 86400 / 3600)}h ${Math.floor(value % 3600 / 60)}m ${Math.floor(value % 60)}s`;
   }
   function series(read: (sample: MetricSample) => number | null) { return metrics.samples.map((s) => ({ at: s.elapsedMs, value: read(s) })); }
-  const channels = $derived(sample ? [
-    { name: "HTTP/2", traffic: sample.http2 }, { name: "yamux", traffic: sample.yamux },
-    { name: "Reverse TCP", traffic: sample.reverseConnections },
-  ] : []);
+  const channels = $derived([
+    { name: "HTTP/2", traffic: sample?.http2 }, { name: "yamux", traffic: sample?.yamux },
+    { name: "Reverse TCP", traffic: sample?.reverseConnections },
+  ]);
 </script>
-<section class="metrics-slide" aria-label="Metrics">
+<section class="metrics-slide" aria-label="Metrics" aria-busy={!sample}>
   <header>
-    <div><h2>Metrics</h2><p>Server process{view ? ` · PID ${view.identity.pid}` : ""}</p>{#if view}<p>Host: {#if view.identity.hostname}<PrivateField field="metrics:host" label="host name">{view.identity.hostname}</PrivateField>{:else}n/a{/if}</p>{/if}</div>
-    {#if view}<div class="identity">chan {view.identity.version}<br /><code>{view.identity.build}</code></div>{/if}
+    <div><h2>Metrics</h2><p>Server process{view ? ` · PID ${view.identity.pid}` : ""}</p><p>Host: {#if view?.identity.hostname}<PrivateField field="metrics:host" label="host name">{view.identity.hostname}</PrivateField>{:else}n/a{/if}</p></div>
+    <div class="identity">chan {view?.identity.version ?? "n/a"}<br /><code>{view?.identity.build ?? "n/a"}</code></div>
   </header>
   {#if metrics.error}<p class="error" role="status">Metrics unavailable: {metrics.error}. Displayed readings may be stale.</p>{/if}
-  {#if !sample}<p class="waiting">Waiting for server metrics...</p>{:else}
-    <div class="summary"><span>Uptime <strong>{process ? uptime(process.uptimeSeconds) : "n/a"}</strong></span><span>1-second samples · up to 10 minutes</span></div>
-    <div class="cards">
-      <article><h3>CPU <strong>{process?.cpuPercent == null ? "n/a" : `${process.cpuPercent.toFixed(1)}%`}</strong></h3>
-        <MetricChart label="CPU percent, one core equals 100%" values={series((s) => s.process?.cpuPercent ?? null)} /><p>100% = one logical core</p></article>
-      <article><h3>Memory <strong>{bytes(process?.residentBytes)}</strong></h3>
-        <MetricChart label="Resident memory in bytes" values={series((s) => s.process?.residentBytes ?? null)} /><p>Resident memory · excludes child processes</p></article>
-      <article><h3>Network <strong>{rate(sample.network.receivedBytesPerSecond)}</strong></h3>
-        <MetricChart label="Service transport receive bytes per second" values={series((s) => s.network.receivedBytesPerSecond)} /><p>RX · TX {rate(sample.network.sentBytesPerSecond)}</p></article>
-      <article><h3>I/O read <strong>{rate(process?.readBytesPerSecond)}</strong></h3>
-        <MetricChart label="Process I/O read bytes per second" values={series((s) => s.process?.readBytesPerSecond ?? null)} /><p>{bytes(process?.readBytes)} total · {process?.ioScope === "unavailable" ? "Unavailable on this platform" : process?.ioScope === "process_io" ? "all process I/O" : "storage I/O"}</p></article>
-      <article><h3>I/O write <strong>{rate(process?.writtenBytesPerSecond)}</strong></h3>
-        <MetricChart label="Process I/O write bytes per second" values={series((s) => s.process?.writtenBytesPerSecond ?? null)} /><p>{bytes(process?.writtenBytes)} total</p></article>
-      <article><h3>File transfers <strong>{sample.transfers.running} running</strong></h3>
-        <MetricChart label="Active file transfer worker jobs" values={series((s) => s.transfers.running)} /><p>{sample.transfers.queued}/{sample.transfers.queueCapacity} queued · {sample.transfers.workerCapacity} workers</p></article>
-    </div>
-    <div class="details">
-      <article><h3>Channels &amp; tunnels</h3>
-        <p>{sample.gatewayTunnels} gateway · {sample.reverseListeners} reverse listeners · {sample.tunnelDialFailures} dial failures</p>
-        <table><thead><tr><th>Layer</th><th>Active</th><th>RX</th><th>TX</th></tr></thead>
-          <tbody>{#each channels as channel}<tr><th>{channel.name}</th><td>{channel.traffic.active}</td><td>{rate(channel.traffic.receivedBytesPerSecond)}</td><td>{rate(channel.traffic.sentBytesPerSecond)}</td></tr>{/each}</tbody></table>
-        <p>yamux: {sample.yamuxServing}/{sample.yamuxServiceCapacity} handlers · {sample.yamuxWaiting} waiting · {sample.yamuxStreamLimit} streams/tunnel</p>
-        <p>Layer payloads overlap. Network counts service TCP/connector bytes.</p>
-      </article>
-      <article><h3>Storage <strong>{bytes(view?.storage.logicalBytes)}</strong></h3>
-        <p class="path"><PrivateField field="metrics:chan-home" label="chan home path"><span title={view?.storage.path}>{view?.storage.path}</span></PrivateField></p>
-        <p>{bytes(view?.storage.allocatedBytes)} allocated · {view?.storage.files ?? "n/a"} files</p>
-        <p>{view?.storage.sampledAtMs ? `Scanned ${new Date(view.storage.sampledAtMs).toLocaleTimeString()}` : "Scan pending"} · refreshes every minute</p>
-        {#if view?.storage.error}<p class="error">Storage scan failed: {view.storage.error}{view.storage.logicalBytes == null ? "." : "; showing the last completed total."}</p>{/if}
-        <h3 class="transfer-heading">Transfer payload</h3>
-        <p>RX {rate(sample.transferPayload.receivedBytesPerSecond)} · TX {rate(sample.transferPayload.sentBytesPerSecond)}</p>
-        <p>{sample.transfers.cancelled} cancelled · {sample.transfers.stalled} stalled · {sample.transfers.refused} refused</p>
-      </article>
-    </div>
-  {/if}
+  <div class="summary"><span>{#if sample}Uptime <strong>{process ? uptime(process.uptimeSeconds) : "n/a"}</strong>{:else}Waiting for server metrics...{/if}</span><span>1-second samples · up to 10 minutes</span></div>
+  <div class="cards">
+    <article><h3>CPU <strong>{process?.cpuPercent == null ? "n/a" : `${process.cpuPercent.toFixed(1)}%`}</strong></h3>
+      <MetricChart label="CPU percent, one core equals 100%" values={series((s) => s.process?.cpuPercent ?? null)} /><p>100% = one logical core</p></article>
+    <article><h3>Memory <strong>{bytes(process?.residentBytes)}</strong></h3>
+      <MetricChart label="Resident memory in bytes" values={series((s) => s.process?.residentBytes ?? null)} /><p>Resident memory · excludes child processes</p></article>
+    <article><h3>Network <strong>{rate(sample?.network.receivedBytesPerSecond)}</strong></h3>
+      <MetricChart label="Service transport receive bytes per second" values={series((s) => s.network.receivedBytesPerSecond)} /><p>RX · TX {rate(sample?.network.sentBytesPerSecond)}</p></article>
+    <article><h3>I/O read <strong>{rate(process?.readBytesPerSecond)}</strong></h3>
+      <MetricChart label="Process I/O read bytes per second" values={series((s) => s.process?.readBytesPerSecond ?? null)} /><p>{bytes(process?.readBytes)} total · {process?.ioScope === "unavailable" ? "Unavailable on this platform" : process?.ioScope === "process_io" ? "all process I/O" : "storage I/O"}</p></article>
+    <article><h3>I/O write <strong>{rate(process?.writtenBytesPerSecond)}</strong></h3>
+      <MetricChart label="Process I/O write bytes per second" values={series((s) => s.process?.writtenBytesPerSecond ?? null)} /><p>{bytes(process?.writtenBytes)} total</p></article>
+    <article><h3>File transfers <strong>{sample?.transfers.running ?? "n/a"} running</strong></h3>
+      <MetricChart label="Active file transfer worker jobs" values={series((s) => s.transfers.running)} /><p>{sample?.transfers.queued ?? "n/a"}/{sample?.transfers.queueCapacity ?? "n/a"} queued · {sample?.transfers.workerCapacity ?? "n/a"} workers</p></article>
+  </div>
+  <div class="details">
+    <article><h3>Channels &amp; tunnels</h3>
+      <p>{sample?.gatewayTunnels ?? "n/a"} gateway · {sample?.reverseListeners ?? "n/a"} reverse listeners · {sample?.tunnelDialFailures ?? "n/a"} dial failures</p>
+      <table><thead><tr><th>Layer</th><th>Active</th><th>RX</th><th>TX</th></tr></thead>
+        <tbody>{#each channels as channel}<tr><th>{channel.name}</th><td>{channel.traffic?.active ?? "n/a"}</td><td>{rate(channel.traffic?.receivedBytesPerSecond)}</td><td>{rate(channel.traffic?.sentBytesPerSecond)}</td></tr>{/each}</tbody></table>
+      <p>yamux: {sample?.yamuxServing ?? "n/a"}/{sample?.yamuxServiceCapacity ?? "n/a"} handlers · {sample?.yamuxWaiting ?? "n/a"} waiting · {sample?.yamuxStreamLimit ?? "n/a"} streams/tunnel</p>
+      <p>Layer payloads overlap. Network counts service TCP/connector bytes.</p>
+    </article>
+    <article><h3>Storage <strong>{bytes(view?.storage.logicalBytes)}</strong></h3>
+      <p class="path"><PrivateField field="metrics:chan-home" label="chan home path"><span title={view?.storage.path}>{view?.storage.path ?? "n/a"}</span></PrivateField></p>
+      <p>{bytes(view?.storage.allocatedBytes)} allocated · {view?.storage.files ?? "n/a"} files</p>
+      <p>{view?.storage.sampledAtMs ? `Scanned ${new Date(view.storage.sampledAtMs).toLocaleTimeString()}` : "Scan pending"} · refreshes every minute</p>
+      {#if view?.storage.error}<p class="error">Storage scan failed: <PrivateField field="metrics:storage-error" label="storage scan error">{view.storage.error}</PrivateField>{view.storage.logicalBytes == null ? "." : "; showing the last completed total."}</p>{/if}
+      <h3 class="transfer-heading">Transfer payload</h3>
+      <p>RX {rate(sample?.transferPayload.receivedBytesPerSecond)} · TX {rate(sample?.transferPayload.sentBytesPerSecond)}</p>
+      <p>{sample?.transfers.finished ?? "n/a"} finished · {sample?.transfers.cancelled ?? "n/a"} cancelled · {sample?.transfers.stalled ?? "n/a"} stalled · {sample?.transfers.panicked ?? "n/a"} panicked · {sample?.transfers.refused ?? "n/a"} refused</p>
+    </article>
+  </div>
 </section>
 <style>
   /* Auto margins put the slide in the middle of the carousel's stage, a flex
@@ -103,5 +100,4 @@
   .path { overflow-wrap: anywhere; }
   .error { color: var(--warn-text); margin: 0 0 12px; }
   .transfer-heading { margin-top: 20px; margin-bottom: 4px; }
-  .waiting { padding: 32px 0; }
 </style>

@@ -246,9 +246,8 @@ export default {
 
     try {
       await showSlide(page, "Metrics", ".metrics-slide");
-      // The cards arrive with the first sample; the slide before it holds
-      // its header and one waiting line, which is no slide to measure.
-      await page.waitForSelector(".dashboard.active .metrics-slide .details", {
+      // The cards also render while waiting; measure the first real sample.
+      await page.waitForSelector('.dashboard.active .metrics-slide[aria-busy="false"]', {
         timeout: 20_000,
       });
 

@@ -19,7 +19,10 @@ afterEach(async () => {
 
 test("receiving a snapshot does not retrigger the visibility effect or bypass the poll interval", async () => {
   vi.useFakeTimers();
-  const view = { schemaVersion: 1, identity: { instanceId: "a", version: "1", build: "abc", pid: 42, hostname: "devserver.example" }, latest: null, history: [] } as unknown as MetricsView;
+  const view: MetricsView = {
+    schemaVersion: 1, identity: { instanceId: "a", version: "1", build: "abc", pid: 42, hostname: "devserver.example" }, latest: null, history: [],
+    storage: { path: "/home/test/.chan", logicalBytes: null, allocatedBytes: null, files: null, sampledAtMs: null, scanMs: null, error: null },
+  };
   const request = vi.spyOn(api, "metrics").mockResolvedValue(view);
   const target = document.createElement("div"); document.body.append(target);
   mounted = mount(MetricsSlide, { target });
@@ -42,7 +45,7 @@ test("unavailable process I/O is labelled and leaves gaps instead of plotting ze
     sequence: 1, elapsedMs: 1000, sampledAtMs: 1000, collectionMicros: 1,
     process: { uptimeSeconds: 1, cpuTimeMs: 1, cpuPercent: null, residentBytes: 1024, ioScope: "unavailable", readBytes: null, writtenBytes: null, readBytesPerSecond: null, writtenBytesPerSecond: null },
     network: traffic, http2: traffic, yamux: traffic, reverseConnections: traffic, transferPayload: traffic,
-    transfers: { queued: 0, running: 0, workerCapacity: 2, queueCapacity: 32, finished: 0, cancelled: 0, stalled: 0, panicked: 0, refused: 0 },
+    transfers: { queued: 0, running: 0, workerCapacity: 2, queueCapacity: 32, finished: 9, cancelled: 3, stalled: 5, panicked: 6, refused: 8 },
     gatewayTunnels: 0, tunnelDialFailures: 0, reverseListeners: 0, yamuxWaiting: 0, yamuxServing: 0, yamuxServiceCapacity: 0, yamuxStreamLimit: 256,
   };
   metrics.view = {
@@ -54,6 +57,7 @@ test("unavailable process I/O is labelled and leaves gaps instead of plotting ze
   const target = document.createElement("div"); document.body.append(target);
   mounted = mount(MetricsSlide, { target, props: { active: false } });
   await tick();
+  expect(target.textContent).toContain("9 finished · 3 cancelled · 5 stalled · 6 panicked · 8 refused");
   const cards = [...target.querySelectorAll("article")].filter((card) => card.querySelector("h3")?.textContent?.startsWith("I/O"));
   expect(cards).toHaveLength(2);
   expect(cards[0].textContent).toContain("Unavailable on this platform");
@@ -123,8 +127,19 @@ test("a failed storage scan shows its error and names a last completed total onl
   metrics.samples = [sample];
   const target = document.createElement("div"); document.body.append(target);
   mounted = mount(MetricsSlide, { target, props: { active: false } });
+  await tick();
+  expect(target.textContent).toContain("Waiting for server metrics...");
+  const waitingCards = [...target.querySelectorAll("article")];
+  expect(waitingCards).toHaveLength(8);
+  expect(target.querySelector("section")?.getAttribute("aria-busy")).toBe("true");
+  expect(target.querySelectorAll('svg[role="img"]')).toHaveLength(6);
+  expect(target.querySelectorAll("tbody tr")).toHaveLength(3);
+  expect(target.textContent).not.toContain("0 running");
   // The first scan failed: there is no total, and the reason is the server's.
   let card = await show({ ...pending, error: "Permission denied (os error 13)" });
+  expect(target.querySelector("section")?.getAttribute("aria-busy")).toBe("false");
+  expect(target.textContent).not.toContain("Waiting for server metrics...");
+  expect([...target.querySelectorAll("article")]).toEqual(waitingCards);
   expect(card).not.toContain("last completed total");
   expect(card).toContain("Storage scan failed: Permission denied (os error 13).");
   expect(card).toContain("Scan pending");
@@ -143,5 +158,18 @@ test("a failed storage scan shows its error and names a last completed total onl
   card = await show({ ...pending, error: "<b>boom</b>" });
   expect(card).toContain("Storage scan failed: <b>boom</b>.");
   expect(target.querySelector("b")).toBeNull();
+
+  const pathError = "cannot scan /home/test/.chan/cache: permission denied";
+  card = await show({ ...scanned, error: pathError });
+  expect(card).toContain(pathError);
+  privacy.enabled = true;
+  await tick();
+  expect(target.innerHTML).not.toContain("/home/test/.chan");
+  expect(target.querySelector('[aria-label="storage scan error hidden"]')?.textContent).toBe("Hidden");
+  expect(target.textContent).toContain("Storage scan failed:");
+  expect(target.textContent).toContain("showing the last completed total.");
+  privacy.enabled = false;
+  await tick();
+  expect(target.textContent).toContain(pathError);
 });
 
