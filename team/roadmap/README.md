@@ -79,8 +79,8 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | landed | GA |
 | [a used token's cut is lost when the client hangs up][tokencut] | landed | GA |
-| [an image pasted by chord on the Linux desktop lands nothing][linuxpaste] | not started | design |
-| [a file dropped on the Linux desktop hands the page a URI][linuxdrop] | not started | design |
+| [an image pasted by chord on the Linux desktop lands nothing][linuxpaste] | landed | GA |
+| [a file dropped on the Linux desktop hands the page a URI][linuxdrop] | landed | GA |
 | [a save that meets its file gone opens the external edit dialog][savegone] | landed | GA |
 | [the tag-scoped graph never refits its nodes][taglens] | landed | GA |
 | [ghostty sends a pasted line break as LF][ghosttylf] | not started | design |

@@ -1,6 +1,6 @@
 # A file dropped on the Linux desktop hands the page a URI, not a file
 
-Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Not started.
+Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Landed on 2026-11-11.
 
 Origin: proposed by the lead on 2026-11-11 from the basic-flows row's WebKit arm (its XDND drop arms); not accepted. Read on WebKitGTK 2.52.6 in the desktop guest with a GTK drag source offering `text/uri-list`, five of five runs, and once with a file manager's target set.
 
@@ -28,3 +28,7 @@ The same desktop reads the clipboard image for a paste through its own command w
 1. The basic-flows driver's `xdnd` group green: a GTK drag source's drop embeds the image in the editor and the composer, and a drop on the tab strip leaves the window on its page; red at the code before the fix (the arm's current readings).
 2. Mounted tests of the handlers and the guard with a `text/uri-list` drop beside the `Files` drop.
 3. The owner's Mac check unchanged; Chrome's check 215 unchanged.
+
+## Built, 2026-11-11
+
+Built on 2026-11-11 on `v0128/linux-clipboard` (`165d13def`, `ae9ebb655`, `c3be6a18b`), merged as 3b0e6e2eb. WebKitGTK lists `text/uri-list` for such a drop but answers `getData` with nothing (it hides file paths from a page), so the page cannot name the file. The desktop observes each window webview's own GTK drag signals without stopping them (wry's native handler stays off) and records the latest drop from another application; `dropped_files` lists that drop's base names and `read_dropped_file` answers one file's bytes by its place, once, within 30 seconds, a regular file within the 50 MiB upload cap. A page reads only what the user dropped on it, and no path reaches the page; both commands are granted with the native transfers. The editor's drop handler, which the Rich Prompt shares, takes a desktop file drop (`isDesktopFileDrop`: `text/uri-list`, no Files, not a page drag, the list hidden or naming `file:` URIs), reads its images and uploads them as a Files drop, at the drop point. The window guard treats a `text/uri-list` drag the document did not start as a file drag on the desktop, so a drop outside every zone leaves the window on its page. Evidence: unit tests of the drop record and the read's checks, the ACL parity tests, mounted tests of the guard and the handler; the basic-flows WebKit arm's `xdnd` group faulted three times at the base (the URI as text twice, the window taken by the outside drop) and held in five consecutive runs of all nine groups at the tip; without the handler's desktop drop both drops fault, with the guard keyed on Files the outside drop takes the window again, and with the desktop's record unwritten both drops fault. macOS (WKWebView hands Files) and Chrome's checks are unchanged.
