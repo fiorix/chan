@@ -3317,7 +3317,8 @@ function closeRisk(t: Tab): "live-terminal" | null {
 function notSavedSentence(refused: FileTab[]): string {
   if (refused.length === 1) {
     const t = refused[0]!;
-    return `${tabLabel(t)} was not saved because ${t.saveError}. Its changes will be lost.`;
+    const reason = t.fileMissing ? "its file was moved or deleted" : t.saveError;
+    return `${tabLabel(t)} was not saved because ${reason}. Its changes will be lost.`;
   }
   const names = refused.map((t) => tabLabel(t));
   const last = names.pop()!;
@@ -3361,8 +3362,9 @@ async function confirmCloseTabs(
     // Still dirty with no refusal once the tab's save has ended: a conflict
     // opened its own dialog, a live session refused the buffer and wrote no
     // reason, the save was paused by an outage, or an edit landed during the
-    // write. The close is refused, as for any tab a save leaves dirty.
-    if (!live.saveError) return false;
+    // write. The close is refused, as for any tab a save leaves dirty. A tab
+    // whose file is gone has nowhere to save to, which the question names.
+    if (!live.saveError && !live.fileMissing) return false;
     refused.push(live);
   }
   const risky = tabs.filter((t) => closeRisk(t) !== null);
@@ -6683,12 +6685,15 @@ async function performSaveOnce(t: FileTab): Promise<SaveHold> {
       // loads), nothing is said and the choice stands.
       if (overwriting) overwritePending.delete(t.id);
       else if (overwritePending.has(t.id)) return null;
-      const data = e.data as {
-        current_mtime?: number | null;
-        current_mtime_ns?: string | null;
-        current_authority_version?: number | null;
-        disk_conflicted?: boolean;
-      } | null;
+      const data = e.data as WriteConflictBody | null;
+      // A refusal for a file that is gone is not an external edit: the tab
+      // says the file was moved or deleted and keeps the buffer, and no
+      // prompt asks to reload a file that has nothing to read.
+      if (await writeMetFileGone(path, data)) {
+        const gone = liveFileTabById(t.id) ?? live;
+        if (!gone.fileMissing) markTabFileMissing(gone.id);
+        return null;
+      }
       showConflict({
         kind: "classic",
         tabId: live.id,
@@ -6704,6 +6709,31 @@ async function performSaveOnce(t: FileTab): Promise<SaveHold> {
     // says so the way a tab whose file vanished does.
     if (e instanceof DraftGoneError) markFileMissing(liveFileTabById(t.id) ?? live);
     throw e;
+  }
+}
+
+/// The body of a write refused as the write conflict.
+type WriteConflictBody = {
+  current_mtime?: number | null;
+  current_mtime_ns?: string | null;
+  current_authority_version?: number | null;
+  disk_conflicted?: boolean;
+};
+
+/// Whether a write refused as the write conflict met its file gone. The
+/// server answers a conditional write to a missing file under a live root
+/// with the conflict, and its body names the time on disk as null (it sends
+/// `current_mtime` on every refusal, null when the file has none). A read of
+/// the path then confirms the file is not there. A file that is back by the
+/// read, or a read that fails another way, is an external edit.
+async function writeMetFileGone(path: string, data: WriteConflictBody | null): Promise<boolean> {
+  if (data === null || data.current_mtime !== null || data.current_mtime_ns != null) return false;
+  if (data.current_authority_version != null || data.disk_conflicted) return false;
+  try {
+    await api.read(path);
+    return false;
+  } catch (e) {
+    return isMissingFileError(e);
   }
 }
 
@@ -6806,6 +6836,12 @@ function markFileMissing(t: FileTab): void {
     path: t.path,
     fragment: missingFragment(t.content || t.saved),
   };
+  // An external-edit prompt has nothing left to ask of a file that is gone,
+  // and its Reload would empty the tab. A live session's first-attach choice
+  // is ended by the session itself when its file goes.
+  if (conflictDialog.open && conflictDialog.tabId === t.id && conflictDialog.kind === "classic") {
+    dismissConflict();
+  }
 }
 
 /// Set of paths with unsaved changes across all panes. Used by the
@@ -8952,6 +8988,45 @@ export async function attemptInPlaceReopen(
   await loadTabContent(tabId, path);
   const after = findFileTabById(tabId);
   return after !== null && after.tab.fileMissing === null;
+}
+
+/// Write a missing-file tab's buffer back to its own path: the missing state's
+/// Save here. The write names no time on disk, so it creates the file and any
+/// folder above it that went with it. It writes only while a read finds the
+/// path empty: a file that is there again is another program's, and the
+/// tab's ordinary save meets it as an external edit.
+export async function saveMissingTabHere(tabId: string): Promise<void> {
+  const found = findFileTabById(tabId);
+  if (!found || !found.tab.fileMissing) return;
+  const path = found.tab.path;
+  let gone: boolean;
+  try {
+    await api.read(path);
+    gone = false;
+  } catch (e) {
+    if (!isMissingFileError(e)) {
+      notify(`Save failed: ${(e as Error).message}`);
+      return;
+    }
+    gone = true;
+  }
+  const live = liveFileTabById(tabId);
+  if (!live || live.path !== path || !live.fileMissing) return;
+  if (gone) {
+    live.savedMtime = null;
+    live.savedMtimeNs = null;
+    live.authorityVersion = null;
+    live.diskConflicted = false;
+  } else {
+    live.fileMissing = null;
+  }
+  try {
+    await performSave(live);
+  } catch (e) {
+    const after = liveFileTabById(tabId) ?? live;
+    after.saveError = classicSaveFailure(e);
+    notify(`Save failed: ${(e as Error).message}`);
+  }
 }
 
 /// The instruction a re-open by a pick shows while it waits for the user.
