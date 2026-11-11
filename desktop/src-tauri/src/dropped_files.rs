@@ -43,13 +43,17 @@ const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
 #[derive(Debug, Default)]
 struct DropRecord {
     /// The paths the drag over the window offers, from its `text/uri-list`.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     offered: Vec<PathBuf>,
     /// A drop that came before its drag's URIs did: the URIs complete it.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     awaiting_uris: bool,
     /// The latest drop's paths, each `None` once read, and when it came.
     dropped: Option<(Instant, Vec<Option<PathBuf>>)>,
 }
 
+// Only the GTK drag signals record a drop (see `observe`).
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 impl DropRecord {
     /// A drag moves over the window, so no drop is pending.
     fn motion(&mut self) {
@@ -82,7 +86,9 @@ impl DropRecord {
             self.dropped = Some((now, paths.into_iter().map(Some).collect()));
         }
     }
+}
 
+impl DropRecord {
     /// The latest drop's paths, in the order the drag offered them, while the
     /// read window lasts; an expired drop is cleared.
     fn current(&mut self, now: Instant) -> Option<&mut Vec<Option<PathBuf>>> {
@@ -138,6 +144,7 @@ fn with_record<T>(label: &str, f: impl FnOnce(&mut DropRecord) -> T) -> T {
 
 /// The local path a `file:` URI names, percent-decoded. Any other scheme, and
 /// a file URI naming another host, is refused.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     let url = url::Url::parse(uri.trim()).map_err(|_| "not a file URI".to_string())?;
     if url.scheme() != "file" {
@@ -281,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn a_drop_lists_its_files_and_hands_each_over_once() {
         let now = Instant::now();
         let mut record = DropRecord::default();
@@ -307,6 +315,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn a_drag_that_left_without_dropping_hands_nothing_to_a_later_drop() {
         let now = Instant::now();
         let mut record = DropRecord::default();
@@ -322,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn nothing_lists_or_reads_without_a_drop_or_after_the_read_window() {
         let now = Instant::now();
         let mut record = DropRecord::default();
@@ -339,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn a_later_drop_replaces_the_earlier_one() {
         let now = Instant::now();
         let mut record = DropRecord::default();
@@ -353,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn a_drop_before_its_uris_is_completed_by_them_and_only_by_them() {
         let now = Instant::now();
         let mut record = DropRecord::default();
@@ -373,9 +385,9 @@ mod tests {
     fn windows_keep_their_own_drops() {
         let now = Instant::now();
         let (one, two) = ("dropped-files-test-one", "dropped-files-test-two");
+        // Seeded without the GTK drag methods, so this runs on every platform.
         with_record(one, |record| {
-            record.offer(paths(&["/tmp/a.png"]), now);
-            record.drop_here(now);
+            record.dropped = Some((now, paths(&["/tmp/a.png"]).into_iter().map(Some).collect()));
         });
         assert!(with_record(two, |record| record.names(now)).is_empty());
         assert_eq!(
@@ -392,6 +404,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn file_uris_decode_to_local_paths_and_nothing_else_does() {
         assert_eq!(
             path_from_file_uri("file:///tmp/a%20b.png"),
