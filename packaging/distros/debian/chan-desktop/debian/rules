@@ -44,13 +44,22 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	install -Dm755 target/release/chan-desktop $(DESTROOT)/usr/bin/chan-desktop
-	# The desktop binary IS the chan/cs command line (argv0 dispatch).
+	# The desktop binary IS the chan/cs command line and the chan-files and
+	# chan-edit openers (argv0 dispatch); the openers' entries run them.
 	ln -s chan-desktop $(DESTROOT)/usr/bin/chan
 	ln -s chan-desktop $(DESTROOT)/usr/bin/cs
+	ln -s chan-desktop $(DESTROOT)/usr/bin/chan-files
+	ln -s chan-desktop $(DESTROOT)/usr/bin/chan-edit
 	install -Dm644 packaging/distros/shared/chan-desktop.desktop \
 	  $(DESTROOT)/usr/share/applications/chan-desktop.desktop
+	install -Dm644 packaging/distros/shared/chan-files.desktop \
+	  $(DESTROOT)/usr/share/applications/chan-files.desktop
+	install -Dm644 packaging/distros/shared/chan-edit.desktop \
+	  $(DESTROOT)/usr/share/applications/chan-edit.desktop
 	desktop-file-validate \
-	  $(DESTROOT)/usr/share/applications/chan-desktop.desktop
+	  $(DESTROOT)/usr/share/applications/chan-desktop.desktop \
+	  $(DESTROOT)/usr/share/applications/chan-files.desktop \
+	  $(DESTROOT)/usr/share/applications/chan-edit.desktop
 	install -Dm644 $(ICONS)/32x32.png $(HICOLOR)/32x32/apps/chan-desktop.png
 	install -Dm644 $(ICONS)/64x64.png $(HICOLOR)/64x64/apps/chan-desktop.png
 	install -Dm644 $(ICONS)/128x128.png $(HICOLOR)/128x128/apps/chan-desktop.png

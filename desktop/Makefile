@@ -94,7 +94,8 @@ ci-linux: ci-linux-prereqs tauri-cli $(CI_WEB_PREREQ)
 	    -type f -print -quit)"; \
 	    [ -n "$$appimage" ] \
 	        || { echo "error: Tauri emitted no AppImage"; exit 1; }; \
-	    "$(CHAN_REPO)/scripts/smoke-built-devserver.sh" "$$appimage"
+	    "$(CHAN_REPO)/scripts/check-desktop-entries.py" --appimage "$$appimage" \
+	    && "$(CHAN_REPO)/scripts/smoke-built-devserver.sh" "$$appimage"
 
 ci-macos: tauri-cli $(CI_WEB_PREREQ)
 	@test "$$(uname -s)" = Darwin || { \

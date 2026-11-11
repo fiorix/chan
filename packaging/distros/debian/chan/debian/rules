@@ -44,9 +44,11 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	install -Dm755 target/release/chan debian/chan/usr/bin/chan
-	# The binary dispatches the `cs` CLI when invoked through a cs name
-	# (argv0).
+	# The binary dispatches the `cs` CLI when invoked through a cs name, and
+	# opens a path in a window as chan-files or chan-edit (argv0).
 	ln -s chan debian/chan/usr/bin/cs
+	ln -s chan debian/chan/usr/bin/chan-files
+	ln -s chan debian/chan/usr/bin/chan-edit
 	install -Dm644 packaging/distros/shared/chan-devserver.service \
 	  debian/chan/usr/lib/systemd/user/chan-devserver.service
 

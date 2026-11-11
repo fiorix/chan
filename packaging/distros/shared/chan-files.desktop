@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Chan Files
+GenericName=File Browser
+Comment=Open a directory in Chan's file browser
+Exec=chan-files %U
+Icon=chan-desktop
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;

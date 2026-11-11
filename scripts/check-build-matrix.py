@@ -18,6 +18,15 @@ class ContractError(RuntimeError):
     """One missing edge in the build graph."""
 
 
+# The names of the chan binary a package links: the CLI, the `cs` alias and
+# the two openers the Linux desktop entries run by name.
+ENTRY_POINTS = ("chan", "cs", "chan-files", "chan-edit")
+# The desktop entries a desktop package installs: the app's own, and the two
+# that make it a file browser and a Markdown editor to `xdg-open`.
+DESKTOP_ENTRIES = ("chan-desktop.desktop", "chan-files.desktop", "chan-edit.desktop")
+OPENER_ENTRIES = ("chan-files.desktop", "chan-edit.desktop")
+
+
 def read(relative: str) -> str:
     """The text of RELATIVE, or a contract failure that names the file."""
     try:
@@ -254,6 +263,7 @@ def check_desktop_contract() -> None:
                 "ci-linux-prereqs",
                 "--bundles appimage",
                 "$(BUNDLE_DIR)/appimage",
+                "check-desktop-entries.py\" --appimage",
                 "smoke-built-devserver.sh",
             ),
         ),
@@ -311,6 +321,62 @@ def check_desktop_contract() -> None:
         "../../target/release/chan.exe",
         "Windows CI bundle resources",
     )
+
+
+def check_opener_contract() -> None:
+    """Every package links the openers, and every desktop package carries their entries.
+
+    `chan-files` and `chan-edit` are dispatched on the program name, so a
+    package that does not link them has no openers, and a desktop entry whose
+    file a package does not install never reaches `xdg-open`. NAME stands for
+    each linked name and ENTRY for each opener entry. The AppImage takes the
+    entries through Tauri's bundle files; its links come from the desktop's
+    shim installer instead, as an AppImage has no `/usr/bin`.
+    """
+    cli_names = ENTRY_POINTS[1:]
+    packages = (
+        ("packaging/distros/debian/chan/debian/rules", cli_names,
+         ("ln -s chan debian/chan/usr/bin/NAME",), ()),
+        ("packaging/distros/debian/chan-desktop/debian/rules", ENTRY_POINTS,
+         ("ln -s chan-desktop $(DESTROOT)/usr/bin/NAME",),
+         ("install -Dm644 packaging/distros/shared/ENTRY",
+          "$(DESTROOT)/usr/share/applications/ENTRY")),
+        ("packaging/distros/fedora/chan.spec", cli_names,
+         ("ln -s chan %{buildroot}%{_bindir}/NAME", "%{_bindir}/NAME\n"), ()),
+        ("packaging/distros/fedora/chan-desktop.spec", ENTRY_POINTS,
+         ("ln -s chan-desktop %{buildroot}%{_bindir}/NAME", "%{_bindir}/NAME\n"),
+         ("install -Dm644 packaging/distros/shared/ENTRY",
+          "desktop-file-validate %{buildroot}%{_datadir}/applications/ENTRY",
+          "%{_datadir}/applications/ENTRY\n")),
+        ("packaging/distros/arch/aur/chan/PKGBUILD.in", cli_names,
+         ('ln -s chan "$pkgdir/usr/bin/NAME"',), ()),
+        ("packaging/distros/arch/aur/chan-desktop/PKGBUILD.in", ENTRY_POINTS,
+         ('ln -s chan-desktop "$pkgdir/usr/bin/NAME"',),
+         ("desktop-file-validate packaging/distros/shared/ENTRY",
+          "install -Dm644 packaging/distros/shared/ENTRY")),
+        ("packaging/nix/chan.nix", cli_names, ('ln -s chan "$out/bin/NAME"',), ()),
+        ("packaging/nix/chan-desktop.nix", ENTRY_POINTS,
+         ('ln -s chan-desktop "$out/bin/NAME"',),
+         ("install -Dm644 packaging/distros/shared/ENTRY",
+          '"$out/share/applications/ENTRY"')),
+    )
+    for path, names, link_needles, entry_needles in packages:
+        text = read(path)
+        for name in names:
+            for needle in link_needles:
+                require(text, needle.replace("NAME", name), path)
+        for entry in OPENER_ENTRIES:
+            for needle in entry_needles:
+                require(text, needle.replace("ENTRY", entry), path)
+    linux = json.loads(read("desktop/src-tauri/tauri.conf.json"))["bundle"]["linux"]
+    for bundle in ("deb", "rpm", "appimage"):
+        files = linux.get(bundle, {}).get("files", {})
+        for entry in OPENER_ENTRIES:
+            if files.get(f"/usr/share/applications/{entry}") != f"../../packaging/distros/shared/{entry}":
+                raise ContractError(
+                    f"desktop/src-tauri/tauri.conf.json: bundle.linux.{bundle}.files must install "
+                    f"packaging/distros/shared/{entry} at /usr/share/applications/{entry}"
+                )
 
 
 def check_workflow_contract() -> None:
@@ -999,6 +1065,8 @@ def check_nix_contract() -> None:
         'CHAN_PACKAGED = "nix";',
         'cargoBuildFlags = [\n    "-p"\n    "chan"\n  ];',
         'ln -s chan "$out/bin/cs"',
+        'ln -s chan "$out/bin/chan-files"',
+        'ln -s chan "$out/bin/chan-edit"',
         'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
     ):
         require(headless, needle, "packaging/nix/chan.nix")
@@ -1029,6 +1097,8 @@ def check_nix_contract() -> None:
         '"chan-desktop"',
         'ln -s chan-desktop "$out/bin/chan"',
         'ln -s chan-desktop "$out/bin/cs"',
+        'ln -s chan-desktop "$out/bin/chan-files"',
+        'ln -s chan-desktop "$out/bin/chan-edit"',
         'test ! -e "$out/lib/systemd/user/chan-devserver.service"',
     ):
         require(desktop, needle, "packaging/nix/chan-desktop.nix")
@@ -1425,9 +1495,9 @@ def check_aur_artifact(path: str, recipe: str, package: str) -> None:
                     "package-bin" in word for word in words
                 ):
                     continue
-                if words in (
-                    ["true"],
-                    ["desktop-file-validate", "packaging/distros/shared/chan-desktop.desktop"],
+                if words == ["true"] or words in (
+                    ["desktop-file-validate", f"packaging/distros/shared/{entry}"]
+                    for entry in DESKTOP_ENTRIES
                 ):
                     continue
                 if words[0] == "echo" and not any(SHELL_EXPANSION.search(word) for word in words):
@@ -1458,7 +1528,7 @@ def check_aur_artifact(path: str, recipe: str, package: str) -> None:
                 if (
                     len(words) == 4 and words[:2] == ["ln", "-s"]
                     and words[2] == package
-                    and words[3] in {f"$pkgdir/usr/bin/{name}" for name in ("chan", "cs") if name != package}
+                    and words[3] in {f"$pkgdir/usr/bin/{name}" for name in ENTRY_POINTS if name != package}
                 ):
                     continue
             raise ContractError(
@@ -1848,6 +1918,7 @@ def main(argv: list[str]) -> int:
     for check in (
         check_make_contract,
         check_desktop_contract,
+        check_opener_contract,
         check_workflow_contract,
         check_gateway_trigger_contract,
         check_docker_contract,

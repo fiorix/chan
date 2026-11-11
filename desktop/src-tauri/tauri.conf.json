@@ -45,7 +45,23 @@
     },
     "linux": {
       "deb": {
-        "depends": []
+        "depends": [],
+        "files": {
+          "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
+          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
+          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/share/applications/chan-files.desktop": "../../packaging/distros/shared/chan-files.desktop",
+          "/usr/share/applications/chan-edit.desktop": "../../packaging/distros/shared/chan-edit.desktop"
+        }
       }
     }
   }

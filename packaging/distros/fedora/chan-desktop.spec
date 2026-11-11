@@ -3,9 +3,10 @@
 # The build tooling rewrites %%upstream_version from the workspace
 # Cargo.toml before rpmbuild, so the committed value is a fallback.
 #
-# The desktop binary IS the chan/cs command line (argv0 dispatch), so this
-# package ships /usr/bin/{chan,cs} symlinks and conflicts with the chan
-# package instead of depending on it.
+# The desktop binary IS the chan/cs command line and the chan-files and
+# chan-edit openers (argv0 dispatch), so this package ships
+# /usr/bin/{chan,cs,chan-files,chan-edit} symlinks and conflicts with the
+# chan package instead of depending on it.
 
 %global debug_package %{nil}
 %global upstream_version 0.127.0
@@ -41,8 +42,8 @@ BuildRequires:  desktop-file-utils
 BuildRequires:  systemd-rpm-macros
 
 Requires:       systemd
-# Both packages own %%{_bindir}/{chan,cs}; the desktop binary provides the
-# full CLI in-process, so install one or the other.
+# Both packages own %%{_bindir}/{chan,cs,chan-files,chan-edit}; the desktop
+# binary provides the full CLI in-process, so install one or the other.
 Conflicts:      chan
 
 %description
@@ -64,8 +65,14 @@ cargo build --release --frozen -p chan-desktop
 install -Dm755 target/release/chan-desktop %{buildroot}%{_bindir}/chan-desktop
 ln -s chan-desktop %{buildroot}%{_bindir}/chan
 ln -s chan-desktop %{buildroot}%{_bindir}/cs
+ln -s chan-desktop %{buildroot}%{_bindir}/chan-files
+ln -s chan-desktop %{buildroot}%{_bindir}/chan-edit
 install -Dm644 packaging/distros/shared/chan-desktop.desktop \
     %{buildroot}%{_datadir}/applications/chan-desktop.desktop
+install -Dm644 packaging/distros/shared/chan-files.desktop \
+    %{buildroot}%{_datadir}/applications/chan-files.desktop
+install -Dm644 packaging/distros/shared/chan-edit.desktop \
+    %{buildroot}%{_datadir}/applications/chan-edit.desktop
 install -Dm644 desktop/src-tauri/icons/32x32.png \
     %{buildroot}%{_datadir}/icons/hicolor/32x32/apps/chan-desktop.png
 install -Dm644 desktop/src-tauri/icons/64x64.png \
@@ -81,6 +88,8 @@ install -Dm644 packaging/distros/shared/chan-devserver.service \
 
 %check
 desktop-file-validate %{buildroot}%{_datadir}/applications/chan-desktop.desktop
+desktop-file-validate %{buildroot}%{_datadir}/applications/chan-files.desktop
+desktop-file-validate %{buildroot}%{_datadir}/applications/chan-edit.desktop
 
 %post
 %systemd_user_post chan-devserver.service
@@ -94,7 +103,11 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/chan-desktop.desktop
 %{_bindir}/chan-desktop
 %{_bindir}/chan
 %{_bindir}/cs
+%{_bindir}/chan-files
+%{_bindir}/chan-edit
 %{_datadir}/applications/chan-desktop.desktop
+%{_datadir}/applications/chan-files.desktop
+%{_datadir}/applications/chan-edit.desktop
 %{_datadir}/icons/hicolor/*/apps/chan-desktop.png
 %{_userunitdir}/chan-devserver.service
 

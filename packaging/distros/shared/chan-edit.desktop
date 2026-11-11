@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Chan Editor
+GenericName=Text Editor
+Comment=Open a Markdown file in Chan's editor
+Exec=chan-edit %U
+Icon=chan-desktop
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=Utility;TextEditor;
+MimeType=text/markdown;

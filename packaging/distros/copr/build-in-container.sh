@@ -99,6 +99,9 @@ echo ">> installing $(basename "$rpm_path")" >&2
 dnf -y install "$rpm_path"
 chan --version
 cs --help >/dev/null
+for opener in chan-files chan-edit; do
+    "$opener" --help | grep "^Usage: $opener " >/dev/null
+done
 systemd-analyze verify /usr/lib/systemd/user/chan-devserver.service
 
 if [ "$PKG" = chan-desktop ]; then
@@ -107,7 +110,9 @@ if [ "$PKG" = chan-desktop ]; then
     # reached the binary instead; the standalone CLI assertion below covers
     # the executable package-manager refusal path.
     grep -aFq 'sudo dnf upgrade' /usr/bin/chan-desktop
-    desktop-file-validate /usr/share/applications/chan-desktop.desktop
+    desktop-file-validate /usr/share/applications/chan-desktop.desktop \
+        /usr/share/applications/chan-files.desktop \
+        /usr/share/applications/chan-edit.desktop
     ldd_output="$(ldd /usr/bin/chan-desktop)"
     if grep -q 'not found' <<<"$ldd_output"; then
         echo "error: chan-desktop has unresolved shared libraries" >&2

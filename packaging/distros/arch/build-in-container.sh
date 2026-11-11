@@ -190,6 +190,10 @@ for pkgbase in "${packages[@]}"; do
     chan --version
     echo ">> smoke: cs --help" >&2
     cs --help >/dev/null
+    for opener in chan-files chan-edit; do
+        echo ">> smoke: $opener --help" >&2
+        "$opener" --help | grep "^Usage: $opener " >/dev/null
+    done
     # Runs through sudo so it holds wherever /run/systemd/ is absent; see the
     # sudoers rule above.
     echo ">> smoke: systemd-analyze verify chan-devserver.service" >&2
@@ -210,7 +214,9 @@ for pkgbase in "${packages[@]}"; do
         fi
         grep -aFq 'your AUR helper (for example, paru -Syu or yay -Syu)' \
             /usr/bin/chan-desktop
-        desktop-file-validate /usr/share/applications/chan-desktop.desktop
+        desktop-file-validate /usr/share/applications/chan-desktop.desktop \
+            /usr/share/applications/chan-files.desktop \
+            /usr/share/applications/chan-edit.desktop
         for size in 32x32 64x64 128x128 256x256 512x512; do
             test -f "/usr/share/icons/hicolor/$size/apps/chan-desktop.png"
         done

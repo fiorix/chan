@@ -70,6 +70,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   postInstall = ''
     ln -s chan "$out/bin/cs"
+    ln -s chan "$out/bin/chan-files"
+    ln -s chan "$out/bin/chan-edit"
     install -Dm644 LICENSE "$out/share/licenses/chan/LICENSE"
     install -Dm644 README.md CHANGELOG.md \
       -t "$out/share/doc/chan/"
