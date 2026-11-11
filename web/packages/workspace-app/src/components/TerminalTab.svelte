@@ -38,6 +38,7 @@
     readClipboardText,
     readDroppedPaths,
     writeClipboardText,
+    writePrimarySelection,
   } from "../api/desktop";
   import { isOsFileDrag, shellEscapePaths } from "../state/fileDropGuard";
   import { resolveTerminalColors } from "../state/paneColor";
@@ -155,6 +156,7 @@
   } from "../terminal/clipboardChord";
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
+  import { installTerminalPrimarySelection, isPrimarySelectionDesktop } from "../terminal/primarySelection";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
   import { trackUserInput, type UserInputTracker } from "../terminal/xtermUserInput";
   import {
@@ -561,6 +563,7 @@
   let ghosttyFind: GhosttyFind | null = null;
   // Rows built up by wheel input the app owns (see handleGhosttyWheel).
   const ghosttyWheelRows = new GhosttyWheelRows();
+  let primarySelectionCleanup: (() => void) | null = null;
   // Removes the gate that keeps ghostty-web's overlay scrollbar from claiming
   // clicks on the content beneath it while it is invisible. Non-null ONLY on
   // the ghostty backend, and only while the gate is installed.
@@ -1415,7 +1418,10 @@
       }
       // ghostty-web's own copies (mouse release, double and triple click)
       // write through the same writer as the chord and the menu.
-      if (!installGhosttySelection(ghosttyTerm, (text) => void copyToClipboard(text))) {
+      if (!installGhosttySelection(ghosttyTerm, (text) => {
+        void copyToClipboard(text);
+        if (isPrimarySelectionDesktop()) void writePrimarySelection(text);
+      })) {
         console.warn(
           "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
         );
@@ -1450,6 +1456,7 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
+    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend);
     // The masker logged and disabled itself; sync the toggle state so the
     // menu label stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
@@ -2608,6 +2615,8 @@
     replayMaskScans.reset();
     resizeObserver?.disconnect();
     resizeObserver = null;
+    primarySelectionCleanup?.();
+    primarySelectionCleanup = null;
     ghosttyKeyParity?.();
     ghosttyKeyParity = null;
     ghosttyClickExtents?.();
