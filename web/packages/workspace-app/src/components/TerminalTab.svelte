@@ -207,6 +207,7 @@
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyEmptyPaste } from "../terminal/ghosttyPaste";
   import { installGhosttySelection } from "../terminal/ghosttySelection";
+  import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import { ghosttyScrollbackText } from "../terminal/ghosttyVt";
   import type { SubmitAgent } from "../terminal/submitMode";
   import { uiConfirm } from "../state/confirm.svelte";
@@ -821,8 +822,8 @@
     recoverTerminalRendererAfterHostResume();
   });
 
-  // Track the resolved terminal body theme so xterm.js' canvas
-  // palette follows the per-surface override.
+  // Track the resolved terminal body theme so either backend's canvas
+  // palette follows a switch and the per-surface override.
   $effect(() => {
     effectiveHybridSurfaceTheme("terminal");
     customTerminalColors;
@@ -921,8 +922,11 @@
 
   function applyTerminalTheme(): void {
     if (!term) return;
-    term.options.theme = terminalTheme();
-    if (backend === "xterm") {
+    const theme = terminalTheme();
+    if (backend === "ghostty") {
+      applyGhosttyTheme(term as GhosttyTerminal, theme);
+    } else {
+      term.options.theme = theme;
       (term as Terminal).options.minimumContrastRatio =
         terminalMinimumContrastRatio();
     }
