@@ -11,6 +11,7 @@
     type DeckScope,
     type DeckScopeId,
   } from "@chan/web-shared/command-deck";
+  import { privateText } from "@chan/web-shared/privacy";
   import { windowDisplayName } from "@chan/web-shared/window-label";
   import {
     AppWindow,
@@ -308,14 +309,17 @@
     return [...withArguments, ...base];
   });
 
+  /// Privacy mode names every window `Window` and every workspace
+  /// `Workspace`, as the launcher's deck does: a row is a deck option, which
+  /// cannot hold a reveal button.
   function scopedWindowTitle(window: ScopedLibraryWindow): string {
-    return windowDisplayName(window);
+    return privateText(windowDisplayName(window), "Window");
   }
 
   /// A workspace row's name in the deck: its label, else its root's last
   /// component cut at `/` alone, so a Windows root with no label reads whole.
   function scopedWorkspaceName(workspace: ScopedLibraryWorkspace): string {
-    return workspace.label || workspace.path.split("/").filter(Boolean).at(-1) || workspace.path;
+    return privateText(workspace.label || workspace.path.split("/").filter(Boolean).at(-1) || workspace.path, "Workspace");
   }
 
   /// A workspace window is named by the row that lists its workspace, as the
@@ -328,7 +332,8 @@
     if (window.kind === "terminal") return "Terminal";
     const workspace = scopedLibrary?.workspaces.find((row) => row.path === window.workspace_path);
     if (workspace) return scopedWorkspaceName(workspace);
-    return window.workspace_path?.split("/").filter(Boolean).at(-1) ?? "Workspace";
+    const name = window.workspace_path?.split("/").filter(Boolean).at(-1);
+    return name ? privateText(name, "Workspace") : "Workspace";
   }
 
   // The deck keeps the capability lifecycle and the snapshot; how a window is

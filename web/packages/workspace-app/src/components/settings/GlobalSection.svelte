@@ -39,7 +39,7 @@
 
 <SettingField
   label="Privacy mode"
-  hint="While recording or sharing your screen, hide computer and gateway names, addresses, connection scripts and tokens, workspace paths in Computers, WireGuard file paths and public keys, connection errors, launcher notices and action details, window labels in Computers and window titles, terminal program details, and the Metrics slide's host name and chan home path. Reveal individual fields where an eye button is shown. Shared across Chan desktop windows, or browser tabs at the same address. Screen recording is not detected automatically."
+  hint="While recording or sharing your screen, hide computer and gateway names, addresses, connection scripts and tokens, workspace paths in Computers, WireGuard file paths and public keys, connection errors, launcher notices and action details, window labels in Computers and window titles, terminal program details, the Metrics slide's host name and chan home path, the command launcher's window labels and workspace names, and the Workspace slide's root path. Reveal individual fields where an eye button is shown. Shared across Chan desktop windows, or browser tabs at the same address. Screen recording is not detected automatically."
 >
   <PillToggle label="Privacy mode on" checked={privacy.enabled} disabled={!privacy.ready || privacy.saving} ontoggle={(enabled) => void setPrivacy({ enabled })} />
   <PillToggle label="Also enable terminal secret masking" checked={privacy.mask_terminal_secrets} disabled={!privacy.ready || privacy.saving} ontoggle={(mask_terminal_secrets) => void setPrivacy({ mask_terminal_secrets })} />

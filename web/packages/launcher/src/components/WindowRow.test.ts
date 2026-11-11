@@ -167,6 +167,33 @@ describe("WindowRow", () => {
     expect(el.querySelector('button[title="Add or edit window text"]')).toBeNull();
   });
 
+  // Privacy mode drops the user's text and keeps the generated name; a control
+  // terminal's name is fixed and holds nothing to conceal, and its generated
+  // form ("Terminal Window 0") is a name the window goes by nowhere else.
+  it("names a row in privacy mode by its generated name, and a control terminal by its fixed name", async () => {
+    const { setPrivacy } = await import("@chan/web-shared/privacy");
+    await setPrivacy({ enabled: true });
+    try {
+      const names = [
+        win({ window_id: "w", library_id: "local", kind: "workspace", workspace_path: "/p", ordinal: 2, label: "release checks" }),
+        win({ window_id: "t", library_id: "local", ordinal: 3, label: "deploy shell" }),
+        win({ window_id: "c", library_id: "lib-remote", ordinal: 0, control: true }),
+        // A tmux connection's control terminal, marked by its tmux flag alone.
+        win({ window_id: "m", library_id: "local", ordinal: 0, tmux: { connection: "tm", control: true } }),
+      ].map((w) => {
+        const name = render(w).querySelector(".row-name")?.textContent ?? "";
+        if (app) unmount(app);
+        app = null;
+        target?.remove();
+        target = null;
+        return name;
+      });
+      expect(names).toEqual(["Window 2", "Terminal Window 3", "Control terminal", "Control terminal"]);
+    } finally {
+      await setPrivacy({ enabled: false });
+    }
+  });
+
   it("a hidden window shows the Show (EyeOff) toggle", () => {
     const el = render(win({ window_id: "h", library_id: "local", hidden: true }));
     expect(el.querySelector('[aria-label="Show window"]')).not.toBeNull();

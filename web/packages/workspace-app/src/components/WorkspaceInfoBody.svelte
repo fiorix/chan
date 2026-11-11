@@ -11,8 +11,14 @@
   // workspace chip + title up top stay distinct (workspace-rooted, not a
   // generic folder). `variant` only toggles the directory action row
   // (inspector) vs. nothing (dashboard slide).
+  //
+  // Privacy mode conceals the root path, which names the user's home, behind
+  // a private field; the heading's hover title drops it rather than follow
+  // that field's reveal.
 
   import { untrack } from "svelte";
+  import PrivateField from "@chan/web-shared/PrivateField.svelte";
+  import { privacy } from "@chan/web-shared/privacy";
   import { ApiError, apiErrorCode } from "../api/errors";
   import { api } from "../api/client";
   import type { InspectorPayload, ReportPrefix } from "../api/types";
@@ -318,12 +324,12 @@
   <header class="head">
     <span class="kind-chip workspace">workspace</span>
   </header>
-  <h3 class="title" title={workspace.info?.root}>
+  <h3 class="title" title={privacy.enabled ? undefined : workspace.info?.root}>
     {workspace.info?.label ?? "(workspace)"}
   </h3>
   <div class="meta-grid">
     <span class="k">directory</span>
-    <span class="v mono path" title={workspace.info?.root}>{workspace.info?.root ?? ""}</span>
+    <PrivateField field="workspace:root" label="workspace root path"><span class="v mono path" title={workspace.info?.root}>{workspace.info?.root ?? ""}</span></PrivateField>
   </div>
 
   {#if variant === "inspector"}

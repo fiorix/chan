@@ -25,3 +25,9 @@ export function rootName(path: string): string {
 export function windowRowLabel(w: WindowRecord): string {
   return windowDisplayName(w.tmux?.control ? { ...w, control: true } : w);
 }
+
+/** The row's name in privacy mode: the generated name without the user's
+ * text, or a control terminal's fixed name, which holds nothing to conceal. */
+export function windowPrivateRowLabel(w: WindowRecord): string {
+  return windowRowLabel({ ...w, label: "" });
+}

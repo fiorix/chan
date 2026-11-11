@@ -15,6 +15,7 @@ test("Global privacy hint names the concealed surfaces and the field reveal limi
     "window titles, terminal program details", "Metrics slide's host name and chan home path",
     "where an eye button is shown", "Shared across Chan desktop windows, or browser tabs at the same address",
     "Screen recording is not detected automatically",
+    "the command launcher's window labels and workspace names", "the Workspace slide's root path",
   ]) expect.soft(hint).toContain(detail);
   // The pane list has no heading: the window tab bar carries the window's
   // title, which "window titles" covers.

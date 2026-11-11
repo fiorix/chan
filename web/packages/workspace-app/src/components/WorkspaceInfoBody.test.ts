@@ -8,6 +8,7 @@
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { setPrivacy } from "@chan/web-shared/privacy";
 import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
 import type { GraphView, ReportPrefix } from "../api/types";
 import { graphData, invalidateGraph } from "../state/graphData.svelte";
@@ -308,6 +309,37 @@ describe("the contacts", () => {
     const second = await render({ onContactNavigate });
     [...second.querySelectorAll<HTMLButtonElement>("button.ref.contact")][1]!.click();
     expect(onContactNavigate).toHaveBeenCalledWith("Contacts/zed.md");
+  });
+});
+
+describe("privacy mode", () => {
+  afterEach(async () => { await setPrivacy({ enabled: false }); });
+
+  // The Workspace slide and the root's inspector show this one body, so both
+  // variants conceal the root path, which names the user's home.
+  test.each(["dashboard", "inspector"] as const)("the %s variant conceals the root path, reveals it on request and follows a toggle", async (variant) => {
+    const target = await render({ variant });
+    const shown = () => {
+      expect(target.querySelector(".v.path")?.textContent).toBe("/home/me/ws");
+      expect(target.querySelector("h3.title")?.getAttribute("title")).toBe("/home/me/ws");
+      expect(target.querySelector(".redacted")).toBeNull();
+    };
+    shown();
+    await setPrivacy({ enabled: true });
+    await tick();
+    // Nowhere in the body, the heading's hover title included; the
+    // workspace's name stays.
+    expect.soft(target.innerHTML).not.toContain("/home/me");
+    expect.soft(target.querySelector('[aria-label="workspace root path hidden"]')?.textContent).toBe("Hidden");
+    expect(target.querySelector("h3.title")?.textContent?.trim()).toBe("ws");
+    (target.querySelector('[aria-label="Reveal workspace root path"]') as HTMLButtonElement).click();
+    await tick();
+    expect(target.querySelector(".v.path")?.textContent).toBe("/home/me/ws");
+    // The reveal is the field's own: a tooltip never reveals it implicitly.
+    expect(target.querySelector("h3.title")?.hasAttribute("title")).toBe(false);
+    await setPrivacy({ enabled: false });
+    await tick();
+    shown();
   });
 });
 
