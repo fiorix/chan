@@ -85,6 +85,7 @@ describe("liveApi gateway routes (frozen wire)", () => {
       last_error: null,
       wireguard: null,
       wireguard_status: null,
+      wireguard_ingresses: [],
       wireguard_public_key: null,
       wireguard_enrolled: false,
     } satisfies GatewayEntry;
@@ -94,6 +95,7 @@ describe("liveApi gateway routes (frozen wire)", () => {
     expect(entry).toEqual(wire);
     expect(entry.wireguard).toBeNull();
     expect(entry.wireguard_status).toBeNull();
+    expect(entry.wireguard_ingresses).toEqual([]);
     expect(entry.wireguard_public_key).toBeNull();
     expect(entry.wireguard_enrolled).toBe(false);
   });
@@ -110,6 +112,7 @@ describe("liveApi gateway routes (frozen wire)", () => {
       last_error: null,
       wireguard: "/home/u/.chan/desktop/wireguard/gw-1a2b3c4d.conf",
       wireguard_status: "up",
+      wireguard_ingresses: [{ id: "p1", status: "up" }, { id: "p2", status: "connecting" }],
       wireguard_public_key: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
       wireguard_enrolled: true,
     } satisfies GatewayEntry;
@@ -117,6 +120,7 @@ describe("liveApi gateway routes (frozen wire)", () => {
     const [entry] = await liveApi.listGateways();
     expect(entry.wireguard_public_key).toBe("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=");
     expect(entry.wireguard_enrolled).toBe(true);
+    expect(entry.wireguard_ingresses).toEqual([{ id: "p1", status: "up" }, { id: "p2", status: "connecting" }]);
   });
 
   it("parses WireGuard gateway rows: the stored path, the live status, a refusal reason", async () => {
@@ -255,6 +259,35 @@ describe("mock gateway registry", () => {
     const listed = (await mockApi.listGateways()).find((g) => g.id === gw.id)!;
     expect(listed.wireguard_public_key).toBeNull();
     expect(listed.wireguard_enrolled).toBe(false);
+  });
+
+  it("projects mock ingress states through enrollment, regeneration, disconnect and reconnect", async () => {
+    const gw = await mockApi.addGateway({ url: "https://gw.example" });
+    const list = async () => (await mockApi.listGateways()).find((row) => row.id === gw.id)!;
+    expect(gw.wireguard_ingresses).toEqual([]);
+    await mockApi.generateWireguardKey(gw.id);
+    expect((await list()).wireguard_ingresses).toEqual([]);
+    await mockApi.connectGateway(gw.id);
+    const ingresses = [{ id: "p1", status: "connecting" }, { id: "p2", status: "connecting" }];
+    expect((await list()).wireguard_ingresses).toEqual(ingresses);
+    await mockApi.updateGateway(gw.id, { url: gw.url, label: "renamed" });
+    expect((await list()).wireguard_ingresses).toEqual(ingresses);
+    await mockApi.generateWireguardKey(gw.id);
+    expect((await list()).wireguard_enrolled).toBe(false);
+    expect((await list()).wireguard_ingresses).toEqual(ingresses);
+    await mockApi.connectGateway(gw.id);
+    await mockApi.disconnectGateway(gw.id);
+    expect((await list()).wireguard_enrolled).toBe(true);
+    expect((await list()).wireguard_ingresses).toEqual([]);
+    expect((await list()).wireguard_status).toBeNull();
+    await mockApi.connectGateway(gw.id);
+    expect((await list()).wireguard_ingresses).toEqual(ingresses);
+    expect((await list()).wireguard_status).toBe("connecting");
+    await mockApi.updateGateway(gw.id, { url: gw.url, wireguard: "/manual.conf" });
+    expect((await list()).wireguard_ingresses).toEqual([]);
+    expect((await list()).wireguard_status).toBe("connecting");
+    await mockApi.updateGateway(gw.id, { url: gw.url });
+    expect((await list()).wireguard_ingresses).toEqual([]);
   });
 
   it("refuses a relative WireGuard path with the registry's 400 sentence", () => {

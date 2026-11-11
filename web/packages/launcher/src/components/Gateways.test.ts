@@ -6,6 +6,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync, tick } from "svelte";
+import { setPrivacy } from "@chan/web-shared/privacy";
 import Gateways from "./Gateways.svelte";
 import { addGateway, library } from "../state/library.svelte";
 import * as libraryActions from "../state/library.svelte";
@@ -767,5 +768,99 @@ describe("Gateways WireGuard key", () => {
     expect(card().querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe("enrolled");
     expect(card().querySelector(".gw-wg-file")).toBeNull();
     expect(card().querySelector(".gw-wg-status")?.textContent).toBe("connecting");
+  });
+});
+
+describe("Gateways WireGuard ingresses", () => {
+  afterEach(async () => {
+    await setPrivacy({ enabled: false });
+  });
+
+  function ingressRows(el: HTMLElement): (string | null | undefined)[][] {
+    return [...el.querySelectorAll(".gw-wg-ingress")].map((row) => [
+      row.querySelector(".gw-wg-id")?.textContent,
+      row.querySelector(".gw-wg-status")?.textContent,
+    ]);
+  }
+
+  it("shows one ingress id beside its live status on one WireGuard line", () => {
+    library.gateways = [gw({
+      wireguard_enrolled: true,
+      wireguard_status: "up",
+      wireguard_ingresses: [{ id: "p1", status: "up" }],
+    })];
+    const el = render();
+    expect(ingressRows(el)).toEqual([["p1", "up"]]);
+    expect(el.querySelectorAll(".gw-wireguard")).toHaveLength(1);
+    expect(el.querySelector(".gw-wireguard .chip")?.textContent).toBe("WireGuard");
+    expect(el.querySelector(".gw-wg-file")).toBeNull();
+  });
+
+  it("shows two independent ingress states without an extra summary line", () => {
+    library.gateways = [gw({
+      wireguard_enrolled: true,
+      wireguard_status: "connecting",
+      wireguard_ingresses: [{ id: "p1", status: "up" }, { id: "p2", status: "connecting" }],
+    })];
+    const el = render();
+    expect(ingressRows(el)).toEqual([["p1", "up"], ["p2", "connecting"]]);
+    expect(el.querySelectorAll(".gw-wireguard")).toHaveLength(2);
+    expect(el.querySelectorAll(".gw-wg-status")).toHaveLength(2);
+    expect([...el.querySelectorAll(".gw-wireguard .chip")].map((node) => node.textContent)).toEqual(["WireGuard", "WireGuard"]);
+  });
+
+  it("refreshes and reorders each ingress on the same card and removes retired ingresses", () => {
+    library.gateways = [gw({ wireguard_ingresses: [{ id: "p1", status: "up" }, { id: "p2", status: "connecting" }] })];
+    const el = render();
+    const card = el.querySelector(".gateway-card");
+    const lost = "lost (last handshake 3 min ago)";
+    const refused = "refused: endpoint did not resolve: private-node.example";
+    library.gateways = [gw({ wireguard_ingresses: [{ id: "p2", status: refused }, { id: "p1", status: lost }] })];
+    flushSync();
+    expect(el.querySelector(".gateway-card")).toBe(card);
+    expect(ingressRows(el)).toEqual([["p2", refused], ["p1", lost]]);
+    expect([...el.querySelectorAll(".gw-wg-status")].map((node) => node.getAttribute("title"))).toEqual([refused, lost]);
+    library.gateways = [gw({ wireguard_ingresses: [{ id: "p1", status: "up" }] })];
+    flushSync();
+    expect(ingressRows(el)).toEqual([["p1", "up"]]);
+    library.gateways = [gw({ wireguard_ingresses: [] })];
+    flushSync();
+    expect(el.querySelector(".gw-wireguard")).toBeNull();
+  });
+
+  it.each([undefined, []])("keeps the summary and manual path when the ingress list is %j", (wireguard_ingresses) => {
+    library.gateways = [gw({ wireguard: "/manual.conf", wireguard_status: "up", wireguard_ingresses })];
+    const el = render();
+    expect(ingressRows(el)).toEqual([]);
+    expect(el.querySelectorAll(".gw-wireguard")).toHaveLength(1);
+    expect(el.querySelector(".gw-wg-status")?.textContent).toBe("up");
+    expect(el.querySelector(".gw-wg-file")?.textContent).toBe("/manual.conf");
+  });
+
+  it("conceals each ingress id and status and keeps reveals attached to ids after reorder", async () => {
+    const ingresses = [
+      { id: "private-node-a", status: "refused: private-a.example: timeout" },
+      { id: "private-node-b", status: "endpoint did not resolve: private-b.example, retrying" },
+    ];
+    library.gateways = [gw({ wireguard_ingresses: ingresses })];
+    await setPrivacy({ enabled: true });
+    const el = render();
+    flushSync();
+    const rows = [...el.querySelectorAll(".gw-wg-ingress")];
+    expect(rows).toHaveLength(2);
+    for (const { id, status } of ingresses) {
+      expect(el.innerHTML).not.toContain(id);
+      expect(el.innerHTML).not.toContain(status);
+    }
+    (rows[1].querySelector('[aria-label="Reveal WireGuard ingress"]') as HTMLButtonElement).click();
+    flushSync();
+    expect(ingressRows(el)).toEqual([[undefined, undefined], ["private-node-b", undefined]]);
+    library.gateways = [gw({ wireguard_ingresses: [ingresses[1], ingresses[0]] })];
+    flushSync();
+    expect(ingressRows(el)).toEqual([["private-node-b", undefined], [undefined, undefined]]);
+    (el.querySelector('[aria-label="Reveal connection details"]') as HTMLButtonElement).click();
+    flushSync();
+    expect(ingressRows(el)).toEqual([["private-node-b", ingresses[1].status], [undefined, undefined]]);
+    expect(el.innerHTML).not.toContain(ingresses[0].status);
   });
 });
