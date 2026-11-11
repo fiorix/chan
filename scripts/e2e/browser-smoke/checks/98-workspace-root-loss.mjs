@@ -1,10 +1,11 @@
-// Remove the harness-owned workspace root with cached directory listings, a max-depth Graph and a dirty >2 MiB editor. The runner pins this check last because every later check would inherit a deliberately missing workspace.
+// Remove the harness-owned workspace root with cached directory listings, a max-depth Graph and a dirty >2 MiB editor. First the editor's file alone is removed under the live root while its save is held: the tab must turn to its missing state with the typed text kept and no external-edit prompt. The runner pins this check last because every later check would inherit a deliberately missing workspace.
 
 import {
   existsSync,
   lstatSync,
   mkdirSync,
   realpathSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +16,14 @@ const TREE = "root-loss-tree";
 const LARGE = "root-loss-large.md";
 const DIRTY_MARKER = `ROOT-LOSS-UNSAVED-${Date.now()}`;
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+
+async function until(predicate, timeoutMs, what) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
+    await delay(100);
+  }
+}
 
 function seedVisibleTree(root) {
   const dirs = [];
@@ -151,7 +160,7 @@ export default {
     }
     const page = await ctx.browser.newPage();
     const httpFailures = [];
-    const evidence = { apiTimeline: [], httpFailures, heldSaves: 0, saveAnswers: [] };
+    const evidence = { apiTimeline: [], httpFailures, heldSaves: 0, saveAnswers: [], fileGone: {} };
     let deleteStarted = null;
     let saves = null;
     const recordHttpFailure = (response) => {
@@ -292,11 +301,9 @@ export default {
         LARGE,
       );
       // The editor autosaves a dirty buffer 800 ms after its last change, so
-      // a save would race the deletion below: answered while `rm` runs, it
-      // finds the file gone under a live root, and the external-edit prompt
-      // it opens takes the next click. The editor's saves are held in the
-      // browser until the root is gone, so the loss is the one this check
-      // means: a dirty editor whose save meets a missing workspace.
+      // a save would race the deletion below. The editor's saves are held in
+      // the browser and released once the file is gone under a root that is
+      // still there, the loss this check's editor leg means.
       saves = await page.createCDPSession();
       const heldSaves = [];
       let holdSaves = true;
@@ -332,6 +339,57 @@ export default {
         { timeout: 15_000 },
         { name: LARGE, marker: DIRTY_MARKER },
       );
+
+      // The file goes first, under a root that is still there. Its autosave,
+      // held until the file is gone, is refused as the write conflict with no
+      // time on disk. The tab must say the file was moved or deleted and keep
+      // the typed text, with no external-edit prompt over it, offering only
+      // the choices that keep it. The root then goes with the tab in that
+      // state. (Save here cannot recreate this file: a new text file over the
+      // server's 2 MiB write budget is refused; 222 drives Save here.)
+      const largePath = join(ctx.workspaceDir, LARGE);
+      const fileGone = evidence.fileGone;
+      await until(() => heldSaves.length > 0, 15_000, "the editor's autosave of the typed text");
+      unlinkSync(largePath);
+      if (existsSync(largePath)) throw new Error(`unlink returned but ${LARGE} still exists`);
+      ctx.mark("file-gone:unlinked");
+      const answersBefore = evidence.saveAnswers.length;
+      await releaseSaves();
+      await until(() => evidence.saveAnswers.length > answersBefore, 15_000, "the answer to the held save");
+      fileGone.saveAnswer = evidence.saveAnswers[answersBefore];
+      await page.waitForFunction(
+        (name) => {
+          const state = document.querySelector(".editor-tab .missing-file-state");
+          const tab = [...document.querySelectorAll(".tab")]
+            .find((candidate) => candidate.textContent?.includes(name));
+          return (state?.textContent ?? "").includes(name) && tab?.querySelector(".dirty.unsaved") !== null;
+        },
+        { timeout: 15_000, polling: 100 },
+        LARGE,
+      );
+      // A prompt opens in the same turn as the refusal's answer; give the
+      // page a second past it before reading that none is there.
+      await delay(1_000);
+      const goneDialog = await page.evaluate(() =>
+        document.querySelector('[role="dialog"][aria-modal="true"]')?.textContent?.trim().slice(0, 200) ?? null);
+      fileGone.dialog = goneDialog;
+      if (goneDialog !== null) {
+        await ctx.shot("file-gone-dialog", page);
+        throw new Error(`a save that met its file gone opened a dialog: ${goneDialog}`);
+      }
+      const goneState = await page.$eval(".editor-tab .missing-file-state", (state) => ({
+        text: state.textContent?.replace(/\s+/g, " ").trim() ?? "",
+        actions: [...state.querySelectorAll(".missing-actions button")].map((button) => button.textContent?.trim() ?? ""),
+      }));
+      fileGone.state = goneState;
+      if (
+        !goneState.text.includes("File moved or deleted") ||
+        !goneState.text.includes("The unsaved edits are still in this tab.") ||
+        JSON.stringify(goneState.actions) !== JSON.stringify(["Save here", "Find", "Close"])
+      ) {
+        throw new Error(`the missing state of the dirty tab: ${JSON.stringify(goneState)}`);
+      }
+      ctx.mark("file-gone:missing", fileGone);
       await ctx.shot("ready-to-delete", page);
 
       const canonicalRoot = assertOwnedThrowawayRoot(ctx.workspaceDir);
@@ -413,7 +471,6 @@ export default {
       if (existsSync(canonicalRoot)) {
         throw new Error(`rm returned but workspace root still exists: ${canonicalRoot}`);
       }
-      await releaseSaves();
       const badIntermediate = apiTimeline.find(
         (sample) =>
           ![200, 404].includes(sample.files) ||
@@ -588,7 +645,8 @@ export default {
 
       const uiTimeline = await uiTimelinePromise;
       evidence.uiTimeline = uiTimeline;
-      console.log(`[smoke:98] editor saves held until the root was gone: ${evidence.heldSaves}; save answers: ${JSON.stringify(evidence.saveAnswers)}`);
+      console.log(`[smoke:98] the file gone under the live root: ${JSON.stringify(evidence.fileGone)}`);
+      console.log(`[smoke:98] editor saves held: ${evidence.heldSaves}; save answers: ${JSON.stringify(evidence.saveAnswers)}`);
       await ctx.shot("root-unavailable", page);
       return {
         fixture: {
@@ -612,6 +670,7 @@ export default {
         rootRemainedAbsent: true,
         heldSaves: evidence.heldSaves,
         saveAnswers: evidence.saveAnswers,
+        fileGone: evidence.fileGone,
         httpFailures,
       };
     } catch (error) {
