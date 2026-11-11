@@ -1003,6 +1003,7 @@ dependencies = [
  "chan-server",
  "chan-shell",
  "chan-systemd",
+ "chan-tls",
  "chan-wireguard",
  "chan-workspace",
  "clap 4.6.1",
