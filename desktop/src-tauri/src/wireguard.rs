@@ -13,9 +13,10 @@
 //! carry the same value. What the proxy routes is not decided at start: the
 //! tunnels are a live registry behind it, keyed by gateway id. A row's source
 //! is adopted when it is set or changed through the Gateways form, when the
-//! row connects, and at start for every enabled row, so its tunnel starts and
-//! is routed in the running proxy; a cleared file, a removed row and a user
-//! disconnect retire the row's tunnel. A file that cannot be read or a
+//! row connects, and at start for every enabled row. An enrolled row holds
+//! one tunnel per ingress, with its own host map; a manual file stays one
+//! tunnel. A cleared source, a removed row and a user disconnect retire
+//! every tunnel of that row. A file that cannot be read or a
 //! tunnel that cannot start disables that row alone, with the reader's
 //! message, until its next adopt; a proxy that cannot bind disables every
 //! WireGuard row with that reason, and the app runs without a proxy.
@@ -42,7 +43,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::http::Uri;
 use url::Url;
 
-use crate::config::Gateway;
+use crate::config::{Gateway, WireguardEnrollment};
 
 /// The destinations the HTTP clients dial without the proxy: the proxy
 /// would only pass them through, and the embedded server and a devserver on
@@ -66,9 +67,9 @@ pub struct WireguardFabric {
     /// The runtime every tunnel's driver runs on, whichever thread adopts.
     runtime: tokio::runtime::Handle,
     /// One row per adopted gateway. Adopt and retire hold it from the check
-    /// to the swap, so two adopts of one row never start two tunnels.
-    rows: Mutex<HashMap<String, Row>>,
-    /// The proxy preserves a route's place on replace and appends new ids.
+    /// to the swap, so concurrent adopts never race on an ingress.
+    rows: Mutex<HashMap<String, GatewayRow>>,
+    /// Gateways keep their place; each row follows its ingress list order.
     next_route_order: AtomicU64,
 }
 
@@ -81,14 +82,22 @@ enum Proxy {
     Unavailable(String),
 }
 
-/// What the fabric holds for one gateway.
+/// One gateway's routes in discovery order. Only public parameters are
+/// retained for comparison; each tunnel owns its private configuration.
+struct GatewayRow {
+    route_order: u64,
+    enrollment: Option<(WireguardEnrollment, String)>,
+    ingresses: Vec<(String, Row)>,
+}
+
+/// One manual tunnel or enrolled ingress.
+#[derive(Clone)]
 enum Row {
     /// The tunnel runs from `path` (a client file or enrolled key file).
     Running {
         path: PathBuf,
         tunnel: Tunnel,
         hosts: Vec<HostRoute>,
-        route_order: u64,
         endpoint: String,
         started: Instant,
         #[cfg(test)]
@@ -99,7 +108,7 @@ enum Row {
 }
 
 impl WireguardFabric {
-    /// Adopt a hand-written file or the first peer of an enrolled row.
+    /// Adopt a hand-written file or every peer of an enrolled row.
     /// Enrolled configurations are built in memory from the one key file.
     pub fn adopt_gateway(&self, gateway: &Gateway) -> Option<Result<String, String>> {
         if gateway.wireguard.is_some() && gateway.wireguard_enrollment.is_some() {
@@ -119,30 +128,113 @@ impl WireguardFabric {
             && gateway.wireguard_public_key != gateway.wireguard_enrolled_key
         {
             let mut rows = self.rows.lock().unwrap();
-            if matches!(rows.get(&gateway.id), Some(Row::Refused { .. })) {
-                rows.remove(&gateway.id);
+            if let Some(row) = rows.get_mut(&gateway.id) {
+                row.ingresses
+                    .retain(|(_, ingress)| matches!(ingress, Row::Running { .. }));
+                if row.ingresses.is_empty() {
+                    rows.remove(&gateway.id);
+                }
             }
             return None;
         }
         let source = gateway.wireguard_source()?;
         if let Some(enrollment) = &gateway.wireguard_enrollment {
-            Some(
-                self.adopt_with(&gateway.id, source, gateway.host_routes(), || {
-                    let key = gateway
-                        .wireguard_enrolled_key
-                        .as_deref()
-                        .ok_or_else(|| "WireGuard: enrollment has no enrolled key".to_string())?;
-                    let config = enrollment
-                        .configs(key)?
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| "WireGuard: enrollment has no ingress".to_string())?;
-                    start_config(&gateway.id, config)
-                }),
-            )
+            Some(self.adopt_enrolled(gateway, enrollment))
         } else {
             Some(self.adopt(&gateway.id, source, gateway.host_routes()))
         }
+    }
+
+    fn adopt_enrolled(
+        &self,
+        gateway: &Gateway,
+        enrollment: &WireguardEnrollment,
+    ) -> Result<String, String> {
+        if let Proxy::Unavailable(reason) = &self.proxy {
+            return Err(reason.clone());
+        }
+        let mut rows = self.rows.lock().unwrap();
+        let key = gateway.wireguard_enrolled_key.clone().unwrap_or_default();
+        let previous = rows.get(&gateway.id);
+        if let Some(row) = previous {
+            if row
+                .enrollment
+                .as_ref()
+                .is_some_and(|(parameters, enrolled_key)| {
+                    parameters == enrollment && enrolled_key == &key
+                })
+                && row
+                    .ingresses
+                    .iter()
+                    .all(|(_, ingress)| matches!(ingress, Row::Running { .. }))
+            {
+                return row.answer();
+            }
+        }
+        let configs = if key.is_empty() {
+            Err("WireGuard: enrollment has no enrolled key".to_string())
+        } else {
+            enrollment.configs(&key)
+        };
+        let same_client =
+            previous
+                .and_then(|r| r.enrollment.as_ref())
+                .is_some_and(|(old, old_key)| {
+                    old_key == &key
+                        && old.key_file == enrollment.key_file
+                        && old.addresses == enrollment.addresses
+                        && old.allowed_ips == enrollment.allowed_ips
+                        && old.persistent_keepalive == enrollment.persistent_keepalive
+                });
+        let ingresses = match configs {
+            Ok(configs) => enrollment
+                .ingresses
+                .iter()
+                .zip(configs)
+                .map(|(ingress, config)| {
+                    let id = format!("{}/{}", gateway.id, ingress.id);
+                    let retained = previous.filter(|_| same_client).and_then(|row| {
+                        let (old, _) = row.enrollment.as_ref()?;
+                        if !old.ingresses.contains(ingress) {
+                            return None;
+                        }
+                        row.ingresses.iter().find(|(held, state)| {
+                            held == &id && matches!(state, Row::Running { .. })
+                        })
+                    });
+                    let state = if let Some((_, state)) = retained {
+                        state.clone()
+                    } else {
+                        let _runtime = self.runtime.enter();
+                        let hosts = ingress
+                            .hosts
+                            .iter()
+                            .map(|host| HostRoute {
+                                name: host.name.clone(),
+                                addresses: host.addresses.clone(),
+                            })
+                            .collect();
+                        Row::from_started(&enrollment.key_file, hosts, start_config(&id, config))
+                    };
+                    (id, state)
+                })
+                .collect(),
+            Err(reason) => vec![(
+                gateway.id.clone(),
+                Row::Refused {
+                    path: enrollment.key_file.clone(),
+                    reason,
+                },
+            )],
+        };
+        let row = GatewayRow {
+            route_order: previous
+                .map(|row| row.route_order)
+                .unwrap_or_else(|| self.next_route_order.fetch_add(1, Ordering::Relaxed)),
+            enrollment: Some((enrollment.clone(), key)),
+            ingresses,
+        };
+        self.install_row(&mut rows, &gateway.id, row)
     }
 
     /// The proxy as the legs name it, `http://127.0.0.1:<port>`; `None`
@@ -160,7 +252,8 @@ impl WireguardFabric {
             .lock()
             .unwrap()
             .values()
-            .filter(|row| matches!(row, Row::Running { .. }))
+            .flat_map(|row| &row.ingresses)
+            .filter(|(_, row)| matches!(row, Row::Running { .. }))
             .count()
     }
 
@@ -202,74 +295,95 @@ impl WireguardFabric {
         hosts: Vec<HostRoute>,
         start: impl FnOnce() -> Result<(Tunnel, String), String>,
     ) -> Result<String, String> {
-        let proxy = match &self.proxy {
-            Proxy::Bound { proxy, .. } => proxy,
-            Proxy::Unavailable(reason) => return Err(reason.clone()),
-        };
+        if let Proxy::Unavailable(reason) = &self.proxy {
+            return Err(reason.clone());
+        }
         let mut rows = self.rows.lock().unwrap();
-        if let Some(Row::Running { path, tunnel, .. }) = rows.get(gateway_id) {
-            if path == conf {
-                return Ok(describe(tunnel.status()));
+        if let Some(row) = rows.get(gateway_id) {
+            if row.enrollment.is_none()
+                && matches!(row.ingresses.first(), Some((_, Row::Running { path, .. })) if path == conf)
+            {
+                return row.answer();
             }
         }
         let started = {
             let _runtime = self.runtime.enter();
             start()
         };
-        let row_hosts = hosts.clone();
-        let route_order = match rows.get(gateway_id) {
-            Some(Row::Running { route_order, .. }) => *route_order,
-            _ => self.next_route_order.fetch_add(1, Ordering::Relaxed),
+        let route_order = rows
+            .get(gateway_id)
+            .map(|row| row.route_order)
+            .unwrap_or_else(|| self.next_route_order.fetch_add(1, Ordering::Relaxed));
+        let row = GatewayRow {
+            route_order,
+            enrollment: None,
+            ingresses: vec![(
+                gateway_id.to_owned(),
+                Row::from_started(conf, hosts, started),
+            )],
         };
-        let routed = started.and_then(|(tunnel, endpoint)| {
-            let route = ProxyRoute {
-                tunnel: tunnel.clone(),
-                hosts,
-            };
-            match proxy.replace_route(gateway_id, route) {
-                Ok(()) => Ok((tunnel, endpoint)),
-                Err(e) => {
-                    tracing::warn!(gateway = %gateway_id, error = %e, "gateway WireGuard host map refused");
-                    Err(format!("WireGuard: {}: {e}", conf.display()))
+        self.install_row(&mut rows, gateway_id, row)
+    }
+
+    fn install_row(
+        &self,
+        rows: &mut HashMap<String, GatewayRow>,
+        gateway_id: &str,
+        row: GatewayRow,
+    ) -> Result<String, String> {
+        let path = row.ingresses[0].1.path().to_owned();
+        let previous = rows.insert(gateway_id.to_owned(), row);
+        if let Err(error) = self.publish_routes(rows) {
+            let reason = format!("WireGuard: {}: {error}", path.display());
+            tracing::warn!(gateway = %gateway_id, %error, "gateway WireGuard host map refused");
+            rows.get_mut(gateway_id).expect("inserted row").ingresses =
+                vec![(gateway_id.to_owned(), Row::Refused { path, reason })];
+            self.publish_routes(rows)
+                .expect("remaining routes were validated at their adoption");
+        }
+        for (id, row) in &rows[gateway_id].ingresses {
+            if let Row::Running {
+                path,
+                endpoint,
+                started,
+                ..
+            } = row
+            {
+                let retained = previous.as_ref().is_some_and(|old| old.ingresses.iter().any(|(held, row)| {
+                    held == id && matches!(row, Row::Running { started: before, .. } if before == started)
+                }));
+                if !retained {
+                    tracing::info!(gateway = %gateway_id, ingress = %id, file = %path.display(), %endpoint, "gateway WireGuard tunnel started");
                 }
             }
-        });
-        let (row, answer) = match routed {
-            Ok((tunnel, endpoint)) => {
-                tracing::info!(
-                    gateway = %gateway_id,
-                    file = %conf.display(),
-                    %endpoint,
-                    "gateway WireGuard tunnel started"
-                );
-                let status = describe(tunnel.status());
-                let row = Row::Running {
-                    path: conf.to_owned(),
-                    tunnel,
-                    hosts: row_hosts,
-                    route_order,
-                    endpoint,
-                    started: Instant::now(),
-                    #[cfg(test)]
-                    test_status: None,
-                };
-                (row, Ok(status))
-            }
-            Err(reason) => {
-                proxy.remove_route(gateway_id);
-                let row = Row::Refused {
-                    path: conf.to_owned(),
-                    reason: reason.clone(),
-                };
-                (row, Err(reason))
-            }
-        };
-        let previous = rows.insert(gateway_id.to_owned(), row);
-        drop(rows);
-        // The previous tunnel's last handle goes here, after the new route
-        // carries the next connections; its driver stops with it.
+        }
+        // Retained handles survive a table swap; removed tunnels end only
+        // after the proxy routes the complete replacement.
         drop(previous);
-        answer
+        rows[gateway_id].answer()
+    }
+
+    fn publish_routes(&self, rows: &HashMap<String, GatewayRow>) -> io::Result<()> {
+        let Proxy::Bound { proxy, .. } = &self.proxy else {
+            return Ok(());
+        };
+        let mut ordered: Vec<_> = rows.values().collect();
+        ordered.sort_by_key(|row| row.route_order);
+        let routes = ordered
+            .into_iter()
+            .flat_map(|row| &row.ingresses)
+            .filter_map(|(id, row)| match row {
+                Row::Running { tunnel, hosts, .. } => Some((
+                    id.clone(),
+                    ProxyRoute {
+                        tunnel: tunnel.clone(),
+                        hosts: hosts.clone(),
+                    },
+                )),
+                Row::Refused { .. } => None,
+            })
+            .collect();
+        proxy.replace_routes(routes)
     }
 
     /// Drop `gateway_id`'s route and row: its tunnel ends, and so does
@@ -277,13 +391,16 @@ impl WireguardFabric {
     /// for the row.
     pub fn retire(&self, gateway_id: &str) -> bool {
         let mut rows = self.rows.lock().unwrap();
-        if let Proxy::Bound { proxy, .. } = &self.proxy {
-            proxy.remove_route(gateway_id);
-        }
         let row = rows.remove(gateway_id);
+        self.publish_routes(&rows)
+            .expect("retiring only removes validated routes");
         drop(rows);
-        if let Some(Row::Running { path, .. }) = &row {
-            tracing::info!(gateway = %gateway_id, file = %path.display(), "gateway WireGuard tunnel retired");
+        if let Some(row) = &row {
+            for (id, ingress) in &row.ingresses {
+                if let Row::Running { path, .. } = ingress {
+                    tracing::info!(gateway = %gateway_id, ingress = %id, file = %path.display(), "gateway WireGuard tunnel retired");
+                }
+            }
         }
         row.is_some()
     }
@@ -293,12 +410,8 @@ impl WireguardFabric {
     /// running one, a config edited by hand while the desktop runs among
     /// them, reads no status until it is adopted.
     pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
-        match self.rows.lock().unwrap().get(gateway_id)? {
-            row @ Row::Running { path, .. } if Some(path.as_path()) == configured => {
-                Some(describe(row.tunnel_status()?))
-            }
-            _ => None,
-        }
+        let rows = self.rows.lock().unwrap();
+        rows.get(gateway_id)?.status(configured)
     }
 
     /// A matched route's missing-session reason. Host maps take precedence
@@ -311,38 +424,21 @@ impl WireguardFabric {
         addresses: &[IpAddr],
     ) -> Option<Option<String>> {
         let rows = self.rows.lock().unwrap();
-        let mapped = rows
-            .values()
-            .filter_map(|row| match row {
-                Row::Running {
-                    hosts, route_order, ..
-                } if hosts
+        let ordered = || {
+            rows.values().flat_map(|gateway| {
+                gateway
+                    .ingresses
                     .iter()
-                    .any(|route| host_route_matches(&route.name, host)) =>
-                {
-                    Some((*route_order, row))
-                }
-                _ => None,
+                    .enumerate()
+                    .map(move |(index, (_, row))| ((gateway.route_order, index), row))
             })
-            .min_by_key(|(order, _)| *order)
-            .map(|(_, row)| row);
-        let row = mapped.or_else(|| {
-            addresses.iter().find_map(|ip| {
-                rows.values()
-                    .filter_map(|row| match row {
-                        Row::Running {
-                            tunnel,
-                            route_order,
-                            ..
-                        } if tunnel.allowed_ips().iter().any(|cidr| cidr.contains(*ip)) => {
-                            Some((*route_order, row))
-                        }
-                        _ => None,
-                    })
-                    .min_by_key(|(order, _)| *order)
-                    .map(|(_, row)| row)
-            })
-        })?;
+        };
+        let mapped = ordered().filter(|(_, row)| matches!(row, Row::Running { hosts, .. } if hosts.iter().any(|route| host_route_matches(&route.name, host))))
+            .min_by_key(|(order, _)| *order).map(|(_, row)| row);
+        let row = mapped.or_else(|| addresses.iter().find_map(|ip| {
+            ordered().filter(|(_, row)| matches!(row, Row::Running { tunnel, .. } if tunnel.allowed_ips().iter().any(|cidr| cidr.contains(*ip))))
+                .min_by_key(|(order, _)| *order).map(|(_, row)| row)
+        }))?;
         match row {
             row @ Row::Running {
                 path,
@@ -362,28 +458,38 @@ impl WireguardFabric {
     /// Why discovery through this gateway's running tunnel lacks a session.
     /// A row whose configured file changed cannot explain the new row.
     pub fn discovery_failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
-        match self.rows.lock().unwrap().get(gateway_id)? {
-            row @ Row::Running {
+        let rows = self.rows.lock().unwrap();
+        let row = rows.get(gateway_id)?;
+        // Without a destination, only a manual tunnel can explain an
+        // identity-origin failure. An enrolled node's outage says nothing
+        // about the public identity service or another node.
+        if row.enrollment.is_some() {
+            return None;
+        }
+        match &row.ingresses.first()?.1 {
+            ingress @ Row::Running {
                 path,
                 endpoint,
                 started,
                 ..
-            } if Some(path.as_path()) == configured => {
-                missing_handshake_reason(row.tunnel_status()?, endpoint, path, started.elapsed())
-            }
+            } if Some(path.as_path()) == configured => missing_handshake_reason(
+                ingress.tunnel_status()?,
+                endpoint,
+                path,
+                started.elapsed(),
+            ),
             _ => None,
         }
     }
 
-    /// Why the row's file was refused at its last adopt, while the row
-    /// still names that file.
+    /// The first ingress refusal, in discovery order, while the configured
+    /// source is the adopted one.
     pub fn failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
-        match self.rows.lock().unwrap().get(gateway_id)? {
-            Row::Refused { path, reason } if Some(path.as_path()) == configured => {
-                Some(reason.clone())
-            }
-            _ => None,
-        }
+        self.rows
+            .lock()
+            .unwrap()
+            .get(gateway_id)?
+            .failure(configured)
     }
 
     /// Why a row naming `configured` cannot be reached: its file's
@@ -401,14 +507,93 @@ impl WireguardFabric {
     #[cfg(test)]
     pub(crate) fn set_test_status(&self, gateway_id: &str, status: chan_wireguard::Status) {
         let mut rows = self.rows.lock().unwrap();
-        let Some(Row::Running { test_status, .. }) = rows.get_mut(gateway_id) else {
+        let Some((_, Row::Running { test_status, .. })) = rows
+            .get_mut(gateway_id)
+            .and_then(|row| row.ingresses.first_mut())
+        else {
             panic!("test gateway has no running tunnel");
         };
         *test_status = Some(status);
     }
 }
 
+impl GatewayRow {
+    fn failure(&self, configured: Option<&Path>) -> Option<String> {
+        self.ingresses.iter().find_map(|(id, row)| match row {
+            Row::Refused { path, reason } if Some(path.as_path()) == configured => {
+                Some(if self.ingresses.len() > 1 {
+                    format!("{id}: {reason}")
+                } else {
+                    reason.clone()
+                })
+            }
+            _ => None,
+        })
+    }
+
+    fn status(&self, configured: Option<&Path>) -> Option<String> {
+        let mut worst = None;
+        for (_, row) in &self.ingresses {
+            if Some(row.path()) != configured {
+                continue;
+            }
+            let Some(status) = row.tunnel_status() else {
+                continue;
+            };
+            let rank = match status.handshake {
+                chan_wireguard::HandshakeState::Lost(_) => 4,
+                chan_wireguard::HandshakeState::Never if status.resolution_error.is_some() => 3,
+                chan_wireguard::HandshakeState::Never => 2,
+                chan_wireguard::HandshakeState::Live(_) if status.resolution_error.is_some() => 1,
+                chan_wireguard::HandshakeState::Live(_) => 0,
+            };
+            if worst.as_ref().is_none_or(|(held, _)| rank > *held) {
+                worst = Some((rank, status));
+            }
+        }
+        worst.map(|(_, status)| describe(status))
+    }
+
+    fn answer(&self) -> Result<String, String> {
+        let path = Some(self.ingresses[0].1.path());
+        match self.failure(path) {
+            Some(reason) => Err(reason),
+            None => Ok(self
+                .status(path)
+                .expect("a nonempty row without refusals has a running tunnel")),
+        }
+    }
+}
+
 impl Row {
+    fn from_started(
+        path: &Path,
+        hosts: Vec<HostRoute>,
+        started: Result<(Tunnel, String), String>,
+    ) -> Self {
+        match started {
+            Ok((tunnel, endpoint)) => Self::Running {
+                path: path.to_owned(),
+                tunnel,
+                hosts,
+                endpoint,
+                started: Instant::now(),
+                #[cfg(test)]
+                test_status: None,
+            },
+            Err(reason) => Self::Refused {
+                path: path.to_owned(),
+                reason,
+            },
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Self::Running { path, .. } | Self::Refused { path, .. } => path,
+        }
+    }
+
     fn tunnel_status(&self) -> Option<chan_wireguard::Status> {
         #[cfg(test)]
         if let Row::Running {
@@ -435,10 +620,7 @@ impl std::fmt::Debug for WireguardFabric {
             .lock()
             .unwrap()
             .iter()
-            .map(|(id, row)| {
-                let (Row::Running { path, .. } | Row::Refused { path, .. }) = row;
-                (id.clone(), path.display().to_string())
-            })
+            .map(|(id, row)| (id.clone(), row.ingresses[0].1.path().display().to_string()))
             .collect();
         let mut out = f.debug_struct("WireguardFabric");
         match &self.proxy {
@@ -867,7 +1049,16 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn peer(dir: &Path, name: &str, client_addr: &str, peer_addr: &str) -> Peer {
-        let client = secret();
+        peer_with_key(dir, name, client_addr, peer_addr, &secret()).await
+    }
+
+    async fn peer_with_key(
+        dir: &Path,
+        name: &str,
+        client_addr: &str,
+        peer_addr: &str,
+        client: &StaticSecret,
+    ) -> Peer {
         let server = secret();
         let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let at = udp.local_addr().unwrap();
@@ -875,7 +1066,7 @@ pub(crate) mod tests {
         let server_config = chan_wireguard::config::Config::parse(&format!(
             "[Interface]\nPrivateKey = {}\nAddress = {peer_addr}/32\n[Peer]\nPublicKey = {}\nEndpoint = {nowhere}\nAllowedIPs = {client_addr}/32\n",
             base64_of(&server.to_bytes()),
-            base64_of(PublicKey::from(&client).as_bytes()),
+            base64_of(PublicKey::from(client).as_bytes()),
         ))
         .unwrap();
         let tunnel = Tunnel::start_on(server_config, udp, nowhere).unwrap();
@@ -926,7 +1117,15 @@ pub(crate) mod tests {
         /// A handle of the row's running tunnel, held apart from the
         /// fabric's own.
         fn tunnel(&self, gateway_id: &str) -> Option<Tunnel> {
-            match self.rows.lock().unwrap().get(gateway_id)? {
+            match &self
+                .rows
+                .lock()
+                .unwrap()
+                .get(gateway_id)?
+                .ingresses
+                .first()?
+                .1
+            {
                 Row::Running { tunnel, .. } => Some(tunnel.clone()),
                 Row::Refused { .. } => None,
             }
@@ -1076,6 +1275,236 @@ pub(crate) mod tests {
             name: name.into(),
             addresses: vec![address.parse().unwrap()],
         }
+    }
+
+    async fn enrolled_peers(dir: &Path) -> (Gateway, Vec<Peer>) {
+        use crate::wireguard_keys::{EnrollmentIngress, EnrollmentParams};
+        let client = secret();
+        let public = base64_of(PublicKey::from(&client).as_bytes());
+        let key = owner_only(dir, "gw-multi.key", &base64_of(&client.to_bytes()));
+        let mut peers = Vec::new();
+        let mut ingresses = Vec::new();
+        for id in ["p1", "p2"] {
+            let far =
+                peer_with_key(dir, &format!("{id}.conf"), "10.7.0.1", "10.7.0.2", &client).await;
+            let cfg = chan_wireguard::config::read_file(&far.conf).unwrap();
+            ingresses.push(crate::config::WireguardIngress {
+                id: id.into(),
+                endpoint: cfg.peer.endpoint.to_string(),
+                public_key: base64_of(cfg.peer.public_key.as_bytes()),
+                hosts: vec![host(&format!("*.{id}.proxy.chan.invalid"), "10.7.0.2")],
+            });
+            peers.push(far);
+        }
+        let first = &ingresses[0];
+        let discovery = crate::devserver::WireguardDiscovery {
+            endpoint: first.endpoint.clone(),
+            public_key: first.public_key.clone(),
+            allowed_ips: Some(vec!["10.7.0.2/32".into()]),
+            persistent_keepalive: None,
+            ingresses: Some(ingresses.clone()),
+        };
+        let params = EnrollmentParams {
+            endpoint: first.endpoint.clone(),
+            server_public_key: first.public_key.clone(),
+            addresses: vec!["10.7.0.1/32".into()],
+            allowed_ips: vec!["10.7.0.2/32".into()],
+            persistent_keepalive: None,
+            hosts: first.hosts.clone(),
+            ingresses: Some(
+                ingresses
+                    .into_iter()
+                    .map(|i| EnrollmentIngress {
+                        id: i.id,
+                        endpoint: i.endpoint,
+                        server_public_key: i.public_key,
+                        hosts: i.hosts,
+                    })
+                    .collect(),
+            ),
+        };
+        let enrollment =
+            crate::wireguard_keys::prepare(dir, "gw-multi", &public, &discovery, &params).unwrap();
+        let mut row = gateway("gw-multi", None);
+        row.wireguard_public_key = Some(public.clone());
+        row.wireguard_enrolled_key = Some(public);
+        row.wireguard_enrollment = Some(enrollment.parameters(key));
+        (row, peers)
+    }
+
+    #[tokio::test]
+    async fn two_ingress_enrollment_routes_each_name_to_its_own_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (row, peers) = enrolled_peers(dir.path()).await;
+        let key = row.wireguard_source().unwrap();
+        let key_bytes = std::fs::read(key).unwrap();
+        let fabric = start(std::slice::from_ref(&row)).await;
+        assert_eq!(
+            fabric.tunnels(),
+            2,
+            "every redeemed ingress starts a tunnel"
+        );
+        assert_eq!(fabric.routes(), 2);
+        // Both peers listen at the same IP and port; only the host map can choose one.
+        for (id, peer) in ["p1", "p2"].into_iter().zip(&peers) {
+            let mut listener = peer.tunnel.listen(8123).unwrap();
+            carried_by_name(
+                &fabric,
+                &mut listener,
+                "10.7.0.1",
+                &format!("alice--a1.{id}.proxy.chan.invalid"),
+            )
+            .await;
+        }
+        assert_eq!(std::fs::read(key).unwrap(), key_bytes);
+        assert!(fabric.retire(&row.id));
+        assert_eq!(fabric.routes(), 0);
+        assert_eq!(fabric.tunnels(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dead_ingress_does_not_block_another_nodes_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut row, peers) = enrolled_peers(dir.path()).await;
+        row.wireguard_enrollment.as_mut().unwrap().ingresses[1].endpoint = "127.0.0.1:9".into();
+        let fabric = start(std::slice::from_ref(&row)).await;
+        let mut listener = peers[0].tunnel.listen(8123).unwrap();
+        carried_by_name(
+            &fabric,
+            &mut listener,
+            "10.7.0.1",
+            "alice--a1.p1.proxy.chan.invalid",
+        )
+        .await;
+        let now = Instant::now();
+        let ((status, _), ()) = tokio::join!(
+            connect_authority(&fabric, "alice--a1.p2.proxy.chan.invalid:8123"),
+            carried_by_name(
+                &fabric,
+                &mut listener,
+                "10.7.0.1",
+                "bob--b2.p1.proxy.chan.invalid"
+            ),
+        );
+        assert_eq!(status, 502, "only the unreachable ingress refuses");
+        assert!(
+            now.elapsed() < Duration::from_secs(10),
+            "the missing session has the per-tunnel bound"
+        );
+        assert_eq!(
+            fabric.status(&row.id, row.wireguard_source()).as_deref(),
+            Some("connecting"),
+            "one up ingress must not hide the other pending ingress"
+        );
+        assert_eq!(
+            fabric.reason_for_destination("alice--a1.p1.proxy.chan.invalid", &[]),
+            Some(None)
+        );
+        assert!(fabric
+            .reason_for_destination("alice--a1.p2.proxy.chan.invalid", &[])
+            .unwrap()
+            .unwrap()
+            .contains("127.0.0.1:9"));
+        assert!(
+            fabric
+                .discovery_failure(&row.id, row.wireguard_source())
+                .is_none(),
+            "a node cannot explain failure of the public identity service"
+        );
+    }
+
+    #[tokio::test]
+    async fn enrolled_adopt_reorders_without_restarting_and_replaces_only_changed_ingresses() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut row, peers) = enrolled_peers(dir.path()).await;
+        let fabric = start(std::slice::from_ref(&row)).await;
+        let started = |id: &str| {
+            let rows = fabric.rows.lock().unwrap();
+            let (_, state) = rows[&row.id]
+                .ingresses
+                .iter()
+                .find(|(held, _)| held == id)
+                .unwrap();
+            match state {
+                Row::Running { started, .. } => *started,
+                _ => panic!("running ingress"),
+            }
+        };
+        let original = [started("gw-multi/p1"), started("gw-multi/p2")];
+        // A live connection must survive a reorder, not merely get a new session.
+        let mut listener = peers[0].tunnel.listen(8123).unwrap();
+        let (status, mut client) =
+            connect_authority(&fabric, "alice--a1.p1.proxy.chan.invalid:8123").await;
+        assert_eq!(status, 200);
+        let mut server = tokio::time::timeout(WAIT, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        row.wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .reverse();
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        assert_eq!(started("gw-multi/p1"), original[0]);
+        assert_eq!(started("gw-multi/p2"), original[1]);
+        client.write_all(b"kept").await.unwrap();
+        let mut bytes = [0; 4];
+        tokio::time::timeout(WAIT, server.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes, b"kept");
+        // Both AllowedIPs contain this address: the reordered first ingress wins.
+        assert!(fabric
+            .reason_for_destination("unmapped.invalid", &["10.7.0.2".parse().unwrap()])
+            .unwrap()
+            .is_some());
+        let mut other_listener = peers[1].tunnel.listen(8123).unwrap();
+        carried(&fabric, &mut other_listener, "10.7.0.1", "10.7.0.2").await;
+        for change in ["key", "endpoint", "hosts"] {
+            let before = started("gw-multi/p2");
+            let ingress = &mut row.wireguard_enrollment.as_mut().unwrap().ingresses[0];
+            match change {
+                "key" => ingress.public_key = base64_of(PublicKey::from(&secret()).as_bytes()),
+                "endpoint" => ingress.endpoint = "127.0.0.1:9".into(),
+                "hosts" => ingress.hosts = vec![host("*.renamed.proxy.chan.invalid", "10.7.0.2")],
+                _ => unreachable!(),
+            }
+            fabric.adopt_gateway(&row).unwrap().unwrap();
+            assert_ne!(
+                started("gw-multi/p2"),
+                before,
+                "{change} replaces its ingress"
+            );
+            assert_eq!(
+                started("gw-multi/p1"),
+                original[0],
+                "{change} leaves the other tunnel alone"
+            );
+        }
+        row.wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .remove(0);
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        assert_eq!(fabric.routes(), 1);
+        assert_eq!(started("gw-multi/p1"), original[0]);
+        let mut extra = row.wireguard_enrollment.as_ref().unwrap().ingresses[0].clone();
+        extra.id = "p3".into();
+        extra.hosts = vec![host("*.p3.proxy.chan.invalid", "10.7.0.2")];
+        row.wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .push(extra);
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        assert_eq!(fabric.routes(), 2);
+        assert_eq!(started("gw-multi/p1"), original[0]);
+        assert!(fabric
+            .reason_for_destination("alice--a1.renamed.proxy.chan.invalid", &[])
+            .is_none());
     }
 
     #[tokio::test]

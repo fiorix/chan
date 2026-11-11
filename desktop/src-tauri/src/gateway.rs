@@ -4027,7 +4027,7 @@ pub(crate) mod tests {
                 let parameters = row.wireguard_enrollment.as_ref().unwrap();
                 assert_eq!(parameters.ingresses.len(), 2);
                 assert_eq!(parameters.configs(&run.sent).unwrap().len(), 2);
-                assert_eq!(run.fabric.tunnels(), 1, "the fabric adopts the first peer");
+                assert_eq!(run.fabric.tunnels(), 2, "the fabric adopts every peer");
             }
             assert_eq!(std::fs::read(&key).unwrap(), bytes);
             assert_eq!(std::fs::read_dir(&run.keys).unwrap().count(), 1);
