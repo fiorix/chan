@@ -329,7 +329,7 @@
   </h3>
   <div class="meta-grid">
     <span class="k">directory</span>
-    <PrivateField field="workspace:root" label="workspace root path"><span class="v mono path" title={workspace.info?.root}>{workspace.info?.root ?? ""}</span></PrivateField>
+    <PrivateField field="workspace:root" label="workspace root path"><span class="v mono path" title={workspace.info?.root}><bdi dir="ltr">{workspace.info?.root ?? ""}</bdi></span></PrivateField>
   </div>
 
   {#if variant === "inspector"}
@@ -479,6 +479,11 @@
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
+  /* A root path wider than its cell loses its start and keeps its tail, the
+     workspace's own name: the cell runs right to left, so the overflow and
+     the ellipsis fall on the left. The path inside is a left-to-right
+     isolate (the bdi), so the cell's direction does not reorder it; without
+     it the bidi algorithm moves the leading slash to the end. */
   .meta-grid .v.path {
     overflow: hidden;
     text-overflow: ellipsis;

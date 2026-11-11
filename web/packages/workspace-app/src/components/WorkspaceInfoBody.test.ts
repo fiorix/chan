@@ -6,10 +6,14 @@
 // calls.
 
 import { flushSync, mount, tick, unmount } from "svelte";
+import { compile } from "svelte/compiler";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { setPrivacy } from "@chan/web-shared/privacy";
 import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
+import appSource from "../App.svelte?raw";
+import bodySource from "./WorkspaceInfoBody.svelte?raw";
+import codeReportSource from "./CodeReportSection.svelte?raw";
 import type { GraphView, ReportPrefix } from "../api/types";
 import { graphData, invalidateGraph } from "../state/graphData.svelte";
 import { ApiError } from "../api/errors";
@@ -60,6 +64,7 @@ import {
   openGraphForContact,
   openGraphForLanguage,
   revealPathInBrowser,
+  workspace,
 } from "../state/store.svelte";
 import { openTerminalInActivePane } from "../state/tabs.svelte";
 
@@ -444,5 +449,66 @@ describe("the shared graph load", () => {
     invalidateGraph();
     await settle();
     expect(api.graphStream).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the laid-out body", () => {
+  // Vitest loads no component CSS, so these compile the body's and the code
+  // report's stylesheets with the scope hashes their mounted elements carry,
+  // and App's theme token blocks, and inject them; jsdom then cascades the
+  // real rules. jsdom lays nothing out: each test reads the rule that decides
+  // the layout, and the browser reads the layout itself.
+  const info = workspace.info;
+
+  afterEach(() => {
+    (workspace as { info: unknown }).info = info;
+    for (const el of document.head.querySelectorAll("style[data-body-css]")) el.remove();
+    delete document.documentElement.dataset.theme;
+  });
+
+  function componentCss(source: string, hash: string): string {
+    const css = compile(source, { filename: "Body.svelte", css: "external", cssHash: () => hash }).css?.code;
+    if (!css) throw new Error("no stylesheet compiled");
+    return css;
+  }
+
+  function scopeHash(el: Element | null): string {
+    const hash = [...(el?.classList ?? [])].find((c) => /^svelte-[a-z0-9]+$/.test(c));
+    if (!hash) throw new Error("no scope hash on the element");
+    return hash;
+  }
+
+  function injectCss(target: HTMLElement): void {
+    const sheets = [
+      componentCss(appSource, "svelte-app-unused"),
+      componentCss(bodySource, scopeHash(target.querySelector(".info"))),
+    ];
+    const report = target.querySelector(".code-report");
+    if (report) sheets.push(componentCss(codeReportSource, scopeHash(report)));
+    for (const css of sheets) {
+      const style = document.createElement("style");
+      style.dataset.bodyCss = "";
+      style.textContent = css;
+      document.head.append(style);
+    }
+  }
+
+  test("the root path is one left-to-right run inside a cell that clips its start", async () => {
+    (workspace as { info: unknown }).info = { root: "/work/tmp/chan-smoke-X", label: "chan-smoke-X" };
+    const target = await render({ variant: "dashboard" });
+    injectCss(target);
+    const cell = target.querySelector<HTMLElement>(".v.path")!;
+
+    // The cell runs right to left, so a path wider than it loses its start
+    // and keeps its tail, the workspace's own name, behind a leading ellipsis.
+    expect(getComputedStyle(cell).direction).toBe("rtl");
+    expect(getComputedStyle(cell).textOverflow).toBe("ellipsis");
+    // The path inside is a left-to-right isolate, so the cell's direction
+    // does not reorder it: the leading slash stays first, not moved to the
+    // end. The whole text is in it, in the source's order.
+    const isolate = cell.querySelector("bdi");
+    expect(isolate?.getAttribute("dir")).toBe("ltr");
+    expect(isolate?.textContent).toBe("/work/tmp/chan-smoke-X");
+    expect(cell.textContent).toBe(isolate?.textContent);
   });
 });
