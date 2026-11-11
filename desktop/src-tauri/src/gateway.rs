@@ -687,8 +687,12 @@ async fn apply_roster_policy_diff(state: &Arc<AppState>, gateway_id: &str, diff:
 
 fn roster_client() -> Result<reqwest::Client, String> {
     crate::wireguard::client_builder()
-        .timeout(Duration::from_secs(ROSTER_HTTP_TIMEOUT_SECS))
-        .build()
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(ROSTER_HTTP_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
         .map_err(|e| format!("building roster http client: {e}"))
 }
 

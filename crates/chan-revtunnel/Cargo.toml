@@ -27,4 +27,5 @@ futures = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 
 [dev-dependencies]
+chan-tls = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true }

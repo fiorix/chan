@@ -25,6 +25,7 @@ mod single_instance;
 mod terminal_mode;
 mod terminal_opacity;
 mod titlebar_tabs;
+mod tls;
 // Reads the updater plugin's offered update, and FreeBSD builds without
 // the plugin (see Cargo.toml), so the module goes with it.
 #[cfg(not(target_os = "freebsd"))]
@@ -4035,10 +4036,12 @@ async fn with_tunnel_reason(
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     let state = window.state::<Arc<AppState>>();
     let label = window.label();
-    let client = match crate::wireguard::client_builder()
-        .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
-        .build()
-    {
+    let client = match crate::wireguard::client_builder().and_then(|builder| {
+        builder
+            .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| e.to_string())
+    }) {
         Ok(c) => c,
         Err(e) => {
             let result = probe_result_for(

@@ -91,6 +91,8 @@ fn raw_client_config(
         tunnel_id,
         spec,
         half_close,
+        // A `ws://` origin runs no TLS.
+        connector: None,
     }
 }
 
@@ -118,6 +120,8 @@ fn gateway_client_config(
         tunnel_id,
         spec,
         half_close,
+        // The gateway is verified as the window feed verifies it.
+        connector: Some(crate::tls::ws_connector()?),
     })
 }
 
@@ -274,6 +278,7 @@ mod tests {
         assert_eq!(cfg.cookie, None);
         assert_eq!(cfg.origin, None);
         assert!(cfg.half_close);
+        assert!(cfg.connector.is_none(), "a ws:// dial runs no TLS");
     }
 
     #[test]
@@ -304,6 +309,12 @@ mod tests {
         // record: the gateway hop authenticates the browser session.
         assert_eq!(cfg.bearer, None);
         assert!(cfg.half_close);
+        // The gateway is verified with the shared trust decision, not
+        // tokio-tungstenite's bundled roots.
+        assert!(matches!(
+            cfg.connector,
+            Some(tokio_tungstenite::Connector::Rustls(_))
+        ));
     }
 
     #[test]

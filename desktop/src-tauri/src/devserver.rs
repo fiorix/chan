@@ -539,8 +539,12 @@ fn http_client() -> Result<reqwest::Client, String> {
     CLIENT
         .get_or_init(|| {
             crate::wireguard::client_builder()
-                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-                .build()
+                .and_then(|builder| {
+                    builder
+                        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+                        .build()
+                        .map_err(|e| e.to_string())
+                })
                 .map_err(|e| format!("building devserver http client: {e}"))
         })
         .clone()
@@ -552,9 +556,13 @@ fn http_client_no_redirect() -> Result<reqwest::Client, String> {
     CLIENT
         .get_or_init(|| {
             crate::wireguard::client_builder()
-                .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
+                .and_then(|builder| {
+                    builder
+                        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .map_err(|e| e.to_string())
+                })
                 .map_err(|e| format!("building devserver no-redirect http client: {e}"))
         })
         .clone()

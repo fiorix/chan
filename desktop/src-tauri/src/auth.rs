@@ -1339,8 +1339,12 @@ enum Revoked {
 async fn revoke_inner(identity_origin: &str, secret: &str) -> Result<Revoked, String> {
     let url = format!("{}/desktop/v1/token", identity_origin.trim_end_matches('/'));
     let client = crate::wireguard::client_builder()
-        .timeout(Duration::from_secs(REVOKE_TIMEOUT_SECS))
-        .build()
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(REVOKE_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
         .map_err(|e| format!("building revoke http client: {e}"))?;
     let resp = client
         .delete(&url)
@@ -1486,8 +1490,12 @@ async fn redeem_inner(
     );
     let body = serde_json::json!({ "code": code, "code_verifier": code_verifier });
     let client = crate::wireguard::client_builder()
-        .timeout(Duration::from_secs(REDEEM_TIMEOUT_SECS))
-        .build()
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(REDEEM_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
         .map_err(|e| format!("building redeem http client: {e}"))?;
     let resp = client
         .post(&url)

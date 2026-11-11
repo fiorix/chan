@@ -61,7 +61,8 @@ tracing-subscriber = { workspace = true }
 
 # Self-upgrade flow (`chan upgrade` + the probe in `chan serve`).
 # reqwest is workspace-shared so we inherit rustls + the same
-# *_PROXY env-var handling install.sh expects.
+# *_PROXY env-var handling install.sh expects. `rustls-tls`: the
+# self-upgrade and an explicit metrics URL trust reqwest's bundled roots.
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Pulled in for `chan config get`: dumps the editor preferences as
@@ -69,7 +70,7 @@ serde_json = { workspace = true }
 # Writes go through chan-server's existing store helpers (see
 # `EditorPrefs::save`); we never roll our own tempfile + rename here.
 toml = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 sha2 = { workspace = true }
 rustix = { workspace = true }
 

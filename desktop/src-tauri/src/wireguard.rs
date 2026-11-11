@@ -586,15 +586,21 @@ fn decision() -> Option<&'static ProxyDecision> {
     PROXY.get_or_init(|| None).as_ref()
 }
 
-/// The builder every HTTP client of the desktop starts from: through the
-/// proxy when the process has one, with loopback destinations direct, and
-/// the plain builder otherwise.
-pub fn client_builder() -> reqwest::ClientBuilder {
-    client_builder_with(decision().map(|d| &d.proxy))
+/// The builder every HTTP client of the desktop starts from: verifying
+/// servers with chan-tls's trust decision, and through the proxy when the
+/// process has one, with loopback destinations direct, or the plain builder
+/// otherwise. Fails only when that trust decision cannot be built.
+pub fn client_builder() -> Result<reqwest::ClientBuilder, String> {
+    let proxy = decision().map(|d| &d.proxy);
+    let tls = chan_tls::client_config().map_err(|e| e.to_string())?;
+    Ok(client_builder_with(proxy, tls))
 }
 
-fn client_builder_with(proxy: Option<&reqwest::Proxy>) -> reqwest::ClientBuilder {
-    let builder = reqwest::Client::builder();
+fn client_builder_with(
+    proxy: Option<&reqwest::Proxy>,
+    tls: chan_tls::rustls::ClientConfig,
+) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder().use_preconfigured_tls(crate::tls::http1(tls));
     match proxy {
         Some(proxy) => builder.proxy(proxy.clone()),
         None => builder,
@@ -1742,6 +1748,29 @@ pub(crate) mod tests {
             .no_proxy(reqwest::NoProxy::from_string(DIRECT_HOSTS))
     }
 
+    fn shared_tls() -> chan_tls::rustls::ClientConfig {
+        chan_tls::client_config().unwrap()
+    }
+
+    #[tokio::test]
+    async fn client_builder_verifies_with_the_config_it_is_given_over_http1() {
+        let (tls, handshakes) = chan_tls::testing::recording(shared_tls());
+        let sink = chan_tls::testing::Sink::start();
+        // No proxy from the environment either, so the dial is the sink's.
+        let client = client_builder_with(None, tls)
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let refused = client
+            .get(format!("https://{}/roster", sink.addr))
+            .send()
+            .await;
+        assert!(refused.is_err(), "the sink never answers");
+        assert_eq!(handshakes.server_names(), ["127.0.0.1"]);
+        assert_eq!(sink.alpn_offers(), [["http/1.1"]]);
+    }
+
     #[tokio::test]
     async fn client_builder_applies_the_proxy_exactly_when_a_fabric_exists() {
         const NO_CONTENT: &str = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
@@ -1752,7 +1781,7 @@ pub(crate) mod tests {
         // With a fabric a remote origin is asked of the proxy in absolute
         // form, which is how the proxy learns the destination; the name is
         // never resolved here (`.invalid` never resolves).
-        let proxied = client_builder_with(Some(&proxy_for(&proxy.url())))
+        let proxied = client_builder_with(Some(&proxy_for(&proxy.url())), shared_tls())
             .timeout(timeout)
             .build()
             .unwrap();
@@ -1788,7 +1817,10 @@ pub(crate) mod tests {
 
         // Without a fabric nothing reaches the proxy: the remote origin
         // fails on its own resolution and the loopback origin is direct.
-        let plain = client_builder_with(None).timeout(timeout).build().unwrap();
+        let plain = client_builder_with(None, shared_tls())
+            .timeout(timeout)
+            .build()
+            .unwrap();
         assert!(plain.get("http://nowhere.invalid:1/").send().await.is_err());
         let response = plain
             .get(format!("http://{}/plain", direct.addr))
