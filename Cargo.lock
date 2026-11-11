@@ -1225,6 +1225,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-tls"
+version = "0.127.0"
+dependencies = [
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier",
+ "tracing",
+ "webpki-roots 1.0.7",
+]
+
+[[package]]
 name = "chan-tmux"
 version = "0.127.0"
 dependencies = [

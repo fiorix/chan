@@ -13,6 +13,7 @@ members = [
     "crates/chan-revtunnel",
     "crates/chan-systemd",
     "crates/chan-tmux",
+    "crates/chan-tls",
     "crates/chan-server",
     "crates/chan-shell",
     "crates/chan-tunnel-client",
@@ -55,6 +56,9 @@ chan-library = { version = "0.127.0", path = "crates/chan-library" }
 chan-revtunnel = { version = "0.127.0", path = "crates/chan-revtunnel", default-features = false }
 chan-systemd = { version = "0.127.0", path = "crates/chan-systemd" }
 chan-tmux = { version = "0.127.0", path = "crates/chan-tmux" }
+# The one TLS trust decision of the clients that reach a gateway; the
+# gateway workspace takes it by path for its WireGuard agent.
+chan-tls = { version = "0.127.0", path = "crates/chan-tls" }
 chan-server = { version = "0.127.0", path = "crates/chan-server", default-features = false }
 # default-features off so chan-server can pull just the wire types
 # (`ControlRequest` / `ControlResponse`) without the clap-backed `cs`
@@ -119,6 +123,9 @@ rustix = { version = "1.1", features = ["fs", "net", "process", "termios"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
+# chan-tls's verifier on macOS and Windows; the version reqwest 0.13 (the
+# desktop updater's) already links.
+rustls-platform-verifier = "0.7"
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -151,6 +158,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+# The Mozilla roots chan-tls keeps as the floor beside the system bundle on
+# Linux and the other Unixes.
+webpki-roots = "1"
 x25519-dalek = { version = "2", features = ["static_secrets", "reusable_secrets"] }
 yamux = "0.13"
 # Defaults pull `zstdmt` for parallel encode, fine on the build
