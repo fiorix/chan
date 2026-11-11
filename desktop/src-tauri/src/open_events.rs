@@ -400,12 +400,13 @@ mod tests {
     /// The type the document type names, which the bundle imports.
     const MARKDOWN_UTI: &str = "net.daringfireball.markdown";
 
-    /// What Finder reads from the bundle, built here by the bundler's own
-    /// emitter (tauri-utils' `file_associations_plist`, the version
-    /// tauri-cli's lock pins) from the macOS config: one document type for
-    /// `.md` and `.markdown`, by the Markdown type, which chan edits (role
-    /// Editor) without claiming to be its default (rank Alternate), and no
-    /// exported type, since chan does not define Markdown.
+    /// What Finder reads from the bundle, built here by the emitter the
+    /// bundler calls (tauri-utils' `file_associations_plist`, at the version
+    /// this crate locks; the tauri-cli that bundles may carry another) from
+    /// the macOS config: one document type for `.md` and `.markdown`, by the
+    /// Markdown type, which chan edits (role Editor) without claiming to be
+    /// its default (rank Alternate), and no exported type, since chan does
+    /// not define Markdown.
     #[test]
     fn the_macos_bundle_lists_chan_as_an_alternate_markdown_editor() {
         let macos = config("tauri.macos.conf.json");
