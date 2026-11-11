@@ -7,6 +7,12 @@
 //! ([`launch_paths::from_urls`]) and opened as a launch's paths are: as
 //! `cs open PATH` typed in a standalone window would open it.
 //!
+//! Finder offers Chan for Markdown files because the bundle declares them: a
+//! document type chan edits without claiming to be its default
+//! (`bundle.fileAssociations` in `tauri.macos.conf.json`, macOS's alone) and
+//! the Markdown content type it names, imported (`Info.plist`, which tauri-cli
+//! merges into the bundle's). The tests below pin both from those files.
+//!
 //! The boot opens what came before it reached its paths, right after the
 //! launch's own and before the first-open rule and the boot window, which
 //! then find the window the files opened in rather than open one beside it.
@@ -329,6 +335,112 @@ mod tests {
             .is_some(),
             "the next event starts a task of its own"
         );
+    }
+
+    fn manifest_file(relative: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    fn config(relative: &str) -> serde_json::Value {
+        serde_json::from_str(&manifest_file(relative))
+            .unwrap_or_else(|e| panic!("parse {relative}: {e}"))
+    }
+
+    /// The type the document type names, which the bundle imports.
+    const MARKDOWN_UTI: &str = "net.daringfireball.markdown";
+
+    /// What Finder reads from the bundle, built here by the bundler's own
+    /// emitter (tauri-utils' `file_associations_plist`, the version
+    /// tauri-cli's lock pins) from the macOS config: one document type for
+    /// `.md` and `.markdown`, by the Markdown type, which chan edits (role
+    /// Editor) without claiming to be its default (rank Alternate), and no
+    /// exported type, since chan does not define Markdown.
+    #[test]
+    fn the_macos_bundle_lists_chan_as_an_alternate_markdown_editor() {
+        let macos = config("tauri.macos.conf.json");
+        let associations: Vec<tauri::utils::config::FileAssociation> =
+            serde_json::from_value(macos["bundle"]["fileAssociations"].clone())
+                .expect("tauri.macos.conf.json declares bundle.fileAssociations");
+        let plist = tauri::utils::config::file_associations_plist(&associations)
+            .expect("the associations make Info.plist keys");
+        let keys = plist.as_dictionary().expect("a dictionary of keys");
+        assert_eq!(
+            keys.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["CFBundleDocumentTypes"],
+            "a document type and no exported type"
+        );
+        let types = keys
+            .get("CFBundleDocumentTypes")
+            .and_then(|value| value.as_array())
+            .unwrap();
+        assert_eq!(types.len(), 1, "{types:?}");
+        let markdown = types[0].as_dictionary().unwrap();
+        let text = |key: &str| markdown.get(key).and_then(|value| value.as_string());
+        let list = |key: &str| -> Vec<&str> {
+            markdown
+                .get(key)
+                .and_then(|value| value.as_array())
+                .unwrap_or_else(|| panic!("{key} is a list"))
+                .iter()
+                .map(|value| value.as_string().unwrap())
+                .collect()
+        };
+        assert_eq!(text("CFBundleTypeRole"), Some("Editor"));
+        assert_eq!(text("LSHandlerRank"), Some("Alternate"));
+        assert_eq!(list("LSItemContentTypes"), [MARKDOWN_UTI]);
+        assert_eq!(list("CFBundleTypeExtensions"), ["md", "markdown"]);
+    }
+
+    /// The bundle imports the Markdown type its document type names, so a
+    /// Mac where nothing declares it still maps `.md` and `.markdown` to it:
+    /// a plain-text type, imported rather than exported, so a declaration by
+    /// macOS or another app wins. tauri-cli merges `Info.plist` into the
+    /// bundle's on macOS alone, so the file is pinned here whole, its
+    /// comment and layout aside.
+    #[test]
+    fn the_macos_bundle_imports_the_markdown_type_it_names() {
+        let source = manifest_file("Info.plist");
+        let body = source
+            .split_once("-->")
+            .expect("the comment ends before the plist")
+            .1;
+        let compact: String = body.split_whitespace().collect();
+        let expected = format!(
+            "<plistversion=\"1.0\"><dict><key>UTImportedTypeDeclarations</key><array><dict>\
+             <key>UTTypeIdentifier</key><string>{MARKDOWN_UTI}</string>\
+             <key>UTTypeDescription</key><string>Markdowndocument</string>\
+             <key>UTTypeConformsTo</key><array><string>public.plain-text</string></array>\
+             <key>UTTypeTagSpecification</key><dict>\
+             <key>public.filename-extension</key><array><string>md</string><string>markdown</string></array>\
+             <key>public.mime-type</key><array><string>text/markdown</string></array>\
+             </dict></dict></array></dict></plist>"
+        );
+        assert_eq!(compact, expected);
+        assert!(
+            !source.contains("UTExportedTypeDeclarations")
+                && !source.contains("CFBundleDocumentTypes"),
+            "the document type is the config's, and the type is imported"
+        );
+    }
+
+    /// Only the macOS bundle declares the type. A declaration in the base
+    /// config would reach the Windows installers too, which register a
+    /// declared extension with chan, and Windows has no file surface to open
+    /// it in.
+    #[test]
+    fn only_the_macos_bundle_declares_a_document_type() {
+        for name in [
+            "tauri.conf.json",
+            "tauri.windows.conf.json",
+            "tauri.ci.windows.conf.json",
+            "tauri.ci.macos.conf.json",
+        ] {
+            assert!(
+                config(name)["bundle"].get("fileAssociations").is_none(),
+                "{name} declares bundle.fileAssociations"
+            );
+        }
     }
 
     fn production(source: &str) -> &str {
