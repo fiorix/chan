@@ -145,17 +145,23 @@
   // title that runs past rolls by that distance (see the roll rules below).
   // And the width the title's box takes to show the text whole, 0 until it
   // is measured, which bounds how far a short title gives way to the tabs:
-  // the text's width, which the engine reports rounded, so a pixel over it,
-  // and the box's padding.
+  // the text's width, rounded up, and the box's padding. The text's width is
+  // read from the inline run that holds it, whose width is the text's
+  // whatever the box around it: the box's own scroll width is never less
+  // than the box, and the box is never narrower than this floor, so a floor
+  // read from the box could only grow.
   let titleText = $state<HTMLElement | null>(null);
+  let titleRun = $state<HTMLElement | null>(null);
   let titleOverflow = $state(0);
   let titleNatural = $state(0);
   function measureTitle(): void {
     const text = titleText;
-    if (!text) return;
-    const past = text.scrollWidth - text.clientWidth;
+    const run = titleRun;
+    if (!text || !run) return;
+    const width = run.getBoundingClientRect().width;
+    const past = Math.ceil(width - text.clientWidth);
     titleOverflow = past > 1 ? past : 0;
-    titleNatural = text.scrollWidth > 0 ? text.scrollWidth + 1 + 2 * TITLE_PADDING_PX : 0;
+    titleNatural = width > 0 ? Math.ceil(width) + 2 * TITLE_PADDING_PX : 0;
   }
   $effect(() => {
     void title;
@@ -167,7 +173,13 @@
     if (!text || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measureTitle);
     observer.observe(text);
-    return () => observer.disconnect();
+    // A face that loads late changes the text's width under a box the
+    // floor may be holding still.
+    document.fonts?.addEventListener?.("loadingdone", measureTitle);
+    return () => {
+      observer.disconnect();
+      document.fonts?.removeEventListener?.("loadingdone", measureTitle);
+    };
   });
   // A roll is head to tail and back, each way over about a third of the
   // cycle, with a rest at each end (the keyframes below).
@@ -310,8 +322,8 @@
     {/if}
   </button>
   <!-- The window's title, display only: a press on it drags the window as
-       the band around it does, so the box and its text both carry the drag
-       attribute, which Tauri's drag script reads on the element pressed.
+       the band around it does, so the box, its text and the run inside all
+       carry the drag attribute, which Tauri's drag script reads on the element pressed.
        This is its place while the window has no tabs; with tabs the mover
        takes it to the bar's end. It is always rendered, and hidden while
        there is no title, so the mover never moves a block's boundary. -->
@@ -334,7 +346,9 @@
       restored && WINDOW_TITLE_MOVE === "slide" ? WINDOW_TITLE_SLIDE_MS : 0,
     )}
   >
-    <span class="bar-title-text" bind:this={titleText} data-tauri-drag-region={drag}>{title ?? ""}</span>
+    <span class="bar-title-text" bind:this={titleText} data-tauri-drag-region={drag}
+      ><span bind:this={titleRun} data-tauri-drag-region={drag}>{title ?? ""}</span></span
+    >
   </div>
   <!-- The name and the badge are display only, so nothing here reopens the
        hidden strip or offers a tab action tmux cannot take; on the desktop a
@@ -532,6 +546,10 @@
   .bar-title[data-place="end"] {
     flex: 0 100000 auto;
     min-width: min(var(--window-title-natural, 0px), var(--window-title-reserve), 40%);
+    /* Any width the box has over its text lies at its start, so the text
+       sits flush with the strip's actions; text that runs past the box
+       still starts at the box's start. */
+    text-align: right;
   }
   .bar-title-text {
     display: block;

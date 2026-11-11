@@ -812,24 +812,57 @@ describe("the window's title", () => {
     expect(box.style.getPropertyValue("--window-title-natural"), "and no width is known yet").toBe("");
     expect(box.style.padding).toBe("0px 8px");
 
-    let scrollWidth = 430;
-    Object.defineProperty(text, "scrollWidth", { configurable: true, get: () => scrollWidth });
-    Object.defineProperty(text, "clientWidth", { configurable: true, get: () => 250 });
+    // jsdom lays nothing out: the text is 429.4 px wide in a 250 px box.
+    let textWidth = 429.4;
+    let boxWidth = 250;
+    const run = text.firstElementChild as HTMLElement;
+    run.getBoundingClientRect = () => ({ width: textWidth }) as DOMRect;
+    Object.defineProperty(text, "clientWidth", { configurable: true, get: () => boxWidth });
+    Object.defineProperty(text, "scrollWidth", { configurable: true, get: () => Math.max(boxWidth, Math.round(textWidth)) });
     windowTabBar.title = `${LOCAL} and then some`;
     await tick();
     expect(box.hasAttribute("data-overflow")).toBe(true);
     expect(box.style.getPropertyValue("--window-title-roll-distance")).toBe("-180px");
-    // The width that shows the text whole: the text, a pixel over the
-    // engine's rounding, and the box's 8 px padding at each end.
-    expect(box.style.getPropertyValue("--window-title-natural")).toBe("447px");
+    // The width that shows the text whole: the text, rounded up, and the
+    // box's 8 px padding at each end.
+    expect(box.style.getPropertyValue("--window-title-natural")).toBe("446px");
     expect(box.style.getPropertyValue("--window-title-roll-duration")).toMatch(/^\d+(\.\d+)?s$/);
     expect(box.getAttribute("title"), "the whole title stays a tooltip").toBe(`${LOCAL} and then some`);
 
-    scrollWidth = 200;
+    // A retitle to a short name while the box is still as wide as the long
+    // one left it: the floor comes down to the short text.
+    textWidth = 60;
     windowTabBar.title = "Window 1";
     await tick();
     expect(box.hasAttribute("data-overflow")).toBe(false);
-    expect(box.style.getPropertyValue("--window-title-natural"), "a short title's floor is its own width").toBe("217px");
+    expect(box.style.getPropertyValue("--window-title-natural"), "a short title's floor is its own width").toBe("76px");
+    expect(box.style.getPropertyValue("--window-title-roll-distance")).toBe("0px");
+  });
+
+  test("its own width is the text's, whatever the width of the box around it", async () => {
+    windowTabBar.title = LOCAL;
+    resetLayout([terminalTab()]);
+    await renderBar();
+    const box = titleBox();
+    const text = box.querySelector<HTMLElement>(".bar-title-text")!;
+    const run = text.firstElementChild as HTMLElement;
+    // A browser's scroll width is never less than the box, so a box wider
+    // than its text reports its own width there.
+    let boxWidth = 400;
+    run.getBoundingClientRect = () => ({ width: 164.2 }) as DOMRect;
+    Object.defineProperty(text, "clientWidth", { configurable: true, get: () => boxWidth });
+    Object.defineProperty(text, "scrollWidth", { configurable: true, get: () => boxWidth });
+    windowTabBar.title = "\u2193\uFE0E local Terminal Window 1";
+    await tick();
+    expect(box.style.getPropertyValue("--window-title-natural")).toBe("181px");
+    expect(box.hasAttribute("data-overflow")).toBe(false);
+
+    // The box changes width under the same text: the floor stays the text's.
+    for (boxWidth of [234, 250, 181, 600]) {
+      windowTabBar.title = `\u2193\uFE0E local Terminal Window 1 [${boxWidth}]`;
+      await tick();
+      expect(box.style.getPropertyValue("--window-title-natural"), `in a ${boxWidth} px box`).toBe("181px");
+    }
   });
 
   test("privacy mode shows the generated name alone, and the full title once it is off", async () => {
@@ -929,18 +962,20 @@ describe("the window's title", () => {
     expect(shown()).toBe("Terminal Window 2 [deploy shell]");
   });
 
-  test("is display only, and on the desktop a press on the box or its text drags the window", async () => {
+  test("is display only, and on the desktop a press on the box, its text or the run inside drags the window", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: { invoke: async () => null } });
     windowTabBar.title = LOCAL;
     await renderBar();
     const box = titleBox();
     const text = box.querySelector<HTMLElement>(".bar-title-text")!;
-    for (const part of [box, text]) {
+    const run = text.firstElementChild as HTMLElement;
+    for (const part of [box, text, run]) {
       expect(part.getAttribute("data-tauri-drag-region"), part.className).toBe("");
       expect(part.closest("button, [role], [tabindex]"), "nothing to press or focus").toBeNull();
       part.click();
     }
-    expect(text.querySelector("*"), "a press lands on the text itself").toBeNull();
+    expect(run.querySelector("*"), "a press lands on the run itself").toBeNull();
+    expect(text.children, "the text holds the run alone").toHaveLength(1);
     await tick();
     expect(paneTree.open, "a press opens nothing").toBe(false);
   });
