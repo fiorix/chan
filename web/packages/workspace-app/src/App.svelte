@@ -1635,9 +1635,8 @@
       case "app.screensaver.lock":
         lockNow();
         return;
-      // Open Dashboard in the active pane. Same command from the command
-      // launcher, pane hamburger Apps row, and carousel slide-1 button. A
-      // pane showing a tmux pane draws no tab strip and refuses it.
+      // A control terminal or a pane showing tmux has no tab strip to
+      // switch back from a Dashboard, so opening one is refused.
       case "app.dashboard.open":
         if (!openDashboardInActivePane()) setTransientStatus("no dashboard in a tmux pane");
         return;
