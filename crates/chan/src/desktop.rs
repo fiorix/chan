@@ -167,7 +167,17 @@ pub(super) async fn maybe_handoff_to_desktop(
         // browser. A standalone binary that reached the desktop target only via
         // a live-desktop parentage instead falls through to a standalone serve:
         // its `current_exe` is NOT the desktop, so it must not try to spawn one.
+        // A desktop that holds the endpoint and has not started its listener
+        // yet (which only Windows tells apart) is booting: launching another
+        // would only meet it, so the CLI says why it serves on its own.
         chan_server::handoff::Outcome::NoDesktop => {
+            if chan_server::handoff::desktop_is_starting() {
+                eprintln!(
+                    "chan: chan-desktop is starting and cannot open the workspace yet; \
+                     starting a standalone server."
+                );
+                return None;
+            }
             if launch_if_absent {
                 maybe_launch_desktop(root).await
             } else {

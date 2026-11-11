@@ -673,17 +673,22 @@ pub fn handoff_forced() -> bool {
 /// The right to serve the well-known endpoint, taken apart from the bind so
 /// a desktop can learn at the very start of its boot whether another desktop
 /// serves the endpoint, and keep the right through the rest of its boot. On
-/// unix it is the endpoint's flock (`take_stable_lock`); on Windows it is the
-/// pipe's first instance, which no other process can create while it exists.
-/// It ends when the claim, or the listener started on it, is dropped, and
-/// with the process.
+/// unix it is the endpoint's flock (`take_stable_lock`). On Windows it is the
+/// first instance of a pipe of its own beside the endpoint's, `<endpoint>.claim`,
+/// which no other process can create while it exists and no client opens: a
+/// pipe's first instance takes a client before anyone reads it, so the
+/// endpoint's own pipe is created only when the listener starts, and a client
+/// during the boot meets no pipe instead of one nobody reads. The pipe
+/// namespace is one for the whole machine, so two sessions of one account
+/// meet the same claim. It ends when the claim, or the listener started on
+/// it, is dropped, and with the process.
 #[derive(Debug)]
 pub struct EndpointClaim {
     socket_path: PathBuf,
     #[cfg(unix)]
     lock: std::fs::File,
     #[cfg(windows)]
-    first_instance: tokio::net::windows::named_pipe::NamedPipeServer,
+    claim_pipe: tokio::net::windows::named_pipe::NamedPipeServer,
 }
 
 /// Why [`claim_endpoint_at`] did not claim the endpoint.
@@ -728,30 +733,180 @@ pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError
     }
 }
 
-/// Claim the endpoint at `socket_path` (see [`EndpointClaim`]). The pipe
-/// instance registers with the tokio reactor, so this must be called from
-/// within a tokio runtime, like [`start_listener`].
+/// Claim the endpoint at `socket_path` (see [`EndpointClaim`]). The claim's
+/// pipe registers with the tokio reactor, so this must be called from within
+/// a tokio runtime, like [`start_listener`].
+///
+/// The claim is held when its pipe already has an instance, since
+/// `CreateNamedPipe` refuses another instance of the name (pipe busy, the
+/// claim pipe's limit being one, or access denied for a first instance),
+/// another account's pipe of the name included; and when the
+/// endpoint's pipe is served without it: a desktop of the previous release
+/// claims by the endpoint pipe's own first instance and holds no claim pipe,
+/// and a launch beside it asks that desktop to come forward instead of
+/// booting a second one. A listing that cannot be read says nothing about
+/// such a holder, and refusing to boot on it would leave no desktop at all,
+/// so the claim stands.
 #[cfg(windows)]
 pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError> {
-    use tokio::net::windows::named_pipe::ServerOptions;
-
-    // What CreateNamedPipe answers for FILE_FLAG_FIRST_PIPE_INSTANCE when the
-    // name already has an instance.
+    // What CreateNamedPipe answers when the name already has an instance:
+    // access denied for FILE_FLAG_FIRST_PIPE_INSTANCE, and pipe busy when the
+    // name's instance limit is reached, which the claim pipe's limit of one
+    // makes the answer a second claim meets.
     const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_PIPE_BUSY: i32 = 231;
 
-    match ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(socket_path.as_os_str())
-    {
-        Ok(first_instance) => Ok(EndpointClaim {
-            socket_path: socket_path.to_path_buf(),
-            first_instance,
-        }),
-        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-            Err(ClaimError::Held(error))
+    let claim_pipe = match create_claim_pipe(socket_path) {
+        Ok(claim_pipe) => claim_pipe,
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY)
+            ) =>
+        {
+            return Err(ClaimError::Held(error))
         }
-        Err(error) => Err(ClaimError::Unavailable(error)),
+        Err(error) => return Err(ClaimError::Unavailable(error)),
+    };
+    if endpoint_listing_at(socket_path).served() {
+        return Err(ClaimError::Held(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "{} is served by a process that holds no claim pipe",
+                socket_path.display()
+            ),
+        )));
     }
+    Ok(EndpointClaim {
+        socket_path: socket_path.to_path_buf(),
+        claim_pipe,
+    })
+}
+
+/// Create the claim pipe of the endpoint at `socket_path`: the first, and
+/// only, instance of `<endpoint>.claim`, inbound, which nothing reads. The
+/// user name in an endpoint's name keeps only `[A-Za-z0-9_-]`, so no
+/// account's endpoint is another account's claim.
+#[cfg(windows)]
+fn create_claim_pipe(
+    socket_path: &Path,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .access_outbound(false)
+        .max_instances(1)
+        .create(claim_pipe_name(socket_path))
+}
+
+#[cfg(windows)]
+fn claim_pipe_name(socket_path: &Path) -> std::ffi::OsString {
+    let mut name = socket_path.as_os_str().to_owned();
+    name.push(".claim");
+    name
+}
+
+/// What the pipe directory says of an endpoint and its claim.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipeListing {
+    /// Neither pipe has an instance: no desktop.
+    Absent,
+    /// The claim pipe has an instance and the endpoint's pipe has none: a
+    /// desktop that claimed the endpoint and has not started its listener,
+    /// which is a desktop still booting.
+    Booting,
+    /// The endpoint's pipe has an instance: a listener serves it, this
+    /// release's or one of the previous release's, which holds no claim pipe.
+    Served,
+    /// The listing could not be read. It is no reading of a boot: the
+    /// guard's ask goes on as for a desktop that is up, and the CLI falls
+    /// back as it does for no desktop, without saying one is starting.
+    Unreadable,
+}
+
+#[cfg(any(windows, test))]
+impl PipeListing {
+    /// A desktop still booting, and nothing else: not an unreadable listing.
+    fn booting(self) -> bool {
+        self == PipeListing::Booting
+    }
+
+    /// A listener serves the endpoint, which a claim beside it reads as held;
+    /// an unreadable listing is not.
+    fn served(self) -> bool {
+        self == PipeListing::Served
+    }
+}
+
+/// Read the endpoint at `socket_path` and its claim from the listing of
+/// `\\.\pipe\`. Opening a pipe to find out would connect to an instance a
+/// client is waiting for, or one a server would read from; a listing opens
+/// none.
+#[cfg(windows)]
+fn endpoint_listing_at(socket_path: &Path) -> PipeListing {
+    let name = |pipe: &std::ffi::OsStr| {
+        pipe.to_str()
+            .and_then(|pipe| pipe.strip_prefix(r"\\.\pipe\"))
+            .map(str::to_ascii_lowercase)
+    };
+    let (Some(claim), Some(endpoint)) = (
+        name(&claim_pipe_name(socket_path)),
+        name(socket_path.as_os_str()),
+    ) else {
+        return PipeListing::Unreadable;
+    };
+    let listed = std::fs::read_dir(r"\\.\pipe\").and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect()
+    });
+    classify_listing(&claim, &endpoint, listed)
+}
+
+/// [`PipeListing`] from the names in the pipe directory. Names compare
+/// without case, as the pipe file system compares them; `claim` and
+/// `endpoint` are lowercase.
+#[cfg(any(windows, test))]
+fn classify_listing(
+    claim: &str,
+    endpoint: &str,
+    listed: std::io::Result<Vec<String>>,
+) -> PipeListing {
+    let Ok(listed) = listed else {
+        return PipeListing::Unreadable;
+    };
+    let has = |wanted: &str| {
+        listed
+            .iter()
+            .any(|name| name.to_ascii_lowercase() == wanted)
+    };
+    match (has(claim), has(endpoint)) {
+        (_, true) => PipeListing::Served,
+        (true, false) => PipeListing::Booting,
+        (false, false) => PipeListing::Absent,
+    }
+}
+
+/// Whether a desktop holds the claim of the endpoint at `socket_path` and
+/// has not started its listener yet, which is a desktop still booting
+/// ([`PipeListing::Booting`]; an unreadable listing is not). On unix the
+/// claim is the flock beside the socket, and this reads false.
+#[cfg(windows)]
+pub fn endpoint_is_booting_at(socket_path: &Path) -> bool {
+    endpoint_listing_at(socket_path).booting()
+}
+
+/// See the Windows arm.
+#[cfg(not(windows))]
+pub fn endpoint_is_booting_at(_socket_path: &std::path::Path) -> bool {
+    false
+}
+
+/// [`endpoint_is_booting_at`] on this user's well-known endpoint: what the
+/// CLI asks after a request found no desktop, so it can say that one is on
+/// its way up instead of serving on its own without a word.
+pub fn desktop_is_starting() -> bool {
+    existing_well_known_socket_path().is_some_and(|path| endpoint_is_booting_at(&path))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -806,6 +961,11 @@ pub struct ListenerHandle {
     /// take the stable path and then have this handle remove its node.
     #[cfg(unix)]
     _stable_lock: std::fs::File,
+    /// The claim, held by the handle rather than by the accept loop, so an
+    /// accept loop that stops while its desktop runs leaves the endpoint
+    /// claimed.
+    #[cfg(windows)]
+    _claim: tokio::net::windows::named_pipe::NamedPipeServer,
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -891,8 +1051,9 @@ impl Drop for ListenerHandle {
 /// called from within a tokio runtime.
 ///
 /// Claims the endpoint first and fails while a live process holds it, with
-/// the error the claim met: `AddrInUse` on unix, the pipe's access-denied
-/// error on Windows. [`start_claimed_listener`] serves a claim taken
+/// the error the claim met: `AddrInUse` on unix; on Windows the claim
+/// pipe's access-denied error, or `AddrInUse` for an endpoint pipe served
+/// without a claim pipe. [`start_claimed_listener`] serves a claim taken
 /// earlier.
 #[cfg(any(unix, windows))]
 pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
@@ -1008,6 +1169,11 @@ where
 /// so a client arriving during the swap still finds a live server instance.
 /// Same per-connection framing (read one JSON line -> `dispatch` -> write one
 /// JSON line) as the unix arm; `dispatch` applies the protocol-version gate.
+///
+/// The pipe is created here, not by the claim: until the listener starts,
+/// a client meets no pipe and answers at once, and nothing a client writes
+/// waits in an instance to be served after it gave up. The first instance
+/// refuses a name another process already serves.
 #[cfg(windows)]
 pub fn start_claimed_listener<F, Fut>(
     claim: EndpointClaim,
@@ -1017,14 +1183,38 @@ where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
+    start_listener_with_instances(claim, handler, |pipe_name| {
+        tokio::net::windows::named_pipe::ServerOptions::new().create(pipe_name)
+    })
+}
+
+/// Windows listener with an injectable source of the instances that follow
+/// the first, so a failed re-arm can be tested without exhausting the system.
+#[cfg(windows)]
+fn start_listener_with_instances<F, Fut, N>(
+    claim: EndpointClaim,
+    handler: F,
+    mut next_instance: N,
+) -> Result<ListenerHandle, ListenerStartError>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Response> + Send + 'static,
+    N: FnMut(&std::ffi::OsStr) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer>
+        + Send
+        + 'static,
+{
     use tokio::net::windows::named_pipe::ServerOptions;
 
-    // The claim's first instance is the singleton / squatter guard, mirroring
-    // how the unix flock owns the filesystem socket path; it serves the first
-    // client, and fresh instances follow it.
+    let first = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(claim.socket_path.as_os_str());
+    let mut next = match first {
+        Ok(first) => first,
+        Err(error) => return Err(ListenerStartError { claim, error }),
+    };
     let EndpointClaim {
         socket_path,
-        first_instance: mut next,
+        claim_pipe,
     } = claim;
     let pipe_name = socket_path.as_os_str().to_owned();
 
@@ -1045,10 +1235,15 @@ where
                 continue;
             }
             // Re-arm BEFORE serving so the next client doesn't race to NotFound.
-            let fresh = match ServerOptions::new().create(&pipe_name) {
+            let fresh = match next_instance(&pipe_name) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("handoff re-arm: {e}");
+                    tracing::warn!(
+                        error = %e,
+                        "handoff listener stopped: it could not create the next pipe instance; \
+                         the endpoint stays claimed, so a second launch exits instead of \
+                         running beside this desktop"
+                    );
                     break;
                 }
             };
@@ -1069,6 +1264,7 @@ where
         socket_path,
         stop: Some(stop),
         accept_loop: Some(accept_loop),
+        _claim: claim_pipe,
     })
 }
 
@@ -1421,24 +1617,30 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
 }
 
 /// Windows: connect the well-known named pipe and round-trip one
-/// `OpenWorkspace`. A missing pipe (no desktop) maps to `NoDesktop` at once --
-/// it must NOT hang the common no-desktop `chan serve`; a momentarily-busy pipe
-/// (the desktop mid accept-swap) gets a short bounded retry. Same request /
-/// timed response / parse as the unix arm.
+/// `OpenWorkspace`. A missing pipe (no desktop, or one still booting) maps to
+/// `NoDesktop` at once -- it must NOT hang the common no-desktop `chan serve`;
+/// a momentarily-busy pipe (the desktop mid accept-swap) gets a short bounded
+/// retry. Same request / timed response / parse as the unix arm.
 #[cfg(windows)]
 pub async fn try_handoff(workspace_path: &Path) -> Outcome {
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return Outcome::NoDesktop;
+    };
+    try_handoff_at(&socket_path, workspace_path).await
+}
+
+/// The post-resolution half of the Windows [`try_handoff`], on an explicit
+/// pipe name so a test can drive it against its own listener.
+#[cfg(windows)]
+async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
     use tokio::net::windows::named_pipe::ClientOptions;
 
     // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
     const ERROR_PIPE_BUSY: i32 = 231;
 
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return Outcome::NoDesktop;
-    };
-
     let deadline = std::time::Instant::now() + Duration::from_millis(1500);
     let client = loop {
-        match ClientOptions::new().open(&socket_path) {
+        match ClientOptions::new().open(socket_path) {
             Ok(c) => break c,
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 if std::time::Instant::now() >= deadline {
@@ -3606,6 +3808,19 @@ mod tests {
         ));
     }
 
+    /// On unix a held claim with no socket is not read as a desktop booting:
+    /// the guard's ask keeps its one bound there, and the CLI says nothing
+    /// about a desktop starting.
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_claim_without_its_listener_does_not_read_as_booting() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let _claim = claim_endpoint_at(&sock).unwrap();
+        assert!(!sock.exists(), "the claim binds no socket");
+        assert!(!endpoint_is_booting_at(&sock));
+    }
+
     /// A listener that fails to start hands its claim back still held, so a
     /// desktop that goes on without the listener keeps the endpoint and a
     /// second claim meets it held until that claim is dropped. The bind fails
@@ -3898,8 +4113,8 @@ mod tests {
     }
 
     /// The Windows twin of `listener_round_trip_activated` and
-    /// `an_endpoint_claim_is_held_until_dropped`: the claim is the pipe's
-    /// first instance, and the listener serves the client from it.
+    /// `an_endpoint_claim_is_held_until_dropped`: a second claim meets the
+    /// first held, and the listener started on it serves the client.
     #[cfg(windows)]
     #[tokio::test]
     async fn listener_round_trip_activated_pipe() {
@@ -3948,6 +4163,243 @@ mod tests {
             try_upgrade_at(&pipe, true).await,
             UpgradeOutcome::NoDesktop
         ));
+    }
+
+    /// A pipe name of one Windows test's own, so parallel tests and an
+    /// installed desktop never meet.
+    #[cfg(windows)]
+    fn test_pipe(tag: &str) -> PathBuf {
+        PathBuf::from(format!(r"\\.\pipe\chan-test-{tag}-{}", std::process::id()))
+    }
+
+    #[cfg(windows)]
+    fn opened() -> Response {
+        Response::Opened {
+            desktop_version: CHAN_VERSION.into(),
+            capabilities: Capabilities {
+                open_local_workspace: true,
+            },
+        }
+    }
+
+    /// The client of a `chan serve --desktop` that writes its request while
+    /// the desktop boots and gives up before the listener starts is never
+    /// served afterwards: there is nothing to write it into until the
+    /// listener runs.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_request_sent_during_the_boot_is_never_served_late() {
+        use std::sync::{Arc, Mutex};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let pipe = test_pipe("boot-late");
+        let claim = claim_endpoint_at(&pipe).unwrap();
+        if let Ok(mut early) = ClientOptions::new().open(&pipe) {
+            let mut line = serde_json::to_vec(&Request::OpenWorkspace {
+                protocol: PROTOCOL_VERSION,
+                cli_version: CHAN_VERSION.into(),
+                workspace_path: "early".into(),
+            })
+            .unwrap();
+            line.push(b'\n');
+            let _ = early.write_all(&line).await;
+        }
+        let served = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&served);
+        let _handle = start_claimed_listener(claim, move |req| {
+            let seen = Arc::clone(&seen);
+            async move {
+                if let Request::OpenWorkspace { workspace_path, .. } = req {
+                    seen.lock().unwrap().push(workspace_path);
+                }
+                opened()
+            }
+        })
+        .unwrap();
+        assert!(matches!(
+            try_handoff_at(&pipe, Path::new("late")).await,
+            Outcome::HandedOff
+        ));
+        // An early request the listener took would be served beside the late
+        // one; give it the time.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(*served.lock().unwrap(), ["late"]);
+    }
+
+    /// The connect-only probe during the boot takes nothing from the client
+    /// after it: both answer at once, within the second a `chan serve`
+    /// during a boot is given, and once the listener runs both find it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_probe_during_the_boot_turns_no_client_away() {
+        let pipe = test_pipe("boot-probe");
+        let claim = claim_endpoint_at(&pipe).unwrap();
+        let started = std::time::Instant::now();
+        assert!(
+            !desktop_is_live_at(&pipe).await,
+            "a desktop still booting is not live"
+        );
+        assert!(matches!(
+            try_handoff_at(&pipe, Path::new("during")).await,
+            Outcome::NoDesktop
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a client during the boot answers within a second, not after {:?}",
+            started.elapsed()
+        );
+        let _handle = start_claimed_listener(claim, |_req| async { opened() }).unwrap();
+        assert!(desktop_is_live_at(&pipe).await);
+        assert!(matches!(
+            try_handoff_at(&pipe, Path::new("after")).await,
+            Outcome::HandedOff
+        ));
+    }
+
+    /// A listener that cannot create its next pipe instance stops serving,
+    /// and the endpoint stays claimed while its handle lives: a second
+    /// desktop meets it held instead of booting beside this one.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_listener_whose_rearm_fails_keeps_the_claim() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let pipe = test_pipe("rearm");
+        let claim = claim_endpoint_at(&pipe).unwrap();
+        let handle = start_listener_with_instances(
+            claim,
+            |_req| async {
+                Response::Activated {
+                    desktop_version: CHAN_VERSION.into(),
+                }
+            },
+            |_pipe_name| Err(std::io::Error::other("no pipe instance left")),
+        )
+        .unwrap();
+        // The first client is accepted, and the re-arm after it fails.
+        let _ = try_activate_at(&pipe, Duration::from_secs(1)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match ClientOptions::new().open(&pipe) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                _ => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stopped listener left a pipe instance"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))),
+            "the endpoint stays claimed while the desktop runs"
+        );
+        drop(handle);
+        assert!(claim_endpoint_at(&pipe).is_ok());
+    }
+
+    /// A claim whose listener has not started reads as a desktop booting,
+    /// and creates no endpoint pipe; a running listener reads as served, and
+    /// a claim given up as absent once its pipes are gone.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_without_its_listener_reads_as_booting() {
+        let pipe = test_pipe("booting");
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Absent);
+        assert!(!endpoint_is_booting_at(&pipe), "no claim");
+        let claim = claim_endpoint_at(&pipe).unwrap();
+        assert_eq!(
+            endpoint_listing_at(&pipe),
+            PipeListing::Booting,
+            "the claim creates no endpoint pipe"
+        );
+        assert!(endpoint_is_booting_at(&pipe));
+        let handle = start_claimed_listener(claim, |_req| async { opened() }).unwrap();
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Served);
+        assert!(!endpoint_is_booting_at(&pipe), "the listener is up");
+        drop(handle);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while endpoint_listing_at(&pipe) != PipeListing::Absent {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a pipe outlived its listener: {:?}",
+                endpoint_listing_at(&pipe)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(claim_endpoint_at(&pipe).is_ok());
+    }
+
+    /// A desktop of the previous release claims by the endpoint pipe's first
+    /// instance and holds no claim pipe: a launch beside it reads the
+    /// endpoint held, not booting, so it asks that desktop instead of booting
+    /// a second one, and its refused claim leaves no claim pipe behind.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_pipe_served_without_a_claim_pipe_reads_as_held() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("older-holder");
+        let older = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe)
+            .unwrap();
+        assert!(matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))));
+        assert!(!endpoint_is_booting_at(&pipe));
+        drop(older);
+        assert_eq!(
+            endpoint_listing_at(&pipe),
+            PipeListing::Absent,
+            "the refused claim left its pipe"
+        );
+        assert!(claim_endpoint_at(&pipe).is_ok());
+    }
+
+    /// The pipe directory read by name, without case, and its failure: a
+    /// listing that cannot be read is not a boot, so the guard's ask goes on
+    /// as for a desktop that is up and the CLI says nothing of a desktop
+    /// starting.
+    #[test]
+    fn the_pipe_listing_tells_absent_booting_and_served_and_a_failure_is_no_boot() {
+        let read = |names: &[&str]| Ok(names.iter().map(|name| name.to_string()).collect());
+        let (claim, endpoint) = ("chan-desktop-a.claim", "chan-desktop-a");
+        assert_eq!(
+            classify_listing(claim, endpoint, read(&["other", "chan-desktop-ab"])),
+            PipeListing::Absent
+        );
+        assert_eq!(
+            classify_listing(claim, endpoint, read(&["Chan-Desktop-A.Claim"])),
+            PipeListing::Booting
+        );
+        assert_eq!(
+            classify_listing(
+                claim,
+                endpoint,
+                read(&["chan-desktop-a.claim", "chan-desktop-a"])
+            ),
+            PipeListing::Served
+        );
+        assert_eq!(
+            classify_listing(claim, endpoint, read(&["CHAN-DESKTOP-A"])),
+            PipeListing::Served,
+            "an endpoint served without a claim pipe is a holder of the previous release"
+        );
+        let unreadable = classify_listing(
+            claim,
+            endpoint,
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        );
+        assert_eq!(unreadable, PipeListing::Unreadable);
+        for (listing, booting, served) in [
+            (PipeListing::Absent, false, false),
+            (PipeListing::Booting, true, false),
+            (PipeListing::Served, false, true),
+            (PipeListing::Unreadable, false, false),
+        ] {
+            assert_eq!(listing.booting(), booting, "{listing:?}");
+            assert_eq!(listing.served(), served, "{listing:?}");
+        }
     }
 
     #[cfg(unix)]

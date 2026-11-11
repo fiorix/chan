@@ -4,19 +4,20 @@
 //! only its own process's windows, so a second desktop beside the first
 //! opens a native window for every record the first already shows, attached
 //! to the same sessions. A GUI launch therefore claims the handoff endpoint
-//! (the flock beside the per-user socket, the pipe's first instance on
-//! Windows) before it touches anything, and keeps the claim until its
-//! listener serves it. A launch that finds the endpoint held asks the desktop
-//! holding it to come forward over the handoff socket and exits without
-//! opening a window, starting a watcher or reading any state. When that
-//! desktop does not answer, or is still shutting down past the wait, the
-//! launch says so in a native message before it exits, unless its stderr is
-//! a terminal that has the log line. The CLI
-//! personalities and the default-terminal launch never reach this: they are
-//! dispatched before it in `main`.
+//! (the flock beside the per-user socket; on Windows a named mutex, the pipe
+//! being created only when the listener starts) before it touches anything,
+//! and keeps the claim until its listener serves it. A launch that finds the
+//! endpoint held asks the desktop holding it to come forward over the
+//! handoff socket and exits without opening a window, starting a watcher or
+//! reading any state; on Windows a holder still booting, its claim held and
+//! its pipe not created yet, is waited for first. When that desktop does not
+//! answer, or is still shutting down past the wait, the launch says so in a
+//! native message before it exits, unless its stderr is a terminal that has
+//! the log line. The CLI personalities and the default-terminal launch never
+//! reach this: they are dispatched before it in `main`.
 //!
 //! The endpoint is per user (the runtime directory on unix, the user name in
-//! the pipe name on Windows), not per `CHAN_HOME`.
+//! the pipe's and the mutex's names on Windows), not per `CHAN_HOME`.
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
@@ -33,9 +34,21 @@ use tauri::{AppHandle, Manager, Runtime};
 use crate::{serve, window_watcher, AppState};
 
 /// How long a launch that found the endpoint held keeps asking the holder to
-/// come forward. The holder may still be booting: it claims the endpoint
-/// first thing and binds its listener only once its embedded server is up.
+/// come forward. On unix the holder may still be booting within this bound:
+/// it claims the endpoint first thing and binds its listener only once its
+/// embedded server is up. On Windows a holder still booting is waited for
+/// first ([`BOOT_BOUND`]), and this bound starts once its listener is up.
 const ASK_BOUND: Duration = Duration::from_secs(5);
+
+/// How long a launch waits for a holder that is still booting before it
+/// asks. On Windows the holder's claim is held from the start of its boot
+/// and its pipe exists only once its listener starts, after the embedded
+/// server is up: 0.4 to 2.2 s on the Windows test VM, and 7.1 s for the first
+/// run of a fresh install. Thirty seconds covers a slow first start several
+/// times over, and only a holder that never starts its listener (one whose
+/// listener failed) makes a launch wait it out, which then asks and exits 1
+/// as before.
+const BOOT_BOUND: Duration = Duration::from_secs(30);
 
 /// How long a launch waits for the endpoint after a refusal that does not
 /// say the holder is shutting down. An older desktop relaunching after an
@@ -64,6 +77,27 @@ pub(crate) const SHUTTING_DOWN: &str = "chan-desktop is shutting down";
 
 /// The pause between two looks at the endpoint while waiting.
 const POLL: Duration = Duration::from_millis(100);
+
+/// The bounds of the start-up check's waits, together so a test can shorten
+/// them.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    /// [`BOOT_BOUND`].
+    boot: Duration,
+    /// [`ASK_BOUND`].
+    ask: Duration,
+    /// [`RELEASE_GRACE`].
+    release: Duration,
+    /// [`DRAIN_GRACE`].
+    drain: Duration,
+}
+
+const BOUNDS: Bounds = Bounds {
+    boot: BOOT_BOUND,
+    ask: ASK_BOUND,
+    release: RELEASE_GRACE,
+    drain: DRAIN_GRACE,
+};
 
 /// The first look at the endpoint.
 #[derive(Debug)]
@@ -170,7 +204,7 @@ pub(crate) fn decide<C>(
 /// process here.
 pub(crate) fn guard() -> Option<EndpointClaim> {
     let startup = match handoff::ensure_well_known_socket_path() {
-        Some(path) => check_at(&path, ASK_BOUND, RELEASE_GRACE, DRAIN_GRACE),
+        Some(path) => check_at(&path, BOUNDS),
         None => Startup::RunWithoutListener {
             why: "no owner-controlled runtime directory for the handoff endpoint".into(),
         },
@@ -317,19 +351,14 @@ fn show_message(notice: Notice) {
 )))]
 fn show_message(_: Notice) {}
 
-fn check_at(
-    path: &Path,
-    ask_bound: Duration,
-    release_grace: Duration,
-    drain_grace: Duration,
-) -> Startup<EndpointClaim> {
+fn check_at(path: &Path, bounds: Bounds) -> Startup<EndpointClaim> {
     decide(
         claim(path),
-        || ask(path, ask_bound),
+        || ask(path, bounds),
         |wait| {
             let grace = match wait {
-                Wait::Drain => drain_grace,
-                Wait::Release => release_grace,
+                Wait::Drain => bounds.drain,
+                Wait::Release => bounds.release,
             };
             wait_for_release(path, grace)
         },
@@ -346,14 +375,40 @@ fn claim(path: &Path) -> Lock<EndpointClaim> {
     }
 }
 
-fn ask(path: &Path, bound: Duration) -> Answer<EndpointClaim> {
-    let deadline = Instant::now() + bound;
+fn ask(path: &Path, bounds: Bounds) -> Answer<EndpointClaim> {
+    ask_with(
+        bounds,
+        || handoff::endpoint_is_booting_at(path),
+        |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+        || match claim(path) {
+            Lock::Taken(claim) => Some(claim),
+            Lock::Held | Lock::Unavailable(_) => None,
+        },
+    )
+}
+
+/// Ask the holder to come forward, with the endpoint's probes passed in so
+/// the waits can be driven without a desktop. A holder still booting, which
+/// only Windows tells apart, is waited for until its listener is up or
+/// `bounds.boot` passes; then the holder has `bounds.ask` to answer, and a
+/// holder that exits meanwhile frees the endpoint for this launch.
+fn ask_with<C>(
+    bounds: Bounds,
+    mut booting: impl FnMut() -> bool,
+    mut activate: impl FnMut(Duration) -> ActivateReply,
+    mut claim: impl FnMut() -> Option<C>,
+) -> Answer<C> {
+    let boot_deadline = Instant::now() + bounds.boot;
+    while booting() && Instant::now() < boot_deadline {
+        std::thread::sleep(POLL);
+    }
+    let deadline = Instant::now() + bounds.ask;
     loop {
         let budget = deadline.saturating_duration_since(Instant::now());
         if budget.is_zero() {
             return Answer::Silent;
         }
-        match tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)) {
+        match activate(budget) {
             ActivateReply::Activated { desktop_version } => {
                 return Answer::CameForward {
                     version: desktop_version,
@@ -364,7 +419,7 @@ fn ask(path: &Path, bound: Duration) -> Answer<EndpointClaim> {
         }
         // Nothing answers a holder that is still booting, or one that has
         // exited, which frees the endpoint.
-        if let Lock::Taken(claim) = claim(path) {
+        if let Some(claim) = claim() {
             return Answer::Released(claim);
         }
         std::thread::sleep(POLL);
@@ -641,6 +696,133 @@ mod tests {
 
     fn never_waited(_: Wait) -> Option<&'static str> {
         panic!("the endpoint must not be waited for")
+    }
+
+    /// The guard's bounds for a test that never meets a holder still booting
+    /// (unix reads none): `ask` for the holder to answer, `release` and
+    /// `drain` for the waits after a refusal.
+    #[cfg(unix)]
+    fn bounds(ask: Duration, release: Duration, drain: Duration) -> Bounds {
+        Bounds {
+            boot: Duration::ZERO,
+            ask,
+            release,
+            drain,
+        }
+    }
+
+    fn activated() -> ActivateReply {
+        ActivateReply::Activated {
+            desktop_version: "9.9.9".into(),
+        }
+    }
+
+    /// A holder whose listener comes up within the boot bound comes forward,
+    /// though its boot took longer than the ask bound: the ask starts once
+    /// the listener is up, and a holder still booting is not asked.
+    #[test]
+    fn a_holder_still_booting_is_waited_for_and_comes_forward() {
+        let up_at = Instant::now() + Duration::from_millis(600);
+        let mut asked_while_booting = false;
+        let answer = ask_with(
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_millis(200),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            || Instant::now() < up_at,
+            |_| {
+                if Instant::now() < up_at {
+                    asked_while_booting = true;
+                    ActivateReply::NoReply
+                } else {
+                    activated()
+                }
+            },
+            || None::<&str>,
+        );
+        assert!(
+            matches!(&answer, Answer::CameForward { version } if version == "9.9.9"),
+            "{answer:?}"
+        );
+        assert!(!asked_while_booting, "a holder still booting is not asked");
+    }
+
+    /// A holder that never starts its listener is waited for up to the boot
+    /// bound and then asked like any other, so the launch ends in the exit
+    /// that tells the user.
+    #[test]
+    fn a_holder_that_never_starts_its_listener_ends_unanswered_after_the_boot_bound() {
+        let started = Instant::now();
+        let mut asks = 0;
+        let answer = ask_with(
+            Bounds {
+                boot: Duration::from_millis(400),
+                ask: Duration::from_millis(200),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            || true,
+            |_| {
+                asks += 1;
+                ActivateReply::NoReply
+            },
+            || None::<&str>,
+        );
+        assert!(matches!(answer, Answer::Silent), "{answer:?}");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(600) && waited < Duration::from_secs(3),
+            "the boot bound, then the ask bound, and no longer: {waited:?}"
+        );
+        assert!(asks > 0, "past the boot bound the holder is asked");
+        let startup = decide(Lock::Held, || answer, never_waited);
+        assert_eq!(startup, Startup::Unanswered);
+        assert_eq!(startup.exit_code(), Some(1));
+    }
+
+    /// A holder that exits while it boots frees the endpoint, and the launch
+    /// takes it and boots.
+    #[test]
+    fn a_holder_that_exits_while_booting_hands_the_endpoint_over() {
+        let gone_at = Instant::now() + Duration::from_millis(300);
+        let answer = ask_with(
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_secs(5),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            || Instant::now() < gone_at,
+            |_| ActivateReply::NoReply,
+            || (Instant::now() >= gone_at).then_some("claim"),
+        );
+        assert!(matches!(answer, Answer::Released("claim")), "{answer:?}");
+    }
+
+    /// A holder whose listener is up and does not answer has the ask bound
+    /// alone: the boot bound does not lengthen it.
+    #[test]
+    fn a_served_holder_that_does_not_answer_has_the_ask_bound_alone() {
+        let started = Instant::now();
+        let answer = ask_with(
+            Bounds {
+                boot: Duration::from_secs(30),
+                ask: Duration::from_millis(300),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            || false,
+            |_| ActivateReply::NoReply,
+            || None::<&str>,
+        );
+        assert!(matches!(answer, Answer::Silent), "{answer:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1145,9 +1327,11 @@ mod tests {
         .unwrap();
         let startup = check_at(
             &sock,
-            Duration::from_secs(5),
-            Duration::from_millis(200),
-            Duration::from_millis(200),
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
         );
         assert_eq!(
             startup.exit_code(),
@@ -1170,9 +1354,7 @@ mod tests {
         .unwrap();
         let startup = check_at(
             &sock,
-            Duration::from_secs(5),
-            Duration::ZERO,
-            Duration::ZERO,
+            bounds(Duration::from_secs(5), Duration::ZERO, Duration::ZERO),
         );
         assert!(matches!(startup, Startup::StillShuttingDown), "{startup:?}");
         assert_eq!(startup.exit_code(), Some(1));
@@ -1188,9 +1370,11 @@ mod tests {
         let _held = handoff::claim_endpoint_at(&sock).unwrap();
         let startup = check_at(
             &sock,
-            Duration::from_millis(400),
-            Duration::from_millis(200),
-            Duration::from_millis(200),
+            bounds(
+                Duration::from_millis(400),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
         );
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
         assert_eq!(startup.exit_code(), Some(1));
@@ -1226,9 +1410,11 @@ mod tests {
         hold_endpoint(&state, started);
         let startup = check_at(
             &sock,
-            Duration::from_millis(400),
-            Duration::from_millis(200),
-            Duration::from_millis(200),
+            bounds(
+                Duration::from_millis(400),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
         );
         assert!(
             matches!(startup, Startup::Unanswered),
@@ -1260,11 +1446,199 @@ mod tests {
         });
         let startup = check_at(
             &sock,
-            Duration::from_secs(5),
-            Duration::from_millis(200),
-            Duration::from_millis(200),
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
         );
         release.join().unwrap();
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+    }
+
+    /// A pipe name of one Windows test's own, so parallel tests and an
+    /// installed desktop never meet.
+    #[cfg(windows)]
+    fn test_pipe(tag: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            r"\\.\pipe\chan-desktop-test-{tag}-{}",
+            std::process::id()
+        ))
+    }
+
+    /// The claim of `pipe`, taken inside the runtime its pipe registers with.
+    #[cfg(windows)]
+    fn claimed(pipe: &Path) -> EndpointClaim {
+        tauri::async_runtime::block_on(async { handoff::claim_endpoint_at(pipe) }).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn activate_answers(req: handoff::Request) -> Response {
+        match req {
+            handoff::Request::Activate { .. } => Response::Activated {
+                desktop_version: "9.9.9".into(),
+            },
+            _ => Response::Error {
+                message: "unexpected request".into(),
+            },
+        }
+    }
+
+    /// A second launch during a boot longer than the ask bound waits for the
+    /// holder's listener and comes forward, instead of taking a desktop that
+    /// is only booting for one that does not answer.
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_during_a_long_boot_comes_forward() {
+        let pipe = test_pipe("long-boot");
+        let held = claimed(&pipe);
+        let serving = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            tauri::async_runtime::block_on(async {
+                handoff::start_claimed_listener(held, |req| async move { activate_answers(req) })
+            })
+        });
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_millis(500),
+                release: Duration::from_millis(200),
+                drain: Duration::from_millis(200),
+            },
+        );
+        let _listener = serving.join().unwrap().unwrap();
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
+            "{startup:?}"
+        );
+        assert_eq!(startup.exit_code(), Some(0));
+    }
+
+    /// A claim whose listener never starts reads as a desktop booting until
+    /// the boot bound, and then as one that does not answer: the launch
+    /// exits 1 rather than boot beside it.
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_beside_a_claim_that_never_listens_exits_non_zero() {
+        let pipe = test_pipe("never-listens");
+        let _held = claimed(&pipe);
+        let started = Instant::now();
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_millis(600),
+                ask: Duration::from_millis(300),
+                release: Duration::from_millis(200),
+                drain: Duration::from_millis(200),
+            },
+        );
+        assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
+        assert_eq!(startup.exit_code(), Some(1));
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "a claim with no pipe is waited for as a boot: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The Windows twin of `a_launch_beside_a_serving_desktop_hands_over`.
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_beside_a_serving_desktop_hands_over_on_windows() {
+        let pipe = test_pipe("serving");
+        let _listener = tauri::async_runtime::block_on(async {
+            handoff::start_listener(pipe.clone(), |req| async move { activate_answers(req) })
+        })
+        .unwrap();
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_secs(5),
+                release: Duration::from_millis(200),
+                drain: Duration::from_millis(200),
+            },
+        );
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
+            "{startup:?}"
+        );
+    }
+
+    /// The Windows twin of `a_launch_claims_the_endpoint_a_silent_holder_frees`:
+    /// a holder that exits during its boot frees the claim, and the launch
+    /// boots on it.
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_claims_the_endpoint_a_booting_holder_frees() {
+        let pipe = test_pipe("frees");
+        let held = claimed(&pipe);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_secs(5),
+                release: Duration::from_millis(200),
+                drain: Duration::from_millis(200),
+            },
+        );
+        release.join().unwrap();
+        assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+    }
+
+    /// The Windows twin of
+    /// `a_desktop_whose_listener_failed_to_start_still_holds_the_endpoint`:
+    /// the listener fails to start because another process created a pipe of
+    /// the name during the boot, the desktop keeps the claim, and a second
+    /// launch meets a holder that does not answer and exits 1.
+    #[cfg(windows)]
+    #[test]
+    fn a_desktop_whose_listener_failed_to_start_still_holds_the_endpoint_on_windows() {
+        let pipe = test_pipe("listener-failed");
+        let config = tempfile::tempdir().unwrap();
+        let store = Arc::new(std::sync::Mutex::new(crate::config::ConfigStore::at_path(
+            config.path().join("config.json"),
+        )));
+        let state = AppState::with_store(store);
+        let claimed = claimed(&pipe);
+        let (squatter, started) = tauri::async_runtime::block_on(async {
+            let squatter = tokio::net::windows::named_pipe::ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe)
+                .unwrap();
+            let started = handoff::start_claimed_listener(claimed, |_req| async {
+                Response::Error {
+                    message: "unreachable".into(),
+                }
+            });
+            (squatter, started)
+        });
+        assert!(started.is_err(), "a pipe another process created first");
+        hold_endpoint(&state, started);
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_millis(400),
+                release: Duration::from_millis(200),
+                drain: Duration::from_millis(200),
+            },
+        );
+        assert!(
+            matches!(startup, Startup::Unanswered),
+            "a second launch must not boot beside a desktop whose listener failed to start: \
+             {startup:?}"
+        );
+        release_endpoint(&state);
+        drop(squatter);
+        assert!(
+            matches!(claim(&pipe), Lock::Taken(_)),
+            "a relaunch gives the endpoint up"
+        );
     }
 }
