@@ -67,6 +67,33 @@ test("unavailable process I/O is labelled and leaves gaps instead of plotting ze
   }
 });
 
+// One window spells one unit one way: the slide prints sizes as the file
+// browser does (`formatSize`), and a fractional rate as whole bytes.
+test("sizes and rates read in the file browser's units", async () => {
+  const traffic = (receivedBytesPerSecond: number | null) => ({ active: 0, opened: 0, receivedBytes: 0, sentBytes: 0, receivedBytesPerSecond, sentBytesPerSecond: null });
+  const sample: MetricSample = {
+    sequence: 1, elapsedMs: 1000, sampledAtMs: 1000, collectionMicros: 1,
+    process: { uptimeSeconds: 1, cpuTimeMs: 1, cpuPercent: 1, residentBytes: 3.5 * 1024 * 1024, ioScope: "storage_io", readBytes: 2048, writtenBytes: 0, readBytesPerSecond: 512.4, writtenBytesPerSecond: 0 },
+    network: traffic(1536), http2: traffic(null), yamux: traffic(null), reverseConnections: traffic(null), transferPayload: traffic(null),
+    transfers: { queued: 0, running: 0, workerCapacity: 2, queueCapacity: 32, finished: 0, cancelled: 0, stalled: 0, panicked: 0, refused: 0 },
+    gatewayTunnels: 0, tunnelDialFailures: 0, reverseListeners: 0, yamuxWaiting: 0, yamuxServing: 0, yamuxServiceCapacity: 0, yamuxStreamLimit: 256,
+  };
+  metrics.view = {
+    schemaVersion: 1, identity: { instanceId: "a", version: "1", build: "abc", pid: 42, hostname: "box" },
+    latest: sample, history: [sample],
+    storage: { path: "/home/test/.chan", logicalBytes: 1.5 * 1024 ** 3, allocatedBytes: 5, files: 1, sampledAtMs: 1000, scanMs: 1, error: null },
+  };
+  metrics.samples = [sample];
+  const target = document.createElement("div"); document.body.append(target);
+  mounted = mount(MetricsSlide, { target, props: { active: false } });
+  await tick();
+  const text = target.textContent ?? "";
+  for (const reading of ["Memory 3.5 MB", "Network 1.5 KB/s", "I/O read 512 B/s", "2.0 KB total", "Storage 1.5 GB", "5 B allocated"]) {
+    expect.soft(text).toContain(reading);
+  }
+  expect(text).not.toMatch(/[KMGT]iB/);
+});
+
 test("privacy mode masks the host name and the chan home path, and follows a toggle while mounted", async () => {
   const traffic = { active: 0, opened: 0, receivedBytes: 0, sentBytes: 0, receivedBytesPerSecond: null, sentBytesPerSecond: null };
   const sample: MetricSample = {
@@ -146,7 +173,7 @@ test("a failed storage scan shows its error and names a last completed total onl
   // A later scan failed: the totals are those of the last completed one.
   card = await show({ ...scanned, error: "storage scan interrupted or exceeded its bound" });
   expect(card).toContain("Storage scan failed: storage scan interrupted or exceeded its bound; showing the last completed total.");
-  expect(card).toContain("2.0 KiB");
+  expect(card).toContain("2.0 KB");
   // No failure: a scan still pending, then a completed one.
   card = await show(pending);
   expect(card).toContain("Scan pending");

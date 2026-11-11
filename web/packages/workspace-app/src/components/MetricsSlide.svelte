@@ -4,6 +4,7 @@
   import PrivateField from "@chan/web-shared/PrivateField.svelte";
   import { metrics, watchMetrics } from "../state/metrics.svelte";
   import type { MetricSample } from "../api/metrics";
+  import { formatSize } from "../state/format";
   import MetricChart from "./MetricChart.svelte";
   let { active = true }: { active?: boolean } = $props();
   let visible = $state(typeof document === "undefined" || !document.hidden);
@@ -16,12 +17,10 @@
   const view = $derived(metrics.view);
   const sample = $derived(view?.latest);
   const process = $derived(sample?.process);
+  // The file browser's spelling, so one window spells one unit one way. Rates
+  // arrive as fractional bytes, and formatSize prints a byte count as given.
   function bytes(value: number | null | undefined): string {
-    if (value == null) return "n/a";
-    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let i = 0;
-    while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
-    return `${value.toFixed(i ? 1 : 0)} ${units[i]}`;
+    return value == null ? "n/a" : formatSize(Math.round(value));
   }
   function rate(value: number | null | undefined): string { return value == null ? "n/a" : `${bytes(value)}/s`; }
   function uptime(value: number): string {
