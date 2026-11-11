@@ -89,10 +89,23 @@ export function started(log, fixture, gateway, keyFile) {
     require(lines.length === fixture.ingresses.length, "there must be one start per ingress, with no restarted tunnel");
     for (const ingress of fixture.ingresses) {
         require(lines.filter((line) => line.includes(` gateway=${gateway} `) &&
-            line.includes(` ingress=${ingress.id} `) && line.includes(` file=${keyFile} `) &&
+            line.includes(` ingress=${gateway}/${ingress.id} `) && line.includes(` file=${keyFile} `) &&
             (line + " ").includes(` endpoint=${ingress.endpoint} `)).length === 1,
         `${ingress.id} must start exactly once with its own endpoint and the shared key file`);
     }
+}
+
+export function observed(log, rows, fixture, gateway) {
+    const row = rows.find((row) => row.id === gateway);
+    const starts = log.split("\n").filter((line) => line.includes("gateway WireGuard tunnel started"));
+    return {
+        status: row?.status ?? null,
+        enrolled: row?.wireguard_enrolled ?? null,
+        summary: row?.wireguard_status ?? null,
+        ingresses: row?.wireguard_ingresses ?? null,
+        starts: Object.fromEntries(fixture.ingresses.map(({ id }) => [id, starts.filter((line) =>
+            line.includes(` gateway=${gateway} `) && line.includes(` ingress=${gateway}/${id} `)).length])),
+    };
 }
 
 export function privateKeyUnique(work, keyFile) {
@@ -130,10 +143,12 @@ function main([command, ...args]) {
         routed(read(args[2]), requests(args[0], Number(args[1])), args[3], args[4]);
     } else if (command === "started") {
         started(text(args[0]), read(args[1]), args[2], args[3]);
+    } else if (command === "observed") {
+        console.log(JSON.stringify(observed(text(args[0]), read(args[1]), read(args[2]), args[3])));
     } else if (command === "private-key") {
         privateKeyUnique(args[0], args[1]);
     } else {
-        throw new Error("usage: wireguard-enrollment-oracle.mjs seed FILE | fixture FILE LOG... | stored CONFIG FIXTURE ID KEYFILE | projection ROWS FIXTURE ID | snapshot WORK COUNT OUT | routed WORK COUNT SNAPSHOT ID|none PATH | started LOG FIXTURE ID KEYFILE | private-key WORK KEYFILE");
+        throw new Error("usage: wireguard-enrollment-oracle.mjs seed FILE | fixture FILE LOG... | stored CONFIG FIXTURE ID KEYFILE | projection ROWS FIXTURE ID | snapshot WORK COUNT OUT | routed WORK COUNT SNAPSHOT ID|none PATH | started LOG FIXTURE ID KEYFILE | observed LOG ROWS FIXTURE ID | private-key WORK KEYFILE");
     }
 }
 

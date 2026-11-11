@@ -802,6 +802,22 @@ single_sign_in() {
         [ "$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log")" -ge 1 ]
 }
 
+enrollment_report() {
+    local pid_before="$1" key_file="$2" key_before="$3" pid_after key_after key_same=no observations
+    desktop_log
+    pid_after="$(desktop_pid || echo none)"
+    key_after="$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")" || key_after=unavailable
+    [ "$key_after" != "$key_before" ] || key_same=yes
+    observations="$(enrollment_oracle observed "$CLEAN" "$WORK/rows.json" "$WORK/identity-peer.json" "$GATEWAY_ID")" || observations=unavailable
+    printf 'observed=%s desktop_pid=%s->%s proxy_pid=%s->%s proxy=%s->%s proxy_listeners=%s browser_urls=%s authorize=%s redeem=%s roster=%s key_digest_and_metadata_same=%s' \
+        "$observations" "$pid_before" "$pid_after" "$pid_before" "$pid_after" \
+        "$PROXY" "$(proxy_addresses | sort -u | tr '\n' ',')" "$(count 'gateway WireGuard proxy listening')" \
+        "$(grep -c . "$WORK/browser.urls" || true)" \
+        "$(grep -c '^identity: authorize wireguard_public_key=' "$WORK/identity.log" || true)" \
+        "$(grep -c '^identity: redeem pkce=ok wireguard=sent$' "$WORK/identity.log" || true)" \
+        "$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log" || true)" "$key_same"
+}
+
 enroll_arms() {
     local arm_rc keys key_file conf key_status client_key enrolled key_mode dir_mode
     local connect_status opened read_back sent_url sent_key recorded walk
@@ -827,6 +843,7 @@ enroll_arms() {
     verdict key "$arm_rc" "POST answered $key_status, a public key of ${#client_key} characters, enrolled $enrolled (want false), key file mode $key_mode in a $dir_mode directory (want 600 in 700)"
     [ "$arm_rc" = 0 ] || fail "no WireGuard key: the sign-in needs it"
 
+    key_before="$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")"
     start_enrollment_peer p1 "$client_key"
     start_enrollment_peer p2 "$client_key"
     identity_peers
@@ -866,7 +883,8 @@ enroll_arms() {
     same_desktop "$pid_before" || arm_rc=1
     single_sign_in || arm_rc=1
     enrollment_oracle private-key "$WORK" "$key_file" || arm_rc=1
-    verdict adopt "$arm_rc" "two distinct peers handshook; exact stored parameters and ordered up statuses; one start per ingress, one sign-in, one key file, unchanged desktop and proxy"
+    [ "$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")" = "$key_before" ] || arm_rc=1
+    verdict adopt "$arm_rc" "$(enrollment_report "$pid_before" "$key_file" "$key_before")"
     enrollment_tenant_arm enrolled 2 1 2 live
 
     if [ "$RECONCILE" = 1 ]; then
@@ -890,7 +908,7 @@ enroll_arms() {
         [ "$(stat -c %a "$key_file")" = 600 ] && [ "$(stat -c %a "$keys")" = 700 ] || arm_rc=1
         [ ! -e "$conf" ] || arm_rc=1
         enrollment_oracle private-key "$WORK" "$key_file" || arm_rc=1
-        verdict reconcile "$arm_rc" "connect HTTP $connect_status (want 204), p3 handshook and is stored/projected; p1/p2 start once, one sign-in, unchanged key/mode, desktop and proxy"
+        verdict reconcile "$arm_rc" "connect_http=$connect_status (want 204) $(enrollment_report "$pid_before" "$key_file" "$key_before")"
         enrollment_tenant_arm reconciled 3 1 3 live
     fi
 }

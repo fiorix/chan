@@ -3,15 +3,15 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parameters, peerReady, privateKeyUnique, projected, routed, started, stored } from "./wireguard-enrollment-oracle.mjs";
+import { observed, parameters, peerReady, privateKeyUnique, projected, routed, started, stored } from "./wireguard-enrollment-oracle.mjs";
 
 const clone = structuredClone;
 const peers = [1, 2, 3].map((n) => ({
     endpoint: `127.0.0.1:${40000 + n}`, public_key: Buffer.alloc(32, n).toString("base64"),
 }));
 const fixture = parameters(peers.slice(0, 2));
-const keyFile = "/test/wg.key";
-const id = "gw-test";
+const keyFile = "/test/chan-home/desktop/wireguard/gw-e2e00001.key";
+const id = "gw-e2e00001";
 const config = { gateways: [{ id, wireguard_enrollment: {
     key_file: keyFile, addresses: ["10.7.0.1/32"], allowed_ips: ["10.7.0.2/32"], persistent_keepalive: 5,
     ingresses: [1, 2].map((n) => ({
@@ -97,7 +97,9 @@ test("routing needs fresh matching traffic on exactly the selected peer", () => 
     assert.throws(() => routed(before, { p2: [request] }, "p2", path), /every peer/);
 });
 
-const start = (n) => `2026-11-11T12:00:00Z INFO chan_desktop::wireguard: gateway WireGuard tunnel started gateway=${id} ingress=p${n} file=${keyFile} endpoint=${peers[n - 1].endpoint}`;
+// Native desktop trace from 2026-11-11; only the temporary key path and UDP port are normalized.
+const startRecord = "2026-11-11T17:37:00.468921Z  INFO chan_desktop::wireguard: gateway WireGuard tunnel started gateway=gw-e2e00001 ingress=gw-e2e00001/p1 file=/test/chan-home/desktop/wireguard/gw-e2e00001.key endpoint=127.0.0.1:40001";
+const start = (n) => startRecord.replace("/p1 ", `/p${n} `).replace(peers[0].endpoint, peers[n - 1].endpoint);
 test("reconcile requires one start per ingress and no restart of existing peers", () => {
     started([start(1), start(2)].join("\n"), fixture, id, keyFile);
     started([start(1), start(2), start(3)].join("\n"), parameters(peers), id, keyFile);
@@ -105,7 +107,29 @@ test("reconcile requires one start per ingress and no restart of existing peers"
     assert.throws(() => started([start(1), start(2), start(1)].join("\n"), parameters(peers), id, keyFile), /exactly once/);
     assert.throws(() => started([start(1), start(2), start(3), start(1)].join("\n"), parameters(peers), id, keyFile), /one start per ingress/);
     assert.throws(() => started([start(1), start(2).replace(peers[1].endpoint, peers[0].endpoint)].join("\n"), fixture, id, keyFile), /own endpoint/);
-    assert.throws(() => started([start(1), start(2).replace("ingress=p2", "ingress=p1")].join("\n"), fixture, id, keyFile), /exactly once/);
+    assert.throws(() => started([start(1), start(2).replace(`ingress=${id}/p2`, `ingress=${id}/p1`)].join("\n"), fixture, id, keyFile), /exactly once/);
+});
+
+test("start records must use the gateway-qualified route id", () => {
+    const bare = [start(1), start(2)].map((line) => line.replace(`ingress=${id}/`, "ingress=")).join("\n");
+    assert.throws(() => started(bare, fixture, id, keyFile), /must start exactly once/);
+    const otherGateway = [start(1), start(2)].map((line) => line.replace(`ingress=${id}/`, "ingress=gw-other/")).join("\n");
+    assert.throws(() => started(otherGateway, fixture, id, keyFile), /must start exactly once/);
+});
+
+test("observations report missing, refused and restarted ingresses without asserting success", () => {
+    const log = [start(1), start(1),
+        start(2).replace(`gateway=${id}`, "gateway=gw-other"),
+        start(2).replace(`ingress=${id}/p2`, "ingress=p2")].join("\n");
+    const failed = [{ ...rows[0], status: "disconnected", wireguard_status: "connecting",
+        wireguard_ingresses: [{ id: "p1", status: "connecting" }, { id: "p2", status: "refused" }] }];
+    assert.deepEqual(observed(log, failed, fixture, id), {
+        status: "disconnected", enrolled: true, summary: "connecting",
+        ingresses: failed[0].wireguard_ingresses, starts: { p1: 2, p2: 0 },
+    });
+    assert.deepEqual(observed("", [], fixture, id), {
+        status: null, enrolled: null, summary: null, ingresses: null, starts: { p1: 0, p2: 0 },
+    });
 });
 
 test("key scan finds only an owner-only key file and refuses duplicates and empty keys", (t) => {

@@ -96,3 +96,83 @@ enrollment_tenant_arm enrolled 2 1 2 live`;
         assert.equal(result.stdout, `tenant-enrolled-p1 rc=${want}\ntenant-enrolled-p2 rc=${want}\n`);
     }
 });
+
+test("enrollment verdict details expose measured failures and key changes", (t) => {
+    const work = mkdtempSync(join(tmpdir(), "wg-verdict-test-"));
+    t.after(() => rmSync(work, { recursive: true, force: true }));
+    const key = join(work, "client.key");
+    writeFileSync(key, "first key\n");
+    writeFileSync(join(work, "browser.urls"), "first\nsecond\n");
+    writeFileSync(join(work, "identity.log"), "identity: authorize wireguard_public_key=test\n".repeat(2) +
+        "identity: redeem pkce=ok wireguard=sent\n".repeat(2));
+    const code = `desktop_log() { :; }
+desktop_pid() { echo 4321; }
+proxy_addresses() { echo 127.0.0.1:40001; }
+count() { echo 2; }
+enrollment_oracle() { echo '{"status":"disconnected","summary":"connecting","starts":{"p1":2,"p2":0}}'; }
+${shellFunction("enrollment_report")}
+key_before="$(sha256sum "$KEY_FILE") $(stat -c '%d:%i:%s:%y:%z:%a' "$KEY_FILE")"
+[ "$CHANGE_KEY" = no ] || printf 'replacement key\n' > "$KEY_FILE"
+enrollment_report 1234 "$KEY_FILE" "$key_before"`;
+    for (const change of ["no", "yes"]) {
+        const result = shell(code, { WORK: work, CLEAN: "/unused", KEY_FILE: key,
+            GATEWAY_ID: "gw-test", PROXY: "127.0.0.1:40000", CHANGE_KEY: change });
+        assert.equal(result.status, 0);
+        assert.match(result.stdout, /"status":"disconnected"/);
+        assert.match(result.stdout, /"starts":\{"p1":2,"p2":0\}/);
+        assert.match(result.stdout, /desktop_pid=1234->4321 proxy_pid=1234->4321/);
+        assert.match(result.stdout, /proxy=127\.0\.0\.1:40000->127\.0\.0\.1:40001,/);
+        assert.match(result.stdout, /proxy_listeners=2 browser_urls=2 authorize=2 redeem=2 roster=0/);
+        assert.match(result.stdout, new RegExp(`key_digest_and_metadata_same=${change === "no" ? "yes" : "no"}$`));
+    }
+});
+
+test("adoption and reconciliation verdicts reject a changed key", (t) => {
+    const work = mkdtempSync(join(tmpdir(), "wg-key-continuity-test-"));
+    t.after(() => rmSync(work, { recursive: true, force: true }));
+    const publicKey = Buffer.alloc(32, 1).toString("base64");
+    writeFileSync(join(work, "browser.urls"), "http://identity.test/desktop/authorize\n");
+    writeFileSync(join(work, "browser.log"), "browser: authorize=302 callback=303\n");
+    writeFileSync(join(work, "identity.log"), `identity: authorize wireguard_public_key=${publicKey}\n`);
+    const code = `CHAN_HOME="$WORK/home"
+mkdir -p "$CHAN_HOME/desktop/wireguard"
+chmod 700 "$CHAN_HOME/desktop/wireguard"
+printf 'original key\\n' > "$CHAN_HOME/desktop/wireguard/$GATEWAY_ID.key"
+chmod 600 "$CHAN_HOME/desktop/wireguard/$GATEWAY_ID.key"
+proxy_first_arm() { :; }
+launcher_bearer_arm() { :; }
+library_call() { if [[ "$2" = */wireguard-key ]]; then echo 200; else echo 204; fi; }
+entry_field() { if [ "$2" = wireguard_public_key ]; then echo "$PUBLIC_KEY"; else echo false; fi; }
+start_enrollment_peer() {
+    if { [ "$CHANGE_KEY" = adopt ] && [ "$1" = p1 ]; } || { [ "$CHANGE_KEY" = reconcile ] && [ "$1" = p3 ]; }; then
+        printf 'replacement key\\n' > "$CHAN_HOME/desktop/wireguard/$GATEWAY_ID.key"
+    fi
+}
+identity_peers() { :; }
+enrollment_tenant_arm() { :; }
+desktop_pid() { echo 1234; }
+count() { echo 0; }
+wait_for() { :; }
+authorize_read() { echo "$IDENTITY_ORIGIN/desktop/authorize $PUBLIC_KEY"; }
+enrollment_parameters() { :; }
+enrollment_starts() { :; }
+same_desktop() { :; }
+single_sign_in() { :; }
+enrollment_oracle() { :; }
+enrollment_report() { :; }
+verdict() { echo "$1 rc=$2"; }
+fail() { exit 99; }
+${shellFunction("enroll_arms")}
+enroll_arms`;
+    for (const change of ["none", "adopt", "reconcile"]) {
+        const result = shell(code, { WORK: work, PUBLIC_KEY: publicKey, GATEWAY_ID: "gw-test",
+            IDENTITY_ORIGIN: "http://identity.test", CHANGE_KEY: change, FAILED: "0",
+            RECONCILE: change === "adopt" ? "0" : "1" });
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /^key rc=0\nauthorize rc=0\n/);
+        assert.match(result.stdout, new RegExp(`^adopt rc=${change === "adopt" ? 1 : 0}$`, "m"));
+        if (change !== "adopt") {
+            assert.match(result.stdout, new RegExp(`^reconcile rc=${change === "reconcile" ? 1 : 0}$`, "m"));
+        }
+    }
+});
