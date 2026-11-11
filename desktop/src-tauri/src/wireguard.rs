@@ -381,6 +381,18 @@ impl WireguardFabric {
         }
         // Retained handles survive a table swap; removed tunnels end only
         // after the proxy routes the complete replacement.
+        if let Some(previous) = &previous {
+            for (id, ingress) in &previous.ingresses {
+                if let Row::Running { path, started, .. } = ingress {
+                    let retained = rows[gateway_id].ingresses.iter().any(|(held, row)| {
+                        held == id && matches!(row, Row::Running { started: current, .. } if current == started)
+                    });
+                    if !retained {
+                        tracing::info!(gateway = %gateway_id, ingress = %id, file = %path.display(), "gateway WireGuard tunnel retired");
+                    }
+                }
+            }
+        }
         drop(previous);
         rows[gateway_id].answer()
     }
@@ -1749,6 +1761,85 @@ pub(crate) mod tests {
         assert!(fabric
             .reason_for_destination("alice--a1.renamed.proxy.chan.invalid", &[])
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn enrolled_reconcile_logs_each_retired_tunnel_once() {
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut row, _peers) = enrolled_peers(dir.path(), "gw-multi").await;
+        let fabric = start(std::slice::from_ref(&row)).await;
+        let retired = || {
+            lines
+                .infos()
+                .into_iter()
+                .filter(|line| line.contains("gateway WireGuard tunnel retired"))
+                .collect::<Vec<_>>()
+        };
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        row.wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .reverse();
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        assert!(retired().is_empty(), "kept tunnels must not log retirement");
+
+        let removed = row
+            .wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .remove(0);
+        assert_eq!(removed.id, "p2");
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        let dropped = retired();
+        assert_eq!(
+            dropped.len(),
+            1,
+            "a dropped ingress must log once: {dropped:?}"
+        );
+        assert!(dropped[0].contains("gateway=gw-multi"), "{dropped:?}");
+        assert!(dropped[0].contains("ingress=gw-multi/p2"), "{dropped:?}");
+        assert!(
+            dropped[0].contains(&format!(
+                "file={}",
+                row.wireguard_source().unwrap().display()
+            )),
+            "{dropped:?}"
+        );
+
+        row.wireguard_enrollment.as_mut().unwrap().ingresses[0].endpoint = "127.0.0.1:9".into();
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        let replaced = retired();
+        assert_eq!(
+            replaced.len(),
+            2,
+            "a replaced tunnel must log once: {replaced:?}"
+        );
+        assert!(replaced[1].contains("ingress=gw-multi/p1"), "{replaced:?}");
+
+        fabric
+            .refused_starts
+            .lock()
+            .unwrap()
+            .insert("gw-multi/p2".into());
+        row.wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .push(removed);
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        row.wireguard_enrollment.as_mut().unwrap().ingresses.pop();
+        fabric.adopt_gateway(&row).unwrap().unwrap();
+        assert_eq!(
+            retired(),
+            replaced,
+            "a refused ingress ran no tunnel to retire"
+        );
     }
 
     #[tokio::test]
