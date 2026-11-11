@@ -899,19 +899,23 @@ uninstall: ## Remove chan from PREFIX/bin.
 	@echo "removed $(PREFIX)/bin/chan"
 
 .PHONY: clean
-clean: ## Remove local build outputs (root workspace, web, gateway, desktop).
+clean: ## Remove local build outputs, node_modules and .build-tools (root, web, gateway, desktop).
 	$(CARGO) clean
 	rm -rf web/dist web/node_modules web/pkg
 	rm -rf web-launcher/dist web-launcher/node_modules
 	rm -f $(WEB_BUILD_STAMP) $(LAUNCHER_BUILD_STAMP)
 	# gateway/ is its own cargo workspace: root `cargo clean` never
 	# touches gateway/target. The gateway frontend lives in the ./web
-	# npm workspace; only its rust-embed SPA dist remains under gateway/.
+	# npm workspace; its rust-embed SPA dist is written under gateway/.
 	cd gateway && $(CARGO) clean
 	rm -rf gateway/crates/identity/web/dist
+	# These node_modules trees are leftovers of the gateway's former npm root.
+	rm -rf gateway/node_modules gateway/crates/*/web/node_modules
 	# Desktop owns its extras (downloaded sidecar binaries); same
 	# delegation as the chan-desktop / desktop-dev build targets.
 	$(MAKE) -C desktop clean
+	# Build tools stay outside target/ for CI's cache; clean is a local reset.
+	rm -rf .build-tools
 
 .PHONY: dev
 dev: chan ## Run chan serve against /tmp/chan-dev with no token.
