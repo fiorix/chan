@@ -261,7 +261,9 @@ async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActiv
     let Some(addr) = local_devserver_dial_addr() else {
         return out;
     };
-    let client = reqwest::Client::new();
+    let Ok(client) = crate::http_client::local_devserver(PS_ACTIVITY_TIMEOUT) else {
+        return out;
+    };
     // One gate for the whole enrichment: if the listing does not answer, we
     // stop here rather than waiting out a timeout per workspace.
     let Some(entries) = ps_get::<Vec<chan_server::devserver_api::WorkspaceEntry>>(
@@ -823,7 +825,7 @@ mod tests {
             drop(stream);
         };
         let query = async {
-            let client = reqwest::Client::new();
+            let client = crate::http_client::local_devserver(PS_ACTIVITY_TIMEOUT).unwrap();
             let result = tokio::time::timeout(
                 Duration::from_secs(4),
                 ps_get::<serde_json::Value>(&client, &base, "/api/health", "test-token"),
@@ -836,6 +838,43 @@ mod tests {
         assert!(result
             .expect("activity body decode must be bounded")
             .is_none());
+    }
+
+    #[test]
+    fn activity_ignores_proxy() {
+        use crate::test_env::http_proxy::{check, Route};
+        check(
+            "status::tests::activity_ignores_proxy",
+            vec![
+                Route {
+                    method: "GET",
+                    path: "/api/devserver/workspaces",
+                    token: Some("test-token"),
+                    body: r#"[{"prefix":"/notes","path":"/notes","label":"notes","on":true,"status":"running","token":"workspace-token"}]"#,
+                },
+                Route {
+                    method: "GET",
+                    path: "/notes/api/index/status",
+                    token: Some("workspace-token"),
+                    body: "{}",
+                },
+                Route {
+                    method: "GET",
+                    path: "/notes/api/health",
+                    token: Some("workspace-token"),
+                    body: r#"{"indexer":{"status":"idle","queue_depth":0}}"#,
+                },
+            ],
+            0,
+            |_| async {
+                let activity = devserver_activity(&HashSet::from(["/notes".to_string()])).await;
+                let notes = activity.get("/notes").expect("stand-in workspace activity");
+                assert_eq!(
+                    notes.indexer.as_ref().unwrap().status.as_deref(),
+                    Some("idle")
+                );
+            },
+        );
     }
 
     #[tokio::test]

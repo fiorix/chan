@@ -215,7 +215,7 @@ pub(crate) async fn run_health_watchdog(
     subject: &str,
 ) -> Result<()> {
     let health_url = format!("http://{addr}/api/health");
-    let client = reqwest::Client::new();
+    let client = crate::http_client::local_devserver(WATCHDOG_PROBE_TIMEOUT)?;
     let mut state = WatchdogState::new(WATCHDOG_GRACE);
     let stdin_eof = wait_for_join_stdin_eof();
     tokio::pin!(stdin_eof);
@@ -275,6 +275,49 @@ pub(crate) async fn run_health_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_probe_ignores_proxy() {
+        use crate::test_env::http_proxy::{check, Route};
+        use chan_workspace::daemon_lock::{DaemonAcquire, DaemonLock};
+
+        check(
+            "devserver::watchdog::tests::health_probe_ignores_proxy",
+            vec![Route {
+                method: "GET",
+                path: "/api/health",
+                token: None,
+                body: "{}",
+            }],
+            0,
+            |addr| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let record_path = dir.path().join("daemon.json");
+                let DaemonAcquire::Daemon(_lock) = DaemonLock::acquire(
+                    &dir.path().join("daemon.lock"),
+                    &record_path,
+                    &addr.to_string(),
+                    false,
+                )
+                .unwrap() else {
+                    panic!("test owns the daemon fixture lock");
+                };
+                let mut liveness = DaemonLiveness::Chan {
+                    record_path,
+                    pid: std::process::id(),
+                };
+                let client = crate::http_client::local_devserver(WATCHDOG_PROBE_TIMEOUT).unwrap();
+                let sample = watchdog_probe(
+                    &mut liveness,
+                    &client,
+                    &format!("http://{addr}/api/health"),
+                    &addr.to_string(),
+                )
+                .await;
+                assert_eq!(sample, WatchdogSample::Healthy);
+            },
+        );
+    }
 
     #[test]
     fn watchdog_failure_bursts_shorter_than_grace_never_bail() {

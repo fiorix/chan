@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 mod child_env;
+pub(crate) mod http_proxy;
 use child_env::is_chan_var;
 
 /// Serializes every in-process environment mutation behind one permit.

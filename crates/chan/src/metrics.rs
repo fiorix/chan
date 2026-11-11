@@ -19,21 +19,13 @@ pub(crate) struct Client {
 
 impl Client {
     pub(crate) fn new(args: MetricsArgs) -> Result<Self> {
-        let mut http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(5));
-        // The local devserver is on this host and its bearer must reach only
-        // the listener `local_target` checked. reqwest otherwise takes the
-        // proxy from the environment (and on macOS and Windows the system),
-        // with no loopback exemption, and would hand the bearer to it. An
-        // explicit URL keeps the user's proxy, which a remote server may need.
-        if args.url.is_none() {
-            http = http.no_proxy();
-        }
-        Ok(Self {
-            args,
-            http: http.build()?,
-        })
+        let timeout = Duration::from_secs(5);
+        let http = if args.url.is_some() {
+            crate::http_client::explicit_url(timeout)?
+        } else {
+            crate::http_client::local_devserver(timeout)?
+        };
+        Ok(Self { args, http })
     }
 
     /// The metrics URL and bearer to read, resolved afresh on every read: the
@@ -879,6 +871,28 @@ mod tests {
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn explicit_url_keeps_proxy() {
+        crate::test_env::http_proxy::check(
+            "metrics::tests::explicit_url_keeps_proxy",
+            vec![],
+            1,
+            |addr| async move {
+                let client = Client::new(MetricsArgs {
+                    url: Some(format!("http://{addr}/")),
+                    token: Some("explicit-test-token".into()),
+                    json: false,
+                    watch: false,
+                    history: false,
+                    varlink: false,
+                })
+                .unwrap();
+                // The recording proxy closes the connection; reaching it is the assertion.
+                assert!(client.read(false, None).await.is_err());
+            },
         );
     }
 
