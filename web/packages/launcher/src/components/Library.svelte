@@ -5,7 +5,9 @@
   // tmux control-mode connection as an equal top-level machine, each owning
   // its windows. A machine block is a header
   // (its machine-level actions) over the connected/local content: a TERMINALS
-  // section (the control terminal pinned first, then standalone terminals) and a
+  // section (control terminals pinned first, the machine's own and then the
+  // buried ones of the tmux connections its terminals ran, each with its
+  // connection's detach, then standalone terminals) and a
   // WORKSPACES section of collapsible cards whose windows nest inside on expand.
   // A disconnected devserver shows only its header + a connect prompt. The
   // grouping is the pure lib/machineTree; this component is the presentation +
@@ -70,7 +72,9 @@
     buildMachineTree,
     machineName,
     machineWindowCount,
+    tmuxWindowMachine,
     type MachineNode,
+    type TmuxControlRow,
     type WorkspaceNode,
   } from "../lib/machineTree";
   import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
@@ -259,6 +263,7 @@
   function machineIsEmpty(node: MachineNode): boolean {
     return (
       node.control.length === 0 &&
+      node.tmuxControls.length === 0 &&
       node.terminals.length === 0 &&
       node.workspaces.length === 0 &&
       node.looseWindows.length === 0 &&
@@ -296,6 +301,32 @@
       </div>
     {/if}
   </div>
+{/snippet}
+
+<!-- A tmux connection's control terminal on the card of the machine whose
+     terminal ran `tmux -CC`: buried as on the connection's card, with the
+     connection's detach on the row, since this card has no connection title
+     to carry it. The context names the connection and its session, so two
+     runs on one machine read apart. A record that has not arrived places no
+     row here (the tree's rule), so the row always has a connection to ask.
+     The read-only surface, which can ask nothing, shows the row alone. -->
+{#snippet tmuxControlRow(row: TmuxControlRow)}
+  {@const connection = tmuxWindowMachine(row.node.tmux, row.node.tmuxHost)}
+  <WindowRow w={row.window} icon context={connection}>
+    {#snippet actions()}
+      {#if !readOnly}
+        <button
+          class="icon-btn on"
+          type="button"
+          title="Detach (o)"
+          data-deck-key="o"
+          aria-label={`Detach ${privateText(connection, "tmux computer")}`}
+          onclick={() => run(detachTmux(row.node.connection!))}>
+          <Unplug size={16} />
+        </button>
+      {/if}
+    {/snippet}
+  </WindowRow>
 {/snippet}
 
 {#snippet workspaceCard(node: WorkspaceNode, kind: "workspace" | "served", devserverId: string | null)}
@@ -439,13 +470,18 @@
   {@const kind = node.kind === "local" ? "workspace" : "served"}
   {@const devserverId = node.devserver?.id ?? null}
   <div class="machine-content">
-    {#if node.control.length || node.terminals.length || node.unopened.length}
+    {#if node.control.length || node.tmuxControls.length || node.terminals.length || node.unopened.length}
       <!-- A tmux card's rows are the connection's windows, and the section
-           says so; its windows with no chan window yet follow the open ones. -->
+           says so; its windows with no chan window yet follow the open ones.
+           A machine's control terminals lead, its own and then those of the
+           tmux connections its terminals ran. -->
       <div class="section-label">{node.kind === "tmux" ? "Windows" : "Terminals"}</div>
       <div class="term-list">
         {#each node.control as w (w.window_id)}
           <WindowRow {w} icon />
+        {/each}
+        {#each node.tmuxControls as row (row.window.window_id)}
+          {@render tmuxControlRow(row)}
         {/each}
         {#each node.terminals as w (w.window_id)}
           <WindowRow {w} icon />

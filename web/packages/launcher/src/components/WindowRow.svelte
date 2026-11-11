@@ -19,7 +19,7 @@
   // row. The textual "connection lost" cue is
   // the devserver identity row's machine icon turned red (Library.svelte), not a
   // pill on this row.
-  import { tick } from "svelte";
+  import { tick, type Snippet } from "svelte";
   import { AppWindow, ExternalLink, Eye, EyeOff, Focus, SquareTerminal } from "@lucide/svelte";
   import {
     focusWindow,
@@ -42,16 +42,21 @@
     w: WindowRecord;
     icon?: boolean;
     context?: string;
+    /** Controls the caller adds after the row's own, on the surfaces that
+     * act (a buried row has none of its own). The read-only surface drops
+     * them with its other actions. */
+    actions?: Snippet;
   }
-  let { w, icon = false, context }: Props = $props();
+  let { w, icon = false, context, actions }: Props = $props();
   const current = $derived(isLauncherHost(w));
   // A control terminal by either mark: the devserver's flag, or the tmux
   // connection's, which the library clears when the connection ends.
   const isControl = $derived(w.control === true || w.tmux?.control === true);
   // A tmux connection's control terminal stays buried while the connection
   // runs: the desktop opens no window for a control row, so a show would
-  // flip the flag and open nothing. The row lists it and offers no action;
-  // the library shows it again, as a plain window, when the connection ends.
+  // flip the flag and open nothing. The row lists it and offers no action of
+  // its own (its machine's card adds the connection's detach); the library
+  // shows it again, as a plain window, when the connection ends.
   const buried = $derived(w.tmux?.control === true);
   const BURIED_NOTE = "The control terminal stays buried while the connection runs; it returns as a plain window when the connection ends.";
   let editingLabel = $state(false);
@@ -172,6 +177,7 @@
     {@render windowName()}
     {#if buried}
       <span class="row-sub row-buried" title={BURIED_NOTE}>buried</span>
+      {#if actions}<div class="row-actions">{@render actions()}</div>{/if}
     {:else}
     <div class="row-actions">
       <button
@@ -206,6 +212,7 @@
         }}>
         {#if w.hidden}<EyeOff size={16} />{:else}<Eye size={16} />{/if}
       </button>
+      {@render actions?.()}
     </div>
     {/if}
   </div>
@@ -222,6 +229,7 @@
     {@render windowName()}
     {#if buried}
       <span class="row-sub row-buried" title={BURIED_NOTE}>buried</span>
+      {#if actions}<div class="row-actions">{@render actions()}</div>{/if}
     {:else}
     <div class="row-actions">
       <!-- SHOW repairs a disconnected browser window before unhiding it.
@@ -252,6 +260,7 @@
         onclick={async () => { await run(w, openWindowRecord(w).then(() => {})); }}>
         <ExternalLink size={16} />
       </button>
+      {@render actions?.()}
     </div>
     {/if}
   </div>
