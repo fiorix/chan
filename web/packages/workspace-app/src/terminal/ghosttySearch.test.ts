@@ -314,9 +314,11 @@ describe("a search over the binding's terminal", () => {
     s.free();
   });
 
-  test("a resize drops the selected match and scans again, to the same matches on their reflowed rows", async () => {
-    // Find relies on this: after a resize there is no active match to move a
-    // highlight to, and a select starts the walk over.
+  test("a resize drops the selected match and scans again, to the same matches on their reflowed rows, where a tracked cell names it", async () => {
+    // Find relies on both halves. The core keeps no selected match across a
+    // resize, one that only changes the rows too, so find keeps the active
+    // match's first cell tracked; the rescan lists that match again where
+    // the cell now is, and stepping to it selects it again.
     const t = await terminal(20, 6);
     t.write(
       [
@@ -332,6 +334,7 @@ describe("a search over the binding's terminal", () => {
     s.selectNext();
     s.selectNext();
     expect(s.state()).toMatchObject({ total: 4, index: 1, active: range(3, 17, 4, 2) });
+    const first = t.trackCell(3, 17)!;
     for (const [cols, rows] of [
       [12, 6],
       [12, 8],
@@ -345,11 +348,16 @@ describe("a search over the binding's terminal", () => {
       fresh.setNeedle("needle");
       scan(fresh);
       expect(s.state()).toEqual({ total: 4, index: null, active: null, complete: true });
-      expect(s.matchesBetween(0, 100, 10)).toEqual(fresh.matchesBetween(0, 100, 10));
+      const matches = s.matchesBetween(0, 100, 10);
+      expect(matches).toEqual(fresh.matchesBetween(0, 100, 10));
       fresh.free();
+      const at = first.point()!;
+      expect(matches[1], "the tracked cell starts the same match").toMatchObject({ startRow: at.row, startCol: at.col });
+      expect(s.indexOfMatchAt(at.row, at.col)).toBe(1);
       // Selected again, so the next resize has a match to drop.
-      expect(s.selectNext()).toBe(true);
-      expect(s.state().index).toBe(0);
+      s.selectNext();
+      s.selectNext();
+      expect(s.state()).toMatchObject({ index: 1, active: matches[1] });
     }
     // A select toward newer output from no selection lands on the oldest.
     t.resize(20, 6);
@@ -357,7 +365,42 @@ describe("a search over the binding's terminal", () => {
     scan(s);
     expect(s.selectPrev()).toBe(true);
     expect(s.state()).toMatchObject({ index: 3, active: range(0, 6, 0, 11) });
+    first.free();
     s.free();
+  });
+
+  test("indexOfMatchAt names a match by its first cell, counted as the index is", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    scan(s);
+    expect(ERRORS.map((m) => s.indexOfMatchAt(m.startRow, m.startCol))).toEqual([0, 1, 2, 3]);
+    expect(s.indexOfMatchAt(9, 8), "inside a match").toBeNull();
+    expect(s.indexOfMatchAt(9, 0), "left of one on its row").toBeNull();
+    expect(s.indexOfMatchAt(8, 7), "a row without one").toBeNull();
+    expect(s.indexOfMatchAt(1000, 0), "below the screen").toBeNull();
+    s.free();
+
+    // Overlapping matches, which the core lists right to left on their row,
+    // and one across a soft wrap.
+    const w = await terminal(20, 5);
+    w.write(`xaaaa\r\n${"x".repeat(18)}aa\r\n`);
+    const o = w.createSearch();
+    o.setNeedle("aa");
+    scan(o);
+    expect(o.matchesBetween(0, 4, 10)).toEqual([range(1, 18, 1, 19), range(0, 3, 0, 4), range(0, 2, 0, 3), range(0, 1, 0, 2)]);
+    expect([o.indexOfMatchAt(1, 18), o.indexOfMatchAt(0, 3), o.indexOfMatchAt(0, 2), o.indexOfMatchAt(0, 1)]).toEqual([0, 1, 2, 3]);
+    o.free();
+    const v = await terminal(20, 5);
+    v.write("x".repeat(17) + "needle\r\n");
+    const n = v.createSearch();
+    n.setNeedle("needle");
+    scan(n);
+    expect(n.indexOfMatchAt(0, 17)).toBe(0);
+    expect(n.indexOfMatchAt(1, 0), "the wrapped part is not its start").toBeNull();
+    v.free();
+    expect(n.indexOfMatchAt(0, 17), "after its terminal was freed").toBeNull();
+    n.free();
   });
 
   test("an empty needle returns the search to idle", async () => {

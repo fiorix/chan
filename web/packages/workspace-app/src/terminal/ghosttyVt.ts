@@ -243,6 +243,10 @@ const FUNCTIONS = [
   "ghostty_terminal_vt_write",
   "ghostty_terminal_grid_ref",
   "ghostty_terminal_point_from_grid_ref",
+  "ghostty_terminal_grid_ref_track",
+  "ghostty_tracked_grid_ref_point",
+  "ghostty_tracked_grid_ref_set",
+  "ghostty_tracked_grid_ref_free",
   "ghostty_grid_ref_cell",
   "ghostty_grid_ref_row",
   "ghostty_grid_ref_style",
@@ -639,12 +643,23 @@ export class VtTerminal {
   private bg: Rgb = { r: 0, g: 0, b: 0 };
   private palette = new Uint8Array(768);
   private replies: Uint8Array[] = [];
+  /// The cells tracked on this terminal and not freed yet; the terminal
+  /// frees them with itself.
+  private readonly trackedCells = new Set<VtTrackedCell>();
+  private readonly cellOwner: TrackedCellOwner;
+  private readonly resizeListeners = new Set<(from: { cols: number; rows: number }) => void>();
 
   constructor(wasm: VtWasm, owner: GhosttyVt, cols: number, rows: number, config?: VtTerminalConfig) {
     this.wasm = wasm;
     this.owner = owner;
     this._cols = cols;
     this._rows = rows;
+    this.cellOwner = {
+      handle: () => this.handle,
+      point: (row, col) => this.writePoint(ABI.GhosttyPointTag.SCREEN, col, row),
+      coordinate: () => this.scratch + SCRATCH.slot,
+      release: (cell) => void this.trackedCells.delete(cell),
+    };
     const fn = wasm.fn;
     this.scratch = wasm.alloc(SCRATCH.size);
     this.handle = wasm.newHandle((slot) => fn.ghostty_terminal_new(0, slot, cols, rows), "terminal");
@@ -690,6 +705,8 @@ export class VtTerminal {
 
   resize(cols: number, rows: number): void {
     if (cols === this._cols && rows === this._rows) return;
+    const from = { cols: this._cols, rows: this._rows };
+    for (const listener of this.resizeListeners) listener(from);
     this._cols = cols;
     this._rows = rows;
     this.changes++;
@@ -707,8 +724,22 @@ export class VtTerminal {
     }
   }
 
+  /// Calls `listener` at the start of each resize that changes the size,
+  /// while the core still holds the old grid; `from` is the size it leaves.
+  /// ghostty-web sets its own `cols` and `rows` before it hands the core the
+  /// new size and fires its resize event after, so a reader that needs the
+  /// grid as it was (find, to tell whether its match was on the screen)
+  /// reads it here. Returns the call that stops it.
+  beforeResize(listener: (from: { cols: number; rows: number }) => void): () => void {
+    this.resizeListeners.add(listener);
+    return () => {
+      this.resizeListeners.delete(listener);
+    };
+  }
+
   free(): void {
     const fn = this.wasm.fn;
+    for (const cell of [...this.trackedCells]) cell.free();
     this.owner.unregister(this.handle);
     fn.ghostty_render_state_row_cells_free(this.rowCells);
     fn.ghostty_render_state_row_iterator_free(this.rowIterator);
@@ -1043,6 +1074,20 @@ export class VtTerminal {
     return new VtSearch(this.wasm, { handle: () => this.handle, changes: () => this.changes });
   }
 
+  /// Tracks the cell at SCREEN row `row` and column `col` of the screen
+  /// showing now (see `VtTrackedCell`); null when no such cell exists or the
+  /// terminal was freed. The core bounds-checks the point, so a negative row
+  /// or column, written unsigned, is outside the screen too.
+  trackCell(row: number, col: number): VtTrackedCell | null {
+    if (!this.handle) return null;
+    const point = this.writePoint(ABI.GhosttyPointTag.SCREEN, col, row);
+    const out = this.scratch + SCRATCH.slot;
+    if (this.wasm.fn.ghostty_terminal_grid_ref_track(this.handle, point, out) !== ABI.GhosttyResult.SUCCESS) return null;
+    const cell = new VtTrackedCell(this.wasm, this.cellOwner, this.wasm.view().getUint32(out, true));
+    this.trackedCells.add(cell);
+    return cell;
+  }
+
   // ------------------------------------------------------------------
   // Replies to the program (DSR, DA, mode reports, ...)
   // ------------------------------------------------------------------
@@ -1287,14 +1332,20 @@ export class VtTerminal {
   /// Points the scratch grid ref at a cell; false when the point is
   /// outside the screen.
   private gridRef(tag: number, x: number, y: number): boolean {
-    const s = this.scratch;
+    const point = this.writePoint(tag, x, y);
+    return this.wasm.fn.ghostty_terminal_grid_ref(this.handle, point, this.scratch + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
+  }
+
+  /// Writes a `GhosttyPoint` to the scratch area and returns its address; a
+  /// point is passed by value, which wasm32 does by address.
+  private writePoint(tag: number, x: number, y: number): number {
     const view = this.wasm.view();
-    const point = s + SCRATCH.point;
+    const point = this.scratch + SCRATCH.point;
     const coord = point + LAYOUT.GhosttyPoint.fields.value;
     view.setInt32(point + LAYOUT.GhosttyPoint.fields.tag, tag, true);
     view.setUint16(coord + LAYOUT.GhosttyPointCoordinate.fields.x, x, true);
     view.setUint32(coord + LAYOUT.GhosttyPointCoordinate.fields.y, y, true);
-    return this.wasm.fn.ghostty_terminal_grid_ref(this.handle, point, s + SCRATCH.gridRef) === ABI.GhosttyResult.SUCCESS;
+    return point;
   }
 
   /// A cell of the screen or history as ghostty-web's binding builds it:
@@ -1610,41 +1661,40 @@ export class VtSearch {
   matchesBetween(firstRow: number, lastRow: number, cap: number): MatchRange[] {
     const found: MatchRange[] = [];
     if (cap <= 0 || !this.live()) return found;
-    this.catchUp();
-    const S = LAYOUT.GhosttySelection;
-    const B = LAYOUT.GhosttySelectionBuffer.fields;
-    const buf = this.scratch + SEARCH_SCRATCH.buffer;
-    const list = (ptr: number, capacity: number): number => {
-      const view = this.wasm.view();
-      view.setUint32(buf + B.ptr, ptr, true);
-      view.setUint32(buf + B.cap, capacity, true);
-      view.setUint32(buf + B.len, 0, true);
-      return this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf);
-    };
-    // A null buffer asks how many there are; none is a success.
-    const asked = list(0, 0);
-    if (asked === ABI.GhosttyResult.SUCCESS) return found;
-    if (asked !== ABI.GhosttyResult.OUT_OF_SPACE) this.check("counting the matches", asked);
-    const count = this.wasm.view().getUint32(buf + B.len, true);
-    const arr = this.wasm.alloc(count * S.size);
-    try {
-      this.check("listing the matches", list(arr, count));
-      const len = this.wasm.view().getUint32(buf + B.len, true);
-      for (let i = 0; i < len && found.length < cap; i++) {
-        const sel = arr + i * S.size;
-        const start = this.screenPoint(sel + S.fields.start);
-        // Newer than the window: the match starts below it.
-        if (!start || start.y > lastRow) continue;
-        const end = this.screenPoint(sel + S.fields.end);
-        if (!end) continue;
-        // Older than the window, and every match after it is older still.
-        if (end.y < firstRow) break;
-        found.push({ startRow: start.y, startCol: start.x, endRow: end.y, endCol: end.x });
-      }
-    } finally {
-      this.wasm.free(arr, count * S.size);
-    }
+    const F = LAYOUT.GhosttySelection.fields;
+    this.eachMatch((sel) => {
+      const start = this.screenPoint(sel + F.start);
+      // Newer than the window: the match starts below it.
+      if (!start || start.y > lastRow) return true;
+      const end = this.screenPoint(sel + F.end);
+      if (!end) return true;
+      // Older than the window, and every match after it is older still.
+      if (end.y < firstRow) return false;
+      found.push({ startRow: start.y, startCol: start.x, endRow: end.y, endCol: end.x });
+      return found.length < cap;
+    });
     return found;
+  }
+
+  /// The index of the match that starts at SCREEN row `row` and column
+  /// `col`, counted as `SearchState.index` is (0 the newest) among the
+  /// matches found so far; null when none starts there. Feeds first when the
+  /// terminal changed, as `state` does. It places matches from the newest
+  /// until it reaches the cell, so a match high in a long history costs a
+  /// placement per match below it.
+  indexOfMatchAt(row: number, col: number): number | null {
+    if (!this.live()) return null;
+    const F = LAYOUT.GhosttySelection.fields;
+    let index: number | null = null;
+    this.eachMatch((sel, i) => {
+      const start = this.screenPoint(sel + F.start);
+      // Newer than the cell: below its row, or right of it on the row,
+      // since the core lists a row's matches right to left.
+      if (!start || start.y > row || (start.y === row && start.x > col)) return true;
+      if (start.y === row && start.x === col) index = i;
+      return false;
+    });
+    return index;
   }
 
   /// Releases the search. Safe after the terminal was freed, and again
@@ -1671,6 +1721,37 @@ export class VtSearch {
   /// Feeds when the terminal changed since the last feed.
   private catchUp(): void {
     if (this.fed !== this.terminal.changes()) this.feed();
+  }
+
+  /// Calls `visit` with the address of each match's `GhosttySelection` and
+  /// its index, newest first, until it returns false. The core copies the
+  /// list into a block that lives for the call. Feeds first when the
+  /// terminal changed.
+  private eachMatch(visit: (sel: number, index: number) => boolean): void {
+    this.catchUp();
+    const S = LAYOUT.GhosttySelection;
+    const B = LAYOUT.GhosttySelectionBuffer.fields;
+    const buf = this.scratch + SEARCH_SCRATCH.buffer;
+    const list = (ptr: number, capacity: number): number => {
+      const view = this.wasm.view();
+      view.setUint32(buf + B.ptr, ptr, true);
+      view.setUint32(buf + B.cap, capacity, true);
+      view.setUint32(buf + B.len, 0, true);
+      return this.wasm.fn.ghostty_search_get(this.handle, ABI.GhosttySearchData.MATCHES, buf);
+    };
+    // A null buffer asks how many there are; none is a success.
+    const asked = list(0, 0);
+    if (asked === ABI.GhosttyResult.SUCCESS) return;
+    if (asked !== ABI.GhosttyResult.OUT_OF_SPACE) this.check("counting the matches", asked);
+    const count = this.wasm.view().getUint32(buf + B.len, true);
+    const arr = this.wasm.alloc(count * S.size);
+    try {
+      this.check("listing the matches", list(arr, count));
+      const len = this.wasm.view().getUint32(buf + B.len, true);
+      for (let i = 0; i < len; i++) if (!visit(arr + i * S.size, i)) break;
+    } finally {
+      this.wasm.free(arr, count * S.size);
+    }
   }
 
   private status(): number {
@@ -1719,6 +1800,72 @@ export class VtSearch {
     const view = this.wasm.view();
     const C = LAYOUT.GhosttyPointCoordinate.fields;
     return { x: view.getUint16(out + C.x, true), y: view.getUint32(out + C.y, true) };
+  }
+}
+
+/// A cell's place as SCREEN row and column, the numbering of `MatchRange`.
+export type CellPoint = { row: number; col: number };
+
+/// What a tracked cell reads of its terminal: the core handle; a
+/// `GhosttyPoint` for a SCREEN row and column, written to the terminal's
+/// scratch area; an out slot for a coordinate there; and the call that
+/// forgets a freed cell. The terminal frees its cells before itself, so a
+/// cell that still has its reference has a live terminal.
+type TrackedCellOwner = {
+  handle(): number;
+  point(row: number, col: number): number;
+  coordinate(): number;
+  release(cell: VtTrackedCell): void;
+};
+
+/// A cell of a terminal that the core keeps track of (libghostty-vt's tracked
+/// grid reference). An untracked reference names a cell only until the next
+/// change to the terminal; this one moves with its cell's text through new
+/// output, pruned history and a resize's reflow, so `point` reads where that
+/// text is now. A resize that crops rather than reflows (the alternate
+/// screen's) leaves a cell past the new last column on the row's last
+/// column. It belongs to the screen it was set on, primary or alternate.
+/// Make one with `VtTerminal.trackCell` and `free` it; a terminal frees the
+/// cells still tracked on it when it is freed.
+export class VtTrackedCell {
+  private readonly wasm: VtWasm;
+  private readonly owner: TrackedCellOwner;
+  private ref: number;
+
+  constructor(wasm: VtWasm, owner: TrackedCellOwner, ref: number) {
+    this.wasm = wasm;
+    this.owner = owner;
+    this.ref = ref;
+  }
+
+  /// Where the cell is now; null once its row was pruned from the history,
+  /// or the cell or its terminal was freed.
+  point(): CellPoint | null {
+    if (!this.ref) return null;
+    const out = this.owner.coordinate();
+    const result = this.wasm.fn.ghostty_tracked_grid_ref_point(this.ref, ABI.GhosttyPointTag.SCREEN, out);
+    if (result !== ABI.GhosttyResult.SUCCESS) return null;
+    const view = this.wasm.view();
+    const C = LAYOUT.GhosttyPointCoordinate.fields;
+    return { row: view.getUint32(out + C.y, true), col: view.getUint16(out + C.x, true) };
+  }
+
+  /// Tracks the cell at SCREEN row `row` and column `col` of the screen
+  /// showing now instead; false when no such cell exists, and then the cell
+  /// tracked before stays.
+  moveTo(row: number, col: number): boolean {
+    if (!this.ref) return false;
+    const point = this.owner.point(row, col);
+    return this.wasm.fn.ghostty_tracked_grid_ref_set(this.ref, this.owner.handle(), point) === ABI.GhosttyResult.SUCCESS;
+  }
+
+  /// Stops tracking. Safe after the terminal was freed, and again after
+  /// itself.
+  free(): void {
+    if (!this.ref) return;
+    this.wasm.fn.ghostty_tracked_grid_ref_free(this.ref);
+    this.ref = 0;
+    this.owner.release(this);
   }
 }
 

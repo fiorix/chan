@@ -1529,7 +1529,7 @@ describe("terminal find on the ghostty backend", () => {
     expect(countElement()?.textContent).toBe("2 of 4");
   });
 
-  test("a resize drops the highlight, keeps the total with no index, and Enter starts the walk over", async () => {
+  test("a resize keeps the match highlighted and counted, and Enter goes on from it", async () => {
     const term = await renderGhostty(NEEDLES);
     const { input, frames } = await findNeedle(term);
     pressEnter(input);
@@ -1537,17 +1537,20 @@ describe("terminal find on the ghostty backend", () => {
     expect(selection(term)).toEqual(match(3));
     expect(countElement()?.textContent).toBe("2 of 3");
 
-    // ghostty-web's own resize, where the fit and a broadcast grid end.
+    // ghostty-web's own resize, where the fit and a broadcast grid end. The
+    // rows are short and keep their places; the core still forgets its
+    // selected match and scans again.
     term.resize(60, 24);
-    expect(selection(term), "gone before ghostty-web repaints").toBeNull();
+    expect(selection(term), "kept before ghostty-web repaints").toEqual(match(3));
     frames.settle();
     await tick();
-    expect(countElement()?.textContent).toBe("? of 3");
+    expect(selection(term)).toEqual(match(3));
+    expect(countElement()?.textContent).toBe("2 of 3");
 
     pressEnter(input);
     await tick();
-    expect(selection(term)).toEqual(match(5));
-    expect(countElement()?.textContent).toBe("1 of 3");
+    expect(selection(term)).toEqual(match(1));
+    expect(countElement()?.textContent).toBe("3 of 3");
   });
 
   test("a line chan prints when the session ends counts in an open bar", async () => {
