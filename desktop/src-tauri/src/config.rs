@@ -1511,19 +1511,31 @@ pub(crate) fn migrate_wireguard_enrollments(
                 .and_then(|parameters| parameters.ingresses.first())
                 .map(|ingress| ingress.hosts.as_slice())
                 .unwrap_or(&gw.wireguard_hosts);
-            let parameters = crate::wireguard_keys::migrate_file(&dir, &gw.id, key, hosts)?;
-            if gw
-                .wireguard_enrollment
-                .as_ref()
-                .is_some_and(|stored| Some(stored) != parameters.as_ref())
-            {
+            let Some(parameters) = crate::wireguard_keys::migrate_file(&dir, &gw.id, key, hosts)?
+            else {
                 return Ok(None);
+            };
+            if let Some(stored) = &gw.wireguard_enrollment {
+                // Discovery changes synthetic ids and host maps. Ownership
+                // follows the client settings and a peer still enrolled;
+                // changed file settings may belong to an operator.
+                let peer = &parameters.ingresses[0];
+                if parameters.key_file != stored.key_file
+                    || parameters.addresses != stored.addresses
+                    || parameters.allowed_ips != stored.allowed_ips
+                    || parameters.persistent_keepalive != stored.persistent_keepalive
+                    || !stored.ingresses.iter().any(|ingress| {
+                        ingress.public_key == peer.public_key && ingress.endpoint == peer.endpoint
+                    })
+                {
+                    return Ok(None);
+                }
             }
             // The row must describe the same file whose bytes cleanup owns.
             if Some(&before) != crate::wireguard_keys::read_client_file(path)?.as_ref() {
                 return Ok(None);
             }
-            Ok(parameters.map(|parameters| (parameters, before)))
+            Ok(Some((parameters, before)))
         };
         let (parameters, bytes) = match converted() {
             Ok(Some(converted)) => converted,

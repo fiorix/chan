@@ -6613,6 +6613,187 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn partial_ingress_refusal_keeps_connect_and_roster_usable() {
+        use chan_server::GatewayRegistry;
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run = ReconcileFixture::new().await;
+        let entry = ReconcileFixture::entry(&run.full);
+        let json = serde_json::json!({
+            "endpoint":entry.endpoint, "public_key":entry.public_key,
+            "allowed_ips":entry.allowed_ips, "persistent_keepalive":entry.persistent_keepalive,
+            "ingresses":entry.ingresses,
+        });
+        let (origin, server) = spawn_gateway_stub_full(false, None, Some(json)).await;
+        {
+            let mut store = run.f.state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].url = origin.clone();
+            store.save(&cfg).unwrap();
+        }
+        run.fabric.refuse_start("gw-keychain/p2");
+        let mut listener = run.peers[0].tunnel.listen(8123).unwrap();
+        crate::wireguard::tests::carried_by_name(
+            &run.fabric,
+            &mut listener,
+            "10.7.0.1",
+            "alice--a1.p1.proxy.chan.invalid",
+        )
+        .await;
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "test-partial".into(),
+                secret: "fixture-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        let result = connect_gateway(
+            run.f.app.handle().clone(),
+            Arc::clone(&run.f.state),
+            "gw-keychain".into(),
+            false,
+        )
+        .await;
+        auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        server.abort();
+        result.expect("a refused ingress must not refuse discovery reconciliation");
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Connected);
+        assert_eq!(view.devserver_count, 1);
+        assert!(
+            adopt_wireguard(&run.f.state, "gw-keychain")
+                .unwrap()
+                .is_none(),
+            "partial refusal must not refuse the next connect's adoption"
+        );
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&run.f.state.store),
+            Arc::new(std::sync::OnceLock::new()),
+            Arc::clone(&run.f.state.gateway_manager),
+        );
+        let projected = registry.list().remove(0);
+        assert_eq!(projected.wireguard_status.as_deref(), Some("up"));
+        assert!(projected
+            .last_error
+            .unwrap()
+            .contains("gw-keychain/p2: WireGuard: injected socket refusal"));
+        crate::wireguard::tests::carried_by_name(
+            &run.fabric,
+            &mut listener,
+            "10.7.0.1",
+            "bob--b2.p1.proxy.chan.invalid",
+        )
+        .await;
+        run.f.cancel().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn migration_orphan_retries_after_discovery_changes_ingress_ids() {
+        use std::os::unix::fs::PermissionsExt;
+        for edited in [
+            "none",
+            "endpoint",
+            "peer_key",
+            "addresses",
+            "allowed_ips",
+            "keepalive",
+            "key_file",
+        ] {
+            let run = ReconcileFixture::new().await;
+            let mut row = run.row();
+            let config = run
+                .full
+                .configs(row.wireguard_enrolled_key.as_deref().unwrap())
+                .unwrap()
+                .remove(0);
+            let orphan = run.full.key_file.with_extension("conf");
+            chan_wireguard::config::write_file(&orphan, &config).unwrap();
+            row.wireguard = Some(orphan.clone());
+            row.wireguard_hosts = run.full.ingresses[0].hosts.clone();
+            row.wireguard_enrollment = None;
+            {
+                let mut store = run.f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways = vec![row];
+                store.save(&cfg).unwrap();
+            }
+            let keys = orphan.parent().unwrap();
+            std::fs::set_permissions(keys, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let migrated = config::migrate_wireguard_enrollments(&run.f.state.store);
+            std::fs::set_permissions(keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(migrated.unwrap(), 1);
+            assert!(
+                orphan.exists(),
+                "failed migration cleanup leaves its owned file"
+            );
+            run.fabric.adopt_gateway(&run.row()).unwrap().unwrap();
+            let legacy_start = run.starts()[0].clone();
+            let mut modern = run.full.clone();
+            modern.ingresses.reverse();
+            run.publish(&modern).unwrap().unwrap();
+            assert_eq!(run.starts().len(), 2);
+            assert!(
+                run.starts()
+                    .iter()
+                    .all(|(id, started)| id != &legacy_start.0 && started != &legacy_start.1),
+                "modern route ids replace the legacy tunnel once"
+            );
+            if edited == "key_file" {
+                let alternative = keys.join("operator.key");
+                std::fs::copy(&run.full.key_file, &alternative).unwrap();
+                let mut store = run.f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0]
+                    .wireguard_enrollment
+                    .as_mut()
+                    .unwrap()
+                    .key_file = alternative;
+                store.save(&cfg).unwrap();
+            } else if edited != "none" {
+                let mut changed = chan_wireguard::config::read_file(&orphan).unwrap();
+                match edited {
+                    "endpoint" => {
+                        changed.peer.endpoint =
+                            chan_wireguard::config::Endpoint::parse("127.0.0.1:9").unwrap()
+                    }
+                    "peer_key" => {
+                        changed.peer.public_key = chan_wireguard::config::parse_public_key(
+                            &modern.ingresses[0].public_key,
+                        )
+                        .unwrap()
+                    }
+                    "addresses" => {
+                        changed.addresses =
+                            crate::wireguard_keys::cidrs(&["10.7.0.3/32".into()]).unwrap()
+                    }
+                    "allowed_ips" => {
+                        changed.peer.allowed_ips =
+                            crate::wireguard_keys::cidrs(&["10.7.0.0/24".into()]).unwrap()
+                    }
+                    "keepalive" => changed.peer.persistent_keepalive = Some(25),
+                    _ => unreachable!(),
+                }
+                chan_wireguard::config::write_file(&orphan, &changed).unwrap();
+            }
+            let config_before = age_file(&run.config_path());
+            let key_before = age_file(&run.full.key_file);
+            assert_eq!(
+                config::migrate_wireguard_enrollments(&run.f.state.store).unwrap(),
+                0
+            );
+            assert_eq!(
+                orphan.exists(),
+                edited != "none",
+                "only an operator replacement survives retry"
+            );
+            assert_file_unchanged(&run.config_path(), &config_before);
+            assert_file_unchanged(&run.full.key_file, &key_before);
+        }
+    }
+
+    #[tokio::test]
     async fn discovery_reconcile_failure_names_only_the_ingress_carrying_identity() {
         for mapped in [false, true] {
             let run = ReconcileFixture::new().await;

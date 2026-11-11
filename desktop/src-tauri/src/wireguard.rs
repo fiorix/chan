@@ -71,6 +71,8 @@ pub struct WireguardFabric {
     rows: Mutex<HashMap<String, GatewayRow>>,
     /// Gateways keep their place; each row follows its ingress list order.
     next_route_order: AtomicU64,
+    #[cfg(test)]
+    refused_starts: Mutex<std::collections::HashSet<String>>,
 }
 
 enum Proxy {
@@ -214,6 +216,16 @@ impl WireguardFabric {
                                 addresses: host.addresses.clone(),
                             })
                             .collect();
+                        #[cfg(test)]
+                        if self.refused_starts.lock().unwrap().contains(&id) {
+                            return (
+                                id,
+                                Row::Refused {
+                                    path: enrollment.key_file.clone(),
+                                    reason: "WireGuard: injected socket refusal".into(),
+                                },
+                            );
+                        }
                         Row::from_started(&enrollment.key_file, hosts, start_config(&id, config))
                     };
                     (id, state)
@@ -511,6 +523,11 @@ impl WireguardFabric {
     }
 
     #[cfg(test)]
+    pub(crate) fn refuse_start(&self, id: &str) {
+        self.refused_starts.lock().unwrap().insert(id.into());
+    }
+
+    #[cfg(test)]
     pub(crate) fn ingress_starts(&self, gateway_id: &str) -> Vec<(String, Instant)> {
         self.rows
             .lock()
@@ -577,12 +594,10 @@ impl GatewayRow {
 
     fn answer(&self) -> Result<String, String> {
         let path = Some(self.ingresses[0].1.path());
-        match self.failure(path) {
-            Some(reason) => Err(reason),
-            None => Ok(self
-                .status(path)
-                .expect("a nonempty row without refusals has a running tunnel")),
-        }
+        self.status(path).ok_or_else(|| {
+            self.failure(path)
+                .expect("a nonempty row without running tunnels has a refusal")
+        })
     }
 }
 
@@ -795,6 +810,8 @@ async fn start_with_bind(gateways: &[Gateway], bind: SocketAddr) -> WireguardFab
         runtime: tokio::runtime::Handle::current(),
         rows: Mutex::new(HashMap::new()),
         next_route_order: AtomicU64::new(0),
+        #[cfg(test)]
+        refused_starts: Mutex::new(Default::default()),
     };
     for gateway in gateways.iter().filter(|g| g.enabled) {
         // A refusal is logged and kept on the row by adopt itself.
