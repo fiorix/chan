@@ -10,7 +10,7 @@
 // scrolls, then reads the gap above the first row and the gap below the last
 // one off the laid-out boxes.
 
-const SLIDE_LABEL = "slide 3";
+const SLIDE_LABEL = "About";
 const VIEWPORT_HEIGHTS = [520, 460, 400, 340];
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -22,17 +22,26 @@ async function dispatch(page, name) {
   }, name);
 }
 
-/// Stop the carousel cycling before measuring: a slide rotating out from
-/// under the reads below would make this check's numbers a lottery. The
-/// toggle is persisted, so this also holds across the reflow after the
-/// viewport change.
-async function stopCycling(page) {
-  await page.evaluate(() => {
-    const stop = document.querySelector(
-      '.cycle-toggle[aria-label="stop carousel cycle"]',
-    );
-    if (stop instanceof HTMLElement) stop.click();
-  });
+/// Stop or resume the carousel cycling, and say whether the toggle was there
+/// to press. Stopping comes before measuring: a slide rotating out from under
+/// the reads below would make this check's numbers a lottery. The toggle
+/// writes a server preference that outlives the check and holds across the
+/// reflow after each viewport change, so `run` resumes what it stopped.
+async function setCycling(page, cycling) {
+  const before = cycling ? "resume carousel cycle" : "stop carousel cycle";
+  const after = cycling ? "stop carousel cycle" : "resume carousel cycle";
+  const pressed = await page.evaluate((label) => {
+    const toggle = document.querySelector(`.cycle-toggle[aria-label="${label}"]`);
+    if (!(toggle instanceof HTMLElement)) return false;
+    toggle.click();
+    return true;
+  }, before);
+  if (pressed) {
+    await page.waitForSelector(`.cycle-toggle[aria-label="${after}"]`, {
+      timeout: 10_000,
+    });
+  }
+  return pressed;
 }
 
 async function showAboutSlide(page) {
@@ -102,10 +111,10 @@ export default {
     await page.bringToFront();
     await dispatch(page, "app.dashboard.open");
     await page.waitForSelector(".carousel", { timeout: 20_000 });
-    await stopCycling(page);
-    await showAboutSlide(page);
+    const stopped = await setCycling(page, false);
 
     try {
+      await showAboutSlide(page);
       const margins = await readScrollingMargins(page);
       await ctx.shot("about-slide-bottom");
 
@@ -125,6 +134,7 @@ export default {
     } finally {
       await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
       await delay(200);
+      if (stopped) await setCycling(page, true).catch(() => {});
     }
   },
 };
