@@ -7139,6 +7139,12 @@ fn mint_workspace_window_copy(
     embedded.mint_workspace_window_with_origin(Path::new(path), origin)
 }
 
+/// Dispatched into a tmux window's page on New Window: the page asks its tmux
+/// connection for a new tmux window with no affinity, so it opens in a chan
+/// window of its own, the same request Cmd+T makes with the window as
+/// affinity.
+const TMUX_NEW_WINDOW_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.tmux.newWindow' } }));";
+
 /// Open a new window of the workspace that owns the currently
 /// focused window (the Cmd/Ctrl+Shift+N "New Window" semantics).
 ///
@@ -7149,12 +7155,6 @@ fn mint_workspace_window_copy(
 /// With nothing focused (or the About window), Cmd/Ctrl+Shift+N opens a
 /// standalone terminal window instead, as it does when a focused window's
 /// backing connection can't be resolved.
-/// Dispatched into a tmux window's page on New Window: the page asks its tmux
-/// connection for a new tmux window with no affinity, so it opens in a chan
-/// window of its own, the same request Cmd+T makes with the window as
-/// affinity.
-const TMUX_NEW_WINDOW_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('chan:command', { detail: { name: 'app.tmux.newWindow' } }));";
-
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(focused) = app
         .webview_windows()
@@ -7169,77 +7169,118 @@ fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), S
     open_new_window_for_label(app, &label)
 }
 
-/// Open a new window of the connection owning the window `label` (the
-/// label-addressed core of the New Window semantics above).
-fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    // A watcher-opened local window (`local::<window_id>`): branch on the
-    // window's KIND. A terminal opens ANOTHER standalone terminal; a
-    // workspace mints another window for the same workspace (the watcher opens
-    // it). Each minted window is an independent registry record.
-    // A Terminal record carries no `workspace_path`, so the window kind is the
-    // reliable branch key.
+/// What New Window opens for the focused window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewWindowRoute {
+    /// A new tmux window in a chan window of its own, asked of the focused
+    /// window's page.
+    TmuxWindow,
+    /// Another standalone terminal window on this machine.
+    StandaloneTerminal,
+    /// Another window for the local workspace window's workspace.
+    LocalWorkspaceCopy,
+    /// Another window of the focused window's kind on its devserver.
+    DevserverWindow,
+}
+
+/// The New Window route for the window `focused_label`, from the record the
+/// label resolves to (`None` when it resolves to none).
+///
+/// A tmux window, local or a devserver's, asks tmux for a new window, which
+/// only its page can do, since the page knows which of its sessions is a
+/// pane of the connection. The page sends the request to the server that
+/// serves it, so a devserver's tmux window reaches that devserver's tmux.
+/// The connection's control window is a terminal, not a tmux window, so it
+/// takes the plain routes. A local terminal opens another standalone
+/// terminal and a local workspace window another window of its workspace; a
+/// Terminal record carries no `workspace_path`, so the kind is the branch
+/// key. Any other devserver window mints another window of its kind on its
+/// devserver. A label that resolves to no record, or names no
+/// watcher-opened window, opens a standalone terminal.
+fn new_window_route(
+    focused_label: &str,
+    record: Option<&chan_server::WindowRecord>,
+) -> NewWindowRoute {
+    let devserver = focused_label.starts_with("lib-");
+    if !devserver && !focused_label.starts_with("local::") {
+        return NewWindowRoute::StandaloneTerminal;
+    }
+    match record {
+        Some(r) if r.tmux.as_ref().is_some_and(|mark| !mark.control) => NewWindowRoute::TmuxWindow,
+        Some(_) if devserver => NewWindowRoute::DevserverWindow,
+        Some(r) if r.kind == chan_server::WindowKind::Terminal => {
+            NewWindowRoute::StandaloneTerminal
+        }
+        Some(_) => NewWindowRoute::LocalWorkspaceCopy,
+        None => NewWindowRoute::StandaloneTerminal,
+    }
+}
+
+/// The record of the watcher-opened window `focused_label`: a local window's
+/// (`local::<window_id>`) from the embedded library, a devserver window's
+/// (`lib-<library_id>::<window_id>`) from the window feed, which covers
+/// persisted-config devservers and gateway-rostered ones alike.
+fn focused_window_record(
+    state: &AppState,
+    focused_label: &str,
+) -> Option<chan_server::WindowRecord> {
     if focused_label.starts_with("local::") {
-        let record = state.embedded().and_then(|embedded| {
+        state.embedded().and_then(|embedded| {
             embedded
                 .assemble_window_records()
                 .into_iter()
                 .find(|r| crate::window_watcher::native_label(r) == focused_label)
-        });
-        return match record {
-            // A tmux window: a new window is a new tmux window in a chan
-            // window of its own, which only the page can ask for, since it
-            // knows which of its sessions is a pane of the connection. The
-            // connection's control window is a terminal, not a tmux window,
-            // so it takes the plain branches below.
-            Some(r) if r.tmux.as_ref().is_some_and(|mark| !mark.control) => {
-                let window = app
-                    .get_webview_window(focused_label)
-                    .ok_or_else(|| format!("no webview window {focused_label}"))?;
-                window
-                    .eval(TMUX_NEW_WINDOW_DISPATCH_JS)
-                    .map_err(|e| format!("asking the tmux window for a new window: {e}"))
-            }
-            Some(r) if r.kind == chan_server::WindowKind::Terminal => {
-                spawn_terminal_window(app);
-                Ok(())
-            }
-            Some(r) => mint_workspace_window_copy(
-                state
-                    .embedded()
-                    .ok_or_else(|| "embedded local server is unavailable".to_string())?,
-                &r,
-                chan_server::WindowOrigin::Native,
-            )
-            .map(|_| ()),
-            None => {
-                spawn_terminal_window(app);
-                Ok(())
-            }
-        };
+        })
+    } else if focused_label.starts_with("lib-") {
+        state
+            .devserver_feed
+            .record_for_native_label(focused_label)
+            .map(|(_, record)| record)
+    } else {
+        None
     }
-    // A watcher-opened devserver window (`lib-<library_id>::<window_id>`): mint
-    // ANOTHER window of the SAME kind on the same devserver, mirroring the
-    // `local::` branch (a Terminal opens another standalone terminal; a Workspace
-    // another window for its workspace). There is no stored library_id->devserver
-    // map, so the async helper matches the focused label against each connected
-    // devserver's feed (which hands back the focused window's kind +
-    // workspace_path). It is an HTTP round-trip, so fire-and-forget -- a failure
-    // surfaces as a warning, not a blocked menu handler. (Without this a `lib-`
-    // label matches no branch below and falls through to the standalone
-    // terminal -- Cmd+Shift+N on a devserver window would open a local one.)
-    if focused_label.starts_with("lib-") {
-        let app = app.clone();
-        let focused_label = focused_label.to_string();
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = mint_another_devserver_window(&app, &focused_label).await {
-                tracing::warn!(label = %focused_label, error = %e, "Cmd+Shift+N on a devserver window failed");
-            }
-        });
-        return Ok(());
+}
+
+/// Open a new window of the connection owning the window `label` (the
+/// label-addressed core of the New Window semantics above), by the route
+/// [`new_window_route`] reads from its record.
+fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Result<(), String> {
+    let state = app.state::<Arc<AppState>>();
+    let record = focused_window_record(&state, focused_label);
+    match new_window_route(focused_label, record.as_ref()) {
+        NewWindowRoute::TmuxWindow => {
+            let window = app
+                .get_webview_window(focused_label)
+                .ok_or_else(|| format!("no webview window {focused_label}"))?;
+            window
+                .eval(TMUX_NEW_WINDOW_DISPATCH_JS)
+                .map_err(|e| format!("asking the tmux window for a new window: {e}"))
+        }
+        NewWindowRoute::StandaloneTerminal => {
+            spawn_terminal_window(app);
+            Ok(())
+        }
+        NewWindowRoute::LocalWorkspaceCopy => {
+            let (Some(embedded), Some(record)) = (state.embedded(), record.as_ref()) else {
+                return Err("embedded local server is unavailable".to_string());
+            };
+            mint_workspace_window_copy(embedded, record, chan_server::WindowOrigin::Native)
+                .map(|_| ())
+        }
+        NewWindowRoute::DevserverWindow => {
+            // Minting is an HTTP round-trip to the devserver, so it runs
+            // fire-and-forget: a failure surfaces as a warning, not a blocked
+            // menu handler.
+            let app = app.clone();
+            let focused_label = focused_label.to_string();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = mint_another_devserver_window(&app, &focused_label).await {
+                    tracing::warn!(label = %focused_label, error = %e, "Cmd+Shift+N on a devserver window failed");
+                }
+            });
+            Ok(())
+        }
     }
-    spawn_terminal_window(app);
-    Ok(())
 }
 
 /// Mint another window for the devserver window that owns `focused_label`
@@ -13834,6 +13875,176 @@ mod tests {
                 drop(opening);
             });
             drop(other_dir);
+        }
+    }
+
+    /// The route New Window takes from the window it starts from, read from
+    /// the record that window's label resolves to.
+    mod new_window_routing {
+        use super::*;
+        use chan_server::{TmuxWindowMark, WindowKind, WindowRecord};
+
+        /// A window `window_id` of library `library_id` and of `kind`. `tmux`
+        /// marks it a window of the tmux connection `conn-1`: its control
+        /// window for `Some(true)`, one of its tmux windows for `Some(false)`.
+        fn record(
+            library_id: &str,
+            window_id: &str,
+            kind: WindowKind,
+            tmux: Option<bool>,
+        ) -> WindowRecord {
+            WindowRecord {
+                window_id: window_id.into(),
+                library_id: library_id.into(),
+                kind,
+                title: "Terminal".into(),
+                ordinal: 1,
+                label: String::new(),
+                workspace_path: (kind == WindowKind::Workspace).then(|| "/home/user/notes".into()),
+                prefix: "/terminal".into(),
+                token: "tok".into(),
+                persisted: true,
+                connected: true,
+                holders: None,
+                active_transfer: false,
+                control: tmux == Some(true),
+                tmux: tmux.map(|control| TmuxWindowMark {
+                    connection: "conn-1".into(),
+                    control,
+                    user_label: false,
+                }),
+                hidden: false,
+                origin: chan_server::WindowOrigin::Native,
+                start_terminal: false,
+            }
+        }
+
+        /// A desktop whose window feed holds `records` for one devserver.
+        fn feed(records: Vec<WindowRecord>) -> Arc<AppState> {
+            let state = empty_state();
+            state
+                .devserver_feed
+                .register_windows("ds-1".to_string(), Arc::new(Mutex::new(records.into())));
+            state
+        }
+
+        /// The route New Window takes from the window `label` of `state`.
+        fn route(state: &AppState, label: &str) -> NewWindowRoute {
+            new_window_route(label, focused_window_record(state, label).as_ref())
+        }
+
+        /// New Window in a tmux window on a devserver asks tmux, through the
+        /// window's page, for a new window in that tmux session, whether the
+        /// connection started in a terminal or in a workspace's terminal.
+        #[test]
+        fn new_window_in_a_devservers_tmux_window_asks_tmux() {
+            let state = feed(vec![
+                record("lib-ds", "w-term", WindowKind::Terminal, Some(false)),
+                record("lib-ds", "w-work", WindowKind::Workspace, Some(false)),
+            ]);
+            for label in ["lib-ds::w-term", "lib-ds::w-work"] {
+                assert_eq!(
+                    route(&state, label),
+                    NewWindowRoute::TmuxWindow,
+                    "New Window in the devserver's tmux window {label}"
+                );
+            }
+        }
+
+        /// A devserver's tmux control terminal is a terminal, not a tmux
+        /// window: New Window mints another window of its kind on the
+        /// devserver, as from any devserver terminal.
+        #[test]
+        fn new_window_in_a_devservers_tmux_control_terminal_mints_a_devserver_window() {
+            let state = feed(vec![record(
+                "lib-ds",
+                "w-control",
+                WindowKind::Terminal,
+                Some(true),
+            )]);
+            assert_eq!(
+                route(&state, "lib-ds::w-control"),
+                NewWindowRoute::DevserverWindow
+            );
+        }
+
+        /// A plain devserver window, a terminal or a workspace window, mints
+        /// another window of its kind on its devserver.
+        #[test]
+        fn new_window_in_a_plain_devserver_window_mints_a_devserver_window() {
+            let state = feed(vec![
+                record("lib-ds", "w-term", WindowKind::Terminal, None),
+                record("lib-ds", "w-work", WindowKind::Workspace, None),
+            ]);
+            for label in ["lib-ds::w-term", "lib-ds::w-work"] {
+                assert_eq!(
+                    route(&state, label),
+                    NewWindowRoute::DevserverWindow,
+                    "New Window in the plain devserver window {label}"
+                );
+            }
+        }
+
+        /// A devserver window the feed no longer holds, as after its
+        /// devserver disconnected, opens a standalone terminal, and so does
+        /// a label of no watcher-opened window.
+        #[test]
+        fn new_window_from_a_window_with_no_record_opens_a_standalone_terminal() {
+            let state = feed(vec![record(
+                "lib-ds",
+                "w-term",
+                WindowKind::Terminal,
+                Some(false),
+            )]);
+            for label in [
+                "lib-ds::w-gone",
+                "lib-other::w-term",
+                "control-terminal-ds-1",
+            ] {
+                assert_eq!(
+                    route(&state, label),
+                    NewWindowRoute::StandaloneTerminal,
+                    "New Window from {label}"
+                );
+            }
+        }
+
+        /// A local window: a tmux window asks tmux, its control terminal and
+        /// a plain terminal open a standalone terminal, a workspace window
+        /// another window of its workspace, and a window with no record a
+        /// standalone terminal.
+        #[test]
+        fn new_window_in_a_local_window_routes_by_its_record() {
+            let cases = [
+                (
+                    Some(record("local", "w-1", WindowKind::Terminal, Some(false))),
+                    NewWindowRoute::TmuxWindow,
+                ),
+                (
+                    Some(record("local", "w-1", WindowKind::Workspace, Some(false))),
+                    NewWindowRoute::TmuxWindow,
+                ),
+                (
+                    Some(record("local", "w-1", WindowKind::Terminal, Some(true))),
+                    NewWindowRoute::StandaloneTerminal,
+                ),
+                (
+                    Some(record("local", "w-1", WindowKind::Terminal, None)),
+                    NewWindowRoute::StandaloneTerminal,
+                ),
+                (
+                    Some(record("local", "w-1", WindowKind::Workspace, None)),
+                    NewWindowRoute::LocalWorkspaceCopy,
+                ),
+                (None, NewWindowRoute::StandaloneTerminal),
+            ];
+            for (record, expected) in cases {
+                assert_eq!(
+                    new_window_route("local::w-1", record.as_ref()),
+                    expected,
+                    "New Window in the local window {record:?}"
+                );
+            }
         }
     }
 
