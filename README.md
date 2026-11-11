@@ -10,7 +10,7 @@ Contributors and agents: start at [.agents/README.md](.agents/README.md); the pr
 
 - [docs/extensions.md](docs/extensions.md) - how Chan uses extensions and how to build one.
 - [docs/config-reference.md](docs/config-reference.md) - every persisted configuration file and field.
-- [docs/metrics.md](docs/metrics.md) - the process metrics: what the Dashboard's Metrics slide, `chan metrics` and `/api/metrics` report, and the optional Varlink interface.
+- [docs/metrics.md](docs/metrics.md) - the process metrics: what the Dashboard's Metrics slide, `chan metrics` and `/api/metrics` report, and the optional systemd-report source.
 
 ## Design documents
 

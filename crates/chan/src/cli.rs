@@ -335,7 +335,8 @@ pub(super) struct MetricsArgs {
     /// --watch, later lines hold only the samples newer than the last.
     #[arg(long, requires = "json", verbatim_doc_comment)]
     pub history: bool,
-    /// Serve Varlink on stdin/stdout (systemd StandardInput=socket).
+    /// Serve io.systemd.Metrics for systemd-report on stdin/stdout
+    /// (a socket unit's StandardInput=socket).
     #[arg(long, conflicts_with_all = ["json", "watch", "history"])]
     pub varlink: bool,
 }
@@ -1799,7 +1800,8 @@ mod tests {
             metrics.get_after_long_help().expect("an after_long_help")
         );
         // Every flag the command takes is explained, with the variable that
-        // stands in for one of them, the Linux refusal and the adapter.
+        // stands in for one of them, the Linux refusal and the
+        // systemd-report source.
         let flags = metrics
             .get_arguments()
             .filter_map(|arg| arg.get_long())
@@ -1808,7 +1810,8 @@ mod tests {
             [
                 "CHAN_METRICS_TOKEN",
                 "/proc/net/tcp",
-                "io.chan.Metrics",
+                "io.systemd.Metrics",
+                "io.chan.Devserver",
                 "EXAMPLES:",
             ]
             .map(String::from),
