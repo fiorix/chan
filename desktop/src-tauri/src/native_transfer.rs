@@ -397,9 +397,52 @@ pub fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|error| format!("building native transfer client: {error}"))
 }
 
+/// A transfer request's error as the page may show and keep it: what failed,
+/// down to the cause the system gave, without the request URL. The page builds
+/// that URL, and on the loopback surface it carries the tenant's bearer token
+/// in its `t` query, while reqwest's own Display names the URL and stops
+/// before the cause.
+pub fn reason_without_url(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut reason = error.to_string();
+    let mut cause = std::error::Error::source(&error);
+    while let Some(next) = cause {
+        reason.push_str(": ");
+        reason.push_str(&next.to_string());
+        cause = next.source();
+    }
+    reason
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A send that fails, here to a port nothing listens on, is reported by
+    /// what failed and why, and neither the URL nor the token the page put in
+    /// its query reaches the reason.
+    #[tokio::test]
+    async fn a_failed_send_names_its_cause_and_not_the_url_or_its_token() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}/api/files/upload?t=secret-token");
+        let error = http_client()
+            .unwrap()
+            .post(&url)
+            .send()
+            .await
+            .expect_err("nothing listens on the port");
+        assert!(error.is_connect(), "{error:?}");
+        let reason = reason_without_url(error);
+        for leaked in ["secret-token", "t=", "/api/files/upload", url.as_str()] {
+            assert!(!reason.contains(leaked), "{leaked:?} in {reason:?}");
+        }
+        assert!(
+            reason.to_lowercase().contains("refused"),
+            "the reason says the connection was refused: {reason:?}"
+        );
+    }
 
     #[test]
     fn transfer_endpoints_are_same_origin_and_exact_route_shapes() {

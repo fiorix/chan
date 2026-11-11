@@ -22,8 +22,9 @@ use tauri::{AppHandle, WebviewWindow};
 use tokio::io::AsyncReadExt;
 
 use crate::native_transfer::{
-    endpoint_for_window, fetch_transfer_cap, http_client, request_headers, EndpointKind,
-    PickedFiles, TransferCap, TransferProgress, TransferRegistration, ValidatedEndpoint,
+    endpoint_for_window, fetch_transfer_cap, http_client, reason_without_url, request_headers,
+    EndpointKind, PickedFiles, TransferCap, TransferProgress, TransferRegistration,
+    ValidatedEndpoint,
 };
 
 #[derive(Debug, Deserialize)]
@@ -217,7 +218,9 @@ async fn upload_picked(
         let response = match response {
             Ok(response) => response,
             Err(_error) if progress.is_cancelled() => return Err(Stopped::Cancelled),
-            Err(error) => return Err(format!("upload request failed: {error}").into()),
+            Err(error) => {
+                return Err(format!("upload request failed: {}", reason_without_url(error)).into())
+            }
         };
         if response.status().is_redirection() {
             return Err(Stopped::Failed(
@@ -228,10 +231,9 @@ async fn upload_picked(
             return Err(response_error(response, progress).await);
         }
         uploaded.push(
-            response
-                .json::<UploadedFile>()
-                .await
-                .map_err(|error| format!("decoding upload response: {error}"))?,
+            response.json::<UploadedFile>().await.map_err(|error| {
+                format!("decoding upload response: {}", reason_without_url(error))
+            })?,
         );
     }
     Ok(uploaded)
