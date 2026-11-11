@@ -137,17 +137,25 @@
       : "start",
   );
   const placeTitle = windowTitleMover();
+  // The title box's padding at each end, in CSS px.
+  const TITLE_PADDING_PX = 8;
   const endPlace = { [WINDOW_TITLE_END_ATTR]: "" };
 
   // How far the title's text runs past its box, in CSS px; 0 when it fits. A
   // title that runs past rolls by that distance (see the roll rules below).
+  // And the width the title's box takes to show the text whole, 0 until it
+  // is measured, which bounds how far a short title gives way to the tabs:
+  // the text's width, which the engine reports rounded, so a pixel over it,
+  // and the box's padding.
   let titleText = $state<HTMLElement | null>(null);
   let titleOverflow = $state(0);
+  let titleNatural = $state(0);
   function measureTitle(): void {
     const text = titleText;
     if (!text) return;
     const past = text.scrollWidth - text.clientWidth;
     titleOverflow = past > 1 ? past : 0;
+    titleNatural = text.scrollWidth > 0 ? text.scrollWidth + 1 + 2 * TITLE_PADDING_PX : 0;
   }
   $effect(() => {
     void title;
@@ -315,6 +323,8 @@
     data-place={titlePlace}
     data-roll={WINDOW_TITLE_ROLL}
     data-overflow={titleOverflow > 0 ? "" : undefined}
+    style:--window-title-natural={titleNatural > 0 ? `${titleNatural}px` : undefined}
+    style:padding={`0 ${TITLE_PADDING_PX}px`}
     style:--window-title-roll-distance={`${-titleOverflow}px`}
     style:--window-title-roll-duration={`${rollSeconds}s`}
     data-tauri-drag-region={drag}
@@ -498,10 +508,13 @@
   /* The title is a flex item of the row it sits in: the bar's at the start
      and, through places that draw no box of their own, the strip's or the
      bar's at the end. At the start it takes the room the strip leaves and
-     ends in an ellipsis. At the end it takes its own width up to the
-     reserve, and never more than two fifths of the row in a narrow window,
-     and the strip's tabs give way to it. Both bounds are of the whole box,
-     its padding included. */
+     ends in an ellipsis. At the end it shows whole while the tabs leave it
+     the room. When they do not, it gives way before any tab does: its
+     shrink factor dwarfs the tabs' viewport's, so the row's shortfall falls
+     on the title until it reaches its floor, and only then do the tabs
+     overflow and scroll. The floor is the reserve, or two fifths of the row
+     in a narrow window, or the title's own width when that is smaller, all
+     of the whole box, its padding included. */
   .title-end {
     display: contents;
   }
@@ -509,7 +522,6 @@
     box-sizing: border-box;
     flex: 0 1 auto;
     min-width: 0;
-    padding: 0 8px;
     overflow: hidden;
     font-size: 12px;
     color: var(--text);
@@ -518,8 +530,8 @@
     display: none;
   }
   .bar-title[data-place="end"] {
-    flex: 0 0 auto;
-    max-width: min(var(--window-title-reserve), 40%);
+    flex: 0 100000 auto;
+    min-width: min(var(--window-title-natural, 0px), var(--window-title-reserve), 40%);
   }
   .bar-title-text {
     display: block;

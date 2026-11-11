@@ -793,7 +793,7 @@ describe("the window's title", () => {
     expect(animate).not.toHaveBeenCalled();
   });
 
-  test("reserves two reference tabs for it at the end, and marks its place for the layout", async () => {
+  test("keeps two reference tabs for it at the end, and marks its place for the layout", async () => {
     expect(WINDOW_TITLE_RESERVE_PX).toBe(2 * WINDOW_TITLE_REFERENCE_TAB_PX + 2);
     windowTabBar.title = LOCAL;
     resetLayout([terminalTab()]);
@@ -809,6 +809,8 @@ describe("the window's title", () => {
     const text = box.querySelector<HTMLElement>(".bar-title-text")!;
     expect(box.dataset.roll).toBe(WINDOW_TITLE_ROLL);
     expect(box.hasAttribute("data-overflow"), "jsdom measures nothing: it fits").toBe(false);
+    expect(box.style.getPropertyValue("--window-title-natural"), "and no width is known yet").toBe("");
+    expect(box.style.padding).toBe("0px 8px");
 
     let scrollWidth = 430;
     Object.defineProperty(text, "scrollWidth", { configurable: true, get: () => scrollWidth });
@@ -817,6 +819,9 @@ describe("the window's title", () => {
     await tick();
     expect(box.hasAttribute("data-overflow")).toBe(true);
     expect(box.style.getPropertyValue("--window-title-roll-distance")).toBe("-180px");
+    // The width that shows the text whole: the text, a pixel over the
+    // engine's rounding, and the box's 8 px padding at each end.
+    expect(box.style.getPropertyValue("--window-title-natural")).toBe("447px");
     expect(box.style.getPropertyValue("--window-title-roll-duration")).toMatch(/^\d+(\.\d+)?s$/);
     expect(box.getAttribute("title"), "the whole title stays a tooltip").toBe(`${LOCAL} and then some`);
 
@@ -824,6 +829,7 @@ describe("the window's title", () => {
     windowTabBar.title = "Window 1";
     await tick();
     expect(box.hasAttribute("data-overflow")).toBe(false);
+    expect(box.style.getPropertyValue("--window-title-natural"), "a short title's floor is its own width").toBe("217px");
   });
 
   test("privacy mode shows the generated name alone, and the full title once it is off", async () => {

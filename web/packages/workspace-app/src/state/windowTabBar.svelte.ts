@@ -100,9 +100,10 @@ export const WINDOW_TITLE_ROLL_PX_PER_S = 40;
 /// between them.
 export const WINDOW_TITLE_REFERENCE_TAB_PX = 124;
 
-/// The most room the title takes from the strip while the window has tabs:
-/// two reference tabs and the 2 px the strip keeps between tabs. A shorter
-/// title takes only its own width.
+/// The room the title keeps from the strip while the window has tabs: two
+/// reference tabs and the 2 px the strip keeps between tabs. The title shows
+/// whole while the tabs leave it the room and gives way to them down to this
+/// width; a title shorter than this keeps its own width.
 export const WINDOW_TITLE_RESERVE_PX = 2 * WINDOW_TITLE_REFERENCE_TAB_PX + 2;
 
 /// The bar's height in CSS px where no window controls set it, in a browser:
