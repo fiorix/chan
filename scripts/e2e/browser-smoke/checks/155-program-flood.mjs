@@ -17,29 +17,34 @@ export default {
   async run(ctx) {
     await withProgramStatusTabs(ctx, "155", async (tab) => {
       const before = await tab.read();
+      // Milliseconds as `%s%N` over 10^6: GNU and uutils date print `%s%N`
+      // alike, while uutils prints `%3N` as unpadded nanoseconds.
       const command = [
         "msg=$(printf '%2048s' '' | tr ' ' A | base64 -w0)",
         "[ ${#msg} -eq 2732 ] || exit 41",
-        "start=$(date +%s%3N)",
+        "start=$(($(date +%s%N) / 1000000))",
         "deadline=$((start + 3000))",
         "i=0; last=none",
-        "while [ $(date +%s%3N) -lt $deadline ]; do",
+        "while [ $(($(date +%s%N) / 1000000)) -lt $deadline ]; do",
         "  if [ $((i % 2)) -eq 0 ]; then last=done; else last=error; fi",
         "  printf '\\033]7501;state=%s:id=flood:msg=%s\\033\\\\' \"$last\" \"$msg\"",
         "  if [ $((i % 16)) -eq 0 ]; then printf 'FLOOD155_LINE_%s\\n' \"$i\"; fi",
         "  i=$((i + 1))",
         "done",
-        "end=$(date +%s%3N)",
+        "end=$(($(date +%s%N) / 1000000))",
         "printf 'FLOOD155_END_%s_%s_%s_%s\\n' \"$start\" \"$end\" \"$i\" \"$last\"",
       ].join("; ").replace("do;", "do") + "\n";
       await tab.cs(["write", "--tab-name", tab.subject, command]);
-      const scrollback = await waitScrollback(tab, /FLOOD155_END_\d+_\d+_\d+_(?:done|error)/);
-      const receipt = /FLOOD155_END_(\d+)_(\d+)_(\d+)_(done|error)/.exec(scrollback);
+      // `none` is the receipt of a loop that never ran; it fails below on the
+      // count rather than here on a missing receipt.
+      const scrollback = await waitScrollback(tab, /FLOOD155_END_\d+_\d+_\d+_(?:done|error|none)/);
+      const receipt = /FLOOD155_END_(\d+)_(\d+)_(\d+)_(done|error|none)/.exec(scrollback);
       assert.ok(receipt, "flood completion carries its measured start, end and last state");
       const [, start, end, attempts, last] = receipt;
       const durationMs = Number(end) - Number(start);
+      console.log(`[smoke:155] ${tab.backend}: flood ran ${attempts} iterations in ${durationMs} ms, last=${last}`);
+      assert.ok(Number(attempts) > 16, `the loop ran ${attempts} times; it alternates reports beside more than one ordinary output line`);
       assert.ok(durationMs >= 2500 && durationMs <= 5000, `flood measured ${durationMs} ms`);
-      assert.ok(Number(attempts) > 16, "the loop alternated reports beside more than one ordinary output line");
       assert.match(scrollback, /FLOOD155_LINE_[1-9]\d*/, "plain output kept arriving in terminal scrollback");
       const final = await tab.wait("flood-final", (state) =>
         state.row.program_status?.records?.some((record) => record.id === "flood" && record.state === last && record.msg?.length === 2048) &&
