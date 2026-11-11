@@ -5,7 +5,9 @@
 // handlers, every other pane's is hidden, a focus change (Hybrid Nav's
 // staged one included) moves it, and leaving the mode or destroying the pane
 // puts it back where it was. A tmux pane's strip stays hidden in the bar,
-// which names the pane instead.
+// which names the pane instead. The strip in the bar takes the window's
+// title, left of its actions, while the window has tabs, and its tabs fade
+// toward it while more of them lie past the strip's end.
 
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test } from "vitest";
@@ -62,6 +64,8 @@ afterEach(async () => {
   mounted.clear();
   windowTabBar.on = false;
   windowTabBar.slot = null;
+  windowTabBar.titleSlot = null;
+  windowTabBar.title = "";
   cancelPaneMode();
   document.body.innerHTML = "";
   delete (window as W).__TAURI_INTERNALS__;
@@ -269,6 +273,120 @@ describe("the window tab bar mode", () => {
     expect(labels(barStrips()[0]), "a plain pane's strip shows in the bar").toEqual(["plain one"]);
     expect(barStrips()[0]?.classList.contains("control-hidden")).toBe(false);
     expect(bar.querySelector(".tmux-name, .tmux-badge"), "and the bar names nothing").toBeNull();
+  });
+
+  describe("the window's title", () => {
+    const TITLE = "\u2197 geekom / chan Window 1 [label]";
+
+    function titleBox(): HTMLElement {
+      const box = document.querySelector<HTMLElement>(".bar-title");
+      if (!box) throw new Error("no title");
+      return box;
+    }
+
+    /// The classes of the strip's parts in order, the title's place opened
+    /// up, since it draws no box of its own.
+    function stripParts(strip: HTMLElement): string[] {
+      return [...strip.children].flatMap((part) =>
+        part.classList.contains("bar-title-slot")
+          ? [...part.children].map((inner) => inner.classList[0] ?? "")
+          : [part.classList[0] ?? ""],
+      );
+    }
+
+    test("sits in the strip in the bar, after the tabs and left of the side toggle", async () => {
+      twoPanes();
+      windowTabBar.title = TITLE;
+      await renderBar();
+      await renderPanes("left", "right");
+
+      const strip = barStrips()[0]!;
+      const box = titleBox();
+      expect(strip.contains(box)).toBe(true);
+      expect(box.textContent?.trim()).toBe(TITLE);
+      expect(stripParts(strip)).toEqual(["tab-scroll", "dead-zone", "bar-title", "actions"]);
+      expect(strip.querySelector(".actions")?.firstElementChild?.classList.contains("side-toggle")).toBe(true);
+      expect(inPlace("right")?.querySelector(".bar-title-slot"), "a strip out of the bar offers no place").toBeNull();
+    });
+
+    test("with no tab in the window it sits after the tree button, and the strip keeps its actions", async () => {
+      splitLayout([], []);
+      windowTabBar.title = TITLE;
+      const bar = await renderBar();
+      await renderPanes("left", "right");
+
+      const box = titleBox();
+      expect(box.parentElement).toBe(bar);
+      expect(box.previousElementSibling).toBe(bar.querySelector(".tree-button"));
+      expect(box.nextElementSibling, "the strip follows it").toBe(slot);
+      expect(stripParts(barStrips()[0]!)).toEqual(["tab-scroll", "dead-zone", "actions"]);
+    });
+
+    test("follows the strip to the newly active pane, and survives its pane's destruction", async () => {
+      twoPanes();
+      windowTabBar.title = TITLE;
+      const bar = await renderBar();
+      await renderPanes("left", "right");
+      const box = titleBox();
+
+      setActivePane("right");
+      await tick();
+      expect(labels(barStrips()[0])).toEqual(["right one", "right two"]);
+      expect(barStrips()[0]!.contains(box)).toBe(true);
+      expect(inPlace("left")?.contains(box), "the strip that went home left the title behind").toBe(false);
+
+      await unmount(mounted.get("right")!);
+      mounted.delete("right");
+      await tick();
+      expect(titleBox(), "the same element").toBe(box);
+      expect(bar.contains(box)).toBe(true);
+      expect(box.parentElement?.classList.contains("title-end"), "no strip in the bar: the bar's own end").toBe(true);
+    });
+
+    test("a tmux pane's hidden strip offers no place, so the title sits at the bar's end before the badge", async () => {
+      splitLayout(
+        [terminalTab({ id: "tmux", title: "editor", terminalSessionId: "s0", tmuxPane: { connection: 1, pane: "%0" } })],
+        [terminalTab({ id: "plain", title: "plain one" })],
+      );
+      windowTabBar.title = TITLE;
+      const bar = await renderBar();
+      await renderPanes("left", "right");
+      const box = titleBox();
+      expect(box.parentElement?.classList.contains("title-end")).toBe(true);
+      expect(box.parentElement?.nextElementSibling).toBe(bar.querySelector(".tmux-badge"));
+
+      setActivePane("right");
+      await tick();
+      expect(barStrips()[0]!.contains(box), "a plain pane's strip takes it").toBe(true);
+    });
+
+    test("the strip's tabs fade toward it only while more of them lie past the strip's end", async () => {
+      twoPanes();
+      windowTabBar.title = TITLE;
+      await renderBar();
+      await renderPanes("left", "right");
+      const view = barStrips()[0]!.querySelector<HTMLElement>(".tab-scroll")!;
+      expect(view.classList.contains("fade-end"), "the tabs fit").toBe(false);
+
+      // jsdom lays nothing out: the tabs are 900 px wide in a 400 px viewport.
+      Object.defineProperty(view, "scrollWidth", { configurable: true, get: () => 900 });
+      Object.defineProperty(view, "clientWidth", { configurable: true, get: () => 400 });
+      view.dispatchEvent(new Event("scroll"));
+      await tick();
+      expect(view.classList.contains("fade-end")).toBe(true);
+
+      view.scrollLeft = 500;
+      view.dispatchEvent(new Event("scroll"));
+      await tick();
+      expect(view.classList.contains("fade-end"), "scrolled to the end, the last tab is whole").toBe(false);
+
+      view.scrollLeft = 0;
+      view.dispatchEvent(new Event("scroll"));
+      await tick();
+      windowTabBar.on = false;
+      await tick();
+      expect(inPlace("left")?.querySelector(".tab-scroll")?.classList.contains("fade-end"), "in place nothing fades").toBe(false);
+    });
   });
 
   test("on the desktop the strip's empty stretch in the bar drags the window", async () => {

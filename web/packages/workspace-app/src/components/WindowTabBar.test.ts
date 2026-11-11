@@ -13,7 +13,9 @@
 // draws them at its left, each popping up the desktop's menu under it, with
 // the window's title after them. A tmux pane has no strip, so while one is
 // active the bar names it as the pane tree does and marks the window with a
-// tmux badge at its right end, both display only.
+// tmux badge at its right end, both display only. The bar shows the window's
+// title, display only: after the tree button while the window has no tabs,
+// and at the bar's end, left of the strip's actions, once it has one.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -24,6 +26,7 @@ vi.mock("../state/paneTree.svelte", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/paneTree.svelte")>()),
   hiddenTabStatus: () => tree.status,
 }));
+vi.mock("../api/libraryCommand", () => ({ loadScopedLibrarySnapshot: vi.fn() }));
 
 import WindowTabBar from "./WindowTabBar.svelte";
 import { LAUNCHER_SHOWN_ATTR } from "../state/focusGuard";
@@ -46,11 +49,21 @@ import {
 import {
   NO_TITLEBAR_CHROME,
   WINDOW_TAB_BAR_MIN_HEIGHT,
+  WINDOW_TITLE_REFERENCE_TAB_PX,
+  WINDOW_TITLE_RESERVE_PX,
+  WINDOW_TITLE_ROLL,
+  WINDOW_TITLE_SLIDE_MS,
   windowTabBar,
 } from "../state/windowTabBar.svelte";
+import { applyWindowLabel, loadWindowTitle, __resetWindowTitle } from "../state/windowTitle.svelte";
+import { privacy } from "@chan/web-shared/privacy";
+import { loadScopedLibrarySnapshot, type ScopedLibrarySnapshot } from "../api/libraryCommand";
+import { sessionWindowId } from "../api/client";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
+type Animated = { animate?: unknown };
+type MediaWindow = { matchMedia?: unknown };
 
 let component: Record<string, unknown> | null = null;
 
@@ -62,7 +75,13 @@ afterEach(async () => {
   windowTabBar.chrome = NO_TITLEBAR_CHROME;
   windowTabBar.height = WINDOW_TAB_BAR_MIN_HEIGHT;
   windowTabBar.slot = null;
+  windowTabBar.titleSlot = null;
   windowTabBar.title = "";
+  privacy.enabled = false;
+  __resetWindowTitle();
+  vi.mocked(loadScopedLibrarySnapshot).mockReset();
+  delete (HTMLElement.prototype as Animated).animate;
+  delete (window as MediaWindow).matchMedia;
   delete (window as W).__TAURI_INTERNALS__;
   document.documentElement.removeAttribute(LAUNCHER_SHOWN_ATTR);
   document.body.innerHTML = "";
@@ -564,6 +583,277 @@ describe("the window controls", () => {
   });
 });
 
+describe("the window's title", () => {
+  const LOCAL = "\u2193\uFE0E local / chan Window 1 [my own title]";
+  const REMOTE = "\u2197 geekom / chan Window 1 [label]";
+
+  function titleBox(): HTMLElement {
+    const box = document.querySelector<HTMLElement>(".bar-title");
+    if (!box) throw new Error("no title");
+    return box;
+  }
+
+  function shown(): string | null {
+    const box = titleBox();
+    return box.hidden ? null : (box.textContent?.trim() ?? "");
+  }
+
+  /// What a strip in the bar offers the title: a place between its dead zone
+  /// and its actions (Pane.svelte renders the real one).
+  function stripWithTitleSlot(host: Element): HTMLElement {
+    const strip = document.createElement("div");
+    strip.innerHTML = '<div class="dead-zone"></div><div class="place"></div><div class="actions"></div>';
+    host.append(strip);
+    const place = strip.querySelector<HTMLElement>(".place")!;
+    windowTabBar.titleSlot = place;
+    return place;
+  }
+
+  function ownSnapshot(): ScopedLibrarySnapshot {
+    return {
+      library_id: "local",
+      workspaces: [],
+      windows: [{
+        window_id: sessionWindowId(), kind: "terminal", ordinal: 2,
+        label: "deploy shell", title: "Unrelated terminal title",
+        control: false, tmux: false, workspace_path: null,
+        connected: true, hidden: false, launch_path: "/terminal/",
+      }],
+    };
+  }
+
+  test("with no tab in the window it sits after the tree button, whole as a tooltip", async () => {
+    windowTabBar.title = LOCAL;
+    const bar = await renderBar();
+    const box = titleBox();
+    expect(box.parentElement).toBe(bar);
+    expect(box.previousElementSibling).toBe(bar.querySelector(".tree-button"));
+    expect(box.dataset.place).toBe("start");
+    expect(shown()).toBe(LOCAL);
+    expect(box.getAttribute("title")).toBe(LOCAL);
+    expect(bar.querySelector(".slot")?.classList.contains("beside-title"), "the strip keeps its actions' room").toBe(true);
+
+    windowTabBar.title = REMOTE;
+    await tick();
+    expect(shown(), "a retitle shows").toBe(REMOTE);
+    expect(box.getAttribute("title")).toBe(REMOTE);
+  });
+
+  test("the first tab sends it to the bar's end, left of the strip's actions, and the last one closing brings it back", async () => {
+    windowTabBar.title = LOCAL;
+    const bar = await renderBar();
+    const place = stripWithTitleSlot(bar.querySelector(".slot")!);
+    await tick();
+    expect(titleBox().parentElement, "no tabs yet").toBe(bar);
+
+    resetLayout([terminalTab()]);
+    await tick();
+    const box = titleBox();
+    expect(box.parentElement).toBe(place);
+    expect(box.dataset.place).toBe("end");
+    expect(place.previousElementSibling?.className).toBe("dead-zone");
+    expect(place.nextElementSibling?.className).toBe("actions");
+    expect(shown()).toBe(LOCAL);
+    expect(bar.querySelector(".slot")?.classList.contains("beside-title")).toBe(false);
+
+    resetLayout([]);
+    await tick();
+    expect(box.parentElement).toBe(bar);
+    expect(box.previousElementSibling).toBe(bar.querySelector(".tree-button"));
+    expect(box.dataset.place).toBe("start");
+  });
+
+  test("a tab on a side the pane does not show counts as a tab", async () => {
+    windowTabBar.title = LOCAL;
+    resetLayout([], { bTabs: [terminalTab({ id: "b1" })], bActiveTabId: "b1" });
+    await renderBar();
+    expect(titleBox().dataset.place).toBe("end");
+  });
+
+  test("with tabs and no strip in the bar to take it, it sits at the bar's own end", async () => {
+    windowTabBar.title = LOCAL;
+    resetLayout([terminalTab()]);
+    const bar = await renderBar();
+    const box = titleBox();
+    expect(box.parentElement?.classList.contains("title-end")).toBe(true);
+    expect(box.parentElement?.previousElementSibling).toBe(bar.querySelector(".slot"));
+  });
+
+  test("slides from one place to the other, and cuts under reduced motion", async () => {
+    const animate = vi.fn();
+    (HTMLElement.prototype as Animated).animate = animate;
+    windowTabBar.title = LOCAL;
+    const bar = await renderBar();
+    stripWithTitleSlot(bar.querySelector(".slot")!);
+    await tick();
+    const box = titleBox();
+    // jsdom lays nothing out: the title is 40 px in at the start and 600 px
+    // in at the end.
+    box.getBoundingClientRect = () =>
+      ({ left: box.parentElement === bar ? 40 : 600, width: 120 }) as DOMRect;
+
+    resetLayout([terminalTab()]);
+    await tick();
+    expect(animate).toHaveBeenCalledTimes(1);
+    expect(animate.mock.calls[0]![0]).toEqual([{ transform: "translateX(-560px)" }, { transform: "translateX(0)" }]);
+    expect(animate.mock.calls[0]![1]).toMatchObject({ duration: WINDOW_TITLE_SLIDE_MS });
+
+    resetLayout([]);
+    await tick();
+    expect(animate).toHaveBeenCalledTimes(2);
+    expect(animate.mock.calls[1]![0]).toEqual([{ transform: "translateX(560px)" }, { transform: "translateX(0)" }]);
+
+    (window as MediaWindow).matchMedia = (query: string) => ({ matches: query.includes("reduce") });
+    resetLayout([terminalTab()]);
+    await tick();
+    expect(box.dataset.place).toBe("end");
+    expect(animate, "reduced motion cuts").toHaveBeenCalledTimes(2);
+  });
+
+  test("a strip changing under a title that stays at the end does not slide it", async () => {
+    const animate = vi.fn();
+    (HTMLElement.prototype as Animated).animate = animate;
+    windowTabBar.title = LOCAL;
+    resetLayout([terminalTab()]);
+    const bar = await renderBar();
+    const box = titleBox();
+    box.getBoundingClientRect = () =>
+      ({ left: box.parentElement?.classList.contains("title-end") ? 700 : 600, width: 120 }) as DOMRect;
+    const place = stripWithTitleSlot(bar.querySelector(".slot")!);
+    await tick();
+    expect(box.parentElement).toBe(place);
+    expect(animate).not.toHaveBeenCalled();
+  });
+
+  test("reserves two reference tabs for it at the end, and marks its place for the layout", async () => {
+    expect(WINDOW_TITLE_RESERVE_PX).toBe(2 * WINDOW_TITLE_REFERENCE_TAB_PX + 2);
+    windowTabBar.title = LOCAL;
+    resetLayout([terminalTab()]);
+    const bar = await renderBar();
+    expect(bar.style.getPropertyValue("--window-title-reserve")).toBe(`${WINDOW_TITLE_RESERVE_PX}px`);
+    expect(titleBox().dataset.place).toBe("end");
+  });
+
+  test("a title wider than its room is marked to roll by the width it runs past, and one that fits is not", async () => {
+    windowTabBar.title = LOCAL;
+    await renderBar();
+    const box = titleBox();
+    const text = box.querySelector<HTMLElement>(".bar-title-text")!;
+    expect(box.dataset.roll).toBe(WINDOW_TITLE_ROLL);
+    expect(box.hasAttribute("data-overflow"), "jsdom measures nothing: it fits").toBe(false);
+
+    let scrollWidth = 430;
+    Object.defineProperty(text, "scrollWidth", { configurable: true, get: () => scrollWidth });
+    Object.defineProperty(text, "clientWidth", { configurable: true, get: () => 250 });
+    windowTabBar.title = `${LOCAL} and then some`;
+    await tick();
+    expect(box.hasAttribute("data-overflow")).toBe(true);
+    expect(box.style.getPropertyValue("--window-title-roll-distance")).toBe("-180px");
+    expect(box.style.getPropertyValue("--window-title-roll-duration")).toMatch(/^\d+(\.\d+)?s$/);
+    expect(box.getAttribute("title"), "the whole title stays a tooltip").toBe(`${LOCAL} and then some`);
+
+    scrollWidth = 200;
+    windowTabBar.title = "Window 1";
+    await tick();
+    expect(box.hasAttribute("data-overflow")).toBe(false);
+  });
+
+  test("privacy mode shows the generated name alone, and the full title once it is off", async () => {
+    vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(ownSnapshot());
+    windowTabBar.title = "\u2197 geekom Terminal Window 2 [deploy shell]";
+    await renderBar();
+    expect(shown()).toBe("\u2197 geekom Terminal Window 2 [deploy shell]");
+    expect(loadScopedLibrarySnapshot, "the desktop's title needs no read").not.toHaveBeenCalled();
+
+    // The page still holds the full title when it hears privacy mode turn on.
+    privacy.enabled = true;
+    await vi.waitFor(() => expect(shown()).toBe("Terminal Window 2"));
+    expect(titleBox().getAttribute("title")).toBe("Terminal Window 2");
+    // The desktop masks every window's title while privacy mode is on.
+    windowTabBar.title = "Chan (privacy mode)";
+    await tick();
+    expect(shown()).toBe("Terminal Window 2");
+    applyWindowLabel("private.example");
+    await tick();
+    expect(shown()).toBe("Terminal Window 2");
+    // Turning it off retitles every window before the setting is announced.
+    windowTabBar.title = "\u2197 geekom Terminal Window 2 [private.example]";
+    await tick();
+    expect(shown()).toBe("Terminal Window 2");
+    privacy.enabled = false;
+    await tick();
+    expect(shown()).toBe("\u2197 geekom Terminal Window 2 [private.example]");
+  });
+
+  test("a window no title has reached is named as Computers names it, read at a pane tree open and again after a failed read", async () => {
+    vi.mocked(loadScopedLibrarySnapshot).mockRejectedValueOnce(new Error("offline"));
+    vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(ownSnapshot());
+    const bar = await renderBar();
+    expect(shown(), "nothing to show yet").toBeNull();
+    expect(bar.querySelector(".slot")?.classList.contains("beside-title")).toBe(false);
+    expect(loadScopedLibrarySnapshot).not.toHaveBeenCalled();
+
+    openPaneTree();
+    await vi.waitFor(() => expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(1));
+    await tick();
+    expect(shown()).toBeNull();
+    closePaneTree();
+    await tick();
+    openPaneTree();
+    await vi.waitFor(() => expect(shown()).toBe("Terminal Window 2 [deploy shell]"));
+
+    applyWindowLabel("release checks");
+    await tick();
+    expect(shown(), "a rename shows").toBe("Terminal Window 2 [release checks]");
+  });
+
+  test("a browser's bar, which no title reaches, shows the name its boot read", async () => {
+    vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(ownSnapshot());
+    await loadWindowTitle();
+    await renderBar();
+    expect(shown()).toBe("Terminal Window 2 [deploy shell]");
+  });
+
+  test("is display only, and on the desktop a press on the box or its text drags the window", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: { invoke: async () => null } });
+    windowTabBar.title = LOCAL;
+    await renderBar();
+    const box = titleBox();
+    const text = box.querySelector<HTMLElement>(".bar-title-text")!;
+    for (const part of [box, text]) {
+      expect(part.getAttribute("data-tauri-drag-region"), part.className).toBe("");
+      expect(part.closest("button, [role], [tabindex]"), "nothing to press or focus").toBeNull();
+      part.click();
+    }
+    expect(text.querySelector("*"), "a press lands on the text itself").toBeNull();
+    await tick();
+    expect(paneTree.open, "a press opens nothing").toBe(false);
+  });
+
+  test("hides with the tree button while the Computers launcher covers the window", async () => {
+    windowTabBar.title = LOCAL;
+    await renderBar();
+    expect(titleBox().classList.contains("covered")).toBe(false);
+    document.documentElement.setAttribute(LAUNCHER_SHOWN_ATTR, "");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+    expect(titleBox().classList.contains("covered")).toBe(true);
+  });
+
+  test("leaves with the bar from wherever it sits", async () => {
+    windowTabBar.title = LOCAL;
+    resetLayout([terminalTab()]);
+    await renderBar();
+    // A place outside the bar, as a pane's strip is once the bar has gone.
+    const place = stripWithTitleSlot(document.body);
+    await tick();
+    expect(titleBox().parentElement).toBe(place);
+    if (component) await unmount(component);
+    component = null;
+    expect(document.querySelector(".bar-title")).toBeNull();
+  });
+});
+
 describe("a tmux window", () => {
   /// Two tmux panes side by side, as the server's tmux_layout lays them
   /// out: each pane one terminal tab marked with its tmux pane and titled
@@ -600,7 +890,20 @@ describe("a tmux window", () => {
     expect(nameOf(bar)).toBe("editor");
     expect(nameOf(bar), "the pane tree's label for the pane").toBe(paneTreeLabel());
     expect(bar.querySelector(".tmux-badge")?.textContent?.trim()).toBe("tmux");
-    expect(parts(bar)).toEqual(["inset", "tree-button", "tmux-name", "slot", "tmux-badge", "inset"]);
+    expect(parts(bar)).toEqual(["inset", "tree-button", "tmux-name", "slot", "title-end", "tmux-badge", "inset"]);
+  });
+
+  test("keeps the window's title at the bar's end, between the pane's name and the badge", async () => {
+    tmuxPanes();
+    windowTabBar.title = "\u2193\uFE0E local Terminal Window 1 [build]";
+    const bar = await renderBar();
+    const title = bar.querySelector<HTMLElement>(".bar-title")!;
+    expect(title.textContent?.trim()).toBe("\u2193\uFE0E local Terminal Window 1 [build]");
+    expect(title.dataset.place).toBe("end");
+    expect(title.parentElement?.classList.contains("title-end")).toBe(true);
+    expect(title.parentElement?.previousElementSibling?.classList.contains("slot")).toBe(true);
+    expect(title.parentElement?.nextElementSibling?.classList.contains("tmux-badge")).toBe(true);
+    expect(nameOf(bar), "the pane's name stands").toBe("editor");
   });
 
   test("follows a change of active pane and a tmux rename at once", async () => {
@@ -715,6 +1018,6 @@ describe("a tmux window", () => {
     resetLayout([terminalTab({ id: "plain", title: "shell", terminalSessionId: "s9" })]);
     const bar = await renderBar();
     expect(bar.querySelector(".tmux-name, .tmux-badge")).toBeNull();
-    expect(parts(bar)).toEqual(["inset", "tree-button", "slot", "inset"]);
+    expect(parts(bar)).toEqual(["inset", "tree-button", "slot", "title-end", "inset"]);
   });
 });

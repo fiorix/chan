@@ -1,7 +1,9 @@
 <script lang="ts">
   // The window tab bar: a band across the top of the window holding the pane
-  // tree button and the slot the active pane's tab strip moves into (see
-  // Pane.svelte). In chan-desktop's title bar its insets keep clear of the
+  // tree button, the window's title and the slot the active pane's tab strip
+  // moves into (see Pane.svelte). The title sits after the tree button while
+  // the window has no tabs and at the bar's end, left of the strip's actions,
+  // once it has one. In chan-desktop's title bar its insets keep clear of the
   // window controls, its content row sits on their centre line, and its empty
   // stretches drag the window. Where the desktop asks for it (Windows, whose
   // window has no frame in the mode) the window controls sit over the right
@@ -13,6 +15,7 @@
   // no menubar, and the window's title after them. A tmux pane has no strip,
   // so while one is active the band names it and marks the window as tmux's.
 
+  import { untrack } from "svelte";
   import {
     isTauriDesktop,
     titlebarMenuPopup,
@@ -33,10 +36,18 @@
   import { activeLayout, activeTabInPane, paneMode, paneShowsTmux, tabLabel } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
+    WINDOW_TITLE_MOVE,
+    WINDOW_TITLE_RESERVE_PX,
+    WINDOW_TITLE_ROLL,
+    WINDOW_TITLE_ROLL_PX_PER_S,
+    WINDOW_TITLE_SLIDE_MS,
     windowTabBar,
     windowTabBarCenterPad,
     windowTabBarSlot,
   } from "../state/windowTabBar.svelte";
+  import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
+  import { privacy } from "@chan/web-shared/privacy";
+  import { WINDOW_TITLE_END_ATTR, windowTitleMover, type WindowTitlePlace } from "./windowBarTitle";
 
   // Tauri's drag script starts a window drag on a direct press on an element
   // carrying the attribute, and zooms the window on a double click there.
@@ -68,6 +79,56 @@
     if (tab) return tabLabel(tab);
     return paneMode.tmux !== null ? "New tmux pane" : "Empty pane";
   });
+
+  // The window's title: the one the desktop sends, or in privacy mode the
+  // generated name alone. Display only, like the tmux name.
+  const title = $derived(windowName());
+  // The naming fields behind the privacy form, and behind the name of a
+  // window no title has reached, are read once they are needed: when privacy
+  // mode is on, and at a pane tree open, which is also when a failed read is
+  // tried again.
+  $effect(() => {
+    if (title !== null) return;
+    if (privacy.enabled || paneTree.open) untrack(() => void loadWindowTitle());
+  });
+
+  // With no tab in any pane of the window, on either side, the title sits
+  // after the tree button; one tab anywhere sends it to the bar's end.
+  const titlePlace: WindowTitlePlace = $derived(
+    Object.values(viewLayout.nodes).some(
+      (node) => node.kind === "leaf" && (node.tabs.length > 0 || (node.bTabs?.length ?? 0) > 0),
+    )
+      ? "end"
+      : "start",
+  );
+  const placeTitle = windowTitleMover();
+  const endPlace = { [WINDOW_TITLE_END_ATTR]: "" };
+
+  // How far the title's text runs past its box, in CSS px; 0 when it fits. A
+  // title that runs past rolls by that distance (see the roll rules below).
+  let titleText = $state<HTMLElement | null>(null);
+  let titleOverflow = $state(0);
+  function measureTitle(): void {
+    const text = titleText;
+    if (!text) return;
+    const past = text.scrollWidth - text.clientWidth;
+    titleOverflow = past > 1 ? past : 0;
+  }
+  $effect(() => {
+    void title;
+    void titlePlace;
+    measureTitle();
+  });
+  $effect(() => {
+    const text = titleText;
+    if (!text || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measureTitle);
+    observer.observe(text);
+    return () => observer.disconnect();
+  });
+  // A roll is head to tail and back, each way over about a third of the
+  // cycle, with a rest at each end (the keyframes below).
+  const rollSeconds = $derived(Math.max(4, (titleOverflow / WINDOW_TITLE_ROLL_PX_PER_S) * 3));
 
   // The desktop marks the page's root while the window's Computers launcher
   // is shown over it, from before the launcher slides in until after it has
@@ -164,6 +225,7 @@
   class="window-tab-bar"
   style:height={`${windowTabBar.height}px`}
   style:padding-bottom={`${centerPad}px`}
+  style:--window-title-reserve={`${WINDOW_TITLE_RESERVE_PX}px`}
   data-tauri-drag-region={drag}
 >
   <div class="inset" style:width={`${chrome.insetLeft}px`} data-tauri-drag-region={drag}></div>
@@ -202,6 +264,31 @@
       <span class="badge" data-status={status} aria-hidden="true"></span>
     {/if}
   </button>
+  <!-- The window's title, display only: a press on it drags the window as
+       the band around it does, so the box and its text both carry the drag
+       attribute, which Tauri's drag script reads on the element pressed.
+       This is its place while the window has no tabs; with tabs the mover
+       takes it to the bar's end. It is always rendered, and hidden while
+       there is no title, so the mover never moves a block's boundary. -->
+  <div
+    class="bar-title"
+    class:covered
+    hidden={title === null}
+    title={title ?? undefined}
+    data-place={titlePlace}
+    data-roll={WINDOW_TITLE_ROLL}
+    data-overflow={titleOverflow > 0 ? "" : undefined}
+    style:--window-title-roll-distance={`${-titleOverflow}px`}
+    style:--window-title-roll-duration={`${rollSeconds}s`}
+    data-tauri-drag-region={drag}
+    {@attach placeTitle(
+      titlePlace,
+      windowTabBar.titleSlot,
+      WINDOW_TITLE_MOVE === "slide" ? WINDOW_TITLE_SLIDE_MS : 0,
+    )}
+  >
+    <span class="bar-title-text" bind:this={titleText} data-tauri-drag-region={drag}>{title ?? ""}</span>
+  </div>
   <!-- The name and the badge are display only, so nothing here reopens the
        hidden strip or offers a tab action tmux cannot take; on the desktop a
        press on either drags the window as the band around them does. Each
@@ -210,7 +297,16 @@
   {#if tmuxName !== null}
     <div class="tmux-name" class:covered title={tmuxName} data-tauri-drag-region={drag}>{tmuxName}</div>
   {/if}
-  <div class="slot" class:covered data-tauri-drag-region={drag} {@attach windowTabBarSlot}></div>
+  <div
+    class="slot"
+    class:covered
+    class:beside-title={titlePlace === "start" && title !== null}
+    data-tauri-drag-region={drag}
+    {@attach windowTabBarSlot}
+  ></div>
+  <!-- The title's place at the bar's end while no strip shows in the bar to
+       take it: a tmux window, whose title then sits before the badge. -->
+  <div class="title-end" {...endPlace}></div>
   {#if tmuxName !== null}
     <!-- Where the A and B toggle sits in a window whose panes have sides;
          a tmux window's have none. -->
@@ -356,6 +452,67 @@
     align-self: stretch;
     display: flex;
     align-items: center;
+  }
+  /* Beside a leading title the slot keeps the width of what the strip
+     holds, so a long title gives way to the strip's actions. */
+  .slot.beside-title {
+    flex: 1 0 auto;
+  }
+  /* The title is a flex item of the row it sits in: the bar's at the start
+     and, through places that draw no box of their own, the strip's or the
+     bar's at the end. At the start it takes the room the strip leaves and
+     ends in an ellipsis. At the end it takes its own width up to the
+     reserve, and never more than two fifths of the row in a narrow window,
+     and the strip's tabs give way to it. */
+  .title-end {
+    display: contents;
+  }
+  .bar-title {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 0 8px;
+    overflow: hidden;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .bar-title[hidden] {
+    display: none;
+  }
+  .bar-title[data-place="end"] {
+    flex: 0 0 auto;
+    max-width: min(var(--window-title-reserve), 40%);
+  }
+  .bar-title-text {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  /* A title that runs past its box rolls to its tail and back inside the
+     box: under the pointer in the "hover" variant, all the time in "auto",
+     never in "off" or under reduced motion, where the ellipsis and the
+     tooltip stand. */
+  @media (prefers-reduced-motion: no-preference) {
+    .bar-title[data-roll="hover"][data-overflow]:hover .bar-title-text,
+    .bar-title[data-roll="auto"][data-overflow] .bar-title-text {
+      overflow: visible;
+      text-overflow: clip;
+      animation: window-title-roll var(--window-title-roll-duration) linear infinite;
+    }
+  }
+  @keyframes window-title-roll {
+    0%,
+    12% {
+      transform: translateX(0);
+    }
+    45%,
+    60% {
+      transform: translateX(var(--window-title-roll-distance));
+    }
+    93%,
+    100% {
+      transform: translateX(0);
+    }
   }
   /* In the strip's type, at its active tab's weight; a long name gives up
      the slot's empty stretch first, then ends in an ellipsis. */
