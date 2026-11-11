@@ -283,7 +283,8 @@ enum SocketEnd {
     Open,
 }
 
-/// Every text frame the socket sends from here to its end. A session still
+/// Every text frame except the independently tested program reading, from here to
+/// the socket's end. A session still
 /// in the registry also gets an output fence, so a socket that stays open
 /// ends the read at that event rather than at a timeout.
 async fn frames_to_end(rig: &Rig, client: &mut Client) -> (Vec<Value>, SocketEnd) {
@@ -299,7 +300,10 @@ async fn frames_to_end(rig: &Rig, client: &mut Client) -> (Vec<Value>, SocketEnd
                 return (frames, SocketEnd::Closed)
             }
             Some(Ok(ClientMessage::Text(text))) => {
-                frames.push(serde_json::from_str(&text).expect("JSON frame"))
+                let frame: Value = serde_json::from_str(&text).expect("JSON frame");
+                if frame["type"] != "program" {
+                    frames.push(frame);
+                }
             }
             Some(Ok(ClientMessage::Binary(bytes))) if fenced && bytes.as_ref() == marker => {
                 return (frames, SocketEnd::Open)
@@ -341,7 +345,12 @@ async fn text_frame(client: &mut Client) -> Value {
             .expect("socket open")
             .expect("frame")
         {
-            ClientMessage::Text(text) => return serde_json::from_str(&text).expect("JSON frame"),
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("JSON frame");
+                if frame["type"] != "program" {
+                    return frame;
+                }
+            }
             ClientMessage::Close(_) => panic!("socket closed before expected status"),
             _ => {}
         }
@@ -959,7 +968,9 @@ async fn read_to_transport_end(client: &mut Client) -> Tail {
             }
             Some(Ok(ClientMessage::Text(text))) => {
                 let frame: Value = serde_json::from_str(&text).expect("JSON frame");
-                kinds.push(frame["type"].as_str().unwrap_or("?").to_owned());
+                if frame["type"] != "program" {
+                    kinds.push(frame["type"].as_str().unwrap_or("?").to_owned());
+                }
                 continue;
             }
             Some(Ok(ClientMessage::Binary(bytes))) => {
@@ -1386,7 +1397,9 @@ async fn a_peer_that_never_answers_the_close_is_dropped_at_the_drain_bound() {
         match bounded(client.next()).await {
             Some(Ok(ClientMessage::Text(text))) => {
                 let frame: Value = serde_json::from_str(&text).expect("JSON frame");
-                kinds.push(frame["type"].as_str().unwrap_or("?").to_owned());
+                if frame["type"] != "program" {
+                    kinds.push(frame["type"].as_str().unwrap_or("?").to_owned());
+                }
             }
             Some(Ok(ClientMessage::Close(frame))) => {
                 break frame.map(|frame| u16::from(frame.code))

@@ -20,7 +20,7 @@ use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
-    AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot,
+    AttachHandle, CloseReason, CreateError, CreateOptions, ProgramReading, ProgramStatusSnapshot,
     QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalExit, TerminalPlacement,
     TmuxAnswer, TmuxConsentSnapshot, TmuxPaneRef, TmuxRequest, ALT_SCREEN_ATTACH_PRELUDE,
     DEFAULT_TERMINAL_GROUP,
@@ -312,6 +312,7 @@ enum ServerFrame {
         /// instead of trusting the anonymous `queue_depth`. Always present
         /// (empty when nothing tagged is queued).
         queued_prompt_ids: Vec<String>,
+        program: ProgramReading,
         program_status: Arc<ProgramStatusSnapshot>,
         /// The tmux control-mode consent state, with the question that
         /// stands, if any, so a client joining mid-question shows it.
@@ -327,6 +328,12 @@ enum ServerFrame {
         /// Recomputed for every attach prelude, including after restart.
         #[serde(skip_serializing_if = "Option::is_none")]
         submit_agent: Option<&'static str>,
+    },
+    #[serde(rename = "program")]
+    Program {
+        id: String,
+        generation: u64,
+        program: ProgramReading,
     },
     #[serde(rename = "program-status")]
     ProgramStatus {
@@ -924,6 +931,63 @@ fn normalize_profile_id(profile: Option<&str>) -> Option<String> {
 
 const PROGRAM_STATUS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
+const PROGRAM_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A changed pair can return to the last sent value while its timer waits.
+/// Keep both the consumed notification and that comparison across cancellation.
+struct ProgramFeed {
+    receiver: tokio::sync::watch::Receiver<ProgramReading>,
+    last_sent: ProgramReading,
+    pending: bool,
+    next_send: tokio::time::Instant,
+}
+
+impl ProgramFeed {
+    fn new(session: &AttachHandle, attached_at: tokio::time::Instant) -> Self {
+        Self {
+            receiver: session.program_rx.clone(),
+            last_sent: session.initial_program.clone(),
+            pending: false,
+            next_send: attached_at + PROGRAM_INTERVAL,
+        }
+    }
+
+    async fn next(&mut self) -> Result<ProgramReading, tokio::sync::watch::error::RecvError> {
+        loop {
+            if !self.pending {
+                self.receiver.changed().await?;
+                self.pending = true;
+            }
+            tokio::time::sleep_until(self.next_send).await;
+            if let Some(reading) = self.take_changed() {
+                return Ok(reading);
+            }
+        }
+    }
+
+    fn take_changed(&mut self) -> Option<ProgramReading> {
+        self.pending = false;
+        let reading = self.receiver.borrow_and_update().clone();
+        if reading == self.last_sent {
+            return None;
+        }
+        self.last_sent = reading.clone();
+        Some(reading)
+    }
+
+    fn sent(&mut self) {
+        self.next_send = tokio::time::Instant::now() + PROGRAM_INTERVAL;
+    }
+}
+
+fn program_frame(session: &AttachHandle, program: ProgramReading) -> ServerFrame {
+    ServerFrame::Program {
+        id: session.id().to_owned(),
+        generation: session.generation,
+        program,
+    }
+}
+
 /// Remembers a consumed watch notification across select cancellation while
 /// waiting for the next allowed send. Clean receivers have no ready timer.
 struct ProgramStatusFeed {
@@ -1034,7 +1098,7 @@ where
 }
 
 /// End a socket on its session's exit: drop the session from the registry,
-/// wait out the open status interval, then send the final status and `exit`.
+/// wait out the open intervals, then send the cleared reading, final status and `exit`.
 /// The socket ends after it either way, so it sends one `exit` whether the
 /// exit came as an event or with the attach, which can also find the event
 /// on its subscription.
@@ -1043,12 +1107,23 @@ async fn send_exit(
     state: &AppState,
     session: &AttachHandle,
     program_status: &mut ProgramStatusFeed,
+    program: &mut ProgramFeed,
     exit: &TerminalExit,
 ) {
     state.terminal_sessions.remove_incarnation(session);
     #[cfg(all(test, unix))]
     program_status_tests::observe_exit_wait(session.id());
-    tokio::time::sleep_until(program_status.next_send).await;
+    #[cfg(all(test, unix))]
+    terminal_program_tests::observe_exit_wait(session.id());
+    tokio::time::sleep_until(program_status.next_send.max(program.next_send)).await;
+    if let Some(reading) = program.take_changed() {
+        if send_frame(socket, program_frame(session, reading))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
     let final_status = program_status.current();
     if send_frame(socket, program_status_frame(session, final_status))
         .await
@@ -1195,9 +1270,18 @@ async fn terminal_ws(
         client_size.map(|size| (size.cols, size.rows)),
     );
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
+    let mut program = ProgramFeed::new(&session, attached_at);
     let mut tmux_consent_rx = session.tmux_consent_rx.clone();
     if let Some(exit) = &session.exit {
-        send_exit(&mut socket, &state, &session, &mut program_status, exit).await;
+        send_exit(
+            &mut socket,
+            &state,
+            &session,
+            &mut program_status,
+            &mut program,
+            exit,
+        )
+        .await;
         finish_socket(socket, 1000, "exit".into()).await;
         return;
     }
@@ -1228,6 +1312,13 @@ async fn terminal_ws(
                 program_status.sent();
                 #[cfg(all(test, unix))]
                 program_status_tests::observe_status_send(session.id());
+            }
+            update = program.next() => {
+                let Ok(reading) = update else { break };
+                if send_frame(&mut socket, program_frame(&session, reading)).await.is_err() {
+                    break;
+                }
+                program.sent();
             }
             changed = tmux_consent_rx.changed() => {
                 let Ok(()) = changed else { break };
@@ -1455,7 +1546,7 @@ async fn terminal_ws(
                         }
                     }
                     Ok(SessionEvent::Exit(exit)) => {
-                        send_exit(&mut socket, &state, &session, &mut program_status, &exit).await;
+                        send_exit(&mut socket, &state, &session, &mut program_status, &mut program, &exit).await;
                         finish = Some((1000, "exit"));
                         break;
                     }
@@ -1518,9 +1609,10 @@ async fn terminal_ws(
                                     break;
                                 };
                                 program_status = ProgramStatusFeed::new(&session, attached_at);
+                                program = ProgramFeed::new(&session, attached_at);
                                 tmux_consent_rx = session.tmux_consent_rx.clone();
                                 if let Some(exit) = &session.exit {
-                                    send_exit(&mut socket, &state, &session, &mut program_status, exit)
+                                    send_exit(&mut socket, &state, &session, &mut program_status, &mut program, exit)
                                         .await;
                                     finish = Some((1000, "exit"));
                                     break;
@@ -1692,6 +1784,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
+        program: session.initial_program.clone(),
         program_status: session.initial_program_status.clone(),
         tmux_consent: session.initial_tmux_consent.clone(),
         tmux_pane: session
@@ -1965,6 +2058,10 @@ pub fn spawn_roster_broadcaster(
         }
     })
 }
+
+#[cfg(all(test, unix))]
+#[path = "terminal_program_tests.rs"]
+mod terminal_program_tests;
 
 #[cfg(all(test, unix))]
 #[path = "terminal_program_status_tests.rs"]
@@ -2719,6 +2816,7 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
+            program: ProgramReading::default(),
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_pane: None,
@@ -2726,7 +2824,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program":{"title":null,"command":null},"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0},"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
@@ -2743,6 +2841,7 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],
+            program: ProgramReading::default(),
             program_status: Arc::new(ProgramStatusSnapshot::default()),
             tmux_consent: Arc::new(TmuxConsentSnapshot::default()),
             tmux_pane: None,
@@ -2750,7 +2849,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&session_empty).unwrap(),
-            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[],"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0}}"#
+            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[],"program":{"title":null,"command":null},"program_status":{"revision":0,"records":[]},"tmux_consent":{"revision":0}}"#
         );
         // cancel-prompt decode (client→server) -- pin the tag + field so a
         // rename can't silently break the SPA wire with a green build.
