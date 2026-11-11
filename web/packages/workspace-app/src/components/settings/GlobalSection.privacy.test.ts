@@ -4,6 +4,20 @@ import { closeSettings, openSettings, settleSettings } from "../../__tests__/set
 
 afterEach(async () => { closeSettings(); await setPrivacy({ enabled: false, mask_terminal_secrets: false }); });
 
+test("Global privacy hint names the concealed surfaces and the field reveal limit", async () => {
+  const { target } = await openSettings("Global");
+  const heading = [...target.querySelectorAll("h3")].find((node) => node.textContent === "Privacy mode");
+  const hint = heading?.closest("section")?.querySelector(".hint")?.textContent ?? "";
+  for (const detail of [
+    "computer and gateway names", "addresses", "connection scripts and tokens",
+    "workspace paths in Computers", "WireGuard file paths and public keys", "connection errors",
+    "launcher notices and action details", "window labels in Computers", "window titles",
+    "pane list's heading and terminal program details", "Metrics slide's host name and chan home path",
+    "where an eye button is shown", "Shared across Chan desktop windows, or browser tabs at the same address",
+    "Screen recording is not detected automatically",
+  ]) expect.soft(hint).toContain(detail);
+});
+
 test("Global privacy controls save on the viewing client without changing tenant preferences", async () => {
   const { target, writes } = await openSettings("Global");
   const label = [...target.querySelectorAll("label")].find((node) => node.textContent?.includes("Privacy mode on"))!;
