@@ -1,0 +1,21 @@
+# tmux 3.2a, recorded by a tmux -CC client attached to session main (3.2a-renumber-on-close.txt)
+# listing
+@0 ae5d,80x23,0,0,0 ae5d,80x23,0,0,0  sh
+@1 b25e,80x24,0,0,1 b25e,80x24,0,0,1 - sh
+@2 b25f,80x24,0,0,2 b25f,80x24,0,0,2 * sh
+# panes @0
+%0 1
+# panes @1
+%1 1
+# panes @2
+%2 1
+# leg kill-window -t main:0 (renumber-windows on)
+%unlinked-window-close @0
+%subscription-changed chan-pane-name $0 @1 0 %1 : 1 2 15 sh chan-v0128-desk
+%subscription-changed chan-pane-name $0 @2 1 %2 : 1 2 15 sh chan-v0128-desk
+# refused @0
+can't find window: @0
+# panes @1
+%1 1
+# panes @2
+%2 1

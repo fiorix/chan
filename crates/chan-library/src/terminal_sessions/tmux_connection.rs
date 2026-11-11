@@ -190,6 +190,10 @@ pub(super) enum Purpose {
     Fire,
     ListWindows,
     ListPanes(WindowId),
+    /// The pane list asked of a window tmux reported closed: tmux answers
+    /// it for a window that lives on in any session, which a move leaves,
+    /// and refuses it for one that is gone.
+    Unlinked(WindowId),
     Capture(PaneId),
     /// A `new-window` a client asked for; the window it adds is bound by
     /// `pending_new_windows`, not the reply.
@@ -285,6 +289,9 @@ pub(super) struct TmuxConnection {
     /// Typed input the client's queue could not take yet, oldest first.
     input_backlog: VecDeque<(PaneId, Vec<u8>)>,
     backlog_bytes: usize,
+    /// Windows tmux reported closed whose pane list the client's queue
+    /// could not take yet; each keeps its chan window until it is asked.
+    unasked: Vec<WindowId>,
     /// The latest size asked for each window, sent when the queue allows.
     resize_wanted: BTreeMap<WindowId, (u32, u32)>,
     /// The attached session, as tmux announced it.
@@ -326,6 +333,7 @@ impl TmuxConnection {
                 pending: HashMap::new(),
                 input_backlog: VecDeque::new(),
                 backlog_bytes: 0,
+                unasked: Vec::new(),
                 resize_wanted: BTreeMap::new(),
                 session,
                 pending_new_windows: 0,
@@ -554,7 +562,7 @@ impl TmuxConnection {
                 self.window_seen(window, String::new(), &mut steps);
             }
             Message::WindowClose(window) | Message::UnlinkedWindowClose(window) => {
-                self.window_closed(window, &mut steps);
+                self.window_unlinked(window, &mut steps);
             }
             Message::WindowRenamed { window, name }
             | Message::UnlinkedWindowRenamed { window, name } => {
@@ -613,6 +621,9 @@ impl TmuxConnection {
                 if let Purpose::Capture(pane) = purpose {
                     // The pane is gone; tmux says so with a notification too.
                     self.pane_gone(pane, &mut steps);
+                } else if let Purpose::Unlinked(window) = purpose {
+                    // tmux has no such window in any session: it closed.
+                    self.window_closed(window, &mut steps);
                 } else {
                     if purpose == Purpose::NewWindow {
                         // No window came of it, so the next one tmux adds is
@@ -626,6 +637,9 @@ impl TmuxConnection {
         };
         match purpose {
             Purpose::Fire | Purpose::Capture(_) | Purpose::NewWindow => {}
+            // tmux lists panes for a window it reported closed: the window
+            // moved, and keeps its chan window and its pane sessions.
+            Purpose::Unlinked(_) => {}
             Purpose::ListWindows => match parse_list_windows(&rows) {
                 Ok(windows) => {
                     for info in windows {
@@ -848,6 +862,18 @@ impl TmuxConnection {
         self.input_backlog.push_back((pane, bytes));
     }
 
+    /// The client refused a submit for a full queue and dropped it. A
+    /// window's close question is kept, once per window however often tmux
+    /// reports the close, and asked when a reply frees a slot; anything else
+    /// a later reply resubmits or the state replaces.
+    pub(super) fn unsent(&mut self, purpose: Purpose) {
+        if let Purpose::Unlinked(window) = purpose {
+            if !self.unasked.contains(&window) {
+                self.unasked.push(window);
+            }
+        }
+    }
+
     /// The connection is over: every pane session ends, every minted window
     /// goes, and nothing more is submitted.
     pub(super) fn on_end(&mut self, exit: TerminalExit) -> Vec<Step> {
@@ -925,6 +951,9 @@ impl TmuxConnection {
             for command in Command::send_keys(pane, &bytes) {
                 steps.push(Step::Submit(command, Purpose::Fire));
             }
+        }
+        for window in std::mem::take(&mut self.unasked) {
+            self.window_unlinked(window, steps);
         }
         self.send_resizes(steps);
     }
@@ -1069,6 +1098,24 @@ impl TmuxConnection {
             window_id: chan_window,
             label,
         })));
+    }
+
+    /// tmux reported `window` closed, which is also how it reports a move:
+    /// a window moved to another index or session is reported as added and
+    /// then closed, and before tmux 3.8 a window that leaves this session is
+    /// reported closed under the same unlinked name whether it moved or was
+    /// killed. So tmux is asked for the window's panes, which it lists for a
+    /// window that lives on in any session and refuses for one that is
+    /// gone; it runs commands in order, so the answer is about the window
+    /// after the command that moved or killed it. Until tmux refuses, the
+    /// window keeps its chan window and its pane sessions.
+    fn window_unlinked(&mut self, window: WindowId, steps: &mut Vec<Step>) {
+        if self.windows.contains_key(&window) {
+            steps.push(Step::Submit(
+                Command::ListPanes(window),
+                Purpose::Unlinked(window),
+            ));
+        }
     }
 
     fn window_closed(&mut self, window: WindowId, steps: &mut Vec<Step>) {

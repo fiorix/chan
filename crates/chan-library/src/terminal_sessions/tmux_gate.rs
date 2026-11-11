@@ -726,8 +726,8 @@ impl TmuxGate {
 }
 
 /// Submit the connection's commands through the client and collect its
-/// actions. A full queue keeps typed keys in the connection's backlog and
-/// drops anything else, which a later reply resubmits or the state replaces;
+/// actions. A full queue keeps typed keys in the connection's backlog, and
+/// hands it anything else to keep or drop (see `TmuxConnection::unsent`);
 /// any other refusal is the stream's and ends it.
 fn drive(
     client: &mut Client,
@@ -747,7 +747,8 @@ fn drive(
                     if let Command::SendKeys { pane, bytes } = command {
                         connection.backlog(pane, bytes);
                     } else {
-                        tracing::debug!(?purpose, "tmux command queue full; dropped");
+                        tracing::debug!(?purpose, "tmux command queue full; not sent");
+                        connection.unsent(purpose);
                     }
                 }
                 Err(chan_tmux::Error::BadArgument(what)) => {
