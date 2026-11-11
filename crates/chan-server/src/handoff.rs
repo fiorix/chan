@@ -4139,14 +4139,12 @@ mod tests {
 
         const ERROR_PIPE_BUSY: i32 = 231;
         let sid = chan_winpipe::current_account_sid().unwrap();
+        // Compared as SIDs: SDDL writes a well-known account by its alias, so
+        // the built-in Administrator's pipes read back `O:LAD:P(A;;FA;;;LA)`.
         let owner_only = |sddl: String| {
             assert!(
-                [
-                    format!("O:{sid}D:P(A;;FA;;;{sid})"),
-                    format!("O:{sid}D:P(A;;GA;;;{sid})"),
-                ]
-                .contains(&sddl),
-                "{sddl}"
+                chan_winpipe::grants_account_alone(&sddl, sid),
+                "{sddl} for {sid}"
             )
         };
         let pipe = test_pipe("owner-only");
