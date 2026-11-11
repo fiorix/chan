@@ -15,7 +15,8 @@
 
 #[cfg(windows)]
 pub use sys::{
-    create_owner_only, create_with_sddl, current_account_sid, security_sddl, server_account_sid,
+    create_owner_only, create_with_sddl, current_account_sid, grants_account_alone, sddl_sid,
+    security_sddl, server_account_sid,
 };
 
 /// The SDDL of a security descriptor that grants the account `sid` alone:
@@ -23,6 +24,39 @@ pub use sys::{
 /// so no inherited or default entry applies.
 pub fn owner_only_sddl(sid: &str) -> String {
     format!("O:{sid}D:P(A;;GA;;;{sid})")
+}
+
+/// The owner, and the rights and trustee of the one entry, of a descriptor in
+/// the owner-only shape `O:<owner>D:P(A;;<rights>;;;<trustee>)`, as SDDL
+/// spells them. A SID reads as its string form or, for a well-known SID, as
+/// the two-letter alias SDDL writes for it (`LA` for the built-in
+/// Administrator), so the two parts name accounts only once resolved.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OwnerOnlyParts<'a> {
+    pub owner: &'a str,
+    pub rights: &'a str,
+    pub trustee: &'a str,
+}
+
+/// Split `sddl` into its [`OwnerOnlyParts`]; `None` for any other shape: an
+/// unprotected or auto-inherited DACL, a second entry, a deny, or an entry
+/// with flags or an object type.
+pub fn owner_only_parts(sddl: &str) -> Option<OwnerOnlyParts<'_>> {
+    let (owner, entry) = sddl.strip_prefix("O:")?.split_once("D:P(")?;
+    let entry = entry.strip_suffix(')')?;
+    if owner.is_empty() || entry.contains(['(', ')']) {
+        return None;
+    }
+    match entry.split(';').collect::<Vec<_>>().as_slice() {
+        ["A", "", rights, "", "", trustee] if !rights.is_empty() && !trustee.is_empty() => {
+            Some(OwnerOnlyParts {
+                owner,
+                rights,
+                trustee,
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -37,8 +71,8 @@ mod sys {
     use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-        SE_KERNEL_OBJECT,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
@@ -49,7 +83,7 @@ mod sys {
         GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    use super::owner_only_sddl;
+    use super::{owner_only_parts, owner_only_sddl};
 
     /// The SID of the account this process runs as, as text (`S-1-5-21-...`),
     /// read from the process token the first time and kept, since a process
@@ -176,6 +210,35 @@ mod sys {
         Ok(unsafe { wide_string(text.0.cast()) })
     }
 
+    /// The string form (`S-1-...`) of the SID an SDDL token names: a SID
+    /// string, or the two-letter alias SDDL writes for a well-known SID, which
+    /// resolves to the SID it stands for on this machine.
+    pub fn sddl_sid(token: &str) -> io::Result<String> {
+        let text: Vec<u16> = token.encode_utf16().chain(Some(0)).collect();
+        let mut sid: PSID = null_mut();
+        // SAFETY: `text` is NUL-terminated and outlives the call, and `sid`
+        // receives a SID the system allocated, which `Local` frees below.
+        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sid = Local(sid);
+        sid_string(sid.0)
+    }
+
+    /// Whether `sddl`, a descriptor [`security_sddl`] read back, grants the
+    /// account `sid` alone: the account owns it, and the protected DACL's one
+    /// entry allows it full access, the generic right or the pipe's full
+    /// access it maps to. The owner and the trustee are compared as SIDs,
+    /// since SDDL writes a well-known account by its alias: a pipe the
+    /// built-in Administrator owns reads `O:LAD:P(A;;FA;;;LA)`.
+    pub fn grants_account_alone(sddl: &str, sid: &str) -> bool {
+        let Some(parts) = owner_only_parts(sddl) else {
+            return false;
+        };
+        let is_account = |token: &str| sddl_sid(token).is_ok_and(|resolved| resolved == sid);
+        matches!(parts.rights, "FA" | "GA") && is_account(parts.owner) && is_account(parts.trustee)
+    }
+
     /// The SID of the account the process behind `process`, a handle with at
     /// least PROCESS_QUERY_LIMITED_INFORMATION, runs as.
     fn process_account_sid(process: HANDLE) -> io::Result<String> {
@@ -267,6 +330,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_owner_only_descriptor_splits_into_its_owner_and_one_entry() {
+        assert_eq!(
+            owner_only_parts("O:S-1-5-21-1-2-3-1001D:P(A;;FA;;;S-1-5-21-1-2-3-1001)"),
+            Some(OwnerOnlyParts {
+                owner: "S-1-5-21-1-2-3-1001",
+                rights: "FA",
+                trustee: "S-1-5-21-1-2-3-1001",
+            })
+        );
+        // The built-in Administrator, as the system writes it back.
+        assert_eq!(
+            owner_only_parts("O:LAD:P(A;;FA;;;LA)"),
+            Some(OwnerOnlyParts {
+                owner: "LA",
+                rights: "FA",
+                trustee: "LA",
+            })
+        );
+    }
+
+    #[test]
+    fn any_other_descriptor_shape_is_not_owner_only() {
+        for sddl in [
+            "O:LAD:(A;;FA;;;LA)",
+            "O:LAD:PAI(A;;FA;;;LA)",
+            "O:LAD:P(A;;FA;;;LA)(A;;FA;;;SY)",
+            "O:LAD:P(A;;FA;;;LA)(XYZ)",
+            "O:LAD:P(D;;FA;;;LA)",
+            "O:LAD:P(A;OICI;FA;;;LA)",
+            "O:LAD:P(A;;FA;;;)",
+            "D:P(A;;FA;;;LA)",
+            "O:D:P(A;;FA;;;LA)",
+            "O:LAD:P(A;;FA;;;LA",
+        ] {
+            assert_eq!(owner_only_parts(sddl), None, "{sddl}");
+        }
+    }
+
     #[cfg(windows)]
     mod on_windows {
         use super::super::*;
@@ -280,17 +382,38 @@ mod tests {
             format!(r"\\.\pipe\chan-winpipe-test-{tag}-{}", std::process::id())
         }
 
-        /// The owner-only descriptor as the pipe holds it: the generic right
-        /// may read back mapped to the pipe's full access.
+        /// The owner-only descriptor as the pipe holds it, read back in the
+        /// form the system writes for this account.
         fn assert_owner_only(sddl: &str, sid: &str) {
-            assert!(
-                [
-                    format!("O:{sid}D:P(A;;FA;;;{sid})"),
-                    format!("O:{sid}D:P(A;;GA;;;{sid})"),
-                ]
-                .contains(&sddl.to_string()),
-                "{sddl}"
-            );
+            assert!(grants_account_alone(sddl, sid), "{sddl} for {sid}");
+        }
+
+        /// SDDL writes a well-known account by its alias, so the built-in
+        /// Administrator's own pipe reads back `O:LAD:P(A;;FA;;;LA)`; that
+        /// grants it alone, compared as SIDs, and grants no other account.
+        #[test]
+        fn a_well_known_account_reads_by_its_alias_and_still_grants_it_alone() {
+            assert_eq!(sddl_sid("SY").unwrap(), "S-1-5-18");
+            let sid = current_account_sid().unwrap();
+            assert_eq!(sddl_sid(sid).unwrap(), sid);
+            let la = sddl_sid("LA").unwrap();
+            assert!(la.starts_with("S-1-5-21-") && la.ends_with("-500"), "{la}");
+            assert!(grants_account_alone("O:LAD:P(A;;FA;;;LA)", &la));
+            assert!(grants_account_alone(
+                &format!("O:{la}D:P(A;;GA;;;{la})"),
+                &la
+            ));
+            for other in [
+                "O:LAD:P(A;;FA;;;SY)".to_string(),
+                "O:SYD:P(A;;FA;;;LA)".to_string(),
+                "O:LAD:P(A;;FR;;;LA)".to_string(),
+                "O:LAD:P(A;;FA;;;LA)(A;;FA;;;SY)".to_string(),
+                format!("O:{la}D:(A;;FA;;;{la})"),
+            ] {
+                assert!(!grants_account_alone(&other, &la), "{other}");
+            }
+            assert!(!grants_account_alone("O:LAD:P(A;;FA;;;LA)", "S-1-5-18"));
+            assert!(!grants_account_alone("O:XXD:P(A;;FA;;;XX)", &la));
         }
 
         #[test]
