@@ -467,9 +467,13 @@
     font-weight: 600;
     word-break: break-word;
   }
+  /* The key column grows to the widest key ("subdirectories") from a floor
+     that holds it in the common UI faces and that every inspector body and
+     the code report share, so a body's grids start their values at one
+     edge. */
   .meta-grid {
     display: grid;
-    grid-template-columns: 6.5em 1fr;
+    grid-template-columns: minmax(7.5em, max-content) 1fr;
     gap: 2px 0.5rem;
     margin: 0.4rem 0 0.6rem 0;
     font-size: 14px;

@@ -14,6 +14,9 @@ import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
 import appSource from "../App.svelte?raw";
 import bodySource from "./WorkspaceInfoBody.svelte?raw";
 import codeReportSource from "./CodeReportSection.svelte?raw";
+import fileInfoSource from "./FileInfoBody.svelte?raw";
+import languageInfoSource from "./LanguageInfoBody.svelte?raw";
+import tagInfoSource from "./TagInfoBody.svelte?raw";
 import type { GraphView, ReportPrefix } from "../api/types";
 import { graphData, invalidateGraph } from "../state/graphData.svelte";
 import { ApiError } from "../api/errors";
@@ -510,5 +513,39 @@ describe("the laid-out body", () => {
     expect(isolate?.getAttribute("dir")).toBe("ltr");
     expect(isolate?.textContent).toBe("/work/tmp/chan-smoke-X");
     expect(cell.textContent).toBe(isolate?.textContent);
+  });
+
+  test("every key column on the slide fits its longest key, and all of them line up", async () => {
+    h.report = prefix;
+    const target = await render({ variant: "dashboard" });
+    await vi.waitFor(() => expect(target.querySelector(".code-report")).not.toBeNull());
+    injectCss(target);
+    const grids = [...target.querySelectorAll<HTMLElement>(".meta-grid")];
+    // The root's directory, the counts, the code report's totals and its
+    // COCOMO estimate.
+    expect(grids.map((g) => g.querySelector(".k")?.textContent)).toEqual(["directory", "files", "indexed", "effort"]);
+    expect(target.textContent).toContain("subdirectories");
+
+    const columns = grids.map((g) => getComputedStyle(g).gridTemplateColumns);
+    // The key column grows to its widest key, so "subdirectories" never
+    // runs into its value, from a floor every grid shares so their value
+    // columns start at one edge.
+    for (const c of columns) expect(c).toMatch(/^minmax\(\d+(\.\d+)?em, max-content\) 1fr$/);
+    expect(new Set(columns).size).toBe(1);
+  });
+
+  test("every inspector body's key grid takes the code report's rule", () => {
+    // The file, language and tag inspectors show the same code report under
+    // their own grids, so their key columns line up only on one rule.
+    const rule = (source: string) =>
+      componentCss(source, "svelte-body").match(/\.meta-grid\.svelte-body\s*\{[^}]*grid-template-columns:\s*([^;]+);/)?.[1];
+    const report = rule(codeReportSource);
+    expect(report).toMatch(/max-content/);
+    expect({
+      workspace: rule(bodySource),
+      file: rule(fileInfoSource),
+      language: rule(languageInfoSource),
+      tag: rule(tagInfoSource),
+    }).toEqual({ workspace: report, file: report, language: report, tag: report });
   });
 });
