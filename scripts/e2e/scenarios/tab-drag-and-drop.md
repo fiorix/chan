@@ -145,11 +145,11 @@ Moving a DRAFT releases it. The draft's promote / discard / cancel flow must not
 
 ### TD-08 - the same holds in the desktop WebViews
 
-**MANUAL.** No automated coverage is possible today, on any platform.
+**MANUAL.** No check performs these moves in a desktop WebView yet.
 
 **Expectation.** Everything above holds in the shipped desktop apps, between two `chan-desktop` windows: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows.
 
-**Why this cannot be automated.** Two distinct limits stack. No browser automation protocol can perform a drag between two top-level windows: CDP's drag interception is per-page, so even the Chrome arm replays the payload rather than performing the gesture. And the desktop shells expose no automation endpoint at all: `terminal-pixels.mjs` reaches WebView2 only by hosting a page inside a built `chan-desktop.exe`, which is enough to measure pixels and not enough to drive a two-window drag.
+**What automation reaches today.** The desktop shells can be driven: on Linux the drivers under `desktop-observations/` start chan-desktop with WebKitGTK's remote inspector (`WEBKIT_INSPECTOR_HTTP_SERVER`), evaluate script in its pages through `inspect.mjs`, and send native input under Xvfb with `xdotool` (`hide-flush.sh` types into a note, `basic-flows.sh` pastes into the editor and the Rich Prompt), and on Windows `desktop-wireguard-windows.sh` drives chan-desktop's WebView2 over its remote debugging port. WKWebView on macOS has no such endpoint in this tree. What none of them performs is a pointer drag between two top-level windows. CDP's drag interception is per page, so the Chrome arm replays the payload rather than performing the gesture, and the only desktop tab move, in `terminal-size-native.mjs`, dispatches synthetic drag events between two panes of one page, a payload the page made itself, which is what this pack distrusts. A two-window drag by `xdotool` on WebKitGTK is within reach of those drivers and not written.
 
 **Why it must still be checked.** These engines have already diverged from Chrome on this exact surface. WKWebView mangles a MIME type containing `:` or `|`, which is why the drag scope is hex-encoded through `dragScopeMimeToken`; without that encoding every drop is rejected, and no Chrome check can see it. `webview-flip-render.py` exists because WebKitGTK ignores a CSS property Chrome honors. A green web suite is not evidence about these engines; it is evidence about Chrome.
 
