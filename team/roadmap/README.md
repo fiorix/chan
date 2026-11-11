@@ -58,7 +58,7 @@ One more came from the owner on 2026-11-11 and was built outside the team by his
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
-| [find frames run long at max scrollback][findfeed] | not started | design |
+| [find frames run long at max scrollback][findfeed] | landed | GA |
 | [local devserver calls go through a proxy][cliproxy] | landed | GA |
 | [one WireGuard ingress per proxy node][wgnode] | partly built | build |
 | [the Rust TLS clients ignore the system's CA store][systemca] | built | gate |
