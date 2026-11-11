@@ -456,18 +456,25 @@ impl WireguardFabric {
     }
 
     /// Why discovery through this gateway's running tunnel lacks a session.
-    /// A row whose configured file changed cannot explain the new row.
-    pub fn discovery_failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+    /// An enrolled ingress explains only names its host map carries.
+    pub fn discovery_failure(
+        &self,
+        gateway_id: &str,
+        configured: Option<&Path>,
+        host: Option<&str>,
+    ) -> Option<String> {
         let rows = self.rows.lock().unwrap();
         let row = rows.get(gateway_id)?;
-        // Without a destination, only a manual tunnel can explain an
-        // identity-origin failure. An enrolled node's outage says nothing
-        // about the public identity service or another node.
-        if row.enrollment.is_some() {
-            return None;
-        }
-        match &row.ingresses.first()?.1 {
-            ingress @ Row::Running {
+        let ingress = if row.enrollment.is_some() {
+            let host = host?;
+            &row.ingresses.iter().find(|(_, ingress)| matches!(ingress,
+                Row::Running { hosts, .. } if hosts.iter().any(|route| host_route_matches(&route.name, host))
+            ))?.1
+        } else {
+            &row.ingresses.first()?.1
+        };
+        match ingress {
+            Row::Running {
                 path,
                 endpoint,
                 started,
@@ -502,6 +509,21 @@ impl WireguardFabric {
             Proxy::Unavailable(reason) if configured.is_some() => Some(reason.clone()),
             _ => None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ingress_starts(&self, gateway_id: &str) -> Vec<(String, Instant)> {
+        self.rows
+            .lock()
+            .unwrap()
+            .get(gateway_id)
+            .into_iter()
+            .flat_map(|row| &row.ingresses)
+            .filter_map(|(id, row)| match row {
+                Row::Running { started, .. } => Some((id.clone(), *started)),
+                Row::Refused { .. } => None,
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -1277,11 +1299,11 @@ pub(crate) mod tests {
         }
     }
 
-    async fn enrolled_peers(dir: &Path) -> (Gateway, Vec<Peer>) {
+    pub(crate) async fn enrolled_peers(dir: &Path, id: &str) -> (Gateway, Vec<Peer>) {
         use crate::wireguard_keys::{EnrollmentIngress, EnrollmentParams};
         let client = secret();
         let public = base64_of(PublicKey::from(&client).as_bytes());
-        let key = owner_only(dir, "gw-multi.key", &base64_of(&client.to_bytes()));
+        let key = owner_only(dir, &format!("{id}.key"), &base64_of(&client.to_bytes()));
         let mut peers = Vec::new();
         let mut ingresses = Vec::new();
         for id in ["p1", "p2"] {
@@ -1324,8 +1346,8 @@ pub(crate) mod tests {
             ),
         };
         let enrollment =
-            crate::wireguard_keys::prepare(dir, "gw-multi", &public, &discovery, &params).unwrap();
-        let mut row = gateway("gw-multi", None);
+            crate::wireguard_keys::prepare(dir, id, &public, &discovery, &params).unwrap();
+        let mut row = gateway(id, None);
         row.wireguard_public_key = Some(public.clone());
         row.wireguard_enrolled_key = Some(public);
         row.wireguard_enrollment = Some(enrollment.parameters(key));
@@ -1333,9 +1355,123 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn enrolled_adopt_replaces_all_tunnels_when_shared_client_settings_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut row, _peers) = enrolled_peers(dir.path(), "gw-multi").await;
+        let fabric = start(std::slice::from_ref(&row)).await;
+        for field in ["addresses", "allowed_ips", "keepalive", "key_file", "key"] {
+            let before = fabric.ingress_starts(&row.id);
+            let enrollment = row.wireguard_enrollment.as_mut().unwrap();
+            match field {
+                "addresses" => enrollment.addresses = vec!["10.7.0.3/32".into()],
+                "allowed_ips" => enrollment.allowed_ips = vec!["10.7.0.0/24".into()],
+                "keepalive" => enrollment.persistent_keepalive = Some(25),
+                "key_file" => {
+                    enrollment.key_file = owner_only(
+                        dir.path(),
+                        "other.key",
+                        &std::fs::read_to_string(&enrollment.key_file).unwrap(),
+                    );
+                }
+                "key" => {
+                    let public = crate::wireguard_keys::generate(dir.path(), "other").unwrap();
+                    row.wireguard_public_key = Some(public.clone());
+                    row.wireguard_enrolled_key = Some(public);
+                }
+                _ => unreachable!(),
+            }
+            fabric.adopt_gateway(&row).unwrap().unwrap();
+            let after = fabric.ingress_starts(&row.id);
+            assert_eq!(after.len(), 2);
+            for (old, new) in before.iter().zip(after.iter()) {
+                assert_eq!(old.0, new.0);
+                assert_ne!(old.1, new.1, "{field} must replace every tunnel");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn enrolled_status_uses_the_worst_running_ingress_and_keeps_refusal_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let (row, _peers) = enrolled_peers(dir.path(), "gw-multi").await;
+        let fabric = start(std::slice::from_ref(&row)).await;
+        let status = |handshake, error: Option<&str>| chan_wireguard::Status {
+            handshake,
+            endpoint: Some("127.0.0.1:9".parse().unwrap()),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            resolution_error: error.map(str::to_owned),
+            resolution_stalled: false,
+        };
+        use chan_wireguard::HandshakeState::{Live, Lost, Never};
+        let states = [
+            status(Live(Duration::ZERO), None),
+            status(Live(Duration::ZERO), Some("DNS retry")),
+            status(Never, None),
+            status(Never, Some("DNS retry")),
+            status(Lost(Duration::from_secs(200)), None),
+        ];
+        let assign = |a: chan_wireguard::Status, b: chan_wireguard::Status| {
+            let mut rows = fabric.rows.lock().unwrap();
+            for ((_, ingress), status) in rows
+                .get_mut(&row.id)
+                .unwrap()
+                .ingresses
+                .iter_mut()
+                .zip([a, b])
+            {
+                let Row::Running { test_status, .. } = ingress else {
+                    panic!("running ingress")
+                };
+                *test_status = Some(status);
+            }
+        };
+        for (rank, worse) in states.iter().enumerate() {
+            for better in &states[..=rank] {
+                for pair in [[better, worse], [worse, better]] {
+                    assign(pair[0].clone(), pair[1].clone());
+                    assert_eq!(
+                        fabric.status(&row.id, row.wireguard_source()),
+                        Some(describe(worse.clone()))
+                    );
+                }
+            }
+        }
+        assign(
+            status(Never, Some("first lookup")),
+            status(Never, Some("second lookup")),
+        );
+        assert_eq!(
+            fabric.status(&row.id, row.wireguard_source()).as_deref(),
+            Some("first lookup, retrying")
+        );
+        assign(states[0].clone(), states[0].clone());
+        {
+            let mut rows = fabric.rows.lock().unwrap();
+            rows.get_mut(&row.id).unwrap().ingresses[1].1 = Row::Refused {
+                path: row.wireguard_source().unwrap().to_owned(),
+                reason: "WireGuard: ingress start refused".into(),
+            };
+        }
+        assert_eq!(
+            fabric.status(&row.id, row.wireguard_source()).as_deref(),
+            Some("up")
+        );
+        assert_eq!(
+            fabric
+                .connect_refusal(&row.id, row.wireguard_source())
+                .as_deref(),
+            Some("gw-multi/p2: WireGuard: ingress start refused")
+        );
+        assert!(fabric
+            .status(&row.id, Some(&dir.path().join("other.key")))
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn two_ingress_enrollment_routes_each_name_to_its_own_peer() {
         let dir = tempfile::tempdir().unwrap();
-        let (row, peers) = enrolled_peers(dir.path()).await;
+        let (row, peers) = enrolled_peers(dir.path(), "gw-multi").await;
         let key = row.wireguard_source().unwrap();
         let key_bytes = std::fs::read(key).unwrap();
         let fabric = start(std::slice::from_ref(&row)).await;
@@ -1365,7 +1501,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_dead_ingress_does_not_block_another_nodes_names() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut row, peers) = enrolled_peers(dir.path()).await;
+        let (mut row, peers) = enrolled_peers(dir.path(), "gw-multi").await;
         row.wireguard_enrollment.as_mut().unwrap().ingresses[1].endpoint = "127.0.0.1:9".into();
         let fabric = start(std::slice::from_ref(&row)).await;
         let mut listener = peers[0].tunnel.listen(8123).unwrap();
@@ -1407,7 +1543,11 @@ pub(crate) mod tests {
             .contains("127.0.0.1:9"));
         assert!(
             fabric
-                .discovery_failure(&row.id, row.wireguard_source())
+                .discovery_failure(
+                    &row.id,
+                    row.wireguard_source(),
+                    Some("identity.chan.invalid")
+                )
                 .is_none(),
             "a node cannot explain failure of the public identity service"
         );
@@ -1416,7 +1556,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn enrolled_adopt_reorders_without_restarting_and_replaces_only_changed_ingresses() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut row, peers) = enrolled_peers(dir.path()).await;
+        let (mut row, peers) = enrolled_peers(dir.path(), "gw-multi").await;
         let fabric = start(std::slice::from_ref(&row)).await;
         let started = |id: &str| {
             let rows = fabric.rows.lock().unwrap();
@@ -2666,15 +2806,15 @@ pub(crate) mod tests {
                 resolution_stalled: false,
             },
         );
-        let reason = fabric.discovery_failure("gw-a", Some(a)).unwrap();
+        let reason = fabric.discovery_failure("gw-a", Some(a), None).unwrap();
         assert!(reason.contains("no WireGuard handshake"), "{reason}");
         assert!(reason.contains(&a.display().to_string()), "{reason}");
         // Pointed elsewhere, or at nothing, it reads no status until it is
         // adopted again.
         assert_eq!(fabric.status("gw-a", Some(other)), None);
         assert_eq!(fabric.status("gw-a", None), None);
-        assert_eq!(fabric.discovery_failure("gw-a", Some(other)), None);
-        assert_eq!(fabric.discovery_failure("gw-a", None), None);
+        assert_eq!(fabric.discovery_failure("gw-a", Some(other), None), None);
+        assert_eq!(fabric.discovery_failure("gw-a", None, None), None);
         // The refused file carries its reason while the row names it.
         let reason = fabric.failure("gw-b", Some(&b)).expect("b was refused");
         assert!(reason.contains(&b.display().to_string()), "{reason}");
