@@ -1,6 +1,6 @@
 # Small findings of the v0.127.0 second reading are still open
 
-Status: raised on 2026-11-10 by the second reading of v0.127.0's merged code ([its item](../done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md)) and by the fixes made from it, which listed what they saw nearby and left alone. The owner closed v0.127.0 to new work that day ("no more new features at this point, just close off the current in-flight items and the rest moves to v128"), so everything not already fixed or given a row of its own is collected here. Not started. Each line is a reading of the code unless it says it was run.
+Status: raised on 2026-11-10 by the second reading of v0.127.0's merged code ([its item](../done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md)) and by the fixes made from it, which listed what they saw nearby and left alone. The owner closed v0.127.0 to new work that day ("no more new features at this point, just close off the current in-flight items and the rest moves to v128"), so everything not already fixed or given a row of its own is collected here. Not started. Each line is a reading of the code unless it says it was run. Partly built on 2026-11-11: the CI and gateway bullets (below); the rest follow.
 
 ## What is there now
 
@@ -55,3 +55,10 @@ The documents:
 
 1. Each line carries, in this item, the commit that closed it or the reason it stands, and each fix that can be pinned has a test shown red without it.
 2. The scoped gates of what was touched are green, with Gateway CI green on a tip that holds the workflow and roles changes.
+
+## Built, 2026-11-11 (the CI and the gateway's database roles)
+
+- `.github/workflows/ci.yml` declares `permissions: contents: read` (886dea050). The CI log of a prior run shows the default token was already read-only for contents, metadata and packages, so this is the explicit least declaration, not a repair of a write scope; `make workflow-check` green.
+- The roles suite's three "reconcile must refuse" checks and its readiness refusal require the specific exit status and message of each refusal, the sdme driver bounds the suite run to five minutes with a ten-second kill, and the reconcile script's inventory rejects ordinary and materialized views in both runtime schemas, with the Kubernetes copy matching byte for byte (1d74a18eb). Proofs in a disposable PostgreSQL guest: the planted public view passes the old reconciler and is refused by the new one; eight wrong-status and wrong-message mutations pass the old suite and fail the new one at its assertion; the restored suite and the real `make gateway-database-roles-test` driver pass with the bounded timeout.
+- `scripts/e2e/gateway-zone.sh` has one service-stop helper for sharedroot, tunnelhint and ctrlplane, both sharedroot curls bypass inherited proxies, and the tunnel stub's root-landing grantee that no run presents is gone with its environment input (200b36b81); `make shell-check`, the helper and curl probes and the stub's baseline red are the evidence. The full gateway zone scenarios were not run this round: the script is a host-loopback full stack with real devserver processes and Postgres, last run by hand in v0.68.0, and no guest of this round holds it.
+- The `TEMPORARY` grant through `PUBLIC` is larger than a small change (contract 2): after the complete roles suite both application roles effectively hold `TEMPORARY`, and a revoke from `PUBLIC` in a guest transaction makes both false while `CONNECT` stays true. It is a gateway upgrade step with its own acceptance, drafted for the owner as `dev/v0128-team/reports/row-draft-gateway-application-roles-inherit-temporary-table-creation.md`; the live grant is unchanged here.
