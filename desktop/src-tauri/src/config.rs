@@ -1158,7 +1158,9 @@ fn entry_from_gateway(
 ) -> GatewayEntry {
     let view = view.unwrap_or_default();
     let file = g.wireguard.as_deref();
-    let source = g.wireguard_source();
+    let wireguard = wireguard
+        .map(|fabric| fabric.view(&g.id, g.wireguard_source()))
+        .unwrap_or_default();
     GatewayEntry {
         id: g.id.clone(),
         url: g.url.clone(),
@@ -1170,14 +1172,10 @@ fn entry_from_gateway(
         // A row whose file was refused has no runtime to carry the reason,
         // so the projection carries it until a connect sets its own; so
         // does every row with a file while the proxy could not bind.
-        last_error: view
-            .last_error
-            .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, source))),
+        last_error: view.last_error.or(wireguard.connect_refusal),
         wireguard: file.map(|path| path.display().to_string()),
-        wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, source)),
-        wireguard_ingresses: wireguard
-            .map(|fabric| fabric.ingress_statuses(&g.id, source))
-            .unwrap_or_default(),
+        wireguard_status: wireguard.status,
+        wireguard_ingresses: wireguard.ingresses,
         wireguard_public_key: g.wireguard_public_key.clone(),
         wireguard_enrolled: g.wireguard_public_key.is_some()
             && g.wireguard_enrolled_key == g.wireguard_public_key,
@@ -3900,6 +3898,100 @@ mod tests {
             ])
         );
         assert_eq!(projected()["wireguard_status"], lost);
+    }
+
+    #[tokio::test]
+    async fn gateway_list_keeps_one_fabric_view_across_reconcile() {
+        for refused_before in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut gateway, _peers) =
+                crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+            let (_store, fabric, reg) =
+                gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+            if refused_before {
+                fabric.retire(&gateway.id);
+                fabric.refuse_start("gw-multi/p1");
+                fabric.refuse_start("gw-multi/p2");
+                fabric.adopt_gateway(&gateway).unwrap().unwrap_err();
+            }
+            let before = reg.list().remove(0);
+            for (index, ingress) in gateway
+                .wireguard_enrollment
+                .as_mut()
+                .unwrap()
+                .ingresses
+                .iter_mut()
+                .enumerate()
+            {
+                ingress.id = format!("p{}", index + 3);
+                if !refused_before {
+                    fabric.refuse_start(&format!("{}/{}", gateway.id, ingress.id));
+                }
+            }
+            let reconciled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer = Arc::new(Mutex::new(None));
+            let writer_slot = Arc::clone(&writer);
+            let lock_observed = Arc::clone(&locked);
+            let ran = Arc::clone(&reconciled);
+            let changing = Arc::clone(&fabric);
+            fabric.on_next_summary_read(move || {
+                let held = changing.view_lock_is_held();
+                lock_observed.store(held, std::sync::atomic::Ordering::SeqCst);
+                let reconcile = move || {
+                    let result = changing.adopt_gateway(&gateway).unwrap();
+                    assert_eq!(result.is_ok(), refused_before);
+                    ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                };
+                if held {
+                    let (started, ready) = std::sync::mpsc::channel();
+                    *writer_slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                        started.send(()).unwrap();
+                        reconcile();
+                    }));
+                    ready
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                } else {
+                    reconcile();
+                }
+            });
+            let answer = reg.list().remove(0);
+            if let Some(writer) = writer.lock().unwrap().take() {
+                writer.join().unwrap();
+            }
+            assert!(
+                reconciled.load(std::sync::atomic::Ordering::SeqCst),
+                "the competing reconcile completed"
+            );
+            assert_eq!(
+                answer.wireguard_ingresses, before.wireguard_ingresses,
+                "one list answer must keep its ingress snapshot across reconcile"
+            );
+            assert_eq!(
+                answer.wireguard_status, before.wireguard_status,
+                "one list answer must keep its summary snapshot across reconcile"
+            );
+            assert_eq!(
+                answer.last_error, before.last_error,
+                "one list answer must keep its refusal snapshot across reconcile"
+            );
+            assert!(
+                locked.load(std::sync::atomic::Ordering::SeqCst),
+                "the fabric registry must stay locked between summary and ingress reads"
+            );
+            let after = reg.list().remove(0);
+            assert_eq!(
+                after
+                    .wireguard_ingresses
+                    .iter()
+                    .map(|ingress| ingress.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["p3", "p4"]
+            );
+            assert_ne!(after.wireguard_status, before.wireguard_status);
+            assert_ne!(after.last_error, before.last_error);
+        }
     }
 
     #[tokio::test]

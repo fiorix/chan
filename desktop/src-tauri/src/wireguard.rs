@@ -73,6 +73,16 @@ pub struct WireguardFabric {
     next_route_order: AtomicU64,
     #[cfg(test)]
     refused_starts: Mutex<std::collections::HashSet<String>>,
+    #[cfg(test)]
+    after_summary_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+/// One gateway projection from a single fabric registry read.
+#[derive(Default)]
+pub(crate) struct WireguardView {
+    pub connect_refusal: Option<String>,
+    pub status: Option<String>,
+    pub ingresses: Vec<chan_server::WireguardIngressStatus>,
 }
 
 enum Proxy {
@@ -417,56 +427,31 @@ impl WireguardFabric {
         row.is_some()
     }
 
-    /// The worst running ingress's status, with discovery order breaking
-    /// ties; refusals are reported separately by `failure`. A stored path
-    /// different from the running source reads no status until adopted.
-    pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+    /// Refusal, worst running status and ordered ingress states under one
+    /// registry lock, so a reconcile cannot split a gateway's projection.
+    pub(crate) fn view(&self, gateway_id: &str, configured: Option<&Path>) -> WireguardView {
         let rows = self.rows.lock().unwrap();
-        rows.get(gateway_id)?.status(configured)
+        let row = rows.get(gateway_id);
+        let status = row.and_then(|row| row.status(configured));
+        #[cfg(test)]
+        self.after_summary_read();
+        WireguardView {
+            connect_refusal: row.and_then(|row| row.failure(configured)).or_else(|| {
+                match &self.proxy {
+                    Proxy::Unavailable(reason) if configured.is_some() => Some(reason.clone()),
+                    _ => None,
+                }
+            }),
+            status,
+            ingresses: row
+                .map(|row| row.ingress_statuses(gateway_id, configured))
+                .unwrap_or_default(),
+        }
     }
 
-    /// Listed ingresses' live states or start refusals, in discovery
-    /// order. Manual files and enrollment-wide refusals have no ingress id
-    /// and use the row's summary and error instead.
-    pub fn ingress_statuses(
-        &self,
-        gateway_id: &str,
-        configured: Option<&Path>,
-    ) -> Vec<chan_server::WireguardIngressStatus> {
-        let rows = self.rows.lock().unwrap();
-        let Some(gateway) = rows.get(gateway_id) else {
-            return Vec::new();
-        };
-        // A sole `legacy` id uses the summary to hide synthetic peer labels,
-        // including a real node with that name because enrollment stores no
-        // provenance; multiple ingresses keep every id.
-        if gateway.ingresses.len() == 1
-            && gateway.ingresses[0].0
-                == format!("{gateway_id}/{}", crate::wireguard_keys::LEGACY_INGRESS_ID)
-        {
-            return Vec::new();
-        }
-        gateway
-            .ingresses
-            .iter()
-            .filter_map(|(id, row)| {
-                if Some(row.path()) != configured {
-                    return None;
-                }
-                let id = id.strip_prefix(gateway_id)?.strip_prefix('/')?;
-                let status = match row {
-                    Row::Running { .. } => describe(
-                        row.tunnel_status()
-                            .expect("a running ingress has a tunnel status"),
-                    ),
-                    Row::Refused { reason, .. } => reason.clone(),
-                };
-                Some(chan_server::WireguardIngressStatus {
-                    id: id.to_owned(),
-                    status,
-                })
-            })
-            .collect()
+    #[cfg(test)]
+    pub(crate) fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        self.view(gateway_id, configured).status
     }
 
     /// A matched route's missing-session reason. Host maps take precedence
@@ -544,9 +529,8 @@ impl WireguardFabric {
         }
     }
 
-    /// The first ingress refusal, in discovery order, while the configured
-    /// source is the adopted one.
-    pub fn failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn failure(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
         self.rows
             .lock()
             .unwrap()
@@ -554,15 +538,29 @@ impl WireguardFabric {
             .failure(configured)
     }
 
-    /// Why a row naming `configured` cannot be reached: its file's
-    /// refusal, or, for any row with a file, the proxy's bind failure.
-    pub fn connect_refusal(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
-        if let Some(reason) = self.failure(gateway_id, configured) {
-            return Some(reason);
-        }
-        match &self.proxy {
-            Proxy::Unavailable(reason) if configured.is_some() => Some(reason.clone()),
-            _ => None,
+    #[cfg(test)]
+    fn connect_refusal(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
+        self.view(gateway_id, configured).connect_refusal
+    }
+
+    #[cfg(test)]
+    pub(crate) fn view_lock_is_held(&self) -> bool {
+        matches!(
+            self.rows.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn on_next_summary_read(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.after_summary_read.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn after_summary_read(&self) {
+        let hook = self.after_summary_read.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
@@ -600,6 +598,43 @@ impl WireguardFabric {
 }
 
 impl GatewayRow {
+    /// Listed ingress states retain the manual and sole-legacy fallbacks.
+    fn ingress_statuses(
+        &self,
+        gateway_id: &str,
+        configured: Option<&Path>,
+    ) -> Vec<chan_server::WireguardIngressStatus> {
+        // A sole `legacy` id uses the summary to hide synthetic peer labels,
+        // including a real node with that name because enrollment stores no
+        // provenance; multiple ingresses keep every id.
+        if self.ingresses.len() == 1
+            && self.ingresses[0].0
+                == format!("{gateway_id}/{}", crate::wireguard_keys::LEGACY_INGRESS_ID)
+        {
+            return Vec::new();
+        }
+        self.ingresses
+            .iter()
+            .filter_map(|(id, row)| {
+                if Some(row.path()) != configured {
+                    return None;
+                }
+                let id = id.strip_prefix(gateway_id)?.strip_prefix('/')?;
+                let status = match row {
+                    Row::Running { .. } => describe(
+                        row.tunnel_status()
+                            .expect("a running ingress has a tunnel status"),
+                    ),
+                    Row::Refused { reason, .. } => reason.clone(),
+                };
+                Some(chan_server::WireguardIngressStatus {
+                    id: id.to_owned(),
+                    status,
+                })
+            })
+            .collect()
+    }
+
     fn failure(&self, configured: Option<&Path>) -> Option<String> {
         self.ingresses.iter().find_map(|(id, row)| match row {
             Row::Refused { path, reason } if Some(path.as_path()) == configured => {
@@ -856,6 +891,8 @@ async fn start_with_bind(gateways: &[Gateway], bind: SocketAddr) -> WireguardFab
         next_route_order: AtomicU64::new(0),
         #[cfg(test)]
         refused_starts: Mutex::new(Default::default()),
+        #[cfg(test)]
+        after_summary_read: Mutex::new(None),
     };
     for gateway in gateways.iter().filter(|g| g.enabled) {
         // A refusal is logged and kept on the row by adopt itself.
