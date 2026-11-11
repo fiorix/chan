@@ -77,6 +77,9 @@ pub struct AppState {
     /// One-time desktop-authorize redemption codes; written by the
     /// confirm handler, consumed by `/desktop/authorize/redeem`.
     pub desktop_redemptions: crate::desktop_authorize::RedemptionStore,
+    /// Which hosts the peer-list route refused and when it last said so,
+    /// so an agent polling into the refusal is logged at a bounded rate.
+    pub wireguard_refusals: crate::wireguard::RefusedPolls,
     pub pool: PgPool,
     pub session_store: PostgresStore,
 }
@@ -178,6 +181,7 @@ pub fn routers(
         api_tokens,
         token_throttle,
         desktop_redemptions: Default::default(),
+        wireguard_refusals: Default::default(),
         pool,
         session_store: store,
     };
@@ -348,13 +352,7 @@ struct GatewayDiscovery {
     devserver_proxy_host_depth: u8,
     tunnel_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    wireguard: Option<GatewayWireguardDiscovery>,
-}
-
-#[derive(Debug, Serialize)]
-struct GatewayWireguardDiscovery {
-    endpoint: String,
-    public_key: String,
+    wireguard: Option<crate::wireguard::Discovery>,
 }
 
 async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<GatewayDiscovery>> {
@@ -398,10 +396,7 @@ async fn gateway_discovery(State(state): State<AppState>) -> Result<Json<Gateway
             .cfg
             .wireguard
             .as_ref()
-            .map(|config| GatewayWireguardDiscovery {
-                endpoint: config.endpoint.clone(),
-                public_key: config.public_key.clone(),
-            }),
+            .map(|config| config.discovery()),
     }))
 }
 

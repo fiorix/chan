@@ -66,6 +66,21 @@ async fn run() -> anyhow::Result<()> {
         base = %cfg.base_url,
         "starting identity-service"
     );
+    if let Some(wireguard) = &cfg.wireguard {
+        // The order is the operator's and it matters: the first ingress is
+        // the one a desktop that reads no ingress list enrolls against.
+        // Ids only; a key or an endpoint is not for the log.
+        let ids: Vec<&str> = wireguard
+            .ingresses()
+            .iter()
+            .map(|route| route.ingress.id.as_str())
+            .collect();
+        tracing::info!(
+            ingresses = %ids.join(","),
+            first = %ids.first().copied().unwrap_or_default(),
+            "WireGuard enrollment is configured"
+        );
+    }
 
     // Keep the cap low so a shared Postgres (dev VM, lab cluster)
     // doesn't run out of non-superuser slots when several services

@@ -47,15 +47,15 @@ profile-service never migrates the schema at serve time. `CHAN_GATEWAY_MIGRATION
 | `DEVSERVER_ADMIN_URL`           | yes      | devserver-control admin base    |
 | `DEVSERVER_PROFILE_ADMIN_TOKEN` | yes      | profile-scoped control token    |
 | `DEVSERVER_RETENTION_MINUTES`   | no       | sweeper retention; `0` disables |
-| `WIREGUARD_POOL_V4`            | no       | IPv4 CIDR; enables enrollment  |
-| `WIREGUARD_POOL_V6`            | no       | optional IPv6 CIDR             |
-| `WIREGUARD_POOL_RESERVED`      | no       | comma-separated excluded IPs   |
-| `WIREGUARD_RELEASE_GRACE_MINUTES` | no    | denial-to-release delay; 5 min |
+| `WIREGUARD_POOL_V4`             | no       | IPv4 CIDR; enables enrollment   |
+| `WIREGUARD_POOL_V6`             | no       | optional IPv6 CIDR              |
+| `WIREGUARD_POOL_RESERVED`       | no       | comma-separated excluded IPs    |
+| `WIREGUARD_RELEASE_GRACE_MINUTES` | no    | denial-to-release delay; 5 min   |
 | `RUST_LOG`                      | no       | tracing filter, default info    |
 
 A missing or empty `PROFILE_ADMIN_TOKEN` makes every `/v1/admin/*` route answer unauthorized; that is the safe default for a fresh deploy. `DEVSERVER_RETENTION_MINUTES` drives the devserver registry sweeper; unset means the built-in default and an unparseable value fails startup.
 
-WireGuard enrollment requires `WIREGUARD_POOL_V4`; without it enrollment answers 503. The IPv6 pool and reserved list require that IPv4 pool. Pools exclude their network and first host address, plus the last IPv4 address and explicit reservations. The release grace is a nonnegative whole number of minutes; `0` releases denied peers on the next sweep. Disabling devserver retention does not disable peer release.
+WireGuard enrollment requires `WIREGUARD_POOL_V4`; without it enrollment answers 503. The IPv6 pool and reserved list require that IPv4 pool. The pools are the gateway's: a peer gets one address set, unique across the gateway and valid on every ingress host. Pools exclude their network and first host address, plus the last IPv4 address and explicit reservations. The address the ingress interfaces answer on inside the tunnel must stay outside allocation: the first host address already is, and any other goes in `WIREGUARD_POOL_RESERVED`; profile does not know identity's ingress configuration and cannot check it. `configure.sh` writes `WIREGUARD_POOL_V4` in the run that writes identity's ingress list, and gives identity the pool's first host address as the tunnel address. It refuses a pool with host bits set, narrower than /30 (a /31 or a /32 has no address left to allocate), wider than /8, or overlapping `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `224.0.0.0/4` or `240.0.0.0/4`, all of which profile parses. A rerun offers the pool this file sets as the pool question's default. Profile moves no allocated address when the pool changes: a key that signs in again keeps its row and its address, and only a new key gets one from the new pool, which is what the script says when the answer is another pool. The release grace is a nonnegative whole number of minutes; `0` releases denied peers on the next sweep. Disabling devserver retention does not disable peer release.
 
 ## Routes
 
@@ -88,12 +88,14 @@ Service API (`/v1/users/*`, `/v1/auth-audit`, `/v1/wireguard/peers`):
 | POST   | `/v1/users/{id}/grants/claim`             | claim pending grants by email    |
 | GET    | `/v1/users/{id}/flags`                    | resolved flags for one user      |
 | POST   | `/v1/auth-audit`                          | append an auth event             |
-| POST   | `/v1/users/{id}/wireguard/peers`           | enroll key or replace its PAT    |
-| GET    | `/v1/wireguard/peers?host=p1`              | active peers; ETag and 304        |
+| POST   | `/v1/users/{id}/wireguard/peers`          | enroll key or replace its PAT    |
+| GET    | `/v1/wireguard/peers?host=p1`             | every active peer; ETag and 304  |
 
-Enrollment takes `{token_id, public_key, host}`. Keys are padded standard base64 encoding exactly 32 bytes; hosts are single lowercase DNS labels. A new key returns 201 with `{id, user_id, token_id, host, public_key, addresses, created_at, updated_at}`; addresses use `/32` and optional `/128` host prefixes. The same user's key moves to the supplied token, preserves its addresses and returns 200. Another user's key or an exhausted pool returns 409; an unknown or differently owned token returns 404. Enrollment and release append `wireguard_enrolled` and `wireguard_released` to the token audit.
+Enrollment takes `{token_id, public_key}` and an optional `host`. Keys are padded standard base64 encoding exactly 32 bytes. A key has one peer across the gateway: a new key returns 201 with `{id, user_id, token_id, public_key, addresses, created_at, updated_at}`; addresses use `/32` and optional `/128` host prefixes. The same user's key moves to the supplied token, preserves its addresses and returns 200. Another user's key or an exhausted pool returns 409; an unknown or differently owned token returns 404. Enrollment and release append `wireguard_enrolled` and `wireguard_released` to the token audit. Schema migration 18 appends `wireguard_released` for each enrollment it deletes as a duplicate. The row's `ts` is the start of the transaction that runs the statement: applied by the migrator, which runs the file and records version 18 in `_sqlx_migrations` in one transaction, it equals that version's `installed_on`; applied any other way, for example statement by statement, it does not.
 
-The active list returns `{host, peers: [{public_key, allowed_ips}]}`, sorted by public key. Revocation, expiry and user block remove a peer from this response immediately; unknown hosts return an empty list. `ETag` is the quoted hex SHA-256 of the response bytes, and a matching `If-None-Match` returns 304 without a body. Denied peers keep their addresses until the sweeper releases them after the configured grace.
+`host` in the enroll body selects nothing. When present it must be a single lowercase DNS label, and the answer echoes it as `host`; when absent the answer carries no `host`. It exists for an identity one release behind, which names its ingress host and requires the field in the answer.
+
+The active list returns `{host, peers: [{public_key, allowed_ips}]}`, sorted by public key. `?host=` is required and must be a single lowercase DNS label; it filters nothing and is echoed as `host`, which an agent checks against its own id. Every label reads every active peer: profile does not know which labels are ingress hosts. Revocation, expiry and user block remove a peer from this response immediately, for every host at once. `ETag` is the quoted hex SHA-256 of the response bytes, which include the echoed host, so each host id has its own validator; a matching `If-None-Match` returns 304 without a body. Denied peers keep their addresses until the sweeper releases them after the configured grace.
 
 Admin API (`/v1/admin/*`):
 
@@ -125,7 +127,7 @@ Plus `GET /healthz` (no auth).
 
 Block, pending delete, PAT revoke and claimed-grant delete each reserve a durable revocation job in the same transaction as the state change, answer accepted, and let the background worker confirm the fleet cut through devserver-control with retries that survive restarts. `POST /v1/admin/users/{id}/access/revoke` only revokes PATs and writes the audit row; identity's composite admin route performs the live cuts. Policy routes only persist state; identity owns the drain that follows a stricter user policy or a fleet pause.
 
-Identity supplies the peer's public key, ingress-host id and newly minted token id after browser consent. The private key and PAT secret never enter enrollment storage. Agents read the active set through identity's internal relay; they hold no profile bearer.
+Identity supplies the peer's public key and newly minted token id after browser consent. The private key and PAT secret never enter enrollment storage. Agents read the active set through identity's internal relay; they hold no profile bearer.
 
 ## Design rationale
 

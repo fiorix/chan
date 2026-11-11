@@ -7,13 +7,16 @@
 #   sudo ./configure.sh
 #
 # Prompts for the values that aren't safely defaultable (Postgres
-# password, public origins, OAuth credentials). Generates the shared
-# secrets (PROFILE_AUTH_TOKEN, IDENTITY_INTERNAL_TOKEN,
+# password, public origins, OAuth credentials) and, to offer WireGuard
+# enrollment, for the ingress list and the address pool. Generates the
+# shared secrets (PROFILE_AUTH_TOKEN, IDENTITY_INTERNAL_TOKEN,
 # admission/entry keypairs, the proxy credential, the WireGuard agent's
 # bearer, and distinct profile, identity, controller-operator, and
 # controller-client tokens)
 # and threads them across the files where they must
-# match. Backs up any existing env files before overwriting.
+# match. Backs up any existing env files before overwriting: every run
+# writes each file whole from that run's answers. The one value it takes
+# from a file it replaces is the default of the address pool question.
 
 set -euo pipefail
 
@@ -44,6 +47,104 @@ AGENT_INSTALLED=false
 if getent passwd chan-gateway-wireguard-agent >/dev/null; then
     AGENT_INSTALLED=true
 fi
+
+# Every existing env file this run reads, or copies to a backup before it
+# replaces it, is read before the first question. A file found unreadable
+# later would end the run after its answers were typed, and at the backup
+# after database roles were prepared for files it never writes.
+EXISTING_ENV_FILES=(domain migrate profile identity devserver-control devserver-proxy admin)
+if [[ $AGENT_INSTALLED == true ]]; then
+    EXISTING_ENV_FILES+=(wireguard-agent)
+fi
+for env_name in "${EXISTING_ENV_FILES[@]}"; do
+    env_file=/etc/chan-gateway/$env_name.env
+    if [[ -f $env_file ]] && ! cat -- "$env_file" > /dev/null 2>&1; then
+        echo "error: cannot read $env_file" >&2
+        exit 1
+    fi
+done
+
+# Prints the lines of an existing env file that set one of the named
+# variables to a value, indented for the notices below; nothing for a file
+# that does not exist, a commented line or an empty value. The names are an
+# extended regular expression.
+set_lines() {
+    local file=$1 names=$2
+    [[ -f $file ]] || return 0
+    # sed fails only when it cannot read the file, which must not pass for a
+    # file that sets none of them.
+    sed -n -E "s/^[[:space:]]*((${names})=[[:space:]]*[^[:space:]].*)\$/    \\1/p" "$file" \
+        && return
+    echo "error: cannot read $file" >&2
+    return 1
+}
+
+# Prints NAME=value for each named variable an existing env file sets to a
+# value, as systemd and the service read it: the last line that assigns the
+# name, its value less the whitespace and one pair of quotes around it;
+# nothing for a file that does not exist, a commented line or an empty
+# value. Only the names asked for are printed, and no caller asks for a
+# secret.
+env_settings() {
+    python3 - "$@" <<'PYTHON'
+import sys
+
+path, names = sys.argv[1], sys.argv[2:]
+try:
+    with open(path, "rb") as file:
+        lines = file.read().decode("utf-8", "replace").splitlines()
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    print(f"error: cannot read {path}", file=sys.stderr)
+    sys.exit(1)
+values = {}
+for line in lines:
+    name, equals, value = line.partition("=")
+    name, value = name.strip(), value.strip()
+    if equals and name in names:
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1].strip()
+        values[name] = value
+for name in names:
+    if values.get(name):
+        print(f"{name}={values[name]}")
+PYTHON
+}
+
+# The settings env_settings reads, by name.
+declare -A REPLACED=()
+read_replaced() {
+    local file=$1 settings setting
+    shift
+    settings=$(env_settings "$file" "$@") || exit 1
+    while IFS= read -r setting; do
+        [[ -z $setting ]] || REPLACED[${setting%%=*}]=${setting#*=}
+    done <<< "$settings"
+}
+
+# What the replaced files set for WireGuard, shown before the WireGuard
+# prompt below. Identity refuses to start while one of the four variables
+# that describe a single ingress is set. The list and the pool are this
+# run's answers. Every other WireGuard setting is one the run never writes:
+# REPLACED_ONLY names them, by the file that carries them. None is a secret.
+SINGLE_INGRESS_LINES=$(set_lines /etc/chan-gateway/identity.env \
+    'WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)') || exit 1
+declare -A REPLACED_ONLY=(
+    [identity]='WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS WIREGUARD_PERSISTENT_KEEPALIVE'
+    [profile]='WIREGUARD_POOL_V6 WIREGUARD_POOL_RESERVED WIREGUARD_RELEASE_GRACE_MINUTES'
+    [wireguard-agent]='WIREGUARD_AGENT_POLL_SECS WIREGUARD_WG_BIN'
+)
+# shellcheck disable=SC2086  # the name lists split into words on purpose
+read_replaced /etc/chan-gateway/identity.env WIREGUARD_INGRESSES ${REPLACED_ONLY[identity]}
+# shellcheck disable=SC2086
+read_replaced /etc/chan-gateway/profile.env WIREGUARD_POOL_V4 ${REPLACED_ONLY[profile]}
+if [[ $AGENT_INSTALLED == true ]]; then
+    # shellcheck disable=SC2086
+    read_replaced /etc/chan-gateway/wireguard-agent.env ${REPLACED_ONLY[wireguard-agent]}
+fi
+REPLACED_INGRESSES=${REPLACED[WIREGUARD_INGRESSES]:-}
+REPLACED_POOL_V4=${REPLACED[WIREGUARD_POOL_V4]:-}
 
 read -rp "Postgres user [chan]: " PG_USER
 PG_USER=${PG_USER:-chan}
@@ -84,6 +185,169 @@ origin_host() {
     python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$1"
 }
 
+# Checks an answer by the rules the services apply to it at startup and
+# prints it as it is written, so a value a service would refuse stops this
+# run before database roles are prepared or a file is written. It is one
+# program so that the node id and the ids in the ingress list are held to
+# one rule, ProxyId's (devserver-control-proto), which devserver-proxy,
+# devserver-control, identity and the agent each parse the id with.
+#
+#   check_answer node-id ID
+#     Prints the id.
+#   check_answer ingresses LIST PROXY_HOST IDENTITY_HOST
+#     Prints two lines: the list as it is written, one id=public_key@endpoint
+#     per node with no spaces, and the ids. Identity builds each node's
+#     tenant names from the id and the proxy namespace host and keeps its own
+#     host out of them, so both origins take part in the check.
+#   check_answer pool POOL
+#     Prints four lines: the pool in canonical form; its first host address,
+#     which profile never allocates and every ingress interface answers on;
+#     that address as the /32 a desktop routes into its tunnels; and that
+#     address with the pool's prefix, as an interface carries it. A pool
+#     narrower than /30 has no address left to allocate. Profile and identity
+#     take any IPv4 network, so the other bounds are the script's own: a pool
+#     wider than /8, or one that reaches into a block no tunnel address can
+#     come from, would put that block on every node's interface.
+check_answer() {
+    python3 - "$@" <<'PYTHON'
+import base64
+import binascii
+import ipaddress
+import re
+import sys
+
+SHAPE = "WireGuard ingresses must be id=public_key@endpoint entries with ';' between them"
+
+
+def refuse(message):
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def label(value):
+    return re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", value) is not None
+
+
+def node_id(value):
+    if not label(value):
+        refuse(
+            "This proxy node id must be one lowercase DNS label, of letters a to z,"
+            " digits and inner hyphens and at most 63 long, such as p1"
+        )
+    print(value)
+
+
+def canonical_key(value):
+    if len(value) != 44:
+        return False
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(raw) == 32 and base64.b64encode(raw).decode() == value
+
+
+def endpoint(value):
+    if value.startswith("["):
+        host, closed, tail = value[1:].partition("]")
+        if not closed or not tail.startswith(":"):
+            return False
+        if not re.fullmatch(r"[0-9A-Fa-f:.]+", host):
+            return False
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return False
+        port = tail[1:]
+    else:
+        host, colon, port = value.rpartition(":")
+        if not colon or len(host) > 253:
+            return False
+        if not all(label(part) for part in host.lower().split(".")):
+            return False
+    return re.fullmatch(r"[0-9]{1,5}", port) is not None and 0 < int(port) < 65536
+
+
+def ingress_list(answer, proxy_host, identity_host):
+    # Every part of an entry is ASCII, and lowercasing below must not fold
+    # another script's letter into one.
+    if not answer.isascii():
+        refuse(SHAPE)
+    # A host that ends in a number is an address to identity, with no names
+    # below it.
+    labels = proxy_host.split(".")
+    if not all(label(part) for part in labels) or re.fullmatch(
+        r"[0-9]+|0x[0-9a-f]*", labels[-1]
+    ):
+        refuse("Proxy namespace origin needs a DNS name as its host to offer WireGuard enrollment")
+
+    entries = []
+    for number, entry in enumerate(answer.split(";"), start=1):
+        ingress_id, equals, peer = entry.partition("=")
+        key, at, target = peer.partition("@")
+        if not equals or not at:
+            refuse(SHAPE)
+        ingress_id, key, target = ingress_id.strip(), key.strip(), target.strip()
+        where = f"WireGuard ingress entry {number}"
+        if not label(ingress_id):
+            refuse(f"{where}: the id must be a proxy node id, one lowercase DNS label")
+        if not canonical_key(key):
+            refuse(f"{where}: the public key must be padded base64 for 32 bytes")
+        if not endpoint(target):
+            refuse(f"{where}: the endpoint must be host:port or [IPv6]:port with a port from 1 to 65535")
+        if any(ingress_id == listed for listed, _, _ in entries):
+            refuse(f"{where}: the id {ingress_id} is listed twice")
+        node = f"{ingress_id}.{proxy_host}"
+        if len(node) > 253:
+            refuse(f"{where}: the id does not form a DNS name under the proxy namespace host")
+        if identity_host == node or identity_host.endswith(f".{node}"):
+            refuse(f"{where}: Gateway public origin's host must not be the node's name or a name below it")
+        entries.append((ingress_id, key, target))
+
+    print(";".join(f"{ingress_id}={key}@{target}" for ingress_id, key, target in entries))
+    print(" ".join(ingress_id for ingress_id, _, _ in entries))
+
+
+# The blocks where ipaddress's is_loopback, is_link_local, is_multicast and
+# is_reserved hold, and 0.0.0.0/8, which holds the unspecified address. A
+# pool is refused when it overlaps one, which a network's own predicates
+# miss: they hold only when the whole network is inside the block.
+UNUSABLE = (
+    ("0.0.0.0/8", "this network and the unspecified address"),
+    ("127.0.0.0/8", "the loopback addresses"),
+    ("169.254.0.0/16", "the link-local addresses"),
+    ("224.0.0.0/4", "the multicast addresses"),
+    ("240.0.0.0/4", "the reserved addresses and the broadcast address"),
+)
+
+
+def address_pool(answer):
+    try:
+        if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}/[0-9]{1,2}", answer):
+            raise ValueError(answer)
+        pool = ipaddress.IPv4Network(answer)
+        if not 8 <= pool.prefixlen <= 30:
+            raise ValueError(answer)
+    except ValueError:
+        refuse(
+            "WireGuard address pool must be an IPv4 network from /8 to /30"
+            " with no host bits set, such as 10.7.0.0/24"
+        )
+    for block, holds in UNUSABLE:
+        if pool.overlaps(ipaddress.IPv4Network(block)):
+            refuse(f"WireGuard address pool must not overlap {block}, {holds}")
+    address = pool.network_address + 1
+    print(pool)
+    print(address)
+    print(f"{address}/32")
+    print(f"{address}/{pool.prefixlen}")
+
+
+MODES = {"node-id": node_id, "ingresses": ingress_list, "pool": address_pool}
+MODES[sys.argv[1]](*sys.argv[2:])
+PYTHON
+}
+
 read -rp "Gateway public origin (e.g. https://gw.example.com): " ID_URL || true
 require_origin "Gateway public origin" "$ID_URL"
 read -rp "Proxy namespace origin (e.g. https://proxy.example.com): " PROXY_ORIGIN || true
@@ -96,6 +360,7 @@ TUNNEL_ORIGIN=${TUNNEL_ORIGIN:-$PROXY_ORIGIN}
 require_origin "Tunnel ingress origin" "$TUNNEL_ORIGIN"
 read -rp "This proxy node id [p1]: " PROXY_ID
 PROXY_ID=${PROXY_ID:-p1}
+check_answer node-id "$PROXY_ID" > /dev/null || exit 1
 # The node origin must match the controller's template expansion for the
 # id, so the default prepends it to the namespace host.
 PROXY_BASE_URL_DEFAULT="${PROXY_ORIGIN%%://*}://${PROXY_ID}.${PROXY_ORIGIN#*://}"
@@ -108,6 +373,132 @@ PROXY_BASE_URL_TEMPLATE="${PROXY_ORIGIN%%://*}://{proxy_id}.${PROXY_ORIGIN#*://}
 if [[ $AGENT_INSTALLED == true ]]; then
     read -rp "Kernel WireGuard interface for the agent [wg0]: " WG_INTERFACE
     WG_INTERFACE=${WG_INTERFACE:-wg0}
+fi
+
+# Every run replaces identity.env whole, so none of the four single-ingress
+# variables outlives a run; an existing file that sets one is shown before
+# the prompt, where the same ingress can still be given in the list's form.
+if [[ -n $SINGLE_INGRESS_LINES ]]; then
+    echo
+    echo "/etc/chan-gateway/identity.env configures WireGuard enrollment for one ingress:"
+    printf '%s\n' "$SINGLE_INGRESS_LINES"
+    echo "Identity does not start with these variables set, and this run writes none"
+    echo "of them. To keep enrollment, list that ingress below as"
+    echo "<its node's proxy id>=<WIREGUARD_PUBLIC_KEY>@<WIREGUARD_ENDPOINT>."
+fi
+
+# The pool is not retired with a node. Profile keeps every address it has
+# allocated, and moves none of them when the pool changes. The default is
+# the pool the replaced profile.env sets, also when identity.env has no
+# list: an earlier enrollment's rows may still hold addresses in it. A first
+# run offers the stock pool. A replaced pool this script would refuse is no
+# default at all: Enter then stops the run rather than write it, or move the
+# gateway to the stock pool unseen.
+WG_POOL_DEFAULT=10.7.0.0/24
+if [[ -n $REPLACED_POOL_V4 ]]; then
+    WG_POOL_DEFAULT=
+    if WG_ANSWER=$(check_answer pool "$REPLACED_POOL_V4" 2> /dev/null); then
+        WG_POOL_DEFAULT=${WG_ANSWER%%$'\n'*}
+    fi
+fi
+
+# The list is this run's answer like every other value, so an empty answer
+# below turns enrollment off where the replaced files have it on. It is no
+# default, since a default would keep a node the operator is retiring:
+# it is shown first, as the list check writes it, so that the line shown is
+# an answer the check takes.
+if [[ -n $REPLACED_INGRESSES ]]; then
+    echo
+    if WG_ANSWER=$(check_answer ingresses "$REPLACED_INGRESSES" \
+        "$(origin_host "$PROXY_ORIGIN")" "$(origin_host "$ID_URL")" 2>&1); then
+        echo "The configuration this run replaces has WireGuard enrollment on. An empty"
+        echo "answer to the list below turns it off. To keep it, answer with this line:"
+        echo "    ${WG_ANSWER%%$'\n'*}"
+    else
+        echo "The configuration this run replaces has WireGuard enrollment on, with a list"
+        echo "this run refuses (${WG_ANSWER#error: }):"
+        echo "    $REPLACED_INGRESSES"
+        echo "An empty answer to the list below turns enrollment off. To keep it, answer"
+        echo "with the list corrected."
+    fi
+    if [[ -n $REPLACED_POOL_V4 && -n $WG_POOL_DEFAULT ]]; then
+        echo "The pool question offers the pool profile.env sets, $WG_POOL_DEFAULT."
+    fi
+fi
+
+# A WireGuard setting this run never writes survives only in the backup of
+# its file, so each one the replaced files set is named here. The tunnel
+# address and the allowed networks are written, but only as the pool's
+# first host address and its /32: a value the default pool would not give,
+# such as an IPv6 address added by hand, is named too, and so is any value
+# when there is no default pool to compare with.
+WG_DERIVED_ADDRESS=
+if [[ -n $WG_POOL_DEFAULT ]]; then
+    mapfile -t WG_POOL < <(check_answer pool "$WG_POOL_DEFAULT")
+    WG_DERIVED_ADDRESS=${WG_POOL[1]:-}
+fi
+REPLACED_ONLY_LINES=()
+for env_name in identity profile wireguard-agent; do
+    # shellcheck disable=SC2086
+    for setting in ${REPLACED_ONLY[$env_name]}; do
+        value=${REPLACED[$setting]:-}
+        case $setting in
+            WIREGUARD_INGRESS_ADDRESSES) [[ $value != "$WG_DERIVED_ADDRESS" ]] || value= ;;
+            WIREGUARD_ALLOWED_IPS) [[ $value != "$WG_DERIVED_ADDRESS/32" ]] || value= ;;
+        esac
+        [[ -z $value ]] || REPLACED_ONLY_LINES+=("    $env_name.env: $setting=$value")
+    done
+done
+if [[ ${#REPLACED_ONLY_LINES[@]} -gt 0 ]]; then
+    echo
+    echo "The files this run replaces set these WireGuard settings, which it does not"
+    echo "carry over. Set them again by hand from the backup it keeps of each file,"
+    echo "<file>.bak.<date>-<time> in /etc/chan-gateway:"
+    printf '%s\n' "${REPLACED_ONLY_LINES[@]}"
+fi
+
+echo
+echo "WireGuard enrollment is optional. To offer it, list every proxy node that"
+echo "terminates WireGuard as id=public_key@endpoint, with ';' between nodes. The"
+echo "id is the node's proxy id, the key is what 'wg show <interface> public-key'"
+echo "prints on that node, and the endpoint is the host:port desktops reach its"
+echo "interface on. This node's entry is:"
+echo "    ${PROXY_ID}=<public key>@$(origin_host "$PROXY_BASE_URL"):51820"
+read -rp "WireGuard ingresses (empty to leave enrollment off): " WG_INGRESSES || true
+# WireGuard enrollment is identity's ingress list and profile's address
+# pool, written together or not at all: identity refuses a partial set, and
+# a list without a pool fails every desktop sign-in that enrolls a key.
+if [[ -n $WG_INGRESSES ]]; then
+    WG_ANSWER=$(check_answer ingresses "$WG_INGRESSES" \
+        "$(origin_host "$PROXY_ORIGIN")" "$(origin_host "$ID_URL")") || exit 1
+    mapfile -t WG_LIST <<< "$WG_ANSWER"
+    [[ ${#WG_LIST[@]} -eq 2 ]] || { echo "WireGuard ingress check failed" >&2; exit 1; }
+    WG_INGRESSES=${WG_LIST[0]}
+    WG_INGRESS_IDS=${WG_LIST[1]}
+    echo "Enrolled desktops take their tunnel addresses from one IPv4 pool. Every"
+    echo "ingress interface answers on the pool's first host address, which is"
+    echo "never handed out."
+    if [[ -n $WG_POOL_DEFAULT ]]; then
+        read -rp "WireGuard address pool [$WG_POOL_DEFAULT]: " WG_POOL_V4 || true
+    else
+        echo "profile.env sets the pool $REPLACED_POOL_V4, which this run does not write:"
+        check_answer pool "$REPLACED_POOL_V4" 2>&1 | sed 's/^error: /    /' || true
+        echo "This question has no default; an empty answer stops the run."
+        read -rp "WireGuard address pool: " WG_POOL_V4 || true
+    fi
+    WG_ANSWER=$(check_answer pool "${WG_POOL_V4:-$WG_POOL_DEFAULT}") || exit 1
+    mapfile -t WG_POOL <<< "$WG_ANSWER"
+    [[ ${#WG_POOL[@]} -eq 4 ]] || { echo "WireGuard address pool check failed" >&2; exit 1; }
+    WG_POOL_V4=${WG_POOL[0]}
+    WG_INGRESS_ADDRESS=${WG_POOL[1]}
+    WG_ALLOWED_IPS=${WG_POOL[2]}
+    WG_INTERFACE_ADDRESS=${WG_POOL[3]}
+    # Profile allocates from the pool only for a key it has no row for; a key
+    # that signs in again keeps its row and its address.
+    if [[ -n $REPLACED_POOL_V4 && $WG_POOL_V4 != "$REPLACED_POOL_V4" ]]; then
+        echo "The pool changes from $REPLACED_POOL_V4 to $WG_POOL_V4. Enrolled keys keep their addresses:"
+        echo "nothing moves them into the new pool. Each node's interface takes the Address printed at the end."
+    fi
 fi
 
 echo
@@ -201,7 +592,6 @@ generate_unique_bearer_token; IDENTITY_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
 generate_unique_bearer_token; DEVSERVER_OPERATOR_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
 generate_unique_bearer_token; DEVSERVER_IDENTITY_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
 generate_unique_bearer_token; DEVSERVER_PROFILE_ADMIN_TOKEN=$UNIQUE_BEARER_TOKEN
-generate_unique_bearer_token; WIREGUARD_AGENT_TOKEN=$UNIQUE_BEARER_TOKEN
 
 mapfile -t ADMISSION_KEYS < <("$SCRIPT_DIR/generate-admission-keypair.py")
 [[ ${#ADMISSION_KEYS[@]} -eq 2 ]] || { echo "admission key generation failed" >&2; exit 1; }
@@ -251,24 +641,57 @@ DATABASE_URL=${MIGRATION_DATABASE_URL}
 IDENTITY_DATABASE_PASSWORD=${IDENTITY_DATABASE_PASSWORD}
 PROFILE_DATABASE_PASSWORD=${PROFILE_DATABASE_PASSWORD}
 CHAN_GATEWAY_MIGRATIONS=only
-EXPECTED_SQLX_MIGRATION=17
+EXPECTED_SQLX_MIGRATION=18
 DATABASE_ROLE_POLICY_VERSION=2
 EOF
 )"
+
+# Identity's enrollment values and profile's pool are one answer, so both
+# files carry them or both carry the commented examples.
+if [[ -n $WG_INGRESSES ]]; then
+    IDENTITY_WIREGUARD_ENV=$(cat <<EOF
+# Every listed node's interface answers on WIREGUARD_INGRESS_ADDRESSES, the
+# first host address of profile's WIREGUARD_POOL_V4.
+WIREGUARD_INGRESSES=${WG_INGRESSES}
+WIREGUARD_INGRESS_ADDRESSES=${WG_INGRESS_ADDRESS}
+WIREGUARD_ALLOWED_IPS=${WG_ALLOWED_IPS}
+EOF
+)
+    PROFILE_WIREGUARD_ENV=$(cat <<EOF
+# Enrollment pool. Its first host address is never allocated: every ingress
+# interface answers on it (identity's WIREGUARD_INGRESS_ADDRESSES).
+WIREGUARD_POOL_V4=${WG_POOL_V4}
+EOF
+)
+else
+    IDENTITY_WIREGUARD_ENV=$(cat <<EOF
+# WireGuard enrollment is off. To offer it, set the three values below
+# together with WIREGUARD_POOL_V4 in profile.env, after the kernel interface
+# of every listed node is up.
+# WIREGUARD_INGRESSES=${PROXY_ID}=<interface-public-key>@$(origin_host "$PROXY_BASE_URL"):51820
+# WIREGUARD_INGRESS_ADDRESSES=10.7.0.1
+# WIREGUARD_ALLOWED_IPS=10.7.0.1/32
+EOF
+)
+    PROFILE_WIREGUARD_ENV=$(cat <<EOF
+# Enrollment pool; enable it together with identity's enrollment values.
+# WIREGUARD_POOL_V4=10.7.0.0/24
+EOF
+)
+fi
 
 write_env /etc/chan-gateway/profile.env chan-gateway-profile 0640 "$(cat <<EOF
 # Generated by configure.sh on $(date -Iseconds).
 BIND_ADDR=127.0.0.1:7001
 DATABASE_URL=${PROFILE_DATABASE_URL}
 CHAN_GATEWAY_MIGRATIONS=external
-EXPECTED_SQLX_MIGRATION=17
+EXPECTED_SQLX_MIGRATION=18
 DATABASE_ROLE_POLICY_VERSION=2
 PROFILE_AUTH_TOKEN=${PROFILE_AUTH_TOKEN}
 PROFILE_ADMIN_TOKEN=${PROFILE_ADMIN_TOKEN}
 DEVSERVER_ADMIN_URL=http://127.0.0.1:7003
 DEVSERVER_PROFILE_ADMIN_TOKEN=${DEVSERVER_PROFILE_ADMIN_TOKEN}
-# Enrollment pool; enable it together with identity's enrollment values.
-# WIREGUARD_POOL_V4=10.7.0.0/24
+${PROFILE_WIREGUARD_ENV}
 # WIREGUARD_POOL_V6=fd00:7::/64
 # WIREGUARD_POOL_RESERVED=10.7.0.10,fd00:7::10
 # WIREGUARD_RELEASE_GRACE_MINUTES=5
@@ -289,7 +712,7 @@ BIND_ADDR=127.0.0.1:7000
 INTERNAL_BIND_ADDR=127.0.0.1:7004
 DATABASE_URL=${IDENTITY_DATABASE_URL}
 CHAN_GATEWAY_MIGRATIONS=external
-EXPECTED_SQLX_MIGRATION=17
+EXPECTED_SQLX_MIGRATION=18
 DATABASE_ROLE_POLICY_VERSION=2
 COOKIE_SECURE=true
 PROFILE_SERVICE_URL=http://127.0.0.1:7001
@@ -299,12 +722,7 @@ DEVSERVER_POLICY_REQUIRED=false
 IDENTITY_INTERNAL_TOKEN=${IDENTITY_INTERNAL_TOKEN}
 IDENTITY_SESSION_INTERNAL_TOKEN=${IDENTITY_SESSION_INTERNAL_TOKEN}
 WIREGUARD_AGENT_TOKEN=${WIREGUARD_AGENT_TOKEN}
-# Enrollment values are required together; configure the kernel interface first.
-# WIREGUARD_HOST_ID=p1
-# WIREGUARD_ENDPOINT=wg.example.com:51820
-# WIREGUARD_PUBLIC_KEY=<base64-interface-public-key>
-# WIREGUARD_ALLOWED_IPS=10.7.0.1/32,fd00:7::1/128
-# WIREGUARD_HOSTS=proxy.example.com=10.7.0.1,fd00:7::1;*.proxy.example.com=10.7.0.1,fd00:7::1
+${IDENTITY_WIREGUARD_ENV}
 # WIREGUARD_PERSISTENT_KEEPALIVE=25
 DEVSERVER_ADMISSION_SIGNING_KEY=${DEVSERVER_ADMISSION_SIGNING_KEY}
 DEVSERVER_ADMISSION_VERIFYING_KEYS=${DEVSERVER_ADMISSION_VERIFYING_KEY}
@@ -313,7 +731,6 @@ IDENTITY_ADMIN_TOKEN=${IDENTITY_ADMIN_TOKEN}
 IDENTITY_ACCOUNT_ADMIN_TOKEN=${IDENTITY_ACCOUNT_ADMIN_TOKEN}
 DEVSERVER_ADMIN_URL=http://127.0.0.1:7003
 DEVSERVER_IDENTITY_ADMIN_TOKEN=${DEVSERVER_IDENTITY_ADMIN_TOKEN}
-WIREGUARD_AGENT_TOKEN=${WIREGUARD_AGENT_TOKEN}
 ${PROVIDER_ENV}
 EOF
 )"
@@ -359,9 +776,10 @@ WIREGUARD_INTERFACE=${WG_INTERFACE}
 EOF
 )"
 else
-    echo "chan-gateway-wireguard-agent is not installed here: on the proxy host"
+    echo "chan-gateway-wireguard-agent is not installed here: on each proxy host"
     echo "that runs it, set WIREGUARD_AGENT_TOKEN in wireguard-agent.env to the"
-    echo "value written to /etc/chan-gateway/identity.env."
+    echo "value written to /etc/chan-gateway/identity.env, and"
+    echo "WIREGUARD_AGENT_HOST_ID to that node's id in WIREGUARD_INGRESSES."
 fi
 
 write_env /etc/chan-gateway/admin.env root 0600 "$(cat <<EOF
@@ -397,6 +815,18 @@ echo "    systemctl enable --now chan-gateway-devserver-proxy"
 if [[ $AGENT_INSTALLED == true ]]; then
     echo "and, once the WireGuard interface ${WG_INTERFACE} is up:"
     echo "    systemctl enable --now chan-gateway-wireguard-agent"
+fi
+if [[ -n $WG_INGRESSES ]]; then
+    echo
+    echo "WireGuard enrollment is on for these nodes: ${WG_INGRESS_IDS}"
+    echo "Each needs its interface up with the listed key, reachable at the listed"
+    echo "endpoint, with Address = ${WG_INTERFACE_ADDRESS}, and its agent running with the"
+    echo "node's id as WIREGUARD_AGENT_HOST_ID and the WIREGUARD_AGENT_TOKEN written"
+    echo "to /etc/chan-gateway/identity.env."
+    if [[ $AGENT_INSTALLED == true && " $WG_INGRESS_IDS " != *" $PROXY_ID "* ]]; then
+        echo "This node's id, ${PROXY_ID}, is not one of them: identity answers 404 to its"
+        echo "agent, which then applies no peer list."
+    fi
 fi
 echo
 echo "Tail logs while bringing them up:"

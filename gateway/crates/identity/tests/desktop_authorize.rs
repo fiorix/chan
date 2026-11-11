@@ -1114,19 +1114,23 @@ async fn wireguard_authorize_requires_valid_keys_and_an_enrollment_offer() {
     app.cleanup().await;
 }
 
+/// Two ingresses under the test config's proxy origin, `p1` first, on one
+/// shared pair of tunnel addresses.
 fn wireguard_enrollment() -> identity::wireguard::WireguardEnrollment {
     use base64::Engine;
-    identity::wireguard::WireguardEnrollment {
-        host_id: "p1".into(),
-        endpoint: "wg.example.test:51820".into(),
-        public_key: base64::engine::general_purpose::STANDARD.encode([9; 32]),
-        allowed_ips: vec!["10.7.0.1/32".into(), "fd00:7::1/128".into()],
-        persistent_keepalive: Some(25),
-        hosts: vec![identity::wireguard::HostRoute {
-            name: "*.proxy.example.test".into(),
-            addresses: vec!["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
-        }],
-    }
+    let ingress = |id: &str, byte| gateway_common::wireguard::Ingress {
+        id: id.into(),
+        endpoint: format!("{id}.proxy.example.test:51820"),
+        public_key: base64::engine::general_purpose::STANDARD.encode([byte; 32]),
+    };
+    identity::wireguard::WireguardEnrollment::new(
+        vec![ingress("p1", 9), ingress("p2", 10)],
+        "proxy.example.test",
+        &["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()],
+        vec!["10.7.0.1/32".into(), "fd00:7::1/128".into()],
+        Some(25),
+    )
+    .unwrap()
 }
 
 async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uuid) -> String {
@@ -1152,15 +1156,22 @@ async fn consent_with_wireguard(app: &TestApp, client: &mut Client<'_>, uid: Uui
     let response = client.get("/desktop/authorize/consent").await;
     assert_eq!(response.status, StatusCode::OK);
     assert!(response.body_str().contains("WireGuard key"));
-    assert!(response.body_str().contains("wg.example.test:51820"));
+    // The page names both ingresses the fixture offers, by id and endpoint.
+    for ingress in [
+        "p1 at p1.proxy.example.test:51820",
+        "p2 at p2.proxy.example.test:51820",
+    ] {
+        assert!(response.body_str().contains(ingress), "{ingress}");
+    }
     extract_csrf(response.body_str())
 }
 
 #[tokio::test]
-async fn full_flow_with_a_wireguard_key_enrolls_the_peer_and_returns_its_parameters() {
+async fn full_flow_with_a_wireguard_key_enrolls_one_peer_and_answers_one_address_with_every_ingress(
+) {
     use base64::Engine;
-    let config = wireguard_enrollment();
-    let app = TestApp::with_wireguard(Some(config.clone())).await;
+    let key = |byte: u8| base64::engine::general_purpose::STANDARD.encode([byte; 32]);
+    let app = TestApp::with_wireguard(Some(wireguard_enrollment())).await;
     let uid = Uuid::new_v4();
     let mut client = Client::new(&app);
     let csrf = consent_with_wireguard(&app, &mut client, uid).await;
@@ -1171,13 +1182,9 @@ async fn full_flow_with_a_wireguard_key_enrolls_the_peer_and_returns_its_paramet
             format!("Bearer {PROFILE_TOKEN}"),
         ))
         .respond_with(move |request: &wiremock::Request| {
+            // The peer names a host, as a profile that keys peers by host
+            // answers it; identity reads the addresses and not the host.
             let body: serde_json::Value = request.body_json().unwrap();
-            assert_eq!(body["host"], "p1");
-            assert_eq!(
-                body["public_key"],
-                base64::engine::general_purpose::STANDARD.encode([7; 32])
-            );
-            assert_eq!(body.as_object().unwrap().len(), 3);
             ResponseTemplate::new(201).set_body_json(json!({
                 "id":Uuid::new_v4(), "user_id":uid, "token_id":body["token_id"],
                 "host":"p1", "public_key":body["public_key"],
@@ -1206,28 +1213,68 @@ async fn full_flow_with_a_wireguard_key_enrolls_the_peer_and_returns_its_paramet
         .await;
     assert_eq!(response.status, StatusCode::OK);
     let payload: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    let hosts = |id: &str| {
+        json!([
+            {"name":format!("{id}.proxy.example.test"), "addresses":["10.7.0.1", "fd00:7::1"]},
+            {"name":format!("*.{id}.proxy.example.test"), "addresses":["10.7.0.1", "fd00:7::1"]},
+        ])
+    };
+    // One address set, the first ingress in the single-peer fields, and
+    // both ingresses in the list.
     assert_eq!(
         payload["wireguard"],
         json!({
-            "server_public_key":config.public_key, "endpoint":"wg.example.test:51820",
+            "server_public_key":key(9), "endpoint":"p1.proxy.example.test:51820",
             "addresses":["10.7.0.23/32", "fd00:7::23/128"], "allowed_ips":["10.7.0.1/32", "fd00:7::1/128"],
-            "persistent_keepalive":25, "hosts":[{"name":"*.proxy.example.test", "addresses":["10.7.0.1", "fd00:7::1"]}],
+            "persistent_keepalive":25, "hosts":hosts("p1"),
+            "ingresses":[
+                {"id":"p1", "endpoint":"p1.proxy.example.test:51820", "server_public_key":key(9), "hosts":hosts("p1")},
+                {"id":"p2", "endpoint":"p2.proxy.example.test:51820", "server_public_key":key(10), "hosts":hosts("p2")},
+            ],
         })
     );
+    // The redeem names the peers discovery names: the single pair, which a
+    // desktop that reads no list compares, and the list entry for entry,
+    // with each key under the redeem's name for it.
+    let response = client.get("/.well-known/chan-gateway").await;
+    assert_eq!(response.status, StatusCode::OK);
+    let discovery =
+        serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["wireguard"].take();
+    assert_eq!(
+        payload["wireguard"]["server_public_key"],
+        discovery["public_key"]
+    );
+    for field in ["endpoint", "allowed_ips", "persistent_keepalive"] {
+        assert_eq!(payload["wireguard"][field], discovery[field], "{field}");
+    }
+    let mut listed = discovery["ingresses"].clone();
+    for ingress in listed.as_array_mut().unwrap() {
+        let ingress = ingress.as_object_mut().unwrap();
+        let public_key = ingress.remove("public_key").unwrap();
+        ingress.insert("server_public_key".into(), public_key);
+    }
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    assert_eq!(payload["wireguard"]["ingresses"], listed);
     let token: Uuid = payload["id"].as_str().unwrap().parse().unwrap();
     let rows = app.api_tokens.list(uid).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, token);
     assert!(rows[0].revoked_at.is_none());
     assert!(payload["secret"].as_str().unwrap().starts_with("chan_pat_"));
-    let requests = app.profile.received_requests().await.unwrap();
-    let enroll = requests
+    // One enrollment for every ingress: profile is asked once, for the
+    // minted token, with the first ingress as the host.
+    let enrolls: Vec<serde_json::Value> = app
+        .profile
+        .received_requests()
+        .await
+        .unwrap()
         .iter()
-        .find(|request| request.url.path().ends_with("/wireguard/peers"))
-        .unwrap();
+        .filter(|request| request.url.path().ends_with("/wireguard/peers"))
+        .map(|request| request.body_json().unwrap())
+        .collect();
     assert_eq!(
-        enroll.body_json::<serde_json::Value>().unwrap()["token_id"],
-        token.to_string()
+        enrolls,
+        [json!({"token_id":token, "public_key":key(7), "host":"p1"})]
     );
     let audits: Vec<String> =
         sqlx::query_scalar("SELECT action FROM api_token_audit WHERE token_id = $1 ORDER BY id")

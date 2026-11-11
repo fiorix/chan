@@ -1,10 +1,12 @@
 # wireguard-agent design
 
-The agent makes one kernel WireGuard interface's peers follow the gateway's peer table for this host, and does so without ever touching a peer it did not add. This document holds the rule, the state that makes the second half possible, and how it fails. Install, env and prerequisites are in [`README.md`](README.md).
+The agent makes one kernel WireGuard interface's peers follow the gateway's active peers, and does so without ever touching a peer it did not add. This document holds the rule, the state that makes the second half possible, and how it fails. Install, env and prerequisites are in [`README.md`](README.md).
 
 ## Where it sits
 
-It runs on a proxy host beside devserver-proxy, one agent per interface. The desired set comes from identity's internal listener, `GET /internal/v1/wireguard/peers?host={WIREGUARD_AGENT_HOST_ID}` behind `WIREGUARD_AGENT_TOKEN`; identity relays profile's active rows for that host (a live PAT, an unexpired one, an unblocked user) with profile's `ETag`, the quoted hex SHA-256 of the body. The agent sends that value back byte for byte in `If-None-Match`, and a 304 means the list has not changed. It reads nothing else and writes nowhere in the gateway.
+It runs on a proxy node beside devserver-proxy, one agent per interface, and a gateway has one such interface, its WireGuard ingress, on each node that offers one. The desired set comes from identity's internal listener, `GET /internal/v1/wireguard/peers?host={WIREGUARD_AGENT_HOST_ID}` behind `WIREGUARD_AGENT_TOKEN`; identity relays profile's active rows (a live PAT, an unexpired one, an unblocked user) with profile's `ETag`, the quoted hex SHA-256 of the body. The agent sends that value back byte for byte in `If-None-Match`, and a 304 means the list has not changed. It reads nothing else and writes nowhere in the gateway.
+
+The rows are the gateway's, not the node's. A key is enrolled once, with one address set that every ingress accepts, so every agent is served the same peers and all of them present the same bearer. The host id selects no rows. It is the node's `DEVSERVER_PROXY_ID`, the id of the node's entry in identity's `WIREGUARD_INGRESSES`, and it does two things: identity answers 404 to an id that is not in that list, and the body echoes the id asked with, which the agent checks against its own before it accepts the body.
 
 ## The loop
 
@@ -13,7 +15,8 @@ Every `WIREGUARD_AGENT_POLL_SECS` (default 5) the agent polls, then reconciles a
 - **200** replaces the desired set `{public_key -> allowed_ips}`. A body for another host, a malformed key or CIDR, or a key listed twice is refused as a whole and counts as a failure.
 - **304** keeps it.
 - **401** ends the process with status 1, naming the variable; the unit restarts it.
-- **Anything else** (a refused connection, a timeout, a 5xx, a redirect, which is never followed) keeps the last list. It logs at warn when the failure starts and at debug while it repeats, and once at info when identity answers again.
+- **404** is what identity answers a host id that is not in its configured ingress list. The agent has no case for it: it is one of the answers below.
+- **Anything else** (a refused connection, a timeout, a 404, a 5xx, a redirect, which is never followed) keeps the last list. It logs at warn when the failure starts and at debug while it repeats, and once at info when identity answers again.
 
 Nothing is reconciled until the first list arrives: an unknown desired set must not read as an empty one, which would remove every managed peer on a restart while identity is down.
 
@@ -48,6 +51,7 @@ An absent file manages nothing, so a first run adopts no existing peer. A file t
 ## Failure posture
 
 - identity unreachable or failing: the last list stays in force, revocations included or not; a revoked peer is removed at the first poll after identity answers again.
+- A host id identity does not list (a mistyped `WIREGUARD_AGENT_HOST_ID`, a node missing from identity's `WIREGUARD_INGRESSES`): identity answers 404 on every poll and the agent keeps polling. The list is the same for every host, so the 404 guards no peer; it flags that the agent's host id and identity's list disagree. A running agent keeps its last list in force, and one started that way never reconciles, so the interface keeps the peers it has in both cases. No revoke reaches the interface meanwhile: a PAT revoked, expired or blocked stays a kernel peer until the host id is configured on identity or the interface is taken down, and a running agent adds it back when it is removed by hand, because its last list still names it. A node taken out of identity's list therefore has its agent stopped and its interface taken down. On the node, the agent's warn line is the signal; identity logs the host id it refuses at warn too, when the polls start and once every ten minutes while they last.
 - `wg` failing (the interface missing, `wg` absent): the pass stops at the failing call, logs at warn once and at debug while it repeats, and the next poll retries; the managed set is already consistent.
 - SIGTERM or Ctrl-C: the pass in flight ends after its current `wg` call and its state write, and the process exits 0.
 

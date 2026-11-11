@@ -1,6 +1,6 @@
 # A desktop reaches every proxy node through one WireGuard ingress
 
-Status: raised by the owner on 2026-11-08 while planning the chan.app WireGuard rollout; proposed for v0.126.0 and moved to v0.127.0 by the owner on 2026-11-08; moved to v0.128.0 by the owner on 2026-11-09; not started. Supersedes the v0.125.0 decision "one WireGuard ingress endpoint per gateway, served to the desktop by discovery and the redeem, with no list of ingress hosts distributed to desktops and more regions the operator's concern behind that one endpoint, and one tunnel per gateway row on the desktop" ([release-v0.125.0](../../release/release-v0.125.0.md), decisions, line 60).
+Status: raised by the owner on 2026-11-08 while planning the chan.app WireGuard rollout; proposed for v0.126.0 and moved to v0.127.0 by the owner on 2026-11-08; moved to v0.128.0 by the owner on 2026-11-09; the gateway lane was built on 2026-11-10 on `feat/wireguard-ingress-per-node-gateway` (61 commits over `77c872a8d`, with the integration branch merged in up to `e10d622a4`, gated at `da75ff666`), pushed and not merged; the desktop lane is not started. The build stands on the recommended answers to D1, D2, D3 and D5 and on the owner's ruling of 2026-11-10 on contract 6. Acceptance 1 and 5 hold, and so does the agent half of 3, with the evidence below; 2, the desktop half of 3, and 4 need the desktop lane and have not run. Supersedes the v0.125.0 decision "one WireGuard ingress endpoint per gateway, served to the desktop by discovery and the redeem, with no list of ingress hosts distributed to desktops and more regions the operator's concern behind that one endpoint, and one tunnel per gateway row on the desktop" ([release-v0.125.0](../../release/release-v0.125.0.md), decisions, line 60).
 
 Asked by the owner on 2026-11-08 after reading what a second proxy node would need under v0.125.0 ("with gw, are we funneling bidirectional traffic through that host? it'll become a bottleneck quickly"), and decided the same day: no v0.125.0 rollout on chan.app; each devserver-proxy node terminates its own WireGuard and the desktop reaches the node a devserver is connected to directly, in v0.126.0 ("i prefer to make the changes and release v126").
 
@@ -43,7 +43,8 @@ What already fits per-node ingress:
    - It gains `ingresses: [{id, endpoint, server_public_key, hosts}]`, equal to discovery's list.
    - Consequences: a v0.125.0 desktop enrolls against the first ingress and reaches the other nodes over their public path, and a v0.127.0 desktop starts one tunnel per ingress.
 5. **One peer per key, gateway-wide.** Profile enrolls a peer once, independent of hosts, with one address set unique across the gateway, under one gateway-wide advisory lock. `GET /v1/wireguard/peers?host=` returns every active peer whatever the host, and still echoes `host` in the body (the agent requires it). Migration 18 drops `host` from `wireguard_peers` and its per-host uniques, and adds `UNIQUE (public_key)`, `UNIQUE (address_v4)` and `UNIQUE (address_v6)`. It keeps `token_id UNIQUE` (one peer per PAT). Before the new uniques, it deletes the older of any duplicate rows by `updated_at`; a desktop whose row it deletes signs in again. The sweeper releases gateway-wide with the same grace rules. Revoke, expiry and block drop the peer from every ingress at once.
-6. **Identity guards the agent route.** `GET /internal/v1/wireguard/peers?host=` answers 404 for a host that is not a configured ingress id (and when enrollment is off), so a mistyped agent keeps its last list instead of wiping its peers. One `WIREGUARD_AGENT_TOKEN` stays shared by every agent (decision D5). Identity keeps sending `host` (the first ingress id) in profile's enroll body for one release, so a profile one release behind still accepts it; profile ignores it.
+6. **Identity guards the agent route.** While enrollment is configured, `GET /internal/v1/wireguard/peers?host=` answers 404 for a host that is not a configured ingress id, so an agent whose host id identity's list lacks keeps its last list, and both sides log it at warn. While enrollment is not configured, the route relays profile's list for any well-formed host, so a revoke still reaches every interface. One `WIREGUARD_AGENT_TOKEN` stays shared by every agent (decision D5). Identity keeps sending `host` (the first ingress id) in profile's enroll body for one release, so a profile one release behind still accepts it; profile selects nothing by it, checks it as a label and echoes it.
+   - Amended on 2026-11-10 by the owner's ruling during the build ("i take your recommendation"). The first text answered 404 when enrollment is off as well. Read against the built code, that froze every agent's list on a gateway that turned enrollment off, so a revoked PAT stayed a kernel peer on every node; and since every host's list is now the same, a mistyped host id no longer wipes peers under either answer.
 7. **The consent page names every ingress** it enrolls the key with (id and endpoint), not one endpoint.
 8. **The desktop holds one tunnel per ingress per gateway row.**
    - All of a row's tunnels use the row's one key and its one address set.
@@ -118,7 +119,7 @@ The endpoint may be the node apex itself: the tunnel resolves its endpoint throu
 
 ## Decisions for the owner
 
-Each has a recommendation; the build can start on the recommended answers.
+Each has a recommendation; the build can start on the recommended answers. The gateway lane was built on the recommended answers to D1, D2, D3 and D5, as the owner was told when it started on 2026-11-10. D4 is the desktop lane's.
 
 - **D1. Identity config grammar.** Recommend `WIREGUARD_INGRESSES=id=key@endpoint;...` plus derived host names, as in contract 2. It follows `DEVSERVER_PROXY_CREDENTIALS` (`id=token;...`), and base64's `=` padding is safe because each entry splits once on the first `=` and once on `@`. Alternative: per-id variables (`WIREGUARD_INGRESS_P1_ENDPOINT`, ...), which kube secrets and configure.sh handle worse.
 - **D2. v0.125.0 enrollment variables.** Recommend refusing them at startup, naming `WIREGUARD_INGRESSES`. One form and no hub mode; v0.125.0 enrollment shipped on 2026-11-07, so few gateways set them. Alternative: read them as a one-entry list and keep `*.{proxy host}` as a hub mode, which keeps a second validation path alive.
@@ -219,7 +220,7 @@ Each has a recommendation; the build can start on the recommended answers.
    - **Config:** identity parses a two-ingress config and refuses duplicate ids, a bad key, a bad endpoint, an empty list, an address outside `WIREGUARD_ALLOWED_IPS`, a partial set, and any v0.125.0 name.
    - **Discovery:** carries the legacy pair (first ingress) and `ingresses` with derived hosts, and carries no `wireguard` when enrollment is off.
    - **Full sign-in:** enrolls one peer and answers one address with both ingresses.
-   - **Peers route:** answers every active peer for `host=p1` and `host=p2`, each echoing its host, and 404 for `host=p9`.
+   - **Peers route:** answers every active peer for `host=p1` and `host=p2`, each echoing its host, and 404 for `host=p9`; with enrollment not configured it relays the list for `host=p9` too (contract 6 as amended).
    - **Profile:** never hands one address to two peers; migration 18 dedupes a fixture with one key on two hosts and one address on two hosts, keeping the newer row.
    - **Revoke:** a revoked PAT drops the peer from both hosts' lists.
 2. Desktop unit tests:
@@ -238,6 +239,92 @@ Each has a recommendation; the build can start on the recommended answers.
    - **Node outage:** stopping p2's interface makes only `*.p2` names fail (502 after 3 s) while `*.p1` keeps loading.
    - **Mixed versions:** a v0.125.0 desktop against this gateway enrolls, reaches `*.p1` through the tunnel, and reaches `*.p2` over the public path. A v0.127.0 desktop against a v0.125.0 gateway enrolls and runs one tunnel as v0.125.0 does.
 5. `make gateway-packaging-isolation-test` green with the new configure.sh and env templates, and `make shell-check` green.
+
+## Evidence
+
+The gateway lane is on `feat/wireguard-ingress-per-node-gateway`: 61 commits over `77c872a8d`, with the integration branch merged in up to `e10d622a4`, 43 files against that branch. One agent coordinated it on 2026-11-10 through subagents: a profile half and an identity half built side by side against a fixed client contract, packaging and documents after them, an independent review of each half, their fixes, a pass that brought the documents in line with the packaging, a review of everything after the first merge, and its fixes. The desktop lane has no commit.
+
+What landed, by the Work list:
+
+- **gateway-common:** `Ingress {id, endpoint, public_key}`; `PeerList` and `EnrolledPeer` with no per-host meaning; the enroll body still carries `host`.
+- **identity:** `wireguard_from_vars` reads the list of contract 2 and refuses the four v0.125.0 names in one message; discovery and the redeem carry `ingresses`, with the first ingress in the single fields; the consent page names every ingress; the peers route answers by contract 6 as amended and logs an unlisted host at warn, at its first refused poll and then every ten minutes.
+- **profile:** migration `0018_wireguard_peers_gateway_wide.sql`; enroll, allocation, list and release gateway-wide under `pg_advisory_xact_lock(hashtext('wireguard_pool'))`.
+- **Markers and packaging:** every marker at 18, `packaging/kube/config.yaml` among them; the env templates; `configure.sh` asks for the ingress list and one IPv4 pool, checks both before it writes anything by the rules identity and profile apply at startup, and mints the agent bearer once.
+- **Documents:** `gateway/design.md`, `README.md` and `CONTEXT.md`, [ADR 0004](../../../gateway/docs/adr/0004-one-wireguard-ingress-per-proxy-node.md), the crate READMEs and designs, `.agents/gateway.md`, `packaging/kube/README.md`, and from the docs lane the manual's WireGuard section and one paragraph of the gateway page. `CHANGELOG.md` is left for the release.
+
+Acceptance 1, line by line, under `gateway/crates/`:
+
+- **Config:** `wireguard_config_reads_two_ingresses_in_order_with_derived_host_maps`, `wireguard_config_refuses_an_invalid_ingress_list` (duplicate ids, a bad key, a bad endpoint, an empty list), `wireguard_config_refuses_invalid_addresses_and_routing_policy`, `wireguard_config_refuses_a_partial_set` and `wireguard_config_refuses_the_single_ingress_names_in_one_message`, in `identity/src/config.rs`.
+- **Discovery:** `discovery_lists_every_ingress_and_repeats_the_first_as_the_single_pair` and `discovery_advertises_wireguard_only_when_configured`, in `identity/tests/wireguard.rs`.
+- **Full sign-in:** `full_flow_with_a_wireguard_key_enrolls_one_peer_and_answers_one_address_with_every_ingress`, in `identity/tests/desktop_authorize.rs`.
+- **Peers route:** `wireguard_peers_route_relays_each_configured_ingress_and_answers_404_for_another_host`, `wireguard_peers_route_relays_every_well_formed_host_while_enrollment_is_off` and `an_unlisted_host_is_logged_once_at_warn_with_its_label_and_without_the_bearer`, in `identity/tests/wireguard.rs`.
+- **Profile:** `wireguard_never_hands_one_address_to_two_peers` and `wireguard_migration_18_keeps_the_later_row_of_each_duplicate`, in `profile/tests/api.rs`.
+- **Revoke:** `wireguard_peers_list_drops_revoked_expired_and_blocked` in profile's file and `a_peer_profile_drops_leaves_each_hosts_list_at_that_hosts_next_poll` in identity's.
+
+Each new or changed test was seen red once by its builder, against a change to the one guard it pins. The reviews then found gaps, closed the same way: the migration test did not fix which row of a pair survives, and identity had no test of the redeem's wire shape without a database, of the call that binds the parser to the process's origins, or of the derived names against the names identity mints.
+
+The gate ran at `da75ff666` in a clean detached worktree, with the identity SPA built from the tree: `make gateway-fmt`, `gateway-lint`, `gateway-doc`, `gateway-test` and `gateway-build`; the whole gateway workspace's tests, 753 passed and none failed, built on the host and run against PostgreSQL 18 in a disposable sdme guest with a private network; `make gateway-packaging-isolation-test` (88 PASS lines), the database-roles suite in a guest of its own, `make shell-check` and `packaging/kube/test-manifests.py`. Acceptance 5 is two of those steps. Gateway CI has not run on the branch.
+
+Acceptance 3, the agent half: `scripts/e2e/wireguard-agent.sh`, unchanged, is green at `c13dd6f33` against a kernel WireGuard interface in a VM (kernel 7.2.9, wireguard-tools 1.0.20260223). Its add, remove, operator and unauthorized arms pass with the agent under the packaged unit's hardening. After that commit the agent crate changed in its README alone.
+
+Acceptance 4 has not run. It needs two nodes with kernel interfaces, tenant stand-ins behind TLS and a desktop that holds one tunnel per ingress. What ran is the gateway alone, at `da75ff666`: identity, profile and PostgreSQL in one sdme guest, installed by the six packages' postinst scripts, configured by the unmodified `configure.sh` and started from the packaged units, with GitHub's OAuth the only stand-in.
+
+- The migration unit leaves the schema at 18: `wireguard_peers` has no `host` column and has its three single-column uniques.
+- Discovery carries the single pair of the first ingress and both ingresses with their derived hosts.
+- A sign-in through authorize, consent and redeem enrolls one row and answers one address with both ingresses, and the consent page names both. The same key signing in again keeps its address, and a second key gets the next one.
+- The peers route answers the same peers to `p1` and `p2`, each body echoing its host under its own ETag; `p9` gets 404 and a warn line in identity's journal, a malformed host 400, a request without the agent bearer 401.
+- `chan-gateway-admin token revoke` drops the peer from both lists at their next read.
+- With enrollment commented out and identity restarted, discovery carries no `wireguard` and the route relays the list for `p1`, `p2` and `p9`.
+- With one or all four of the v0.125.0 names set, identity exits 1 before it binds a listener, and its journal names them.
+
+This host's kernel offers no WireGuard to a container, so no kernel interface ran in that guest. Three agents ran there on userspace `wireguard-go` devices with the real `wg`: `p1`, `p2`, and `p9`, which identity's list lacks. An enrolled key was on both listed nodes' interfaces 4.7 s after the consent was confirmed and gone from both 4.6 s after the revoke, inside the two five-second polls allowed. The `p9` agent was answered 404, logged that it keeps its last list and held no peer; with enrollment off it was served the list and added the remaining key.
+
+Departures from the text above:
+
+- **Contract 6** is amended in place, by the owner's ruling.
+- **The dedupe rule of contract 5.** Migration 18 deletes a row when a later enrollment, by `updated_at` and then `id`, holds its key or one of its addresses, whether or not that later row itself stays. A key keeps at most its latest enrollment, and the outcome does not depend on the order rows are visited in. Where three rows chain, one more row goes than "the older of a pair" would take, and that desktop signs in once more. Each column is its own equality join: one join on the three equalities under OR compared every pair of rows under the table lock, 73 s at 32,000 rows against 0.24 s.
+- **Audit rows.** Each enrollment the migration deletes gets a `wireguard_released` row in its token's audit. The profile review raised it; it is one commit, `46ee698c8`, and the owner may drop it until the migration ships, after which the file's checksum fixes its text.
+- **`EnrolledPeer.host` is optional.** Profile echoes the host an enroll request names and leaves the field out otherwise. An identity one release behind names a host and requires the field in the answer.
+- **`WireguardEnrollment` has no `addresses` field.** The tunnel addresses are in each ingress's derived host map.
+- **`configure.sh` asks for the pool as well as the list** and writes `WIREGUARD_POOL_V4` into `profile.env` in the same run. It does not ask for the tunnel address: it takes the pool's first host address. A run over existing files shows the list it replaces as a line to answer with, offers the replaced pool as the pool question's default, and names the WireGuard settings it does not carry over.
+
+## For the release notes
+
+- **Upgrade order.** A profile from a release that carries migration 17 names the dropped column in every WireGuard statement: on the migrated schema its enroll and peer-list routes answer 500 and its sweeper releases no address. Where identity and profile are upgraded apart, profile goes with the migration, before or together with identity. `gateway/README.md` says so.
+- **The four v0.125.0 variables.** `WIREGUARD_HOST_ID`, `WIREGUARD_ENDPOINT`, `WIREGUARD_PUBLIC_KEY` and `WIREGUARD_HOSTS` stop identity at startup, with a message naming `WIREGUARD_INGRESSES`. A gateway that enrolls moves to the list before it upgrades.
+- **Duplicates.** A desktop whose enrollment migration 18 deletes as a duplicate signs in again.
+- **Rollback.** The previous release cannot use a database at migration 18. Its migrate step refuses an applied migration it does not know, and it does so after `prepare-database-roles` has revoked both services' privileges and cleared the ready marker, so the schema is reversed first. On a gateway that ran more than one ingress, stop the agent and take the interface down on every node but the one that stays the ingress: after the rollback the previous profile lists peers only under the host named in the SQL, and an agent polling under another id is served an empty list and removes every peer it manages. Stop `chan-gateway-identity` and `chan-gateway-profile`, then run this as the database owner, with the id of that node in place of `p1`:
+
+  ```sql
+  BEGIN;
+  ALTER TABLE public.wireguard_peers
+      DROP CONSTRAINT wireguard_peers_public_key_key,
+      DROP CONSTRAINT wireguard_peers_address_v4_key,
+      DROP CONSTRAINT wireguard_peers_address_v6_key,
+      ADD COLUMN host text NOT NULL DEFAULT 'p1';
+  ALTER TABLE public.wireguard_peers
+      ALTER COLUMN host DROP DEFAULT,
+      ADD UNIQUE (host, public_key),
+      ADD UNIQUE (host, address_v4),
+      ADD UNIQUE (host, address_v6);
+  DELETE FROM public._sqlx_migrations WHERE version = 18;
+  COMMIT;
+  ```
+
+  Set `EXPECTED_SQLX_MIGRATION=17` in `migrate.env`, `identity.env` and `profile.env`, install the previous packages, put the four single-ingress variables back in `identity.env` in place of the three new ones, then restart `chan-gateway-migrate` and start profile and identity. On Kubernetes, after the SQL, set `EXPECTED_SQLX_MIGRATION: "17"` and the previous image tags and run steps 2 to 4 of `packaging/kube/README.md` (scale profile and identity to zero, delete the three Jobs, prepare, migrate, reconcile, apply); rolling the images back alone leaves the ready marker at 18. What is lost: enrollments that migration 18 deleted stay deleted, every remaining peer is placed on the one host named in the SQL, and the `wireguard_released` rows the migration wrote stay in the audit, no longer told from a sweep's by their time.
+- The SQL ran in a probe: a migrator whose set ends at 17 refuses the database at 18, and after the SQL it runs and applies nothing, the previous statements work and the per-host uniques are back under migration 17's names. The previous release's binaries, the packaged steps and the Kubernetes sequence on a rolled-back database were read, not run.
+
+## Found beside the work
+
+Not changed on the branch; each is the owner's to place.
+
+- `packaging/gateway/scripts/dev/setup.sh` writes `DEVSERVER_PROXY_CREDENTIALS` unquoted into a file the dev runner sources, so a two-node value keeps its first entry only. Read and probed, not run through the runner.
+- `configure.sh`: two runs within one second share a backup name; it sets no umask of its own; and the interface and node id questions take no default from the files they replace, as the pool question did before the last fix.
+- Profile keeps every allocated address when `WIREGUARD_POOL_V4` is changed by hand: a key that signs in again gets its old address back, outside the new pool.
+- The Kubernetes manifests carry no `WIREGUARD_*` variable, so a cluster as shipped offers no enrollment. A manifest for the agent is out of scope above.
+- `docs/contributing/linux-and-macos.md` (its deb walk-through) lists `configure.sh`'s answers in an older form. The `Makefile` comment on `gateway-packaging-isolation-test` and `.agents/skills/gate/SKILL.md` describe that suite without its `configure.sh` arms.
+- The isolation suite's arm for an unreadable env file is skipped when the suite runs as root.
+- identity's `whoami_refusal_shape_is_uniform` (`tests/auth.rs`) went red once in eight runs under host load, at `callback should redirect`, outside this change; a candidate for [loadres](some-tests-still-go-red-under-the-heaviest-cpu-load.md).
 
 ## Related items
 

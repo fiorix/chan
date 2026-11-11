@@ -639,7 +639,7 @@ async fn complete(
         match state
             .cfg
             .profile_client
-            .enroll_wireguard_peer(user.id, token.id, key, &config.host_id)
+            .enroll_wireguard_peer(user.id, token.id, key, &config.first().ingress.id)
             .await
         {
             Ok(peer) => Some(config.parameters(peer.addresses)),
@@ -786,12 +786,13 @@ pub async fn consent(State(state): State<AppState>, session: Session) -> Result<
     if params.wireguard_public_key.is_some() && state.cfg.wireguard.is_none() {
         return Err(Error::BadRequest("wireguard enrollment not offered".into()));
     }
-    let endpoint = state
+    let ingresses = state
         .cfg
         .wireguard
         .as_ref()
-        .map(|config| config.endpoint.as_str());
-    let html = render_consent_html(&params, &user, &csrf, endpoint);
+        .map(|config| config.ingresses())
+        .unwrap_or_default();
+    let html = render_consent_html(&params, &user, &csrf, ingresses);
     Ok((pages::security_headers(), Html(html)).into_response())
 }
 
@@ -868,12 +869,14 @@ pub async fn confirm(
 /// SPA card look). Every interpolated value is escaped; the form's
 /// `csrf` / `action` fields are the wire contract the confirm POST
 /// (and the integration tests) read. Script-free within the shell's
-/// strict CSP.
+/// strict CSP. `ingresses` is every WireGuard ingress the gateway offers,
+/// empty when it offers none; a request carrying a key shows the key and
+/// names each ingress it is enrolled with.
 fn render_consent_html(
     params: &AuthorizeParams,
     user: &User,
     csrf: &str,
-    endpoint: Option<&str>,
+    ingresses: &[crate::wireguard::IngressRoutes],
 ) -> String {
     let display = user
         .display_name
@@ -904,11 +907,27 @@ fn render_consent_html(
     } else {
         String::new()
     };
-    let (wireguard_row, wireguard_blurb) = match (&params.wireguard_public_key, endpoint) {
-        (Some(key), Some(endpoint)) => (
-            format!("      <div class=\"row\"><span class=\"k\">WireGuard key</span><span class=\"v\" style=\"font-family:monospace\">{}</span></div>\n", pages::html_escape(key)),
-            format!("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with the gateway's tunnel at {}; revoking the token removes it.</p>\n    ", pages::html_escape(endpoint)),
-        ),
+    let (wireguard_rows, wireguard_blurb) = match (&params.wireguard_public_key, ingresses) {
+        (Some(key), [_, ..]) => {
+            let mut rows = format!("      <div class=\"row\"><span class=\"k\">WireGuard key</span><span class=\"v\" style=\"font-family:monospace\">{}</span></div>\n", pages::html_escape(key));
+            // The id sits in the value cell, which wraps a long word; the
+            // label cell does not.
+            for route in ingresses {
+                rows.push_str(&format!(
+                    "      <div class=\"row\"><span class=\"k\">WireGuard ingress</span><span class=\"v\">{} at {}</span></div>\n",
+                    pages::html_escape(&route.ingress.id),
+                    pages::html_escape(&route.ingress.endpoint),
+                ));
+            }
+            let enrolled_with = match ingresses.len() {
+                1 => "the gateway's WireGuard ingress listed above; revoking the token removes it".to_owned(),
+                count => format!("the gateway's {count} WireGuard ingresses listed above; revoking the token removes it from all of them"),
+            };
+            (
+                rows,
+                format!("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with {enrolled_with}.</p>\n    "),
+            )
+        }
         _ => (String::new(), String::new()),
     };
     let body = format!(
@@ -921,7 +940,7 @@ fn render_consent_html(
       <div class="row"><span class="k">Calls itself</span><span class="v">{label}</span></div>
       <div class="row"><span class="k">Scopes</span><span class="v">{scopes}</span></div>
       <div class="row"><span class="k">Expires in</span><span class="v">{expires_phrase}</span></div>
-{wireguard_row}    </div>
+{wireguard_rows}    </div>
     {wireguard_blurb}<p class="muted small">It will receive the result on this computer at 127.0.0.1, port {port}.</p>
     <form method="post" action="/desktop/authorize/confirm">
       <input type="hidden" name="csrf" value="{csrf}">
@@ -1413,7 +1432,7 @@ mod tests {
             block_reason: None,
             avatar_url: None,
         };
-        let html = render_consent_html(&p, &user, "csrf-token", None);
+        let html = render_consent_html(&p, &user, "csrf-token", &[]);
         // The finding-3 copy: an untrusted local app, unverifiable.
         assert!(
             html.contains("<h1>Authorize an app on this computer?</h1>"),
@@ -1458,7 +1477,7 @@ mod tests {
             block_reason: None,
             avatar_url: None,
         };
-        let html = render_consent_html(&p, &user, "csrf-token", None);
+        let html = render_consent_html(&p, &user, "csrf-token", &[]);
         // Exposure-framed account blurb with the expiry.
         assert!(
             html.contains(
@@ -1537,22 +1556,79 @@ mod tests {
             .is_none());
     }
 
+    /// An ingress as the consent page reads it: its id and endpoint.
+    fn consent_ingress(id: &str, endpoint: &str) -> crate::wireguard::IngressRoutes {
+        crate::wireguard::IngressRoutes {
+            ingress: gateway_common::wireguard::Ingress {
+                id: id.into(),
+                endpoint: endpoint.into(),
+                public_key: String::new(),
+            },
+            hosts: Vec::new(),
+        }
+    }
+
+    /// The consent page's WireGuard ingress rows, in page order.
+    fn consent_ingress_rows(html: &str) -> Vec<&str> {
+        html.lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix(r#"<div class="row"><span class="k">WireGuard ingress</span><span class="v">"#)?
+                    .strip_suffix("</span></div>")
+            })
+            .collect()
+    }
+
     #[test]
-    fn consent_html_renders_the_wireguard_key() {
+    fn consent_html_renders_the_wireguard_key_and_its_one_ingress_escaped() {
         let mut params = params();
         params.wireguard_public_key = Some("<key & 'quoted'>".into());
         let html = render_consent_html(
             &params,
             &wireguard_consent_user(),
             "csrf-token",
-            Some("<endpoint&>:51820"),
+            &[consent_ingress("<id\">", "<endpoint&>:51820")],
         );
         assert!(html.contains(r#"<span class="k">WireGuard key</span>"#));
         assert!(html.contains("font-family:monospace"));
         assert!(html.contains("&lt;key &amp; &#39;quoted&#39;&gt;"));
-        assert!(html.contains("Approving also enrolls this computer's WireGuard key with the gateway's tunnel at &lt;endpoint&amp;&gt;:51820; revoking the token removes it."));
-        assert!(!html.contains("<key"));
-        assert!(!html.contains("<endpoint"));
+        assert_eq!(
+            consent_ingress_rows(&html),
+            ["&lt;id&quot;&gt; at &lt;endpoint&amp;&gt;:51820"]
+        );
+        assert!(html.contains("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with the gateway's WireGuard ingress listed above; revoking the token removes it.</p>"));
+        for raw in ["<key", "<id", "<endpoint"] {
+            assert!(!html.contains(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn consent_html_names_every_ingress_in_the_configured_order() {
+        let mut params = params();
+        params.wireguard_public_key = Some("key".into());
+        let ingresses = [
+            consent_ingress("p2", "p2.proxy.example.test:51820"),
+            consent_ingress("p1", "[2001:db8::1]:51821"),
+            consent_ingress("p3", "p2.proxy.example.test:51820"),
+        ];
+        let html =
+            render_consent_html(&params, &wireguard_consent_user(), "csrf-token", &ingresses);
+        assert_eq!(
+            consent_ingress_rows(&html),
+            [
+                "p2 at p2.proxy.example.test:51820",
+                "p1 at [2001:db8::1]:51821",
+                "p3 at p2.proxy.example.test:51820",
+            ]
+        );
+        assert!(html.contains("<p class=\"muted\">Approving also enrolls this computer's WireGuard key with the gateway's 3 WireGuard ingresses listed above; revoking the token removes it from all of them.</p>"));
+        // The rows sit inside the details block, after the key's row.
+        let details = &html[html.find(r#"<div class="details">"#).unwrap()..];
+        let details = &details[..details.find("    </div>\n").unwrap()];
+        assert_eq!(details.matches(r#"<div class="row">"#).count(), 3 + 1 + 3);
+        assert!(
+            details.find("WireGuard key").unwrap() < details.find("WireGuard ingress").unwrap()
+        );
     }
 
     #[test]
@@ -1564,12 +1640,26 @@ mod tests {
             head_extra: "",
             body: &body,
         });
-        for endpoint in [None, Some("wg.example.test:51820")] {
+        let offered = [consent_ingress("p1", "wg.example.test:51820")];
+        for ingresses in [&[][..], &offered[..]] {
             assert_eq!(
-                render_consent_html(&params(), &wireguard_consent_user(), "csrf-token", endpoint),
+                render_consent_html(
+                    &params(),
+                    &wireguard_consent_user(),
+                    "csrf-token",
+                    ingresses
+                ),
                 expected
             );
         }
+        // A key with no ingress to enroll it with adds nothing either; the
+        // consent route refuses that request before it renders.
+        let mut with_key = params();
+        with_key.wireguard_public_key = Some("key".into());
+        assert_eq!(
+            render_consent_html(&with_key, &wireguard_consent_user(), "csrf-token", &[]),
+            expected
+        );
     }
 
     #[test]
@@ -1577,21 +1667,35 @@ mod tests {
         let mut value = payload("test-pat");
         let expected = serde_json::json!({"id":Uuid::nil(), "secret":"test-pat", "label":"box", "expires_at":null});
         assert_eq!(serde_json::to_value(&value).unwrap(), expected);
+        let hosts = || {
+            vec![crate::wireguard::HostRoute {
+                name: "p1.proxy.example.test".into(),
+                addresses: vec!["10.7.0.1".parse().unwrap()],
+            }]
+        };
         value.wireguard = Some(crate::wireguard::Parameters {
             server_public_key: "server-key".into(),
             endpoint: "wg.example.test:51820".into(),
             addresses: vec!["10.7.0.23/32".into()],
             allowed_ips: vec!["10.7.0.1/32".into()],
             persistent_keepalive: None,
-            hosts: vec![crate::wireguard::HostRoute {
-                name: "proxy.example.test".into(),
-                addresses: vec!["10.7.0.1".parse().unwrap()],
+            hosts: hosts(),
+            ingresses: vec![crate::wireguard::IngressParameters {
+                id: "p1".into(),
+                endpoint: "wg.example.test:51820".into(),
+                server_public_key: "server-key".into(),
+                hosts: hosts(),
             }],
         });
         let actual = serde_json::to_value(&value).unwrap();
+        let hosts = serde_json::json!([{"name":"p1.proxy.example.test", "addresses":["10.7.0.1"]}]);
         assert_eq!(
             actual["wireguard"],
-            serde_json::json!({"server_public_key":"server-key", "endpoint":"wg.example.test:51820", "addresses":["10.7.0.23/32"], "allowed_ips":["10.7.0.1/32"], "hosts":[{"name":"proxy.example.test", "addresses":["10.7.0.1"]}]})
+            serde_json::json!({
+                "server_public_key":"server-key", "endpoint":"wg.example.test:51820",
+                "addresses":["10.7.0.23/32"], "allowed_ips":["10.7.0.1/32"], "hosts":hosts,
+                "ingresses":[{"id":"p1", "endpoint":"wg.example.test:51820", "server_public_key":"server-key", "hosts":hosts}],
+            })
         );
     }
 }

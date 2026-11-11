@@ -1,4 +1,4 @@
-//! Peer enrollment and per-host address allocation.
+//! Peer enrollment and gateway-wide address allocation.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -21,7 +21,8 @@ use uuid::Uuid;
 use crate::http::AppState;
 use crate::{Error, Result};
 
-/// Allocation pools and explicit exclusions, shared by all ingress hosts.
+/// Allocation pools and explicit exclusions for the whole gateway: a peer has
+/// one address set, valid on every ingress host.
 #[derive(Clone, Debug)]
 pub struct Pool {
     v4: Ipv4Net,
@@ -155,11 +156,19 @@ fn lowest_available(start: u128, end: u128, used: &BTreeSet<u128>) -> Option<u12
     (candidate <= end).then_some(candidate)
 }
 
+/// One lock for every allocation, replacement and release: keys and addresses
+/// are unique across the gateway, whatever host an enrollment names.
+const POOL_LOCK: &str = "SELECT pg_advisory_xact_lock(hashtext('wireguard_pool'))";
+
 #[derive(Deserialize)]
 pub(crate) struct EnrollRequest {
     token_id: Uuid,
     public_key: String,
-    host: String,
+    /// Selects nothing: a peer belongs to no host. An identity one release
+    /// behind names its ingress host here and requires it in the answer, so a
+    /// present value is checked as a label and echoed.
+    #[serde(default)]
+    host: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -167,7 +176,6 @@ struct PeerRow {
     id: Uuid,
     user_id: Uuid,
     token_id: Uuid,
-    host: String,
     public_key: String,
     address_v4: String,
     address_v6: Option<String>,
@@ -176,7 +184,7 @@ struct PeerRow {
 }
 
 const PEER_COLUMNS: &str =
-    "id, user_id, token_id, host, public_key, address_v4, address_v6, created_at, updated_at";
+    "id, user_id, token_id, public_key, address_v4, address_v6, created_at, updated_at";
 
 fn addresses(v4: String, v6: Option<String>) -> Vec<String> {
     let mut addresses = vec![format!("{v4}/32")];
@@ -186,18 +194,16 @@ fn addresses(v4: String, v6: Option<String>) -> Vec<String> {
     addresses
 }
 
-impl From<PeerRow> for EnrolledPeer {
-    fn from(row: PeerRow) -> Self {
-        Self {
-            id: row.id,
-            user_id: row.user_id,
-            token_id: row.token_id,
-            host: row.host,
-            public_key: row.public_key,
-            addresses: addresses(row.address_v4, row.address_v6),
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
+fn enrolled(row: PeerRow, host: Option<String>) -> EnrolledPeer {
+    EnrolledPeer {
+        id: row.id,
+        user_id: row.user_id,
+        token_id: row.token_id,
+        host,
+        public_key: row.public_key,
+        addresses: addresses(row.address_v4, row.address_v6),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     }
 }
 
@@ -208,7 +214,7 @@ pub(crate) async fn enroll(
 ) -> Result<(StatusCode, Json<EnrolledPeer>)> {
     let key = canonical_public_key(&body.public_key)
         .ok_or_else(|| Error::BadRequest("invalid wireguard_public_key".into()))?;
-    if !valid_host(&body.host) {
+    if body.host.as_deref().is_some_and(|host| !valid_host(host)) {
         return Err(Error::BadRequest("invalid wireguard host".into()));
     }
     let pool = state
@@ -217,8 +223,8 @@ pub(crate) async fn enroll(
         .as_ref()
         .ok_or(Error::Unavailable("wireguard pool not configured"))?;
     let mut tx = state.pool.begin().await?;
-    // User-first locking matches block and token minting; the host lock then
-    // serializes allocation across different users sharing the same pool.
+    // User-first locking matches block and token minting; the pool lock then
+    // serializes allocation across every user of the gateway's one pool.
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
         .bind(user_id)
         .fetch_optional(&mut *tx)
@@ -232,14 +238,10 @@ pub(crate) async fn enroll(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(Error::NotFound)?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wireguard_pool'), hashtext($1))")
-        .bind(&body.host)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(POOL_LOCK).execute(&mut *tx).await?;
     let existing = sqlx::query_as::<_, PeerRow>(&format!(
-        "SELECT {PEER_COLUMNS} FROM wireguard_peers WHERE host = $1 AND public_key = $2 FOR UPDATE"
+        "SELECT {PEER_COLUMNS} FROM wireguard_peers WHERE public_key = $1 FOR UPDATE"
     ))
-    .bind(&body.host)
     .bind(&key)
     .fetch_optional(&mut *tx)
     .await?;
@@ -252,14 +254,13 @@ pub(crate) async fn enroll(
         (StatusCode::OK, row)
     } else {
         let occupied = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT address_v4, address_v6 FROM wireguard_peers WHERE host = $1",
+            "SELECT address_v4, address_v6 FROM wireguard_peers",
         )
-        .bind(&body.host)
         .fetch_all(&mut *tx)
         .await?;
         let (v4, v6) = pool.allocate(&occupied)?;
-        let row = sqlx::query_as::<_, PeerRow>(&format!("INSERT INTO wireguard_peers (user_id, token_id, host, public_key, address_v4, address_v6) VALUES ($1, $2, $3, $4, $5, $6) RETURNING {PEER_COLUMNS}"))
-            .bind(user_id).bind(body.token_id).bind(&body.host).bind(&key).bind(v4).bind(v6).fetch_one(&mut *tx).await?;
+        let row = sqlx::query_as::<_, PeerRow>(&format!("INSERT INTO wireguard_peers (user_id, token_id, public_key, address_v4, address_v6) VALUES ($1, $2, $3, $4, $5) RETURNING {PEER_COLUMNS}"))
+            .bind(user_id).bind(body.token_id).bind(&key).bind(v4).bind(v6).fetch_one(&mut *tx).await?;
         (StatusCode::CREATED, row)
     };
     sqlx::query("INSERT INTO api_token_audit (token_id, action) VALUES ($1, 'wireguard_enrolled')")
@@ -267,11 +268,13 @@ pub(crate) async fn enroll(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok((status, Json(row.into())))
+    Ok((status, Json(enrolled(row, body.host))))
 }
 
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
+    /// The reader's ingress host id. It filters nothing and is echoed in the
+    /// body, where an agent checks it against its own id.
     host: String,
 }
 
@@ -286,11 +289,10 @@ pub(crate) async fn list(
     let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
         "SELECT p.public_key, p.address_v4, p.address_v6 FROM wireguard_peers p \
          JOIN api_tokens t ON t.id = p.token_id JOIN users u ON u.id = p.user_id \
-         WHERE p.host = $1 AND t.revoked_at IS NULL \
+         WHERE t.revoked_at IS NULL \
            AND (t.expires_at IS NULL OR t.expires_at > now()) AND u.blocked_at IS NULL \
          ORDER BY p.public_key COLLATE \"C\"",
     )
-    .bind(&query.host)
     .fetch_all(&state.pool)
     .await?;
     let body = serde_json::to_vec(&PeerList {
@@ -304,7 +306,9 @@ pub(crate) async fn list(
             .collect(),
     })
     .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
-    // PostgreSQL supplies SHA-256 without a separate digest dependency in profile.
+    // The digest covers the echoed host with the peers, so a validator one host
+    // id holds never matches the body another would get. PostgreSQL supplies
+    // SHA-256 without a separate digest dependency in profile.
     let digest: String = sqlx::query_scalar("SELECT encode(sha256($1::bytea), 'hex')")
         .bind(&body)
         .fetch_one(&state.pool)
@@ -331,29 +335,27 @@ pub(crate) async fn list(
 /// Release denied peers after their grace, auditing every deletion atomically.
 pub async fn release_once(pool: &PgPool, grace: Duration) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
-    let hosts: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT host FROM wireguard_peers ORDER BY host")
-            .fetch_all(&mut *tx)
-            .await?;
-    let mut released = 0;
-    for host in hosts {
-        // Allocation and release agree on the host lock, so a concurrent
-        // replacement cannot lose its row to an older token's denial.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wireguard_pool'), hashtext($1))")
-            .bind(&host)
-            .execute(&mut *tx)
-            .await?;
-        released += sqlx::query(
-            "WITH released AS (DELETE FROM wireguard_peers p USING api_tokens t, users u \
-             WHERE p.token_id = t.id AND p.user_id = u.id AND p.host = $1 \
-               AND (t.revoked_at IS NOT NULL OR t.expires_at <= now() OR u.blocked_at IS NOT NULL) \
-               AND GREATEST(p.updated_at, LEAST(t.revoked_at, \
-                   CASE WHEN t.expires_at <= now() THEN t.expires_at END, u.blocked_at)) \
-                   < now() - make_interval(secs => $2) \
-             RETURNING p.token_id) \
-             INSERT INTO api_token_audit (token_id, action) SELECT token_id, 'wireguard_released' FROM released",
-        ).bind(host).bind(grace.as_secs_f64()).execute(&mut *tx).await?.rows_affected();
-    }
+    // Release takes the pool lock so a sweep and an enrollment never interleave:
+    // a sweep commits before an enrollment reads the peers, or deletes after
+    // that enrollment commits. The delete does not rest on the lock. It joins
+    // each peer to its token in one statement, and PostgreSQL rechecks that
+    // join on a row that changed while the delete waited for it (READ
+    // COMMITTED), so a peer an enrollment moved to a new token is skipped.
+    sqlx::query(POOL_LOCK).execute(&mut *tx).await?;
+    let released = sqlx::query(
+        "WITH released AS (DELETE FROM wireguard_peers p USING api_tokens t, users u \
+         WHERE p.token_id = t.id AND p.user_id = u.id \
+           AND (t.revoked_at IS NOT NULL OR t.expires_at <= now() OR u.blocked_at IS NOT NULL) \
+           AND GREATEST(p.updated_at, LEAST(t.revoked_at, \
+               CASE WHEN t.expires_at <= now() THEN t.expires_at END, u.blocked_at)) \
+               < now() - make_interval(secs => $1) \
+         RETURNING p.token_id) \
+         INSERT INTO api_token_audit (token_id, action) SELECT token_id, 'wireguard_released' FROM released",
+    )
+    .bind(grace.as_secs_f64())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     tx.commit().await?;
     Ok(released)
 }

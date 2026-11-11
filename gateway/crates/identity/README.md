@@ -118,18 +118,34 @@ Every configured identity bearer must be distinct or startup fails. An unset nar
 
 ### WireGuard enrollment
 
-Set all five enrollment values together; a partial set refuses startup. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
+Identity offers one WireGuard ingress per proxy node that terminates WireGuard: that node's kernel interface. Set `WIREGUARD_INGRESSES`, `WIREGUARD_INGRESS_ADDRESSES` and `WIREGUARD_ALLOWED_IPS` together; a partial set refuses startup, and a value that is empty or only whitespace counts as unset. `WIREGUARD_PERSISTENT_KEEPALIVE` set without the three is a partial set as well: it stops startup with a message naming `WIREGUARD_INGRESSES`, so a deployment that turns enrollment off removes the keepalive line too. Absence omits `wireguard` from discovery and refuses an authorize request carrying a key. Identity stays publicly reachable without the tunnel.
 
 | Name | Value |
 | --- | --- |
-| `WIREGUARD_HOST_ID` | One lowercase ingress-host label |
-| `WIREGUARD_ENDPOINT` | Kernel interface `host:port`, IPv6 in brackets |
-| `WIREGUARD_PUBLIC_KEY` | Padded base64 for the interface's 32-byte key |
-| `WIREGUARD_ALLOWED_IPS` | Comma-separated CIDRs routed through the tunnel |
-| `WIREGUARD_HOSTS` | Semicolon-separated `name=addr[,addr]` mappings |
+| `WIREGUARD_INGRESSES` | `id=public_key@endpoint` per node, `;` between |
+| `WIREGUARD_INGRESS_ADDRESSES` | Comma-separated tunnel IPs of every ingress |
+| `WIREGUARD_ALLOWED_IPS` | Comma-separated CIDRs routed through each tunnel |
 | `WIREGUARD_PERSISTENT_KEEPALIVE` | Optional seconds, default 25; 0 omits it |
 
-Host-map addresses must be inside the allowed CIDRs. Names are the proxy or tunnel origin's host, or `*.` followed by the proxy apex; they are lowercase, and the identity origin's host is refused. Profile separately needs `WIREGUARD_POOL_V4` and may set `WIREGUARD_POOL_V6`, reservations and release grace. `configure.sh` generates the agent bearer and leaves the interface and pool values as commented examples.
+```sh
+WIREGUARD_INGRESSES=p1=<p1 public key>@p1.proxy.example.com:51820;p2=<p2 public key>@p2.proxy.example.com:51820
+WIREGUARD_INGRESS_ADDRESSES=10.7.0.1
+WIREGUARD_ALLOWED_IPS=10.7.0.1/32
+```
+
+In a `WIREGUARD_INGRESSES` entry, `id` is the node's `DEVSERVER_PROXY_ID`, one lowercase DNS label, which is also the `WIREGUARD_AGENT_HOST_ID` of the agent on that node. `public_key` is the node interface's key, padded base64 for 32 bytes. `endpoint` is the interface's `host:port`, with an IPv6 literal in brackets and the port in digits; it may be the node's own name, since a desktop resolves an endpoint on its host and not through a tunnel's host map. An entry is split once on its first `=` and once on `@`, so the `=` that pads the key needs no escaping. In `identity.env`, which systemd reads as an `EnvironmentFile`, the value is written bare and taken to the end of the line. A shell ends an assignment at the first `;`, so in a shell `export`, or in a file a shell sources, as the dev runner (`packaging/gateway/scripts/dev/run.sh`) sources its env files, the value goes in single quotes. In a Kubernetes manifest, quote it as a YAML string: unquoted, a bracketed IPv6 endpoint does not parse inside a flow mapping. Ids are unique; keys and endpoints may repeat. An empty entry, which a trailing or doubled `;` makes, is refused. The order of the list is kept: its first entry is the ingress the single-ingress fields of discovery and of the redeem describe. At startup identity logs the configured ids in that order and which is first, at info, without keys or endpoints.
+
+Every ingress interface answers on the same `WIREGUARD_INGRESS_ADDRESSES`, at most one address per family, each inside `WIREGUARD_ALLOWED_IPS`. No host map is configured: identity derives one per ingress, `{id}.{proxy host}` and `*.{id}.{proxy host}` mapped to the ingress addresses, where `{proxy host}` is the host of `DEVSERVER_PROXY_ORIGIN` without its port. Those are the node's base name and its tenant names, so a tenant name is carried only by its own node's tunnel. With enrollment configured, `DEVSERVER_PROXY_ORIGIN` must have a DNS name as its host, every derived name must be a lowercase DNS name of at most 253 bytes, and `BASE_URL`'s host must be neither a derived node name nor a name below one.
+
+`WIREGUARD_ALLOWED_IPS` and `WIREGUARD_PERSISTENT_KEEPALIVE` apply to every ingress. The ingress addresses must stay out of profile's allocation: profile never allocates a pool's network address or its first host address, and any other ingress address belongs in profile's `WIREGUARD_POOL_RESERVED`. Identity cannot read profile's pool, so it does not check this.
+
+`WIREGUARD_HOST_ID`, `WIREGUARD_ENDPOINT`, `WIREGUARD_PUBLIC_KEY` and `WIREGUARD_HOSTS` describe a single ingress and are refused: a non-empty value in any of them stops startup with one message that names every one that is set and what replaces them. A single ingress becomes one `WIREGUARD_INGRESSES` entry, `<node id>=<WIREGUARD_PUBLIC_KEY>@<WIREGUARD_ENDPOINT>`, where the id is the node's `DEVSERVER_PROXY_ID` whatever `WIREGUARD_HOST_ID` held, and `WIREGUARD_INGRESS_ADDRESSES` takes the tunnel address `WIREGUARD_HOSTS` mapped; the host map itself is derived. A deployment that sets them therefore never starts with enrollment silently off.
+
+A startup refusal names the variable at fault and never a value, since what is wrong may be a key, an endpoint or a secret pasted in the wrong place. A refusal about one entry of `WIREGUARD_INGRESSES` names the entry by its position in the list, counted from 1 (`WIREGUARD_INGRESSES entry 3 public key must be padded base64 for 32 bytes`), and a duplicate id names both positions. A `DEVSERVER_PROXY_ORIGIN` host that no node name can be built under is refused once, as that variable's fault.
+
+With enrollment configured, discovery's `wireguard` object carries `endpoint` and `public_key` (the first ingress's), `allowed_ips`, `persistent_keepalive` (left out when it is 0) and `ingresses`: one `{id, endpoint, public_key, hosts}` per ingress in the configured order, where `hosts` is that ingress's derived map as `[{name, addresses}]`. That is everything a desktop needs to start a tunnel to any ingress except its own key and address. A desktop that reads only `endpoint` and `public_key` sees one ingress, the first.
+
+Profile separately needs `WIREGUARD_POOL_V4` and may set `WIREGUARD_POOL_V6`, reservations and release grace. `configure.sh` generates the agent bearer and asks for the ingress list and one IPv4 address pool. With a list it writes `WIREGUARD_INGRESSES`, `WIREGUARD_INGRESS_ADDRESSES` and `WIREGUARD_ALLOWED_IPS` in `identity.env` and `WIREGUARD_POOL_V4` in `profile.env`, the tunnel address being the pool's first host address; with an empty answer it leaves all four as commented examples. It never writes `WIREGUARD_PERSISTENT_KEEPALIVE`, which stays a commented example at its default. A rerun over an `identity.env` that sets the keepalive, or a tunnel address or allowed networks other than the default pool's first host address and its /32, names them before the WireGuard questions as settings it does not carry over, and the replaced file's backup keeps them.
 
 ## Routes
 
@@ -180,7 +196,7 @@ Desktop authorize (PAT mint for chan-desktop):
 | POST   | `/desktop/authorize/confirm` | allow or deny, then loopback      |
 | POST   | `/desktop/authorize/redeem`  | one-time code to PAT              |
 
-The optional `wireguard_public_key` authorize query carries a padded base64 32-byte key, shown on the consent page. Allow enrolls it in profile against the minted PAT before issuing the redemption code. Enrollment failure soft-revokes that undelivered PAT and hands back `error=wireguard_enroll_failed`. Successful redemption adds `wireguard` with `server_public_key`, `endpoint`, assigned `addresses`, `allowed_ips`, optional `persistent_keepalive` and the `hosts` map. Without a key the response shape is unchanged.
+The optional `wireguard_public_key` authorize query carries a padded base64 32-byte key. The consent page shows it with the id and endpoint of every ingress it is enrolled with. Allow enrolls it in profile once, against the minted PAT, before issuing the redemption code; the one enrollment covers every ingress. Enrollment failure soft-revokes that undelivered PAT and hands back `error=wireguard_enroll_failed`. Successful redemption adds `wireguard`: the peer's one assigned `addresses` set, valid on every ingress, `allowed_ips`, optional `persistent_keepalive`, and `ingresses`, which is discovery's list with each key named `server_public_key`. The object's own `server_public_key`, `endpoint` and `hosts` are the first ingress's, so a desktop that reads no list enrolls against the first ingress and reaches the other nodes over their public path. Without a key the response shape is unchanged.
 
 Desktop API (Bearer PAT):
 
@@ -200,7 +216,9 @@ Internal listener (route-scoped bearers):
 | POST   | `/internal/v1/sessions/whoami` | `IDENTITY_SESSION_INTERNAL_TOKEN` |
 | GET    | `/internal/v1/wireguard/peers` | `WIREGUARD_AGENT_TOKEN`           |
 
-The peer-list route requires `?host=<label>` and relays profile's JSON bytes, quoted ETag and conditional 304 unchanged. Missing or wrong bearer answers 401, an empty configured bearer 404, malformed host 400, and profile failure 502.
+The peer-list route requires `?host=<id>`, the polling agent's `WIREGUARD_AGENT_HOST_ID`, and relays profile's JSON bytes, quoted ETag and conditional 304 unchanged. Every agent presents the same `WIREGUARD_AGENT_TOKEN`. The bearer is checked first: a missing or wrong one answers 401, and an empty configured bearer 404. After it, a missing or malformed host answers 400, and a profile failure answers 502. While enrollment is configured, a host that is not an id in `WIREGUARD_INGRESSES` answers 404 with no call to profile: that agent's host id and identity's list disagree. While enrollment is not configured there is no list to disagree with, and every well-formed host is relayed: profile's list is the same for every host, so the relay cannot wipe or misplace a peer, and a 404 there would hold every agent on its last list.
+
+An agent keeps the list it has on every answer but a served one. An agent answered 404 therefore leaves its interface as it is, and a PAT revoked, expired or blocked meanwhile stays a kernel peer on that node until the agent's host id is an id in `WIREGUARD_INGRESSES` or the node's interface is taken down. A node taken out of the list has its agent stopped and its interface taken down. Identity logs the refusal at warn with the host it names: once when it starts, then once every ten minutes while the agent keeps polling, each line carrying the number of polls it stands for.
 
 The validate route serves PAT validation, Hello-name announcement and lease refresh for devserver-proxy; with `proxy_id` and `registration_id` present the response also carries the signed admission lease. See [Devserver publication](../../design.md#devserver-publication) for the contact inventory.
 

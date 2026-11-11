@@ -108,7 +108,7 @@ for service in profile identity; do
     assert_contains "$REPO/gateway/crates/$service/packaging/chan-gateway-$service.service" \
         "ExecStartPre=/usr/lib/chan-gateway/check-database-ready"
     assert_contains "$REPO/gateway/crates/$service/packaging/$service.env" \
-        "EXPECTED_SQLX_MIGRATION=17"
+        "EXPECTED_SQLX_MIGRATION=18"
     assert_contains "$REPO/gateway/crates/$service/packaging/$service.env" \
         "DATABASE_ROLE_POLICY_VERSION=2"
     if grep -Fq 'postgres://chan:chan@' \
@@ -117,7 +117,7 @@ for service in profile identity; do
     fi
 done
 assert_contains "$migrate_packaging/migrate.env" "CHAN_GATEWAY_MIGRATIONS=only"
-assert_contains "$migrate_packaging/migrate.env" "EXPECTED_SQLX_MIGRATION=17"
+assert_contains "$migrate_packaging/migrate.env" "EXPECTED_SQLX_MIGRATION=18"
 assert_contains "$migrate_packaging/migrate.env" "DATABASE_ROLE_POLICY_VERSION=2"
 assert_contains "$migrate_packaging/postinst" \
     "      chown root:chan-gateway-migrate /etc/chan-gateway/migrate.env"
@@ -174,10 +174,15 @@ assert_contains "$agent_packaging/wireguard-agent.env" "WIREGUARD_AGENT_TOKEN="
 refute_pattern "the WireGuard agent's env carries another service's bearer" \
     '^(IDENTITY_INTERNAL_TOKEN|IDENTITY_SESSION_INTERNAL_TOKEN|IDENTITY_ACCOUNT_ADMIN_TOKEN|IDENTITY_ADMIN_TOKEN|PROFILE_AUTH_TOKEN|PROFILE_ADMIN_TOKEN|DEVSERVER_[A-Z_]*TOKENS?)=' \
     "$agent_packaging/wireguard-agent.env"
-assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
-    'generate_unique_bearer_token; WIREGUARD_AGENT_TOKEN=$UNIQUE_BEARER_TOKEN'
-# The one bearer reaches both ends: each env file configure.sh writes is a
-# heredoc of its own, so each is read on its own.
+# The agent's bearer is minted once. A second mint leaves the first value in
+# the set every later bearer is kept distinct from, held by no file.
+agent_token_mints=$(grep -Fcx \
+    -e 'generate_unique_bearer_token; WIREGUARD_AGENT_TOKEN=$UNIQUE_BEARER_TOKEN' \
+    "$REPO/packaging/gateway/scripts/configure.sh") || true
+[[ "$agent_token_mints" == 1 ]] \
+    || die "configure.sh mints WIREGUARD_AGENT_TOKEN [$agent_token_mints] times, expected once"
+# The one bearer reaches both ends, on one line each: each env file
+# configure.sh writes is a heredoc of its own, so each is read on its own.
 configure_env_body() {
     awk -v target="write_env $1 " '
         { line = $0; sub(/^[ \t]+/, "", line) }
@@ -189,7 +194,35 @@ configure_env_body() {
 for env_file in /etc/chan-gateway/identity.env /etc/chan-gateway/wireguard-agent.env; do
     configure_env_body "$env_file" | grep -Fqx 'WIREGUARD_AGENT_TOKEN=${WIREGUARD_AGENT_TOKEN}' \
         || die "configure.sh does not write WIREGUARD_AGENT_TOKEN into $env_file"
+    agent_token_lines=$(configure_env_body "$env_file" | grep -c '^WIREGUARD_AGENT_TOKEN=') || true
+    [[ "$agent_token_lines" == 1 ]] \
+        || die "configure.sh writes WIREGUARD_AGENT_TOKEN into $env_file [$agent_token_lines] times, expected once"
 done
+
+# Identity refuses to start with one of the single-ingress variables set, so
+# no template, generator or manifest assigns one, as a commented example
+# either: an example is what an operator uncomments. A manifest names one as
+# a ConfigMap key (NAME: value) or in a container's env list (- name: NAME,
+# in block or flow style), the name quoted or not.
+single_ingress_name='["'\'']?WIREGUARD_(HOST_ID|ENDPOINT|PUBLIC_KEY|HOSTS)["'\'']?'
+refute_pattern "packaging assigns a single-ingress WireGuard variable, which identity refuses" \
+    "^[#[:space:]-]*(${single_ingress_name}[[:space:]]*[=:]|\\{?[[:space:]]*name:[[:space:]]*${single_ingress_name}[[:space:]]*([,}#]|\$))" \
+    "$REPO"/gateway/crates/*/packaging/*.env \
+    "$REPO/packaging/gateway/scripts/configure.sh" \
+    "$REPO/packaging/gateway/scripts/dev/setup.sh" \
+    "$REPO/packaging/gateway/scripts/dev/env.example" \
+    "$REPO"/packaging/kube/*.yaml
+# The packaged templates show enrollment and leave it off: identity's three
+# required values are commented examples, and neither file assigns a value
+# that turns on its half.
+for name in WIREGUARD_INGRESSES WIREGUARD_INGRESS_ADDRESSES WIREGUARD_ALLOWED_IPS; do
+    require_fixed "the packaged identity.env does not show $name as a commented example" \
+        "# $name=" "$REPO/gateway/crates/identity/packaging/identity.env"
+done
+refute_pattern "a packaged env template turns WireGuard enrollment on" \
+    '^[[:space:]]*WIREGUARD_(INGRESSES|INGRESS_ADDRESSES|ALLOWED_IPS|PERSISTENT_KEEPALIVE|POOL_V4|POOL_V6|POOL_RESERVED)=' \
+    "$REPO/gateway/crates/identity/packaging/identity.env" \
+    "$REPO/gateway/crates/profile/packaging/profile.env"
 
 assert_contains "$REPO/packaging/gateway/scripts/configure.sh" \
     "install -d -m 0751 -o root -g root /etc/chan-gateway"
