@@ -28,14 +28,21 @@
 // in the case it is named for. The Workspace slide shows the runner's seeded
 // workspace, which is small, and is measured once its height holds. The
 // spine is read from the canvas's own pixels, which it clears to transparent
-// before each frame: the painted box is the spine's, and the root is the one
-// disc filled with the card colour. The seed has no directories, so the check
-// makes a few nested ones for the spine and removes them after. The note is
-// shown by answering the slide's indexing-state poll with no directories,
-// through the browser's request interception, which leaves every other
-// request alone; the resize is read with that poll held unanswered, so the
-// layout is at rest and only the new size can move the view. The controls row is read under each slide against its place
-// under Metrics at the same size.
+// before each frame: the painted box is the spine's. The root is told apart
+// by what the graph draws for it alone, not by a colour: the graph gives the
+// workspace node its own glyph, a hard drive, and every directory a folder,
+// so the check records the discs and glyphs the canvas draws and takes the
+// root as the one disc drawn with the hard drive. A colour cannot do this: a
+// pending directory's grey disc, under a folder glyph stroked in the page's
+// colour, blends through the root's fill colour at the glyph's edges. The
+// seed has no directories, so the check makes a few nested ones for the
+// spine and removes them after; directories an earlier check left, pending
+// or being indexed, join them. The note is shown by answering the slide's
+// indexing-state poll with no directories, through the browser's request
+// interception, which leaves every other request alone; the resize is read
+// with that poll held unanswered, so the layout is at rest and only the new
+// size can move the view. The controls row is read under each slide against
+// its place under Metrics at the same size.
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -67,6 +74,9 @@ const SPINE_DIR = "dashboard-spine-213";
 const SPINE_LEAVES = ["alpha/one/two", "alpha/three", "beta"];
 const EMPTY_NOTE = "No directories to graph yet.";
 const GRAPH = ".slide-indexing .indexing-graph-host canvas";
+/// The start of the hard drive's outline in the workspace glyph's SVG, which
+/// the graph draws on the root's disc and on no other node's.
+const ROOT_GLYPH = "M5.45 5.11L2 12v6";
 
 /// The slides read here. `dot` is the carousel dot that shows the slide and
 /// `selector` what the check waits for once it is shown; `measure` reads one
@@ -309,16 +319,73 @@ async function readSlide(page, spec) {
   );
 }
 
+/// Record, for each canvas in the Search slide's graph host, the discs its
+/// last frame drew and the glyph drawn on each, in device pixels. The graph
+/// paints a node as a full circle followed by its glyph's image, under the
+/// one transform it sets for the frame, and starts each frame by clearing the
+/// canvas, so a frame's record starts there. The context's own methods do the
+/// drawing; the record only reads their arguments. `untraceGraphDraws` puts
+/// the methods back, since the page outlives the check.
+async function traceGraphDraws(page) {
+  await page.evaluate((rootGlyph) => {
+    const proto = CanvasRenderingContext2D.prototype;
+    if (window.__smokeGraphDraws) return;
+    const original = { clearRect: proto.clearRect, arc: proto.arc, drawImage: proto.drawImage };
+    const frames = new WeakMap();
+    const isRootGlyph = new WeakMap();
+    proto.clearRect = function (...args) {
+      if (this.canvas instanceof HTMLCanvasElement && this.canvas.closest(".slide-indexing .indexing-graph-host")) {
+        frames.set(this.canvas, { discs: [], arc: null });
+      }
+      return original.clearRect.apply(this, args);
+    };
+    proto.arc = function (x, y, radius, ...rest) {
+      const frame = frames.get(this.canvas);
+      if (frame) {
+        const m = this.getTransform();
+        frame.arc = {
+          x: m.a * x + m.c * y + m.e,
+          y: m.b * x + m.d * y + m.f,
+          r: radius * Math.hypot(m.a, m.b),
+        };
+      }
+      return original.arc.call(this, x, y, radius, ...rest);
+    };
+    proto.drawImage = function (image, ...rest) {
+      const frame = frames.get(this.canvas);
+      if (frame?.arc && image instanceof HTMLImageElement) {
+        if (!isRootGlyph.has(image)) {
+          let svg = "";
+          try {
+            svg = decodeURIComponent(image.src);
+          } catch {}
+          isRootGlyph.set(image, svg.includes(rootGlyph));
+        }
+        frame.discs.push({ ...frame.arc, root: isRootGlyph.get(image) });
+        frame.arc = null;
+      }
+      return original.drawImage.call(this, image, ...rest);
+    };
+    window.__smokeGraphDraws = { frames, original };
+  }, ROOT_GLYPH);
+}
+
+async function untraceGraphDraws(page) {
+  await page.evaluate(() => {
+    const traced = window.__smokeGraphDraws;
+    if (!traced) return;
+    Object.assign(CanvasRenderingContext2D.prototype, traced.original);
+    delete window.__smokeGraphDraws;
+  });
+}
+
 /// The Search slide's canvas and what it painted, in CSS px. `ink` is the box
 /// of every pixel the graph painted, relative to the canvas, and `room` the
-/// room it leaves to each of the canvas's edges. `root` is the box of the
-/// opaque pixels in the root disc's fill, the card colour the graph reads
-/// from its host as it paints; `ring` is the outline colour every disc is
-/// stroked in, which must differ from it for the root to be told apart.
+/// room it leaves to each of the canvas's edges. `roots` counts the discs
+/// the last frame drew with the workspace glyph and `root` is the box of the
+/// circle drawn for the one, null unless there is exactly one.
 /// `belowRoot` counts the pixels painted below the root's middle outside its
-/// disc's width, with the lowest one's depth: a small zoom leaves only a few
-/// fill pixels around the root's icon, so its fill box says where the disc
-/// is but not exactly where it ends.
+/// disc's width, with the lowest one's depth.
 async function readGraph(page) {
   return page.evaluate(async () => {
     const frame = () => new Promise((done) => requestAnimationFrame(() => done()));
@@ -344,53 +411,30 @@ async function readGraph(page) {
       width: round(r.width),
       height: round(r.height),
     });
-    const host = getComputedStyle(canvas.parentElement);
-    const rgba = (color) => {
-      const probe = document.createElement("canvas");
-      probe.width = 1;
-      probe.height = 1;
-      const p = probe.getContext("2d");
-      p.fillStyle = color;
-      p.fillRect(0, 0, 1, 1);
-      return [...p.getImageData(0, 0, 1, 1).data];
-    };
-    // The same lookups, with the same fallbacks, the graph paints from.
-    const card = rgba(host.getPropertyValue("--bg-card").trim() || "#232325");
-    const ring = rgba(host.getPropertyValue("--bg").trim() || "#1c1c1e");
+    // The discs the frame now on the canvas drew, as the trace recorded them.
+    const discs = window.__smokeGraphDraws?.frames.get(canvas)?.discs ?? [];
+    const roots = discs.filter((disc) => disc.root);
     const pixels = context.getImageData(0, 0, width, height).data;
     const ink = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity, count: 0 };
-    const root = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity, count: 0 };
-    const grow = (b, x, y) => {
-      if (x < b.left) b.left = x;
-      if (x > b.right) b.right = x;
-      if (y < b.top) b.top = y;
-      if (y > b.bottom) b.bottom = y;
-      b.count += 1;
-    };
     for (let y = 0; y < height; y += 1) {
       for (let x = 0; x < width; x += 1) {
-        const o = (y * width + x) * 4;
-        if (pixels[o + 3] === 0) continue;
-        grow(ink, x, y);
-        if (
-          pixels[o + 3] === 255 &&
-          Math.abs(pixels[o] - card[0]) <= 2 &&
-          Math.abs(pixels[o + 1] - card[1]) <= 2 &&
-          Math.abs(pixels[o + 2] - card[2]) <= 2
-        ) {
-          grow(root, x, y);
-        }
+        if (pixels[(y * width + x) * 4 + 3] === 0) continue;
+        if (x < ink.left) ink.left = x;
+        if (x > ink.right) ink.right = x;
+        if (y < ink.top) ink.top = y;
+        if (y > ink.bottom) ink.bottom = y;
+        ink.count += 1;
       }
     }
     // Device pixels to CSS px, a painted pixel covering its whole cell.
     const scale = width / canvas.clientWidth;
+    const disc = roots.length === 1 ? roots[0] : null;
     const below = { count: 0, bottom: null };
-    if (root.count > 0) {
-      const middle = (root.top + root.bottom) / 2;
+    if (disc) {
       const pad = Math.ceil(3 * scale);
-      for (let y = Math.ceil(middle); y < height; y += 1) {
+      for (let y = Math.ceil(disc.y); y < height; y += 1) {
         for (let x = 0; x < width; x += 1) {
-          if (x >= root.left - pad && x <= root.right + pad) continue;
+          if (x >= disc.x - disc.r - pad && x <= disc.x + disc.r + pad) continue;
           if (pixels[(y * width + x) * 4 + 3] === 0) continue;
           below.count += 1;
           below.bottom = y;
@@ -419,7 +463,18 @@ async function readGraph(page) {
       controls: box(controls.getBoundingClientRect()),
       canvasRoom: { left: round(c.left - t.left), right: round(t.right - c.right) },
       ink: painted,
-      root: css(root),
+      root: disc
+        ? {
+            left: round((disc.x - disc.r) / scale),
+            top: round((disc.y - disc.r) / scale),
+            right: round((disc.x + disc.r) / scale),
+            bottom: round((disc.y + disc.r) / scale),
+            width: round((2 * disc.r) / scale),
+            height: round((2 * disc.r) / scale),
+          }
+        : null,
+      roots: roots.length,
+      discs: discs.length,
       belowRoot: {
         count: below.count,
         bottom: below.bottom === null ? null : round((below.bottom + 1) / scale),
@@ -433,8 +488,6 @@ async function readGraph(page) {
               above: painted.top,
               below: round(c.height - painted.bottom),
             },
-      card: card.join(","),
-      ring: ring.join(","),
       scale,
     };
   });
@@ -450,9 +503,11 @@ async function measureGraph(page, spec, label) {
   const edges = (b) => [b.left, b.top, b.right, b.bottom];
   return steady(
     () => readGraph(page),
-    (m) => (m.room && m.root.count > 0 ? [...edges(m.ink), ...edges(m.root)] : null),
+    // The count of discs drawn with the workspace glyph holds too, so a
+    // reading with no root, or more than one, settles and is judged.
+    (m) => (m.room ? [...edges(m.ink), m.roots, ...(m.root ? edges(m.root) : [0, 0, 0, 0])] : null),
     label,
-    (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 1),
+    (a, b) => a.every((v, i) => (i === 4 ? v === b[i] : Math.abs(v - b[i]) <= 1)),
   );
 }
 
@@ -579,10 +634,8 @@ function judgeGraph(spec, size, m) {
   if (differ(m.room.above, m.room.below, GRAPH_TOLERANCE)) {
     wrong.push(`the room above the spine (${m.room.above}) and below it (${m.room.below}) differ`);
   }
-  if (m.card === m.ring) {
-    wrong.push(`the root's fill and every disc's outline share one colour (${m.card}): the root cannot be told apart`);
-  } else if (m.root.count === 0) {
-    wrong.push(`no disc is filled with the root's colour (${m.card})`);
+  if (m.roots !== 1) {
+    wrong.push(`${m.roots} of the ${m.discs} discs drawn are drawn with the workspace glyph, not one: the root cannot be told apart`);
   } else {
     if (m.belowRoot.count > 0) {
       wrong.push(
@@ -619,8 +672,23 @@ function judgeNote(spec, size, m) {
   return wrong;
 }
 
+/// How many directories an indexing state lists in each state.
+function countStates(json) {
+  const states = {};
+  for (const node of json?.nodes ?? []) states[node.state] = (states[node.state] ?? 0) + 1;
+  return states;
+}
+
+/// The workspace's indexing state now, as `countStates` answers it, or the
+/// status of a request that failed.
+async function indexingStates(ctx) {
+  const reply = await request(ctx, "/api/indexing/state");
+  return reply.status === 200 ? countStates(reply.json) : { status: reply.status };
+}
+
 /// Make the spine's directories, each with a note in it, and wait until the
 /// indexing state lists the deepest, so the slide's first poll draws them.
+/// Answers how many directories the state lists in each state then.
 async function makeSpine(ctx) {
   const root = join(ctx.workspaceDir, SPINE_DIR);
   for (const leaf of SPINE_LEAVES) {
@@ -634,7 +702,7 @@ async function makeSpine(ctx) {
   while (Date.now() < deadline) {
     last = await request(ctx, "/api/indexing/state");
     if (last.status === 200 && last.json?.nodes?.some((n) => n.path === deepest)) {
-      return last.json.nodes.length;
+      return countStates(last.json);
     }
     await delay(250);
   }
@@ -693,7 +761,8 @@ export default {
     const failures = [];
     let stopped = false;
     try {
-      details.spineNodes = await makeSpine(ctx);
+      details.spineStates = await makeSpine(ctx);
+      await traceGraphDraws(page);
       await dispatch(page, "app.dashboard.open");
       await page.waitForSelector(".dashboard.active .carousel", { timeout: 20_000 });
       const tabs = await page.evaluate(
@@ -728,6 +797,9 @@ export default {
             await showSlide(page, spec.dot, spec.selector);
             const m = await spec.measure(page, spec, label);
             if (!m) throw new Error(`${label}: the slide did not render its boxes`);
+            // The spine's states as the graph was read, which say whether a
+            // pending or indexing directory was among the discs.
+            if (spec.measure === measureGraph) m.states = await indexingStates(ctx);
             entry.slides[spec.key] = m;
             await ctx.shot(`${spec.key.toLowerCase().replace(/ /g, "-")}-${sizeLabel}`);
             for (const line of spec.judge(spec, size, m)) failures.push(`${label}: ${line}`);
@@ -761,6 +833,7 @@ export default {
       details.resizedFrom = await measureGraph(page, null, `${resized}, at rest`);
       await resize(page, to);
       const m = await measureGraph(page, null, resized);
+      m.states = await indexingStates(ctx);
       details.heldPolls = held.length;
       await intercept(null);
       details.resized = m;
@@ -784,6 +857,7 @@ export default {
     } finally {
       await intercept(null).catch(() => {});
       await cdp.detach().catch(() => {});
+      await untraceGraphDraws(page).catch(() => {});
       await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
       if (stopped) await setCycling(page, true).catch(() => {});
       rmSync(spineRoot, { recursive: true, force: true });
