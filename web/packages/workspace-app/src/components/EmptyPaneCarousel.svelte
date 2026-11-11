@@ -67,6 +67,25 @@
     void loadBuildInfo();
   });
 
+  // The About slide's bottom pad is for a slide that scrolls (see
+  // `.slide-overflows` in the styles), so the slide reads whether its body is
+  // taller than the slide itself. The slide's box is the stage's whatever its
+  // padding, so the pad it adds cannot change the answer.
+  let aboutOverflows = $state(false);
+
+  function watchOverflow(slide: HTMLElement): { destroy(): void } | undefined {
+    const body = slide.querySelector<HTMLElement>(":scope > .slide-body");
+    if (!body || typeof ResizeObserver === "undefined") return undefined;
+    const measure = (): void => {
+      aboutOverflows = body.offsetHeight > slide.clientHeight;
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(slide);
+    observer.observe(body);
+    measure();
+    return { destroy: () => observer.disconnect() };
+  }
+
   // ---- shared index status label (Search slide stub copy) --------------------
 
   const indexLabel = $derived.by<string | null>(() => {
@@ -405,69 +424,76 @@
            a "Fund the work" CTA with the donation QR + the website
            / source links, so the user has one self-contained
            surface to learn what chan is and how to support it. -->
-      <div class="slide slide-about" aria-label="About">
-        <div class="slide-title">About</div>
-        <div class="about-grid">
-          <span class="k">chan version</span>
-          <span class="v mono">{buildInfo?.version ?? "n/a"}</span>
-          <span class="k">build</span>
-          <span class="v mono">{buildInfo?.build ?? "n/a"}</span>
-        </div>
+      <div
+        class="slide slide-about"
+        class:slide-overflows={aboutOverflows}
+        aria-label="About"
+        use:watchOverflow
+      >
+        <div class="slide-body">
+          <div class="slide-title">About</div>
+          <div class="about-grid">
+            <span class="k">chan version</span>
+            <span class="v mono">{buildInfo?.version ?? "n/a"}</span>
+            <span class="k">build</span>
+            <span class="v mono">{buildInfo?.build ?? "n/a"}</span>
+          </div>
 
-        <div class="about-links">
-          <a
-            class="about-link"
-            href="https://chan.app"
-            target="_blank"
-            rel="noopener"
-            title="chan.app"
-          >
-            <Globe size={14} strokeWidth={1.75} aria-hidden="true" />
-            <span>chan.app</span>
-          </a>
-          <a
-            class="about-link"
-            href="https://github.com/fiorix/chan"
-            target="_blank"
-            rel="noopener"
-            title="github.com/fiorix/chan"
-          >
-            <CodeXml size={14} strokeWidth={1.75} aria-hidden="true" />
-            <span>github.com/fiorix/chan</span>
-          </a>
-        </div>
+          <div class="about-links">
+            <a
+              class="about-link"
+              href="https://chan.app"
+              target="_blank"
+              rel="noopener"
+              title="chan.app"
+            >
+              <Globe size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>chan.app</span>
+            </a>
+            <a
+              class="about-link"
+              href="https://github.com/fiorix/chan"
+              target="_blank"
+              rel="noopener"
+              title="github.com/fiorix/chan"
+            >
+              <CodeXml size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>github.com/fiorix/chan</span>
+            </a>
+          </div>
 
-        <div class="about-fund">
-          <div class="fund-copy">
-            <div class="fund-title">Fund the work</div>
-            <p class="fund-text">
-              Chan is independent software. Small tips help cover time
-              spent on releases, packaging, and documentation.
-              Share the love, cheers!
+          <div class="about-fund">
+            <div class="fund-copy">
+              <div class="fund-title">Fund the work</div>
+              <p class="fund-text">
+                Chan is independent software. Small tips help cover time
+                spent on releases, packaging, and documentation.
+                Share the love, cheers!
+              </p>
+            </div>
+            <img
+              class="fund-qr"
+              src={withTokenQuery("/qr-donate.png")}
+              alt="Donation QR code"
+              width="160"
+              height="160"
+            />
+          </div>
+
+          <!-- Separator below the Fund-the-work QR, above the
+               free/open-source tagline. -->
+          <div class="about-sep" role="separator" aria-hidden="true"></div>
+
+          <!-- A one-line statement that chan is built on open source and is
+               itself free/open-source. The detailed dependency list is too
+               much for the About page, and the license link
+               lives in the repository rather than on this surface. -->
+          <div class="about-credits">
+            <p class="credits-tagline">
+              Built on a strong open-source foundation. Chan is free and
+              open-source software.
             </p>
           </div>
-          <img
-            class="fund-qr"
-            src={withTokenQuery("/qr-donate.png")}
-            alt="Donation QR code"
-            width="160"
-            height="160"
-          />
-        </div>
-
-        <!-- Separator below the Fund-the-work QR, above the
-             free/open-source tagline. -->
-        <div class="about-sep" role="separator" aria-hidden="true"></div>
-
-        <!-- A one-line statement that chan is built on open source and is
-             itself free/open-source. The detailed dependency list is too
-             much for the About page, and the license link
-             lives in the repository rather than on this surface. -->
-        <div class="about-credits">
-          <p class="credits-tagline">
-            Built on a strong open-source foundation. Chan is free and
-            open-source software.
-          </p>
         </div>
       </div>
     {:else if slideIndex === 0}
@@ -476,13 +502,15 @@
            workspace-root row is selected. `WorkspaceInfoBody` owns its own
            scroll affordance via the slide's `overflow: auto`. -->
       <div class="slide slide-workspace" aria-label="Workspace info">
-        <div class="slide-title">Workspace</div>
-        <div class="workspace-info-host">
-          <WorkspaceInfoBody
-            variant="dashboard"
-            onLanguageClick={openGraphForLanguage}
-            onContactNavigate={openGraphForContact}
-          />
+        <div class="slide-body">
+          <div class="slide-title">Workspace</div>
+          <div class="workspace-info-host">
+            <WorkspaceInfoBody
+              variant="dashboard"
+              onLanguageClick={openGraphForLanguage}
+              onContactNavigate={openGraphForContact}
+            />
+          </div>
         </div>
       </div>
     {:else}
@@ -722,6 +750,20 @@
     overflow-y: auto;
     overflow-x: hidden;
   }
+  /* The Workspace and About slides keep the stage's whole box and their own
+     scroll, and hold their content in a body with auto margins. The margins
+     take only the room the slide has to spare: in a slide larger than the
+     body they put it in the middle on both axes, and in a smaller one they
+     are zero, so the body starts at the slide's top and scrolls from its
+     first line. `justify-content: center` would push a taller body's first
+     lines above the scroll origin, out of reach. */
+  .slide-body {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    width: 100%;
+    margin: auto;
+  }
   .slide-title {
     font-size: 14px;
     letter-spacing: 0.05em;
@@ -732,14 +774,23 @@
   /* --- Slide 2 (About) --- */
   .slide-about {
     align-items: stretch;
-    gap: 0.9rem;
     color: var(--text);
     opacity: 1;
-    /* The bottom pad matches the carousel's own 2rem above the slide. The
-       slide owns the vertical scroll, so without it the credits line ends
-       flush against the stage edge whenever the About content is taller
-       than the tab, while the top of the same card keeps its margin. */
-    padding: 0 0.25rem 2rem;
+    /* The side padding sits inside the column's width, so the content is
+       centered in the column rather than 4px right of its middle. */
+    box-sizing: border-box;
+    padding: 0 0.25rem;
+  }
+  /* A slide that scrolls ends with a bottom pad matching the carousel's own
+     2rem above the slide; without it the credits line ends flush against the
+     stage edge while the top of the same card keeps its margin. A slide that
+     fits takes none, since the pad would take room from below the body and
+     move it off the middle. */
+  .slide-about.slide-overflows {
+    padding-bottom: 2rem;
+  }
+  .slide-about .slide-body {
+    gap: 0.9rem;
   }
   .slide-about .slide-title {
     align-self: center;
@@ -838,17 +889,14 @@
   .slide-workspace {
     align-items: stretch;
     padding: 0;
-    gap: 0.5rem;
     color: var(--text);
     opacity: 1;
   }
+  .slide-workspace .slide-body {
+    gap: 0.5rem;
+  }
   .slide-workspace .slide-title {
     align-self: center;
-  }
-  .workspace-info-host {
-    flex: 1;
-    min-height: 0;
-    width: 100%;
   }
   /* --- Slide 1 (Indexing graph) --- */
   /* `slide` defaults to `align-items: center` which would collapse

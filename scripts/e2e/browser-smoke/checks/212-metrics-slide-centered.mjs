@@ -202,8 +202,8 @@ function judgeSearch(m) {
 
 /// The About slide's stage is a column in the middle of the tab, narrower than
 /// the wide stage, and the slide starts at the column's top left corner and is
-/// as tall as the column. The slide's width is left unread: its side padding
-/// is added to the column's width.
+/// as tall as the column. The slide's width and its content's place in the
+/// column are check 213's.
 function judgeAbout(m, wide) {
   const wrong = [];
   const room = m.stageRoom;
