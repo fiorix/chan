@@ -45,8 +45,8 @@ mod redraw;
 mod request_status;
 mod ring;
 pub mod shell_profiles;
-#[allow(dead_code)]
 mod terminal_program;
+mod terminal_program_sampling;
 mod tmux_connection;
 mod tmux_gate;
 
@@ -78,6 +78,8 @@ pub use request_status::{ChanRequestStatus, ChanStatusLease};
 use ring::RingBuffer;
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
+pub use terminal_program::ProgramReading;
+use terminal_program::{Foreground, TerminalProgram};
 pub use tmux_connection::{TmuxConnectionStatus, TmuxOrigin, TmuxSessionStatus, TmuxWindowStatus};
 pub use tmux_gate::{TmuxAnswer, TmuxConsentSnapshot, TmuxQuestion, TmuxRequest, TmuxResizeAxis};
 
@@ -548,6 +550,8 @@ pub struct Registry {
     /// debounce) and stores a permit when no waiter is parked, so a change
     /// is never missed.
     roster_notify: Arc<Notify>,
+    /// Coalesces title and attach requests for the one foreground-name sampler.
+    program_refresh: Arc<Notify>,
     /// The tenant's window presence, which the roster reads for each
     /// session's `window_live` (see [`Registry::install_window_presence`]).
     /// Absent, no window reads as live.
@@ -1642,6 +1646,10 @@ pub struct AttachHandle {
     pub initial_program_status: Arc<ProgramStatusSnapshot>,
     /// Publications after `initial_program_status`, independent of output lag.
     pub program_status_rx: watch::Receiver<Arc<ProgramStatusSnapshot>>,
+    /// Current title and foreground name, captured with its watch subscription.
+    pub initial_program: ProgramReading,
+    /// Full replacement readings, retained independently of output lag.
+    pub program_rx: watch::Receiver<ProgramReading>,
     /// The tmux consent state captured with the subscription, so a client
     /// that joins while a question stands sees it.
     pub initial_tmux_consent: Arc<TmuxConsentSnapshot>,
@@ -1975,6 +1983,7 @@ impl Registry {
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
+            program_refresh: Arc::new(Notify::new()),
             window_presence: OnceLock::new(),
             default_program: Mutex::new(None),
             persisted_windows: Mutex::new(HashSet::new()),
@@ -2323,7 +2332,15 @@ impl Registry {
     /// Gives a session the registry's current word. Called with the
     /// `sessions` lock held, as `set_program_status` holds it, so a session
     /// inserted while the word changes ends with the newer one.
+    /// Also binds the foreground sampler's wakeup once at registration.
     fn apply_program_status(&self, session: &Session) {
+        if session
+            .program_refresh
+            .set(self.program_refresh.clone())
+            .is_ok()
+        {
+            session.request_program_refresh();
+        }
         session
             .output
             .lock()
@@ -4789,6 +4806,10 @@ static FOCUS_EPOCHS: AtomicU64 = AtomicU64::new(0);
 struct SessionOutput {
     ring: RingBuffer,
     status: ProgramStatus,
+    program: TerminalProgram,
+    program_tx: watch::Sender<ProgramReading>,
+    program_dirty: bool,
+    program_ended: bool,
     replies: program_status_query::ReplySlots,
 }
 
@@ -4799,6 +4820,10 @@ impl SessionOutput {
         Self {
             ring,
             status,
+            program: TerminalProgram::default(),
+            program_tx: watch::channel(ProgramReading::default()).0,
+            program_dirty: true,
+            program_ended: false,
             replies: program_status_query::ReplySlots::default(),
         }
     }
@@ -4865,6 +4890,7 @@ struct Session {
     command_tx: CommandSink,
     output_tx: broadcast::Sender<SessionEvent>,
     output: Mutex<SessionOutput>,
+    program_refresh: OnceLock<Arc<Notify>>,
     last_activity: AtomicI64,
     /// Wall-clock millis of the most recent VISIBLE output (the agent
     /// rendering / generating), distinct from `last_activity` (which bumps on
@@ -5244,6 +5270,7 @@ impl Session {
                 RingBuffer::new(config.terminal.ring_bytes),
                 config.terminal.program_status,
             )),
+            program_refresh: OnceLock::new(),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             // Seed output-idle at spawn time so a brand-new session is not
             // treated as instantly idle before it has rendered anything.
@@ -5289,6 +5316,8 @@ impl Session {
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
+
+        session.seed_program();
 
         // A single-purpose / devserver CONTROL tenant echoes a banner naming
         // the command it is about to run, so the user sees the launch command
@@ -5675,6 +5704,7 @@ impl Session {
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
             output: Mutex::new(output),
+            program_refresh: OnceLock::new(),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -5720,6 +5750,8 @@ impl Session {
             exit: Mutex::new(None),
             ended: ChildEnded::default(),
         });
+
+        session.seed_program();
 
         {
             let session = session.clone();
@@ -6002,9 +6034,12 @@ impl Session {
             seq,
             initial_program_status,
             program_status_rx,
+            initial_program,
+            program_rx,
         ) = {
             let exit = self.lock_exit();
-            let output = self.output.lock().expect("terminal output poisoned");
+            let mut output = self.output.lock().expect("terminal output poisoned");
+            output.program_dirty = !output.program_ended;
             let ring = &output.ring;
             let rx = self.output_tx.subscribe();
             let alt_screen = self.in_alt_screen.load(Ordering::Relaxed);
@@ -6021,6 +6056,8 @@ impl Session {
             };
             let mut program_status_rx = output.status.published.subscribe();
             let initial_program_status = program_status_rx.borrow_and_update().clone();
+            let mut program_rx = output.program_tx.subscribe();
+            let initial_program = program_rx.borrow_and_update().clone();
             (
                 exit.clone(),
                 rx,
@@ -6030,8 +6067,11 @@ impl Session {
                 ring.end_seq(),
                 initial_program_status,
                 program_status_rx,
+                initial_program,
+                program_rx,
             )
         };
+        self.request_program_refresh();
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
         let generation = self.generation;
@@ -6048,6 +6088,8 @@ impl Session {
             rx,
             initial_program_status,
             program_status_rx,
+            initial_program,
+            program_rx,
             initial_tmux_consent,
             tmux_consent_rx,
             replay,
@@ -6476,6 +6518,7 @@ impl Session {
                 RingBuffer::new(config.terminal.ring_bytes),
                 config.terminal.program_status,
             )),
+            program_refresh: OnceLock::new(),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -6554,11 +6597,11 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
-        self.output
-            .lock()
-            .expect("terminal output poisoned")
-            .status
-            .clear_requests();
+        {
+            let mut output = self.output.lock().expect("terminal output poisoned");
+            output.status.clear_requests();
+            output.end_program();
+        }
         // After the swap guard: a DETACHED session (closed=true, still
         // parked) must keep its store entry through process exit, so a late
         // close() on it returns above without unparking.
@@ -6903,6 +6946,10 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.output
+            .lock()
+            .expect("terminal output poisoned")
+            .end_program();
         self.broadcast(SessionEvent::Closed(CloseReason::Parked));
     }
 
@@ -6917,11 +6964,11 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
-        self.output
-            .lock()
-            .expect("terminal output poisoned")
-            .status
-            .clear_requests();
+        {
+            let mut output = self.output.lock().expect("terminal output poisoned");
+            output.status.clear_requests();
+            output.end_program();
+        }
         // The replacement incarnation is already parked under its own name
         // (the pid differs), so removing this one's entry cannot touch it.
         self.unpark_fdstore();
@@ -7076,11 +7123,11 @@ impl Session {
                 #[cfg(any(test, feature = "test-util"))]
                 fire_attach_seam(&self.id, AttachSeam::ExitWaitingForReader);
             });
-        self.output
-            .lock()
-            .expect("terminal output poisoned")
-            .status
-            .finalize();
+        {
+            let mut output = self.output.lock().expect("terminal output poisoned");
+            output.status.finalize();
+            output.end_program();
+        }
         *stored = Some(exit.clone());
         // The registry's copy is written before this session's exit is
         // released: a reader that finds the exit here may remove the session
@@ -7106,15 +7153,29 @@ impl Session {
     /// can outlive an inner job, and group-id reuse can retain a record.
     /// Tags are ephemeral and are not restored across a server restart.
     fn foreground_program_group(&self) -> Option<u32> {
+        self.raw_foreground_group()
+            .filter(|group| Some(*group) != self.child_pid)
+    }
+
+    /// The foreground group includes the shell at its prompt.
+    fn raw_foreground_group(&self) -> Option<u32> {
         #[cfg(unix)]
         {
             let group = rustix::termios::tcgetpgrp(self.master_fd.as_ref()?).ok()?;
-            let group = u32::try_from(group.as_raw_nonzero().get()).ok()?;
-            (Some(group) != self.child_pid).then_some(group)
+            u32::try_from(group.as_raw_nonzero().get()).ok()
         }
         #[cfg(not(unix))]
         {
             None
+        }
+    }
+
+    fn program_foreground(&self) -> Foreground {
+        if cfg!(windows) {
+            Foreground::TitleOnly
+        } else {
+            self.raw_foreground_group()
+                .map_or(Foreground::Unavailable, Foreground::Group)
         }
     }
 
@@ -7180,6 +7241,14 @@ impl Session {
     /// Output as the terminal shows it: counted, scanned, pushed to the ring
     /// and broadcast.
     fn record_plain_output(&self, bytes: &[u8]) {
+        self.record_plain_output_with_foreground(bytes, || self.program_foreground());
+    }
+
+    fn record_plain_output_with_foreground(
+        &self,
+        bytes: &[u8],
+        foreground: impl FnOnce() -> Foreground,
+    ) {
         self.last_activity
             .store(now_unix_secs() as i64, Ordering::Relaxed);
         let visible = self
@@ -7204,6 +7273,13 @@ impl Session {
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::OutputBeforeRingLock);
         let mut output = self.output.lock().expect("terminal output poisoned");
+        if !self.is_tmux_pane() && !self.closed.load(Ordering::Relaxed) && !output.program_ended {
+            if output.program.feed(bytes, foreground) {
+                output.program_dirty = true;
+                self.request_program_refresh();
+            }
+            output.publish_program();
+        }
         let focused = self.focus_epoch.load(Ordering::Relaxed) != 0;
         let SessionOutput {
             status, replies, ..
@@ -8497,6 +8573,7 @@ mod tests {
             command_tx: CommandSink::Pty(command_tx),
             output_tx,
             output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes), true)),
+            program_refresh: OnceLock::new(),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
