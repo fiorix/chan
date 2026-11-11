@@ -7015,7 +7015,7 @@ mod window_op_route_tests {
             window_id: "w-remote".into(),
             library_id: "lib-remote".into(),
             kind: WindowKind::Workspace,
-            title: "⌂ /srv/project Window 1".into(),
+            title: "project Window 1".into(),
             ordinal: 1,
             label: String::new(),
             workspace_path: Some("/srv/project".into()),

@@ -189,44 +189,52 @@ pub fn workspace_window_prefix(key: &str) -> String {
     format!("workspace-{:016x}", h.finish())
 }
 
-/// The base title of a window on `machine`, led by the machine's glyph:
-/// `{icon} {machine} / {workspace}` for a workspace window and
-/// `{icon} {machine} Terminal` for a terminal; [`compose_window_title`]
-/// appends ` Window {N}` and the caption. The workspace is its root's last
-/// path component, not the whole root: a remote root means nothing as a path
-/// on this desktop, and a local one is long, so both name the workspace the
-/// same short way. A workspace record with no root to name reads
-/// `{icon} {machine}`.
-fn machine_window_title(icon: &str, machine: &str, record: &WindowRecord) -> String {
-    match record.kind {
-        WindowKind::Terminal => format!("{icon} {machine} Terminal"),
-        WindowKind::Workspace => {
-            let workspace = record
-                .workspace_path
-                .as_deref()
-                .and_then(|p| Path::new(p).file_name())
-                .and_then(|n| n.to_str());
-            match workspace {
-                Some(workspace) => format!("{icon} {machine} / {workspace}"),
-                None => format!("{icon} {machine}"),
-            }
-        }
-    }
-}
-
-/// The base title of a watcher-opened window: the remote glyph and the
-/// devserver's name when the window belongs to a connected devserver
-/// (`devserver_name`), else the local glyph and `local`, so a local window and
-/// a remote one read in the same shape. Shared by the open path and the
-/// watcher's retitle so both start from the same base.
+/// The OS title of a watcher-opened window before its caption: the machine's
+/// glyph, then the library's machine-neutral title behind the machine's name
+/// (`chan_server::window_title_on_machine`), the devserver's name when the
+/// window belongs to a connected devserver (`devserver_name`), else `local`.
+/// A local window and a remote one read in the same shape, `local / chan
+/// Window 1` or `geekom Terminal Window 2` behind their arrows, and each ends
+/// with the title `cs window list` prints for it. Composed from the record's
+/// naming fields, never from its `title`: a devserver of another release may
+/// send that in another form, and it must not reach the title bar. Shared by
+/// the open path and the watcher's retitle so both start from the same base.
 pub(crate) fn watched_window_base_title(
     record: &WindowRecord,
     devserver_name: Option<&str>,
 ) -> String {
-    match devserver_name {
-        Some(name) => machine_window_title(ICON_REMOTE, name, record),
-        None => machine_window_title(ICON_LOCAL, LOCAL_MACHINE, record),
+    let (icon, machine) = match devserver_name {
+        Some(name) => (ICON_REMOTE, name),
+        None => (ICON_LOCAL, LOCAL_MACHINE),
+    };
+    let title = chan_server::window_title_on_machine(
+        machine,
+        record.kind,
+        record.ordinal,
+        record.workspace_path.as_deref(),
+    );
+    format!("{icon} {title}")
+}
+
+/// The library's own name for `record`, as `cs window list` prints it: the
+/// machine-neutral title its naming fields compose, with the caption in
+/// brackets. A control row keeps the title its library gave it
+/// (`Control Terminal`, a tmux connection's), which no naming field composes.
+/// For a surface that cannot name the record's machine, such as a devserver
+/// record whose connection has gone.
+pub(crate) fn library_window_title(record: &WindowRecord) -> String {
+    if record.control {
+        return record.title.clone();
     }
+    compose_window_title(
+        &chan_server::window_title(
+            record.kind,
+            record.ordinal,
+            record.workspace_path.as_deref(),
+        ),
+        watched_window_kind(record).unwrap_or("workspace"),
+        &record.label,
+    )
 }
 
 /// The SPA boot mode for a watcher-opened window. Never `control`: a control
@@ -246,37 +254,26 @@ pub(crate) fn watched_window_title(record: &WindowRecord, devserver_name: Option
     compose_window_title(
         &watched_window_base_title(record, devserver_name),
         watched_window_kind(record).unwrap_or("workspace"),
-        u64::from(record.ordinal),
         &record.label,
     )
 }
 
-/// The OS titlebar string for a window: its base title, the display number as
-/// ` Window {N}`, then the user's caption in brackets when there is one.
+/// The OS titlebar string for a window: its base title, then the user's
+/// caption in brackets when there is one (`chan_shell::captioned_window_title`,
+/// the composition `cs window list` prints the caption with).
 ///
 /// The one composer for both the build path and the watcher's retitle. They MUST
 /// agree byte-for-byte: the retitle compares against the live `window.title()`
 /// to decide whether to write, so a second, subtly different formatter would
 /// make every reconcile rewrite the title.
 ///
-/// A control terminal keeps its bare base (it is a singleton per devserver, so a
-/// number would be noise) and carries no caption -- the label route refuses to
-/// set one on a control row.
-pub(crate) fn compose_window_title(
-    base: &str,
-    kind: &str,
-    display_number: u64,
-    caption: &str,
-) -> String {
+/// A control terminal keeps its base verbatim and carries no caption -- the
+/// label route refuses to set one on a control row.
+pub(crate) fn compose_window_title(base: &str, kind: &str, caption: &str) -> String {
     if kind == "control" {
         return base.to_string();
     }
-    let caption = caption.trim();
-    if caption.is_empty() {
-        format!("{base} Window {display_number}")
-    } else {
-        format!("{base} Window {display_number} [{caption}]")
-    }
+    chan_shell::captioned_window_title(base, caption)
 }
 
 /// True when a Tauri label belongs to a watcher-opened SPA webview that accepts
@@ -318,7 +315,6 @@ pub(crate) fn open_watched_local_window(
             session_id: &record.window_id,
             library_id: &record.library_id,
             title: &title,
-            ordinal: Some(record.ordinal),
             caption: &record.label,
             url: &url,
             connecting: None,
@@ -352,7 +348,6 @@ pub(crate) fn open_watched_remote_window(
             session_id: &record.window_id,
             library_id: &record.library_id,
             title: &title,
-            ordinal: Some(record.ordinal),
             caption: &record.label,
             url,
             connecting: Some(url),
@@ -594,7 +589,6 @@ pub async fn spawn_control_terminal_window(
                 // terminal tenant, so it belongs to the `local` library.
                 library_id: "local",
                 title: &title,
-                ordinal: None,
                 caption: "",
                 url: &url,
                 connecting: None,
@@ -662,7 +656,6 @@ pub(crate) async fn spawn_terminal_mode_window(
             // The tenant runs on the local embedded library's host.
             library_id: "local",
             title,
-            ordinal: None,
             caption: "",
             url,
             connecting: None,
@@ -821,14 +814,11 @@ struct WindowSpec<'a> {
     /// cross-window tab drag-and-drop to the same library (`local` for the
     /// baked-in local disk library, `lib-<hex>` for a devserver).
     library_id: &'a str,
-    /// Base title; the builder suffixes a reused " Window N" display number.
+    /// The title before the caption: a watched window's
+    /// [`watched_window_base_title`], whose `Window N` is the library's
+    /// ordinal (the `#` `cs window list` prints), or a control window's title
+    /// verbatim.
     title: &'a str,
-    /// The library's persisted per-(kind, workspace) ordinal -- the same number
-    /// `cs window list` prints as `#`. When `Some`, it is the displayed
-    /// " Window N" suffix, so the titlebar and the registry agree. `None` for
-    /// the control terminal, whose transient in-memory row has no persisted
-    /// ordinal.
-    ordinal: Option<u32>,
     /// The library record's optional user caption (`WindowRecord::label`),
     /// appended to the composed title in brackets so the OS titlebar and window
     /// switcher name the window the way the launcher does. Empty when the
@@ -981,7 +971,6 @@ fn build_workspace_window_with_completion(
         session_id,
         library_id,
         title,
-        ordinal,
         caption,
         url,
         connecting,
@@ -1066,9 +1055,6 @@ fn build_workspace_window_with_completion(
     // "workspace" -- the kind `cs window list` shows.
     // Captured owned so the 'static main-thread closure can hold it.
     let kind_owned = kind.unwrap_or("workspace").to_string();
-    // The library ordinal (Copy) to display as " Window N", or None for the
-    // control terminal, whose transient row has no persisted ordinal.
-    let ordinal_owned = ordinal;
     let caption_owned = caption.to_string();
     let res = app.run_on_main_thread(move || {
         // Defensive: window labels are unique-per-instance now, so
@@ -1078,28 +1064,20 @@ fn build_workspace_window_with_completion(
         if let Some(old) = app_owned.get_webview_window(&label_owned) {
             let _ = old.destroy();
         }
-        // Suffix a reused, lowest-free display number so the OS Window
-        // menu disambiguates windows that share a base title (two
-        // windows on one workspace, several standalone terminals). The
-        // number is freed on close (Ok branch handler / Err branch
-        // below) so the next same-base window reuses it.
+        // Reserve the window's slot in the local display-number counter,
+        // freed on close (Ok branch handler / Err branch below). No title
+        // shows that number: a watched window's `Window N` is the library's
+        // ordinal, already in its base title, and a control window's title
+        // has none.
         let state = app_owned.state::<Arc<AppState>>();
-        let window_number = state.assign_window_number(&label_owned, &title_owned);
-        // Prefer the library's persisted ordinal (the `#` in `cs window list`)
-        // so the titlebar number and the registry agree. The control terminal's
-        // transient row has no persisted ordinal, so it falls back to the local
-        // counter; `compose_window_title` omits that number, and the counter only
-        // keeps reservation and release-on-close bookkeeping balanced.
-        let display_number = ordinal_owned.map(u64::from).unwrap_or(window_number);
+        state.assign_window_number(&label_owned, &title_owned);
         // A `cs window title` override (kept across the bury/reopen cycle)
-        // wins over the auto "{base} Window {N} [caption]" scheme; otherwise use
-        // the default. The resolved title is registered below once the window
+        // wins over the auto "{base} [caption]" scheme; otherwise use the
+        // default. The resolved title is registered below once the window
         // builds, so `cs window list` shows what the title bar shows.
         let display_title = state
             .window_title_override(&label_owned)
-            .unwrap_or_else(|| {
-                compose_window_title(&title_owned, &kind_owned, display_number, &caption_owned)
-            });
+            .unwrap_or_else(|| compose_window_title(&title_owned, &kind_owned, &caption_owned));
         // Resolve the desktop-local OS geometry to restore for this window
         // (keyed by the native label, matched against the live monitor
         // signature). When we will reposition / resize, the window builds HIDDEN
@@ -2414,23 +2392,21 @@ mod tests {
         // The unlabelled shape is what every existing window carries; adding a
         // caption must not disturb it.
         assert_eq!(
-            compose_window_title("\u{2193}\u{FE0E} local / notes", "workspace", 2, ""),
+            compose_window_title("\u{2193}\u{FE0E} local / notes Window 2", "workspace", ""),
             "\u{2193}\u{FE0E} local / notes Window 2",
         );
         assert_eq!(
             compose_window_title(
-                "\u{2193}\u{FE0E} local / notes",
+                "\u{2193}\u{FE0E} local / notes Window 2",
                 "workspace",
-                2,
                 "release checks"
             ),
             "\u{2193}\u{FE0E} local / notes Window 2 [release checks]",
         );
         assert_eq!(
             compose_window_title(
-                "\u{2193}\u{FE0E} local Terminal",
+                "\u{2193}\u{FE0E} local Terminal Window 1",
                 "terminal",
-                1,
                 "deploy shell"
             ),
             "\u{2193}\u{FE0E} local Terminal Window 1 [deploy shell]",
@@ -2439,14 +2415,17 @@ mod tests {
         // whatever the record carries, so whitespace-only must not open an empty
         // pair of brackets.
         assert_eq!(
-            compose_window_title("\u{2193}\u{FE0E} local Terminal", "terminal", 1, "   "),
+            compose_window_title(
+                "\u{2193}\u{FE0E} local Terminal Window 1",
+                "terminal",
+                "   "
+            ),
             "\u{2193}\u{FE0E} local Terminal Window 1",
         );
         assert_eq!(
             compose_window_title(
-                "\u{2193}\u{FE0E} local Terminal",
+                "\u{2193}\u{FE0E} local Terminal Window 1",
                 "terminal",
-                1,
                 "  spaced  "
             ),
             "\u{2193}\u{FE0E} local Terminal Window 1 [spaced]",
@@ -4048,6 +4027,61 @@ mod tests {
         }
     }
 
+    /// `cs window list` prints the library's title with the caption after
+    /// it, and every window's OS title ends with exactly that, local or
+    /// remote, captioned or not. Asserted against the library's function and
+    /// the shared caption composition, not against literals.
+    #[test]
+    fn an_os_title_ends_with_the_title_cs_window_list_prints() {
+        let records = [
+            titled_record(WindowKind::Workspace, Some("/home/hacker/src/chan"), 1),
+            titled_record(WindowKind::Terminal, None, 2),
+            titled_record(WindowKind::Workspace, None, 3),
+        ];
+        for mut record in records {
+            for caption in ["", "my own title"] {
+                record.label = caption.into();
+                let cs = chan_shell::captioned_window_title(
+                    &chan_server::window_title(
+                        record.kind,
+                        record.ordinal,
+                        record.workspace_path.as_deref(),
+                    ),
+                    &record.label,
+                );
+                assert_eq!(library_window_title(&record), cs);
+                for machine in [None, Some("geekom")] {
+                    let os = watched_window_title(&record, machine);
+                    assert!(os.ends_with(&cs), "{os:?} does not end with {cs:?}");
+                    assert!(os.len() > cs.len(), "{os:?} names no machine");
+                }
+            }
+        }
+    }
+
+    /// The OS title is composed from the record's naming fields. A devserver
+    /// of another release sends its own title in another form, and none of it
+    /// reaches the title bar.
+    #[test]
+    fn a_record_title_in_another_form_does_not_reach_the_os_title() {
+        let mut record = titled_record(WindowKind::Workspace, Some("/home/geekom/chan"), 1);
+        record.library_id = "lib-a".into();
+        record.title = "\u{2302} /home/geekom/chan Window 1".into();
+        let os = watched_window_title(&record, Some("geekom"));
+        assert_eq!(os, "\u{2197}\u{FE0E} geekom / chan Window 1");
+        assert_eq!(library_window_title(&record), "chan Window 1");
+    }
+
+    /// A control row's title is the one its library gave it, which no
+    /// naming field composes.
+    #[test]
+    fn a_control_row_keeps_its_library_title() {
+        let mut record = titled_record(WindowKind::Terminal, None, 0);
+        record.control = true;
+        record.title = "Control Terminal".into();
+        assert_eq!(library_window_title(&record), "Control Terminal");
+    }
+
     // Watcher-opened webviews host the SPA, which
     // routes external http(s) link clicks through tauri-plugin-opener
     // via the `plugin:opener|open_url` IPC. Without these permissions
@@ -4352,12 +4386,12 @@ mod tests {
         // devserver-specific base verbatim: no " Window N", and no caption
         // either (the label route refuses to set one on a control row).
         assert_eq!(
-            compose_window_title("Control Terminal - box", "control", 3, ""),
+            compose_window_title("Control Terminal - box", "control", ""),
             "Control Terminal - box",
             "control windows should use their devserver-specific title verbatim",
         );
         assert_eq!(
-            compose_window_title("Control Terminal - box", "control", 3, "ignored"),
+            compose_window_title("Control Terminal - box", "control", "ignored"),
             "Control Terminal - box",
         );
         // Searched in the production half, since this test's own titles carry

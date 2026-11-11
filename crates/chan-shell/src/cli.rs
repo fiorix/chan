@@ -1432,11 +1432,15 @@ async fn cmd_window_op(req: ControlRequest) -> Result<()> {
 }
 
 /// Render the `cs window list` rows (library `WindowRecord`s:
-/// `{window_id, library_id, kind, title, ordinal, connected, …}`) as a
-/// markdown table. Titles are library-owned and auto-derived; `connected`
-/// means a live `/ws` socket is tagged with the window right now. Every row
-/// in the set is a persisted library record, so `connected` is the only
-/// status axis.
+/// `{window_id, library_id, kind, title, ordinal, label, connected, …}`) as
+/// a markdown table. Titles are library-owned and auto-derived, the
+/// machine-neutral end of the title a window shows elsewhere
+/// (`chan Window 1`), and the cell adds the user's caption the way the
+/// desktop's title does ([`crate::captioned_window_title`]), read from the
+/// record's `label` as it is now; `--json` keeps the two fields apart.
+/// `connected` means a live `/ws` socket is tagged with the window right
+/// now. Every row in the set is a persisted library record, so `connected`
+/// is the only status axis.
 fn render_window_list_markdown(raw: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(raw).context("parsing window list JSON")?;
     let rows = value
@@ -1453,7 +1457,12 @@ fn render_window_list_markdown(raw: &str) -> Result<String> {
         let id = row.get("window_id").and_then(|v| v.as_str()).unwrap_or("?");
         let library = row.get("library_id").and_then(|v| v.as_str()).unwrap_or("");
         let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        let title = row.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        // The caption is user text, so a `|` in it must not end the cell.
+        let title = crate::captioned_window_title(
+            row.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            row.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+        )
+        .replace('|', "\\|");
         let ordinal = row.get("ordinal").and_then(|v| v.as_u64()).unwrap_or(0);
         let connected = row
             .get("connected")
@@ -3046,6 +3055,39 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The title cell is the library's title with the record's caption, as
+    /// the window's own title ends: a caption in brackets when there is one,
+    /// with a `|` in it escaped so the row keeps its cells.
+    #[test]
+    fn window_list_prints_the_title_with_its_caption() {
+        let raw = serde_json::json!([
+            {"window_id": "w-1", "library_id": "local", "kind": "workspace",
+             "title": "chan Window 1", "ordinal": 1, "label": "my own title",
+             "connected": true},
+            {"window_id": "w-2", "library_id": "local", "kind": "terminal",
+             "title": "Terminal Window 2", "ordinal": 2, "connected": false},
+            {"window_id": "w-3", "library_id": "local", "kind": "terminal",
+             "title": "Terminal Window 3", "ordinal": 3, "label": "a|b",
+             "connected": false},
+        ])
+        .to_string();
+        let out = render_window_list_markdown(&raw).expect("render");
+        assert!(
+            out.contains(
+                "| w-1 | local | workspace | chan Window 1 [my own title] | 1 | connected |"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("| w-2 | local | terminal | Terminal Window 2 | 2 | offline |"),
+            "{out}"
+        );
+        assert!(
+            out.contains("| w-3 | local | terminal | Terminal Window 3 [a\\|b] | 3 | offline |"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn terminal_status_help_examples_parse() {

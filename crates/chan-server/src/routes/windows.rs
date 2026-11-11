@@ -241,7 +241,7 @@ mod tests {
         titles.set(
             "w-b",
             crate::window_titles::WindowMeta {
-                title: "🏠 /notes Window 1".into(),
+                title: "\u{2193}\u{FE0E} local / notes Window 1".into(),
                 kind: Some("workspace".into()),
             },
         );
@@ -252,7 +252,10 @@ mod tests {
         assert_eq!(by_id("w-a").title, None);
         assert_eq!(by_id("w-a").kind, None);
         // The connected row picks up the desktop's title + kind.
-        assert_eq!(by_id("w-b").title.as_deref(), Some("🏠 /notes Window 1"));
+        assert_eq!(
+            by_id("w-b").title.as_deref(),
+            Some("\u{2193}\u{FE0E} local / notes Window 1")
+        );
         assert_eq!(by_id("w-b").kind.as_deref(), Some("workspace"));
     }
 }

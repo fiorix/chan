@@ -92,12 +92,18 @@ pub(crate) struct PendingDeleteState {
 }
 
 impl PendingDeleteState {
+    /// Queue the DELETE of devserver `devserver_id`'s window `record`. The
+    /// notice of a delete that never lands names the window as the
+    /// devserver's own `cs window list` does ([`crate::serve::library_window_title`]),
+    /// composed from the record's fields rather than read from its title,
+    /// which a devserver of another release sends in another form.
     pub fn queue(&self, devserver_id: &str, record: &WindowRecord) {
         let label = native_label(record);
-        let window_name = if record.title.trim().is_empty() {
+        let window_name = crate::serve::library_window_title(record);
+        let window_name = if window_name.trim().is_empty() {
             record.window_id.clone()
         } else {
-            record.title.clone()
+            window_name
         };
         self.entries
             .lock()
@@ -682,7 +688,7 @@ mod tests {
             window_id: window_id.into(),
             library_id: library_id.into(),
             kind,
-            title: "🏠 Terminal Window 1".into(),
+            title: "Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),
             workspace_path: None,
@@ -1016,7 +1022,12 @@ mod tests {
 
     #[test]
     fn pending_delete_exhausts_without_becoming_visible() {
-        let record = rec("lib-test", "w-1", WindowKind::Terminal);
+        let mut record = rec("lib-test", "w-1", WindowKind::Terminal);
+        // The notice names the window from its fields, with its caption, as
+        // the devserver's `cs window list` does, whatever form the title
+        // the devserver sent is in.
+        record.title = "\u{2302} Terminal Window 1".into();
+        record.label = "deploy shell".into();
         let pending = PendingDeleteState::default();
         pending.queue("devserver-1", &record);
 
@@ -1034,7 +1045,7 @@ mod tests {
             pending.finish(&final_attempt.label, false),
             Some(PendingDeleteFinish::Exhausted {
                 window_id: "w-1".to_string(),
-                window_name: "🏠 Terminal Window 1".to_string(),
+                window_name: "Terminal Window 1 [deploy shell]".to_string(),
                 attempts: MAX_PENDING_DELETE_ATTEMPTS,
             }),
         );

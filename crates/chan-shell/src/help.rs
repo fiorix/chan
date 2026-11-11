@@ -1895,10 +1895,15 @@ pub(crate) const CS_WINDOW: &str = r"Read the window registry and drive the desk
 DESCRIPTION:
 `cs window list` (or `cs w l`) prints the library's authoritative
 window set -- every window across every tenant, with its library,
-kind, title, ordinal and status. The status is `connected` when a
-live event socket is tagged with that window right now (including a
-window chan-desktop has hidden with its close button), else
-`offline`. `--json [--pretty]` emits the raw records.
+kind, title, ordinal and status. The title names the window without
+its machine, `chan Window 1` for a window of the chan workspace or
+`Terminal Window 2`, with the caption given in Computers after it in
+brackets; the desktop's title for the window ends the same way,
+behind the machine's name (`local / chan Window 1 [notes]`). The
+status is `connected` when a live event socket is tagged with that
+window right now (including a window chan-desktop has hidden with
+its close button), else `offline`. `--json [--pretty]` emits the raw
+records, with the caption in `label`.
 
 The lifecycle verbs drive real windows. `new` opens one whose kind
 is derived from the calling tenant: a standalone terminal spawns
@@ -1917,7 +1922,8 @@ only, no window id.
 pub(crate) const CS_WINDOW_AFTER: &str = r#"EXAMPLES:
   cs window list
     a | window | library | kind | title | # | status | table;
-    status is connected or offline
+    a title reads `chan Window 1 [notes]`; status is connected
+    or offline
 
   cs window new
     -> the new window id, printed on stdout

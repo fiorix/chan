@@ -1390,22 +1390,31 @@ fn devserver_url_token(raw: &str) -> Option<String> {
 /// hidden watcher window is destroyed, so this is the normal case for the Hidden
 /// section).
 ///
-/// A LOCAL record composes exactly what the titlebar would show, so a window
-/// reads the same whether it is listed under Open or under Hidden. A REMOTE
-/// record cannot: the titlebar's base is built from the live connection's
-/// display name (`DevserverConn::name`), which the record does not carry here.
-/// Rather than render a plausible-but-different title, fall back to the
-/// library-composed `title` and append the caption to it.
-fn record_menu_title(record: &chan_server::WindowRecord) -> String {
+/// It composes what the titlebar would show ([`serve::watched_window_title`]),
+/// so a window reads the same whether it is listed under Open or under
+/// Hidden. A devserver's record names its machine by `devserver_name`, the
+/// live connection's display name (`DevserverConn::name`), which the record
+/// does not carry. With no connection to name it, the row reads the library's
+/// own title for the window ([`serve::library_window_title`], what
+/// `cs window list` prints there) rather than a plausible but different
+/// machine; so does a devserver's control row, whose title no naming field
+/// composes.
+fn record_menu_title(record: &chan_server::WindowRecord, devserver_name: Option<&str>) -> String {
     if record.library_id == "local" {
         return serve::watched_window_title(record, None);
     }
-    let caption = record.label.trim();
-    if caption.is_empty() {
-        record.title.clone()
-    } else {
-        format!("{} [{caption}]", record.title)
+    match devserver_name {
+        Some(name) if !record.control => serve::watched_window_title(record, Some(name)),
+        _ => serve::library_window_title(record),
     }
+}
+
+/// The display name of the connected devserver that owns `library_id`, for a
+/// Window-menu row ([`record_menu_title`]); `None` for the local library and
+/// for a devserver with no live connection.
+fn menu_devserver_name(state: &AppState, library_id: &str) -> Option<String> {
+    let devserver_id = state.devserver_feed.devserver_id_for_library(library_id)?;
+    state.devservers.get(&devserver_id).map(|conn| conn.name)
 }
 
 /// Reap a devserver's control terminal: close its window AND its chan-library
@@ -6705,12 +6714,18 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
             .iter()
             .map(|record| (window_watcher::native_label(record), record))
             .collect();
+        let menu_title = |record: &chan_server::WindowRecord| {
+            record_menu_title(
+                record,
+                menu_devserver_name(&state, &record.library_id).as_deref(),
+            )
+        };
         let hidden_title = |label: &str, captured: Option<String>| -> String {
             if let Some(title) = app.get_webview_window(label).and_then(|w| w.title().ok()) {
                 return title;
             }
             match records_by_label.get(label) {
-                Some(record) => record_menu_title(record),
+                Some(record) => menu_title(record),
                 None => captured.unwrap_or_else(|| label.to_string()),
             }
         };
@@ -6732,9 +6747,12 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
         }
         // Open = every other window with a native window, so the menu can
         // RAISE a live window as well as reopen a hidden one.
-        let open_rows = open_window_rows(&records, &hidden_rows, |label| {
-            app.get_webview_window(label).map(|window| window.title())
-        });
+        let open_rows = open_window_rows(
+            &records,
+            &hidden_rows,
+            |label| app.get_webview_window(label).map(|window| window.title()),
+            menu_title,
+        );
 
         let tail = window_menu_tail(open_rows, hidden_rows, privacy::enabled(&state));
         // MenuItems can't be shared across menus, so each menubar gets
@@ -6754,11 +6772,13 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
 /// minimized window, and every window of a hidden app, as not visible,
 /// and those are still the user's open windows, listed in AppKit's own
 /// window list below. Nothing rebuilds the menu on a minimize, a restore
-/// or an app hide, so a rebuild in that state must keep them.
+/// or an app hide, so a rebuild in that state must keep them. A window
+/// whose title cannot be read is titled by `record_title`.
 fn open_window_rows(
     records: &[chan_server::WindowRecord],
     hidden: &[(String, String)],
     live_title: impl Fn(&str) -> Option<tauri::Result<String>>,
+    record_title: impl Fn(&chan_server::WindowRecord) -> String,
 ) -> Vec<(String, String)> {
     records
         .iter()
@@ -6768,7 +6788,7 @@ fn open_window_rows(
             if hidden.iter().any(|(hidden, _)| *hidden == label) {
                 return None;
             }
-            let title = live_title(&label)?.unwrap_or_else(|_| record_menu_title(record));
+            let title = live_title(&label)?.unwrap_or_else(|_| record_title(record));
             Some((label, title))
         })
         .collect()
@@ -8149,22 +8169,28 @@ mod tests {
             ("lib-a::w-d", Ok("sdme Window 4"), false),
             ("lib-a::w-f", Err(()), true),
         ];
-        let open = open_window_rows(&records, &hidden, |label| {
-            native
-                .iter()
-                .find(|(native, _, _)| *native == label)
-                .map(|(_, title, _)| {
-                    title
-                        .map(str::to_string)
-                        .map_err(|()| tauri::Error::WindowNotFound)
-                })
-        });
+        let open = open_window_rows(
+            &records,
+            &hidden,
+            |label| {
+                native
+                    .iter()
+                    .find(|(native, _, _)| *native == label)
+                    .map(|(_, title, _)| {
+                        title
+                            .map(str::to_string)
+                            .map_err(|()| tauri::Error::WindowNotFound)
+                    })
+            },
+            |record| record_menu_title(record, Some("sdme")),
+        );
         assert_eq!(
             open,
             menu_rows(&[
                 ("lib-a::w-a", "sdme Window 1"),
                 ("lib-a::w-c", "sdme Window 3"),
-                ("lib-a::w-f", "sdme"),
+                // The title it cannot read is composed from the record.
+                ("lib-a::w-f", "\u{2197}\u{FE0E} sdme Window 1"),
             ]),
             "every native window but the hidden ones, the OS's invisible one included",
         );
@@ -8173,6 +8199,55 @@ mod tests {
                 .iter()
                 .any(|(label, _, visible)| !visible && open.iter().any(|(open, _)| open == label)),
             "the open section holds a window the OS reports as not visible",
+        );
+    }
+
+    /// A Window-menu row with no live title reads what the titlebar would:
+    /// the machine through the one composer for a local record and for a
+    /// devserver's with a live connection, else the library's own title,
+    /// which a devserver's control row keeps too. The record's `title` from
+    /// another release never shows on its own.
+    #[test]
+    fn a_record_menu_title_names_the_machine_when_it_can() {
+        let record = |library_id: &str, kind, path: Option<&str>| chan_server::WindowRecord {
+            window_id: "w-1".into(),
+            library_id: library_id.into(),
+            kind,
+            title: "\u{2302} /home/u/chan Window 1".into(),
+            ordinal: 1,
+            label: "notes".into(),
+            workspace_path: path.map(str::to_string),
+            prefix: "/chan".into(),
+            token: "test-token".into(),
+            persisted: true,
+            connected: false,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: true,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+        let workspace = chan_server::WindowKind::Workspace;
+        let local = record("local", workspace, Some("/home/u/chan"));
+        assert_eq!(
+            record_menu_title(&local, None),
+            "\u{2193}\u{FE0E} local / chan Window 1 [notes]"
+        );
+        let remote = record("lib-a", workspace, Some("/home/u/chan"));
+        assert_eq!(
+            record_menu_title(&remote, Some("geekom")),
+            "\u{2197}\u{FE0E} geekom / chan Window 1 [notes]"
+        );
+        assert_eq!(record_menu_title(&remote, None), "chan Window 1 [notes]");
+        let mut control = record("lib-a", chan_server::WindowKind::Terminal, None);
+        control.control = true;
+        control.label = String::new();
+        control.title = "Control Terminal".into();
+        assert_eq!(
+            record_menu_title(&control, Some("geekom")),
+            "Control Terminal"
         );
     }
 
@@ -10840,13 +10915,13 @@ mod tests {
         assert_eq!(assign(&mut numbers, "local::w-t0", "Terminal"), 1);
         assert_eq!(assign(&mut numbers, "local::w-t1", "Terminal"), 2);
         // A different base title starts its own sequence at 1.
-        assert_eq!(assign(&mut numbers, "local::w-w0", "🏠 /w"), 1);
+        assert_eq!(assign(&mut numbers, "local::w-w0", "workspace w"), 1);
 
         // Free the first terminal; the next terminal reuses 1, not 3.
         numbers.remove("local::w-t0");
         assert_eq!(assign(&mut numbers, "local::w-t2", "Terminal"), 1);
         // The unrelated base is untouched by the terminal churn.
-        assert_eq!(assign(&mut numbers, "local::w-w1", "🏠 /w"), 2);
+        assert_eq!(assign(&mut numbers, "local::w-w1", "workspace w"), 2);
 
         // Re-assigning a live label keeps its slot (ignores itself).
         assert_eq!(assign(&mut numbers, "local::w-t1", "Terminal"), 2);

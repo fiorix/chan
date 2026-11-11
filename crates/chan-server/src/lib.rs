@@ -104,8 +104,8 @@ pub use chan_library::terminal_sessions::{
 pub use chan_library::user_shell;
 pub use chan_library::window_titles::{SharedWindowTitles, WindowMeta, WindowTitles};
 pub use chan_library::windows::{
-    CreateWindow, TmuxConnectionRecord, TmuxWindowMark, WindowKind, WindowOrigin, WindowRecord,
-    WindowSet,
+    window_title, window_title_on_machine, CreateWindow, TmuxConnectionRecord, TmuxWindowMark,
+    WindowKind, WindowOrigin, WindowRecord, WindowSet,
 };
 pub use chan_library::TenantProgram;
 pub(crate) use chan_library::{

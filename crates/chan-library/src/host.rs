@@ -7707,7 +7707,7 @@ mod tmux_window_hook_tests {
             .expect("the row stays");
         assert!(!row.control);
         assert!(row.tmux.is_none());
-        assert_eq!(row.title, "⌂ Terminal Window 1");
+        assert_eq!(row.title, "Terminal Window 1");
         let stored = std::fs::read_to_string(rig.store.path().join("windows.json")).unwrap();
         assert!(stored.contains(&id), "a released control window is saved");
         let parked = rig.pending.take(&id);
