@@ -1,52 +1,72 @@
 #!/usr/bin/env bash
-# Do the basic flows land on chan-desktop's own engine? This stage asks it
-# of an image pasted into the editor and into the Rich Prompt with the
-# clipboard shape WKWebView hands the page: a paste event that advertises
-# Files and exposes no items, no files and no text. The page cannot read
-# such an image itself; it has to ask the desktop for it.
+# Do the basic flows land on chan-desktop's own engine? This asks it of an
+# image pasted and dropped into the editor and into the Rich Prompt.
 #
 # This drives a real chan-desktop on WebKitGTK under Xvfb, with a window
-# manager and a private session bus. The X CLIPBOARD holds a generated PNG
-# (xclip stays its owner). The injected event is defined exactly as the
-# editor's vitest defines the failing shape, so the real desktop command,
-# its capability grant, the clipboard read through arboard and the upload
-# all run. The shape is injected: WebKitGTK stands in for WKWebView here,
-# and what WKWebView itself hands the page stays an owner check on macOS.
+# manager and a private session bus. The X CLIPBOARD holds a generated PNG,
+# owned by xclip or through GTK (clipboard-owner.py); X input comes from
+# xdotool, and a real drop from a small GTK drag source (drag-source.py).
 #
-# Arms, in order (basic-flows.mjs runs them through the engine's remote
-# inspector and records what each saw):
-#   ipc-read                  the page asks the desktop for the clipboard
-#                             image directly; decides nothing by itself and
-#                             names where a fault sits.
-#   editor paste-native-shape the subject: the image must embed in the
-#                             note, land beside it with the fixture's
-#                             pixels, raise no notice, and the note's file
-#                             must name it.
-#   editor paste-file-item    control: a paste whose items carry the image
-#                             as a File, which the handler reads from the
-#                             event without asking the desktop. It must
-#                             land, or the readers cannot see a landed image.
-#   editor paste-text-only    control: the clipboard holds text only, owned
-#                             through GTK as an app's text copy is
-#                             (clipboard-text-owner.py; xclip would answer
-#                             the image request with its text), and the same
-#                             native shape is pasted. Where the subjects
-#                             held, it must say "No image found on the
-#                             clipboard" and land nothing, which shows their
-#                             images came from the X clipboard.
-#   prompt paste-native-shape the subject over a terminal running cat: the
-#                             image must embed in the composer and land in
-#                             its draft, and after Ctrl+Enter (X input) the
-#                             terminal must show its bare absolute path.
-#   prompt paste-file-item    control, as in the editor.
-#   trusted-shape             recorded, decides nothing: a real Ctrl+V into
-#                             the note with the PNG on the clipboard, and
-#                             the shape WebKitGTK itself hands the page.
+# Arms, by group (BASIC_FLOWS_ARMS, a comma list, all four by default;
+# basic-flows.mjs runs them through the engine's remote inspector and
+# records what each saw):
+#   native   the clipboard shape WKWebView hands the page, injected: a paste
+#            event that advertises Files and exposes no items, no files and
+#            no text, defined exactly as the editor's vitest defines it, so
+#            the real desktop command, its capability grant, the clipboard
+#            read through arboard and the upload all run. WebKitGTK stands
+#            in for WKWebView here; what WKWebView itself hands the page
+#            stays an owner check on macOS.
+#              ipc-read            the page asks the desktop for the
+#                                  clipboard image directly; decides nothing
+#                                  by itself and names where a fault sits.
+#              paste-native-shape  the subject, on the editor (the image
+#                                  embeds, lands beside the note with the
+#                                  fixture's pixels, raises no notice, and
+#                                  the note's file names it) and on the
+#                                  composer over a terminal running cat
+#                                  (it embeds, lands in the draft, and after
+#                                  Ctrl+Enter by X input the terminal shows
+#                                  its bare absolute path).
+#              paste-text-only     control: the clipboard holds text only,
+#                                  owned through GTK as an app's text copy
+#                                  is (xclip would answer the image request
+#                                  with its text), and the native shape is
+#                                  pasted. Where the subjects held, it must
+#                                  say "No image found on the clipboard"
+#                                  and land nothing.
+#   trusted  a real Ctrl+V into the note and into the composer under three
+#            owners in turn: GTK's image copy (Gtk.Clipboard.set_image, which
+#            offers image/png, bmp, jpeg, tiff and the rest GdkPixbuf
+#            writes, as a screenshot tool's copy does), a GTK owner of
+#            image/png alone, and xclip with image/png. The image must land
+#            as above; nothing landed is a fault that names the owner, the
+#            surface and the clipboard shape WebKitGTK handed the page. The
+#            terminal menu's Paste row is chosen under each owner with the
+#            composer open and recorded only: the row writes the
+#            clipboard's text to the terminal, so it decides nothing here.
+#   drop     the fixture as a File, dropped on the note's last line and on
+#            the composer's as synthetic DragEvents whose DataTransfer holds
+#            it: the handler's own drop branch. It must land as above, and the
+#            window must stay on its page (the same document at the same
+#            origin and path; the app keeps its own state in the URL's
+#            search and fragment).
+#   xdnd     the same drops for real, by XDND from the GTK drag source, which
+#            offers the fixture's file as text/uri-list as a file manager
+#            does (workspace windows leave wry's native drag handler off, so
+#            the page sees the drop). Last, a real drop on the tab strip,
+#            which no drop zone owns, must leave the window on its page and
+#            upload nothing.
+# In every selection, a paste whose items carry the image as a File (which
+# the handler reads from the event without asking the desktop) runs on each
+# surface as the control: it must land, or the readers cannot see a landed
+# image. It runs again on the composer after the other arms there.
 #
 # Every verdict line names the WebKitGTK version and the page's user agent.
-# A fault counts only where the injected shape reached the page as built,
-# the clipboard offered the PNG and the same surface's control landed its
-# image; anything less is inconclusive. Exit codes are lib.sh's.
+# A fault counts only where the event reached the page as the arm built it,
+# the clipboard offered what the arm needs and the same surface's controls
+# landed their images; anything less is inconclusive. Exit codes are
+# lib.sh's.
 #
 # Needs what lib.sh needs, node 22 or newer, xclip, python3-gi with GTK 3,
 # pkg-config, dbus-daemon and ImageMagick's magick, and a built
@@ -61,7 +81,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/desktop-observations/lib.sh
 . "$HERE/lib.sh"
 
+BASIC_FLOWS_ARMS="${BASIC_FLOWS_ARMS:-native,trusted,drop,xdnd}"
+for group in ${BASIC_FLOWS_ARMS//,/ }; do
+    case "$group" in
+    native | trusted | drop | xdnd) ;;
+    *)
+        echo "basic-flows: cannot run: unknown arm group $group in BASIC_FLOWS_ARMS (native, trusted, drop, xdnd)" >&2
+        exit 2
+        ;;
+    esac
+done
 obs_setup basic-flows
+obs_log "arms: $BASIC_FLOWS_ARMS"
 obs_need node xclip pkg-config dbus-daemon magick
 python3 -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null || obs_refuse "python3-gi with GTK 3 is not installed"
 WEBKIT_VERSION="$(pkg-config --modversion webkit2gtk-4.1 2>/dev/null)" || obs_refuse "pkg-config names no webkit2gtk-4.1"
@@ -134,10 +165,10 @@ xdotool windowactivate --sync "$XID" 2>/dev/null || true
 
 node "$HERE/basic-flows.mjs" run --inspector "$INSPECTOR" --page "$PAGE" --xid "$XID" \
     --ws "$WS" --note notes/paste.md --chan-home "$CHAN_HOME" --fixture "$FIXTURE" \
-    --chan "$CHAN_BIN" --work "$OBS_WORK" --results "$RESULTS" \
+    --chan "$CHAN_BIN" --work "$OBS_WORK" --results "$RESULTS" --arms "$BASIC_FLOWS_ARMS" \
     || obs_inconclusive "the arms' runner failed with status $?; the last record is in $RESULTS"
 
 obs_log "results: $RESULTS; desktop log: $OBS_WORK/desktop.log; screenshots: $OBS_WORK/shots"
 obs_verdict
 node "$HERE/basic-flows.mjs" verdict --results "$RESULTS" --webkit "$WEBKIT_VERSION" 2>&1 | obs_masked
-obs_judge "${PIPESTATUS[0]}" "an image pasted with WKWebView's empty-Files clipboard shape did not land on chan-desktop (WebKitGTK $WEBKIT_VERSION); the lines above name each surface's reading"
+obs_judge "${PIPESTATUS[0]}" "an image pasted or dropped on chan-desktop (WebKitGTK $WEBKIT_VERSION) did not land as it must; the FAULT lines above name each arm, surface and owner"

@@ -3,24 +3,30 @@
 //
 //   basic-flows.mjs run --inspector HOST:PORT --page URL-SUBSTRING --xid X-ID
 //       --ws DIR --note RELATIVE-PATH --chan-home DIR --fixture PNG
-//       --chan PATH --work DIR --results JSONL
+//       --chan PATH --work DIR --results JSONL --arms GROUP[,GROUP...]
 //   basic-flows.mjs verdict --results JSONL --webkit VERSION
 //
 // `run` holds one inspector connection to the workspace page, plants a
-// witness of every paste event, Ctrl+Enter keydown and status bar text the
-// page sees, and runs the arms in order, appending one JSON record per arm.
-// The records are facts: what the X clipboard offered (xclip's TARGETS),
-// the clipboard shape the page's own listener saw, the image embeds in the
-// editor, the files on disk and their pixels decoded against the fixture
-// (arboard re-encodes, so bytes are not compared), the status texts, and
-// the terminal's scrollback. It exits 0 once the arms have run, whatever
-// they saw, and 3 when it cannot reach the page.
+// witness of every paste, drop, drag, pointer move, Ctrl+Enter keydown and
+// status bar text the page sees, and runs the arms of the chosen groups in
+// order, appending one JSON record per arm. The groups are `native` (the
+// injected WKWebView paste shape), `trusted` (a real Ctrl+V and the
+// terminal menu's Paste row under three clipboard owners), `drop` (a
+// synthetic file drop) and `xdnd` (a real file drop over XDND, on the
+// surfaces and outside every drop zone); the file-item paste controls run
+// in every selection. The records are facts: what the X clipboard offered
+// (its TARGETS), the clipboard or drop shape the page's own listener saw,
+// the image embeds, the files on disk and their pixels decoded against the
+// fixture (arboard re-encodes, so bytes are not compared), the status
+// texts, whether the window stayed on its page and the terminal's
+// scrollback. It exits 0 once the arms have run, whatever they saw, and 3
+// when it cannot reach the page.
 //
 // `verdict` judges the records and prints one line per arm, each naming
-// the engine. It exits 0 when every subject held with its controls, 10
-// when a subject's fault was observed under its controls, and 3 otherwise.
+// the engine. It exits 0 when every chosen group held with its controls,
+// 10 when a fault was observed under its controls, and 3 otherwise.
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -33,19 +39,38 @@ const { values: args, positionals } = parseArgs({
     inspector: { type: "string" }, page: { type: "string" }, xid: { type: "string" },
     ws: { type: "string" }, note: { type: "string" }, "chan-home": { type: "string" },
     fixture: { type: "string" }, chan: { type: "string" }, work: { type: "string" },
-    results: { type: "string" }, webkit: { type: "string" },
+    results: { type: "string" }, webkit: { type: "string" }, arms: { type: "string" },
   },
 });
 const mode = positionals[0];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => Number(process.hrtime.bigint() / 1000000n);
+// The window is on the page it was: the same document, which the witness
+// lives in, at the same origin and path. The app rewrites the URL's search
+// and fragment with its own state, so those may change.
+const pageKey = "location.origin + location.pathname";
+const pageKept = (before) => `Boolean(window.__flows) && ${pageKey} === ${JSON.stringify(before)}`;
+const xdo = (...words) => spawnSync("xdotool", words.map(String), { encoding: "utf8", timeout: 10000 });
 
+const GROUPS = ["native", "trusted", "drop", "xdnd"];
 // The notices the paste path raises when it does not land an image. Any of
 // them in a subject arm is a fault; the text-only control expects the first.
 const NO_IMAGE = "No image found on the clipboard";
 const PASTE_NOTICES = [NO_IMAGE, "Could not read image from the clipboard", "Image upload failed", "upload limit", "HEIC conversion failed"];
 const TEXT_ONLY = "basic-flows text only clipboard";
+const IMAGE_FILE = /\.(png|bmp|tiff?|jpe?g|webp|gif|avif|ico)$/i;
+
+// The X CLIPBOARD's owners. xclip answers a request for any target with its
+// data; the GTK owners answer only the targets they offer, as an app's copy
+// does (clipboard-owner.py). `offered` says whether TARGETS is the owner's.
+const OWNERS = {
+  xclip: { label: "xclip image/png", offered: (list) => list.includes("image/png") },
+  "gtk-image": { label: "GTK set_image", offered: (list) => ["image/png", "image/bmp", "image/tiff", "image/jpeg"].every((t) => list.includes(t)) },
+  "gtk-png": { label: "GTK image/png alone", offered: (list) => list.filter((t) => t.includes("/")).join(" ") === "image/png" },
+  text: { label: "GTK text", offered: (list) => list.some((t) => /STRING|text\/plain/.test(t)) && !list.some((t) => t.startsWith("image/")) },
+};
+const TRUSTED_OWNERS = ["gtk-image", "gtk-png", "xclip"];
 
 if (mode === "run") await run();
 else if (mode === "verdict") verdict();
@@ -120,6 +145,8 @@ async function poll(read, done, bound) {
 }
 
 async function run() {
+  const groups = (args.arms ?? GROUPS.join(",")).split(",").map((g) => g.trim()).filter(Boolean);
+  const want = (group) => groups.includes(group);
   const results = args.results;
   const record = (row) => appendFileSync(results, `${JSON.stringify(row)}\n`);
   const fixture = args.fixture;
@@ -127,28 +154,29 @@ async function run() {
   const shot = (name) => spawnSync("import", ["-window", "root", join(args.work, "shots", `${name}.png`)], { timeout: 20000 });
   const csEnv = { ...process.env };
   const cs = (words, cwd = args.ws) => spawnSync(args.chan, ["shell", ...words], { cwd, env: csEnv, encoding: "utf8", timeout: 20000 });
+  record({ arm: "selection", groups });
 
   // The X CLIPBOARD's owner, one at a time and kept in the foreground so the
-  // run can end it; a new owner takes the selection from the old one. The
-  // PNG is owned by xclip. Text is owned through GTK, since xclip answers a
-  // request for image/png with its text and a reader would then be handed
-  // text where a text copy in an app offers no image at all.
+  // run can end it; a new owner takes the selection from the old one.
   const owners = [];
   const ownerLog = openSync(join(args.work, "xclip.log"), "a");
+  const gtkEnv = { ...process.env, NO_AT_BRIDGE: "1" };
   const targets = () => {
     const out = spawnSync("xclip", ["-selection", "clipboard", "-o", "-t", "TARGETS"], { encoding: "utf8", timeout: 5000 });
     return out.status === 0 ? out.stdout.split("\n").map((t) => t.trim()).filter(Boolean) : null;
   };
   async function seed(kind) {
     for (const owner of owners.splice(0)) owner.kill();
-    const owner = kind === "image"
-      ? spawn("xclip", ["-quiet", "-selection", "clipboard", "-t", "image/png", "-i", fixture], { stdio: ["ignore", ownerLog, ownerLog] })
-      : spawn("python3", [join(here, "clipboard-text-owner.py"), TEXT_ONLY], { stdio: ["ignore", ownerLog, ownerLog], env: { ...process.env, NO_AT_BRIDGE: "1" } });
+    const io = { stdio: ["ignore", ownerLog, ownerLog] };
+    const ownerScript = join(here, "clipboard-owner.py");
+    const owner = kind === "xclip"
+      ? spawn("xclip", ["-quiet", "-selection", "clipboard", "-t", "image/png", "-i", fixture], io)
+      : kind === "text"
+        ? spawn("python3", [ownerScript, "text", TEXT_ONLY], { ...io, env: gtkEnv })
+        : spawn("python3", [ownerScript, kind === "gtk-image" ? "image" : "png", fixture], { ...io, env: gtkEnv });
     owners.push(owner);
-    const offered = await poll(async () => targets(), (list) => Boolean(list) && (kind === "image"
-      ? list.includes("image/png")
-      : list.some((t) => /STRING|text\/plain/.test(t)) && !list.some((t) => t.startsWith("image/"))), 5000);
-    return { kind, offered: offered.met, targets: offered.value };
+    const offered = await poll(async () => targets(), (list) => Boolean(list) && OWNERS[kind].offered(list), 5000);
+    return { kind, owner: OWNERS[kind].label, offered: offered.met, targets: offered.value };
   }
 
   let page;
@@ -180,20 +208,33 @@ async function run() {
   }
 
   // The witness: the page's own listeners, beside chan's, which change
-  // nothing chan's handlers do. A paste is recorded in the capture phase,
-  // before any handler, with the shape its clipboardData had, and again
-  // once it bubbled, with whether a handler took it.
+  // nothing chan's handlers do. A paste or a drop is recorded in the capture
+  // phase, before any handler, with the shape its data had, and again once
+  // it bubbled, with whether a handler took it. Drags are counted per
+  // surface, and the last pointer move is kept for placing X input.
   await page.evaluate(`(() => {
     if (window.__flows) return true;
-    const s = (window.__flows = { pastes: [], keys: [], statuses: [] });
-    const surface = (node) => node?.closest?.(".rich-prompt") ? "prompt" : node?.closest?.(".cm-editor") ? "editor" : (node?.nodeName || "none");
+    const s = (window.__flows = { pastes: [], drops: [], drags: {}, keys: [], statuses: [], lastMove: null });
+    const surface = (node) => node?.closest?.(".rich-prompt") ? "prompt" : node?.closest?.(".cm-editor") ? "editor"
+      : node?.closest?.(".terminal-host") ? "terminal" : node?.closest?.("[data-file-drop-zone]") ? "zone" : node?.nodeName ? "outside" : "none";
+    const shapeOf = (d) => d ? { types: Array.from(d.types || []), items: d.items?.length ?? null, files: d.files?.length ?? null,
+      itemKinds: d.items ? Array.from(d.items).map((i) => i.kind + ":" + i.type) : null,
+      fileNames: d.files ? Array.from(d.files).map((f) => f.name + " " + f.type + " " + f.size) : null } : { types: null, items: null, files: null };
     addEventListener("paste", (e) => {
-      const c = e.clipboardData;
-      s.pastes.push({ at: Math.round(performance.now()), surface: surface(e.target), target: e.target?.nodeName || null, isTrusted: e.isTrusted,
-        types: c ? Array.from(c.types || []) : null, items: c ? (c.items?.length ?? null) : null, files: c ? (c.files?.length ?? null) : null,
-        itemKinds: c?.items ? Array.from(c.items).map((i) => i.kind + ":" + i.type) : null });
+      s.pastes.push({ at: Math.round(performance.now()), surface: surface(e.target), target: e.target?.nodeName || null, isTrusted: e.isTrusted, ...shapeOf(e.clipboardData) });
     }, true);
     addEventListener("paste", (e) => { const last = s.pastes[s.pastes.length - 1]; if (last) last.defaultPrevented = e.defaultPrevented; });
+    addEventListener("drop", (e) => {
+      s.drops.push({ at: Math.round(performance.now()), surface: surface(e.target), target: e.target?.nodeName || null, isTrusted: e.isTrusted, ...shapeOf(e.dataTransfer) });
+    }, true);
+    addEventListener("drop", (e) => { const last = s.drops[s.drops.length - 1]; if (last) last.defaultPrevented = e.defaultPrevented; });
+    for (const type of ["dragenter", "dragover"]) {
+      addEventListener(type, (e) => {
+        const key = surface(e.target) + " " + type + " " + (e.isTrusted ? "trusted" : "untrusted");
+        s.drags[key] = (s.drags[key] || 0) + 1;
+      }, true);
+    }
+    addEventListener("mousemove", (e) => { s.lastMove = { clientX: e.clientX, clientY: e.clientY, isTrusted: e.isTrusted }; }, true);
     addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) s.keys.push({ at: Math.round(performance.now()), surface: surface(e.target), isTrusted: e.isTrusted });
     }, true);
@@ -208,10 +249,16 @@ async function run() {
       .observe(document.documentElement, { subtree: true, childList: true, characterData: true });
     return true;
   })()`);
-  const marks = () => page.evaluate("({ pastes: window.__flows.pastes.length, keys: window.__flows.keys.length, statuses: window.__flows.statuses.length })");
-  const since = (mark) => page.evaluate(`({ pastes: window.__flows.pastes.slice(${mark.pastes}), keys: window.__flows.keys.slice(${mark.keys}), statuses: window.__flows.statuses.slice(${mark.statuses}).map((s) => s.text) })`);
+  const marks = () => page.evaluate("({ pastes: window.__flows.pastes.length, drops: window.__flows.drops.length, keys: window.__flows.keys.length, statuses: window.__flows.statuses.length, drags: { ...window.__flows.drags } })");
+  const since = (mark) => page.evaluate(`(() => {
+    const s = window.__flows;
+    const before = ${JSON.stringify(mark.drags)};
+    const drags = {};
+    for (const [key, count] of Object.entries(s.drags)) if (count > (before[key] || 0)) drags[key] = count - (before[key] || 0);
+    return { pastes: s.pastes.slice(${mark.pastes}), drops: s.drops.slice(${mark.drops}), drags, keys: s.keys.slice(${mark.keys}), statuses: s.statuses.slice(${mark.statuses}).map((x) => x.text) };
+  })()`);
 
-  const facts = await page.evaluate(`({ userAgent: navigator.userAgent, isTauriDesktop: Boolean(window.__TAURI__ || window.__TAURI_INTERNALS__), invoke: typeof window.__TAURI_INTERNALS__?.invoke, origin: location.origin })`);
+  const facts = await page.evaluate(`({ userAgent: navigator.userAgent, isTauriDesktop: Boolean(window.__TAURI__ || window.__TAURI_INTERNALS__), invoke: typeof window.__TAURI_INTERNALS__?.invoke, origin: location.origin, devicePixelRatio })`);
   record({ arm: "page", ...facts });
 
   // Decode a file and compare its pixels with the fixture's.
@@ -224,7 +271,7 @@ async function run() {
     return { decoded: true, width: Number(width), height: Number(height), format, differingPixels: Number.isFinite(differing) ? differing : null,
       compareStatus: cmp.status, same: cmp.status === 0 && differing === 0 };
   };
-  const pngsUnder = (dir) => {
+  const imagesUnder = (dir) => {
     const found = [];
     const walk = (d) => {
       let entries;
@@ -232,34 +279,152 @@ async function run() {
       for (const entry of entries) {
         const path = join(d, entry.name);
         if (entry.isDirectory()) walk(path);
-        else if (entry.isFile() && entry.name.endsWith(".png")) found.push(path);
+        else if (entry.isFile() && IMAGE_FILE.test(entry.name)) found.push(path);
       }
     };
     walk(dir);
     return found.sort();
   };
 
+  // Where X input lands on the page: the offset between a screen point and
+  // the client point the page's mousemove reports for it, read at two
+  // points, which must agree.
+  async function calibrate() {
+    const geo = Object.fromEntries((xdo("getwindowgeometry", "--shell", args.xid).stdout || "").trim().split("\n").map((l) => l.split("=")));
+    const [x, y, w, h] = ["X", "Y", "WIDTH", "HEIGHT"].map((k) => Number(geo[k]));
+    const seen = [];
+    for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.35]]) {
+      const sx = Math.round(x + w * fx);
+      const sy = Math.round(y + h * fy);
+      await page.evaluate("window.__flows.lastMove = null; true");
+      xdo("mousemove", sx - 7, sy - 7);
+      await sleep(120);
+      xdo("mousemove", sx, sy);
+      const move = await poll(() => page.evaluate("window.__flows.lastMove"), (m) => m && m.isTrusted, 3000);
+      await sleep(120);
+      const last = await page.evaluate("window.__flows.lastMove");
+      seen.push({ sx, sy, client: move.met ? last : null });
+    }
+    const offsets = seen.map((p) => p.client ? [p.sx - p.client.clientX, p.sy - p.client.clientY] : null);
+    const agree = offsets.every((o) => o && o[0] === offsets[0][0] && o[1] === offsets[0][1]);
+    return { window: { x, y, w, h }, seen, offset: agree ? { dx: offsets[0][0], dy: offsets[0][1] } : null };
+  }
+  let offset = null;
+  const toScreen = (point) => {
+    if (!offset) throw new Error("X input cannot be placed on the page: the calibration's two points disagreed or the page saw no pointer move");
+    return [Math.round(point.x + offset.dx), Math.round(point.y + offset.dy)];
+  };
+
+  // A drop point on a surface: inside its last line, scrolled into view, and
+  // the element under it named, so a point the surface does not own is seen.
+  const dropPoint = (content) => page.evaluate(`(() => {
+    const content = ${content};
+    if (!content) return null;
+    const lines = content.querySelectorAll(".cm-line");
+    const line = lines[lines.length - 1] || content;
+    line.scrollIntoView({ block: "center" });
+    const r = line.getBoundingClientRect();
+    const x = Math.round(r.left + Math.min(24, r.width / 2));
+    const y = Math.round(r.top + r.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, ownsPoint: Boolean(hit && content.contains(hit)), hit: hit ? hit.nodeName + "." + (hit.className?.baseVal ?? hit.className ?? "") : null };
+  })()`);
+  // A point in the window that no drop zone owns: the pane's tab strip past
+  // its last tab.
+  const outsidePoint = () => page.evaluate(`(() => {
+    const zone = "[data-file-drop-zone], .cm-editor, input, textarea, [contenteditable]";
+    for (const strip of document.querySelectorAll('[role="tablist"]')) {
+      const r = strip.getBoundingClientRect();
+      if (r.width < 40 || r.height < 8) continue;
+      for (const fx of [0.92, 0.8, 0.65]) {
+        const x = Math.round(r.left + r.width * fx);
+        const y = Math.round(r.top + r.height / 2);
+        const hit = document.elementFromPoint(x, y);
+        if (hit && !hit.closest(zone)) return { x, y, hit: hit.nodeName + "." + (hit.className?.baseVal ?? hit.className ?? "") };
+      }
+    }
+    return null;
+  })()`);
+
+  // A real drop over XDND: a GTK window offering a file as text/uri-list,
+  // dragged by X input onto a screen point, with the drag source's own
+  // account of the drag.
+  async function xdndDrop(file, point) {
+    const [tx, ty] = toScreen(point);
+    let said = "";
+    const source = spawn("python3", [join(here, "drag-source.py"), file, "1480", "880"], { stdio: ["ignore", "pipe", ownerLog], env: gtkEnv });
+    source.stdout.setEncoding("utf8");
+    source.stdout.on("data", (chunk) => { said += chunk; });
+    const ready = await poll(async () => said, (text) => /^ready \d+ \d+ \d+ \d+/m.test(text), 10000);
+    if (!ready.met) {
+      source.kill();
+      return { started: false, at: [tx, ty], sourceSaid: said.trim().split("\n") };
+    }
+    const [sx, sy, sw, sh] = /^ready (\d+) (\d+) (\d+) (\d+)/m.exec(said).slice(1).map(Number);
+    const overSource = tx >= sx && tx < sx + sw && ty >= sy && ty < sy + sh;
+    const cx = sx + Math.floor(sw / 2);
+    const cy = sy + Math.floor(sh / 2);
+    xdo("mousemove", cx, cy);
+    await sleep(300);
+    xdo("mousedown", 1);
+    await sleep(200);
+    const steps = 24;
+    for (let i = 1; i <= steps; i++) {
+      xdo("mousemove", Math.round(cx + ((tx - cx) * i) / steps), Math.round(cy + ((ty - cy) * i) / steps));
+      await sleep(40);
+    }
+    await sleep(400);
+    xdo("mousemove", tx + 1, ty + 1);
+    await sleep(300);
+    xdo("mousemove", tx, ty);
+    await sleep(500);
+    xdo("mouseup", 1);
+    const ended = await poll(async () => said, (text) => /^(end|failed)/m.test(text), 5000);
+    source.kill();
+    xdo("windowactivate", "--sync", args.xid);
+    return { started: true, at: [tx, ty], overSource, ended: ended.met, sourceSaid: said.trim().split("\n") };
+  }
+
+  // A synthetic drop through the inspector: dragenter, dragover and drop as
+  // DragEvents whose DataTransfer holds the fixture as a File.
+  const syntheticDrop = (name, point) => page.evaluate(`(() => {
+    const bytes = Uint8Array.from(atob(${JSON.stringify(fixtureB64)}), (c) => c.charCodeAt(0));
+    const file = new File([bytes], ${JSON.stringify(name)}, { type: "image/png" });
+    const data = new DataTransfer();
+    data.items.add(file);
+    const target = document.elementFromPoint(${point.x}, ${point.y});
+    if (!target) return { dispatched: false };
+    const sent = {};
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true, clientX: ${point.x}, clientY: ${point.y}, dataTransfer: data });
+      sent[type] = { carried: event.dataTransfer === data, notCancelled: target.dispatchEvent(event) };
+    }
+    return { dispatched: true, target: target.nodeName, files: data.files.length, types: Array.from(data.types), sent };
+  })()`);
+
   // 1. The desktop's own clipboard read, asked of it directly through the
   // IPC the paste uses. It names where a fault sits and decides nothing.
-  try {
-    const clipboard = await seed("image");
-    const answer = await settle(`(async () => {
-      const bytes = await window.__TAURI_INTERNALS__.invoke("read_clipboard_image");
-      if (!bytes) return { bytes: 0 };
-      const u8 = new Uint8Array(bytes);
-      let bin = "";
-      for (const b of u8) bin += String.fromCharCode(b);
-      return { bytes: u8.length, base64: btoa(bin) };
-    })()`);
-    let decoded = null;
-    if (answer.base64) {
-      const file = join(args.work, "ipc-read.png");
-      writeFileSync(file, Buffer.from(answer.base64, "base64"));
-      decoded = pixels(file);
+  if (want("native")) {
+    try {
+      const clipboard = await seed("xclip");
+      const answer = await settle(`(async () => {
+        const bytes = await window.__TAURI_INTERNALS__.invoke("read_clipboard_image");
+        if (!bytes) return { bytes: 0 };
+        const u8 = new Uint8Array(bytes);
+        let bin = "";
+        for (const b of u8) bin += String.fromCharCode(b);
+        return { bytes: u8.length, base64: btoa(bin) };
+      })()`);
+      let decoded = null;
+      if (answer.base64) {
+        const file = join(args.work, "ipc-read.png");
+        writeFileSync(file, Buffer.from(answer.base64, "base64"));
+        decoded = pixels(file);
+      }
+      record({ arm: "ipc-read", clipboard, bytes: answer.bytes, pixels: decoded });
+    } catch (error) {
+      record({ arm: "ipc-read", error: String(error) });
     }
-    record({ arm: "ipc-read", clipboard, bytes: answer.bytes, pixels: decoded });
-  } catch (error) {
-    record({ arm: "ipc-read", error: String(error) });
   }
 
   // The note, opened the way a user's `cs open` does.
@@ -294,45 +459,96 @@ async function run() {
     return { dispatched: true, target: target.nodeName, notCancelled, defaultPrevented: event.defaultPrevented };
   })()`);
 
-  // One paste arm: dispatch the shape, then wait for a new embed whose
-  // source names <name> and a new file named <name> under <dir>. An embed
-  // that was already there before the paste does not count.
-  async function pasteArm({ arm, surface, content, shape, onBr, name, dir, clipboard, bound = 15000 }) {
-    const filesBefore = pngsUnder(dir);
+  // A surface's text, line by line, without the text of its widgets (an
+  // image embed's menu, for one), which take no input.
+  const lineText = (content) => `(() => {
+    const content = ${content};
+    if (!content) return "";
+    return [...content.querySelectorAll(".cm-line")].map((line) => {
+      let text = "";
+      const walk = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+      for (let n = walk.nextNode(); n; n = walk.nextNode()) if (!n.parentElement?.closest('[contenteditable="false"]')) text += n.data;
+      return text;
+    }).join("\\n");
+  })()`;
+
+  // One landing arm: <act>, then wait for a new embed whose source names
+  // <name> and a new image file named <name> under <dir>; a null name takes
+  // any new one. An embed that was already there before does not count.
+  async function landArm({ arm, surface, content, act, name = null, dir, clipboard, bound = 15000, tag = "" }) {
+    const shotName = `${surface}-${arm}${tag ? `-${tag}` : ""}`;
+    const filesBefore = imagesUnder(dir);
     const embedsBefore = (await embeds(content)) ?? [];
+    const keyBefore = await page.evaluate(pageKey);
+    const textBefore = await page.evaluate(lineText(content));
+    const named = (text) => name === null || Boolean(text?.includes(name));
     const newEmbed = (shown) => {
       const prior = embedsBefore.map((e) => e.src);
       for (const e of shown) {
         const at = prior.indexOf(e.src);
         if (at >= 0) { prior.splice(at, 1); continue; }
-        if (e.src?.includes(name) && e.complete && e.naturalWidth > 0) return e;
+        if (named(e.src) && e.complete && e.naturalWidth > 0) return e;
       }
       return null;
     };
     const mark = await marks();
-    shot(`${surface}-${arm}-before`);
-    const event = await dispatch(content, shape, onBr);
+    shot(`${shotName}-before`);
+    const event = await act();
     const landing = await poll(async () => {
       const embed = newEmbed((await embeds(content)) ?? []);
-      const file = pngsUnder(dir).filter((f) => !filesBefore.includes(f)).find((f) => basename(f).startsWith(name)) ?? null;
+      const file = imagesUnder(dir).filter((f) => !filesBefore.includes(f)).find((f) => named(basename(f))) ?? null;
       return { embed, file };
     }, (seen) => seen.embed && seen.file, bound);
     const landedAt = now();
     // Room for a late notice, or a second image, to show.
     await sleep(1000);
     const seen = await since(mark);
-    const newFiles = pngsUnder(dir).filter((f) => !filesBefore.includes(f));
+    const newFiles = imagesUnder(dir).filter((f) => !filesBefore.includes(f));
     const after = (await embeds(content)) ?? [];
-    shot(`${surface}-${arm}-after`);
+    const kept = await page.evaluate(pageKept(keyBefore));
+    const textAfter = kept ? await page.evaluate(lineText(content)) : "";
+    shot(`${shotName}-after`);
     const file = landing.value.file;
     return {
-      arm, surface, clipboard, event, witness: seen.pastes, statuses: seen.statuses,
+      arm, surface, clipboard, event, witness: seen.pastes, drops: seen.drops, drags: seen.drags, statuses: seen.statuses,
       pasteNotices: seen.statuses.filter((text) => PASTE_NOTICES.some((n) => text.includes(n))),
-      landed: landing.met, waitedMs: landing.waitedMs, landedAt,
+      landed: landing.met, waitedMs: landing.waitedMs, landedAt, pageKept: kept,
+      textGrew: textAfter.length - textBefore.length, textTail: textAfter.slice(-160),
       embed: landing.value.embed, embedsAdded: after.length - embedsBefore.length,
       file: file ? { path: file, ...pixels(file) } : null, newFiles,
     };
   }
+  const pasteArm = ({ content, shape, onBr, ...rest }) => landArm({ ...rest, content, act: () => dispatch(content, shape, onBr) });
+
+  // Focus a surface for X input: the window active, the surface's content
+  // focused, the caret at its end.
+  async function focusForKeys(content) {
+    xdo("windowactivate", "--sync", args.xid);
+    const focused = await poll(() => page.evaluate(`(() => { const c = ${content}; if (!c) return false; c.focus(); return document.activeElement === c; })()`), Boolean, 5000);
+    return focused.met;
+  }
+  // A real Ctrl+V on a surface under one owner.
+  const trustedPaste = (surface, content, dir, kind) => async () => {
+    const clipboard = await seed(kind);
+    const focused = await focusForKeys(content);
+    return landArm({ arm: "paste-trusted", surface, content, dir, clipboard, bound: 8000, tag: kind,
+      act: async () => ({ focused, keyStatus: xdo("key", "--clearmodifiers", "ctrl+End", "ctrl+v").status }) });
+  };
+  // A drop by XDND or through the inspector onto a surface's last line.
+  const dropArm = (arm, surface, content, dir) => async () => {
+    const name = arm === "drop-xdnd" ? "drop-xdnd" : "drop-synthetic";
+    const point = await dropPoint(content);
+    if (!point) return { arm, surface, error: "the surface is not on the page" };
+    let file = null;
+    if (arm === "drop-xdnd") {
+      file = join(args.work, `${name}.png`);
+      copyFileSync(fixture, file);
+    }
+    const row = await landArm({ arm, surface, content, dir, name, bound: 10000,
+      act: () => (arm === "drop-xdnd" ? xdndDrop(file, point) : syntheticDrop(`${name}.png`, point)) });
+    row.point = point;
+    return row;
+  };
 
   const opened = cs(["open", args.note]);
   const focused = await poll(() => page.evaluate(`(() => { const c = ${noteContent}; return Boolean(c) && document.activeElement === c; })()`), Boolean, 30000);
@@ -354,6 +570,11 @@ async function run() {
   } catch (error) {
     record({ arm: "bundle", error: String(error) });
   }
+  if (want("trusted") || want("xdnd")) {
+    const calibration = await calibrate();
+    offset = calibration.offset;
+    record({ arm: "calibrate", ...calibration });
+  }
 
   const notesDir = join(args.ws, args.note.split("/").slice(0, -1).join("/"));
   const noteFile = join(args.ws, args.note);
@@ -362,28 +583,37 @@ async function run() {
   };
 
   // 2. The editor's subject, then its controls.
-  await tryArm("paste-native-shape", "editor", async () => {
-    const clipboard = await seed("image");
-    const row = await pasteArm({ arm: "paste-native-shape", surface: "editor", content: noteContent, shape: NATIVE, name: "pasted-image", dir: notesDir, clipboard });
-    // The note's own file names the image once it is saved.
-    const saved = row.file
-      ? await poll(async () => { try { return readFileSync(noteFile, "utf8"); } catch { return ""; } }, (text) => text.includes(basename(row.file.path)), 20000)
-      : null;
-    row.noteNamesImage = saved ? saved.met : false;
-    row.noteSavedAfterLandingMs = saved ? now() - row.landedAt : null;
-    row.noteText = (() => { try { return readFileSync(noteFile, "utf8").slice(0, 400); } catch { return null; } })();
-    return row;
-  });
+  if (want("native")) {
+    await tryArm("paste-native-shape", "editor", async () => {
+      const clipboard = await seed("xclip");
+      const row = await pasteArm({ arm: "paste-native-shape", surface: "editor", content: noteContent, shape: NATIVE, name: "pasted-image", dir: notesDir, clipboard });
+      // The note's own file names the image once it is saved.
+      const saved = row.file
+        ? await poll(async () => { try { return readFileSync(noteFile, "utf8"); } catch { return ""; } }, (text) => text.includes(basename(row.file.path)), 20000)
+        : null;
+      row.noteNamesImage = saved ? saved.met : false;
+      row.noteSavedAfterLandingMs = saved ? now() - row.landedAt : null;
+      row.noteText = (() => { try { return readFileSync(noteFile, "utf8").slice(0, 400); } catch { return null; } })();
+      return row;
+    });
+  }
   await tryArm("paste-file-item", "editor", async () => {
-    const clipboard = await seed("image");
+    const clipboard = await seed("xclip");
     return pasteArm({ arm: "paste-file-item", surface: "editor", content: noteContent, shape: FILE_ITEM, name: "control", dir: notesDir, clipboard });
   });
-  await tryArm("paste-text-only", "editor", async () => {
-    const clipboard = await seed("text");
-    const row = await pasteArm({ arm: "paste-text-only", surface: "editor", content: noteContent, shape: NATIVE, name: "pasted-image", dir: notesDir, clipboard, bound: 6000 });
-    row.noImageNotice = row.statuses.some((text) => text.includes(NO_IMAGE));
-    return row;
-  });
+  if (want("native")) {
+    await tryArm("paste-text-only", "editor", async () => {
+      const clipboard = await seed("text");
+      const row = await pasteArm({ arm: "paste-text-only", surface: "editor", content: noteContent, shape: NATIVE, name: "pasted-image", dir: notesDir, clipboard, bound: 6000 });
+      row.noImageNotice = row.statuses.some((text) => text.includes(NO_IMAGE));
+      return row;
+    });
+  }
+  if (want("trusted")) {
+    for (const kind of TRUSTED_OWNERS) await tryArm("paste-trusted", "editor", trustedPaste("editor", noteContent, notesDir, kind));
+  }
+  if (want("xdnd")) await tryArm("drop-xdnd", "editor", dropArm("drop-xdnd", "editor", noteContent, notesDir));
+  if (want("drop")) await tryArm("drop-synthetic", "editor", dropArm("drop-synthetic", "editor", noteContent, notesDir));
 
   // 3. The Rich Prompt over a terminal running cat, then its control.
   const tab = "basic-flows-cat";
@@ -398,58 +628,143 @@ async function run() {
     await page.evaluate(`window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.richPrompt" } })); true`);
     return poll(() => page.evaluate(`(() => { const c = ${promptContent}; return Boolean(c) && document.activeElement?.closest?.(".rich-prompt") != null; })()`), Boolean, 15000);
   };
+  const ensurePrompt = async () => ((await page.evaluate(`Boolean(${promptContent})`)) ? null : (await openPrompt()).met);
   const prompt = await openPrompt();
   record({ arm: "open-prompt", terminalStatus: terminal.status, terminalOutput: (terminal.stdout + terminal.stderr).trim().slice(0, 300),
     scrollbackAnswered: live.met, promptFocused: prompt.met, waitedMs: prompt.waitedMs });
 
-  await tryArm("paste-native-shape", "prompt", async () => {
-    const clipboard = await seed("image");
-    const row = await pasteArm({ arm: "paste-native-shape", surface: "prompt", content: promptContent, shape: NATIVE, onBr: true, name: "pasted-image", dir: args["chan-home"], clipboard });
-    if (!row.file) return row;
-    // Submit by X input, as a user does, and read what reached the PTY.
-    await page.evaluate(`(() => { ${promptContent}?.focus(); return true; })()`);
-    const mark = await marks();
-    spawnSync("xdotool", ["windowactivate", "--sync", args.xid], { timeout: 10000 });
-    const chord = spawnSync("xdotool", ["key", "--clearmodifiers", "ctrl+Return"], { encoding: "utf8", timeout: 10000 });
-    const path = row.file.path;
-    const delivered = await poll(async () => scrollback() ?? "", (text) => text.includes(path) || text.replace(/\r?\n/g, "").includes(path), 15000);
-    const seen = await since(mark);
-    const text = delivered.value;
-    row.submit = {
-      chordStatus: chord.status, keys: seen.keys, path,
-      scrollbackHasPath: delivered.met, onOneLine: text.split(/\r?\n/).some((line) => line.includes(path)), waitedMs: delivered.waitedMs,
-      scrollbackTail: text.slice(-600),
-    };
-    shot("prompt-paste-native-shape-submitted");
+  if (want("native")) {
+    await tryArm("paste-native-shape", "prompt", async () => {
+      const clipboard = await seed("xclip");
+      const row = await pasteArm({ arm: "paste-native-shape", surface: "prompt", content: promptContent, shape: NATIVE, onBr: true, name: "pasted-image", dir: args["chan-home"], clipboard });
+      if (!row.file) return row;
+      // Submit by X input, as a user does, and read what reached the PTY.
+      await page.evaluate(`(() => { ${promptContent}?.focus(); return true; })()`);
+      const mark = await marks();
+      xdo("windowactivate", "--sync", args.xid);
+      const chord = xdo("key", "--clearmodifiers", "ctrl+Return");
+      const path = row.file.path;
+      const delivered = await poll(async () => scrollback() ?? "", (text) => text.includes(path) || text.replace(/\r?\n/g, "").includes(path), 15000);
+      const seen = await since(mark);
+      const text = delivered.value;
+      row.submit = {
+        chordStatus: chord.status, keys: seen.keys, path,
+        scrollbackHasPath: delivered.met, onOneLine: text.split(/\r?\n/).some((line) => line.includes(path)), waitedMs: delivered.waitedMs,
+        scrollbackTail: text.slice(-600),
+      };
+      shot("prompt-paste-native-shape-submitted");
+      return row;
+    });
+  }
+  const promptControl = (arm) => tryArm(arm, "prompt", async () => {
+    const reopened = await ensurePrompt();
+    const clipboard = await seed("xclip");
+    const row = await pasteArm({ arm, surface: "prompt", content: promptContent, shape: FILE_ITEM, onBr: true, name: "control", dir: args["chan-home"], clipboard });
+    row.reopened = reopened;
     return row;
   });
-  await tryArm("paste-file-item", "prompt", async () => {
-    const shown = await page.evaluate(`Boolean(${promptContent})`);
-    const reopened = shown ? null : await openPrompt();
-    const clipboard = await seed("image");
-    const row = await pasteArm({ arm: "paste-file-item", surface: "prompt", content: promptContent, shape: FILE_ITEM, onBr: true, name: "control", dir: args["chan-home"], clipboard });
-    row.reopened = reopened ? reopened.met : null;
-    return row;
-  });
+  await promptControl("paste-file-item");
 
-  // 4. Recorded, decides nothing: the shape WebKitGTK itself hands the page
-  // for a real Ctrl+V into the note with the PNG on the clipboard.
-  await tryArm("trusted-shape", "editor", async () => {
-    await page.evaluate(`(() => { document.querySelector(".rich-prompt") && window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "terminal.richPrompt" } })); return true; })()`);
-    const reopened = cs(["open", args.note]);
-    const focus = await poll(() => page.evaluate(`(() => { const c = ${noteContent}; return Boolean(c) && document.activeElement === c; })()`), Boolean, 15000);
-    const clipboard = await seed("image");
-    const filesBefore = pngsUnder(notesDir);
-    const mark = await marks();
-    spawnSync("xdotool", ["windowactivate", "--sync", args.xid], { timeout: 10000 });
-    // The caret at the end of the note's text, not on an image's widget.
-    const key = spawnSync("xdotool", ["key", "--clearmodifiers", "ctrl+End", "ctrl+v"], { encoding: "utf8", timeout: 10000 });
-    await sleep(4000);
-    const seen = await since(mark);
-    shot("editor-trusted-shape-after");
-    return { arm: "trusted-shape", surface: "editor", clipboard, openStatus: reopened.status, focused: focus.met, keyStatus: key.status,
-      witness: seen.pastes, statuses: seen.statuses, newFiles: pngsUnder(notesDir).filter((f) => !filesBefore.includes(f)) };
-  });
+  if (want("trusted")) {
+    for (const kind of TRUSTED_OWNERS) {
+      await tryArm("paste-trusted", "prompt", async () => {
+        const reopened = await ensurePrompt();
+        const row = await trustedPaste("prompt", promptContent, args["chan-home"], kind)();
+        row.reopened = reopened;
+        return row;
+      });
+    }
+    // Recorded, decides nothing: the terminal menu's Paste row, chosen by
+    // X input with the composer open, under each owner. The row reads the
+    // clipboard's text and writes it to the terminal.
+    for (const kind of TRUSTED_OWNERS) {
+      await tryArm("menu-paste", "prompt", async () => {
+        const reopened = await ensurePrompt();
+        const clipboard = await seed(kind);
+        const at = await page.evaluate(`(() => {
+          const host = [...document.querySelectorAll(".terminal-host")].find((h) => h.getBoundingClientRect().width > 0);
+          if (!host) return null;
+          const r = host.getBoundingClientRect();
+          const top = document.querySelector(".rich-prompt")?.getBoundingClientRect().top ?? r.bottom;
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + Math.max(8, Math.min(40, (top - r.top) / 2))) };
+        })()`);
+        if (!at) return { arm: "menu-paste", surface: "prompt", clipboard, error: "no terminal on the page" };
+        const filesBefore = imagesUnder(args["chan-home"]);
+        const embedsBefore = ((await embeds(promptContent)) ?? []).length;
+        const before = scrollback() ?? "";
+        const mark = await marks();
+        xdo("windowactivate", "--sync", args.xid);
+        xdo("mousemove", ...toScreen(at));
+        await sleep(200);
+        xdo("click", 3);
+        const menu = await poll(() => page.evaluate(`(() => {
+          const menu = document.querySelector('.terminal-tab-menu-bubble[role="menu"]');
+          if (!menu) return null;
+          const rows = [...menu.querySelectorAll('[role="menuitem"]')];
+          const row = rows.find((b) => b.querySelector(".mbtn-label")?.textContent.trim() === "Paste");
+          if (!row) return { rows: rows.map((b) => b.textContent.trim()).slice(0, 20) };
+          const r = row.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        })()`), (v) => v && v.x !== undefined, 5000);
+        shot(`prompt-menu-paste-${kind}-menu`);
+        if (menu.met) {
+          xdo("mousemove", ...toScreen(menu.value));
+          await sleep(150);
+          xdo("click", 1);
+        }
+        await sleep(4000);
+        const seen = await since(mark);
+        const after = scrollback() ?? "";
+        shot(`prompt-menu-paste-${kind}-after`);
+        const added = after.startsWith(before) ? after.slice(before.length) : null;
+        return { arm: "menu-paste", surface: "prompt", clipboard, reopened, menuOpened: menu.met, menu: menu.value,
+          promptShown: await page.evaluate(`Boolean(${promptContent})`),
+          embedsAdded: ((await embeds(promptContent)) ?? []).length - embedsBefore,
+          newFiles: imagesUnder(args["chan-home"]).filter((f) => !filesBefore.includes(f)),
+          scrollbackGrew: after.length - before.length, scrollbackAdded: added === null ? null : added.slice(0, 200),
+          witness: seen.pastes, statuses: seen.statuses };
+      });
+    }
+  }
+  for (const [arm, group] of [["drop-xdnd", "xdnd"], ["drop-synthetic", "drop"]]) {
+    if (want(group)) {
+      await tryArm(arm, "prompt", async () => {
+        const reopened = await ensurePrompt();
+        const row = await dropArm(arm, "prompt", promptContent, args["chan-home"])();
+        row.reopened = reopened;
+        return row;
+      });
+    }
+  }
+  // The control again, after every other arm on the composer.
+  if (want("trusted") || want("drop") || want("xdnd")) await promptControl("paste-file-item-late");
+
+  // 4. A real drop where no zone takes it, last: it must leave the window
+  // on its page and upload nothing.
+  if (want("xdnd")) {
+    await tryArm("drop-outside", "outside", async () => {
+      const point = await outsidePoint();
+      if (!point) return { arm: "drop-outside", surface: "outside", error: "no point outside every drop zone was found" };
+      const file = join(args.work, "drop-outside.png");
+      copyFileSync(fixture, file);
+      const before = [...imagesUnder(args.ws), ...imagesUnder(args["chan-home"])];
+      const keyBefore = await page.evaluate(pageKey);
+      const mark = await marks();
+      const drag = await xdndDrop(file, point);
+      await sleep(2000);
+      shot("outside-drop-outside-after");
+      // Where the window is now, without the URL's search, which holds the
+      // page's token.
+      const state = await poll(() => page.evaluate(`({ kept: ${pageKept(keyBefore)}, sameDocument: Boolean(window.__flows),
+        where: location.protocol + "//" + location.host + location.pathname, title: document.title.slice(0, 120) })`).catch(() => null), Boolean, 5000);
+      const seen = state.value?.sameDocument ? await since(mark) : null;
+      const after = [...imagesUnder(args.ws), ...imagesUnder(args["chan-home"])];
+      return { arm: "drop-outside", surface: "outside", point, event: drag, pageAnswered: state.met, pageKept: state.value?.kept ?? null,
+        sameDocument: state.value?.sameDocument ?? null, where: state.value?.kept ? null : state.value?.where ?? null, title: state.value?.kept ? null : state.value?.title ?? null,
+        drops: seen?.drops ?? null, drags: seen?.drags ?? null, statuses: seen?.statuses ?? null,
+        newFiles: after.filter((f) => !before.includes(f)) };
+    });
+  }
 
   for (const owner of owners.splice(0)) owner.kill();
   await page.close();
@@ -463,6 +778,7 @@ function verdict() {
     ? readFileSync(args.results, "utf8").trim().split("\n").map((line) => JSON.parse(line))
     : [];
   const find = (arm, surface) => rows.find((r) => r.arm === arm && (surface === undefined || r.surface === surface));
+  const all = (arm, surface) => rows.filter((r) => r.arm === arm && (surface === undefined || r.surface === surface));
   const page = find("page");
   const tag = `(WebKitGTK ${args.webkit}; ${page?.userAgent ?? "no user agent read"})`;
   const say = (line) => console.log(`${line} ${tag}`);
@@ -470,27 +786,23 @@ function verdict() {
     say(`INCONCLUSIVE: the page did not answer: ${page?.error ?? "no record"}`);
     process.exit(3);
   }
+  const groups = find("selection")?.groups;
+  if (!groups?.length || groups.some((g) => !GROUPS.includes(g))) {
+    say(`INCONCLUSIVE: the records name no valid arm selection (${JSON.stringify(groups ?? null)})`);
+    process.exit(3);
+  }
+  const want = (group) => groups.includes(group);
   // The handler reads the desktop's clipboard only in a Tauri page; in any
   // other page no subject is judged.
   const pageWhy = page.isTauriDesktop && page.invoke === "function" ? null : "the page is not a Tauri desktop page with an invoke bridge";
+  const outcome = {};
 
   const bundle = find("bundle");
   say(bundle?.error ? `RECORDED, bundle: unreadable: ${bundle.error}`
     : `RECORDED, bundle: the served scripts ${bundle?.nativeBranchIn?.length ? `hold the native recovery (${bundle.nativeBranchIn.join(", ")})` : "hold no native recovery"} across ${bundle?.scripts ?? 0} scripts`);
 
-  const ipc = find("ipc-read");
-  const ipcLine = ipc?.error ? `failed: ${ipc.error}`
-    : !ipc?.bytes ? "the desktop returned no image"
-      : `the desktop returned ${ipc.bytes} bytes, ${ipc.pixels?.width}x${ipc.pixels?.height}, ${ipc.pixels?.same ? "the fixture's pixels" : `${ipc.pixels?.differingPixels ?? "unknown"} pixels differ from the fixture`}`;
-  say(`RECORDED, ipc-read: read_clipboard_image asked directly with the PNG on the X clipboard (${ipc?.clipboard?.offered ? "offered" : "NOT offered"}): ${ipcLine}`);
-
-  // The injected shape reached the page as built: one untrusted paste on
-  // the surface, advertising Files with no items, files or text.
-  const shapeArrived = (row) => {
-    const seen = (row.witness ?? []).filter((p) => p.surface === row.surface);
-    return seen.length === 1 && !seen[0].isTrusted && JSON.stringify(seen[0].types) === '["Files"]' && seen[0].items === 0 && seen[0].files === 0;
-  };
-  // Landed: the editor shows the uploaded file itself, and the file holds
+  const shapeText = (p) => `{types ${JSON.stringify(p.types)}, items ${p.items} ${JSON.stringify(p.itemKinds ?? null)}, files ${p.files}${p.fileNames?.length ? ` ${JSON.stringify(p.fileNames)}` : ""}, trusted ${p.isTrusted}, taken ${p.defaultPrevented}}`;
+  // Landed: the surface shows the uploaded file itself, and the file holds
   // the fixture's pixels, with no notice from the paste path.
   const landedWell = (row) => Boolean(row.embed && row.file?.same && !row.pasteNotices.length
     && row.embed.naturalWidth === row.file.width && row.embed.naturalHeight === row.file.height);
@@ -502,95 +814,240 @@ function verdict() {
     return parts.join(", ");
   };
 
-  const subjects = {};
+  // The file-item controls, each surface's first: they say whether the
+  // readers can see a landed image there. Every one of a surface's must hold.
+  const controlHeld = {};
   for (const surface of ["editor", "prompt"]) {
-    const subject = find("paste-native-shape", surface);
-    const control = find("paste-file-item", surface);
-    // The control first: it says whether the readers can see a landed image.
-    let controlHeld = false;
-    if (!control || control.error) {
-      say(`INCONCLUSIVE, ${surface} paste-file-item: ${control?.error ?? "no record"}`);
-    } else if (landedWell(control)) {
-      controlHeld = true;
-      say(`CONTROL HELD, ${surface} paste-file-item: ${describe(control)}`);
-    } else {
-      say(`INCONCLUSIVE, ${surface} paste-file-item: a File item did not land, so the readers cannot see a landed image: ${describe(control)}`);
-    }
-
-    if (!subject || subject.error) {
-      subjects[surface] = "inconclusive";
-      say(`INCONCLUSIVE, ${surface} paste-native-shape: ${subject?.error ?? "no record"}`);
-      continue;
-    }
-    const why = pageWhy ? pageWhy
-      : !subject.clipboard?.offered ? "the X clipboard did not offer image/png"
-      : !subject.event?.dispatched ? "the paste target was not on the page"
-        : !shapeArrived(subject) ? `the page saw ${JSON.stringify(subject.witness)} rather than one injected empty-Files paste`
-          : !controlHeld ? "its control did not land an image"
-            : null;
-    if (why) {
-      subjects[surface] = "inconclusive";
-      say(`INCONCLUSIVE, ${surface} paste-native-shape: ${why}; ${describe(subject)}`);
-      continue;
-    }
-    if (!landedWell(subject)) {
-      subjects[surface] = "fault";
-      const what = !subject.embed && !subject.file ? `landed no image within ${subject.waitedMs} ms` : "did not land the clipboard's image cleanly";
-      say(`FAULT, ${surface} paste-native-shape: the injected WKWebView shape ${what}: ${describe(subject)}`);
-      continue;
-    }
-    if (surface === "editor") {
-      if (!subject.noteNamesImage) {
-        subjects[surface] = "fault";
-        say(`FAULT, editor paste-native-shape: the image landed (${describe(subject)}) but the note's file did not name it ${subject.noteSavedAfterLandingMs} ms after the image landed`);
-        continue;
+    const controls = rows.filter((r) => r.surface === surface && r.arm?.startsWith("paste-file-item"));
+    controlHeld[surface] = controls.length > 0;
+    if (!controls.length) say(`INCONCLUSIVE, ${surface} paste-file-item: no record`);
+    for (const control of controls) {
+      if (control.error) {
+        controlHeld[surface] = false;
+        say(`INCONCLUSIVE, ${surface} ${control.arm}: ${control.error}`);
+      } else if (landedWell(control)) {
+        say(`CONTROL HELD, ${surface} ${control.arm}: ${describe(control)}`);
+      } else {
+        controlHeld[surface] = false;
+        say(`INCONCLUSIVE, ${surface} ${control.arm}: a File item did not land, so the readers cannot see a landed image: ${describe(control)}`);
       }
-      subjects[surface] = "held";
-      say(`HELD, editor paste-native-shape: ${describe(subject)}; the note's file named it within ${subject.noteSavedAfterLandingMs} ms of the image landing`);
-      continue;
-    }
-    const submit = subject.submit;
-    const chordArrived = submit?.keys?.some((k) => k.surface === "prompt" && k.isTrusted);
-    if (!submit || !chordArrived) {
-      subjects[surface] = "inconclusive";
-      say(`INCONCLUSIVE, prompt paste-native-shape: the image landed (${describe(subject)}) but no trusted Ctrl+Enter reached the composer (${JSON.stringify(submit?.keys ?? null)})`);
-    } else if (!submit.scrollbackHasPath) {
-      subjects[surface] = "fault";
-      say(`FAULT, prompt paste-native-shape: the image landed (${describe(subject)}) but its absolute path was not in the terminal ${submit.waitedMs} ms after Ctrl+Enter`);
-    } else {
-      subjects[surface] = "held";
-      say(`HELD, prompt paste-native-shape: ${describe(subject)}; Ctrl+Enter delivered ${submit.path} to the terminal${submit.onOneLine ? "" : " (across wrapped lines)"}`);
     }
   }
 
-  // The text-only control: with no image on the X clipboard the native read
-  // must find none. Where both subjects held it must hold, or their images
-  // are not shown to have come from the clipboard.
-  const textOnly = find("paste-text-only", "editor");
-  const allHeld = subjects.editor === "held" && subjects.prompt === "held";
-  let textHeld = false;
-  if (!textOnly || textOnly.error) {
-    say(`INCONCLUSIVE, editor paste-text-only: ${textOnly?.error ?? "no record"}`);
-  } else {
-    textHeld = textOnly.clipboard?.offered && shapeArrived(textOnly) && textOnly.noImageNotice && !textOnly.newFiles.length && textOnly.embedsAdded === 0;
-    const reading = `the clipboard ${textOnly.clipboard?.offered ? "offered text only" : "did NOT offer text only"}; ${textOnly.noImageNotice ? `"${NO_IMAGE}" shown` : "no such notice"}; ${textOnly.newFiles.length} new files, ${textOnly.embedsAdded} new embeds`;
-    if (textHeld) say(`CONTROL HELD, editor paste-text-only: ${reading}`);
-    else if (allHeld) say(`INCONCLUSIVE, editor paste-text-only: ${reading}`);
-    else say(`RECORDED, editor paste-text-only: ${reading}; a subject did not hold, so this decides nothing`);
-  }
+  if (want("native")) outcome.native = judgeNative();
+  if (want("trusted")) outcome.trusted = judgeTrusted();
+  if (want("drop")) outcome.drop = judgeDrops(["drop-synthetic"]);
+  if (want("xdnd")) outcome.xdnd = judgeDrops(["drop-xdnd"], true);
 
-  const trusted = find("trusted-shape", "editor");
-  if (trusted && !trusted.error) {
-    const shape = (trusted.witness ?? []).map((p) => `{types ${JSON.stringify(p.types)}, items ${p.items} ${JSON.stringify(p.itemKinds)}, files ${p.files}, trusted ${p.isTrusted}, taken ${p.defaultPrevented}}`).join(" ") || "no paste event";
-    say(`RECORDED, editor trusted-shape: Ctrl+V by X input with the PNG on the clipboard handed the page ${shape}; ${trusted.newFiles.length} new files; statuses ${JSON.stringify(trusted.statuses)}`);
-  } else {
-    say(`RECORDED, editor trusted-shape: ${trusted?.error ?? "no record"}`);
-  }
-
-  if (Object.values(subjects).includes("fault")) process.exit(10);
-  if (allHeld && textHeld) {
-    say("PASS: an image pasted with WKWebView's empty-Files clipboard shape landed in the editor and in the Rich Prompt through the desktop's clipboard read");
+  const states = Object.values(outcome);
+  if (states.includes("fault")) process.exit(10);
+  if (states.every((s) => s === "held")) {
+    say(`PASS: ${groups.map((g) => ({ native: "an image pasted with WKWebView's empty-Files clipboard shape landed in the editor and in the Rich Prompt through the desktop's clipboard read", trusted: "a real Ctrl+V landed the clipboard's image in the editor and in the Rich Prompt under every owner", drop: "a synthetic image file drop landed in the editor and in the Rich Prompt", xdnd: "a real image file drop landed in the editor and in the Rich Prompt, and one outside every drop zone left the window on its page and uploaded nothing" })[g]).join("; ")}`);
     process.exit(0);
   }
   process.exit(3);
+
+  // The injected WKWebView shape, as the first stage defined it.
+  function judgeNative() {
+    const ipc = find("ipc-read");
+    const ipcLine = ipc?.error ? `failed: ${ipc.error}`
+      : !ipc?.bytes ? "the desktop returned no image"
+        : `the desktop returned ${ipc.bytes} bytes, ${ipc.pixels?.width}x${ipc.pixels?.height}, ${ipc.pixels?.same ? "the fixture's pixels" : `${ipc.pixels?.differingPixels ?? "unknown"} pixels differ from the fixture`}`;
+    say(`RECORDED, ipc-read: read_clipboard_image asked directly with the PNG on the X clipboard (${ipc?.clipboard?.offered ? "offered" : "NOT offered"}): ${ipcLine}`);
+
+    // The injected shape reached the page as built: one untrusted paste on
+    // the surface, advertising Files with no items, files or text.
+    const shapeArrived = (row) => {
+      const seen = (row.witness ?? []).filter((p) => p.surface === row.surface);
+      return seen.length === 1 && !seen[0].isTrusted && JSON.stringify(seen[0].types) === '["Files"]' && seen[0].items === 0 && seen[0].files === 0;
+    };
+    const subjects = {};
+    for (const surface of ["editor", "prompt"]) {
+      const subject = find("paste-native-shape", surface);
+      if (!subject || subject.error) {
+        subjects[surface] = "inconclusive";
+        say(`INCONCLUSIVE, ${surface} paste-native-shape: ${subject?.error ?? "no record"}`);
+        continue;
+      }
+      const why = pageWhy ? pageWhy
+        : !subject.clipboard?.offered ? "the X clipboard did not offer image/png"
+          : !subject.event?.dispatched ? "the paste target was not on the page"
+            : !shapeArrived(subject) ? `the page saw ${JSON.stringify(subject.witness)} rather than one injected empty-Files paste`
+              : !controlHeld[surface] ? "its control did not land an image"
+                : null;
+      if (why) {
+        subjects[surface] = "inconclusive";
+        say(`INCONCLUSIVE, ${surface} paste-native-shape: ${why}; ${describe(subject)}`);
+        continue;
+      }
+      if (!landedWell(subject)) {
+        subjects[surface] = "fault";
+        const what = !subject.embed && !subject.file ? `landed no image within ${subject.waitedMs} ms` : "did not land the clipboard's image cleanly";
+        say(`FAULT, ${surface} paste-native-shape: the injected WKWebView shape ${what}: ${describe(subject)}`);
+        continue;
+      }
+      if (surface === "editor") {
+        if (!subject.noteNamesImage) {
+          subjects[surface] = "fault";
+          say(`FAULT, editor paste-native-shape: the image landed (${describe(subject)}) but the note's file did not name it ${subject.noteSavedAfterLandingMs} ms after the image landed`);
+          continue;
+        }
+        subjects[surface] = "held";
+        say(`HELD, editor paste-native-shape: ${describe(subject)}; the note's file named it within ${subject.noteSavedAfterLandingMs} ms of the image landing`);
+        continue;
+      }
+      const submit = subject.submit;
+      const chordArrived = submit?.keys?.some((k) => k.surface === "prompt" && k.isTrusted);
+      if (!submit || !chordArrived) {
+        subjects[surface] = "inconclusive";
+        say(`INCONCLUSIVE, prompt paste-native-shape: the image landed (${describe(subject)}) but no trusted Ctrl+Enter reached the composer (${JSON.stringify(submit?.keys ?? null)})`);
+      } else if (!submit.scrollbackHasPath) {
+        subjects[surface] = "fault";
+        say(`FAULT, prompt paste-native-shape: the image landed (${describe(subject)}) but its absolute path was not in the terminal ${submit.waitedMs} ms after Ctrl+Enter`);
+      } else {
+        subjects[surface] = "held";
+        say(`HELD, prompt paste-native-shape: ${describe(subject)}; Ctrl+Enter delivered ${submit.path} to the terminal${submit.onOneLine ? "" : " (across wrapped lines)"}`);
+      }
+    }
+
+    // The text-only control: with no image on the X clipboard the native read
+    // must find none. Where both subjects held it must hold, or their images
+    // are not shown to have come from the clipboard.
+    const textOnly = find("paste-text-only", "editor");
+    const allHeld = subjects.editor === "held" && subjects.prompt === "held";
+    let textHeld = false;
+    if (!textOnly || textOnly.error) {
+      say(`INCONCLUSIVE, editor paste-text-only: ${textOnly?.error ?? "no record"}`);
+    } else {
+      textHeld = textOnly.clipboard?.offered && shapeArrived(textOnly) && textOnly.noImageNotice && !textOnly.newFiles.length && textOnly.embedsAdded === 0;
+      const reading = `the clipboard ${textOnly.clipboard?.offered ? "offered text only" : "did NOT offer text only"}; ${textOnly.noImageNotice ? `"${NO_IMAGE}" shown` : "no such notice"}; ${textOnly.newFiles.length} new files, ${textOnly.embedsAdded} new embeds`;
+      if (textHeld) say(`CONTROL HELD, editor paste-text-only: ${reading}`);
+      else if (allHeld) say(`INCONCLUSIVE, editor paste-text-only: ${reading}`);
+      else say(`RECORDED, editor paste-text-only: ${reading}; a subject did not hold, so this decides nothing`);
+    }
+    if (Object.values(subjects).includes("fault")) return "fault";
+    return allHeld && textHeld ? "held" : "inconclusive";
+  }
+
+  // A real Ctrl+V per owner and surface, judged by what landed, with the
+  // shape WebKitGTK handed the page named in every line.
+  function judgeTrusted() {
+    const states = [];
+    for (const surface of ["editor", "prompt"]) {
+      for (const kind of TRUSTED_OWNERS) {
+        const row = all("paste-trusted", surface).find((r) => r.clipboard?.kind === kind);
+        const who = `${surface} paste-trusted, ${OWNERS[kind].label}`;
+        if (!row || row.error) {
+          states.push("inconclusive");
+          say(`INCONCLUSIVE, ${who}: ${row?.error ?? "no record"}`);
+          continue;
+        }
+        const pastes = (row.witness ?? []).filter((p) => p.isTrusted && p.surface === surface);
+        const shape = pastes.map(shapeText).join(" ") || "no paste event";
+        const why = pageWhy ? pageWhy
+          : !row.clipboard.offered ? `the X clipboard did not offer the owner's targets (${JSON.stringify(row.clipboard.targets)})`
+            : !row.event?.focused ? "the surface did not take focus for the chord"
+              : row.event?.keyStatus !== 0 ? `xdotool exited ${row.event?.keyStatus}`
+                : pastes.length !== 1 ? `the chord reached the page as ${pastes.length} trusted pastes on the surface (${JSON.stringify(row.witness)})`
+                  : !controlHeld[surface] ? "the surface's file-item control did not land an image"
+                    : null;
+        if (why) {
+          states.push("inconclusive");
+          say(`INCONCLUSIVE, ${who}: ${why}; ${describe(row)}`);
+        } else if (landedWell(row)) {
+          states.push("held");
+          say(`HELD, ${who}: WebKitGTK handed the page ${shape}; ${describe(row)}`);
+        } else {
+          states.push("fault");
+          const empty = pastes[0].types?.length === 0 && !pastes[0].items && !pastes[0].files;
+          const what = !row.embed && !row.file ? `nothing landed within ${row.waitedMs} ms` : "the clipboard's image did not land cleanly";
+          say(`FAULT, ${who}: WebKitGTK handed the page ${empty ? "an empty shape " : ""}${shape} and ${what}: ${describe(row)}`);
+        }
+      }
+    }
+    for (const row of all("menu-paste", "prompt")) {
+      const who = `prompt menu-paste, ${OWNERS[row.clipboard?.kind]?.label ?? "unknown owner"}`;
+      if (row.error) { say(`RECORDED, ${who}: ${row.error}`); continue; }
+      if (!row.menuOpened) { say(`RECORDED, ${who}: the terminal menu showed no Paste row (${JSON.stringify(row.menu)})`); continue; }
+      say(`RECORDED, ${who}: the terminal menu's Paste row with the composer ${row.promptShown ? "open" : "gone"}: ${row.embedsAdded} new composer embeds, ${row.newFiles.length} new images, the terminal grew ${row.scrollbackGrew} chars${row.scrollbackAdded ? ` ${JSON.stringify(row.scrollbackAdded.slice(0, 80))}` : ""}, paste events ${(row.witness ?? []).map(shapeText).join(" ") || "none"}, statuses ${JSON.stringify(row.statuses)}`);
+    }
+    if (states.includes("fault")) return "fault";
+    return states.every((s) => s === "held") ? "held" : "inconclusive";
+  }
+
+  // The drops: each lands the fixture beside the document and leaves the
+  // window on its page; a real drop outside every zone does nothing.
+  function judgeDrops(arms, outsideToo = false) {
+    const states = [];
+    for (const surface of ["editor", "prompt"]) {
+      for (const arm of arms) {
+        const row = find(arm, surface);
+        const who = `${surface} ${arm}`;
+        if (!row || row.error) {
+          states.push("inconclusive");
+          say(`INCONCLUSIVE, ${who}: ${row?.error ?? "no record"}`);
+          continue;
+        }
+        const trusted = arm === "drop-xdnd";
+        const drops = (row.drops ?? []).filter((d) => d.surface === surface && d.isTrusted === trusted);
+        const shape = drops.map(shapeText).join(" ") || "no drop event";
+        const why = pageWhy ? pageWhy
+          : !row.point?.ownsPoint ? `the drop point is not the surface's (${row.point?.hit})`
+            : trusted && !row.event?.started ? `the drag source did not start (${JSON.stringify(row.event?.sourceSaid)})`
+              : trusted && row.event?.overSource ? "the drop point lies under the drag source"
+                : !trusted && !(row.event?.dispatched && row.event?.sent?.drop?.carried && row.event?.files === 1) ? `the synthetic drop was not built as asked (${JSON.stringify(row.event)})`
+                  : drops.length !== 1 ? `the page saw ${drops.length} ${trusted ? "trusted" : "untrusted"} drops on the surface (drags ${JSON.stringify(row.drags)}, source ${JSON.stringify(row.event?.sourceSaid ?? null)})`
+                    : !controlHeld[surface] ? "the surface's file-item control did not land an image"
+                      : null;
+        if (why) {
+          states.push("inconclusive");
+          say(`INCONCLUSIVE, ${who}: ${why}; ${describe(row)}`);
+        } else if (!row.pageKept) {
+          states.push("fault");
+          say(`FAULT, ${who}: the window left its page after the drop ${shape}; ${describe(row)}`);
+        } else if (landedWell(row)) {
+          states.push("held");
+          say(`HELD, ${who}: the page was handed ${shape}; ${describe(row)}; the window stayed on its page`);
+        } else {
+          states.push("fault");
+          const what = !row.embed && !row.file ? `nothing landed within ${row.waitedMs} ms` : "the dropped image did not land cleanly";
+          const text = row.textGrew > 0 ? `; the surface's text grew by ${row.textGrew} and ends ${JSON.stringify(row.textTail.slice(-80))}` : "";
+          say(`FAULT, ${who}: the page was handed ${shape} and ${what}: ${describe(row)}${text}`);
+        }
+      }
+    }
+    const outside = outsideToo ? find("drop-outside") : null;
+    if (!outsideToo) {
+      // The synthetic drop has no outside arm: an untrusted drop has no
+      // default action to take the window anywhere.
+    } else if (!outside || outside.error) {
+      states.push("inconclusive");
+      say(`INCONCLUSIVE, drop-outside: ${outside?.error ?? "no record"}`);
+    } else {
+      const reached = Object.entries(outside.drags ?? {}).some(([key]) => key.startsWith("outside dragover trusted"));
+      const where = `at ${outside.point.x},${outside.point.y} on ${outside.point.hit}`;
+      const reading = `drags ${JSON.stringify(outside.drags)}, drops ${(outside.drops ?? []).map(shapeText).join(" ") || "none"}, ${outside.newFiles.length} new images, source ${JSON.stringify(outside.event?.sourceSaid ?? null)}`;
+      if (!outside.event?.started) {
+        states.push("inconclusive");
+        say(`INCONCLUSIVE, drop-outside: the drag source did not start; ${reading}`);
+      } else if (outside.pageAnswered && outside.pageKept === false) {
+        states.push("fault");
+        say(`FAULT, drop-outside: a drop ${where} took the window off its page to ${outside.where} (${outside.sameDocument ? "same document" : "a new document"}, title ${JSON.stringify(outside.title)}); ${reading}`);
+      } else if (outside.newFiles.length) {
+        states.push("fault");
+        say(`FAULT, drop-outside: a drop ${where} uploaded ${outside.newFiles.map((f) => basename(f)).join(", ")}; ${reading}`);
+      } else if (!outside.pageAnswered) {
+        states.push("inconclusive");
+        say(`INCONCLUSIVE, drop-outside: the page did not answer after the drop ${where}; ${reading}`);
+      } else if (!reached) {
+        states.push("inconclusive");
+        say(`INCONCLUSIVE, drop-outside: no trusted drag reached the point outside the zones, so nothing was tried there; ${reading}`);
+      } else {
+        states.push("held");
+        say(`HELD, drop-outside: a drop ${where} left the window's URL unchanged and uploaded nothing; ${reading}`);
+      }
+    }
+    if (states.includes("fault")) return "fault";
+    return states.every((s) => s === "held") ? "held" : "inconclusive";
+  }
 }
