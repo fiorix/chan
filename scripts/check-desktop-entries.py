@@ -11,7 +11,8 @@ declare its MIME types; each must pass `desktop-file-validate`.
   check-desktop-entries.py --appimage F   the entries inside the AppImage F
 
 Exits 0 when every entry passes, 1 with one line per finding otherwise, and 2
-when it cannot run (no desktop-file-validate, no AppImage).
+when it cannot run (no desktop-file-validate, no AppImage, one that will not
+extract).
 """
 
 from __future__ import annotations
@@ -79,16 +80,28 @@ def findings(directory: Path, validate: str) -> list[str]:
     return found
 
 
+class CannotRun(Exception):
+    """The check cannot run: the exit-2 case."""
+
+
 def appimage_entries(appimage: Path, into: Path) -> Path:
     """Extract the AppImage's `usr/share/applications` into `into`."""
     if not appimage.is_file():
-        raise SystemExit(f"error: no AppImage at {appimage}")
-    subprocess.run(
-        [str(appimage.resolve()), "--appimage-extract", "usr/share/applications/*"],
-        cwd=into,
-        stdout=subprocess.DEVNULL,
-        check=True,
-    )
+        raise CannotRun(f"no AppImage at {appimage}")
+    try:
+        subprocess.run(
+            [str(appimage.resolve()), "--appimage-extract", "usr/share/applications/*"],
+            cwd=into,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "stderr", b"") or b""
+        detail = detail.decode(errors="replace").strip().replace("\n", "; ")
+        raise CannotRun(
+            f"{appimage} --appimage-extract failed: {error}" + (f": {detail}" if detail else "")
+        ) from error
     return into / "squashfs-root/usr/share/applications"
 
 
@@ -102,7 +115,11 @@ def main(argv: list[str]) -> int:
         return 2
     with tempfile.TemporaryDirectory(prefix="chan-entries-") as scratch:
         if argv[:1] == ["--appimage"] and len(argv) == 2:
-            directory = appimage_entries(Path(argv[1]), Path(scratch))
+            try:
+                directory = appimage_entries(Path(argv[1]), Path(scratch))
+            except CannotRun as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
             source = argv[1]
         elif len(argv) <= 1 and argv[:1] != ["--appimage"]:
             directory = Path(argv[0]) if argv else SHARED

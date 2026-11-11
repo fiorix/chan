@@ -103,11 +103,37 @@ def main() -> int:
                 f"{label}: expected exit 1 naming {expected!r}, got exit "
                 f"{result.returncode}: {result.stderr.strip()!r}"
             )
+    with tempfile.TemporaryDirectory(prefix="chan-entries-test-") as scratch:
+        broken_image = Path(scratch) / "broken.AppImage"
+        broken_image.write_text("#!/bin/sh\necho 'not an AppImage' >&2\nexit 1\n", encoding="utf-8")
+        broken_image.chmod(0o755)
+        for label, image, expected in (
+            ("an AppImage that will not extract", broken_image, "--appimage-extract failed"),
+            ("no AppImage", Path(scratch) / "absent.AppImage", "no AppImage at"),
+        ):
+            result = subprocess.run(
+                [sys.executable, str(CHECKER), "--appimage", str(image)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if (
+                result.returncode != 2
+                or expected not in result.stderr
+                or "Traceback" in result.stderr
+            ):
+                failures.append(
+                    f"{label}: expected exit 2 naming {expected!r}, got exit "
+                    f"{result.returncode}: {result.stderr.strip()!r}"
+                )
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
     if failures:
         return 1
-    print(f"check-desktop-entries: shared entries pass, {len(CASES)} breaks refused")
+    print(
+        f"check-desktop-entries: shared entries pass, {len(CASES)} breaks refused, "
+        "2 unreadable AppImages refused with exit 2"
+    )
     return 0
 
 
