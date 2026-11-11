@@ -3,7 +3,9 @@
 //! desktop running hands each one to it as the handoff's `OpenPath`
 //! (`single_instance`); a launch that boots the desktop opens them itself
 //! during its boot. Either way the path lands as `cs open PATH` typed in a
-//! standalone window would.
+//! standalone window would. On macOS a file Finder opens comes as an
+//! open-file event's URL instead of an argument (`open_events`), read here by
+//! [`from_urls`] as a launch's file URIs are.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -51,14 +53,40 @@ pub(crate) fn from_args(
     }
     let mut launch = LaunchArgs::default();
     for arg in args.iter().filter(|arg| !is_option(arg)) {
-        match handoff::launch_arg_path(arg, cwd) {
-            Ok(path) => launch.paths.push(path),
-            Err(why) => launch
-                .skipped
-                .push((arg.to_string_lossy().into_owned(), why)),
-        }
+        launch.add(
+            arg.to_string_lossy().into_owned(),
+            handoff::launch_arg_path(arg, cwd),
+        );
     }
     Ok(launch)
+}
+
+/// Read the URLs an open-file event delivers (`open_events`) as [`from_args`]
+/// reads a launch's file URIs, through the same reader
+/// ([`handoff::launch_arg_path`]): a `file://` URL is percent-decoded with its
+/// host checked, and one that names nothing this desktop can open is skipped
+/// with its reason.
+pub(crate) fn from_urls(urls: impl IntoIterator<Item = tauri::Url>) -> LaunchArgs {
+    let mut launch = LaunchArgs::default();
+    for url in urls {
+        let text = url.as_str();
+        launch.add(
+            text.to_string(),
+            handoff::launch_arg_path(OsStr::new(text), None),
+        );
+    }
+    launch
+}
+
+impl LaunchArgs {
+    /// Keep the path an argument was read as, or skip the argument with the
+    /// reason it names nothing to open.
+    fn add(&mut self, arg: String, read: Result<String, String>) {
+        match read {
+            Ok(path) => self.paths.push(path),
+            Err(why) => self.skipped.push((arg, why)),
+        }
+    }
 }
 
 fn is_option(arg: &OsStr) -> bool {
@@ -219,6 +247,57 @@ mod tests {
             LaunchArgs::default(),
             "with no path there is nothing to refuse"
         );
+    }
+
+    /// An open-file event's URLs read as the same URIs given to a launch do:
+    /// percent-decoded, another host, another scheme and an encoded `/` or
+    /// NUL skipped with the launch's own reasons, in event order, on every
+    /// platform.
+    #[test]
+    fn an_open_file_events_urls_read_as_a_launchs_file_uris() {
+        let uris = [
+            "file:///tmp/a%20b.md",
+            "file://localhost/srv/caf%C3%A9.md",
+            "file:///home/u/dir/",
+            "file://nas.local/share/notes.md",
+            "smb://nas/share/notes.md",
+            "https://example.com/notes.md",
+            "file:///srv/a%2Fb.md",
+            "file:///srv/a%00b.md",
+            "file://localhost/srv/c%2Fd.md",
+        ];
+        let urls: Vec<tauri::Url> = uris
+            .iter()
+            .map(|uri| tauri::Url::parse(uri).unwrap())
+            .collect();
+        // The url crate spells `file://localhost/...` as `file:///...`, which
+        // an event's skip names, so the launch is given each URL so spelled.
+        let spelled: Vec<OsString> = urls.iter().map(|url| url.as_str().into()).collect();
+        let event = from_urls(urls);
+        assert_eq!(event, from_args(spelled, None).unwrap());
+        // A Unix path has no drive letter, so Windows names none of these.
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                event.paths,
+                ["/tmp/a b.md", "/srv/caf\u{e9}.md", "/home/u/dir/"]
+            );
+            assert_eq!(
+                event
+                    .skipped
+                    .iter()
+                    .map(|(uri, _)| uri.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "file://nas.local/share/notes.md",
+                    "smb://nas/share/notes.md",
+                    "https://example.com/notes.md",
+                    "file:///srv/a%2Fb.md",
+                    "file:///srv/a%00b.md",
+                    "file:///srv/c%2Fd.md",
+                ]
+            );
+        }
     }
 
     /// An update's relaunch keeps `argv[0]` and the options and drops what

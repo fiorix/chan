@@ -16,6 +16,7 @@ mod launcher_panel;
 mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
+mod open_events;
 mod privacy;
 mod registry;
 mod remote_workspace;
@@ -275,6 +276,9 @@ pub struct AppState {
     /// `Activate` opens no terminal, since the boot's own windows are on
     /// their way.
     pub(crate) boot_settled: std::sync::atomic::AtomicBool,
+    /// The files macOS asked this desktop to open that wait for the boot, or
+    /// for the task opening those asked for before them (`open_events`).
+    pub(crate) open_events: Mutex<open_events::OpenEvents>,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -347,6 +351,7 @@ impl AppState {
             unserved_endpoint: Mutex::new(None),
             last_focused_window: Mutex::new(None),
             boot_settled: std::sync::atomic::AtomicBool::new(false),
+            open_events: Mutex::new(open_events::OpenEvents::awaiting_boot()),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
@@ -6138,6 +6143,9 @@ fn main() {
                 // drops, a second launch's `Activate` opens no terminal
                 // beside the windows this boot is about to open.
                 let _boot_settled = single_instance::BootSettled::when_dropped(&state_for_restore);
+                // Held as long, so a boot that never gets to the files macOS
+                // asked to open hands them on rather than leave them waiting.
+                let boot_opens = open_events::Opening::boot(&state_for_restore);
                 // Mount the shared terminal tenant FIRST so persisted terminal
                 // windows resolve and the watcher reopens them on relaunch.
                 if let Some(embedded) = state_for_restore.embedded() {
@@ -6152,6 +6160,10 @@ fn main() {
                 // brought back takes an open only once it has connected, which
                 // at boot it has not, so the paths get a window of their own.
                 launch_paths::open_at_boot(Arc::clone(&state_for_restore), &launch_paths).await;
+                // The files macOS asked to open before the boot got here, the
+                // one that launched it among them, open next, beside the
+                // launch's own; later ones open as they come.
+                boot_opens.open().await;
                 // First-open rule (library-owned): the very first time this local
                 // library is opened with an empty registry, mint one boot terminal
                 // and persist a marker. Once set, an emptied registry never
@@ -6231,6 +6243,10 @@ fn main() {
                     persist_workspaces(&state_for_exit);
                 }
             }
+            // macOS: Finder's Open With, a double click once Chan is the
+            // default app, or `open -a Chan FILE`, at a launch or later.
+            #[cfg(target_os = "macos")]
+            RunEvent::Opened { urls } => open_events::deliver(_app, urls),
             // macOS: Dock click or `open -a` while the process is alive
             // with no visible window, because only hidden-in-place windows
             // remain or because the boot has not opened its windows yet. It

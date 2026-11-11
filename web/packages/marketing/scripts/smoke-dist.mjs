@@ -69,6 +69,8 @@ const checks = [
   { path: "/install/", status: 200, includes: "sudo apt install chan</b>" },
   { path: "/install/", status: 200, includes: "sudo dnf install chan</b>" },
   { path: "/install/", status: 200, includes: "paru -S chan</b>" },
+  { path: "/install/", status: 200, includes: 'href="/manual/install/#open-from-finder"' },
+  { path: "/manual/install/", status: 200, includes: 'id="open-from-finder"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-macos-arm64"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-windows-x64"' },
   { path: "/install/", status: 200, excludes: 'data-release-download="cli-linux-x64"' },

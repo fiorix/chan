@@ -128,7 +128,7 @@ A manual Pages deploy (`gh workflow run pages.yml`) ships marketing-only updates
 
 `/install/` separates two installation paths:
 
-- Desktop: Homebrew or the DMG on macOS, the Windows installer, then the Linux AppImage and the managed `chan-desktop` packages (on Arch, also the prebuilt `chan-desktop-bin`). `/manual/install/#default-terminal` explains how a Linux package becomes the default terminal through xdg-terminal-exec.
+- Desktop: Homebrew or the DMG on macOS, the Windows installer, then the Linux AppImage and the managed `chan-desktop` packages (on Arch, also the prebuilt `chan-desktop-bin`). `/manual/install/#default-terminal` explains how a Linux package becomes the default terminal through xdg-terminal-exec, and `/manual/install/#open-from-finder` how the macOS app becomes the default for Markdown files in Finder.
 - Server: the Unix and Windows installers first, the managed `chan` packages second, then Docker and the optional self-hosted gateway.
 
 The standalone installers support the active CLI release targets: Linux x86_64 and aarch64, macOS aarch64, FreeBSD x86_64 and aarch64, and Windows x86_64. Desktop packages are downloaded directly as release artifacts and are not installed by `install.sh`. Raw CLI archives remain in the release metadata and on GitHub Releases but are not presented as primary install-page choices.

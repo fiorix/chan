@@ -22,6 +22,16 @@
   <p>Run <code>target/release/chan-desktop</code> from an X11 or Wayland session. A source build does not update itself: pull and build again to upgrade.</p>
 </section>
 
+<section class="manual-block" id="open-from-finder">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#open-from-finder">Open Markdown files from Finder</a></h2>
+  </div>
+  <p>On macOS, Chan Desktop is listed as an editor of Markdown files (<code>.md</code> and <code>.markdown</code>) without becoming the app that opens them by default. To open one in Chan, Control-click it in Finder and choose <strong>Open With &rarr; Chan</strong>.</p>
+  <p>To have a double click open every Markdown file in Chan, select one in Finder, choose <strong>File &rarr; Get Info</strong> (<code>Cmd+I</code>), pick <strong>Chan</strong> under <strong>Open with</strong>, and click <strong>Change All...</strong>. In Terminal, <code>open notes.md</code> then opens the file in Chan too, and <code>open -a Chan notes.md</code> opens it in Chan whatever the default is.</p>
+  <p>However it is opened, the file opens as <code>cs open notes.md</code> opens it inside chan: in the editor of a standalone window, one already open or a new one, brought to the front. A file opened while Chan is not running starts it and opens once Chan has reopened the windows of its last session, in a window of its own beside them. Several files opened at once open in one window.</p>
+  <p>In Terminal, <code>chan-edit notes.md</code> does what Finder's open does, and <code>chan-files ~/notes</code> opens a directory in a standalone window's file browser. Chan Desktop installs both commands beside <code>chan</code> and <code>cs</code>.</p>
+</section>
+
 <section class="manual-block" id="default-terminal">
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#default-terminal">Default terminal on Linux</a></h2>
