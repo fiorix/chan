@@ -73,3 +73,7 @@ Each part lands in a release once it is green, in this order; one release can ta
 2. After parts 2 to 4, ghostty-web is not an npm dependency, and a source scan proves chan reads no private field of the widget.
 3. After part 5, find highlights every match and keeps the active match across a resize.
 4. The owner walks chan-desktop on every part that changes rendering or input.
+
+## Parts taken in v0.128.0, 2026-11-11
+
+This release takes part 1 alone: the import of ghostty-web's sources at the pinned commit into `web/packages/ghostty-web-ng`, with the MIT notice and the upstream commit pointer, chan depending on the workspace package instead of the npm one, with no behaviour change. It is scheduled last in the terminal lane and moves to the next release without loss if the lane runs out of time; parts 2 to 6 go to the following releases. The four ghostty rows of this release (a theme switch's colours, the wrapped copy, find across a resize, the find frame's feed) land on today's widget first: each changes chan's own binding, controllers or paste path and the renderer's existing hooks, which part 2 moves rather than rebuilds, and built first they ship as small tasks instead of waiting on the import.
