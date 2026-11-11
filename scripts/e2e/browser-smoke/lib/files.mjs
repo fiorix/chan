@@ -174,6 +174,8 @@ export async function selectFile(page, path, { details = false, scope = "" } = {
 
 export async function openFile(page, path, scope = "") {
   const row = await pathRow(page, path, scope);
+  // A listing that re-renders between the wait and the lookup has no row to hand back.
+  if (!row) throw new Error(`row ${JSON.stringify(path)} went before it could be clicked`);
   scope = await paneScope(page, scope);
   // Details can cover the listing in a narrow pane; expose the row before the pointer opens it.
   const closeDetails = await page.$(within(scope, 'aside[aria-label="Details"] button[aria-label="Close Details"]'));
@@ -183,4 +185,37 @@ export async function openFile(page, path, scope = "") {
     await closeDetails.dispose();
   }
   await row.click({ count: 2 });
+}
+
+/// Open `path` from the Files listing and wait until its tab is the active
+/// one, answering how many tries it took. The listing can re-render between
+/// finding a row and the pointer reaching it (a watch event or a session
+/// change refetches the directory): the row is then detached, or the two
+/// clicks land on two different rows, or the row is gone when it is looked
+/// up, and no tab opens. Each try finds the row again; a file that opens no
+/// tab in any of them is a failure.
+export async function openFileTab(page, path, scope = "", tries = 3) {
+  const title = filePath(path);
+  const pane = await paneScope(page, scope);
+  let last = "";
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      await openFile(page, path, scope);
+    } catch (error) {
+      if (!/detached|went before it could be clicked/i.test(error.message)) throw error;
+      last = error.message;
+      continue;
+    }
+    const opened = await page
+      .waitForFunction(
+        (selector, wanted) => document.querySelector(selector)?.getAttribute("title") === wanted,
+        { timeout: 5_000 },
+        within(pane, ".tabs .tab.active"),
+        title,
+      )
+      .then(() => true, () => false);
+    if (opened) return attempt;
+    last = "no tab opened";
+  }
+  throw new Error(`${path} did not open from the Files tab in ${tries} tries; the last: ${last}`);
 }
