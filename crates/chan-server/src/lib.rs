@@ -977,6 +977,9 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     // Drain the per-session `cs terminal write` queues (deliver each next
     // poke when its agent goes idle). Sibling of the pruner.
     let terminal_drainer = terminal_sessions.clone().spawn_drainer(shutdown_rx.clone());
+    let terminal_program_sampler = terminal_sessions
+        .clone()
+        .spawn_program_sampler(shutdown_rx.clone());
     // Push cross-window roster snapshots onto `/ws` on every session change
     // and every presence change of a window that holds a session.
     let terminal_roster_broadcaster = spawn_roster_broadcaster(
@@ -1031,6 +1034,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     let mut task_handles = vec![
         terminal_pruner,
         terminal_drainer,
+        terminal_program_sampler,
         terminal_roster_broadcaster,
         session_reaper,
     ];
@@ -3107,9 +3111,9 @@ mod tenant_builder_tests {
         );
         // Every owned task is joined on shutdown, so a flusher or reconciler
         // that falls out of the owner's list outlives its tenant.
-        assert_eq!(workspace_app.tasks.task_count(), 8);
-        assert_eq!(terminal_app.tasks.task_count(), 4);
-        assert_eq!(files_app.tasks.task_count(), 4);
+        assert_eq!(workspace_app.tasks.task_count(), 9);
+        assert_eq!(terminal_app.tasks.task_count(), 5);
+        assert_eq!(files_app.tasks.task_count(), 5);
         workspace_app.tasks.shutdown().await;
         terminal_app.tasks.shutdown().await;
         files_app.tasks.shutdown().await;
