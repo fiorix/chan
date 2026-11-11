@@ -4,9 +4,11 @@ const MAX_PAYLOAD_BYTES: usize = 4096;
 const MAX_DISPLAY_CHARS: usize = 128;
 
 /// Display text only; process ownership and lookup revisions never leave the observer.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct ProgramReading {
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ProgramReading {
+    /// The bounded OSC 0/2 title, attributed to the observed foreground.
     pub title: Option<String>,
+    /// The foreground group leader's display name, without arguments.
     pub command: Option<String>,
 }
 
@@ -34,7 +36,7 @@ impl NameRequest {
 
 /// Titles live only as long as their observed ownership is provable. No old title is cached
 /// for a returning group, and no output replay is needed to read the current pair.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct TerminalProgram {
     scanner: Scanner,
     reading: ProgramReading,
@@ -50,10 +52,12 @@ impl TerminalProgram {
 
     /// One foreground observation covers the read, including a carried candidate.
     /// Names are applied separately so an output lock need not cover blocking I/O.
-    pub(super) fn feed(&mut self, bytes: &[u8], probe: impl FnOnce() -> Foreground) {
+    /// True requests a name refresh after a completed title/reset or ownership change.
+    pub(super) fn feed(&mut self, bytes: &[u8], probe: impl FnOnce() -> Foreground) -> bool {
         if bytes.is_empty() {
-            return;
+            return false;
         }
+        let revision = self.revision;
         if self.scanner.has_candidate() || memchr::memchr(0x1b, bytes).is_some() {
             self.set_foreground(probe());
         }
@@ -67,6 +71,7 @@ impl TerminalProgram {
                 }
             }
         }
+        self.revision != revision
     }
 
     /// Capture a name lookup token after expiring any unprovable ownership.
@@ -145,7 +150,7 @@ enum Update {
     Reset,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 enum Framing {
     #[default]
     Ground,
@@ -161,7 +166,7 @@ enum Framing {
     },
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Scanner {
     framing: Framing,
     body: Vec<u8>,
