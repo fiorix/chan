@@ -1040,6 +1040,7 @@ dependencies = [
  "chan-server",
  "chan-shell",
  "chan-tls",
+ "chan-winpipe",
  "chan-wireguard",
  "chan-workspace",
  "dirs 5.0.1",

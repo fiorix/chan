@@ -105,9 +105,11 @@ const BOUNDS: Bounds = Bounds {
 pub(crate) enum Lock<C> {
     /// This process claimed it.
     Taken(C),
-    /// A live process holds it.
+    /// A live process of this account holds it.
     Held,
-    /// The claim could not be tried; the reason is logged.
+    /// The claim could not be tried, or a process of another account holds
+    /// the endpoint's name where no launch of this account can reach it; the
+    /// reason is logged.
     Unavailable(String),
 }
 
@@ -374,6 +376,10 @@ fn claim(path: &Path) -> Lock<EndpointClaim> {
     match tauri::async_runtime::block_on(async { handoff::claim_endpoint_at(path) }) {
         Ok(claim) => Lock::Taken(claim),
         Err(ClaimError::Held(_)) => Lock::Held,
+        Err(ClaimError::Foreign(error)) => Lock::Unavailable(format!(
+            "the handoff endpoint's claim is held by another account's process, which this \
+             account cannot reach: {error}"
+        )),
         Err(ClaimError::Unavailable(error)) => Lock::Unavailable(error.to_string()),
     }
 }
@@ -1592,6 +1598,48 @@ mod tests {
         );
         release.join().unwrap();
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+    }
+
+    /// A launch beside a claim pipe another account holds boots at once,
+    /// without the listener, and says why, instead of waiting for and asking
+    /// a desktop it can never reach. The test stands in for that account with
+    /// a claim pipe whose security grants LocalSystem alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_launch_beside_another_accounts_claim_boots_without_the_listener() {
+        let pipe = test_pipe("foreign-claim");
+        let mut claim_pipe = pipe.as_os_str().to_owned();
+        claim_pipe.push(".claim");
+        let _theirs = tauri::async_runtime::block_on(async {
+            chan_winpipe::create_with_sddl(
+                tokio::net::windows::named_pipe::ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .access_outbound(false),
+                &claim_pipe,
+                "D:P(A;;GA;;;SY)",
+            )
+        })
+        .unwrap();
+        let started = Instant::now();
+        let startup = check_at(
+            &pipe,
+            Bounds {
+                boot: Duration::from_secs(10),
+                ask: Duration::from_secs(5),
+                release: Duration::from_millis(200),
+                drain: Duration::from_millis(200),
+            },
+        );
+        assert!(
+            matches!(&startup, Startup::RunWithoutListener { why } if why.contains("another account")),
+            "{startup:?}"
+        );
+        assert_eq!(startup.exit_code(), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "nothing waited for: {:?}",
+            started.elapsed()
+        );
     }
 
     /// The Windows twin of

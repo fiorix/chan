@@ -698,8 +698,14 @@ pub struct EndpointClaim {
 /// Why [`claim_endpoint_at`] did not claim the endpoint.
 #[derive(Debug)]
 pub enum ClaimError {
-    /// A live process holds it.
+    /// A live process of this account holds it.
     Held(std::io::Error),
+    /// A process of another account holds the endpoint's name in a way this
+    /// account cannot reach (on Windows, a claim pipe that refuses it
+    /// access). That is no holder of this account's: no launch of this
+    /// account can ask it to come forward, so the launch boots without the
+    /// listener rather than exit beside it.
+    Foreign(std::io::Error),
     /// The claim could not be tried: the runtime directory is missing or not
     /// the user's, the lock file cannot be opened, or the platform has no
     /// endpoint.
@@ -709,7 +715,9 @@ pub enum ClaimError {
 impl std::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClaimError::Held(error) | ClaimError::Unavailable(error) => error.fmt(f),
+            ClaimError::Held(error)
+            | ClaimError::Foreign(error)
+            | ClaimError::Unavailable(error) => error.fmt(f),
         }
     }
 }
@@ -719,7 +727,9 @@ impl std::error::Error for ClaimError {}
 impl From<ClaimError> for std::io::Error {
     fn from(error: ClaimError) -> Self {
         match error {
-            ClaimError::Held(error) | ClaimError::Unavailable(error) => error,
+            ClaimError::Held(error)
+            | ClaimError::Foreign(error)
+            | ClaimError::Unavailable(error) => error,
         }
     }
 }
@@ -741,50 +751,34 @@ pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError
 /// pipe registers with the tokio reactor, so this must be called from within
 /// a tokio runtime, like [`start_listener`].
 ///
-/// The claim is held when its pipe already has an instance, since
-/// `CreateNamedPipe` refuses another instance of the name (pipe busy, the
-/// claim pipe's limit being one, or access denied for a first instance),
-/// another account's pipe of the name included; and when the
-/// endpoint's pipe is served without it: a desktop of the previous release
-/// claims by the endpoint pipe's own first instance and holds no claim pipe,
-/// and a launch beside it asks that desktop to come forward instead of
-/// booting a second one. A listing that cannot be read says nothing about
-/// such a holder, and refusing to boot on it would leave no desktop at all,
-/// so the claim stands.
+/// The claim is held when this account's claim pipe already has its one
+/// instance. A claim pipe of the name that refuses this account access is
+/// another account's, since this account's grants it full access: no holder
+/// of this account's ([`ClaimError::Foreign`]). Nothing that holds this
+/// account's claim serves the endpoint without it, so an endpoint pipe some
+/// other process created first does not keep the claim from this launch; the
+/// listener's first instance then fails on it, and the desktop runs without
+/// its listener, keeping the claim.
 #[cfg(windows)]
 pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError> {
-    // What CreateNamedPipe answers when the name already has an instance:
-    // access denied for FILE_FLAG_FIRST_PIPE_INSTANCE, and pipe busy when the
-    // name's instance limit is reached, which the claim pipe's limit of one
-    // makes the answer a second claim meets.
+    // What CreateNamedPipe answers for a claim pipe that already has an
+    // instance: pipe busy when the name is at its instance limit, which this
+    // account's claim pipe of one instance always is, and access denied when
+    // the pipe's security grants this account no instance of it.
     const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_PIPE_BUSY: i32 = 231;
 
-    let claim_pipe = match create_claim_pipe(socket_path) {
-        Ok(claim_pipe) => claim_pipe,
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY)
-            ) =>
-        {
-            return Err(ClaimError::Held(error))
+    match create_claim_pipe(socket_path) {
+        Ok(claim_pipe) => Ok(EndpointClaim {
+            socket_path: socket_path.to_path_buf(),
+            claim_pipe,
+        }),
+        Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => Err(ClaimError::Held(error)),
+        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            Err(ClaimError::Foreign(error))
         }
-        Err(error) => return Err(ClaimError::Unavailable(error)),
-    };
-    if endpoint_listing_at(socket_path).served() {
-        return Err(ClaimError::Held(std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            format!(
-                "{} is served by a process that holds no claim pipe",
-                socket_path.display()
-            ),
-        )));
+        Err(error) => Err(ClaimError::Unavailable(error)),
     }
-    Ok(EndpointClaim {
-        socket_path: socket_path.to_path_buf(),
-        claim_pipe,
-    })
 }
 
 /// Create the claim pipe of the endpoint at `socket_path`: the first, and
@@ -820,8 +814,9 @@ enum PipeListing {
     /// desktop that claimed the endpoint and has not started its listener,
     /// which is a desktop still booting.
     Booting,
-    /// The endpoint's pipe has an instance: a listener serves it, this
-    /// release's or one of the previous release's, which holds no claim pipe.
+    /// The endpoint's pipe has an instance: a listener serves it, or a
+    /// process created a pipe of its name, which a client tells apart by the
+    /// account the pipe's server runs as.
     Served,
     /// The listing could not be read. It is no reading of a boot: the
     /// guard's ask goes on as for a desktop that is up, and the CLI falls
@@ -834,12 +829,6 @@ impl PipeListing {
     /// A desktop still booting, and nothing else: not an unreadable listing.
     fn booting(self) -> bool {
         self == PipeListing::Booting
-    }
-
-    /// A listener serves the endpoint, which a claim beside it reads as held;
-    /// an unreadable listing is not.
-    fn served(self) -> bool {
-        self == PipeListing::Served
     }
 }
 
@@ -1056,10 +1045,10 @@ impl Drop for ListenerHandle {
 /// called from within a tokio runtime.
 ///
 /// Claims the endpoint first and fails while a live process holds it, with
-/// the error the claim met: `AddrInUse` on unix; on Windows the claim
-/// pipe's access-denied error, or `AddrInUse` for an endpoint pipe served
-/// without a claim pipe. [`start_claimed_listener`] serves a claim taken
-/// earlier.
+/// the error the claim met: `AddrInUse` on unix; on Windows the claim pipe's
+/// pipe-busy error, its access-denied error for another account's claim
+/// pipe, or the listener's own when another process created the endpoint's
+/// pipe first. [`start_claimed_listener`] serves a claim taken earlier.
 #[cfg(any(unix, windows))]
 pub fn start_listener<F, Fut>(socket_path: PathBuf, handler: F) -> std::io::Result<ListenerHandle>
 where
@@ -4182,29 +4171,61 @@ mod tests {
         }
     }
 
-    /// A desktop of the previous release claims by the endpoint pipe's first
-    /// instance and holds no claim pipe: a launch beside it reads the
-    /// endpoint held, not booting, so it asks that desktop instead of booting
-    /// a second one, and its refused claim leaves no claim pipe behind.
+    /// An endpoint pipe some other process created first holds no claim: the
+    /// claim is taken, the listener's first instance fails on that pipe and
+    /// hands the claim back held, so a second launch meets it held, and the
+    /// listing reads the endpoint served, not booting.
     #[cfg(windows)]
     #[tokio::test]
-    async fn a_pipe_served_without_a_claim_pipe_reads_as_held() {
+    async fn an_endpoint_pipe_without_a_claim_pipe_holds_no_claim() {
         use tokio::net::windows::named_pipe::ServerOptions;
 
-        let pipe = test_pipe("older-holder");
-        let older = ServerOptions::new()
+        let pipe = test_pipe("endpoint-first");
+        let first = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe)
             .unwrap();
+        let claim = claim_endpoint_at(&pipe).expect("no claim pipe holds the endpoint");
+        let failed = start_claimed_listener(claim, |_req| async { opened() })
+            .err()
+            .expect("the endpoint's name is taken");
         assert!(matches!(claim_endpoint_at(&pipe), Err(ClaimError::Held(_))));
+        assert_eq!(endpoint_listing_at(&pipe), PipeListing::Served);
         assert!(!endpoint_is_booting_at(&pipe));
-        drop(older);
-        assert_eq!(
-            endpoint_listing_at(&pipe),
-            PipeListing::Absent,
-            "the refused claim left its pipe"
-        );
+        drop((first, failed));
         assert!(claim_endpoint_at(&pipe).is_ok());
+    }
+
+    /// A claim pipe of the endpoint's name that refuses this account access
+    /// is another account's, which no launch of this account can ask to come
+    /// forward: no holder of this account's. The test stands in for that
+    /// account with a claim pipe whose security grants LocalSystem alone.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claim_pipe_this_account_cannot_open_is_no_holder() {
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = test_pipe("foreign-claim");
+        let _theirs = chan_winpipe::create_with_sddl(
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .access_outbound(false),
+            claim_pipe_name(&pipe),
+            "D:P(A;;GA;;;SY)",
+        )
+        .unwrap();
+        assert!(
+            matches!(claim_endpoint_at(&pipe), Err(ClaimError::Foreign(_))),
+            "another account's claim pipe"
+        );
+        let _ours = claim_endpoint_at(&test_pipe("own-claim")).unwrap();
+        assert!(
+            matches!(
+                claim_endpoint_at(&test_pipe("own-claim")),
+                Err(ClaimError::Held(_))
+            ),
+            "this account's claim pipe"
+        );
     }
 
     /// The pipe directory read by name, without case, and its failure: a
@@ -4234,7 +4255,7 @@ mod tests {
         assert_eq!(
             classify_listing(claim, endpoint, read(&["CHAN-DESKTOP-A"])),
             PipeListing::Served,
-            "an endpoint served without a claim pipe is a holder of the previous release"
+            "an endpoint pipe without a claim pipe is served, not booting"
         );
         let unreadable = classify_listing(
             claim,
@@ -4242,14 +4263,13 @@ mod tests {
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
         );
         assert_eq!(unreadable, PipeListing::Unreadable);
-        for (listing, booting, served) in [
-            (PipeListing::Absent, false, false),
-            (PipeListing::Booting, true, false),
-            (PipeListing::Served, false, true),
-            (PipeListing::Unreadable, false, false),
+        for (listing, booting) in [
+            (PipeListing::Absent, false),
+            (PipeListing::Booting, true),
+            (PipeListing::Served, false),
+            (PipeListing::Unreadable, false),
         ] {
             assert_eq!(listing.booting(), booting, "{listing:?}");
-            assert_eq!(listing.served(), served, "{listing:?}");
         }
     }
 

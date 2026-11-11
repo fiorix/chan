@@ -196,3 +196,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # `chan_workspace::paths::root_stall`, a seam behind this feature. Features
 # enter no lockfile, so the test build gains the seam and nothing else.
 chan-workspace = { workspace = true, default-features = false, features = ["test-hooks"] }
+
+# The single-instance tests stand in for another account's claim pipe with a
+# pipe whose security descriptor grants this account nothing.
+[target.'cfg(windows)'.dev-dependencies]
+chan-winpipe = { workspace = true }
