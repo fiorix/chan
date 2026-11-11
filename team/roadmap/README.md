@@ -64,7 +64,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | not started | design |
 | [tests still red under the heaviest load][loadres] | not started | design |
-| [tmux windows not on their machine card][tmuxcard] | not started | build |
+| [tmux windows not on their machine card][tmuxcard] | partly built | build |
 | [New Window in a devserver tmux window][tmuxnew] | not started | design |
 | [a launch beside a silent desktop shows nothing][silentlaunch] | not started | design |
 | [the Windows handoff pipe's early clients][winpipe] | not started | measure |
@@ -74,7 +74,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
 | [other Dashboard slides sit at the top][dashslides] | not started | build |
-| [make clean leaves the build tools behind][makeclean] | not started | build |
+| [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | not started | audit |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md

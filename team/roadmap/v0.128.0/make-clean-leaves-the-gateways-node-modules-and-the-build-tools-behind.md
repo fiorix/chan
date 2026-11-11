@@ -1,6 +1,6 @@
 # make clean leaves the gateway's node_modules and the build tools behind
 
-Status: raised by the owner on 2026-11-11 and accepted for v0.128.0 the same day; not started. His words: "make clean doesn't cover: gateway/node_modules and .build-tools/; it should".
+Status: raised by the owner on 2026-11-11 and accepted for v0.128.0 the same day; built the same day and merged into the release's integration branch (the section Built holds the evidence). His words: "make clean doesn't cover: gateway/node_modules and .build-tools/; it should".
 
 ## What is there now
 
@@ -25,3 +25,11 @@ Read at `8e41a9264`. The root `Makefile`'s `clean` target (`Makefile:902-914`) r
 1. In a worktree with `.build-tools/tauri-cli`, `.build-tools/dmg-venv`, `gateway/node_modules` and `gateway/crates/identity/web/node_modules` created as fixtures, `make clean` removes all four and exits 0; run again on the cleaned tree it exits 0.
 2. After `make clean` in that worktree, `make chan` (the CLI with both SPA bundles) completes, and the `make help` line of `clean` names what it removes.
 3. `make shell-check` and `make workflow-check` are not implied by a Makefile change and are not needed by it; the lane's own gate is the two runs above, with their logs.
+
+## Built, 2026-11-11
+
+The root `clean` target removes `.build-tools/`, `gateway/node_modules` and `gateway/crates/*/web/node_modules` beside what it removed before, its help line names them, and its comments say why each tree is there (`3ea58c3fe`, merged as `653072871`). Nothing else moved: the tools still install where they did, and the gitignore entries stand.
+
+Checks: a probe that plants the four trees as empty fixtures and runs `make clean` fails at the base with all four retained and passes on the fixed target (exit 0, all four absent); a second `make clean` on the cleaned tree exits 0; `make -n clean` shows the recipes; `make chan` from the cleaned worktree rebuilds both SPA bundles and the release CLI (5 min 6 s); `make help` prints the new line. Contract 3's desktop half, in the lead's gate worktree at `653072871`: `make clean` removes a planted `.build-tools/`, and `make chan-desktop` reinstalls tauri-cli 2.12.4 under `.build-tools/tauri-cli` and, with that binary running, builds the deb, rpm and AppImage in 6 min 26 s.
+
+Found beside the work, not changed here: cargo resolves `cargo tauri` from `~/.cargo/bin` before `PATH`, so on a host with a stale `cargo-tauri` there (2.11.1 on the lead's host) the desktop Makefile's `PATH="$(TAURI_CLI_ROOT)/bin:$PATH" cargo tauri` runs the stale one, whose AppImage step fails on linuxdeploy, while the same build with the reinstalled binary first passes. The desktop Makefile should run `$(TAURI_CLI_BIN)` by path when it exists and its `tauri-cli` target should check the binary cargo will actually run; that is a row of its own.
