@@ -425,7 +425,7 @@ impl WireguardFabric {
         rows.get(gateway_id)?.status(configured)
     }
 
-    /// Every adopted ingress's live state or start refusal, in discovery
+    /// Listed ingresses' live states or start refusals, in discovery
     /// order. Manual files and enrollment-wide refusals have no ingress id
     /// and use the row's summary and error instead.
     pub fn ingress_statuses(
@@ -437,6 +437,15 @@ impl WireguardFabric {
         let Some(gateway) = rows.get(gateway_id) else {
             return Vec::new();
         };
+        // A sole `legacy` id uses the summary to hide synthetic peer labels,
+        // including a real node with that name because enrollment stores no
+        // provenance; multiple ingresses keep every id.
+        if gateway.ingresses.len() == 1
+            && gateway.ingresses[0].0
+                == format!("{gateway_id}/{}", crate::wireguard_keys::LEGACY_INGRESS_ID)
+        {
+            return Vec::new();
+        }
         gateway
             .ingresses
             .iter()

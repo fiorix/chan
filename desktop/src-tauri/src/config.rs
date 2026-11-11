@@ -3883,6 +3883,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_list_keeps_sole_legacy_ingress_on_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-legacy").await;
+        let ingresses = &mut gateway.wireguard_enrollment.as_mut().unwrap().ingresses;
+        ingresses.truncate(1);
+        ingresses[0].id = crate::wireguard_keys::LEGACY_INGRESS_ID.into();
+        let (_store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+        let projected = || serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(projected()["wireguard_ingresses"], serde_json::json!([]));
+        assert_eq!(projected()["wireguard_status"], "connecting");
+        assert!(projected()["last_error"].is_null());
+        assert_eq!(fabric.tunnels(), 1);
+
+        fabric.retire(&gateway.id);
+        fabric.refuse_start("gw-legacy/legacy");
+        fabric.adopt_gateway(&gateway).unwrap().unwrap_err();
+        assert_eq!(projected()["wireguard_ingresses"], serde_json::json!([]));
+        assert!(projected()["wireguard_status"].is_null());
+        assert_eq!(
+            projected()["last_error"],
+            "WireGuard: injected socket refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_list_keeps_legacy_beside_another_ingress() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+        gateway.wireguard_enrollment.as_mut().unwrap().ingresses[0].id =
+            crate::wireguard_keys::LEGACY_INGRESS_ID.into();
+        let (_store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway]).await;
+        let projected = serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(
+            projected["wireguard_ingresses"],
+            serde_json::json!([
+                {"id": "legacy", "status": "connecting"},
+                {"id": "p2", "status": "connecting"},
+            ])
+        );
+        assert_eq!(projected["wireguard_status"], "connecting");
+        assert!(projected["last_error"].is_null());
+        assert_eq!(fabric.tunnels(), 2);
+    }
+
+    #[tokio::test]
     async fn gateway_list_projects_one_ingress_and_omits_manual_and_retired_rows() {
         let dir = tempfile::tempdir().unwrap();
         let (mut gateway, _peers) =
