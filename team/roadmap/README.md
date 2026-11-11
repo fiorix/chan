@@ -69,7 +69,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [a launch beside a silent desktop shows nothing][silentlaunch] | not started | design |
 | [the Windows handoff pipe's early clients][winpipe] | not started | measure |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
-| [the unused-token test reads too early][tokentest] | not started | build |
+| [the unused-token test reads too early][tokentest] | landed | GA |
 | [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
