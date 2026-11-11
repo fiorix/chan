@@ -1,6 +1,6 @@
 # A desktop upload's cancel and error paths leave traces and name local paths
 
-Status: raised on 2026-11-10 while fixing v0.127.0's transfer row for desktop uploads, found by reading and left alone there; moved to v0.128.0 by the owner the same day ("move all items to v128"). Not started.
+Status: raised on 2026-11-10 while fixing v0.127.0's transfer row for desktop uploads, found by reading and left alone there; moved to v0.128.0 by the owner the same day ("move all items to v128"). Built on 2026-11-11; acceptance 3 (macOS and the Windows VM) is the owner's, in batch 3.
 
 ## What is there now
 
@@ -31,3 +31,9 @@ A fifth is smaller: a failure within one status poll of the pick (a size cap, a 
 1. Page tests through the desktop bridge with a stand-in for the IPC, as v0.127.0's row tests are: a cancel's status line, no row after a dismissed picker, a named failure. The test that pins the dismissed picker's row is replaced.
 2. Desktop tests: every error the command returns for a picked file, with a temp path as the fixture, holds the base name and not the directory.
 3. On chan-desktop on macOS and on the Windows VM (owner): cancel during the pick, dismiss the picker, cancel during the upload, and upload a file that fails; each reads as the contract says.
+
+## Built, 2026-11-11
+
+A desktop upload's cancel and dismissal read as a browser upload's: a cancel rejects with an `AbortError` and both store pickers show the transient "Upload cancelled" with no failure line, and a picker closed without a choice leaves no row (`d03f37be5`). The command answers a page that asks for a named failure (`namedFailure`) with `{ message, cancelled?, picked? }` and any other page with the bare reason (`bcd235044`), so a gateway-served page older than the desktop still reads what it always did: `picked` is the first file's base name and the count, recorded once the picker returns and before the files are validated, so every failure after the pick names its row; `cancelled: true` is set only by the page's own cancel, so a server reason that mentions a cancel stays a failure (`c92ed4874`). Every error for a picked file names it by its base name, never its directory (stat, not a regular file, not UTF-8, open), and a refusal's reason no longer carries an "upload failed" the page adds again. Contract 3 takes its second form on macOS, Windows and Linux alike, because `tauri-plugin-dialog` gives no handle to close an open native dialog and closing one would take platform code on each: the row offers no Cancel until the picker returns, so no file picked after a cancel is dropped silently (`3e6ff57cc`). The manual's Transfers section and both design documents say so (`1206fb7ae`); merged as `6adbedeb7` and `00cf69cda`.
+
+Checks: page tests through the IPC stand-in (the dismissed-picker pin replaced; base red 15 and 8 on their own assertions), desktop tests that read every error for a picked file against a temporary directory, the named failure's shape for a refused selection and for the cancel mark; eleven mutations, each red at its own guard (seven Rust, four page, plus the first stage's three); chan-desktop fmt, clippy and 915 tests; web-check; the marketing check. A third stage keeps the page's bearer token out of a send failure's reason (reqwest's error prints the request URL, which carries the token as a query). Open: the owner's macOS and Windows readings (batch 3, section E).
