@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::{now_ms, Stop};
+use super::{now_ms, Demand};
 
 /// Last completed chan-home scan; a failed refresh preserves these totals.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -45,7 +45,7 @@ fn skippable(error: &io::Error) -> bool {
     )
 }
 
-pub(super) fn scan(root: &Path, stop: &Stop) -> io::Result<Storage> {
+pub(super) fn scan(root: &Path, stop: &Demand) -> io::Result<Storage> {
     scan_with(root, stop, |path| std::fs::symlink_metadata(path))
 }
 
@@ -53,7 +53,7 @@ pub(super) fn scan(root: &Path, stop: &Stop) -> io::Result<Storage> {
 /// the exact point a concurrent writer would.
 fn scan_with(
     root: &Path,
-    stop: &Stop,
+    stop: &Demand,
     stat: impl Fn(&Path) -> io::Result<Metadata>,
 ) -> io::Result<Storage> {
     let started = Instant::now();
@@ -161,12 +161,12 @@ mod tests {
             std::os::unix::fs::symlink(root.path(), root.path().join("loop")).unwrap();
             std::fs::hard_link(root.path().join("file"), root.path().join("hardlink")).unwrap();
         }
-        let stop = Stop::default();
+        let stop = Demand::default();
         let sample = scan(root.path(), &stop).unwrap();
         assert_eq!((sample.logical_bytes, sample.files), (Some(5), Some(1)));
         stop.stop();
         assert!(scan(root.path(), &stop).is_err());
-        assert!(scan(&root.path().join("missing"), &Stop::default()).is_err());
+        assert!(scan(&root.path().join("missing"), &Demand::default()).is_err());
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
         let (gone, gone_dir) = (base.join("gone"), base.join("gone-dir"));
         // The file goes before its stat; the directory goes after its stat and
         // before its read, the two windows a concurrent rename or merge opens.
-        let sample = scan_with(root.path(), &Stop::default(), |path| {
+        let sample = scan_with(root.path(), &Demand::default(), |path| {
             if path == gone {
                 std::fs::remove_file(path).unwrap();
             }
@@ -216,8 +216,8 @@ mod tests {
         mode(&locked, 0o000);
         mode(&listed, 0o400);
         let privileged = std::fs::read_dir(&locked).is_ok();
-        let sample = scan(root.path(), &Stop::default());
-        let locked_root = scan(&locked, &Stop::default());
+        let sample = scan(root.path(), &Demand::default());
+        let locked_root = scan(&locked, &Demand::default());
         mode(&locked, 0o700);
         mode(&listed, 0o700);
         if privileged {

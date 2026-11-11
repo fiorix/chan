@@ -129,34 +129,6 @@ struct Cached {
     storage: Storage,
 }
 
-/// The stop flag both workers read, and the sampler's sleep between
-/// samples, which a stop ends at once. The chan-home walker reads the flag
-/// between filesystem calls but sleeps on [`Demand`], which carries a stop
-/// of its own; the runtime's `Drop` sets both.
-#[derive(Default)]
-struct Stop {
-    stopped: Mutex<bool>,
-    wake: Condvar,
-}
-
-impl Stop {
-    fn is_stopped(&self) -> bool {
-        *self.stopped.lock().unwrap_or_else(|e| e.into_inner())
-    }
-    fn wait(&self, duration: Duration) -> bool {
-        let stopped = self.stopped.lock().unwrap_or_else(|e| e.into_inner());
-        let (stopped, _) = self
-            .wake
-            .wait_timeout_while(stopped, duration, |v| !*v)
-            .unwrap_or_else(|e| e.into_inner());
-        *stopped
-    }
-    fn stop(&self) {
-        *self.stopped.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        self.wake.notify_all();
-    }
-}
-
 /// When the chan-home walker scans: every `period` while reads arrive, and
 /// never once `quiet` has passed since the last read.
 #[derive(Clone, Copy, Debug)]
@@ -197,9 +169,9 @@ impl Schedule {
     }
 }
 
-/// Reads that drive the walker. Its own lock and condvar pair the stop flag
-/// with the last read, so neither a read nor a stop can slip past a walker
-/// that is about to wait.
+/// Shared stop signal and reads that drive the walker. The lock and condvar
+/// pair the stop flag with the last read, so neither a read nor a stop can
+/// slip past a worker that is about to wait.
 #[derive(Default)]
 struct Demand {
     state: Mutex<DemandState>,
@@ -214,6 +186,8 @@ struct DemandState {
     clock: Option<Instant>,
     #[cfg(test)]
     steps: Option<std::sync::mpsc::Sender<Walk>>,
+    #[cfg(test)]
+    sampler_waiting: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl DemandState {
@@ -227,6 +201,23 @@ impl DemandState {
 }
 
 impl Demand {
+    fn is_stopped(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stopped
+    }
+
+    fn wait(&self, duration: Duration) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        if let Some(waiting) = &state.sampler_waiting {
+            let _ = waiting.send(());
+        }
+        let (state, _) = self
+            .wake
+            .wait_timeout_while(state, duration, |state| !state.stopped)
+            .unwrap_or_else(|e| e.into_inner());
+        state.stopped
+    }
+
     fn read(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.last_read = Some(state.now());
@@ -288,7 +279,6 @@ fn walk(demand: &Demand, schedule: Schedule, mut scan: impl FnMut() -> bool) {
 pub struct Runtime {
     identity: Identity,
     cached: Arc<Mutex<Cached>>,
-    stop: Arc<Stop>,
     demand: Arc<Demand>,
 }
 
@@ -296,7 +286,6 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         // A filesystem syscall can stall indefinitely on a remote mount. Never
         // join that worker on the serving thread; it observes stop on return.
-        self.stop.stop();
         self.demand.stop();
     }
 }
@@ -308,7 +297,6 @@ impl Runtime {
     }
 
     fn start_with(home: PathBuf, schedule: Schedule) -> std::io::Result<Arc<Self>> {
-        let stop = Arc::new(Stop::default());
         let demand = Arc::new(Demand::default());
         let cached = Arc::new(Mutex::new(Cached {
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
@@ -323,11 +311,10 @@ impl Runtime {
                 hostname: System::host_name(),
             },
             cached: cached.clone(),
-            stop: stop.clone(),
             demand: demand.clone(),
         });
         let process_cache = cached.clone();
-        let process_stop = stop.clone();
+        let process_stop = demand.clone();
         std::thread::Builder::new()
             .name("chan-metrics".into())
             .spawn(move || {
@@ -353,8 +340,8 @@ impl Runtime {
             .name("chan-storage-metrics".into())
             .spawn(move || {
                 walk(&demand, schedule, || {
-                    let result = storage::scan(&home, &stop);
-                    if stop.is_stopped() {
+                    let result = storage::scan(&home, &demand);
+                    if demand.is_stopped() {
                         return false;
                     }
                     let mut cache = cached.lock().unwrap_or_else(|e| e.into_inner());
@@ -578,7 +565,6 @@ mod tests {
     fn collection_runs_without_readers_and_owner_drop_stops_it() {
         let home = tempfile::tempdir().unwrap();
         let runtime = Runtime::start(home.path().into()).unwrap();
-        let stop = runtime.stop.clone();
         let cache = runtime.cached.clone();
         let deadline = Instant::now() + Duration::from_secs(5);
         while cache.lock().unwrap().history.len() < 2 {
@@ -602,8 +588,55 @@ mod tests {
         }
         let demand = runtime.demand.clone();
         drop(runtime);
-        assert!(stop.is_stopped());
-        assert!(demand.state.lock().unwrap().stopped);
+        assert!(demand.is_stopped());
+        assert!(demand.wait(Duration::from_secs(60)));
+        assert!(!demand.wait_for_scan(STORAGE_SCHEDULE, None));
+    }
+
+    #[test]
+    fn one_stop_wakes_both_sleeping_workers() {
+        let demand = Arc::new(Demand::default());
+        let (steps, walker_waiting) = std::sync::mpsc::channel();
+        let (sampler_signal, sampler_waiting) = std::sync::mpsc::channel();
+        {
+            let mut state = demand.state.lock().unwrap();
+            state.steps = Some(steps);
+            state.sampler_waiting = Some(sampler_signal);
+        }
+        let (done, completed) = std::sync::mpsc::channel();
+        let sampler = {
+            let demand = demand.clone();
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let stopped = demand.wait(Duration::from_secs(60));
+                done.send(("sampler", stopped)).unwrap();
+            })
+        };
+        let walker = {
+            let demand = demand.clone();
+            std::thread::spawn(move || {
+                let stopped = !demand.wait_for_scan(STORAGE_SCHEDULE, None);
+                done.send(("walker", stopped)).unwrap();
+            })
+        };
+        let bound = Duration::from_secs(5);
+        sampler_waiting.recv_timeout(bound).unwrap();
+        assert_eq!(walker_waiting.recv_timeout(bound).unwrap(), Walk::Rest);
+        // Both observations are sent with the shared lock held. Stop takes
+        // that lock only after each condvar has atomically begun its wait.
+        demand.stop();
+        let first = completed.recv_timeout(bound);
+        let second = completed.recv_timeout(bound);
+        // Release a deliberately broken notification before asserting its red.
+        demand.wake.notify_all();
+        sampler.join().unwrap();
+        walker.join().unwrap();
+        let mut workers = [
+            first.expect("first stopped worker"),
+            second.expect("second stopped worker"),
+        ];
+        workers.sort_unstable();
+        assert_eq!(workers, [("sampler", true), ("walker", true)]);
     }
 
     #[test]

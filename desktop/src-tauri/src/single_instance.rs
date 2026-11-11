@@ -48,11 +48,11 @@ const RELEASE_GRACE: Duration = Duration::from_secs(5);
 /// which follows its drain: every embedded tenant at once, each given 5 s
 /// for its tasks (`TENANT_TASK_SHUTDOWN_GRACE`) and then 5 s for its
 /// workspace to be let go (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`), both in
-/// chan-library, and then the extension runtime, 3 s for a supervisor
+/// chan-library, and then the extension runtime, 3 s shared by all supervisors
 /// (`SUPERVISOR_SHUTDOWN_GRACE` in chan-server). That is 13 s, and the rest
-/// is for the exit itself. The drain has no hard bound, since a task that
-/// outlives its abort holds it and each further stuck supervisor adds 3 s,
-/// so the launch does not wait it out: past this it exits 1.
+/// is for the exit itself. A task that never yields can still delay process
+/// exit despite its abort, so the launch waits no longer than this bound.
+/// Past it, the launch exits 1.
 const DRAIN_GRACE: Duration = Duration::from_secs(20);
 
 /// What a desktop that is shutting down answers an `Activate` with. The
@@ -60,7 +60,7 @@ const DRAIN_GRACE: Duration = Duration::from_secs(20);
 /// to free the endpoint, from one that refuses and stays, so the text is
 /// exchanged between releases: a desktop that words it differently is read
 /// as one that stays.
-const SHUTTING_DOWN: &str = "chan-desktop is shutting down";
+pub(crate) const SHUTTING_DOWN: &str = "chan-desktop is shutting down";
 
 /// The pause between two looks at the endpoint while waiting.
 const POLL: Duration = Duration::from_millis(100);
@@ -754,6 +754,25 @@ mod tests {
         assert!(come_forward.contains(
             "if state.shutdown_started.load(Ordering::SeqCst) {\n        return shutting_down();"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_terminal_offer_uses_the_same_shutdown_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(std::sync::Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = Arc::new(AppState::with_store(store));
+        state.shutdown_started.store(true, Ordering::SeqCst);
+        let message = serve::spawn_throwaway_terminal_window(state, dir.path().to_path_buf())
+            .await
+            .expect_err("a shutting-down desktop refuses terminal offers");
+        assert_eq!(
+            message, "chan-desktop is shutting down",
+            "release wire text"
+        );
+        let sent = serde_json::to_string(&Response::Error { message }).unwrap();
+        assert!(matches!(refusal::<()>(sent), Answer::ShuttingDown));
     }
 
     /// The wait for a desktop that is shutting down outlasts the bounds its

@@ -90,7 +90,14 @@ pub(crate) fn check<F: Future<Output = ()>>(
             loop {
                 let (mut socket, _) = stale.accept().await.unwrap();
                 seen.fetch_add(1, Ordering::SeqCst);
-                socket.write_all(b"HTTP/1.1 503 Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                socket
+                    .write_all(
+                        b"HTTP/1.1 503 Unavailable\r\n\
+                     content-length: 0\r\n\
+                     connection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
             }
         });
         let uid = rustix::process::geteuid().as_raw();
@@ -100,23 +107,40 @@ pub(crate) fn check<F: Future<Output = ()>>(
             _ => {
                 let owner = if case == Case::Foreign { uid + 1 } else { uid };
                 let word = u32::from_ne_bytes([127, 0, 0, 1]);
-                Ok(format!("0: {word:08X}:{:04X} 00000000:0000 0A 0:0 0:0 0 {owner}\n", recorded.port()))
+                Ok(format!(
+                    "0: {word:08X}:{:04X} 00000000:0000 0A 0:0 0:0 0 {owner}\n",
+                    recorded.port()
+                ))
             }
         };
         TABLE.set(Some(table));
         let units = env.home().join("config/systemd/user");
         std::fs::create_dir_all(&units).unwrap();
-        std::fs::write(units.join("chan-devserver.service"), format!(
-            "[Service]\nExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port={}\n", pinned.port()
-        )).unwrap();
+        std::fs::write(
+            units.join("chan-devserver.service"),
+            format!(
+                "[Service]\nExecStart=/usr/bin/chan devserver run --bind=127.0.0.1 --port={}\n",
+                pinned.port()
+            ),
+        )
+        .unwrap();
         let state = env.home().join("devserver");
         std::fs::create_dir_all(&state).unwrap();
-        std::fs::write(state.join("config.json"), format!(
-            r#"{{"devserver_token":"test-token","port":{}}}"#, recorded.port()
-        )).unwrap();
+        std::fs::write(
+            state.join("config.json"),
+            format!(
+                r#"{{"devserver_token":"test-token","port":{}}}"#,
+                recorded.port()
+            ),
+        )
+        .unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
         let seen = connections.clone();
-        let expected = if matches!(case, Case::Owned | Case::Fallback) { routes.len() } else { 0 };
+        let expected = if matches!(case, Case::Owned | Case::Fallback) {
+            routes.len()
+        } else {
+            0
+        };
         let peer = tokio::spawn(async move {
             for route in routes {
                 let (mut socket, _) = server.accept().await.unwrap();
@@ -127,20 +151,56 @@ pub(crate) fn check<F: Future<Output = ()>>(
                     assert!(head.len() < 16384);
                 }
                 let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
-                assert!(head.starts_with(&format!("{} {} http/1.1\r\n", route.method.to_ascii_lowercase(), route.path)), "{head}");
-                assert!(head.contains(&format!("authorization: bearer {}\r\n", route.token.unwrap())), "{head}");
-                socket.write_all(format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    route.body.len(), route.body
-                ).as_bytes()).await.unwrap();
+                assert!(
+                    head.starts_with(&format!(
+                        "{} {} http/1.1\r\n",
+                        route.method.to_ascii_lowercase(),
+                        route.path
+                    )),
+                    "{head}"
+                );
+                assert!(
+                    head.contains(&format!(
+                        "authorization: bearer {}\r\n",
+                        route.token.unwrap()
+                    )),
+                    "{head}"
+                );
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\n\
+                     content-type: application/json\r\n\
+                     content-length: {}\r\n\
+                     connection: close\r\n\r\n{}",
+                            route.body.len(),
+                            route.body
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
             }
         });
-        tokio::time::timeout(Duration::from_secs(15), run(pinned)).await.expect("bounded caller");
+        tokio::time::timeout(Duration::from_secs(15), run(pinned))
+            .await
+            .expect("bounded caller");
         tokio::task::yield_now().await;
-        assert_eq!(connections.load(Ordering::SeqCst), expected, "bearers sent to fixture listener");
-        assert_eq!(stale_connections.load(Ordering::SeqCst), 0, "stale pinned address was dialed");
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            expected,
+            "bearers sent to fixture listener"
+        );
+        assert_eq!(
+            stale_connections.load(Ordering::SeqCst),
+            0,
+            "stale pinned address was dialed"
+        );
         if expected > 0 {
-            tokio::time::timeout(Duration::from_secs(2), peer).await.expect("all routes served").unwrap();
+            tokio::time::timeout(Duration::from_secs(2), peer)
+                .await
+                .expect("all routes served")
+                .unwrap();
         } else {
             peer.abort();
             assert!(peer.await.unwrap_err().is_cancelled());

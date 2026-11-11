@@ -24,13 +24,24 @@ pub(super) fn resolve_devserver_addr(
     SocketAddr::new(ip, port)
 }
 
-/// Where to dial this machine's devserver: the address its systemd unit
-/// file pins, else the recorded port on the default bind. The unit file
-/// stays on disk when the unit is stopped, so this is the address a running
-/// devserver serves only while that unit is the one running; a devserver
+/// Where to dial this machine's devserver: the address its launchd plist on
+/// macOS or systemd unit pins, else the recorded port on the default bind.
+/// The definition stays on disk when the service is stopped, so this is the
+/// address a running devserver serves only while that service is running; a devserver
 /// started some other way is at [`recorded_devserver_addr`].
 pub(crate) fn local_devserver_dial_addr() -> Option<SocketAddr> {
-    running_systemd_devserver_addr().or_else(recorded_devserver_addr)
+    local_devserver_dial_addr_on(std::env::consts::OS)
+}
+
+fn local_devserver_dial_addr_on(os: &str) -> Option<SocketAddr> {
+    if os == "macos" {
+        read_launch_agent_plist()
+            .as_deref()
+            .and_then(devserver_addr_from_persisted_args)
+            .or_else(recorded_devserver_addr)
+    } else {
+        running_systemd_devserver_addr().or_else(recorded_devserver_addr)
+    }
 }
 
 /// The port the devserver last bound, on the default bind. Every start with
@@ -223,6 +234,82 @@ pub(super) fn recorded_launch_agent_search_path(plist: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn local_dial_uses_the_platform_service_definition() {
+        const CHILD: &str = "LOCAL_DIAL_TEST_CHILD";
+        const NAME: &str =
+            "devserver::persisted::tests::local_dial_uses_the_platform_service_definition";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", home.path().join("config"))
+                .env("CHAN_HOME", home.path().join("chan"))
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}{stderr}");
+            assert!(stdout.contains("platform dial cases completed"), "{stdout}");
+            return;
+        }
+
+        let unit = systemd_user_unit_dir()
+            .unwrap()
+            .join(DEVSERVER_SYSTEMD_UNIT);
+        let plist = launch_agent_path().unwrap();
+        let config = chan_workspace::paths::config_dir().join("devserver/config.json");
+        for path in [&unit, &plist, &config] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(
+            &unit,
+            "ExecStart=/bin/chan devserver run --bind=192.0.2.1 --port=9000\n",
+        )
+        .unwrap();
+        std::fs::write(&config, r#"{"port":9123}"#).unwrap();
+        std::fs::write(
+            &plist,
+            concat!(
+                "<key>EnvironmentVariables</key><dict><key>PATH</key>",
+                "<string>/decoy/--bind=192.0.2.99/--port=9999</string></dict>",
+                "<key>ProgramArguments</key><array>",
+                "<string>--bind=2001:db8::5</string><string>--port=9001</string></array>",
+            ),
+        )
+        .unwrap();
+        let mac = "[2001:db8::5]:9001".parse().unwrap();
+        let linux = "192.0.2.1:9000".parse().unwrap();
+        assert_eq!(local_devserver_dial_addr_on("macos"), Some(mac));
+        assert_eq!(local_devserver_dial_addr_on("linux"), Some(linux));
+        assert_eq!(
+            local_devserver_dial_addr(),
+            Some(if cfg!(target_os = "macos") {
+                mac
+            } else {
+                linux
+            })
+        );
+        for missing_or_bad in [None, Some("<array>not a service definition</array>")] {
+            if let Some(text) = missing_or_bad {
+                std::fs::write(&plist, text).unwrap();
+            } else {
+                std::fs::remove_file(&plist).unwrap();
+            }
+            assert_eq!(
+                local_devserver_dial_addr_on("macos"),
+                Some("127.0.0.1:9123".parse().unwrap())
+            );
+        }
+        std::fs::remove_file(config).unwrap();
+        assert_eq!(local_devserver_dial_addr_on("macos"), None);
+        println!("platform dial cases completed");
+    }
+
     /// `stop`/`restart` address precedence: explicit flag > running
     /// persisted > default, applied per field so a flagless restart preserves
     /// the running address (the bug) while a single flag overrides just that
@@ -283,12 +370,20 @@ mod tests {
     /// launchd ProgramArguments joined (with plist `<string>` values unescaped).
     #[test]
     fn status_command_extracts_per_backend() {
-        let unit = "[Service]\nExecStart=/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000\nRestart=on-failure\n";
+        let unit = concat!(
+            "[Service]\nExecStart=/usr/bin/chan devserver run ",
+            "--bind=0.0.0.0 --port=9000\nRestart=on-failure\n",
+        );
         assert_eq!(
             systemd_execstart_line(unit).as_deref(),
             Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
         );
-        let plist = "<array>\n  <string>/usr/bin/chan</string>\n  <string>devserver</string>\n  <string>run</string>\n  <string>--bind=0.0.0.0</string>\n  <string>--port=9000</string>\n</array>";
+        let plist = concat!(
+            "<array>\n  <string>/usr/bin/chan</string>\n",
+            "  <string>devserver</string>\n  <string>run</string>\n",
+            "  <string>--bind=0.0.0.0</string>\n",
+            "  <string>--port=9000</string>\n</array>",
+        );
         assert_eq!(
             launchd_program_arguments(plist).as_deref(),
             Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
