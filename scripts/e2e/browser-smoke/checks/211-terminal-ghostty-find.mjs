@@ -14,12 +14,12 @@
 //             4998 to 4990 on the screen with the viewport still, then to
 //             4899 above it: the viewport moves and centres that row.
 //   RESIZE -- the page narrows, then widens back, and the terminal reflows
-//             to each width. libghostty-vt forgets the selected match on a
-//             resize and scans again, so each time the highlight goes (it
-//             would sit on rows the reflow gave other text), the count keeps
-//             its N with no index, and Enter starts over: the selection is
-//             the newest match again, its text the needle, and the count
-//             reads 1 of N.
+//             to each width. libghostty-vt forgets its selected match on a
+//             resize and scans again; find keeps the match itself, so each
+//             time the same match is selected again once the scan finds it:
+//             the count reads the same k of N, the selection is that match,
+//             its text the needle, and it is on the screen. Enter then goes
+//             on from it to the next older match, k+1 of N.
 //   ESCAPE -- Escape closes the bar and clears the selection.
 //   OLDEST -- the chord opens the bar again with the query it kept, and
 //             Shift+Enter, the first step of a fresh search, lands on the
@@ -262,8 +262,12 @@ export default {
       // RESIZE
       const size = pageViewport ?? { width: 1600, height: 1000 };
       readings.resize = [];
+      // The active match is nines[k], counted k + 1 of N.
+      let k = steps.length;
       for (const [stage, width] of [["narrower", size.width - 400], ["wider", size.width]]) {
         const before = await state();
+        const kept = nines[k];
+        const want = `${k + 1} of ${nines.length}`;
         resized = true;
         await page.setViewport({ ...size, width });
         const until = Date.now() + 15_000;
@@ -271,24 +275,28 @@ export default {
         for (;;) {
           const count = await page.evaluate((q) => document.querySelector(q)?.textContent ?? null, countQuery);
           after = { count, ...(await state()) };
-          if (after.cols !== before.cols && count === `? of ${nines.length}` && !after.hasSelection) break;
+          if (after.cols !== before.cols && count === want && after.startRowText === kept.line) break;
           if (Date.now() > until) {
             await ctx.shot(`ghostty-find-resize-${stage}-failure`);
-            throw new Error(`resize ${stage}: expected a reflowed grid, no highlight and the count ? of ${nines.length}; page showed ${JSON.stringify({ before, after })}`);
+            throw new Error(`resize ${stage}: expected a reflowed grid and the match kept, ${want} on row ${JSON.stringify(kept.line)}; page showed ${JSON.stringify({ before, after })}`);
           }
           await sleep(50);
         }
         if (stage === "narrower" && !(after.cols < before.cols)) {
           throw new Error(`resize ${stage}: the grid did not narrow: ${JSON.stringify({ before, after })}`);
         }
+        expectMatch(`resize-${stage}`, after, kept);
+        if (after.selectedText !== "99") throw new Error(`resize ${stage}: the selected text is not the match: ${JSON.stringify(after)}`);
+        const keptAt = onScreen(after, after.start.absoluteRow);
+        if (keptAt < 0 || keptAt >= after.rows) throw new Error(`resize ${stage}: the kept match is off the screen: ${JSON.stringify(after)}`);
         await ctx.shot(`ghostty-find-resize-${stage}`);
         await page.keyboard.press("Enter");
-        const again = await waitFor(`resize-${stage}-enter`, `1 of ${nines.length}`, nines[0].line);
-        expectMatch(`resize-${stage}-enter`, again, nines[0]);
-        if (again.selectedText !== "99") throw new Error(`resize ${stage}: the selected text is not the match: ${JSON.stringify(again)}`);
-        const at = onScreen(again, again.start.absoluteRow);
-        if (at < 0 || at >= again.rows) throw new Error(`resize ${stage}: the selected match is off the screen: ${JSON.stringify(again)}`);
-        readings.resize.push({ stage, colsBefore: before.cols, after, again });
+        k += 1;
+        const next = await waitFor(`resize-${stage}-enter`, `${k + 1} of ${nines.length}`, nines[k].line);
+        expectMatch(`resize-${stage}-enter`, next, nines[k]);
+        const at = onScreen(next, next.start.absoluteRow);
+        if (at < 0 || at >= next.rows) throw new Error(`resize ${stage}: the next match is off the screen: ${JSON.stringify(next)}`);
+        readings.resize.push({ stage, colsBefore: before.cols, after, next });
         await ctx.shot(`ghostty-find-resize-${stage}-enter`);
       }
 
