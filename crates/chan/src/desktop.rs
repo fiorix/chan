@@ -263,7 +263,8 @@ fn spawn_desktop_gui() -> std::io::Result<()> {
 /// process started is returned when it is the desktop's own, so a caller can
 /// read its exit: a launch that finds another desktop hands it the paths and
 /// exits from its single-instance guard. On macOS the process is `open`,
-/// which exits once LaunchServices has the app, so there is none to read.
+/// which exits once LaunchServices has the app, so there is none to read;
+/// with paths it asks for a new instance (`-n`), which runs that guard.
 ///
 /// `current_exe()` is the chan-desktop binary (this only runs for the Desktop
 /// personality). We start it with a clean argv0 (NOT `chan`/`cs`) so the
@@ -287,6 +288,12 @@ pub(super) fn spawn_desktop_gui_opening(
     {
         if let Some(bundle) = macos_app_bundle(&exe) {
             let mut open = Command::new("/usr/bin/open");
+            // `-n` with paths: `open --args` aimed at an app that is already
+            // launching drops the arguments, where a new instance runs the
+            // single-instance guard and hands them to the one on its way up.
+            if !paths.is_empty() {
+                open.arg("-n");
+            }
             open.arg(bundle);
             if !paths.is_empty() {
                 open.arg("--args").args(paths);

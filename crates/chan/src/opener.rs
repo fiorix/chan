@@ -20,11 +20,6 @@ const ANSWER_BOUND: Duration = Duration::from_secs(5);
 /// The pause before asking again a listener that closed without an answer.
 const ASK_AGAIN_AFTER: Duration = Duration::from_millis(200);
 
-/// How long a desktop this command started has to serve its endpoint, the
-/// bound `chan serve` gives the desktop it launches.
-#[cfg(unix)]
-const LAUNCH_DEADLINE: Duration = Duration::from_secs(20);
-
 /// Open each of `args` (the current directory itself when there are none).
 /// In a chan terminal whose server answers, each path goes through `cs
 /// open`; anywhere else, to the running desktop ([`open_in_desktop`]), which
@@ -210,10 +205,11 @@ fn when_no_desktop(personality: Personality) -> NoDesktop {
 enum Started {
     /// Neither settled yet.
     Waiting,
-    /// The endpoint is served: the started desktop, or one it handed to.
+    /// The endpoint is served and the started process outlived the guard's
+    /// bound: it is the desktop.
     Up,
-    /// The started process exited 0 before the endpoint was served: it found
-    /// a desktop on its way up and handed it the paths.
+    /// The started process exited 0: it found a desktop on its way up and
+    /// handed it the paths, which that desktop opens or refuses.
     HandedOver,
     /// It exited non-zero: the desktop it found never answered it.
     Unanswered,
@@ -221,15 +217,70 @@ enum Started {
 
 /// The process the command started settles it first: a second launch exits
 /// from its single-instance guard, so its status says whether the desktop it
-/// found took the paths. `exited` is that status, when it has one.
+/// found took the paths. A served endpoint says the started process is the
+/// desktop only once that process has outlived the guard's bound
+/// (`past_guard`): before then the listener can be a desktop still booting,
+/// which binds before it answers, with the started process asking it.
 #[cfg(unix)]
-fn started(exited: Option<bool>, endpoint_served: bool) -> Started {
-    match (exited, endpoint_served) {
-        (Some(true), _) => Started::HandedOver,
-        (Some(false), _) => Started::Unanswered,
-        (None, true) => Started::Up,
-        (None, false) => Started::Waiting,
+fn started(exited: Option<bool>, served: bool, past_guard: bool) -> Started {
+    match (exited, served, past_guard) {
+        (Some(true), ..) => Started::HandedOver,
+        (Some(false), ..) => Started::Unanswered,
+        (None, true, true) => Started::Up,
+        (None, ..) => Started::Waiting,
     }
+}
+
+/// The bounds a launch is read within.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct LaunchBounds {
+    /// How often the started process and the endpoint are read.
+    poll: Duration,
+    /// How long from the start a running process may still be a second
+    /// launch asking another desktop: the guard's ask bound and a grace.
+    guard: Duration,
+    /// How long the launch has to settle, the bound `chan serve` gives the
+    /// desktop it launches.
+    deadline: Duration,
+}
+
+/// What the guard's ask bound is given on top of itself before a running
+/// process is taken for the desktop.
+#[cfg(unix)]
+const GUARD_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(unix)]
+const LAUNCH_BOUNDS: LaunchBounds = LaunchBounds {
+    poll: Duration::from_millis(400),
+    guard: Duration::from_secs(ANSWER_BOUND.as_secs() + GUARD_GRACE.as_secs()),
+    deadline: Duration::from_secs(20),
+};
+
+/// Read a launch until it settles ([`started`]): `exited` reads the started
+/// process's exit, `true` for success, and `served` whether the endpoint is
+/// served. `None` when nothing settles within the deadline.
+#[cfg(unix)]
+async fn watch_launch<F>(
+    bounds: LaunchBounds,
+    mut exited: impl FnMut() -> Option<bool>,
+    mut served: impl FnMut() -> F,
+) -> Option<Started>
+where
+    F: std::future::Future<Output = bool>,
+{
+    let start = Instant::now();
+    while start.elapsed() < bounds.deadline {
+        tokio::time::sleep(bounds.poll).await;
+        let exited = exited();
+        let past_guard = start.elapsed() >= bounds.guard;
+        let served = exited.is_none() && past_guard && served().await;
+        match started(exited, served, past_guard) {
+            Started::Waiting => {}
+            settled => return Some(settled),
+        }
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -239,36 +290,33 @@ async fn launch_desktop(name: &str, paths: &[String], action: NoDesktop) -> Resu
     }
     let mut child = crate::desktop::spawn_desktop_gui_opening(paths)
         .map_err(|error| anyhow::anyhow!("starting chan-desktop: {error}"))?;
-    let deadline = Instant::now() + LAUNCH_DEADLINE;
-    while Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let exited = child
+    let exited = || {
+        child
             .as_mut()
             .and_then(|child| child.try_wait().ok().flatten())
-            .map(|status| status.success());
-        let served = exited.is_none() && handoff::desktop_is_live().await;
-        match started(exited, served) {
-            Started::Waiting => {}
-            Started::Up => {
-                eprintln!("started chan-desktop to open {}", paths.join(", "));
-                return Ok(());
-            }
-            Started::HandedOver => {
-                eprintln!(
-                    "handed {} to the chan-desktop that was starting",
-                    paths.join(", ")
-                );
-                return Ok(());
-            }
-            Started::Unanswered => bail!(
-                "a chan-desktop was starting and did not answer; run {name} again once it is up"
-            ),
+            .map(|status| status.success())
+    };
+    match watch_launch(LAUNCH_BOUNDS, exited, handoff::desktop_is_live).await {
+        Some(Started::Up) => {
+            eprintln!("started chan-desktop to open {}", paths.join(", "));
+            Ok(())
         }
+        Some(Started::HandedOver) => {
+            eprintln!(
+                "handed {} to the chan-desktop that was starting; it decides what to open",
+                paths.join(", ")
+            );
+            Ok(())
+        }
+        Some(Started::Unanswered) => {
+            bail!("a chan-desktop was starting and did not answer; run {name} again once it is up")
+        }
+        Some(Started::Waiting) | None => bail!(
+            "started chan-desktop, and it did not come up within {} s; run {name} again once it \
+             is up",
+            LAUNCH_BOUNDS.deadline.as_secs()
+        ),
     }
-    bail!(
-        "started chan-desktop, and it did not come up within {} s; run {name} again once it is up",
-        LAUNCH_DEADLINE.as_secs()
-    )
 }
 
 #[cfg(not(unix))]
@@ -322,16 +370,82 @@ mod tests {
 
     /// The process a command started settles the launch before the endpoint
     /// does: a second launch's exit says whether the desktop it found took
-    /// the paths, whatever the endpoint shows by then.
+    /// the paths, whatever the endpoint shows by then, and a served endpoint
+    /// counts only past the guard's bound.
     #[cfg(unix)]
     #[test]
     fn a_started_desktop_is_read_from_its_exit_first() {
-        assert_eq!(started(None, false), Started::Waiting);
-        assert_eq!(started(None, true), Started::Up);
-        assert_eq!(started(Some(true), false), Started::HandedOver);
-        assert_eq!(started(Some(true), true), Started::HandedOver);
-        assert_eq!(started(Some(false), false), Started::Unanswered);
-        assert_eq!(started(Some(false), true), Started::Unanswered);
+        for past_guard in [false, true] {
+            assert_eq!(started(None, false, past_guard), Started::Waiting);
+            for served in [false, true] {
+                assert_eq!(started(Some(true), served, past_guard), Started::HandedOver);
+                assert_eq!(
+                    started(Some(false), served, past_guard),
+                    Started::Unanswered
+                );
+            }
+        }
+        assert_eq!(started(None, true, false), Started::Waiting);
+        assert_eq!(started(None, true, true), Started::Up);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_launch_waits_out_the_guards_ask_before_it_reads_the_endpoint() {
+        assert_eq!(LAUNCH_BOUNDS.guard, ANSWER_BOUND + GUARD_GRACE);
+        assert!(LAUNCH_BOUNDS.guard < LAUNCH_BOUNDS.deadline);
+    }
+
+    #[cfg(unix)]
+    const SHORT: LaunchBounds = LaunchBounds {
+        poll: Duration::from_millis(20),
+        guard: Duration::from_millis(600),
+        deadline: Duration::from_secs(5),
+    };
+
+    /// The started process is a second launch whose guard is asking a desktop
+    /// that bound its listener and stays silent: the endpoint reads served at
+    /// once, and the process exits 1 when its ask runs out, within the guard
+    /// bound. That is the failure, never a start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_launch_asking_a_silent_desktop_is_not_a_start() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.3; exit 1"])
+            .spawn()
+            .unwrap();
+        let exited = || child.try_wait().unwrap().map(|status| status.success());
+        let settled = watch_launch(SHORT, exited, || async { true }).await;
+        assert_eq!(settled, Some(Started::Unanswered));
+    }
+
+    /// A launch that handed its paths to a desktop on its way up exits 0.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_launch_that_handed_over_is_read_as_such() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 0.1; exit 0"])
+            .spawn()
+            .unwrap();
+        let exited = || child.try_wait().unwrap().map(|status| status.success());
+        let settled = watch_launch(SHORT, exited, || async { true }).await;
+        assert_eq!(settled, Some(Started::HandedOver));
+    }
+
+    /// The started process is the desktop: still running past the guard's
+    /// bound with the endpoint served. It is reported up then, not before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_started_desktop_is_up_once_past_the_guard() {
+        let begun = Instant::now();
+        let settled = watch_launch(SHORT, || None, || async { true }).await;
+        assert_eq!(settled, Some(Started::Up));
+        assert!(begun.elapsed() >= SHORT.guard, "{:?}", begun.elapsed());
+        let never = LaunchBounds {
+            deadline: Duration::from_millis(200),
+            ..SHORT
+        };
+        assert_eq!(watch_launch(never, || None, || async { false }).await, None);
     }
 
     #[test]
