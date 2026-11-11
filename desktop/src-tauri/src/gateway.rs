@@ -905,11 +905,11 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
     }))
 }
 
-/// Adopt `gateway_id`'s WireGuard file before it connects, so a file
-/// refused earlier and fixed in place, or a config edited by hand, comes
-/// up here without a save; a tunnel already running from the file is left
-/// as it is. The row's host map rides the adopt. `Some` with the reason
-/// when the file or the fabric cannot carry the row: a connect that ran
+/// Adopt `gateway_id`'s WireGuard source before it connects: every stored
+/// enrolled ingress or the one manual file. A refused source fixed in
+/// place can come up without a save; unchanged running tunnels are kept.
+/// Each ingress's host map rides the adopt. `Some` with the reason
+/// when the source or the fabric cannot carry the row: a connect that ran
 /// anyway would reach the gateway the wrong way or not at all, so the row
 /// says what to fix instead.
 ///

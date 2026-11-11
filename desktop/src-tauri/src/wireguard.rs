@@ -386,8 +386,8 @@ impl WireguardFabric {
         proxy.replace_routes(routes)
     }
 
-    /// Drop `gateway_id`'s route and row: its tunnel ends, and so does
-    /// every connection through it. `false` when the fabric held nothing
+    /// Drop `gateway_id`'s routes and row: its tunnels end, and so does
+    /// every connection through them. `false` when the fabric held nothing
     /// for the row.
     pub fn retire(&self, gateway_id: &str) -> bool {
         let mut rows = self.rows.lock().unwrap();
@@ -405,10 +405,9 @@ impl WireguardFabric {
         row.is_some()
     }
 
-    /// The launcher's words for the row's live tunnel, while the row still
-    /// names the file it runs from. A row whose stored path is not the
-    /// running one, a config edited by hand while the desktop runs among
-    /// them, reads no status until it is adopted.
+    /// The worst running ingress's status, with discovery order breaking
+    /// ties; refusals are reported separately by `failure`. A stored path
+    /// different from the running source reads no status until adopted.
     pub fn status(&self, gateway_id: &str, configured: Option<&Path>) -> Option<String> {
         let rows = self.rows.lock().unwrap();
         rows.get(gateway_id)?.status(configured)
@@ -764,9 +763,9 @@ fn missing_handshake_reason(
     }
 }
 
-/// Bind the proxy on loopback with no tunnel, then adopt every enabled
-/// gateway with a WireGuard file, with its host map. Never waits for an endpoint lookup or a
-/// handshake. A file that cannot be read or a tunnel that cannot start
+/// Bind the proxy on loopback, then adopt every enabled gateway's manual
+/// file or enrolled ingresses, each with its host map. Never waits for an
+/// endpoint lookup or a handshake. A source that cannot be read or a tunnel that cannot start
 /// fails that row alone; a proxy that cannot bind fails every row, since
 /// nothing can reach a tunnel without it. Must run on the tokio runtime
 /// the tunnels live on for the process.
