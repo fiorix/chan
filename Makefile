@@ -37,7 +37,7 @@ RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
 CHAN_TARGET ?=
 # Crates whose test targets the native Windows arm compiles.
-CHAN_WINDOWS_TEST_CRATES := chan-workspace chan-server chan-library chan-desktop
+CHAN_WINDOWS_TEST_CRATES := chan-workspace chan-server chan-library chan-winpipe chan-desktop
 CHAN_SERVER_WINDOWS_TESTS := \
 	tenant_builder_tests::tenant_builders_preserve_routes_and_state \
 	handoff::tests::well_known_path_is_named_pipe_on_windows \

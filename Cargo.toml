@@ -20,6 +20,7 @@ members = [
     "crates/chan-tunnel-proto",
     "crates/chan-tunnel-server",
     "crates/chan-wireguard",
+    "crates/chan-winpipe",
     "crates/fetch-models",
     "desktop/src-tauri",
 ]
@@ -69,6 +70,7 @@ chan-tunnel-client = { version = "0.127.0", path = "crates/chan-tunnel-client" }
 chan-tunnel-proto = { version = "0.127.0", path = "crates/chan-tunnel-proto" }
 chan-tunnel-server = { version = "0.127.0", path = "crates/chan-tunnel-server" }
 chan-wireguard = { version = "0.127.0", path = "crates/chan-wireguard" }
+chan-winpipe = { version = "0.127.0", path = "crates/chan-winpipe" }
 
 anyhow = "1"
 # Native OS clipboard for chan-desktop: the terminal "Paste" menu and the

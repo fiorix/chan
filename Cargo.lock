@@ -1319,6 +1319,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-winpipe"
+version = "0.127.0"
+dependencies = [
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "chan-wireguard"
 version = "0.127.0"
 dependencies = [

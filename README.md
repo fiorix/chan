@@ -28,6 +28,7 @@ Core:
 - [crates/chan-tmux](crates/chan-tmux/design.md) - the tmux control-mode protocol: stream framing, notifications, commands, layouts.
 - [crates/chan-report](crates/chan-report/design.md) - repository reports: the walker, the JSONL schema, the COCOMO model.
 - [crates/chan-metrics](crates/chan-metrics/design.md) - the process-wide counters and the metered I/O wrapper the serving and transport code feed.
+- [crates/chan-winpipe](crates/chan-winpipe/design.md) - the Win32 boundary of chan's named pipes: the account SID, owner-only pipes, the account serving a pipe.
 - [crates/fetch-models](crates/fetch-models/design.md) - build-only helper that produces the embedded-model tarball.
 
 Desktop and web:
