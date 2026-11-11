@@ -16,6 +16,37 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+#[derive(Debug)]
+pub(super) enum Refusal {
+    NoListener(Vec<SocketAddr>),
+    Foreign(SocketAddr, u32),
+    Unreadable(&'static str, std::io::Error),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoListener(candidates) => {
+                let tried: Vec<String> = candidates.iter().map(SocketAddr::to_string).collect();
+                write!(f, "no devserver is listening on {}", tried.join(" or "))
+            }
+            Self::Foreign(addr, uid) => write!(f,
+                "{addr} is held by uid {uid}, not this user's devserver; not sending the devserver token"
+            ),
+            Self::Unreadable(path, _) => write!(f, "cannot read {path} to check who listens on the devserver port"),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable(_, error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// What the socket tables say about a local address.
 #[derive(Debug, PartialEq)]
 pub(super) enum Owner {
@@ -31,16 +62,26 @@ pub(super) enum Owner {
 /// where the caller owns every listener that could take the connection. A
 /// refusal when there is none.
 #[cfg(target_os = "linux")]
-pub(super) fn callers_listener(candidates: &[SocketAddr]) -> anyhow::Result<SocketAddr> {
-    let (tcp, tcp6) = tables(|path| std::fs::read_to_string(path))?;
+pub(super) fn callers_listener(candidates: &[SocketAddr]) -> Result<SocketAddr, Refusal> {
+    let (tcp, tcp6) = tables(|path| {
+        #[cfg(test)]
+        if let Some(result) = crate::test_env::local_listener::read_table(path) {
+            return result;
+        }
+        std::fs::read_to_string(path)
+    })?;
     let uid = rustix::process::geteuid().as_raw();
-    first_owned(&[&tcp, &tcp6], candidates, uid).map_err(anyhow::Error::msg)
+    first_owned(&[&tcp, &tcp6], candidates, uid)
 }
 
 /// The first of `candidates` that reads as the caller's in `tables`, else
 /// the refusal. Another user's listener is named before an address nobody
 /// listens on: it is the answer that says where the bearer would have gone.
-fn first_owned(tables: &[&str], candidates: &[SocketAddr], uid: u32) -> Result<SocketAddr, String> {
+fn first_owned(
+    tables: &[&str],
+    candidates: &[SocketAddr],
+    uid: u32,
+) -> Result<SocketAddr, Refusal> {
     let mut foreign = None;
     for &addr in candidates {
         match owner(tables, addr, uid) {
@@ -52,14 +93,8 @@ fn first_owned(tables: &[&str], candidates: &[SocketAddr], uid: u32) -> Result<S
         }
     }
     Err(match foreign {
-        Some((addr, other)) => format!(
-            "{addr} is held by uid {other}, not this user's devserver; \
-             not sending the devserver token"
-        ),
-        None => {
-            let tried: Vec<String> = candidates.iter().map(SocketAddr::to_string).collect();
-            format!("no devserver is listening on {}", tried.join(" or "))
-        }
+        Some((addr, other)) => Refusal::Foreign(addr, other),
+        None => Refusal::NoListener(candidates.to_vec()),
     })
 }
 
@@ -67,17 +102,12 @@ fn first_owned(tables: &[&str], candidates: &[SocketAddr], uid: u32) -> Result<S
 /// tcp6 table means no IPv6 listener: a kernel without IPv6 has none. Any
 /// other failure refuses, since a table that cannot be read could hide
 /// another user's listener.
-fn tables(read: impl Fn(&str) -> std::io::Result<String>) -> anyhow::Result<(String, String)> {
-    use anyhow::Context;
-    let check = "to check who listens on the devserver port";
-    let tcp =
-        read("/proc/net/tcp").with_context(|| format!("cannot read /proc/net/tcp {check}"))?;
+fn tables(read: impl Fn(&str) -> std::io::Result<String>) -> Result<(String, String), Refusal> {
+    let tcp = read("/proc/net/tcp").map_err(|error| Refusal::Unreadable("/proc/net/tcp", error))?;
     let tcp6 = match read("/proc/net/tcp6") {
         Ok(table) => table,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot read /proc/net/tcp6 {check}"))
-        }
+        Err(error) => return Err(Refusal::Unreadable("/proc/net/tcp6", error)),
     };
     Ok((tcp, tcp6))
 }
@@ -296,7 +326,7 @@ mod tests {
                 .iter()
                 .map(|(addr, uid)| row(addr.ip(), addr.port(), "0A", *uid))
                 .collect();
-            first_owned(&[&table(&rows)], &both, ME)
+            first_owned(&[&table(&rows)], &both, ME).map_err(|error| error.to_string())
         };
         // The pinned address wins while the caller listens there.
         assert_eq!(listening(&[(pinned, ME), (recorded, ME)]), Ok(pinned));
@@ -318,7 +348,7 @@ mod tests {
             );
         }
         assert_eq!(
-            first_owned(&[""], &[pinned], ME),
+            first_owned(&[""], &[pinned], ME).map_err(|error| error.to_string()),
             Err("no devserver is listening on 127.0.0.1:8787".into())
         );
     }

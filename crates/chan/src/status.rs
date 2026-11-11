@@ -261,6 +261,13 @@ async fn devserver_activity(wanted: &HashSet<String>) -> HashMap<String, PsActiv
     let Some(addr) = local_devserver_dial_addr() else {
         return out;
     };
+    let addr = match crate::local_listener::resolve(addr) {
+        Ok(addr) => addr,
+        Err(error) => {
+            eprintln!("chan: cannot read devserver activity: {error}");
+            return out;
+        }
+    };
     let Ok(client) = crate::http_client::local_devserver(PS_ACTIVITY_TIMEOUT) else {
         return out;
     };
@@ -737,6 +744,82 @@ fn workspace_status_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn activity_listener_case(case: crate::test_env::local_listener::Case, name: &str) {
+        use crate::test_env::http_proxy::Route;
+        use crate::test_env::local_listener::{check, Case};
+        check(
+            &format!("status::tests::{name}"),
+            case,
+            vec![
+                Route {
+                    method: "GET",
+                    path: "/api/devserver/workspaces",
+                    token: Some("test-token"),
+                    body: r#"[{"prefix":"/notes","path":"/notes","label":"notes","on":true,"status":"running","token":"workspace-token"}]"#,
+                },
+                Route {
+                    method: "GET",
+                    path: "/notes/api/index/status",
+                    token: Some("workspace-token"),
+                    body: "{}",
+                },
+                Route {
+                    method: "GET",
+                    path: "/notes/api/health",
+                    token: Some("workspace-token"),
+                    body: r#"{"indexer":{"status":"idle","queue_depth":0}}"#,
+                },
+            ],
+            |_| async move {
+                let activity = devserver_activity(&HashSet::from(["/notes".to_string()])).await;
+                if matches!(case, Case::Owned | Case::Fallback) {
+                    assert_eq!(
+                        activity["/notes"]
+                            .indexer
+                            .as_ref()
+                            .unwrap()
+                            .status
+                            .as_deref(),
+                        Some("idle")
+                    );
+                } else {
+                    assert!(
+                        activity.is_empty(),
+                        "foreign listener must receive no activity request"
+                    );
+                }
+            },
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn activity_owner_refuses_foreign() {
+        activity_listener_case(
+            crate::test_env::local_listener::Case::Foreign,
+            "activity_owner_refuses_foreign",
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn activity_owner_accepts_caller() {
+        activity_listener_case(
+            crate::test_env::local_listener::Case::Owned,
+            "activity_owner_accepts_caller",
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn activity_fallback_reaches_recorded() {
+        activity_listener_case(
+            crate::test_env::local_listener::Case::Fallback,
+            "activity_fallback_reaches_recorded",
+        );
+    }
 
     #[tokio::test]
     async fn workspace_status_reports_a_served_workspace_without_taking_the_lock() {

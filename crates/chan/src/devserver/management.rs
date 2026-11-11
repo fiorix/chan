@@ -43,6 +43,7 @@ async fn drain_devserver_terminals_with_token(
     addr: SocketAddr,
     token: &str,
 ) -> std::result::Result<(), String> {
+    let addr = crate::local_listener::resolve(addr).map_err(|error| error.to_string())?;
     let url = format!("http://{addr}/api/devserver/terminal-sessions/drain");
     let client = crate::http_client::local_devserver(Duration::from_secs(10))
         .map_err(|error| error.to_string())?;
@@ -97,7 +98,7 @@ pub(super) async fn cmd_rotate_devserver_token() -> Result<()> {
     };
     let dial = local_devserver_dial_addr();
     if let Some(addr) = dial {
-        if let Some(rotated) = rotate_devserver_token_at(addr, &current).await? {
+        if let Some((addr, rotated)) = rotate_devserver_token_at(addr, &current).await? {
             eprintln!("chan devserver: token rotated; the old bearer no longer authorizes");
             print!("{}", token_marker_output(Some(addr), &rotated.token));
             return Ok(());
@@ -125,7 +126,13 @@ pub(super) async fn cmd_rotate_devserver_token() -> Result<()> {
 async fn rotate_devserver_token_at(
     addr: SocketAddr,
     current: &str,
-) -> Result<Option<chan_server::devserver_api::RotatedToken>> {
+) -> Result<Option<(SocketAddr, chan_server::devserver_api::RotatedToken)>> {
+    let addr = match crate::local_listener::resolve(addr) {
+        Ok(addr) => addr,
+        #[cfg(target_os = "linux")]
+        Err(error) if crate::local_listener::no_listener(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let url = format!("http://{addr}/api/devserver/rotate-token");
     let client = crate::http_client::local_devserver(Duration::from_secs(5))?;
     let request = client.post(&url).bearer_auth(current).send();
@@ -135,7 +142,7 @@ async fn rotate_devserver_token_at(
                 .json()
                 .await
                 .context("parsing the rotate-token response")?;
-            Ok(Some(rotated))
+            Ok(Some((addr, rotated)))
         }
         Ok(Ok(response)) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
             anyhow::bail!(
@@ -241,6 +248,149 @@ pub(crate) async fn emit_devserver_token_marker(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn management_listener_case(
+        case: crate::test_env::local_listener::Case,
+        name: &str,
+        rotate: bool,
+    ) {
+        use crate::test_env::http_proxy::Route;
+        use crate::test_env::local_listener::{check, Case};
+        let route = if rotate {
+            Route {
+                method: "POST",
+                path: "/api/devserver/rotate-token",
+                token: Some("test-token"),
+                body: r#"{"token":"rotated-test-token"}"#,
+            }
+        } else {
+            Route {
+                method: "POST",
+                path: "/api/devserver/terminal-sessions/drain",
+                token: Some("test-token"),
+                body: r#"{"closed":2,"dead":2,"lingering":[]}"#,
+            }
+        };
+        check(
+            &format!("devserver::management::tests::{name}"),
+            case,
+            vec![route],
+            |addr| async move {
+                let config = chan_workspace::paths::config_dir().join("devserver/config.json");
+                let before = std::fs::read(&config).unwrap();
+                let result = if rotate {
+                    cmd_rotate_devserver_token()
+                        .await
+                        .map_err(|error| error.to_string())
+                } else {
+                    drain_devserver_terminals(addr).await
+                };
+                match case {
+                    Case::Foreign => {
+                        let error =
+                            result.expect_err("foreign listener must not receive the bearer");
+                        assert!(error.contains("is held by uid"), "{error}");
+                        assert_eq!(std::fs::read(&config).unwrap(), before);
+                    }
+                    Case::Unreadable => {
+                        let error = result.expect_err("unreadable tables must refuse");
+                        assert!(error.contains("cannot read /proc/net/tcp"), "{error}");
+                        assert_eq!(std::fs::read(&config).unwrap(), before);
+                    }
+                    Case::Absent => {
+                        result.unwrap();
+                        assert_ne!(
+                            std::fs::read(&config).unwrap(),
+                            before,
+                            "offline rotation rewrites only the file"
+                        );
+                    }
+                    _ => result.unwrap(),
+                }
+            },
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drain_owner_refuses_foreign() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Foreign,
+            "drain_owner_refuses_foreign",
+            false,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drain_owner_accepts_caller() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Owned,
+            "drain_owner_accepts_caller",
+            false,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drain_fallback_reaches_recorded() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Fallback,
+            "drain_fallback_reaches_recorded",
+            false,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rotation_owner_refuses_foreign() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Foreign,
+            "rotation_owner_refuses_foreign",
+            true,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rotation_owner_accepts_caller() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Owned,
+            "rotation_owner_accepts_caller",
+            true,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rotation_owner_requires_readable_tables() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Unreadable,
+            "rotation_owner_requires_readable_tables",
+            true,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rotation_owner_absent_rotates_only_the_file() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Absent,
+            "rotation_owner_absent_rotates_only_the_file",
+            true,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rotation_fallback_reaches_recorded() {
+        management_listener_case(
+            crate::test_env::local_listener::Case::Fallback,
+            "rotation_fallback_reaches_recorded",
+            true,
+        );
+    }
+
     #[test]
     fn drain_ignores_proxy() {
         use crate::test_env::http_proxy::{check, Route};
@@ -274,11 +424,12 @@ mod tests {
             }],
             0,
             |addr| async move {
-                let rotated = rotate_devserver_token_at(addr, "test-token")
+                let (dial, rotated) = rotate_devserver_token_at(addr, "test-token")
                     .await
                     .unwrap()
                     .unwrap();
                 assert_eq!(rotated.token, "rotated-test-token");
+                assert_eq!(dial, addr);
             },
         );
     }

@@ -49,6 +49,7 @@ mod desktop;
 mod devserver;
 mod http_client;
 mod index;
+mod local_listener;
 mod mcp;
 mod metadata;
 mod metrics;
