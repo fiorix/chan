@@ -629,6 +629,7 @@ export const mockApi: LibraryApi = {
       // The desktop starts a file's tunnel as the row is saved, so a new row
       // with a file reads as connecting at once.
       wireguard_status: wireguard === null ? null : "connecting",
+      wireguard_ingresses: [],
       wireguard_public_key: null,
       wireguard_enrolled: false,
     };
@@ -644,7 +645,10 @@ export const mockApi: LibraryApi = {
     if (!gw) throw new Error(`unknown gateway ${id}`);
     const wireguard = mockWireguardFile(input.wireguard);
     gw.label = (input.label ?? "").trim();
-    if (wireguard !== gw.wireguard) gw.wireguard_status = wireguard === null ? null : "connecting";
+    if (wireguard !== gw.wireguard) {
+      gw.wireguard_status = wireguard === null ? null : "connecting";
+      gw.wireguard_ingresses = [];
+    }
     // Clearing the file drops the enrollment it came from, as the desktop does.
     if (wireguard === null && gw.wireguard !== null) gw.wireguard_enrolled = false;
     gw.wireguard = wireguard;
@@ -673,6 +677,11 @@ export const mockApi: LibraryApi = {
       if (gw.wireguard_public_key && !gw.wireguard_enrolled) {
         gw.wireguard_enrolled = true;
         gw.wireguard = null;
+      }
+      if (gw.wireguard_enrolled && gw.wireguard === null) {
+        gw.wireguard_ingresses = [{ id: "p1", status: "connecting" }, { id: "p2", status: "connecting" }];
+        gw.wireguard_status = "connecting";
+      } else if (gw.wireguard) {
         gw.wireguard_status = "connecting";
       }
       notify();
@@ -685,6 +694,8 @@ export const mockApi: LibraryApi = {
     if (gw) {
       gw.status = "disconnected";
       gw.enabled = false;
+      gw.wireguard_ingresses = [];
+      gw.wireguard_status = null;
       notify();
     }
     return tick(undefined);

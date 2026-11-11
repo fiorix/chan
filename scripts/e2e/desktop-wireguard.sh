@@ -63,8 +63,8 @@
 #                   with no key and no file, its gateway is the stand-in
 #                   identity `stub-identity.mjs`, and the desktop's browser
 #                   is a stand-in `xdg-open` that records the URL it is given
-#                   and walks the redirect with curl. The peer starts once
-#                   the desktop has minted the key it admits.
+#                   and walks the redirect with curl. Two peers start once
+#                   the desktop has minted the key they both admit.
 #     proxy-first, launcher-bearer  as for --live-adopt.
 #     key           the library's key route answers the row with a public
 #                   key, not enrolled, and the key file is owner-only in an
@@ -75,24 +75,26 @@
 #                   answers 303.
 #     adopt         the redeem's parameters are stored on the row with its
 #                   one owner-only key file and no client file, the running
-#                   fabric starts its tunnel from them and the peer
-#                   handshakes, the row reads enrolled and connected, in the
+#                   fabric starts both tunnels and both peers handshake;
+#                   each ingress projects up, the row reads connected, in the
 #                   same desktop process with the same proxy address; the
 #                   private key is in the key file and in no other file of
 #                   the run.
-#     tenant        a second, disabled row whose gateway is at the name the
-#                   enrollment maps, which resolves nowhere: its connect's
-#                   discovery GET and a launcher fetch to a name under the
-#                   mapped wildcard reach the peer from the desktop's tunnel
-#                   address, and the same two, sent before the sign-in, did
-#                   not.
+#     tenant        disabled rows at each node's mapped name: discovery and
+#                   a launcher fetch under its wildcard reach only its own
+#                   peer at the shared inner address. Before enrollment,
+#                   neither request reaches any peer.
+#   --reconcile     enrolls p1/p2, adds p3 to discovery, then connects again.
+#     reconcile     p3 starts and routes its names without another sign-in,
+#                   key rewrite, desktop/proxy restart or p1/p2 tunnel restart;
+#                   all three nodes still route independently.
 #
 # What it cannot prove: a real gateway's TLS and identity behind the proxy
 # (the peer answers 404 to everything, and --enroll's identity has no OAuth
 # or consent page), the macOS and Windows webviews, and a peer behind NAT or
 # at a changing address.
 #
-# Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key | --live-adopt | --no-wireguard | --enroll]
+# Usage: desktop-wireguard.sh [--unresolved-endpoint | --wrong-key | --live-adopt | --no-wireguard | --enroll | --reconcile]
 #   --unresolved-endpoint proves startup and the proxy with a missing name;
 #                         it runs instead of the connected-peer arms.
 #   --wrong-key           proves the missing-handshake error and expiry with
@@ -103,6 +105,7 @@
 #   --no-wireguard        proves the always-bound proxy with no gateway row.
 #   --enroll              proves enrollment at sign-in (above); needs node 22
 #                         or later for the identity and the inspector reads.
+#   --reconcile           also proves adding an ingress without another sign-in.
 #   The modes are exclusive: one is taken, and anything after it is refused.
 #   CHAN_DESKTOP_BIN  a built debug chan-desktop (default
 #                     target/debug/chan-desktop). It is not built here: it
@@ -134,12 +137,14 @@ WRONG_KEY=0
 LIVE_ADOPT=0
 NO_WIREGUARD=0
 ENROLL=0
+RECONCILE=0
 case "${1:-}" in
     --unresolved-endpoint) UNRESOLVED=1; shift ;;
     --wrong-key) WRONG_KEY=1; shift ;;
     --live-adopt) LIVE_ADOPT=1; shift ;;
     --no-wireguard) NO_WIREGUARD=1; shift ;;
     --enroll) ENROLL=1; shift ;;
+    --reconcile) ENROLL=1; RECONCILE=1; shift ;;
 esac
 [ "$#" = 0 ] || { printf 'unknown arguments: %s\n' "$*" >&2; exit 2; }
 
@@ -190,10 +195,12 @@ if [ -z "${WG_PEER_BIN:-}" ]; then
 fi
 [ -x "$WG_PEER_BIN" ] || refuse "no wg-peer binary at $WG_PEER_BIN"
 IDENTITY="$REPO/scripts/e2e/stub-identity.mjs"
+ENROLLMENT_ORACLE="$REPO/scripts/e2e/wireguard-enrollment-oracle.mjs"
 if [ "$ENROLL" = 1 ]; then
     command -v node >/dev/null 2>&1 || refuse "node is not installed (--enroll runs stub-identity.mjs and reads the launcher through inspect.mjs)"
     [ -f "$INSPECT" ] || refuse "no inspector helper at $INSPECT"
     [ -f "$IDENTITY" ] || refuse "no stand-in identity at $IDENTITY"
+    [ -f "$ENROLLMENT_ORACLE" ] || refuse "no enrollment evidence reader at $ENROLLMENT_ORACLE"
 fi
 
 PIDS=()
@@ -321,22 +328,20 @@ count() { desktop_log; grep -cE -- "$1" "$CLEAN" || true; }
 peer_logged() { grep -qE -- "$1" "$WORK/peer.log"; }
 identity_logged() { grep -qE -- "$1" "$WORK/identity.log"; }
 
-# --enroll's second row: a gateway at the name the enrollment maps, which
-# resolves nowhere, and a name under the mapped wildcard for the launcher's
-# fetch. The peer listens on its default port 8080.
-TENANT_ID="gw-e2e00002"
-TENANT_NAME="tenant.chan-e2e.invalid"
-TENANT_URL="http://$TENANT_NAME:8080"
-PROBE_URL="http://probe.$TENANT_NAME:8080"
-
-# identity_peer <server public key> <endpoint>: the WireGuard parameters the
-# stand-in identity offers and answers a redeem with, replaced whole: the
-# wg-peer example's tunnel addresses, its keepalive, and the second row's
-# name and wildcard mapped to the peer.
-identity_peer() {
-    printf '{"server_public_key":"%s","endpoint":"%s","addresses":["10.7.0.1/32"],"allowed_ips":["10.7.0.2/32"],"persistent_keepalive":5,"hosts":[{"name":"%s","addresses":["10.7.0.2"]},{"name":"*.%s","addresses":["10.7.0.2"]}]}\n' \
-        "$1" "$2" "$TENANT_NAME" "$TENANT_NAME" > "$WORK/identity-peer.json.new"
-    mv -f "$WORK/identity-peer.json.new" "$WORK/identity-peer.json"
+# Every enrolled peer has the same inner listener. Only the mapped node
+# name can select the right tunnel; separate logs establish that routing.
+ENROLL_PEERS=()
+enrollment_oracle() { node "$ENROLLMENT_ORACLE" "$@" 2>>"$WORK/oracle.err"; }
+enrollment_peer_logged() { grep -qE -- "$2" "$WORK/peer-$1.log"; }
+start_enrollment_peer() {
+    local id="$1" key="$2" log_file="$WORK/peer-$1.log"
+    "$WG_PEER_BIN" --client-key "$key" > "$log_file" 2>&1 &
+    PIDS+=("$!")
+    wait_for 20 "peer $id" enrollment_peer_logged "$id" '^peer: ready' || fail "peer $id did not start; see $log_file"
+    ENROLL_PEERS+=("$log_file")
+}
+identity_peers() {
+    enrollment_oracle fixture "$WORK/identity-peer.json" "${ENROLL_PEERS[@]}" || fail "invalid peer fixture; see oracle.err"
 }
 
 # The desktop's browser for --enroll, an `xdg-open` first on its PATH, in
@@ -405,17 +410,23 @@ JSON
 elif [ "$NO_WIREGUARD" = 1 ]; then
     printf '{"gateways":[]}\n' > "$CHAN_HOME/desktop/config.json"
 elif [ "$ENROLL" = 1 ]; then
-    # The identity offers enrollment from the start; until the arm starts
-    # the peer, the parameters name a placeholder one.
-    identity_peer "$(head -c 32 /dev/urandom | base64)" 127.0.0.1:9
+    # Discovery offers enrollment before the desktop mints its key; the
+    # placeholders are replaced once both peers can admit that key.
+    enrollment_oracle seed "$WORK/identity-peer.json" || fail "could not seed identity fixture"
     node "$IDENTITY" "$WORK/identity-peer.json" > "$WORK/identity.log" 2>&1 &
     PIDS+=("$!")
     wait_for 20 "the identity" identity_logged '^identity: ready' || fail "the identity did not start: $(cat "$WORK/identity.log")"
     IDENTITY_ORIGIN="$(sed -n 's/^identity: ready origin=\(http:[^ ]*\)$/\1/p' "$WORK/identity.log" | head -1)"
     [ -n "$IDENTITY_ORIGIN" ] || fail "the identity printed no origin: $(cat "$WORK/identity.log")"
-    cat > "$CHAN_HOME/desktop/config.json" <<JSON
-{"gateways":[{"id":"$GATEWAY_ID","url":"$IDENTITY_ORIGIN","label":"wg","enabled":true,"added_at":0,"native_trust":[]},{"id":"$TENANT_ID","url":"$TENANT_URL","label":"tenant","enabled":false,"added_at":0,"native_trust":[]}]}
-JSON
+    node -e '
+        const [file, id, origin, count] = process.argv.slice(1);
+        const gateways = [{id, url: origin, label: "wg", enabled: true, added_at: 0, native_trust: []}];
+        for (let n = 1; n <= Number(count); n++) gateways.push({
+            id: `gw-tenant-p${n}`, url: `http://p${n}.proxy.chan-e2e.invalid:8080`,
+            label: `tenant-p${n}`, enabled: false, added_at: 0, native_trust: [],
+        });
+        require("fs").writeFileSync(file, JSON.stringify({gateways}) + "\n");
+    ' "$CHAN_HOME/desktop/config.json" "$GATEWAY_ID" "$IDENTITY_ORIGIN" "$((2 + RECONCILE))"
     mkdir -p "$WORK/bin"
     stand_in_browser > "$WORK/bin/xdg-open"
     chmod 700 "$WORK/bin/xdg-open"
@@ -718,32 +729,100 @@ authorize_read() {
     ' "$1" 2>/dev/null || echo "unread unread"
 }
 
-peer_discoveries() { grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' "$WORK/peer.log" || true; }
-row_connected() {
+enrollment_ready() {
     [ "$(library_call GET /api/library/gateways '' "$WORK/rows.json")" = 200 ] &&
-        [ "$(entry_field "$WORK/rows.json" status "$GATEWAY_ID")" = connected ]
+        enrollment_oracle projection "$WORK/rows.json" "$WORK/identity-peer.json" "$GATEWAY_ID"
 }
 
-enrollment_stored() {
-    node -e '
-        const [file, id, key] = process.argv.slice(1);
-        const row = JSON.parse(require("fs").readFileSync(file, "utf8")).gateways.find((row) => row.id === id);
-        const params = row?.wireguard_enrollment;
-        if (row?.wireguard != null || !params || params.key_file !== key ||
-            !Array.isArray(params.addresses) || params.addresses.length === 0 ||
-            !Array.isArray(params.allowed_ips) || params.allowed_ips.length === 0 ||
-            !Array.isArray(params.ingresses) || params.ingresses.length !== 1 ||
-            !params.ingresses[0].public_key || !params.ingresses[0].endpoint) process.exit(1);
-    ' "$@"
+# The inspector returns promises as remote objects, without awaiting them.
+# Record completion in the page so a negative probe cannot race its fetch.
+enrollment_probe_settled() {
+    node "$INSPECT" "$INSPECTOR" eval 'Chan Launcher' \
+        "window.__chanWireguardEnrollmentProbe?.url === '$1' && window.__chanWireguardEnrollmentProbe.done === true" \
+        > "$WORK/probe-state.json" 2>>"$WORK/inspect.err" || return 1
+    grep -qx true "$WORK/probe-state.json"
+}
+enrollment_fetch() {
+    node "$INSPECT" "$INSPECTOR" eval 'Chan Launcher' \
+        "(() => { const probe = window.__chanWireguardEnrollmentProbe = {url: '$1', done: false}; fetch(probe.url, {mode: 'no-cors'}).then(() => { probe.done = true; }, () => { probe.done = true; }); return 'dispatched'; })()" \
+        > "$WORK/probe-start.json" 2>>"$WORK/inspect.err" || return 1
+    grep -qx '"dispatched"' "$WORK/probe-start.json" || return 1
+    wait_for 30 'the webview probe to settle' enrollment_probe_settled "$1"
+}
+
+# Each discovery and webview request has a before snapshot of every peer.
+# A wrong peer receiving even one matching request fails the same probe.
+enrollment_tenant_arm() {
+    local phase="$1" peer_count="$2" first="$3" last="$4" route="$5"
+    local n id target snapshot path status arm_rc body
+    for ((n=first; n<=last; n++)); do
+        arm_rc=0
+        id="p$n"
+        target="$id"
+        [ "$route" != none ] || target=none
+        snapshot="$WORK/$phase-$id-before.json"
+        body="$WORK/$phase-$id-connect.json"
+        path="/webview-$phase-$id"
+        enrollment_oracle snapshot "$WORK" "$peer_count" "$snapshot" || fail "could not snapshot peers"
+        status="$(library_call POST "/api/library/gateways/gw-tenant-$id/connect" '' "$body")"
+        [ "$status" = 409 ] || arm_rc=1
+        if [ "$route" = none ]; then
+            if grep -q 'gateway discovery returned HTTP 404' "$body"; then arm_rc=1; fi
+        else
+            grep -q 'gateway discovery returned HTTP 404' "$body" || arm_rc=1
+        fi
+        enrollment_oracle routed "$WORK" "$peer_count" "$snapshot" "$target" '/.well-known/chan-gateway' || arm_rc=1
+        enrollment_fetch "http://probe.$id.proxy.chan-e2e.invalid:8080$path" || arm_rc=1
+        enrollment_oracle routed "$WORK" "$peer_count" "$snapshot" "$target" "$path" || arm_rc=1
+        verdict "tenant-$phase-$id" "$arm_rc" "connect HTTP $status (want 409); discovery and webview request must reach $target only, all $peer_count peer logs checked"
+    done
+}
+
+enrollment_parameters() {
+    enrollment_oracle stored "$CHAN_HOME/desktop/config.json" "$WORK/identity-peer.json" "$GATEWAY_ID" "$1"
+}
+
+enrollment_starts() {
+    desktop_log
+    enrollment_oracle started "$CLEAN" "$WORK/identity-peer.json" "$GATEWAY_ID" "$1"
+}
+
+same_desktop() {
+    local pid_before="$1" addresses
+    [ "$pid_before" != none ] && [ "$(desktop_pid || echo none)" = "$pid_before" ] || return 1
+    [ "$(count 'gateway WireGuard proxy listening')" = 1 ] || return 1
+    addresses="$(proxy_addresses | sort -u | tr '\n' ' ')"
+    [ "$addresses" = "$PROXY " ]
+}
+
+single_sign_in() {
+    [ "$(grep -c . "$WORK/browser.urls")" = 1 ] &&
+        [ "$(grep -c '^identity: authorize wireguard_public_key=' "$WORK/identity.log")" = 1 ] &&
+        [ "$(grep -c '^identity: redeem pkce=ok wireguard=sent$' "$WORK/identity.log")" = 1 ] &&
+        [ "$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log")" -ge 1 ]
+}
+
+enrollment_report() {
+    local pid_before="$1" key_file="$2" key_before="$3" pid_after key_after key_same=no observations
+    desktop_log
+    pid_after="$(desktop_pid || echo none)"
+    key_after="$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")" || key_after=unavailable
+    [ "$key_after" != "$key_before" ] || key_same=yes
+    observations="$(enrollment_oracle observed "$CLEAN" "$WORK/rows.json" "$WORK/identity-peer.json" "$GATEWAY_ID")" || observations=unavailable
+    printf 'observed=%s desktop_pid=%s->%s proxy_pid=%s->%s proxy=%s->%s proxy_listeners=%s browser_urls=%s authorize=%s redeem=%s roster=%s key_digest_and_metadata_same=%s' \
+        "$observations" "$pid_before" "$pid_after" "$pid_before" "$pid_after" \
+        "$PROXY" "$(proxy_addresses | sort -u | tr '\n' ',')" "$(count 'gateway WireGuard proxy listening')" \
+        "$(grep -c . "$WORK/browser.urls" || true)" \
+        "$(grep -c '^identity: authorize wireguard_public_key=' "$WORK/identity.log" || true)" \
+        "$(grep -c '^identity: redeem pkce=ok wireguard=sent$' "$WORK/identity.log" || true)" \
+        "$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log" || true)" "$key_same"
 }
 
 enroll_arms() {
     local arm_rc keys key_file conf key_status client_key enrolled key_mode dir_mode
-    local control_connect control_404=no control_discoveries control_sent=no
-    local peer_key peer_udp connect_status opened read_back sent_url sent_key recorded walk
-    local pid_before pid_after listening addresses row_file row_enrolled row_wg row_status row_error
-    local redeemed rostered private_key holder in_key=no in_conf=no leaked="" parameters=no
-    local key_sent=no key_recorded=no tenant_status tenant_404=no
+    local connect_status opened read_back sent_url sent_key recorded walk
+    local pid_before key_before n
+    local key_sent=no key_recorded=no
     keys="$CHAN_HOME/desktop/wireguard"
     key_file="$keys/$GATEWAY_ID.key"
     conf="$keys/$GATEWAY_ID.conf"
@@ -764,23 +843,11 @@ enroll_arms() {
     verdict key "$arm_rc" "POST answered $key_status, a public key of ${#client_key} characters, enrolled $enrolled (want false), key file mode $key_mode in a $dir_mode directory (want 600 in 700)"
     [ "$arm_rc" = 0 ] || fail "no WireGuard key: the sign-in needs it"
 
-    # The peer, admitting that key, and the identity naming it, so the
-    # sign-in's discovery and redeem carry its key and endpoint.
-    "$WG_PEER_BIN" --client-key "$client_key" > "$WORK/peer.log" 2>&1 &
-    PIDS+=("$!")
-    wait_for 20 "the peer" peer_logged '^peer: ready' || fail "the peer did not start: $(cat "$WORK/peer.log")"
-    peer_key="$(sed -n 's/^peer: ready .* public_key=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
-    peer_udp="$(sed -n 's/^peer: ready .* udp=\([^ ]*\).*/\1/p' "$WORK/peer.log" | head -1)"
-    [ -n "$peer_key" ] && [ -n "$peer_udp" ] || fail "the peer printed no key or UDP address: $(head -1 "$WORK/peer.log")"
-    identity_peer "$peer_key" "$peer_udp"
-
-    # The controls for the tenant arm: before the sign-in, neither the
-    # second row's discovery nor a launcher fetch under the mapped names has
-    # a route to the peer. They are judged there.
-    control_connect="$(library_call POST "/api/library/gateways/$TENANT_ID/connect" '' "$WORK/control-connect.json")"
-    if grep -q 'HTTP 404' "$WORK/control-connect.json" 2>/dev/null; then control_404=yes; fi
-    control_discoveries="$(peer_discoveries)"
-    if launcher_fetch "$PROBE_URL/webview-probe-before"; then control_sent=yes; fi
+    key_before="$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")"
+    start_enrollment_peer p1 "$client_key"
+    start_enrollment_peer p2 "$client_key"
+    identity_peers
+    enrollment_tenant_arm before 2 1 2 none
 
     # authorize: Connect signs in in the browser, since the key is not
     # enrolled, and the stand-in browser walks it.
@@ -803,64 +870,47 @@ enroll_arms() {
     [ "$walk" = 'browser: authorize=302 callback=303' ] || arm_rc=1
     verdict authorize "$arm_rc" "connect answered $connect_status (want 204), URLs opened ${opened:-0} (want 1) at ${sent_url:-none}, its key is the row's: $key_sent, the identity recorded it: $key_recorded, ${walk:-no walk} (want 302 then 303)"
 
-    # adopt: the redeem stores public parameters and the running fabric
-    # reads the one key file, with no restart or duplicate private key.
+    # Both peers must handshake, and storage/projection must name exactly
+    # the parameters served. A summary alone cannot prove a second tunnel.
     arm_rc=0
-    wait_for 30 "the enrolled tunnel's start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID .*file=$key_file " || arm_rc=1
-    wait_for 30 "the handshake at the peer" peer_logged '^status: handshake=[0-9]' || arm_rc=1
-    wait_for 30 "the row connected" row_connected || arm_rc=1
-    row_file="$(entry_field "$WORK/rows.json" wireguard "$GATEWAY_ID")"
-    row_enrolled="$(entry_field "$WORK/rows.json" wireguard_enrolled "$GATEWAY_ID")"
-    row_wg="$(entry_field "$WORK/rows.json" wireguard_status "$GATEWAY_ID")"
-    row_status="$(entry_field "$WORK/rows.json" status "$GATEWAY_ID")"
-    row_error="$(entry_field "$WORK/rows.json" last_error "$GATEWAY_ID")"
-    case "$row_file" in absent|null) ;; *) arm_rc=1 ;; esac
-    [ "$row_enrolled" = true ] || arm_rc=1
-    if enrollment_stored "$CHAN_HOME/desktop/config.json" "$GATEWAY_ID" "$key_file"; then parameters=yes; else arm_rc=1; fi
+    for n in 1 2; do
+        wait_for 30 "p$n handshake" enrollment_peer_logged "p$n" '^status: handshake=[0-9]' || arm_rc=1
+    done
+    wait_for 30 "both ingress statuses up" enrollment_ready || arm_rc=1
+    enrollment_parameters "$key_file" || arm_rc=1
+    enrollment_starts "$key_file" || arm_rc=1
     [ ! -e "$conf" ] || arm_rc=1
-    case "$row_wg" in connecting|up) ;; *) arm_rc=1 ;; esac
-    key_mode="$(stat -c %a "$key_file" 2>/dev/null || echo none)"
-    [ "$key_mode" = 600 ] || arm_rc=1
-    redeemed="$(grep -c '^identity: redeem pkce=ok wireguard=sent$' "$WORK/identity.log" || true)"
-    rostered="$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log" || true)"
-    [ "$redeemed" = 1 ] && [ "$rostered" -ge 1 ] || arm_rc=1
-    listening="$(count 'gateway WireGuard proxy listening')"
-    addresses="$(proxy_addresses | sort -u | tr '\n' ' ')"
-    [ "$listening" = 1 ] && [ "$addresses" = "$PROXY " ] || arm_rc=1
-    pid_after="$(desktop_pid || echo none)"
-    [ "$pid_before" != none ] && [ "$pid_after" = "$pid_before" ] || arm_rc=1
-    # Every file of the run that holds the private key, read from its file
-    # and handed to grep on a descriptor, never on a command line: the
-    # search must find only the key file.
-    private_key="$(head -1 "$key_file" 2>/dev/null || true)"
-    if [ -n "$private_key" ]; then
-        while IFS= read -r holder; do
-            case "$holder" in
-                "$key_file") in_key=yes ;;
-                "$conf") in_conf=yes ;;
-                *) leaked+="${holder#"$WORK"/} " ;;
-            esac
-        done < <(grep -rlF -D skip -f <(printf '%s\n' "$private_key") "$WORK" 2>/dev/null || true)
-    fi
-    unset private_key
-    [ "$in_key" = yes ] && [ "$in_conf" = no ] && [ -z "$leaked" ] || arm_rc=1
-    verdict adopt "$arm_rc" "tunnel start lines $STARTED_BEFORE -> $(count 'gateway WireGuard tunnel started'), the row's file $row_file (want absent or null), public parameters $parameters, key mode $key_mode, enrolled $row_enrolled, WireGuard $row_wg, status $row_status, last error $row_error; identity redeems $redeemed, roster reads $rostered; proxy lines $listening at ${addresses% }, desktop pid $pid_before -> $pid_after; peer $(grep -E '^status: ' "$WORK/peer.log" | tail -1 | cut -d' ' -f2-); the private key found in the key file: $in_key, the client file: $in_conf, any other file: ${leaked:-none}"
+    same_desktop "$pid_before" || arm_rc=1
+    single_sign_in || arm_rc=1
+    enrollment_oracle private-key "$WORK" "$key_file" || arm_rc=1
+    [ "$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")" = "$key_before" ] || arm_rc=1
+    verdict adopt "$arm_rc" "$(enrollment_report "$pid_before" "$key_file" "$key_before")"
+    enrollment_tenant_arm enrolled 2 1 2 live
 
-    # tenant: the desktop's HTTP leg and the launcher's webview reach the
-    # peer by the enrolled names through the adopted tunnel.
-    arm_rc=0
-    tenant_status="$(library_call POST "/api/library/gateways/$TENANT_ID/connect" '' "$WORK/tenant.json")"
-    # The peer answers discovery 404, which the bridge answers 409 with the
-    # desktop's reason.
-    [ "$tenant_status" = 409 ] || arm_rc=1
-    if grep -q 'gateway discovery returned HTTP 404' "$WORK/tenant.json" 2>/dev/null; then tenant_404=yes; else arm_rc=1; fi
-    wait_for 30 "the second row's discovery at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /\.well-known/chan-gateway' || arm_rc=1
-    launcher_fetch "$PROBE_URL/webview-probe" || arm_rc=1
-    wait_for 30 "the webview's fetch at the peer" peer_logged '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' || arm_rc=1
-    [ "$control_connect" = 409 ] && [ "$control_404" = no ] && [ "$control_discoveries" = 0 ] || arm_rc=1
-    [ "$control_sent" = yes ] || arm_rc=1
-    if peer_logged 'line=GET /webview-probe-before '; then arm_rc=1; fi
-    verdict tenant "$arm_rc" "connect answered $tenant_status naming the discovery 404: $tenant_404 (want 409, yes), discovery requests from the tunnel address $(peer_discoveries), webview probe $(grep -cE '^request: from=10\.7\.0\.1:[0-9]+ line=GET /webview-probe ' "$WORK/peer.log" || true); before the sign-in: connect answered $control_connect naming a 404: $control_404 with $control_discoveries discovery requests at the peer (want 409, no, 0), the probe sent $control_sent and reached the peer $(grep -c 'line=GET /webview-probe-before ' "$WORK/peer.log" || true) (want yes, 0)"
+    if [ "$RECONCILE" = 1 ]; then
+        [ "$FAILED" = 0 ] || fail "enrollment prerequisites failed before reconciliation"
+        # A third peer admits the same client key. Until discovery changes,
+        # its names must still have no route, even though the peer is live.
+        key_before="$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")"
+        start_enrollment_peer p3 "$client_key"
+        enrollment_tenant_arm before-reconcile 3 3 3 none
+        identity_peers
+        arm_rc=0
+        connect_status="$(library_call POST "/api/library/gateways/$GATEWAY_ID/connect" '' "$WORK/reconcile-connect.json")"
+        [ "$connect_status" = 204 ] || arm_rc=1
+        wait_for 30 'p3 handshake' enrollment_peer_logged p3 '^status: handshake=[0-9]' || arm_rc=1
+        wait_for 30 'three ingress statuses up' enrollment_ready || arm_rc=1
+        enrollment_parameters "$key_file" || arm_rc=1
+        enrollment_starts "$key_file" || arm_rc=1
+        same_desktop "$pid_before" || arm_rc=1
+        single_sign_in || arm_rc=1
+        [ "$(sha256sum "$key_file") $(stat -c '%d:%i:%s:%y:%z:%a' "$key_file")" = "$key_before" ] || arm_rc=1
+        [ "$(stat -c %a "$key_file")" = 600 ] && [ "$(stat -c %a "$keys")" = 700 ] || arm_rc=1
+        [ ! -e "$conf" ] || arm_rc=1
+        enrollment_oracle private-key "$WORK" "$key_file" || arm_rc=1
+        verdict reconcile "$arm_rc" "connect_http=$connect_status (want 204) $(enrollment_report "$pid_before" "$key_file" "$key_before")"
+        enrollment_tenant_arm reconciled 3 1 3 live
+    fi
 }
 
 if [ "$LIVE_ADOPT" = 1 ]; then

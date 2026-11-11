@@ -1155,6 +1155,9 @@ fn entry_from_gateway(
             .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, source))),
         wireguard: file.map(|path| path.display().to_string()),
         wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, source)),
+        wireguard_ingresses: wireguard
+            .map(|fabric| fabric.ingress_statuses(&g.id, source))
+            .unwrap_or_default(),
         wireguard_public_key: g.wireguard_public_key.clone(),
         wireguard_enrolled: g.wireguard_public_key.is_some()
             && g.wireguard_enrolled_key == g.wireguard_public_key,
@@ -1341,10 +1344,12 @@ pub(crate) async fn generate_wireguard_key(
     guard.save(&cfg).map_err(|e| e.to_string())?;
     drop(guard);
     tracing::info!(gateway = %id, "gateway WireGuard key generated");
-    Ok(WireguardKeyOutcome::Generated(entry_from_gateway(
-        &gw,
-        manager.view(id),
-        manager.wireguard().map(|fabric| fabric.as_ref()),
+    Ok(WireguardKeyOutcome::Generated(Box::new(
+        entry_from_gateway(
+            &gw,
+            manager.view(id),
+            manager.wireguard().map(|fabric| fabric.as_ref()),
+        ),
     )))
 }
 
@@ -3777,6 +3782,202 @@ mod tests {
         assert!(reg.remove("gw-cccccccc").unwrap());
         assert_eq!(fabric.tunnels(), 1);
         assert_eq!(fabric.status("gw-cccccccc", Some(&a_file)), None);
+    }
+
+    #[tokio::test]
+    async fn gateway_list_projects_each_enrolled_ingress_in_discovery_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+        let (store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+        let live = chan_wireguard::Status {
+            handshake: chan_wireguard::HandshakeState::Live(std::time::Duration::ZERO),
+            endpoint: Some("127.0.0.1:9".parse().unwrap()),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            resolution_error: None,
+            resolution_stalled: false,
+        };
+        fabric.set_test_status(&gateway.id, live.clone());
+        let projected = || serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(
+            projected()["wireguard_ingresses"],
+            serde_json::json!([
+                {"id": "p1", "status": "up"},
+                {"id": "p2", "status": "connecting"},
+            ])
+        );
+        assert_eq!(projected()["wireguard_status"], "connecting");
+        fabric.set_test_status(
+            &gateway.id,
+            chan_wireguard::Status {
+                handshake: chan_wireguard::HandshakeState::Lost(std::time::Duration::from_secs(
+                    200,
+                )),
+                resolution_error: Some("endpoint lookup timed out".into()),
+                resolution_stalled: true,
+                ..live
+            },
+        );
+        let lost = "lost; no handshake for 3 min; endpoint lookup timed out; stalled, waiting for the system resolver";
+        assert_eq!(projected()["wireguard_ingresses"][0]["status"], lost);
+        assert_eq!(projected()["wireguard_status"], lost);
+
+        gateway
+            .wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .reverse();
+        {
+            let mut store = store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways = vec![gateway.clone()];
+            store.save(&cfg).unwrap();
+            fabric.adopt_gateway(&gateway).unwrap().unwrap();
+        }
+        assert_eq!(
+            projected()["wireguard_ingresses"],
+            serde_json::json!([
+                {"id": "p2", "status": "connecting"},
+                {"id": "p1", "status": lost},
+            ])
+        );
+        assert_eq!(projected()["wireguard_status"], lost);
+    }
+
+    #[tokio::test]
+    async fn gateway_list_keeps_refused_ingresses_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+        let (_store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+        fabric.retire(&gateway.id);
+        fabric.refuse_start("gw-multi/p2");
+        fabric.adopt_gateway(&gateway).unwrap().unwrap();
+        let projected = serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(
+            projected["wireguard_ingresses"],
+            serde_json::json!([
+                {"id": "p1", "status": "connecting"},
+                {"id": "p2", "status": "WireGuard: injected socket refusal"},
+            ])
+        );
+        assert_eq!(projected["wireguard_status"], "connecting");
+        assert_eq!(
+            projected["last_error"],
+            "gw-multi/p2: WireGuard: injected socket refusal"
+        );
+        fabric.retire(&gateway.id);
+        fabric.refuse_start("gw-multi/p1");
+        fabric.adopt_gateway(&gateway).unwrap().unwrap_err();
+        let projected = serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(
+            projected["wireguard_ingresses"],
+            serde_json::json!([
+                {"id": "p1", "status": "WireGuard: injected socket refusal"},
+                {"id": "p2", "status": "WireGuard: injected socket refusal"},
+            ])
+        );
+        assert!(projected["wireguard_status"].is_null());
+    }
+
+    #[tokio::test]
+    async fn gateway_list_keeps_sole_legacy_ingress_on_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-legacy").await;
+        let ingresses = &mut gateway.wireguard_enrollment.as_mut().unwrap().ingresses;
+        ingresses.truncate(1);
+        ingresses[0].id = crate::wireguard_keys::LEGACY_INGRESS_ID.into();
+        let (_store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+        let projected = || serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(projected()["wireguard_ingresses"], serde_json::json!([]));
+        assert_eq!(projected()["wireguard_status"], "connecting");
+        assert!(projected()["last_error"].is_null());
+        assert_eq!(fabric.tunnels(), 1);
+
+        fabric.retire(&gateway.id);
+        fabric.refuse_start("gw-legacy/legacy");
+        fabric.adopt_gateway(&gateway).unwrap().unwrap_err();
+        assert_eq!(projected()["wireguard_ingresses"], serde_json::json!([]));
+        assert!(projected()["wireguard_status"].is_null());
+        assert_eq!(
+            projected()["last_error"],
+            "WireGuard: injected socket refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_list_keeps_legacy_beside_another_ingress() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+        gateway.wireguard_enrollment.as_mut().unwrap().ingresses[0].id =
+            crate::wireguard_keys::LEGACY_INGRESS_ID.into();
+        let (_store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway]).await;
+        let projected = serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(
+            projected["wireguard_ingresses"],
+            serde_json::json!([
+                {"id": "legacy", "status": "connecting"},
+                {"id": "p2", "status": "connecting"},
+            ])
+        );
+        assert_eq!(projected["wireguard_status"], "connecting");
+        assert!(projected["last_error"].is_null());
+        assert_eq!(fabric.tunnels(), 2);
+    }
+
+    #[tokio::test]
+    async fn gateway_list_projects_one_ingress_and_omits_manual_and_retired_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut gateway, _peers) =
+            crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+        gateway
+            .wireguard_enrollment
+            .as_mut()
+            .unwrap()
+            .ingresses
+            .truncate(1);
+        let (store, fabric, reg) = gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+        let projected = || serde_json::to_value(reg.list().remove(0)).unwrap();
+        assert_eq!(
+            projected()["wireguard_ingresses"],
+            serde_json::json!([{"id": "p1", "status": "connecting"}])
+        );
+        assert_eq!(projected()["wireguard_status"], "connecting");
+        {
+            let mut store = store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0]
+                .wireguard_enrollment
+                .as_mut()
+                .unwrap()
+                .key_file = dir.path().join("not-adopted.key");
+            store.save(&cfg).unwrap();
+        }
+        assert_eq!(projected()["wireguard_ingresses"], serde_json::json!([]));
+        {
+            let mut store = store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways = vec![gateway.clone()];
+            store.save(&cfg).unwrap();
+        }
+        fabric.retire(&gateway.id);
+        assert_eq!(projected()["wireguard_ingresses"], serde_json::json!([]));
+        assert!(projected()["wireguard_status"].is_null());
+
+        let file = wg_file(dir.path(), "manual.conf", &wg_text());
+        let manual = reg
+            .add(wg_input(
+                "https://manual.example",
+                Some(file.to_str().unwrap()),
+            ))
+            .unwrap();
+        let manual = serde_json::to_value(manual).unwrap();
+        assert_eq!(manual["wireguard_ingresses"], serde_json::json!([]));
+        assert_eq!(manual["wireguard_status"], "connecting");
     }
 
     /// A gateway's discovery document on a loopback listener, carrying

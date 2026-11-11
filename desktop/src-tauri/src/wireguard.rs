@@ -425,6 +425,50 @@ impl WireguardFabric {
         rows.get(gateway_id)?.status(configured)
     }
 
+    /// Listed ingresses' live states or start refusals, in discovery
+    /// order. Manual files and enrollment-wide refusals have no ingress id
+    /// and use the row's summary and error instead.
+    pub fn ingress_statuses(
+        &self,
+        gateway_id: &str,
+        configured: Option<&Path>,
+    ) -> Vec<chan_server::WireguardIngressStatus> {
+        let rows = self.rows.lock().unwrap();
+        let Some(gateway) = rows.get(gateway_id) else {
+            return Vec::new();
+        };
+        // A sole `legacy` id uses the summary to hide synthetic peer labels,
+        // including a real node with that name because enrollment stores no
+        // provenance; multiple ingresses keep every id.
+        if gateway.ingresses.len() == 1
+            && gateway.ingresses[0].0
+                == format!("{gateway_id}/{}", crate::wireguard_keys::LEGACY_INGRESS_ID)
+        {
+            return Vec::new();
+        }
+        gateway
+            .ingresses
+            .iter()
+            .filter_map(|(id, row)| {
+                if Some(row.path()) != configured {
+                    return None;
+                }
+                let id = id.strip_prefix(gateway_id)?.strip_prefix('/')?;
+                let status = match row {
+                    Row::Running { .. } => describe(
+                        row.tunnel_status()
+                            .expect("a running ingress has a tunnel status"),
+                    ),
+                    Row::Refused { reason, .. } => reason.clone(),
+                };
+                Some(chan_server::WireguardIngressStatus {
+                    id: id.to_owned(),
+                    status,
+                })
+            })
+            .collect()
+    }
+
     /// A matched route's missing-session reason. Host maps take precedence
     /// over resolved addresses, as they do in the proxy. The outer option
     /// says a route matched; its inner value is absent when that route is

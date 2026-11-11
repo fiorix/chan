@@ -6,9 +6,10 @@
   // rename pencil, and the connect/disconnect control with a spinning cancel
   // while connecting, sign-in narration while a browser sign-in is pending,
   // and a red lost dot + disconnect-to-recover while unreachable. A badge
-  // reached through WireGuard shows its file under the URL with the tunnel's
-  // live state beside it: the desktop runs a file as soon as the row is
-  // saved, so the state follows a change within one refresh. A file the
+  // reached through WireGuard shows each enrolled ingress's id and live
+  // state under the URL. A manual file or an older desktop keeps the summary
+  // line: the desktop runs a file as soon as the row is saved, so the state
+  // follows a change within one refresh. A file the
   // desktop refused arrives as the row's `last_error`, which the status line
   // already narrates. A badge with a generated WireGuard key shows the
   // public key's first eight characters with a copy action and whether the
@@ -156,15 +157,32 @@
             </span>
           </span>
         {/if}
-        {#if gw.wireguard || gw.wireguard_status || gw.wireguard_enrolled}
+        {#if gw.wireguard_ingresses?.length}
+          {#each gw.wireguard_ingresses as ingress (ingress.id)}
+            <span class="gw-addr-row gw-wireguard gw-wg-ingress">
+              <span class="gw-glyph"></span>
+              <span class="chip">WireGuard</span>
+              <span class="gw-wg-fixed">
+                <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:id`} label="WireGuard ingress"><span class="gw-url gw-wg-id" title={ingress.id}>{ingress.id}</span></PrivateField>
+              </span>
+              <span class="gw-wg-detail">
+                <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={ingress.status}>{ingress.status}</span></PrivateField>
+              </span>
+            </span>
+          {/each}
+        {:else if gw.wireguard || gw.wireguard_status || gw.wireguard_enrolled}
           <span class="gw-addr-row gw-wireguard">
             <span class="gw-glyph"></span>
             <span class="chip">WireGuard</span>
             {#if gw.wireguard_status}
-              <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
+              <span class="gw-wg-summary">
+                <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
+              </span>
             {/if}
             {#if gw.wireguard}
-              <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+              <span class="gw-wg-detail">
+                <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+              </span>
             {/if}
           </span>
         {/if}
@@ -334,6 +352,23 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Size the privacy wrapper too, so revealing a long status cannot steal the id's width. */
+  .gw-wg-fixed {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+
+  .gw-wg-summary,
+  .gw-wg-detail {
+    display: inline-flex;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .gw-wg-detail {
+    flex: 1;
   }
 
   /* The file is a path the user typed, so it reads as literal text. */

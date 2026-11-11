@@ -23,7 +23,7 @@ import {
   updateGateway,
   windowLiveTerminalCount,
 } from "./library.svelte";
-import { ApiError, type WorkspaceEntry } from "../api/library";
+import { ApiError, type GatewayEntry, type WorkspaceEntry } from "../api/library";
 import { setDemoMode } from "./demo.svelte";
 import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "./pending.svelte";
 
@@ -516,6 +516,37 @@ describe("workspace polling", () => {
     stopWatching();
     setDemoMode(null);
     vi.restoreAllMocks();
+  });
+
+  it("refreshes refused ingress states after key regeneration without a summary or registry event", async () => {
+    stopWatching();
+    vi.useFakeTimers();
+    const { backend } = await import("../api/backend");
+    const row: GatewayEntry = {
+      id: "gw-refused", url: "https://gateway.example", label: "", enabled: true,
+      status: "disconnected", pending_signin: false, devserver_count: 0, last_error: null,
+      wireguard: null, wireguard_status: null, wireguard_enrolled: false,
+      wireguard_ingresses: [{ id: "p1", status: "refused: unavailable" }],
+    };
+    const list = vi.spyOn(backend, "listGateways").mockResolvedValue([row]);
+    vi.spyOn(backend, "watchWindows").mockReturnValue(() => {});
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    await loadLibrary();
+    const ingresses = [{ id: "p2", status: "connecting" }, { id: "p1", status: "up" }];
+    list.mockResolvedValue([{ ...row, wireguard_ingresses: ingresses }]);
+    list.mockClear();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(library.gateways[0].wireguard_ingresses).toEqual(ingresses);
+    visibility.mockReturnValue("hidden");
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(1);
+    visibility.mockReturnValue("visible");
+    list.mockResolvedValue([{ ...row, wireguard_ingresses: [] }]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(library.gateways[0].wireguard_ingresses).toEqual([]);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(2);
   });
 
   it.each([

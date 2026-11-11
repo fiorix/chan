@@ -48,6 +48,16 @@ pub enum GatewayStatus {
     Unreachable,
 }
 
+/// One enrolled WireGuard ingress's volatile state in discovery order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardIngressStatus {
+    /// The gateway's ingress id, without the desktop's gateway id prefix.
+    pub id: String,
+    /// Live tunnel state, including lookup failures, or the start refusal.
+    /// Uses the same words as [`GatewayEntry::wireguard_status`].
+    pub status: String,
+}
+
 /// One configured gateway, as the launcher lists it. Every key is always
 /// present on the wire (`last_error` serializes as `null` when clear).
 /// Defaults admit fields absent from the previous release.
@@ -93,6 +103,11 @@ pub struct GatewayEntry {
     /// anyway; `null` when no matching tunnel runs.
     #[serde(default)]
     pub wireguard_status: Option<String>,
+    /// Each adopted enrolled ingress's status, in discovery order. Empty
+    /// for manual files, unadopted enrollments, and older desktops. An
+    /// enrollment-wide refusal is carried by `last_error` instead.
+    #[serde(default)]
+    pub wireguard_ingresses: Vec<WireguardIngressStatus>,
     /// The public half of the WireGuard key the desktop generated for this
     /// gateway, base64 as `wg` prints it; `null` when none was generated.
     /// The private half never leaves the desktop's key file.
@@ -177,6 +192,7 @@ mod tests {
             last_error: None,
             wireguard: None,
             wireguard_status: None,
+            wireguard_ingresses: Vec::new(),
             wireguard_public_key: None,
             wireguard_enrolled: false,
         };
@@ -185,7 +201,7 @@ mod tests {
             "{\"id\":\"gw-1a2b3c4d\",\"url\":\"https://gw.chan.app\",\"label\":\"\",\
              \"enabled\":true,\"status\":\"disconnected\",\"pending_signin\":false,\
              \"devserver_count\":3,\"last_error\":null,\"wireguard\":null,\
-             \"wireguard_status\":null,\"wireguard_public_key\":null,\
+             \"wireguard_status\":null,\"wireguard_ingresses\":[],\"wireguard_public_key\":null,\
              \"wireguard_enrolled\":false}"
         );
         // And the shape round-trips.
@@ -262,5 +278,31 @@ mod tests {
             "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
         );
         assert_eq!(json["wireguard_enrolled"], true);
+    }
+
+    #[test]
+    fn entry_preserves_per_ingress_wireguard_states() {
+        let states = serde_json::json!([
+            {"id": "p2", "status": "up"},
+            {"id": "p1", "status": "WireGuard: socket refused"}
+        ]);
+        let entry: GatewayEntry = serde_json::from_value(serde_json::json!({
+            "id": "gw-1a2b3c4d", "url": "https://gw.chan.app", "label": "",
+            "enabled": true, "wireguard_status": "up", "wireguard_ingresses": states,
+        }))
+        .unwrap();
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["wireguard_ingresses"], states);
+        assert_eq!(json["wireguard_status"], "up");
+
+        let old: GatewayEntry = serde_json::from_value(serde_json::json!({
+            "id": "gw-1a2b3c4d", "url": "https://gw.chan.app", "label": "",
+            "enabled": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap()["wireguard_ingresses"],
+            serde_json::json!([])
+        );
     }
 }

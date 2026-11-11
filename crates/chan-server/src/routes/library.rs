@@ -6228,6 +6228,7 @@ mod gateway_route_tests {
                     last_error: None,
                     wireguard: None,
                     wireguard_status: None,
+                    wireguard_ingresses: Vec::new(),
                     wireguard_public_key: None,
                     wireguard_enrolled: false,
                 }]),
@@ -6254,6 +6255,7 @@ mod gateway_route_tests {
                 last_error: None,
                 wireguard: None,
                 wireguard_status: None,
+                wireguard_ingresses: Vec::new(),
                 wireguard_public_key: None,
                 wireguard_enrolled: false,
             };
@@ -6817,22 +6819,25 @@ mod window_op_route_tests {
             while let Some(op) = rx.recv().await {
                 if let DesktopWindowOp::GenerateWireguardKey { id, reply } = op {
                     let outcome = match id.as_str() {
-                        "gw-1" => Ok(WireguardKeyOutcome::Generated(crate::GatewayEntry {
-                            id,
-                            url: "https://gw.chan.app".into(),
-                            label: String::new(),
-                            enabled: true,
-                            status: crate::GatewayStatus::Disconnected,
-                            pending_signin: false,
-                            devserver_count: 0,
-                            last_error: None,
-                            wireguard: None,
-                            wireguard_status: None,
-                            wireguard_public_key: Some(
-                                "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into(),
-                            ),
-                            wireguard_enrolled: false,
-                        })),
+                        "gw-1" => Ok(WireguardKeyOutcome::Generated(Box::new(
+                            crate::GatewayEntry {
+                                id,
+                                url: "https://gw.chan.app".into(),
+                                label: String::new(),
+                                enabled: true,
+                                status: crate::GatewayStatus::Disconnected,
+                                pending_signin: false,
+                                devserver_count: 0,
+                                last_error: None,
+                                wireguard: None,
+                                wireguard_status: None,
+                                wireguard_ingresses: Vec::new(),
+                                wireguard_public_key: Some(
+                                    "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into(),
+                                ),
+                                wireguard_enrolled: false,
+                            },
+                        ))),
                         "gw-plain" => Ok(WireguardKeyOutcome::NotOffered),
                         "gw-ghost" => Ok(WireguardKeyOutcome::NotFound),
                         _ => Err("gateway discovery failed: offline".to_string()),

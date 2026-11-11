@@ -865,8 +865,15 @@ file-classes-check: ## Verify the frontend path classifier mirrors chan-workspac
 web-marketing-check: ## Run marketing site checks.
 	cd web && $(NPM) install && $(NPM) run check -w @chan/marketing
 
+.PHONY: wireguard-enrollment-test
+wireguard-enrollment-test: ## Run the Linux desktop WireGuard enrollment helper tests.
+	$(LINUX_ONLY)
+	node --test scripts/e2e/stub-identity.test.mjs \
+		scripts/e2e/wireguard-enrollment-oracle.test.mjs \
+		scripts/e2e/desktop-wireguard-enrollment.test.mjs
+
 .PHONY: e2e-check
-e2e-check: ## Syntax-check the e2e harness and the desktop shell's JavaScript.
+e2e-check: ## Check e2e syntax and, on Linux, the WireGuard enrollment helpers.
 	# scripts/e2e produces nothing but a verdict and desktop/src ships in
 	# every desktop release, yet no cargo or npm target reads either, so a
 	# syntax error in them surfaces as a broken run instead of a failed
@@ -874,6 +881,9 @@ e2e-check: ## Syntax-check the e2e harness and the desktop shell's JavaScript.
 	# scripts. The driver is Python because this target runs on the Windows
 	# runner too, and it fails when a pattern matches nothing.
 	$(PYTHON) scripts/check-e2e-syntax.py
+ifeq ($(UNAME_S),Linux)
+	$(MAKE) wireguard-enrollment-test
+endif
 
 .PHONY: models
 models: ## Pre-fetch the optional embedded search model.
