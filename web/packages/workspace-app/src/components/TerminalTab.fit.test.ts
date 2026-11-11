@@ -36,9 +36,36 @@ installTerminalDom();
 /// Past the trailing fit's 120ms settle.
 const SETTLED = 170;
 
+const ownCancelFrame = globalThis.cancelAnimationFrame;
+
 afterEach(() => {
   resetTerminals();
+  globalThis.cancelAnimationFrame = ownCancelFrame;
 });
+
+/// Hold the page's animation frames until the test runs them, as a hidden
+/// page holds them until its window comes back. `resetTerminals` puts the
+/// harness's synchronous frame back.
+function holdFrames() {
+  const queue = new Map<number, FrameRequestCallback>();
+  let next = 1;
+  globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    const handle = next++;
+    queue.set(handle, callback);
+    return handle;
+  }) as typeof requestAnimationFrame;
+  globalThis.cancelAnimationFrame = ((handle: number) => {
+    queue.delete(handle);
+  }) as typeof cancelAnimationFrame;
+  return {
+    pending: () => queue.size,
+    run() {
+      const callbacks = [...queue.values()];
+      queue.clear();
+      for (const callback of callbacks) callback(0);
+    },
+  };
+}
 
 async function mounted(props: { active?: boolean } = {}) {
   const [tab] = seatTerminals([terminalTab()]);
@@ -77,6 +104,38 @@ describe("the fit", () => {
 
     await new Promise((r) => setTimeout(r, SETTLED));
     expect(xterm.fit.calls - before, "one trailing fit after the last").toBe(4);
+  });
+});
+
+// A window off-screen gets no animation frame, so the fits its resizes ask
+// for wait for the frame in which it comes back.
+describe("the fit while frames are held", () => {
+  test("many resizes wait as one fit, which reads the host's size when it runs", async () => {
+    const { socket } = await mounted();
+    await attach(socket);
+    const frames = holdFrames();
+    const before = xterm.fit.calls;
+    const observer = resizeObservers.at(-1)!;
+    for (let resized = 0; resized < 500; resized++) observer.callback();
+    expect(frames.pending(), "one frame however many resizes").toBe(1);
+
+    xterm.fit.size = { cols: 120, rows: 40 };
+    frames.run();
+    expect(xterm.fit.calls - before, "one fit in the frame back").toBe(1);
+    expect(resizeFrames(socket).at(-1)).toEqual({ type: "resize", cols: 120, rows: 40 });
+
+    observer.callback();
+    expect(frames.pending(), "a resize after the frame ran asks for another").toBe(1);
+  });
+
+  test("a fit still waiting for its frame is cancelled at teardown", async () => {
+    await mounted();
+    const frames = holdFrames();
+    resizeObservers.at(-1)!.callback();
+    expect(frames.pending()).toBe(1);
+
+    resetTerminals();
+    expect(frames.pending(), "nothing waits for a frame after teardown").toBe(0);
   });
 });
 
