@@ -1,6 +1,6 @@
 # chan cannot be opened as a file browser or Markdown editor
 
-Status: raised by the owner on 2026-11-09 and accepted for v0.128.0 the same day; not started.
+Status: raised by the owner on 2026-11-09 and accepted for v0.128.0 the same day; in build since 2026-11-11 (the open-path request and the launch's arguments first; the verb's name chosen by the owner, below).
 
 ## What is there now
 
@@ -18,6 +18,10 @@ Status: raised by the owner on 2026-11-09 and accepted for v0.128.0 the same day
 3. The CLI has a verb for the same thing, so `chan <verb> PATH` opens a directory or file in a standalone window of the running desktop or devserver. Naming it is hard, since `chan open` is a visible alias of `chan serve`: the item evaluates the options (a new verb, re-pointing `chan open`, or a flag) with what each breaks for existing users and scripts, and records the owner's choice before the verb is built (owner, 2026-11-09).
 4. Linux: the desktop entry, packaged and in the AppImage, declares `inode/directory` and `text/markdown` (at least) with a field code, so `xdg-open` and the desktop environment's Open With can use chan, and the user can make it the default file browser or Markdown editor with `xdg-mime`; installing chan does not make it the default by itself.
 5. macOS: the bundle declares Markdown as a document type chan can edit, without claiming to be its default, so it shows in Open With and can be made the default Markdown app in Finder's Get Info; Finder's open, a double click once it is the default, and `open -a` deliver the file to a standalone window. Being the default file browser is not a goal on macOS.
+
+## The verb, chosen 2026-11-11
+
+Contract 3's spelling is `chan edit PATH...`, a new verb; `chan open` stays the alias of `chan serve`, the public spelling for opening a workspace since v0.112.0. The owner chose it from the team's note, which weighed the three options the contract names: a new verb breaks nothing and costs one help line telling two ways of opening a directory apart (`chan open DIR` serves a workspace, `chan edit DIR` opens a file browser in a standalone window); re-pointing `chan open` would be the more coherent end state but reverses the launcher's hints, four manual pages, both help heads and the agent skill two weeks after they shipped, with `chan open newproj` making an empty file where it made a workspace; a flag on `chan serve` hides the verb from `chan -h` and conflicts with most of serve's flags. `edit` reads as editors do (`vim .`, `code .` open a directory as a tree and a new name as an empty file, the standalone rule), takes a free prefix letter, and returns at once (`EDITOR="chan edit"` is not a waiting editor; a `--wait` is a later row if wanted).
 
 ## Boundaries
 
