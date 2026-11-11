@@ -9044,6 +9044,42 @@ mod tests {
         }
     }
 
+    /// `chan-files` and `chan-edit` run the CLI from the probe that runs
+    /// `chan`, parsed under the name the probe read. Without the opener check
+    /// a link of either name would boot the GUI, which opens its arguments as
+    /// launch paths anyway, so only the help and the routing would change,
+    /// and nothing else would notice.
+    #[test]
+    fn the_opener_names_run_the_cli_as_chan_does() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let probe = source_region(
+            production,
+            "\nfn run_as_chan_if_requested(",
+            "\nasync fn run_mcp_proxy(",
+        );
+        let check = probe
+            .find("!chan::invoked_as_opener(&arg0)")
+            .expect("the chan probe also takes the opener names");
+        let run = probe
+            .find("chan::run_invoked_as(\n        arg0,")
+            .expect("the CLI parses under the name the probe read");
+        assert!(
+            check < run,
+            "the probe checks the name before it runs the CLI"
+        );
+        let attach = source_region(
+            production,
+            "\nfn attach_parent_console_for_cli() {",
+            "\n/// Win32 console-attach mechanics",
+        );
+        assert!(
+            attach.contains("!chan::invoked_as_opener(&arg0)"),
+            "the openers reattach the parent console on Windows as chan and cs do"
+        );
+    }
+
     /// Only the GUI boot refuses a second instance. Every CLI personality
     /// (`__mcp-proxy`, `cs`, `chan`, `--version`) and the default-terminal
     /// launch returns from `main` before the single-instance guard, so none of
