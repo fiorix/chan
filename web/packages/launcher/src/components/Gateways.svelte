@@ -141,19 +141,21 @@
         {#if gw.wireguard_public_key}
           <span class="gw-addr-row gw-wg-key">
             <span class="gw-glyph"></span>
-            <span class="chip">WireGuard key</span>
-            <PrivateField field={`gateway:${gw.id}:key`} label="WireGuard public key"><span class="gw-url gw-wg-key-prefix" title={gw.wireguard_public_key}
-              >{gw.wireguard_public_key.slice(0, 8)}</span></PrivateField>
-            <button
-              class="icon-btn gw-wg-copy"
-              type="button"
-              title="Copy the WireGuard public key"
-              aria-label={`Copy the WireGuard public key of ${privateText(gatewayName(gw), "gateway")}`}
-              onclick={() => run(copyPublicKey(gw.wireguard_public_key!))}>
-              <Copy size={12} />
-            </button>
-            <span class="gw-url gw-wg-enrolled">
-              {gw.wireguard_enrolled ? "enrolled" : "not enrolled: connect to sign in"}
+            <span class="gw-line">
+              <span class="chip">WireGuard key</span>
+              <PrivateField field={`gateway:${gw.id}:key`} label="WireGuard public key"><span class="gw-url gw-wg-key-prefix" title={gw.wireguard_public_key}
+                >{gw.wireguard_public_key.slice(0, 8)}</span></PrivateField>
+              <button
+                class="icon-btn gw-wg-copy"
+                type="button"
+                title="Copy the WireGuard public key"
+                aria-label={`Copy the WireGuard public key of ${privateText(gatewayName(gw), "gateway")}`}
+                onclick={() => run(copyPublicKey(gw.wireguard_public_key!))}>
+                <Copy size={12} />
+              </button>
+              <span class="gw-url gw-wg-enrolled">
+                {gw.wireguard_enrolled ? "enrolled" : "not enrolled: connect to sign in"}
+              </span>
             </span>
           </span>
         {/if}
@@ -161,29 +163,33 @@
           {#each gw.wireguard_ingresses as ingress (ingress.id)}
             <span class="gw-addr-row gw-wireguard gw-wg-ingress">
               <span class="gw-glyph"></span>
-              <span class="chip">WireGuard</span>
-              <span class="gw-wg-fixed">
-                <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:id`} label="WireGuard ingress"><span class="gw-url gw-wg-id" title={ingress.id}>{ingress.id}</span></PrivateField>
-              </span>
-              <span class="gw-wg-detail">
-                <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={ingress.status}>{ingress.status}</span></PrivateField>
+              <span class="gw-line">
+                <span class="chip">WireGuard</span>
+                <span class="gw-wg-fixed">
+                  <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:id`} label="WireGuard ingress"><span class="gw-url gw-wg-id" title={ingress.id}>{ingress.id}</span></PrivateField>
+                </span>
+                <span class="gw-wg-detail">
+                  <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={ingress.status}>{ingress.status}</span></PrivateField>
+                </span>
               </span>
             </span>
           {/each}
         {:else if gw.wireguard || gw.wireguard_status || gw.wireguard_enrolled}
           <span class="gw-addr-row gw-wireguard">
             <span class="gw-glyph"></span>
-            <span class="chip">WireGuard</span>
-            {#if gw.wireguard_status}
-              <span class="gw-wg-summary">
-                <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
-              </span>
-            {/if}
-            {#if gw.wireguard}
-              <span class="gw-wg-detail">
-                <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
-              </span>
-            {/if}
+            <span class="gw-line">
+              <span class="chip">WireGuard</span>
+              {#if gw.wireguard_status}
+                <span class="gw-wg-summary">
+                  <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
+                </span>
+              {/if}
+              {#if gw.wireguard}
+                <span class="gw-wg-detail">
+                  <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+                </span>
+              {/if}
+            </span>
           </span>
         {/if}
       </div>
@@ -325,6 +331,29 @@
     display: flex;
     align-items: center;
     gap: 0.45rem;
+    min-width: 0;
+  }
+
+  /* A chip is a label: it keeps its words on one line, and the text beside
+     it gives way first. */
+  .gw-id .chip {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* What follows a chip wraps below it rather than cut a word short when
+     the card is narrow (with privacy mode on a mask is wider than the key's
+     eight characters): the key, its copy action and whether the gateway
+     enrolled it; an ingress's id; the summary. A status or file beside them
+     (`.gw-wg-detail`) takes the width left on its line and ends in an
+     ellipsis, as does any part wider than a whole line. The line fills its
+     row, so that width is the row's. */
+  .gw-line {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.1rem 0.45rem;
     min-width: 0;
   }
 

@@ -6,8 +6,10 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync, tick } from "svelte";
+import { compile } from "svelte/compiler";
 import { setPrivacy } from "@chan/web-shared/privacy";
 import Gateways from "./Gateways.svelte";
+import gatewaysSource from "./Gateways.svelte?raw";
 import { addGateway, library } from "../state/library.svelte";
 import * as libraryActions from "../state/library.svelte";
 import { backend } from "../api/backend";
@@ -909,5 +911,108 @@ describe("Gateways WireGuard ingresses", () => {
     flushSync();
     expect(ingressRows(el)).toEqual([["private-node-b", ingresses[1].status], [undefined, undefined]]);
     expect(el.innerHTML).not.toContain(ingresses[0].status);
+  });
+});
+
+// A narrow card (the launcher at its 640 px minimum, where privacy mode's
+// masks are wider than a key's eight characters) has no room for a
+// WireGuard row's parts on one line. Vitest loads no component CSS and jsdom
+// lays nothing out, so these compile the component's scoped rules with the
+// scope hash the mounted card carries and read the computed declarations
+// that keep the chips whole and let the rest wrap below them.
+describe("Gateways WireGuard rows on a narrow card", () => {
+  const KEY = "VC4iwoJ2wtcsxQssd+OIlaneI45CL0CRy1vZSsryu38=";
+  let sheet: HTMLStyleElement | null = null;
+
+  afterEach(async () => {
+    sheet?.remove();
+    sheet = null;
+    await setPrivacy({ enabled: false });
+  });
+
+  function styled(card: Element): void {
+    const hash = [...card.querySelector(".gw-id")!.classList].find((c) => /^svelte-[a-z0-9]+$/.test(c));
+    if (!hash) throw new Error("no scope hash on the card");
+    const css = compile(gatewaysSource, { filename: "Gateways.svelte", css: "external", cssHash: () => hash }).css?.code;
+    if (!css) throw new Error("no stylesheet compiled");
+    sheet = document.createElement("style");
+    sheet.textContent = css;
+    document.head.append(sheet);
+  }
+
+  /// A connected gateway with a key and either two listed ingresses or, with
+  /// none listed, the summary line of a manual file.
+  function wireguardCard(ingresses: boolean): Element {
+    library.gateways = [
+      gw({
+        label: "prod",
+        status: "connected",
+        wireguard_public_key: KEY,
+        wireguard_enrolled: true,
+        wireguard_status: "up",
+        wireguard: ingresses ? null : "/home/u/.chan/wireguard/prod.conf",
+        wireguard_ingresses: ingresses
+          ? [{ id: "p1", status: "up" }, { id: "p2", status: "connecting; endpoint did not resolve: p2-endpoint.example: retrying" }]
+          : [],
+      }),
+    ];
+    const card = render().querySelector("section.gateway-card")!;
+    styled(card);
+    return card;
+  }
+
+  it.each([true, false])("every chip keeps its words on one line and does not shrink (ingresses listed: %s)", (ingresses) => {
+    const chips = [...wireguardCard(ingresses).querySelectorAll(".gw-id .chip")];
+    expect(chips.map((chip) => chip.textContent!.trim())).toEqual(
+      ingresses ? ["0 devservers", "WireGuard key", "WireGuard", "WireGuard"] : ["0 devservers", "WireGuard key", "WireGuard"],
+    );
+    for (const chip of chips) {
+      const style = getComputedStyle(chip);
+      expect.soft(style.whiteSpace, chip.textContent!).toBe("nowrap");
+      expect.soft(style.flexShrink, chip.textContent!).toBe("0");
+    }
+  });
+
+  it.each([
+    [true, ".gw-wg-key", [".chip", ".gw-wg-key-prefix", ".gw-wg-copy", ".gw-wg-enrolled"]],
+    [true, ".gw-wg-ingress", [".chip", ".gw-wg-fixed .gw-wg-id", ".gw-wg-detail .gw-wg-status"]],
+    [false, ".gw-wireguard", [".chip", ".gw-wg-summary .gw-wg-status", ".gw-wg-detail .gw-wg-file"]],
+  ])("with ingresses listed %s, every %s row's parts sit on one line that fills the row and wraps below its chip", (ingresses, row, parts) => {
+    const rows = [...wireguardCard(ingresses).querySelectorAll(row)];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const element of rows) {
+      const line = element.querySelector(":scope > .gw-line");
+      expect(line).not.toBeNull();
+      const style = getComputedStyle(line!);
+      expect(style.display).toBe("flex");
+      expect(style.flexWrap).toBe("wrap");
+      expect(style.flexGrow).toBe("1");
+      for (const part of parts) expect.soft(line!.querySelector(part), part).not.toBeNull();
+    }
+  });
+
+  it("inside the line an ingress id keeps its width and its status takes what is left", () => {
+    for (const row of wireguardCard(true).querySelectorAll(".gw-wg-ingress")) {
+      const fixed = getComputedStyle(row.querySelector(".gw-line > .gw-wg-fixed")!);
+      const detail = getComputedStyle(row.querySelector(".gw-line > .gw-wg-detail")!);
+      expect(fixed.flexShrink).toBe("0");
+      expect(detail.flexGrow).toBe("1");
+      expect(detail.minWidth).toBe("0px");
+      expect(detail.overflow).toBe("hidden");
+    }
+  });
+
+  it.each([true, false])("with privacy on the masks sit in their rows' lines (ingresses listed: %s)", async (ingresses) => {
+    await setPrivacy({ enabled: true });
+    const card = wireguardCard(ingresses);
+    expect(card.querySelectorAll(".gw-wg-key > .gw-line .redacted")).toHaveLength(1);
+    expect(card.querySelector(".gw-wg-key > .gw-line .gw-wg-enrolled")!.textContent!.trim()).toBe("enrolled");
+    if (ingresses) {
+      for (const row of card.querySelectorAll(".gw-wg-ingress")) {
+        expect(row.querySelectorAll(":scope > .gw-line .redacted")).toHaveLength(2);
+      }
+    } else {
+      expect(card.querySelectorAll(".gw-wireguard > .gw-line .redacted")).toHaveLength(2);
+    }
   });
 });
