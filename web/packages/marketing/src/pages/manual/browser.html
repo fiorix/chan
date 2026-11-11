@@ -55,6 +55,7 @@ http://127.0.0.1:8787/?t=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u</code></pre>
   <pre class="sample-output"><code>STATE    BY                PID  READY       GEN      PASS       ACTION     INDEXER   QUEUE  WORKSPACE
 served   standalone      41873  -           -        -          -          -             -  /home/user/notes</code></pre>
   <p><code>chan workspace ls</code> lists every registered workspace, served or not, and <code>chan workspace forget ~/notes</code> removes one along with chan's data about it. Your files are never touched.</p>
+  <p>When the desktop serves a workspace, a local <code>chan close</code> or <code>chan workspace forget</code> allows time for the desktop to release it. If it answers <code>workspace is still releasing; retry</code>, the workspace is off and its cleanup continues; retry the command once that cleanup finishes.</p>
   <p class="minor">Under the hood: while it runs, the server indexes the workspace for <a href="/manual/search/">search</a> and the graph, watches the directory and pushes changes to every open window, hosts the <a href="/manual/collaboration/">sessions</a> of the browsers attached to it, and runs <a href="/manual/extensions/">extensions</a>. Everything it derives lives under <code>~/.chan</code> (or <code>$CHAN_HOME</code>), never inside your directory. <a href="https://github.com/fiorix/chan/blob/main/design.md#the-workspace">design.md</a> describes the server and the workspace.</p>
 </section>
 

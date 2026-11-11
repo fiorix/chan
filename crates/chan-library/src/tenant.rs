@@ -229,7 +229,8 @@ pub enum UnserveMode {
     Unsupported,
 }
 
-const TENANT_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Cooperative grace before unfinished tenant tasks are aborted and joined.
+pub const TENANT_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Owns the background tasks whose lifetime is bounded by one tenant.
 ///

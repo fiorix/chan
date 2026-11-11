@@ -54,7 +54,7 @@ const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 /// workspace bound cell teardown and the writer-lock check together by it.
 /// A close whose workspace is still held when it runs out answers that the
 /// workspace is still releasing and leaves the hop running.
-const WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often a close's teardown hop looks, past that budget, for its
 /// workspace to be let go. Each look opens the writer lock's file under the
 /// chan home, and a teardown held on a root that stopped answering looks

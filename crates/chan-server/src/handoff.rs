@@ -275,7 +275,9 @@ impl Request {
 
     /// How long a one-shot client waits for this request's reply once the
     /// connection is up. The devserver-registry verbs answer from memory and
-    /// keep the 3 s window; the remote workspace arms wait on a devserver
+    /// keep the 3 s window. A local close or forget allows the tenant-task
+    /// grace, the workspace release wait, and 3 s for dispatch and the reply.
+    /// The remote workspace arms wait on a devserver
     /// round-trip (a mount can take up to the server's own 60 s mount timeout,
     /// an unmount drains terminals with a bounded wait), so their budget sits
     /// above those timeouts and the server's error, not the client's
@@ -283,6 +285,11 @@ impl Request {
     #[cfg(any(unix, windows))]
     pub fn reply_budget(&self) -> Duration {
         match self {
+            Request::CloseWorkspace { .. } => {
+                chan_library::tenant::TENANT_TASK_SHUTDOWN_GRACE
+                    + chan_library::host::WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT
+                    + Duration::from_secs(3)
+            }
             Request::ServeRemoteWorkspace { .. } => Duration::from_secs(75),
             Request::CloseRemoteWorkspace { .. } | Request::ForgetRemoteWorkspace { .. } => {
                 Duration::from_secs(30)
@@ -1526,7 +1533,7 @@ async fn try_close_workspace_at(
         workspace_path: workspace_path.display().to_string(),
         remove,
     };
-    let Ok(line) = request_endpoint(socket_path, &req, IO_TIMEOUT).await else {
+    let Ok(line) = request_endpoint(socket_path, &req, req.reply_budget()).await else {
         return Outcome::NoDesktop;
     };
 
@@ -1574,7 +1581,7 @@ pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome
 
     let (read, mut write) = tokio::io::split(client);
     let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
+    let line = match tokio::time::timeout(req.reply_budget(), io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => line,
         _ => return Outcome::NoDesktop,
     };
@@ -3700,7 +3707,21 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn reply_budget_is_three_seconds_for_registry_verbs_and_longer_for_remote_arms() {
+    fn reply_budget_covers_local_teardown_and_preserves_the_other_verbs() {
+        for remove in [false, true] {
+            let close = Request::CloseWorkspace {
+                protocol: PROTOCOL_VERSION,
+                cli_version: "9.9.9".into(),
+                workspace_path: "/srv/notes".into(),
+                remove,
+            };
+            assert!(
+                close.reply_budget()
+                    > chan_library::tenant::TENANT_TASK_SHUTDOWN_GRACE
+                        + chan_library::host::WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT,
+                "local close and forget must leave room for the teardown reply"
+            );
+        }
         let base = |target: &str| Request::ConnectDevserver {
             protocol: PROTOCOL_VERSION,
             cli_version: "9.9.9".into(),
@@ -3727,6 +3748,33 @@ mod tests {
             .reply_budget(),
             Duration::from_secs(30)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_close_and_forget_receive_retry_after_the_release_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        for remove in [false, true] {
+            let listener = start_listener(sock.clone(), move |request| async move {
+                assert!(matches!(
+                    request,
+                    Request::CloseWorkspace { remove: actual, .. } if actual == remove
+                ));
+                tokio::time::sleep(chan_library::host::WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT).await;
+                Response::Error {
+                    message: chan_library::host::WORKSPACE_STILL_RELEASING.into(),
+                }
+            })
+            .unwrap();
+            let outcome = try_close_workspace_at(&sock, Path::new("/srv/notes"), remove).await;
+            assert!(
+                matches!(&outcome, Outcome::DesktopError { message }
+                    if message == chan_library::host::WORKSPACE_STILL_RELEASING),
+                "the release retry must reach the CLI before its reply deadline: {outcome:?}"
+            );
+            drop(listener);
+        }
     }
 
     #[cfg(unix)]
