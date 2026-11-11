@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  createFitFrameScheduler,
   createTrailingFitScheduler,
   proposeGhosttyDimensions,
   runTerminalFit,
@@ -114,5 +115,90 @@ describe("terminal resize helpers", () => {
     expect(runFit).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(runFit).toHaveBeenCalledTimes(1);
+  });
+});
+
+/// A frame host that holds every frame until the test runs them, as a hidden
+/// page holds them until its window comes back.
+function heldFrames() {
+  const queue = new Map<number, () => void>();
+  let next = 1;
+  const requestFrame = vi.fn((callback: () => void) => {
+    const handle = next++;
+    queue.set(handle, callback);
+    return handle;
+  });
+  const cancelFrame = vi.fn((handle: number) => {
+    queue.delete(handle);
+  });
+  return {
+    host: { requestFrame, cancelFrame },
+    pending: () => queue.size,
+    run() {
+      const callbacks = [...queue.values()];
+      queue.clear();
+      for (const callback of callbacks) callback();
+    },
+  };
+}
+
+describe("the leading-edge fit frame", () => {
+  test("many requests while a frame is pending queue one frame and one fit", () => {
+    const frames = heldFrames();
+    const runFit = vi.fn();
+    const scheduler = createFitFrameScheduler(runFit, frames.host);
+
+    for (let asked = 0; asked < 1000; asked++) scheduler.request();
+    expect(frames.host.requestFrame).toHaveBeenCalledTimes(1);
+    expect(frames.pending()).toBe(1);
+
+    frames.run();
+    expect(runFit).toHaveBeenCalledTimes(1);
+
+    scheduler.request();
+    expect(frames.host.requestFrame, "a request after the frame ran schedules again").toHaveBeenCalledTimes(2);
+  });
+
+  test("cancel drops the pending frame, and a later request schedules again", () => {
+    const frames = heldFrames();
+    const runFit = vi.fn();
+    const scheduler = createFitFrameScheduler(runFit, frames.host);
+
+    scheduler.request();
+    scheduler.cancel();
+    expect(frames.host.cancelFrame).toHaveBeenCalledWith(1);
+    expect(frames.pending()).toBe(0);
+
+    scheduler.request();
+    expect(frames.host.requestFrame).toHaveBeenCalledTimes(2);
+    frames.run();
+    expect(runFit).toHaveBeenCalledTimes(1);
+  });
+
+  test("cancel with nothing pending cancels nothing", () => {
+    const frames = heldFrames();
+    const scheduler = createFitFrameScheduler(vi.fn(), frames.host);
+    scheduler.cancel();
+    scheduler.request();
+    frames.run();
+    scheduler.cancel();
+    expect(frames.host.cancelFrame).not.toHaveBeenCalled();
+  });
+
+  test("a host that runs the frame before returning fits on every request", () => {
+    // The component tests' frame stub runs the callback synchronously, as no
+    // browser does; the handle it returns names a frame that already ran.
+    const runFit = vi.fn();
+    const requestFrame = vi.fn((callback: () => void) => {
+      callback();
+      return 0;
+    });
+    const cancelFrame = vi.fn();
+    const scheduler = createFitFrameScheduler(runFit, { requestFrame, cancelFrame });
+    for (let asked = 0; asked < 3; asked++) scheduler.request();
+    expect(requestFrame).toHaveBeenCalledTimes(3);
+    expect(runFit).toHaveBeenCalledTimes(3);
+    scheduler.cancel();
+    expect(cancelFrame).not.toHaveBeenCalled();
   });
 });

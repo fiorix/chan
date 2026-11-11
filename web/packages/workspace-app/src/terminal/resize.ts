@@ -67,6 +67,51 @@ export function shouldReclaimPtySize(
   return event.isTrusted && pty !== null && (pty.cols !== local.cols || pty.rows !== local.rows);
 }
 
+/// What a pending fit waits on: the next animation frame. Injectable so a
+/// test drives it without a browser.
+export type FitFrameHost = {
+  requestFrame: (callback: () => void) => number;
+  cancelFrame: (handle: number) => void;
+};
+
+/// The leading-edge fit, pending at most once at a time. A hidden page gets
+/// no animation frame, so every fit asked for while its window is off-screen
+/// waits for the frame in which the window comes back. The fit reads the
+/// host's size when it runs, so asking again while one is pending adds
+/// nothing: the pending fit already fits the host as it is then.
+export function createFitFrameScheduler(
+  runFit: () => void,
+  host: FitFrameHost = {
+    requestFrame: (callback) => requestAnimationFrame(callback),
+    cancelFrame: (handle) => cancelAnimationFrame(handle),
+  },
+): {
+  request(): void;
+  cancel(): void;
+} {
+  let frame: number | null = null;
+  return {
+    request() {
+      if (frame !== null) return;
+      // A host that runs the callback before returning (a test's
+      // synchronous frame) has nothing pending once it returns; keeping its
+      // handle would refuse every later request.
+      let ran = false;
+      const handle = host.requestFrame(() => {
+        ran = true;
+        frame = null;
+        runFit();
+      });
+      if (!ran) frame = handle;
+    },
+    cancel() {
+      if (frame === null) return;
+      host.cancelFrame(frame);
+      frame = null;
+    },
+  };
+}
+
 export function createTrailingFitScheduler(runFit: () => void, delayMs = 120): {
   schedule(): void;
   clear(): void;

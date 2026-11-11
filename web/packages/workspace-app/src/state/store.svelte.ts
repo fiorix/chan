@@ -2193,7 +2193,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
   }
   if (frame.command === "window_labeled" && typeof frame.label === "string") {
     // The caption changed from the launcher. Every surface keeps it for the
-    // pane tree's window name; only a browser retitles its document, since a
+    // window tab bar's title; only a browser retitles its document, since a
     // desktop window's name is its OS titlebar, which the window watcher
     // retitles.
     applyWindowLabel(frame.label);

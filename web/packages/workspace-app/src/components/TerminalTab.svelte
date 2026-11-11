@@ -191,6 +191,7 @@
   } from "../terminal/renderer";
   import { resolveReadyTerminalFont } from "../terminal/font";
   import {
+    createFitFrameScheduler,
     createTrailingFitScheduler,
     proposeGhosttyDimensions,
     runTerminalFit,
@@ -576,6 +577,7 @@
   // macOS display/system sleep in WKWebView; the detector catches it off the
   // wall clock instead.
   let disposeWakeGap: (() => void) | null = null;
+  const fitFrame = createFitFrameScheduler(fitToHost);
   const trailingFit = createTrailingFitScheduler(fitToHost);
   // While output arrives at an unfocused terminal the unseen-output
   // dot pulses; this timer flips it solid once output has been quiet
@@ -2562,7 +2564,7 @@
   }
 
   function queueFit(): void {
-    requestAnimationFrame(fitToHost);
+    fitFrame.request();
     // Trailing-edge fit. ResizeObserver sometimes misses or swallows
     // the FINAL resize event of a drag gesture (a browser quirk: the
     // observer batches and can collapse intermediate sizes when the
@@ -2570,7 +2572,7 @@
     // `display: none` ↔ visible on tab switch). Without a
     // trailing-edge fit, the terminal stays at the size from
     // the FIRST observed resize tick instead of the FINAL pane
-    // width. The rAF above handles the leading edge; the
+    // width. The frame fit above handles the leading edge; the
     // debounced trailing fit below converges on the steady-
     // state size 120ms after the last observed change. Idempotent
     // when the size hasn't drifted: `fit.fit` short-circuits +
@@ -2607,6 +2609,7 @@
       clearTimeout(sessionSaveTimer);
       sessionSaveTimer = null;
     }
+    fitFrame.cancel();
     trailingFit.clear();
     clearHostResumeTimers();
     rendererRepaint.cancel();

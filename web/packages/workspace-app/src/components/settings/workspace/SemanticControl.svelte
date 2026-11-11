@@ -7,6 +7,7 @@
 
   import { onDestroy, onMount } from "svelte";
   import { api } from "../../../api/client";
+  import { formatSize } from "../../../state/format";
   import type {
     BuildInfo,
     SemanticModelRegistry,
@@ -109,8 +110,7 @@
 
   function formatModelSize(bytes: number | null | undefined): string {
     if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return "size unknown";
-    const mb = bytes / (1024 * 1024);
-    return `${mb.toFixed(1)} MB`;
+    return formatSize(bytes);
   }
 
   function formatModelMeta(model: SemanticModelRegistry["models"][number]): string {

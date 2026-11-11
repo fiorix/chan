@@ -13,6 +13,7 @@
   import { api } from "../api/client";
   import { errorText } from "../api/errors";
   import { tree, refreshTree, importStatus } from "../state/store.svelte";
+  import { formatSize } from "../state/format";
   import ModalShell from "./ModalShell.svelte";
 
   type Provider = { id: "google"; label: string; instructions: string };
@@ -195,7 +196,7 @@
           />
           {#if file}
             <div class="picked">
-              Selected: <strong>{file.name}</strong> ({fmtBytes(file.size)})
+              Selected: <strong>{file.name}</strong> ({formatSize(file.size)})
             </div>
           {/if}
         </div>
@@ -343,11 +344,6 @@
     if (s === "file") return file !== null;
     if (s === "folder") return true;
     return false;
-  }
-  function fmtBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 </script>
 

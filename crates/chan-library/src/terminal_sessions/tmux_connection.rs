@@ -1021,10 +1021,11 @@ impl TmuxConnection {
     }
 
     /// tmux named `window`: its chan window takes the label the name makes,
-    /// so the window's title, its pane tree's heading and the launcher read
-    /// what tmux calls it. Its panes keep their own names: with automatic
-    /// renaming a window's name is its active pane's command, which is no
-    /// name for the panes beside it.
+    /// so the window's title, in the OS title bar or in the window tab bar
+    /// when tabs sit in the title bar, and the launcher read what tmux calls
+    /// it. Its panes keep their own names: with automatic renaming a
+    /// window's name is its active pane's command, which is no name for the
+    /// panes beside it.
     fn window_named(&mut self, window: WindowId, name: String, steps: &mut Vec<Step>) {
         let Some(w) = self.windows.get_mut(&window) else {
             return;

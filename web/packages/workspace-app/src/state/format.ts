@@ -2,13 +2,15 @@
 // COCOMO months, developers and cost) and path helpers (`parentDir`,
 // `basename`), each defined once for the callers that share its rule.
 
-/** Human-friendly byte size (B / KB / MB / GB). One decimal at all
- *  scales above bytes; bytes are rendered as integers. */
+/** Human-friendly byte size (B / KB / MB / GB / TB), in steps of 1024.
+ *  One decimal at all scales above bytes; bytes are rendered as
+ *  integers. The one spelling of a size across the workspace app. */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  return `${(bytes / 1024 / 1024 / 1024 / 1024).toFixed(1)} TB`;
 }
 
 /** Relative time for an mtime (Unix epoch seconds). Falls back to an
