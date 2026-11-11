@@ -18,6 +18,8 @@ permissions = [
   "allow-platform-os",
   "allow-read-clipboard-text",
   "allow-write-clipboard-text",
+  "allow-read-primary-selection",
+  "allow-write-primary-selection",
   "allow-read-clipboard-image",
   "allow-write-clipboard-image",
   "allow-read-clipboard-html",
@@ -63,6 +65,8 @@ permissions = [
   "allow-platform-os",
   "allow-read-clipboard-text",
   "allow-write-clipboard-text",
+  "allow-read-primary-selection",
+  "allow-write-primary-selection",
   "allow-read-clipboard-image",
   "allow-write-clipboard-image",
   "allow-read-clipboard-html",
@@ -359,3 +363,13 @@ commands.allow = ["privacy_settings"]
 identifier = "allow-set-privacy-settings"
 description = "Change privacy settings for the viewing desktop."
 commands.allow = ["set_privacy_settings"]
+
+[[permission]]
+identifier = "allow-read-primary-selection"
+description = "Reads the native PRIMARY selection on Linux and FreeBSD."
+commands.allow = ["read_primary_selection"]
+
+[[permission]]
+identifier = "allow-write-primary-selection"
+description = "Writes the native PRIMARY selection on Linux and FreeBSD."
+commands.allow = ["write_primary_selection"]

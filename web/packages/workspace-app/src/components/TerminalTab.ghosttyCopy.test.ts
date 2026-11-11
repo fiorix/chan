@@ -45,6 +45,8 @@ import {
   TERMINAL_PANE,
   TerminalSocket,
   terminalTab,
+  xterm,
+  pressInTerminal,
 } from "../__tests__/terminalTab";
 
 /// What a case reads of the ghostty terminal stand-in.
@@ -242,6 +244,7 @@ afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   TerminalSocket.all.splice(0);
   ghostty.terminals.splice(0);
+  xterm.terminals.splice(0);
   __testSetStandalonePreferences(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -418,5 +421,184 @@ describe("pasting into a ghostty terminal", () => {
     );
     await tick();
     expect(inputs().slice(before + 2), "an insertFromPaste input").toEqual([CLEANED]);
+  });
+});
+
+describe("the Linux desktop PRIMARY selection", () => {
+  function desktop(primary: string | null = "from another application") {
+    const invoke = vi.fn(async (cmd: string, _args?: unknown) => cmd === "read_primary_selection" ? primary : undefined);
+    tauri.__TAURI_INTERNALS__ = { invoke };
+    return invoke;
+  }
+
+  function middle(host: HTMLElement): MouseEvent {
+    for (const type of ["mousedown", "mouseup"]) {
+      host.dispatchEvent(new MouseEvent(type, { button: 1, bubbles: true, cancelable: true }));
+    }
+    const event = new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true });
+    host.dispatchEvent(event);
+    return event;
+  }
+
+  function inputs(): string[] {
+    return sentFrames(TerminalSocket.all[0]!).filter((f) => f.type === "input").map((f) => f.data as string);
+  }
+
+  test("ghostty mouse copies also write PRIMARY, while chord and menu copies leave PRIMARY alone", async () => {
+    const invoke = desktop();
+    const { term, target } = await renderGhostty(PATH_COMMAND);
+    invoke.mockClear();
+    drag(term, { col: 0, row: 0 }, { col: PATH_COMMAND.length - 81, row: 1 });
+    await tick();
+    expect(invoke.mock.calls).toEqual([
+      ["write_clipboard_text", { text: PATH_COMMAND }], ["write_primary_selection", { text: PATH_COMMAND }],
+    ]);
+    invoke.mockClear();
+    for (const [detail, text] of [[2, PATH], [3, PATH_COMMAND]] as const) {
+      term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, detail, clientX: 25, clientY: 17 }));
+      await tick();
+      expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text }], ["write_primary_selection", { text }]]);
+      invoke.mockClear();
+    }
+    term.element!.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "C", code: "KeyC", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+    }));
+    await tick();
+    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: PATH_COMMAND }]]);
+    invoke.mockClear();
+    await openBodyMenu(target);
+    menuRow("Copy").click();
+    await tick();
+    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: PATH_COMMAND }]]);
+    expect(clipboard.write).not.toHaveBeenCalled();
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+  });
+
+  test("middle click sends hostile PRIMARY through ghostty's cleaned paste exactly once", async () => {
+    const invoke = desktop("echo one\x1b[201~; echo two\r\nprintf '\x1b[31mred'\x03\nlast");
+    const { term } = await renderGhostty();
+    await output(TerminalSocket.all[0]!, "\x1b[?2004h");
+    invoke.mockClear();
+    const before = inputs().length;
+    const widget = vi.fn();
+    term.element!.addEventListener("auxclick", widget);
+    const event = middle(term.canvas);
+    await vi.waitFor(() => expect(inputs().slice(before)).toEqual([
+      "\x1b[200~echo one [201~; echo two\rprintf ' [31mred' \rlast\x1b[201~",
+    ]));
+    expect(event.defaultPrevented).toBe(true);
+    expect(widget).not.toHaveBeenCalled();
+    expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
+    expect(clipboard.readText).not.toHaveBeenCalled();
+  });
+
+  async function renderXterm() {
+    __testSetStandalonePreferences(terminalPreferences({ ghostty: false }));
+    const [tab] = seatTerminals([terminalTab()]);
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(TerminalTab, { target, props: { tab: tab!, paneId: TERMINAL_PANE, side: "a", active: true, focused: true } }));
+    await tick();
+    await vi.waitFor(() => expect(xterm.terminals).toHaveLength(1));
+    await attach(TerminalSocket.all[0]!);
+    return xterm.terminals[0]!;
+  }
+
+  test("xterm mouse selection writes its copy text only on release, never for a keyboard selection", async () => {
+    const invoke = desktop();
+    const term = await renderXterm();
+    invoke.mockClear();
+    term.changeSelection("a find result");
+    expect(invoke).not.toHaveBeenCalled();
+    term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+    term.changeSelection("partial");
+    expect(invoke).not.toHaveBeenCalled();
+    term.changeSelection(COMMAND);
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    await tick();
+    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: COMMAND }]]);
+    invoke.mockClear();
+    pressInTerminal(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
+    await tick();
+    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: COMMAND }]]);
+    invoke.mockClear();
+    term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+    term.changeSelection("");
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    await tick();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  test("xterm middle click sends PRIMARY through its real paste encoder", async () => {
+    const text = "one\r\ntwo\nthree\x1b[201~";
+    const invoke = desktop(text);
+    const term = await renderXterm();
+    invoke.mockClear();
+    const { Terminal } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+    const real = new Terminal();
+    // Its encoder needs only the hidden textarea; no renderer or display.
+    (real as unknown as { _core: { textarea: HTMLTextAreaElement } })._core.textarea = document.createElement("textarea");
+    const subscription = real.onData((data) => term.type(data));
+    await new Promise<void>((resolve) => real.write("\x1b[?2004h", resolve));
+    const paste = vi.spyOn(term, "paste").mockImplementation((value) => real.paste(value));
+    const before = inputs().length;
+    const event = middle(term.element!);
+    await vi.waitFor(() => expect(inputs().slice(before)).toEqual(["\x1b[200~one\rtwo\rthree\x1b[201~\x1b[201~"]));
+    expect(paste).toHaveBeenCalledExactlyOnceWith(text);
+    subscription.dispose();
+    real.dispose();
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
+    expect(clipboard.readText).not.toHaveBeenCalled();
+  });
+
+  test.each(["ghostty", "xterm"])("%s installs no PRIMARY handler in a browser", async (backend) => {
+    const term = backend === "ghostty" ? (await renderGhostty()).term : await renderXterm();
+    const event = middle(term.element!);
+    await tick();
+    expect(event.defaultPrevented).toBe(false);
+    expect(clipboard.readText).not.toHaveBeenCalled();
+    expect(inputs()).toEqual([]);
+  });
+
+  test.each(["Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)", "Mozilla/5.0 (Windows NT 10.0)"])("non-Linux desktops keep native middle click (%s)", async (ua) => {
+    const invoke = desktop();
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(ua);
+    const { term } = await renderGhostty();
+    invoke.mockClear();
+    expect(middle(term.canvas).defaultPrevented).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  test("teardown ignores a delayed PRIMARY read and removes the mouse handlers", async () => {
+    const invoke = desktop();
+    const { term } = await renderGhostty();
+    const host = term.element!;
+    const encode = vi.spyOn(term.wasmTerm, "encodePaste");
+    let finish!: (text: string) => void;
+    invoke.mockImplementation((cmd) => cmd === "read_primary_selection"
+      ? new Promise<string>((resolve) => { finish = resolve; }) : Promise.resolve(undefined));
+    const before = inputs().length;
+    middle(host);
+    await unmount(mounted.pop()!);
+    finish("must not reach a disposed terminal");
+    // Drain the nested invoke/read continuations before the negative assertion.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(inputs().length).toBe(before);
+    expect(encode, "no paste reaches the freed core").not.toHaveBeenCalled();
+    invoke.mockClear();
+    expect(middle(host).defaultPrevented).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  test.each([null, ""])("an absent or empty PRIMARY does not paste (%s)", async (text) => {
+    const invoke = desktop(text);
+    const { term } = await renderGhostty();
+    const before = inputs().length;
+    invoke.mockClear();
+    middle(term.canvas);
+    await tick();
+    expect(invoke.mock.calls).toEqual([["read_primary_selection", undefined]]);
+    expect(inputs().length).toBe(before);
   });
 });

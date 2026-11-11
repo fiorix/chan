@@ -5,6 +5,8 @@ import {
   openWebInspector,
   listDroppedFiles,
   readClipboardText,
+  readPrimarySelection,
+  writePrimarySelection,
   readDroppedFile,
   readGatewayCsrfToken,
   reloadWindow,
@@ -505,5 +507,37 @@ describe("cs paste text through the real desktop reader", () => {
     const result = await readClipboardPayload("text").catch((error: Error) => error.message);
     expect(result, "the web payload fallback can succeed").toEqual({ mime: "text/plain;charset=utf-8", bytes: new TextEncoder().encode("permitted on retry") });
     expect(readText).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("PRIMARY selection bridge", () => {
+  afterEach(() => { clearTauriGlobals(); vi.restoreAllMocks(); });
+
+  test("the page reads and writes PRIMARY through its named commands", async () => {
+    const invoke = vi.fn(async (cmd: string, _args?: unknown) => cmd === "read_primary_selection" ? "selected text" : undefined);
+    setTauriInternals(invoke);
+    expect(await readPrimarySelection()).toBe("selected text");
+    await writePrimarySelection("joined selection\nwith a hard break");
+    expect(invoke.mock.calls).toEqual([
+      ["read_primary_selection", undefined],
+      ["write_primary_selection", { text: "joined selection\nwith a hard break" }],
+    ]);
+  });
+
+  test("an unsupported native selection never falls back to CLIPBOARD", async () => {
+    const invoke = vi.fn(async (_cmd: string, _args?: unknown) => { throw new Error("PRIMARY not supported"); });
+    setTauriInternals(invoke);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await readPrimarySelection()).toBeNull();
+    await writePrimarySelection("selected");
+    expect(invoke.mock.calls.map(([cmd]) => cmd)).toEqual(["read_primary_selection", "write_primary_selection"]);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  test("a browser cannot use PRIMARY", async () => {
+    clearTauriGlobals();
+    expect(await readPrimarySelection()).toBeNull();
+    await expect(writePrimarySelection("selection")).resolves.toBeUndefined();
   });
 });

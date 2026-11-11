@@ -46,6 +46,7 @@ export class FakeTerminal {
   refreshCalls: Array<[number, number]> = [];
   pasted: string[] = [];
   selection = "";
+  selectionHandlers: Array<() => void> = [];
   focusCount = 0;
   blurCount = 0;
   disposed = false;
@@ -137,6 +138,14 @@ export class FakeTerminal {
   }
   refresh(start: number, end: number): void {
     this.refreshCalls.push([start, end]);
+  }
+  onSelectionChange(handler: () => void): { dispose(): void } {
+    this.selectionHandlers.push(handler);
+    return { dispose: () => { this.selectionHandlers = this.selectionHandlers.filter((h) => h !== handler); } };
+  }
+  changeSelection(text: string): void {
+    this.selection = text;
+    for (const handler of this.selectionHandlers) handler();
   }
   getSelection(): string {
     return this.selection;

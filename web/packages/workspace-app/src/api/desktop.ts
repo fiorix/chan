@@ -229,6 +229,27 @@ export async function writeClipboardText(text: string): Promise<void> {
   await navigator.clipboard?.writeText(text);
 }
 
+/// PRIMARY has no browser fallback: falling back to CLIPBOARD would paste
+/// a different selection. Unsupported desktops and compositors do nothing.
+export async function readPrimarySelection(): Promise<string | null> {
+  if (!isTauriDesktop()) return null;
+  try {
+    return await tauriInvoke<string | null>("read_primary_selection");
+  } catch (err) {
+    console.warn("readPrimarySelection: native read failed", err);
+    return null;
+  }
+}
+
+export async function writePrimarySelection(text: string): Promise<void> {
+  if (!isTauriDesktop()) return;
+  try {
+    await tauriInvoke<void>("write_primary_selection", { text });
+  } catch (err) {
+    console.warn("writePrimarySelection: native write failed", err);
+  }
+}
+
 /// Write a PNG image onto the OS clipboard on desktop (`cs copy` of an
 /// image). chan-desktop's WKWebView rejects a gesture-less
 /// `navigator.clipboard.write()`, and `cs copy` arrives from a control
