@@ -448,6 +448,104 @@ describe("a search over the binding's terminal", () => {
     expect(text(t.getLine(0))).toBe("line 9 ERROR here");
     t.free();
   });
+
+  test("restart drops the results and the selection and scans again for the same needle", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.restart();
+    expect(s.state(), "with no needle there is nothing to restart").toEqual({ total: 0, index: null, active: null, complete: true });
+    s.setNeedle("error");
+    scan(s);
+    s.selectNext();
+    s.selectNext();
+    expect(s.state()).toEqual({ total: 4, index: 1, active: ERRORS[1], complete: true });
+    s.restart();
+    expect(s.state()).toMatchObject({ index: null, active: null, complete: false });
+    scan(s);
+    expect(s.state()).toEqual({ total: 4, index: null, active: null, complete: true });
+    expect(s.selectNext()).toBe(true);
+    expect(s.state().active, "the same needle, newest first again").toEqual(ERRORS[0]);
+    s.free();
+  });
+
+  test("restart keeps its needle when setting it again fails, so the next restart can", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    scan(s);
+    const { wasm } = raw(s);
+    const set = wasm.fn.ghostty_search_set!;
+    let sets = 0;
+    // The second needle set of the restart fails.
+    wasm.fn.ghostty_search_set = (...args) => (args[1] === ABI.GhosttySearchOption.NEEDLE && ++sets === 2 ? -1 : set(...args));
+    try {
+      expect(() => s.restart()).toThrow(/setting the needle/);
+    } finally {
+      wasm.fn.ghostty_search_set = set;
+    }
+    s.restart();
+    scan(s);
+    expect(s.state()).toEqual({ total: 4, index: null, active: null, complete: true });
+    s.free();
+  });
+
+  test("caughtUp reads the scan's status as of the last feed without feeding", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    expect(s.caughtUp(), "never fed").toBe(false);
+    scan(s);
+    expect(s.caughtUp()).toBe(true);
+    const { wasm } = raw(s);
+    const real = wasm.fn.ghostty_search_feed;
+    let feeds = 0;
+    wasm.fn.ghostty_search_feed = (...args) => {
+      feeds++;
+      return real(...args);
+    };
+    try {
+      t.write("another ERROR\r\n");
+      expect(s.caughtUp(), "as of the last feed").toBe(true);
+      expect(feeds).toBe(0);
+      s.restart();
+      expect(s.caughtUp()).toBe(false);
+      expect(feeds).toBe(0);
+    } finally {
+      wasm.fn.ghostty_search_feed = real;
+    }
+    t.free();
+    expect(s.caughtUp(), "a freed terminal's search reports nothing to do").toBe(true);
+    s.free();
+  });
+
+  test("completingUnitMs is how long the unit that last completed a scan took", async () => {
+    const t = await errorTerminal();
+    const s = t.createSearch();
+    s.setNeedle("error");
+    expect(s.completingUnitMs).toBeNull();
+    // Each read of the clock moves it 1 ms, and the step reads it once per
+    // unit: each unit takes 1 ms, and a call with a 10 ms budget runs units
+    // until 10 have passed, so the call's time is not the completing unit's.
+    let at = 0;
+    let reads = 0;
+    const clock = () => {
+      reads++;
+      return (at += 1);
+    };
+    let result: "running" | "complete" = "running";
+    let mostUnits = 0;
+    while (result === "running") {
+      reads = 0;
+      result = s.step(10, clock);
+      mostUnits = Math.max(mostUnits, reads - 1);
+    }
+    expect(mostUnits, "a call ran several units").toBeGreaterThan(1);
+    expect(s.completingUnitMs).toBe(1);
+    at = 100;
+    expect(s.step(10, clock), "nothing to scan, no unit").toBe("complete");
+    expect(s.completingUnitMs).toBe(1);
+    s.free();
+  });
 });
 
 describe("a search the core fails to make", () => {

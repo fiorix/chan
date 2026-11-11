@@ -10,12 +10,22 @@ declare module "*.ts?raw" {
 
 // Minimal `node:fs` shim for tests that need to read on-disk files
 // the `?raw` Vite import can't surface (notably `.css`, which the
-// CSS plugin chain consumes before vitest sees the file). The full
-// `@types/node` package isn't a dev dep; this declaration carries
-// just the read helpers we actually call.
+// CSS plugin chain consumes before vitest sees the file), and for the
+// measurements that write their figures out. The full `@types/node`
+// package isn't a dev dep; this declaration carries just the helpers
+// we actually call.
 declare module "node:fs" {
   export function readFileSync(path: string, encoding: string): string;
   export function readFileSync(path: string): Uint8Array<ArrayBuffer>;
+  export function writeFileSync(path: string, data: string): void;
+}
+
+// The `node:process` members a measurement reads: its settings from the
+// environment, the Node version for its report, and the monotonic clock.
+declare module "node:process" {
+  export const env: Record<string, string | undefined>;
+  export const version: string;
+  export const hrtime: { bigint(): bigint };
 }
 
 // React is a runtime peer of @excalidraw/excalidraw, dynamic-imported

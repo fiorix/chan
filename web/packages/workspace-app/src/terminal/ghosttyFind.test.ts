@@ -7,14 +7,16 @@
 // hands the core the new grid, fires the resize event and repaints), and
 // frames run and the clock moves only when a case says so. The scan budget
 // is 0, one unit of the core's work per frame, so a scan's progress is the
-// same on any machine.
+// same on any machine. Find times its feeds on the same clock, so a feed
+// costs nothing unless a case makes it move during one.
 
 import { readFileSync } from "node:fs";
 import { SelectionManager, type Terminal } from "ghostty-web";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import { FIND_WAIT_CAP_MS, type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
+import { FIND_COST_PRIORS, FIND_FRAME_BUDGET_MS, FIND_SCAN_BUDGET_MS, FIND_WAIT_CAP_MS, type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";
 import { GhosttyVt, type MatchRange, type VtSearch, VtTerminal } from "./ghosttyVt";
+import { SCROLLBACK_MB_DEFAULT, scrollbackLinesFromMb } from "./scrollback";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
 
@@ -77,7 +79,7 @@ function manualClock() {
   };
 }
 
-async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit = 10_000 } = {}) {
+async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit = 10_000, budgetMs = 0 } = {}) {
   const vt = new GhosttyVt(await WebAssembly.instantiate(vendored, {}));
   const core = vt.createTerminal(cols, rows, { scrollbackLimit }) as unknown as VtTerminal;
   if (lines.length) core.write(lines.map((line) => `${line}\r\n`).join(""));
@@ -146,7 +148,7 @@ async function fixture(lines: string[], { cols = 40, rows = 10, scrollbackLimit 
     selection: manager as unknown as ConstructorParameters<typeof GhosttyFind>[1]["selection"],
     onCount: (count) => counts.push(count),
     frames,
-    budgetMs: 0,
+    budgetMs,
     clock: clock.now,
   });
   return { core, view, viewport, manager: manager as unknown as Manager, frames, clock, counts, created, find, painted };
@@ -1095,7 +1097,545 @@ describe("a resize while the bar is open", () => {
   });
 });
 
-describe("the kept match's tracked cells", () => {
+describe("output a feed would take too long to take in", () => {
+  /// At 200 columns, with the costs assumed before any is measured and next
+  /// to nothing held to check, a backlog of this many rows predicts exactly
+  /// the frame's budget.
+  const COLS = 200;
+  const LIMIT = FIND_FRAME_BUDGET_MS / (COLS * FIND_COST_PRIORS.read);
+
+  /// A 200x10 terminal with a 60,000-line history, or `scrollbackLimit`,
+  /// holding `lines`.
+  const wide = (lines: string[], scrollbackLimit = 60_000, budgetMs = 0) => fixture(lines, { cols: COLS, rows: 10, scrollbackLimit, budgetMs });
+
+  /// Writes `n` rows through the viewport, a thousand a write, with no
+  /// needle unless `line` puts one in.
+  function filler(viewport: GhosttyViewportController, n: number, line = (i: number) => `filler ${i}`): void {
+    for (let from = 0; from < n; from += 1000) {
+      const count = Math.min(1000, n - from);
+      viewport.write(Array.from({ length: count }, (_, i) => `${line(from + i)}\r\n`).join(""));
+    }
+  }
+
+  /// Every match in the buffer now, newest first, from a scan of its own.
+  function truth(core: VtTerminal, needle = "needle"): MatchRange[] {
+    const search = VtTerminal.prototype.createSearch.call(core);
+    search.setNeedle(needle);
+    for (let i = 0; search.step(1) !== "complete"; i++) if (i > 100_000) throw new Error("the search did not complete");
+    const all = search.matchesBetween(0, Number.MAX_SAFE_INTEGER, 100_000);
+    search.free();
+    return all;
+  }
+
+  const textAt = (core: VtTerminal, at: MatchRange) => core.plainText(at)?.replace(/\n/g, "");
+
+  /// Makes each feed of find's search take `cost.ms(rows)` on the case's
+  /// clock, `rows` the history rows added since the last feed; the case
+  /// changes `cost.ms` as it goes.
+  function costly(f: Awaited<ReturnType<typeof wide>>, ms: (rows: number) => number) {
+    const search = f.created[0]!;
+    const feed = search.feed.bind(search);
+    const cost = { ms };
+    let history = f.core.getScrollbackLength();
+    vi.spyOn(search, "feed").mockImplementation(() => {
+      const now = f.core.getScrollbackLength();
+      f.clock.set(f.clock.now() + cost.ms(now - history));
+      history = now;
+      feed();
+    });
+    return cost;
+  }
+
+  /// A frame with `rows` filler rows written before it; true when find
+  /// restarted its search instead of feeding it.
+  function frameAfter(f: Awaited<ReturnType<typeof wide>>, rows: number, line?: (i: number) => string): boolean {
+    const restart = vi.spyOn(f.created[0]!, "restart");
+    restart.mockClear();
+    filler(f.viewport, rows, line);
+    f.frames.frame();
+    return restart.mock.calls.length > 0;
+  }
+
+  test("a backlog predicted to fit the frame is fed, and one predicted over it restarts the scan", async () => {
+    const under = await wide(["needle a", "needle b"]);
+    under.find.find("needle");
+    under.frames.settle();
+    expect(frameAfter(under, Math.floor(LIMIT) - 500)).toBe(false);
+    const over = await wide(["needle a", "needle b"]);
+    over.find.find("needle");
+    over.frames.settle();
+    expect(frameAfter(over, Math.ceil(LIMIT) + 500)).toBe(true);
+    expect(over.counts.at(-1), "the rescan has only begun").toMatchObject({ partial: true });
+    over.frames.settle();
+    expect(over.counts.at(-1)).toEqual({ index: 1, total: 2, partial: false });
+  });
+
+  test("feeds measured cheaper than assumed do not lower the read under the assumed cost", async () => {
+    const f = await wide(["needle a"]);
+    f.find.find("needle");
+    f.frames.settle();
+    // A tenth of the assumed cost.
+    costly(f, (rows) => (rows * COLS * FIND_COST_PRIORS.read) / 10);
+    for (let i = 0; i < 4; i++) expect(frameAfter(f, 1000)).toBe(false);
+    expect(frameAfter(f, Math.floor(LIMIT) - 500), "under the threshold").toBe(false);
+    expect(frameAfter(f, Math.ceil(LIMIT) + 500), "over it, as at the assumed cost").toBe(true);
+  });
+
+  test("small feeds measured cheaper than assumed do not lower the check under its assumed cost", async () => {
+    // 50,000 matches in a 50,000-line history at 200 columns: a feed's check
+    // assumed at 10 ms, a completing unit's at 15. 10,000 more rows predict
+    // 18 ms at the assumed check, dearer than the completion, and restart;
+    // with the check measured near nothing they would predict 8 and feed.
+    const f = await wide(numbered(50_000, () => true), 80_000);
+    f.find.find("needle");
+    f.frames.settle();
+    costly(f, () => 0.01);
+    for (let i = 0; i < 6; i++) expect(frameAfter(f, 10), `small cheap feed ${i}`).toBe(false);
+    expect(frameAfter(f, 10_000)).toBe(true);
+  });
+
+  test("completing units measured cheaper than assumed do not lower the completion under its assumed cost", async () => {
+    // 40,000 matches in a 40,000-line history at 200 columns: the completing
+    // unit's check assumed at 9.6 ms leaves the step 2.4 ms of the frame.
+    const f = await wide(numbered(40_000, () => true), 60_000, FIND_SCAN_BUDGET_MS);
+    const wasm = (f.core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number> } }).wasm;
+    const feed = wasm.fn.ghostty_search_feed!;
+    // Every unit that feeds the scan, the completing one among them, takes
+    // 0.01 ms on the case's clock: a check measured near nothing.
+    wasm.fn.ghostty_search_feed = (...args) => {
+      f.clock.set(f.clock.now() + 0.01);
+      return feed(...args);
+    };
+    f.find.find("needle");
+    f.frames.settle();
+    wasm.fn.ghostty_search_feed = feed;
+    const held = f.counts.at(-1)!.total;
+    const completion = held * f.core.getScrollbackLength() * COLS * FIND_COST_PRIORS.complete;
+    const step = vi.spyOn(f.created[0]!, "step");
+    expect(frameAfter(f, 10)).toBe(false);
+    expect(step.mock.calls[0]![0]).toBeCloseTo(FIND_FRAME_BUDGET_MS - completion, 1);
+  });
+
+  test("one feed that ran long raises the read estimate by a quarter at most", async () => {
+    // With nothing to check, 11,000 rows at 200 columns predict 8.8 ms at
+    // the assumed read cost, 11 ms a quarter above it and 13.2 ms half above.
+    const f = await wide(["needle a"]);
+    f.find.find("needle");
+    f.frames.settle();
+    const cost = costly(f, () => 100);
+    expect(frameAfter(f, 1000), "the long feed").toBe(false);
+    cost.ms = () => 0.01;
+    expect(frameAfter(f, 11_000)).toBe(false);
+  });
+
+  test("cheap feeds under the predicted check do not lower the read", async () => {
+    // 20,000 matches at 200 columns, the history growing to 62,000 lines:
+    // the predicted check grows from 1.6 to 4.1 ms. Each 6,000-row feed
+    // takes 1 ms, under its check, which would measure its read as nothing;
+    // the read stays at its assumed cost, and 12,000 more rows still predict
+    // 13.7 ms, over the budget and the completion, and restart. Had the feeds
+    // lowered the read, they would predict 7.9 ms.
+    const f = await wide(numbered(20_000, () => true), 80_000);
+    f.find.find("needle");
+    f.frames.settle();
+    costly(f, () => 1);
+    for (let i = 0; i < 5; i++) expect(frameAfter(f, 6_000), `cheap feed ${i}`).toBe(false);
+    expect(frameAfter(f, 12_000)).toBe(true);
+  });
+
+  test("a check under the learning floor is not learned: small slow feeds below about 2 ms of work teach nothing", async () => {
+    // 5,000 matches in a 10,000-line history at 200 columns: 1e10 matches
+    // times cells, a check assumed at 0.2 ms. Twenty small feeds of 20 ms
+    // would each raise it by a quarter, to about 17 ms, and restart the next
+    // feed; under the floor they do not.
+    const f = await wide(numbered(10_000, (i) => i % 2 === 0), 20_000);
+    f.find.find("needle");
+    f.frames.settle();
+    costly(f, () => 20);
+    for (let i = 0; i < 20; i++) expect(frameAfter(f, 10), `slow small feed ${i}`).toBe(false);
+    expect(frameAfter(f, 100)).toBe(false);
+  });
+
+  test("a feed under the clock's grain, measured as no time, teaches nothing", async () => {
+    // Three feeds of twice the budget raise the read to about 1.95 times its
+    // assumed cost, where 10,000 rows at 200 columns predict 15.6 ms and
+    // restart; four feeds the clock reads as no time leave it there, where
+    // learned as cheap they would lower it to about 1.05 times, 8.4 ms.
+    const f = await wide(["needle a"]);
+    f.find.find("needle");
+    f.frames.settle();
+    const cost = costly(f, () => 2 * FIND_FRAME_BUDGET_MS);
+    for (let i = 0; i < 3; i++) expect(frameAfter(f, 1000), `slow feed ${i}`).toBe(false);
+    cost.ms = () => 0;
+    for (let i = 0; i < 4; i++) expect(frameAfter(f, 1000), `feed under the grain ${i}`).toBe(false);
+    expect(frameAfter(f, 10_000)).toBe(true);
+  });
+
+  test("feeds that keep costing more than assumed restart a backlog of a size fed before, though one slow feed alone does not", async () => {
+    const f = await wide(["needle a"]);
+    f.find.find("needle");
+    f.frames.settle();
+    const cost = costly(f, () => 100);
+    expect(frameAfter(f, 1000), "the slow feed").toBe(false);
+    cost.ms = () => 0.01;
+    expect(frameAfter(f, 1000), "measured once, raised by a quarter").toBe(false);
+    // Each 1,000-row feed now takes twice the frame's budget.
+    cost.ms = () => 2 * FIND_FRAME_BUDGET_MS;
+    const restarted: boolean[] = [];
+    for (let i = 0; i < 24 && !restarted.includes(true); i++) restarted.push(frameAfter(f, 1000));
+    expect(restarted.indexOf(true), "after several feeds, not on the first").toBeGreaterThan(2);
+  });
+
+  test("a running scan's cheaper feeds do not lower what a complete scan's feed is predicted to cost", async () => {
+    const f = await wide(["needle a"]);
+    f.find.find("needle");
+    f.frames.settle();
+    // A complete scan's feed of 1,000 rows takes twice the budget; a running
+    // scan's, which drops nothing the output pruned, next to nothing.
+    const search = f.created[0]!;
+    costly(f, () => (search.caughtUp() ? 2 * FIND_FRAME_BUDGET_MS : 0.01));
+    let frames = 0;
+    while (!frameAfter(f, 1000)) if (++frames > 20) throw new Error("never restarted");
+    // Small backlogs while the rescan runs are fed, each one cheap.
+    for (let i = 0; i < 6; i++) expect(frameAfter(f, 100), `running feed ${i}`).toBe(false);
+    f.frames.settle();
+    expect(search.caughtUp()).toBe(true);
+    expect(frameAfter(f, 1000), "the complete scan's cost is still the one measured").toBe(true);
+  });
+
+  test("a step pressed with a backlog predicted over the budget restarts rather than feeds", async () => {
+    const f = await wide(["needle a", "needle b"]);
+    f.find.find("needle");
+    f.frames.settle();
+    const restart = vi.spyOn(f.created[0]!, "restart");
+    filler(f.viewport, Math.ceil(LIMIT) + 500);
+    f.find.step("needle", "older");
+    expect(restart, "before any frame").toHaveBeenCalledTimes(1);
+    f.frames.settle();
+    // From the kept match, needle b, one older.
+    expect(selected(f.manager)).toEqual(range(0, 0, 0, 5));
+    expect(f.counts.at(-1)).toEqual({ index: 2, total: 2, partial: false });
+  });
+
+  test("a backlog that spans the whole history is fed: the core starts its history search over by itself", async () => {
+    // The 20,000-line history at 200 columns predicts over the budget when
+    // read whole; a backlog past it leaves the backlog cell's row pruned.
+    expect(20_000 * COLS * FIND_COST_PRIORS.read).toBeGreaterThan(FIND_FRAME_BUDGET_MS);
+    const f = await wide(["needle a"], 20_000);
+    filler(f.viewport, 20_000);
+    f.find.find("needle");
+    f.frames.settle();
+    expect(frameAfter(f, 25_000)).toBe(false);
+    f.frames.settle();
+    expect(f.counts.at(-1)).toEqual({ index: 0, total: 0, partial: false });
+  });
+
+  test("after a resize it feeds: the core scans again from scratch by itself", async () => {
+    const f = await wide(["needle a"]);
+    f.find.find("needle");
+    f.frames.settle();
+    const restart = vi.spyOn(f.created[0]!, "restart");
+    filler(f.viewport, Math.ceil(LIMIT) + 500);
+    // Rows only, so the backlog's cells stay over the budget.
+    f.view.resize(COLS, 12);
+    f.frames.frame();
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  test("a new query starts from the assumed costs again: how often the needle matches decides them", async () => {
+    const f = await wide(["needle a", "other b"]);
+    f.find.find("needle");
+    f.frames.settle();
+    costly(f, () => 2 * FIND_FRAME_BUDGET_MS);
+    let frames = 0;
+    while (!frameAfter(f, 1000)) if (++frames > 20) throw new Error("never restarted");
+    f.frames.settle();
+    expect(frameAfter(f, 1000), "1,000 rows still cost what was measured").toBe(true);
+    f.frames.settle();
+    f.find.find("other");
+    f.frames.settle();
+    expect(frameAfter(f, 1000), "at the assumed cost").toBe(false);
+  });
+
+  test("at the default scrollback the whole history at 200 columns fits the frame at the assumed cost, so no write restarts", async () => {
+    const lines = scrollbackLinesFromMb(SCROLLBACK_MB_DEFAULT);
+    const f = await wide(numbered(lines, (i) => i % 2 === 0), lines);
+    f.find.find("needle");
+    f.frames.settle();
+    // Feeds that cost what the prior assumes keep it where it is.
+    costly(f, (rows) => rows * COLS * FIND_COST_PRIORS.read);
+    for (const rows of [500, 2_000, 9_000, lines - 100, 2 * lines]) expect(frameAfter(f, rows), `${rows} rows`).toBe(false);
+  });
+
+  test("the scan's step leaves room in the frame for the check of the unit that completes it", async () => {
+    // 40,000 matches in a 40,000-line history at 200 columns: the completing
+    // unit's check is assumed to take most of the frame.
+    const f = await wide(numbered(40_000, () => true), 60_000, FIND_SCAN_BUDGET_MS);
+    f.find.find("needle");
+    f.frames.settle();
+    const held = f.counts.at(-1)!.total;
+    const completion = held * f.core.getScrollbackLength() * COLS * FIND_COST_PRIORS.complete;
+    expect(completion).toBeGreaterThan(FIND_FRAME_BUDGET_MS - FIND_SCAN_BUDGET_MS);
+    expect(completion).toBeLessThan(FIND_FRAME_BUDGET_MS);
+    const step = vi.spyOn(f.created[0]!, "step");
+    expect(frameAfter(f, 10)).toBe(false);
+    expect(step).toHaveBeenCalledTimes(1);
+    expect(step.mock.calls[0]![0]).toBeCloseTo(FIND_FRAME_BUDGET_MS - completion, 1);
+  });
+
+  test("a complete scan's feed over the budget is fed, not restarted, when the rescan's completion would cost more", async () => {
+    // 50,000 matches in a 50,000-line history at 200 columns: a feed's check
+    // is assumed at 10 ms and a completing unit's at 15. With 10,000 more
+    // rows to read the feed predicts 18 ms, over the budget and over the
+    // completion, so it restarts; once a completing unit has taken 30 ms
+    // the completion predicts dearer than the feed, so it feeds.
+    for (const slow of [false, true]) {
+      const f = await wide(numbered(50_000, () => true));
+      const wasm = (f.core as unknown as { wasm: { fn: Record<string, (...args: number[]) => number> } }).wasm;
+      const feed = wasm.fn.ghostty_search_feed!;
+      // Every unit that feeds the scan, the completing one among them,
+      // takes 30 ms on the case's clock.
+      if (slow) {
+        wasm.fn.ghostty_search_feed = (...args) => {
+          f.clock.set(f.clock.now() + 30);
+          return feed(...args);
+        };
+      }
+      f.find.find("needle");
+      f.frames.settle();
+      wasm.fn.ghostty_search_feed = feed;
+      expect(frameAfter(f, 10_000), slow ? "the completion measured dearer" : "at the assumed costs").toBe(!slow);
+    }
+  });
+
+  /// 50,000 matches in a 50,000-line history at 200 columns, the completing
+  /// unit's check assumed at 15 ms, over the budget with any reading; a
+  /// backlog of 10,000 rows makes the complete scan's feed predict 18 ms,
+  /// dearer than that, so the search restarts, holding as many matches.
+  async function restartedBig(budgetMs = 0) {
+    const f = await wide(numbered(50_000, () => true), 80_000, budgetMs);
+    f.find.find("needle");
+    f.frames.settle();
+    expect(frameAfter(f, 10_000)).toBe(true);
+    expect(f.created[0]!.caughtUp()).toBe(false);
+    return f;
+  }
+
+  test("a running scan restarts for a read of a scan step or more whose completion would not fit, and feeds smaller ones", async () => {
+    const f = await restartedBig();
+    // 6,000 rows read in 4.8 ms at the assumed cost: a step's budget or
+    // more, and with the completion over the frame's.
+    for (let i = 0; i < 3; i++) expect(frameAfter(f, 6_000), `big write ${i}`).toBe(true);
+    // 100 rows read in 0.08 ms: a restart would throw the scan away to save
+    // next to nothing.
+    for (let i = 0; i < 3; i++) expect(frameAfter(f, 100), `small write ${i}`).toBe(false);
+    f.frames.settle();
+    expect(f.counts.at(-1)).toEqual({ index: 1, total: truth(f.core).length, partial: false });
+  });
+
+  test("a running scan whose completion is predicted over the budget feeds writes that add no rows, and completes", async () => {
+    const f = await restartedBig();
+    const search = f.created[0]!;
+    const restart = vi.spyOn(search, "restart");
+    restart.mockClear();
+    // A spinner: a write every frame that moves no row into the history.
+    let frames = 0;
+    for (; !search.caughtUp(); frames++) {
+      if (frames > 5000) throw new Error("the scan never completed");
+      f.viewport.write(`\r${"|/-\\"[frames % 4]}`);
+      f.frames.frame();
+    }
+    expect(restart).not.toHaveBeenCalled();
+    expect(frames).toBeGreaterThan(10);
+    f.frames.settle();
+    expect(f.counts.at(-1)).toEqual({ index: 1, total: truth(f.core).length, partial: false });
+  });
+
+  test("with the completion predicted over the budget the scan's step runs its whole budget", async () => {
+    // As restartedBig, with the scan budget: the restart's frame steps the
+    // rescan, whose completing unit is assumed at 15 ms, over the frame.
+    const f = await wide(numbered(50_000, () => true), 80_000, FIND_SCAN_BUDGET_MS);
+    f.find.find("needle");
+    f.frames.settle();
+    const step = vi.spyOn(f.created[0]!, "step");
+    expect(frameAfter(f, 10_000)).toBe(true);
+    expect(step).toHaveBeenCalledTimes(1);
+    expect(step.mock.calls[0]![0]).toBe(FIND_SCAN_BUDGET_MS);
+  });
+
+  test("with under a millisecond left beside the completion the scan's step still gets one", async () => {
+    // 43,000 matches in a 43,000-line history at 200 columns: the completing
+    // unit's check is assumed at 11.1 ms, leaving 0.9 ms of the frame.
+    const f = await wide(numbered(43_000, () => true), 60_000, FIND_SCAN_BUDGET_MS);
+    f.find.find("needle");
+    f.frames.settle();
+    const held = f.counts.at(-1)!.total;
+    const completion = held * f.core.getScrollbackLength() * COLS * FIND_COST_PRIORS.complete;
+    expect(FIND_FRAME_BUDGET_MS - completion).toBeLessThan(1);
+    expect(FIND_FRAME_BUDGET_MS - completion).toBeGreaterThan(0);
+    const step = vi.spyOn(f.created[0]!, "step");
+    expect(frameAfter(f, 10)).toBe(false);
+    expect(step.mock.calls[0]![0]).toBe(1);
+  });
+
+  test("small feeds of a complete scan that take long raise the check its next feed predicts", async () => {
+    // 50,000 matches in a 50,000-line history at 200 columns: a feed's check
+    // is assumed at 10 ms and a completing unit's at 15. A backlog of 4,700
+    // rows reads in about 3.8 ms: a feed predicts 13.8 ms, over the budget
+    // but under the completion, and is fed; after a slow small feed raises
+    // the check by a quarter, to 12.5, it predicts 16.3, over the
+    // completion, and restarts.
+    const backlog = 4_700;
+    for (const slow of [false, true]) {
+      const f = await wide(numbered(50_000, () => true));
+      f.find.find("needle");
+      f.frames.settle();
+      if (slow) {
+        const cost = costly(f, () => 20);
+        expect(frameAfter(f, 10), "the slow small feed").toBe(false);
+        cost.ms = () => 0.01;
+      }
+      expect(frameAfter(f, backlog), slow ? "after the slow feed" : "at the assumed check").toBe(slow);
+    }
+  });
+
+  describe("across a restart", () => {
+    /// 20,000 lines with a needle on every one ending in 5, the fifth newest
+    /// selected; the rescan after a restart takes frames.
+    async function selectedFifth(scrollbackLimit = 60_000) {
+      const f = await wide(numbered(20_000, (i) => i % 10 === 5), scrollbackLimit);
+      f.find.find("needle");
+      f.frames.settle();
+      for (let k = 2; k <= 5; k++) f.find.step("needle", "older");
+      expect(selected(f.manager)).toEqual(needleAt(19_955));
+      expect(f.counts.at(-1)).toEqual({ index: 5, total: 2000, partial: false });
+      return f;
+    }
+
+    test("the count is partial with no index and never more than the buffer holds, and the kept match gets its index back", async () => {
+      const f = await selectedFifth();
+      const kept = selected(f.manager);
+      expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
+      const total = truth(f.core).length;
+      const shown: FindCount[] = [f.counts.at(-1)!];
+      for (let i = 0; f.frames.pending(); i++) {
+        if (i > 10_000) throw new Error("the rescan never completed");
+        f.frames.frame();
+        shown.push(f.counts.at(-1)!);
+        expect(selected(f.manager), `frame ${i}`).toEqual(kept);
+      }
+      // Until the rescan finds the match again the count has no index: "0
+      // of 0+" while the filler has given it nothing, then "? of n+".
+      const landed = shown.findIndex((c) => c.index !== null && c.total > 0);
+      expect(landed, "frames with no index first").toBeGreaterThan(1);
+      expect(shown.slice(0, landed).every((c) => c.partial && (c.index === null || c.total === 0))).toBe(true);
+      expect(shown.slice(0, landed).some((c) => c.index === null && c.total > 0), "some matches found, none selected").toBe(true);
+      expect(shown.every((c) => c.total <= total)).toBe(true);
+      expect(shown.slice(landed).map((c) => c.index), "the filler added no newer match").toEqual(shown.slice(landed).map(() => 5));
+      expect(f.counts.at(-1)).toEqual({ index: 5, total, partial: false });
+    });
+
+    test("a step pressed while it rescans waits behind the kept match and applies from it", async () => {
+      const f = await selectedFifth();
+      expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
+      const kept = selected(f.manager);
+      f.find.step("needle", "older");
+      expect(selected(f.manager), "the step waits").toEqual(kept);
+      f.frames.settle();
+      expect(selected(f.manager)).toEqual(needleAt(19_945));
+      expect(f.counts.at(-1)).toEqual({ index: 6, total: 2000, partial: false });
+    });
+
+    test("a selection the user made stays theirs, and the kept match still gets its index back", async () => {
+      const f = await selectedFifth();
+      f.manager.selectionStart = { col: 0, absoluteRow: 3 };
+      f.manager.selectionEnd = { col: 4, absoluteRow: 3 };
+      expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
+      f.frames.settle();
+      expect(selected(f.manager)).toEqual(range(3, 0, 3, 4));
+      expect(f.counts.at(-1)).toEqual({ index: 5, total: 2000, partial: false });
+    });
+
+    test("a match the backlog pruned is lost: no highlight and no index until the next step, which starts over", async () => {
+      // A 20,000-line history, full: the backlog prunes its oldest rows.
+      const f = await wide(numbered(20_000, (i) => i % 10 === 5), 20_000);
+      f.find.find("needle");
+      f.frames.settle();
+      // The oldest match of all: newer from nothing selected, once complete.
+      f.find.step("needle", "newer");
+      const oldest = selected(f.manager)!;
+      expect(f.counts.at(-1)).toMatchObject({ index: f.counts.at(-1)!.total, partial: false });
+      expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
+      expect(selected(f.manager), "gone with its row").toBeNull();
+      f.frames.settle();
+      const all = truth(f.core);
+      expect(all).not.toContainEqual(oldest);
+      expect(f.counts.at(-1)).toEqual({ index: null, total: all.length, partial: false });
+      f.find.step("needle", "older");
+      expect(selected(f.manager)).toEqual(all[0]);
+      expect(f.counts.at(-1)).toEqual({ index: 1, total: all.length, partial: false });
+    });
+
+    test("a step pressed when the backlog pruned the match drops its highlight at once, with nothing found yet to land on", async () => {
+      const f = await wide(numbered(20_000, (i) => i % 10 === 5), 20_000);
+      f.find.find("needle");
+      f.frames.settle();
+      f.find.step("needle", "newer");
+      expect(selected(f.manager)).not.toBeNull();
+      filler(f.viewport, Math.ceil(LIMIT) + 500);
+      f.find.step("needle", "older");
+      expect(selected(f.manager), "no frame has run").toBeNull();
+      expect(f.frames.pending()).toBe(1);
+    });
+
+    test("the highlight follows the kept match while pruned history moves its rows during the rescan", async () => {
+      // A full 20,000-line history: each write prunes its oldest rows.
+      const f = await selectedFifth(20_000);
+      const history = () => f.core.getScrollbackLength();
+      expect(frameAfter(f, Math.ceil(LIMIT) + 500)).toBe(true);
+      for (let i = 0; i < 5; i++) {
+        filler(f.viewport, 200);
+        f.frames.frame();
+        const now = selected(f.manager)!;
+        expect(textAt(f.core, now), `frame ${i}, history ${history()}`).toBe("needle");
+        expect(now.startRow).toBeLessThan(19_955 - Math.ceil(LIMIT));
+      }
+      f.frames.settle();
+      expect(textAt(f.core, selected(f.manager)!)).toBe("needle");
+      expect(f.counts.at(-1)).toMatchObject({ index: 5, partial: false });
+    });
+
+    test("output that restarts the search frame after frame holds a step behind the kept match no longer than the cap from the first restart", async () => {
+      const f = await selectedFifth();
+      const kept = selected(f.manager);
+      // Feeds that take twice the budget teach find that 1,000 rows do, so
+      // from some frame on every 1,000-row frame restarts.
+      costly(f, () => 2 * FIND_FRAME_BUDGET_MS);
+      let first = 0;
+      while (!frameAfter(f, 1000)) if (++first > 20) throw new Error("never restarted");
+      const pressed = f.clock.now();
+      f.find.step("needle", "older");
+      // Output with a needle on every tenth line, so each rescan's first
+      // unit finds some.
+      const shown: FindCount[] = [];
+      for (let i = 1; f.clock.now() < pressed + FIND_WAIT_CAP_MS + 200; i++) {
+        f.clock.set(pressed + 100 * i);
+        expect(frameAfter(f, 1000, (n) => `output ${n}${n % 10 === 0 ? " needle" : ""}`), `frame ${i} restarts`).toBe(true);
+        shown.push(f.counts.at(-1)!);
+      }
+      // The rescan never reached the kept match before the cap, so it was
+      // lost, and the step, past its own cap, landed on the newest match
+      // found so far: older from no match selected.
+      const landed = shown.findIndex((c) => c.index !== null && c.total > 0);
+      expect(landed, "not before the cap").toBeGreaterThanOrEqual(FIND_WAIT_CAP_MS / 100 - 1);
+      expect(shown[landed]).toMatchObject({ index: 1, partial: true });
+      expect(selected(f.manager)).not.toEqual(kept);
+      expect(textAt(f.core, selected(f.manager)!)).toBe("needle");
+    });
+  });
+});
+
+describe("the tracked cells", () => {
   /// The cells the core tracks for `core`, by their handles: each one made
   /// and not freed yet; `made` counts every one made.
   function tracked(core: VtTerminal): Set<number> & { made: number } {
@@ -1117,23 +1657,24 @@ describe("the kept match's tracked cells", () => {
     return live;
   }
 
-  test("are two, follow the active match through a search's life, and go with the search and the terminal", async () => {
-    const { core, frames, find, view } = await fixture(SHORT);
+  test("are three, the kept match's two and the backlog's, moved through a search's life and gone with the search and the terminal", async () => {
+    const { core, frames, find, view, viewport } = await fixture(SHORT);
     const live = tracked(core);
     find.find("needle");
     frames.settle();
-    expect(live.size, "the newest match's first and last cells").toBe(2);
+    expect(live.size, "the newest match's first and last cells, and the backlog's").toBe(3);
     find.step("needle", "older");
     find.step("needle", "older");
+    viewport.write("more output\r\n");
     view.resize(30, 10);
     frames.settle();
-    expect(live.size).toBe(2);
-    expect(live.made, "moved from match to match, not made again").toBe(2);
+    expect(live.size).toBe(3);
+    expect(live.made, "moved from match to match and feed to feed, not made again").toBe(3);
     find.close();
     expect(live.size, "freed with the search").toBe(0);
     find.find("needle");
     frames.settle();
-    expect(live.size).toBe(2);
+    expect(live.size).toBe(3);
     find.dispose();
     expect(live.size, "freed when the terminal goes").toBe(0);
   });
@@ -1143,7 +1684,7 @@ describe("the kept match's tracked cells", () => {
     const live = tracked(core);
     find.find("needle");
     frames.settle();
-    expect(live.size).toBe(2);
+    expect(live.size).toBe(3);
     core.free();
     expect(live.size).toBe(0);
     expect(() => find.dispose()).not.toThrow();

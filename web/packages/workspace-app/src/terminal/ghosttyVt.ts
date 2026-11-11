@@ -1532,6 +1532,14 @@ export class VtSearch {
   /// later write may have moved or pruned, so a read after a change feeds
   /// first rather than resolve a stale snapshot.
   private fed: number;
+  private needle = "";
+  /// Milliseconds the unit of `step` that last completed a scan took, on
+  /// the clock `step` was given; null until a scan completes in `step`. The
+  /// core checks every match it holds against the terminal's pages as a
+  /// scan completes, and again on each later feed and select while the scan
+  /// stays complete, a cost that grows with the matches times the pages of
+  /// history; this unit is its measure.
+  completingUnitMs: number | null = null;
 
   constructor(wasm: VtWasm, terminal: SearchTerminal) {
     this.wasm = wasm;
@@ -1584,27 +1592,46 @@ export class VtSearch {
         view.setUint32(str + S.fields.len, bytes.length, true);
       }
       this.check("setting the needle", this.wasm.fn.ghostty_search_set(this.handle, ABI.GhosttySearchOption.NEEDLE, str));
+      this.needle = needle;
     } finally {
       this.wasm.free(str, len);
     }
   }
 
-  /// Works toward a complete scan for about `budgetMs` milliseconds: a feed
-  /// when the search needs the terminal, a tick while it has copied data
-  /// to scan, at least one of either, until the scan is complete or the
-  /// budget is spent. "running" asks for another call. "complete" means
-  /// caught up with the terminal as of the last feed; a later write needs
-  /// another feed.
-  step(budgetMs: number): "running" | "complete" {
+  /// Drops the results and scans again from scratch for the same needle,
+  /// as a new needle does: nothing is selected, and `step` scans from the
+  /// newest output up in budgeted units. Cheap however many matches the
+  /// search held.
+  restart(): void {
+    const needle = this.needle;
+    if (!needle) return;
+    this.setNeedle("");
+    // Kept before the set, so a set that fails leaves the next restart
+    // something to set again.
+    this.needle = needle;
+    this.setNeedle(needle);
+  }
+
+  /// Works toward a complete scan for about `budgetMs` milliseconds on
+  /// `now` (`performance.now` unless given): a feed when the search needs
+  /// the terminal, a tick while it has copied data to scan, at least one of
+  /// either, until the scan is complete or the budget is spent. "running"
+  /// asks for another call. "complete" means caught up with the terminal as
+  /// of the last feed; a later write needs another feed.
+  step(budgetMs: number, now: () => number = () => performance.now()): "running" | "complete" {
     if (!this.live()) return "complete";
     const S = ABI.GhosttySearchStatus;
-    const deadline = performance.now() + budgetMs;
+    let unitStart = now();
+    const deadline = unitStart + budgetMs;
     let status = this.status();
     while (status !== S.COMPLETE) {
       if (status === S.FEED_REQUIRED) this.feed();
       else this.check("scanning", this.wasm.fn.ghostty_search_tick(this.handle, 0));
       status = this.status();
-      if (performance.now() >= deadline) break;
+      const unitEnd = now();
+      if (status === S.COMPLETE) this.completingUnitMs = unitEnd - unitStart;
+      if (unitEnd >= deadline) break;
+      unitStart = unitEnd;
     }
     return status === S.COMPLETE ? "complete" : "running";
   }
@@ -1633,6 +1660,14 @@ export class VtSearch {
   /// to the oldest; otherwise as `selectNext`.
   selectPrev(): boolean {
     return this.select(false);
+  }
+
+  /// Whether the scan had caught up with the terminal as of the last feed,
+  /// read without feeding: a reader deciding how to bring the search up to
+  /// date asks this first. After the terminal was freed: true.
+  caughtUp(): boolean {
+    if (!this.live()) return true;
+    return this.status() === ABI.GhosttySearchStatus.COMPLETE;
   }
 
   /// The count, the selected match and whether the scan is complete. When
