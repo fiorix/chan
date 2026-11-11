@@ -63,7 +63,7 @@ export class GhosttyViewportController {
   /// lines chan prints itself), and each resize, heard from ghostty-web's
   /// own resize event so that no caller can resize around it. A resize is
   /// reported before ghostty-web repaints the new grid, so an observer can
-  /// take a mark off rows the reflow gave other text before they are drawn.
+  /// move a mark off rows the reflow gave other text before they are drawn.
   /// Returns the call that stops it.
   observeChanges(observer: (change: GhosttyChange) => void): () => void {
     this.changeObservers.add(observer);
@@ -108,12 +108,20 @@ export class GhosttyViewportController {
   /// alternate screen has no history: its scrollback length is 0, its rows
   /// are its own, and the offset clamps to 0.
   reveal(row: number): void {
+    if (this.shows(row)) return;
     const scrollback = this.terminal.getScrollbackLength();
-    const rows = this.terminal.rows;
-    const onScreen = row - scrollback + this.terminal.getViewportY();
-    if (onScreen >= 0 && onScreen < rows) return;
-    const centred = scrollback - row + Math.floor(rows / 2);
+    const centred = scrollback - row + Math.floor(this.terminal.rows / 2);
     this.terminal.scrollToLine(Math.max(0, Math.min(scrollback, centred)));
+  }
+
+  /// Whether absolute row `row`, numbered as `reveal` numbers it, is on the
+  /// screen. `rows` is the screen's height, the terminal's own unless given:
+  /// while a resize is under way ghostty-web has already set its new row
+  /// count, though the core still holds the old grid until the resize
+  /// reaches it, so a reader of the grid as it was passes the old count.
+  shows(row: number, rows = this.terminal.rows): boolean {
+    const onScreen = row - this.terminal.getScrollbackLength() + this.terminal.getViewportY();
+    return onScreen >= 0 && onScreen < rows;
   }
 
   /// Claim only macOS pixel-mode primary-buffer wheel events with no mouse
