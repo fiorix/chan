@@ -43,6 +43,7 @@ One repository builds everything: a Cargo workspace for the binaries and librari
 | `chan-llm` | The MCP server that exposes a workspace's files and search to agent CLIs. |
 | `chan-tmux` | The tmux control-mode protocol: framing, notifications, commands and layouts, with no I/O. |
 | `chan-systemd` | The systemd boundary: readiness and watchdog notifications, the fd store, unit rendering. |
+| `chan-winpipe` | The Win32 boundary of chan's named pipes: the account SID, pipes that grant one account alone, and the account serving a pipe a client reached. |
 | `chan-tunnel-proto`, `chan-tunnel-client`, `chan-tunnel-server` | The gateway tunnel: the wire contract, the dial side the devserver embeds, and the terminating side the gateway embeds. |
 | `chan-wireguard` | The in-process WireGuard peer and TCP/IP stack the devserver's tunnel dial runs through when a wg-quick file is given, with no interface or privilege on the host. |
 | `chan-revtunnel` | Reverse port forwarding from a devserver to the connected desktop (`cs tunnel`). |

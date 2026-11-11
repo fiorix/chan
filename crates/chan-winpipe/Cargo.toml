@@ -1,0 +1,24 @@
+[package]
+name = "chan-winpipe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Owner-only Windows named pipes and the account serving a pipe, for chan."
+publish = false
+
+[lib]
+name = "chan_winpipe"
+
+# windows-sys at chan-workspace's and chan-desktop's version, so the lockfile
+# carries one copy of it.
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

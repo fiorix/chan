@@ -37,12 +37,21 @@ RPM_TARGET ?= $(LINUX_TARGET)
 ARCHPKG_TARGET ?= $(LINUX_TARGET)
 CHAN_TARGET ?=
 # Crates whose test targets the native Windows arm compiles.
-CHAN_WINDOWS_TEST_CRATES := chan-workspace chan-server chan-library chan-desktop
+CHAN_WINDOWS_TEST_CRATES := chan-workspace chan-server chan-library chan-winpipe chan-desktop
 CHAN_SERVER_WINDOWS_TESTS := \
 	tenant_builder_tests::tenant_builders_preserve_routes_and_state \
 	handoff::tests::well_known_path_is_named_pipe_on_windows \
 	handoff::tests::listener_round_trip_upgrade_checked_pipe \
+	handoff::tests::listener_round_trip_activated_pipe \
 	handoff::tests::unserved_pipe_is_no_desktop \
+	handoff::tests::a_request_sent_during_the_boot_is_never_served_late \
+	handoff::tests::a_probe_during_the_boot_turns_no_client_away \
+	handoff::tests::a_listener_whose_rearm_fails_keeps_the_claim \
+	handoff::tests::a_claim_without_its_listener_reads_as_booting \
+	handoff::tests::a_pipe_served_by_another_account_is_never_written_to \
+	handoff::tests::the_claim_and_the_endpoint_grant_this_account_alone \
+	handoff::tests::an_endpoint_pipe_without_a_claim_pipe_holds_no_claim \
+	handoff::tests::a_claim_pipe_this_account_cannot_open_is_no_holder \
 	devserver_handoff::tests::instance_socket_names_are_stable_short_and_scoped \
 	devserver_handoff::tests::listener_round_trip_registered_pipe
 

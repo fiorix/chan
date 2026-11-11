@@ -88,6 +88,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
+# The handoff endpoint's account SID, its owner-only pipes and the client's
+# check of the account serving them: the Win32 calls this crate, which
+# forbids unsafe code, does not make itself.
+[target.'cfg(windows)'.dependencies]
+chan-winpipe = { workspace = true }
+
 [dev-dependencies]
 # This crate's tests (indexer.rs) arm chan-workspace's startup-recovery pause
 # barrier, one of the test-only seams behind the `test-hooks` feature; enable it

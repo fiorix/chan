@@ -1040,6 +1040,7 @@ dependencies = [
  "chan-server",
  "chan-shell",
  "chan-tls",
+ "chan-winpipe",
  "chan-wireguard",
  "chan-workspace",
  "dirs 5.0.1",
@@ -1177,6 +1178,7 @@ dependencies = [
  "chan-systemd",
  "chan-tunnel-client",
  "chan-tunnel-proto",
+ "chan-winpipe",
  "chan-wireguard",
  "chan-workspace",
  "chrono",
@@ -1317,6 +1319,14 @@ dependencies = [
  "url",
  "uuid",
  "yamux",
+]
+
+[[package]]
+name = "chan-winpipe"
+version = "0.127.0"
+dependencies = [
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
