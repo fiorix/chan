@@ -19,7 +19,7 @@ use chan_wireguard::config::{parse_public_key, Cidr, Config, Endpoint, Peer};
 use chan_wireguard::x25519::{PublicKey, StaticSecret};
 use serde::Deserialize;
 
-use crate::config::WireguardHost;
+use crate::config::{WireguardHost, WireguardIngress};
 use crate::devserver::WireguardDiscovery;
 
 /// The key file of `gateway_id` under the key directory `dir`.
@@ -159,6 +159,76 @@ pub fn prepare(
     })
 }
 
+fn valid_label(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 63
+        && !raw.starts_with('-')
+        && !raw.ends_with('-')
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn valid_dns_name(raw: &str) -> bool {
+    raw.len() <= 253 && raw.split('.').all(valid_label)
+}
+
+/// The gateway's canonical key and endpoint grammars; wg-quick also reads
+/// hex keys and other endpoint spellings that discovery must not offer.
+pub(crate) fn valid_peer(key: &str, raw: &str) -> bool {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(key) else {
+        return false;
+    };
+    if bytes.len() != 32 || encode(&bytes) != key {
+        return false;
+    }
+    let Ok(endpoint) = Endpoint::parse(raw) else {
+        return false;
+    };
+    if raw
+        .rsplit_once(':')
+        .is_none_or(|(_, port)| port.starts_with('+'))
+    {
+        return false;
+    }
+    if raw.starts_with('[') {
+        endpoint.host.parse::<std::net::Ipv6Addr>().is_ok()
+    } else {
+        valid_dns_name(&endpoint.host.to_ascii_lowercase())
+    }
+}
+
+/// Validate every entry before a sign-in or discovery can persist it.
+pub(crate) fn validate_ingresses(
+    ingresses: &[WireguardIngress],
+    allowed: &[Cidr],
+) -> Result<(), ()> {
+    if ingresses.is_empty() || allowed.is_empty() {
+        return Err(());
+    }
+    let mut ids = std::collections::HashSet::new();
+    for ingress in ingresses {
+        if !valid_label(&ingress.id)
+            || !ids.insert(&ingress.id)
+            || !valid_peer(&ingress.public_key, &ingress.endpoint)
+        {
+            return Err(());
+        }
+        for host in &ingress.hosts {
+            if !valid_dns_name(host.name.strip_prefix("*.").unwrap_or(&host.name))
+                || host.addresses.is_empty()
+                || host
+                    .addresses
+                    .iter()
+                    .any(|ip| !allowed.iter().any(|net| net.contains(*ip)))
+            {
+                return Err(());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write an enrollment's client file for `gateway_id` under `dir`, owner-only
 /// like the key beside it, and answer its path.
 pub fn write_client_file(
@@ -217,7 +287,7 @@ fn read_key(dir: &Path, gateway_id: &str) -> Result<StaticSecret, String> {
 
 /// Addresses with prefix lengths as the file reader reads them: an address
 /// alone is a host prefix. `None` when one does not read.
-fn cidrs(items: &[String]) -> Option<Vec<Cidr>> {
+pub(crate) fn cidrs(items: &[String]) -> Option<Vec<Cidr>> {
     items
         .iter()
         .map(|item| {
@@ -374,6 +444,9 @@ mod tests {
 
     fn entry() -> WireguardDiscovery {
         WireguardDiscovery {
+            allowed_ips: None,
+            persistent_keepalive: None,
+            ingresses: None,
             endpoint: "wg.chan.app:51820".into(),
             public_key: SERVER_KEY.into(),
         }

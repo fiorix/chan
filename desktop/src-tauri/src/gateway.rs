@@ -2882,6 +2882,9 @@ pub(crate) mod tests {
             auth::Enrolling {
                 public_key: self.sent.clone(),
                 entry: crate::devserver::WireguardDiscovery {
+                    allowed_ips: None,
+                    persistent_keepalive: None,
+                    ingresses: None,
                     endpoint: WG_ENDPOINT.into(),
                     public_key: WG_SERVER_KEY.into(),
                 },

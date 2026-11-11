@@ -1900,6 +1900,9 @@ pub(crate) mod tests {
         let plain = crate::gateway::tests::runtime_with(Vec::new()).discovery;
         let mut offering = plain.clone();
         offering.wireguard = Some(crate::devserver::WireguardDiscovery {
+            allowed_ips: None,
+            persistent_keepalive: None,
+            ingresses: None,
             endpoint: "wg.chan.app:51820".into(),
             public_key: "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into(),
         });

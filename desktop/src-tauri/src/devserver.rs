@@ -653,6 +653,45 @@ pub struct WireguardDiscovery {
     pub endpoint: String,
     /// The interface's public key as `wg` prints it.
     pub public_key: String,
+    /// Routing policy shared by the advertised ingresses. Older gateways
+    /// provide it only in the redeem.
+    #[serde(default)]
+    pub allowed_ips: Option<Vec<String>>,
+    #[serde(default)]
+    pub persistent_keepalive: Option<u16>,
+    /// Absent on gateways that advertise only the legacy peer pair.
+    #[serde(default)]
+    pub ingresses: Option<Vec<crate::config::WireguardIngress>>,
+}
+
+impl WireguardDiscovery {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let invalid = || "chan-gateway discovery has an invalid wireguard entry".to_string();
+        if !crate::wireguard_keys::valid_peer(&self.public_key, &self.endpoint)
+            || self.persistent_keepalive == Some(0)
+        {
+            return Err(invalid());
+        }
+        let allowed = self
+            .allowed_ips
+            .as_deref()
+            .map(crate::wireguard_keys::cidrs);
+        if matches!(&allowed, Some(None))
+            || matches!(&allowed, Some(Some(cidrs)) if cidrs.is_empty())
+        {
+            return Err(invalid());
+        }
+        if let Some(ingresses) = &self.ingresses {
+            let allowed = allowed.flatten().ok_or_else(invalid)?;
+            crate::wireguard_keys::validate_ingresses(ingresses, &allowed)
+                .map_err(|_| invalid())?;
+            let first = &ingresses[0];
+            if first.public_key != self.public_key || first.endpoint != self.endpoint {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
 }
 
 fn origin_of(raw: &str) -> Result<String, String> {
@@ -720,14 +759,8 @@ fn validate_gateway_discovery(
         }
         require_https_unless_loopback(roster_url)?;
     }
-    // The enrollment entry is read with the wg-quick file's own grammars,
-    // since the desktop writes both values into a client file.
     if let Some(wireguard) = &d.wireguard {
-        let valid = chan_wireguard::config::Endpoint::parse(&wireguard.endpoint).is_ok()
-            && chan_wireguard::config::parse_public_key(&wireguard.public_key).is_ok();
-        if !valid {
-            return Err("chan-gateway discovery has an invalid wireguard entry".to_string());
-        }
+        wireguard.validate()?;
     }
 
     for raw in [
@@ -3305,6 +3338,9 @@ mod tests {
         assert_eq!(
             d.wireguard,
             Some(WireguardDiscovery {
+                allowed_ips: None,
+                persistent_keepalive: None,
+                ingresses: None,
                 endpoint: "wg.chan.app:51820".into(),
                 public_key: WG_SERVER_KEY.into(),
             })
@@ -3312,10 +3348,71 @@ mod tests {
         // A bracketed IPv6 endpoint is the file's grammar too.
         let mut d = valid_gateway_discovery();
         d.wireguard = Some(WireguardDiscovery {
+            allowed_ips: None,
+            persistent_keepalive: None,
+            ingresses: None,
             endpoint: "[2001:db8::7]:51820".into(),
             public_key: WG_SERVER_KEY.into(),
         });
         validate_gateway_discovery("https://gw.chan.app", d).expect("an IPv6 endpoint");
+    }
+
+    #[test]
+    fn gateway_discovery_requires_the_first_ingress_to_match_the_single_peer() {
+        let mut discovery: WireguardDiscovery = serde_json::from_value(serde_json::json!({
+            "endpoint": "p1.proxy.chan.app:51820", "public_key": WG_SERVER_KEY,
+            "allowed_ips": ["10.7.0.1/32"],
+            "ingresses": [{"id": "p1", "endpoint": "p1.proxy.chan.app:51820",
+                "public_key": WG_SERVER_KEY, "hosts": []}]
+        }))
+        .unwrap();
+        discovery.validate().unwrap();
+        discovery.endpoint = "p1.proxy.chan.app:51821".into();
+        assert!(discovery.validate().is_err(), "single endpoint must match");
+        discovery.endpoint = "p1.proxy.chan.app:51820".into();
+        discovery.public_key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=".into();
+        assert!(discovery.validate().is_err(), "single key must match");
+    }
+
+    #[test]
+    fn gateway_discovery_rejects_invalid_ingresses_and_routing_policy() {
+        let good = serde_json::json!({
+            "endpoint": "p1.proxy.chan.app:51820", "public_key": WG_SERVER_KEY,
+            "allowed_ips": ["10.7.0.1/32"], "persistent_keepalive": 25,
+            "ingresses": [
+                {"id": "p1", "endpoint": "p1.proxy.chan.app:51820", "public_key": WG_SERVER_KEY,
+                 "hosts": [{"name": "*.p1.proxy.chan.app", "addresses": ["10.7.0.1"]}]},
+                {"id": "p2", "endpoint": "[2001:db8::2]:51820", "public_key": WG_SERVER_KEY,
+                 "hosts": [{"name": "*.p2.proxy.chan.app", "addresses": ["10.7.0.1"]}]}
+            ]
+        });
+        let parse = |wireguard: &serde_json::Value| {
+            let d =
+                serde_json::from_str(&discovery_document(Some(&wireguard.to_string()))).unwrap();
+            validate_gateway_discovery("https://gw.chan.app", d)
+        };
+        parse(&good).expect("two valid ingresses");
+        for (pointer, value) in [
+            ("/ingresses/1/id", serde_json::json!("p1")),
+            ("/ingresses/1/id", serde_json::json!("UPPER")),
+            ("/ingresses/1/public_key", serde_json::json!("bad")),
+            ("/ingresses/1/endpoint", serde_json::json!("host:+1")),
+            ("/ingresses/1/endpoint", serde_json::json!("[not-ipv6]:1")),
+            ("/ingresses/1/hosts/0/name", serde_json::json!("bad/name")),
+            (
+                "/ingresses/1/hosts/0/addresses",
+                serde_json::json!(["10.8.0.1"]),
+            ),
+            ("/ingresses/1/hosts/0/addresses", serde_json::json!([])),
+            ("/ingresses", serde_json::json!([])),
+            ("/allowed_ips", serde_json::json!([])),
+            ("/allowed_ips", serde_json::Value::Null),
+            ("/persistent_keepalive", serde_json::json!(0)),
+        ] {
+            let mut bad = good.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(parse(&bad).is_err(), "accepted invalid {pointer}: {bad}");
+        }
     }
 
     #[test]
@@ -3340,6 +3437,9 @@ mod tests {
         ] {
             let mut d = valid_gateway_discovery();
             d.wireguard = Some(WireguardDiscovery {
+                allowed_ips: None,
+                persistent_keepalive: None,
+                ingresses: None,
                 endpoint: endpoint.into(),
                 public_key: public_key.into(),
             });

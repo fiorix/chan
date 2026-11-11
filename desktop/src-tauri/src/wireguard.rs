@@ -1069,6 +1069,9 @@ pub(crate) mod tests {
         let endpoint = client.peer.endpoint.to_string();
         let sent = base64_of(PublicKey::from(&client.private_key).as_bytes());
         let entry = crate::devserver::WireguardDiscovery {
+            allowed_ips: None,
+            persistent_keepalive: None,
+            ingresses: None,
             endpoint: endpoint.clone(),
             public_key: server_key.clone(),
         };

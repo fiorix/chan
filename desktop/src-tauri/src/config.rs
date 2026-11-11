@@ -180,6 +180,15 @@ pub struct WireguardHost {
     pub addresses: Vec<std::net::IpAddr>,
 }
 
+/// One gateway node's WireGuard interface and the names it routes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardIngress {
+    pub id: String,
+    pub endpoint: String,
+    pub public_key: String,
+    pub hosts: Vec<WireguardHost>,
+}
+
 impl Gateway {
     pub fn trusts_native(&self, owner_user_id: uuid::Uuid, devserver_id: &str) -> bool {
         self.native_trust.iter().any(|trust| {
