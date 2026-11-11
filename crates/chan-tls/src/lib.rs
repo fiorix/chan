@@ -354,6 +354,11 @@ pub mod testing {
     }
 }
 
+/// The CA, leaf and in-memory handshake the integration tests use too.
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod support;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -396,6 +401,26 @@ mod tests {
         assert!(
             client_config().unwrap().alpn_protocols.is_empty(),
             "a caller's ALPN never reaches the next config"
+        );
+    }
+
+    use crate::support;
+
+    #[test]
+    fn a_server_under_a_ca_in_neither_store_fails_the_handshake() {
+        let ca = support::ca("chan-tls refused test CA");
+        let leaf = support::leaf(&ca);
+        let error = support::handshake(client_config().unwrap(), &leaf)
+            .expect_err("the config client_config returns refuses an unknown CA");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(
+            error,
+            TlsError::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(
+            matches!(error, TlsError::InvalidCertificate(_)),
+            "{error:?}"
         );
     }
 
@@ -547,6 +572,18 @@ mod tests {
                     UnixTime::now(),
                 )
                 .is_err());
+        }
+
+        /// The control for the refusal above: the same kind of chain
+        /// completes a handshake once its CA is in the root store, so the
+        /// refusal is about trust, not about how the certificates are made.
+        #[test]
+        fn a_server_under_a_ca_in_the_store_completes_the_handshake() {
+            let ca = support::ca("chan-tls trusted test CA");
+            let leaf = support::leaf(&ca);
+            let roots = roots_with_floor(vec![ca.cert.clone()]);
+            let config = config_with(webpki_verifier(roots.store, provider()).unwrap()).unwrap();
+            support::handshake(config, &leaf).expect("a CA in the store verifies its leaf");
         }
 
         #[test]

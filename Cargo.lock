@@ -1231,6 +1231,7 @@ dependencies = [
 name = "chan-tls"
 version = "0.127.0"
 dependencies = [
+ "ring",
  "rustls",
  "rustls-native-certs",
  "rustls-platform-verifier",

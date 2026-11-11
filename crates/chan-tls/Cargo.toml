@@ -29,3 +29,8 @@ rustls-platform-verifier = { workspace = true }
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 rustls-native-certs = { workspace = true }
 webpki-roots = { workspace = true }
+
+[dev-dependencies]
+# Signs the CA and the leaf the handshake tests make at run time
+# (tests/support), with the ring rustls already links.
+ring = { workspace = true }
