@@ -343,8 +343,14 @@ A `gateways[]` entry is the account-level connection; the account token lives in
 | `added_at` | `u64` | now on add | wall-clock millis the row was added or converted |
 | `native_trust[]` | `Vec<NativeDevserverTrust>` | empty | shared devservers allowed to receive native IPC: `owner_user_id` (UUID), `owner` and `devserver_id`; removing the gateway removes them |
 | `wireguard` | `Option<PathBuf>` | unset | wg-quick file path; see below |
+| `wireguard_public_key` | `Option<String>` | unset | generated public key; private half in the owned key file |
+| `wireguard_enrolled_key` | `Option<String>` | unset | public key enrolled by the last kept sign-in |
+| `wireguard_hosts[]` | `Vec<WireguardHost>` | empty | host map accompanying an unmigrated enrollment file |
+| `wireguard_enrollment` | `Option<WireguardEnrollment>` | unset | key-file path and public tunnel parameters |
 
 The launcher's Gateway form sets or clears `wireguard` through its optional **WireGuard file** field. It accepts an absolute path or a path starting with `~/`, expands `~/` to the user's home, and validates the file when saving. An unset field is omitted from JSON. The desktop adopts an enabled gateway's file at startup; setting, changing or clearing the file through the Gateway form takes effect as the row is saved. The file uses the same parser and Unix permissions rule as `--tunnel-wireguard` above. Source: `desktop/src-tauri/src/config.rs` and `desktop/src-tauri/src/wireguard.rs`.
+
+`wireguard_enrollment` contains `key_file`, `addresses`, `allowed_ips`, optional `persistent_keepalive`, and `ingresses[]` with `id`, `endpoint`, `public_key` and `hosts[]` (`name` and IP `addresses`). It stores no private key. The fabric builds each configuration in memory and currently adopts the first ingress. Matching owned legacy enrollment files migrate at startup; a key mismatch or hand edit keeps the old file operational until successful re-enrollment. A hand-written `wireguard` file stays a single tunnel. A row naming both a manual file and enrolled parameters is refused. The [desktop design](../desktop/design.md#the-wireguard-fabric) describes migration and credential rollback.
 
 A `window_geometry[]` record holds `window_label`, `saved_at` and a `geometries[]` list, newest first, of `{monitor_sig, x, y, w, h, saved_at}`: one logical position and size per monitor signature, so a machine that docks and undocks restores each layout's own geometry.
 
