@@ -1534,7 +1534,7 @@ impl OwnerCut {
         app: &TestApp,
         uid: Uuid,
         token_id: Uuid,
-        profile: ResponseTemplate,
+        profile: impl wiremock::Respond + 'static,
     ) -> Self {
         let cut = Self {
             profile_revoke: format!("/v1/users/{uid}/tokens/{token_id}/revoke"),
@@ -1804,6 +1804,48 @@ async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
 }
 
 #[tokio::test]
+async fn a_used_tokens_cut_outlives_a_request_dropped_between_commit_and_spawn() {
+    let app = TestApp::new().await;
+    let uid = Uuid::new_v4();
+    app.insert_user(uid, "commit-drop@example.com").await;
+    let used = mint(&app, uid, &["desktop.account"]).await;
+    app.api_tokens
+        .validate_no_audit(&used.secret)
+        .await
+        .expect("the token is live");
+    let cut = OwnerCut::mount(&app, uid, used.token.id).await;
+    let (committed, release) = app.api_tokens.test_hold_give_back_after_commit();
+
+    with_cuts_settled(async {
+        let mut request = Box::pin(self_revoke(&app, Some(&used.secret)));
+        tokio::select! {
+            reached = tokio::time::timeout(Duration::from_secs(10), committed) => {
+                reached.expect("the give-back reaches its commit").expect("commit observed");
+            }
+            answer = &mut request => panic!("request answered before the commit hold: {answer:?}"),
+        }
+        assert!(!active(&app, used.token.id).await, "the revoke committed");
+        assert_eq!(cut.counts(&app).await, (0, 0, 0), "the cut has not started");
+        drop(request);
+        // A request-owned give-back drops this receiver on hang-up. Let the
+        // completion observer finish in either case, then assert the cut.
+        let _ = release.send(());
+    })
+    .await;
+
+    assert_eq!(
+        cut.counts(&app).await,
+        (1, 1, 1),
+        "the committed give-back must start its cut after the request is dropped"
+    );
+    assert_eq!(
+        audit_actions(&app, used.token.id).await,
+        ["created_via_desktop", "revoked_via_desktop"]
+    );
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn a_used_tokens_cut_outlives_a_request_dropped_after_the_give_back() {
     let app = TestApp::new().await;
     let uid = Uuid::new_v4();
@@ -1815,28 +1857,32 @@ async fn a_used_tokens_cut_outlives_a_request_dropped_after_the_give_back() {
         .expect("the token is live");
     // Profile answers slowly, as one under load does: a cut awaited inside
     // the request would still be waiting on it when the client goes.
-    let cut = OwnerCut::mount_answering(
-        &app,
-        uid,
-        used.token.id,
-        ResponseTemplate::new(202).set_delay(Duration::from_secs(1)),
-    )
+    let started = Arc::new(tokio::sync::Notify::new());
+    let cut_started = started.clone();
+    let cut = OwnerCut::mount_answering(&app, uid, used.token.id, move |_: &wiremock::Request| {
+        cut_started.notify_one();
+        ResponseTemplate::new(202).set_delay(Duration::from_secs(1))
+    })
     .await;
 
-    // Drive the request only until the give-back has committed, then drop
-    // it, as a desktop that hangs up or gives up does.
-    let mut request = Box::pin(self_revoke(&app, Some(&used.secret)));
-    let answered = loop {
+    // The reservation request observes the cut's start. A database read
+    // observes only the commit, which can precede the cut's spawn.
+    let answered = with_cuts_settled(async {
+        let mut request = Box::pin(self_revoke(&app, Some(&used.secret)));
+        let started = tokio::time::timeout(Duration::from_secs(10), started.notified());
+        tokio::pin!(started);
         tokio::select! {
-            answer = &mut request => break Some(answer),
-            () = tokio::time::sleep(Duration::from_millis(10)) => {
-                if !active(&app, used.token.id).await {
-                    break None;
-                }
+            answer = &mut request => {
+                started.await.expect("the cut starts after the reply");
+                Some(answer)
+            }
+            reached = &mut started => {
+                reached.expect("the cut starts before the request is dropped");
+                None
             }
         }
-    };
-    drop(request);
+    })
+    .await;
 
     if let Some((status, body)) = answered {
         assert_eq!(status, StatusCode::NO_CONTENT);
@@ -1847,7 +1893,7 @@ async fn a_used_tokens_cut_outlives_a_request_dropped_after_the_give_back() {
         "the give-back committed"
     );
     assert_eq!(
-        cut.settled(&app, (1, 1, 1)).await,
+        cut.counts(&app).await,
         (1, 1, 1),
         "profile's reservation and the first cut outlive the request"
     );

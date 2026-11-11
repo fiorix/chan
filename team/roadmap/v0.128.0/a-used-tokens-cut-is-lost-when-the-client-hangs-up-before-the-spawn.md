@@ -23,3 +23,9 @@ The window shows in `a_used_tokens_cut_outlives_a_request_dropped_after_the_give
 
 1. The test red ten of ten on the code before the fix (with a hook that drops the request right after the commit) and green ten of ten after, through the PostgreSQL guest runner.
 2. The identity design's sentence on the cut says when it is started.
+
+## Built
+
+The identity handler launches a task before it calls `give_back`. That task owns both the database commit and the used token's cut spawn; the request only awaits its join handle, so dropping the request between those steps cannot cancel either. The cut still runs separately from the reply, and unused tokens still receive no owner-wide cut. Profile's reservation and the first cut are unchanged, including their existing failure and process-shutdown limits.
+
+The regression pauses `give_back` immediately after its real transaction commits, verifies that the token is revoked and no cut has started, drops the request, then releases the pause and observes completion before asserting the reservation, tunnel kill and session drain. Its hook is per service and feature-gated; an identity self dev-dependency enables it for normal tests without including it in normal builds. The existing post-give-back test waits for the reservation request to observe the cut's start rather than racing a database read. The identity design, route reference and gateway manual describe the ownership and cancellation behavior.

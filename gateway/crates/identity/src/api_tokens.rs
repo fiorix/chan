@@ -209,6 +209,14 @@ pub struct ApiTokenService {
     pool: PgPool,
     admission_signer: Option<AdmissionLeaseSigner>,
     policy_required: bool,
+    #[cfg(feature = "test-util")]
+    give_back_hold: std::sync::Arc<std::sync::Mutex<Option<GiveBackHold>>>,
+}
+
+#[cfg(feature = "test-util")]
+struct GiveBackHold {
+    committed: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl ApiTokenService {
@@ -221,6 +229,8 @@ impl ApiTokenService {
             pool,
             admission_signer: None,
             policy_required: false,
+            #[cfg(feature = "test-util")]
+            give_back_hold: Default::default(),
         }
     }
 
@@ -229,12 +239,39 @@ impl ApiTokenService {
             pool,
             admission_signer: Some(admission_signer),
             policy_required: false,
+            #[cfg(feature = "test-util")]
+            give_back_hold: Default::default(),
         }
     }
 
     pub fn with_policy_required(mut self, policy_required: bool) -> Self {
         self.policy_required = policy_required;
         self
+    }
+
+    /// Pause the next successful give-back after its transaction commits,
+    /// before its caller can start the cut. Shared by clones of this service.
+    /// The first channel observes that point; sending or dropping the second
+    /// releases it. Install once before driving the request.
+    #[cfg(feature = "test-util")]
+    pub fn test_hold_give_back_after_commit(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (committed, observed) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let mut hold = self
+            .give_back_hold
+            .lock()
+            .expect("give-back test hook lock");
+        assert!(hold.is_none(), "give-back test hook already installed");
+        *hold = Some(GiveBackHold {
+            committed,
+            release: released,
+        });
+        (observed, release)
     }
 
     /// Single PAT-mint entry point for the SPA, desktop-authorize flow,
@@ -378,6 +415,18 @@ impl ApiTokenService {
         let revoked = self
             .soft_revoke(user_id, token_id, ACTION_REVOKED_DESKTOP, meta)
             .await?;
+        #[cfg(feature = "test-util")]
+        if revoked.is_some() {
+            let hold = self
+                .give_back_hold
+                .lock()
+                .expect("give-back test hook lock")
+                .take();
+            if let Some(hold) = hold {
+                let _ = hold.committed.send(());
+                let _ = hold.release.await;
+            }
+        }
         Ok(revoked.map(|used| {
             if used {
                 GivenBack::Used
