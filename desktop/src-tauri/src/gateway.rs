@@ -914,11 +914,11 @@ fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedCon
     }))
 }
 
-/// Adopt `gateway_id`'s WireGuard file before it connects, so a file
-/// refused earlier and fixed in place, or a config edited by hand, comes
-/// up here without a save; a tunnel already running from the file is left
-/// as it is. The row's host map rides the adopt. `Some` with the reason
-/// when the file or the fabric cannot carry the row: a connect that ran
+/// Adopt `gateway_id`'s WireGuard source before it connects: every stored
+/// enrolled ingress or the one manual file. A refused source fixed in
+/// place can come up without a save; unchanged running tunnels are kept.
+/// Each ingress's host map rides the adopt. `Some` with the reason
+/// when the source or the fabric cannot carry the row: a connect that ran
 /// anyway would reach the gateway the wrong way or not at all, so the row
 /// says what to fix instead.
 ///
@@ -1179,6 +1179,71 @@ fn new_runtime(discovery: GatewayDiscovery) -> GatewayRuntime {
     }
 }
 
+/// The caller holds the store and current-attempt lock until adoption ends.
+fn reconcile_wireguard(
+    store: &mut config::ConfigStore,
+    manager: &GatewayManager,
+    gateway_id: &str,
+    discovery: &GatewayDiscovery,
+) -> Result<(), String> {
+    let Some(entry) = &discovery.wireguard else {
+        return Ok(());
+    };
+    // A legacy discovery has no complete routing policy. Keep the enrolled
+    // parameters until a modern discovery or another sign-in supplies it.
+    let Some(ingresses) = &entry.ingresses else {
+        return Ok(());
+    };
+    let mut cfg = store
+        .get()
+        .map_err(|error| format!("WireGuard: reading enrolled gateways: {error}"))?;
+    let gateway = cfg
+        .gateways
+        .iter_mut()
+        .find(|gateway| gateway.id == gateway_id)
+        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+    if !gateway.enabled || gateway.wireguard.is_some() {
+        return Ok(());
+    }
+    let Some(enrollment) = &gateway.wireguard_enrollment else {
+        return Ok(());
+    };
+    // A replacement key still needs sign-in. Keep a live old tunnel while
+    // allowing discovery to reach that recovery path.
+    if gateway.wireguard_public_key.is_some()
+        && gateway.wireguard_public_key != gateway.wireguard_enrolled_key
+    {
+        return Ok(());
+    }
+    entry.validate()?;
+    let mut next = enrollment.clone();
+    next.ingresses = ingresses.clone();
+    next.allowed_ips = entry
+        .allowed_ips
+        .clone()
+        .expect("a validated ingress list has AllowedIPs");
+    next.persistent_keepalive = entry.persistent_keepalive;
+    if &next == enrollment {
+        return Ok(());
+    }
+    let key = gateway
+        .wireguard_enrolled_key
+        .as_deref()
+        .ok_or("WireGuard: enrollment has no enrolled key")?;
+    next.configs(key)?;
+    gateway.wireguard_enrollment = Some(next);
+    let gateway = gateway.clone();
+    store
+        .save(&cfg)
+        .map_err(|error| format!("WireGuard: saving discovered ingresses: {error}"))?;
+    if let Some(fabric) = manager.wireguard() {
+        if let Some(result) = fabric.adopt_gateway(&gateway) {
+            result?;
+        }
+    }
+    Ok(())
+}
+
 fn publish_discovery<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
@@ -1187,31 +1252,37 @@ fn publish_discovery<R: tauri::Runtime>(
     attempt: &Arc<GatewayAttempt>,
     result: Result<GatewayDiscovery, GatewayDiscoveryError>,
 ) -> Result<Option<GatewayDiscovery>, String> {
-    // Read the row's current file before taking the gateway-state lock.
-    // An edited config or a retired tunnel must not explain this failure.
-    // The proxy's no-session 502 is an Other error, but still came from the
-    // tunnel; a live tunnel or absent row returns no WireGuard reason.
-    let tunnel_reason = if result.is_err() {
-        let configured = state.store.lock().unwrap().get().ok().and_then(|config| {
-            config
-                .gateways
-                .into_iter()
-                .find(|gateway| gateway.id == gateway_id)
-                .and_then(|gateway| gateway.wireguard_source().map(std::path::Path::to_path_buf))
-        });
-        state
-            .gateway_manager
-            .wireguard()
-            .and_then(|fabric| fabric.discovery_failure(gateway_id, configured.as_deref()))
-    } else {
-        None
-    };
+    // Registry writes and disconnect take these locks in the same order.
+    // Keep both through persistence and adoption so a stale result cannot
+    // replace a successor's tunnels or revive a disconnected row.
+    let mut store = state.store.lock().unwrap();
     let mut live = state.gateway_manager.state.lock().unwrap();
     if !live.owns(gateway_id, attempt) {
         return Ok(None);
     }
+    let tunnel_reason = if result.is_err() {
+        store.get().ok().and_then(|cfg| {
+            let gateway = cfg
+                .gateways
+                .iter()
+                .find(|gateway| gateway.id == gateway_id)?;
+            let origin = url::Url::parse(&gateway.url).ok();
+            state.gateway_manager.wireguard()?.discovery_failure(
+                gateway_id,
+                gateway.wireguard_source(),
+                origin.as_ref().and_then(url::Url::host_str),
+            )
+        })
+    } else {
+        None
+    };
     let (title, msg) = match result {
-        Ok(discovery) if discovery.roster_url.is_some() => return Ok(Some(discovery)),
+        Ok(discovery) if discovery.roster_url.is_some() => {
+            match reconcile_wireguard(&mut store, &state.gateway_manager, gateway_id, &discovery) {
+                Ok(()) => return Ok(Some(discovery)),
+                Err(reason) => ("Gateway WireGuard", reason),
+            }
+        }
         Ok(_) => (
             "Gateway too old",
             "this gateway is too old for account connections - upgrade the gateway".into(),
@@ -1236,6 +1307,7 @@ fn publish_discovery<R: tauri::Runtime>(
         live.discovery_errors.insert(gateway_id.into(), msg.clone());
     }
     drop(live);
+    drop(store);
     emit_notice(app, "error", "gateway", gateway_id, label, title, &msg);
     signal_rows_changed(app, state);
     Err(msg)
@@ -4036,7 +4108,7 @@ pub(crate) mod tests {
                 let parameters = row.wireguard_enrollment.as_ref().unwrap();
                 assert_eq!(parameters.ingresses.len(), 2);
                 assert_eq!(parameters.configs(&run.sent).unwrap().len(), 2);
-                assert_eq!(run.fabric.tunnels(), 1, "the fabric adopts the first peer");
+                assert_eq!(run.fabric.tunnels(), 2, "the fabric adopts every peer");
             }
             assert_eq!(std::fs::read(&key).unwrap(), bytes);
             assert_eq!(std::fs::read_dir(&run.keys).unwrap().count(), 1);
@@ -6158,6 +6230,636 @@ pub(crate) mod tests {
             notices.try_recv().is_err(),
             "stale discovery raised a notice"
         );
+    }
+
+    struct ReconcileFixture {
+        f: SigninFixture,
+        fabric: Arc<crate::wireguard::WireguardFabric>,
+        peers: Vec<crate::wireguard::tests::Peer>,
+        full: config::WireguardEnrollment,
+    }
+
+    impl ReconcileFixture {
+        async fn new() -> Self {
+            let mut f = SigninFixture::new("https://identity.chan.invalid");
+            let keys = f.state.store.lock().unwrap().wireguard_dir();
+            std::fs::create_dir_all(&keys).unwrap();
+            let (mut row, peers) =
+                crate::wireguard::tests::enrolled_peers(&keys, "gw-keychain").await;
+            row.url = f.discovery.identity_origin.clone();
+            let full = row.wireguard_enrollment.as_ref().unwrap().clone();
+            row.wireguard_enrollment
+                .as_mut()
+                .unwrap()
+                .ingresses
+                .truncate(1);
+            {
+                let mut store = f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways = vec![row.clone()];
+                store.save(&cfg).unwrap();
+            }
+            let fabric = Arc::new(crate::wireguard::start(&[row]).await);
+            f.state
+                .gateway_manager
+                .set_wireguard(Arc::clone(&fabric))
+                .unwrap();
+            f.discovery.wireguard = Some(Self::entry(&full));
+            Self {
+                f,
+                fabric,
+                peers,
+                full,
+            }
+        }
+
+        fn entry(parameters: &config::WireguardEnrollment) -> crate::devserver::WireguardDiscovery {
+            let first = &parameters.ingresses[0];
+            crate::devserver::WireguardDiscovery {
+                endpoint: first.endpoint.clone(),
+                public_key: first.public_key.clone(),
+                allowed_ips: Some(parameters.allowed_ips.clone()),
+                persistent_keepalive: parameters.persistent_keepalive,
+                ingresses: Some(parameters.ingresses.clone()),
+            }
+        }
+
+        fn publish(
+            &self,
+            parameters: &config::WireguardEnrollment,
+        ) -> Result<Option<GatewayDiscovery>, String> {
+            let mut discovery = self.f.discovery.clone();
+            discovery.wireguard = Some(Self::entry(parameters));
+            self.publish_result(Ok(discovery))
+        }
+
+        fn publish_result(
+            &self,
+            result: Result<GatewayDiscovery, GatewayDiscoveryError>,
+        ) -> Result<Option<GatewayDiscovery>, String> {
+            publish_discovery(
+                self.f.app.handle(),
+                &self.f.state,
+                "gw-keychain",
+                "test",
+                &self.f.attempt,
+                result,
+            )
+        }
+
+        fn row(&self) -> Gateway {
+            gateway_row(&self.f.state, "gw-keychain").unwrap()
+        }
+
+        fn starts(&self) -> Vec<(String, std::time::Instant)> {
+            self.fabric.ingress_starts("gw-keychain")
+        }
+
+        fn config_path(&self) -> std::path::PathBuf {
+            self.f
+                .state
+                .store
+                .lock()
+                .unwrap()
+                .wireguard_dir()
+                .with_file_name("config.json")
+        }
+    }
+
+    fn age_file(path: &std::path::Path) -> (Vec<u8>, std::time::SystemTime) {
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        (
+            std::fs::read(path).unwrap(),
+            std::fs::metadata(path).unwrap().modified().unwrap(),
+        )
+    }
+
+    fn assert_file_unchanged(path: &std::path::Path, before: &(Vec<u8>, std::time::SystemTime)) {
+        assert_eq!(std::fs::read(path).unwrap(), before.0, "file bytes changed");
+        assert_eq!(
+            std::fs::metadata(path).unwrap().modified().unwrap(),
+            before.1,
+            "file was rewritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_adds_retires_and_replaces_without_key_writes() {
+        let run = ReconcileFixture::new().await;
+        let key_before = age_file(&run.full.key_file);
+        let original = run.starts();
+        assert_eq!(original.len(), 1);
+        assert!(run.publish(&run.full).unwrap().is_some());
+        assert_eq!(
+            run.fabric.tunnels(),
+            2,
+            "discovery must start its added ingress"
+        );
+        assert_eq!(run.row().wireguard_enrollment.as_ref(), Some(&run.full));
+        assert_eq!(
+            run.starts()[0],
+            original[0],
+            "unchanged ingress keeps its tunnel"
+        );
+        for (id, peer) in ["p1", "p2"].into_iter().zip(&run.peers) {
+            let mut listener = peer.tunnel.listen(8123).unwrap();
+            crate::wireguard::tests::carried_by_name(
+                &run.fabric,
+                &mut listener,
+                "10.7.0.1",
+                &format!("alice--a1.{id}.proxy.chan.invalid"),
+            )
+            .await;
+        }
+        let mut parameters = run.full.clone();
+        parameters.ingresses.remove(0);
+        let before = run.starts();
+        run.publish(&parameters).unwrap().unwrap();
+        assert_eq!(
+            run.starts(),
+            vec![before[1].clone()],
+            "gone ingress is retired alone"
+        );
+        for field in ["key", "endpoint", "hosts", "allowed_ips", "keepalive"] {
+            let before = run.starts();
+            match field {
+                "key" => {
+                    parameters.ingresses[0].public_key = run.full.ingresses[0].public_key.clone()
+                }
+                "endpoint" => parameters.ingresses[0].endpoint = "127.0.0.1:9".into(),
+                "hosts" => {
+                    parameters.ingresses[0].hosts[0].name = "*.renamed.proxy.chan.invalid".into()
+                }
+                "allowed_ips" => parameters.allowed_ips = vec!["10.7.0.0/24".into()],
+                "keepalive" => parameters.persistent_keepalive = Some(25),
+                _ => unreachable!(),
+            }
+            run.publish(&parameters).unwrap().unwrap();
+            assert_ne!(
+                run.starts()[0].1,
+                before[0].1,
+                "{field} replaces the affected tunnel"
+            );
+            assert_eq!(run.row().wireguard_enrollment.as_ref(), Some(&parameters));
+        }
+        let before = run.starts();
+        let config_before = age_file(&run.config_path());
+        run.publish(&parameters).unwrap().unwrap();
+        assert_eq!(run.starts(), before, "unchanged discovery retains tunnels");
+        assert_file_unchanged(&run.config_path(), &config_before);
+        assert_file_unchanged(&run.full.key_file, &key_before);
+        assert!(!run.full.key_file.with_extension("conf").exists());
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_upgrades_a_migrated_legacy_row() {
+        let run = ReconcileFixture::new().await;
+        let key_before = age_file(&run.full.key_file);
+        let mut row = run.row();
+        let config = run
+            .full
+            .configs(row.wireguard_enrolled_key.as_deref().unwrap())
+            .unwrap()
+            .remove(0);
+        let owned = run.full.key_file.with_extension("conf");
+        chan_wireguard::config::write_file(&owned, &config).unwrap();
+        row.wireguard = Some(owned.clone());
+        row.wireguard_hosts = run.full.ingresses[0].hosts.clone();
+        row.wireguard_enrollment = None;
+        {
+            let mut store = run.f.state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways = vec![row];
+            store.save(&cfg).unwrap();
+        }
+        assert_eq!(
+            config::migrate_wireguard_enrollments(&run.f.state.store).unwrap(),
+            1
+        );
+        assert!(!owned.exists());
+        let migrated = run.row();
+        assert_eq!(
+            migrated.wireguard_enrollment.as_ref().unwrap().ingresses[0].id,
+            crate::wireguard_keys::LEGACY_INGRESS_ID
+        );
+        run.fabric.adopt_gateway(&migrated).unwrap().unwrap();
+        assert_eq!(run.fabric.tunnels(), 1);
+        run.publish(&run.full).unwrap().unwrap();
+        assert_eq!(
+            run.fabric.tunnels(),
+            2,
+            "converted enrollment gains every discovered peer"
+        );
+        assert_eq!(run.row().wireguard_enrollment.as_ref(), Some(&run.full));
+        let mut listener = run.peers[1].tunnel.listen(8123).unwrap();
+        crate::wireguard::tests::carried_by_name(
+            &run.fabric,
+            &mut listener,
+            "10.7.0.1",
+            "alice--a1.p2.proxy.chan.invalid",
+        )
+        .await;
+        assert_file_unchanged(&run.full.key_file, &key_before);
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_stale_and_cancelled_publications_change_nothing() {
+        for cancel in [false, true] {
+            let run = ReconcileFixture::new().await;
+            if cancel {
+                run.f.cancel().await;
+            } else {
+                begin_connect(&run.f.state, "gw-keychain").unwrap().unwrap();
+            }
+            let before = run.starts();
+            let row = run.row();
+            let config_before = age_file(&run.config_path());
+            let notices = notices(&run.f.app);
+            assert!(run.publish(&run.full).unwrap().is_none());
+            assert_eq!(run.starts(), before);
+            assert_eq!(run.row(), row);
+            assert_file_unchanged(&run.config_path(), &config_before);
+            assert!(notices.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_preserves_manual_disabled_and_legacy_discovery() {
+        for case in ["manual", "disabled", "absent", "legacy"] {
+            let run = ReconcileFixture::new().await;
+            let mut row = run.row();
+            if case == "manual" {
+                row.wireguard_enrollment = None;
+                row.wireguard = Some(run.peers[0].conf.clone());
+                row.wireguard_enrolled_key = None;
+                row.wireguard_public_key = None;
+                run.fabric.adopt_gateway(&row).unwrap().unwrap();
+            } else if case == "disabled" {
+                row.enabled = false;
+                run.fabric.retire(&row.id);
+            }
+            {
+                let mut store = run.f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways = vec![row.clone()];
+                store.save(&cfg).unwrap();
+            }
+            let mut discovery = run.f.discovery.clone();
+            if case == "absent" {
+                discovery.wireguard = None;
+            } else if case == "legacy" {
+                let entry = discovery.wireguard.as_mut().unwrap();
+                entry.ingresses = None;
+                entry.allowed_ips = None;
+            }
+            let before = run.starts();
+            let config_before = age_file(&run.config_path());
+            assert!(run.publish_result(Ok(discovery)).unwrap().is_some());
+            assert_eq!(run.starts(), before, "{case}");
+            assert_eq!(run.row(), row, "{case}");
+            assert_file_unchanged(&run.config_path(), &config_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_preserves_regenerated_key_recovery() {
+        let run = ReconcileFixture::new().await;
+        let before = run.starts();
+        {
+            let mut store = run.f.state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            let public =
+                crate::wireguard_keys::generate(&store.wireguard_dir(), "gw-keychain").unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(public);
+            store.save(&cfg).unwrap();
+        }
+        let key_before = age_file(&run.full.key_file);
+        let config_before = age_file(&run.config_path());
+        let discovery = run.publish(&run.full).unwrap().unwrap();
+        assert!(
+            wireguard_key_unenrolled(&run.row(), &discovery),
+            "sign-in recovery remains available"
+        );
+        assert_eq!(
+            run.starts(),
+            before,
+            "running old key survives until re-enrollment"
+        );
+        assert_file_unchanged(&run.full.key_file, &key_before);
+        assert_file_unchanged(&run.config_path(), &config_before);
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_invalid_parameters_and_key_leave_runtime_and_store_unchanged() {
+        for case in [
+            "empty",
+            "first-pair",
+            "outside-allowed",
+            "key-file",
+            "unenrolled",
+        ] {
+            let run = ReconcileFixture::new().await;
+            let mut discovery = run.f.discovery.clone();
+            let entry = discovery.wireguard.as_mut().unwrap();
+            match case {
+                "empty" => entry.ingresses = Some(vec![]),
+                "first-pair" => entry.endpoint = "127.0.0.1:9".into(),
+                "outside-allowed" => entry.allowed_ips = Some(vec!["192.0.2.1/32".into()]),
+                "key-file" => {
+                    crate::wireguard_keys::generate(
+                        run.full.key_file.parent().unwrap(),
+                        "gw-keychain",
+                    )
+                    .unwrap();
+                }
+                "unenrolled" => {
+                    let mut store = run.f.state.store.lock().unwrap();
+                    let mut cfg = store.get().unwrap();
+                    cfg.gateways[0].wireguard_public_key = None;
+                    cfg.gateways[0].wireguard_enrolled_key = None;
+                    store.save(&cfg).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = run.starts();
+            let config_before = age_file(&run.config_path());
+            let error = run.publish_result(Ok(discovery)).unwrap_err();
+            assert!(
+                error.contains("WireGuard") || error.contains("wireguard"),
+                "{case}: {error}"
+            );
+            assert_eq!(run.starts(), before, "{case}");
+            assert_file_unchanged(&run.config_path(), &config_before);
+            let live = run.f.state.gateway_manager.state.lock().unwrap();
+            assert!(!live.owns("gw-keychain", &run.f.attempt));
+            assert_eq!(
+                live.runtimes["gw-keychain"].last_error.as_deref(),
+                Some(error.as_str())
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discovery_reconcile_failed_save_never_adopts_and_emits_after_unlocking() {
+        use tauri::Listener;
+        let run = ReconcileFixture::new().await;
+        let path = run.config_path();
+        use std::os::unix::fs::PermissionsExt;
+        let directory = path.parent().unwrap();
+        let permissions = std::fs::metadata(directory).unwrap().permissions();
+        let before = run.starts();
+        let config_before = age_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = Arc::clone(&run.f.state);
+        run.f.app.listen(LAUNCHER_NOTICE, move |_| {
+            tx.send((
+                state.store.try_lock().is_ok(),
+                state.gateway_manager.state.try_lock().is_ok(),
+            ))
+            .unwrap();
+        });
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = run.publish(&run.full);
+        std::fs::set_permissions(directory, permissions).unwrap();
+        let error = result.unwrap_err();
+        assert!(error.contains("saving discovered ingresses"), "{error}");
+        assert_eq!(
+            run.starts(),
+            before,
+            "persistence failure cannot mutate tunnels"
+        );
+        assert_file_unchanged(&path, &config_before);
+        assert_eq!(rx.try_recv().unwrap(), (true, true));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn partial_ingress_refusal_keeps_connect_and_roster_usable() {
+        use chan_server::GatewayRegistry;
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run = ReconcileFixture::new().await;
+        let entry = ReconcileFixture::entry(&run.full);
+        let json = serde_json::json!({
+            "endpoint":entry.endpoint, "public_key":entry.public_key,
+            "allowed_ips":entry.allowed_ips, "persistent_keepalive":entry.persistent_keepalive,
+            "ingresses":entry.ingresses,
+        });
+        let (origin, server) = spawn_gateway_stub_full(false, None, Some(json)).await;
+        {
+            let mut store = run.f.state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].url = origin.clone();
+            store.save(&cfg).unwrap();
+        }
+        run.fabric.refuse_start("gw-keychain/p2");
+        let mut listener = run.peers[0].tunnel.listen(8123).unwrap();
+        crate::wireguard::tests::carried_by_name(
+            &run.fabric,
+            &mut listener,
+            "10.7.0.1",
+            "alice--a1.p1.proxy.chan.invalid",
+        )
+        .await;
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "test-partial".into(),
+                secret: "fixture-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        let result = connect_gateway(
+            run.f.app.handle().clone(),
+            Arc::clone(&run.f.state),
+            "gw-keychain".into(),
+            false,
+        )
+        .await;
+        auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        server.abort();
+        result.expect("a refused ingress must not refuse discovery reconciliation");
+        let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Connected);
+        assert_eq!(view.devserver_count, 1);
+        assert!(
+            adopt_wireguard(&run.f.state, "gw-keychain")
+                .unwrap()
+                .is_none(),
+            "partial refusal must not refuse the next connect's adoption"
+        );
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&run.f.state.store),
+            Arc::new(std::sync::OnceLock::new()),
+            Arc::clone(&run.f.state.gateway_manager),
+        );
+        let projected = registry.list().remove(0);
+        assert_eq!(projected.wireguard_status.as_deref(), Some("up"));
+        assert!(projected
+            .last_error
+            .unwrap()
+            .contains("gw-keychain/p2: WireGuard: injected socket refusal"));
+        crate::wireguard::tests::carried_by_name(
+            &run.fabric,
+            &mut listener,
+            "10.7.0.1",
+            "bob--b2.p1.proxy.chan.invalid",
+        )
+        .await;
+        run.f.cancel().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn migration_orphan_retries_after_discovery_changes_ingress_ids() {
+        use std::os::unix::fs::PermissionsExt;
+        for edited in [
+            "none",
+            "endpoint",
+            "peer_key",
+            "addresses",
+            "allowed_ips",
+            "keepalive",
+            "key_file",
+        ] {
+            let run = ReconcileFixture::new().await;
+            let mut row = run.row();
+            let config = run
+                .full
+                .configs(row.wireguard_enrolled_key.as_deref().unwrap())
+                .unwrap()
+                .remove(0);
+            let orphan = run.full.key_file.with_extension("conf");
+            chan_wireguard::config::write_file(&orphan, &config).unwrap();
+            row.wireguard = Some(orphan.clone());
+            row.wireguard_hosts = run.full.ingresses[0].hosts.clone();
+            row.wireguard_enrollment = None;
+            {
+                let mut store = run.f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways = vec![row];
+                store.save(&cfg).unwrap();
+            }
+            let keys = orphan.parent().unwrap();
+            std::fs::set_permissions(keys, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let migrated = config::migrate_wireguard_enrollments(&run.f.state.store);
+            std::fs::set_permissions(keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(migrated.unwrap(), 1);
+            assert!(
+                orphan.exists(),
+                "failed migration cleanup leaves its owned file"
+            );
+            run.fabric.adopt_gateway(&run.row()).unwrap().unwrap();
+            let legacy_start = run.starts()[0].clone();
+            let mut modern = run.full.clone();
+            modern.ingresses.reverse();
+            run.publish(&modern).unwrap().unwrap();
+            assert_eq!(run.starts().len(), 2);
+            assert!(
+                run.starts()
+                    .iter()
+                    .all(|(id, started)| id != &legacy_start.0 && started != &legacy_start.1),
+                "modern route ids replace the legacy tunnel once"
+            );
+            if edited == "key_file" {
+                let alternative = keys.join("operator.key");
+                std::fs::copy(&run.full.key_file, &alternative).unwrap();
+                let mut store = run.f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0]
+                    .wireguard_enrollment
+                    .as_mut()
+                    .unwrap()
+                    .key_file = alternative;
+                store.save(&cfg).unwrap();
+            } else if edited != "none" {
+                let mut changed = chan_wireguard::config::read_file(&orphan).unwrap();
+                match edited {
+                    "endpoint" => {
+                        changed.peer.endpoint =
+                            chan_wireguard::config::Endpoint::parse("127.0.0.1:9").unwrap()
+                    }
+                    "peer_key" => {
+                        changed.peer.public_key = chan_wireguard::config::parse_public_key(
+                            &modern.ingresses[0].public_key,
+                        )
+                        .unwrap()
+                    }
+                    "addresses" => {
+                        changed.addresses =
+                            crate::wireguard_keys::cidrs(&["10.7.0.3/32".into()]).unwrap()
+                    }
+                    "allowed_ips" => {
+                        changed.peer.allowed_ips =
+                            crate::wireguard_keys::cidrs(&["10.7.0.0/24".into()]).unwrap()
+                    }
+                    "keepalive" => changed.peer.persistent_keepalive = Some(25),
+                    _ => unreachable!(),
+                }
+                chan_wireguard::config::write_file(&orphan, &changed).unwrap();
+            }
+            let config_before = age_file(&run.config_path());
+            let key_before = age_file(&run.full.key_file);
+            assert_eq!(
+                config::migrate_wireguard_enrollments(&run.f.state.store).unwrap(),
+                0
+            );
+            assert_eq!(
+                orphan.exists(),
+                edited != "none",
+                "only an operator replacement survives retry"
+            );
+            assert_file_unchanged(&run.config_path(), &config_before);
+            assert_file_unchanged(&run.full.key_file, &key_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_reconcile_failure_names_only_the_ingress_carrying_identity() {
+        for mapped in [false, true] {
+            let run = ReconcileFixture::new().await;
+            let mut row = run.row();
+            if mapped {
+                row.wireguard_enrollment.as_mut().unwrap().ingresses[0].hosts[0].name =
+                    "identity.chan.invalid".into();
+            }
+            {
+                let mut store = run.f.state.store.lock().unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways = vec![row.clone()];
+                store.save(&cfg).unwrap();
+            }
+            run.fabric.adopt_gateway(&row).unwrap().unwrap();
+            run.fabric.set_test_status(
+                &row.id,
+                chan_wireguard::Status {
+                    handshake: chan_wireguard::HandshakeState::Never,
+                    endpoint: Some("127.0.0.1:9".parse().unwrap()),
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    resolution_error: None,
+                    resolution_stalled: false,
+                },
+            );
+            let error = run
+                .publish_result(Err(GatewayDiscoveryError::Other("HTTP 502".into())))
+                .unwrap_err();
+            if mapped {
+                assert!(
+                    error.contains("no WireGuard handshake"),
+                    "identity is carried by the migrated host map: {error}"
+                );
+            } else {
+                assert_eq!(
+                    error, "gateway discovery failed: HTTP 502",
+                    "an unrelated node cannot explain an identity failure"
+                );
+            }
+        }
     }
 
     #[test]

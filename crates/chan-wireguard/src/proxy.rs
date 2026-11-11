@@ -327,6 +327,25 @@ impl ConnectProxy {
         found
     }
 
+    /// Replace the complete routing table in the supplied order. All ids
+    /// and host maps are validated before publication; a refusal leaves
+    /// the old table intact. Retained tunnel handles keep their sessions
+    /// and streams, while removed tunnels end after their last handle is
+    /// dropped. An owner of several related routes can therefore reorder
+    /// or reconcile them without exposing a partially updated table.
+    pub fn replace_routes(&self, routes: Vec<(String, ProxyRoute)>) -> io::Result<()> {
+        let mut ids = std::collections::HashSet::new();
+        for (id, route) in &routes {
+            check_route(route)?;
+            if !ids.insert(id) {
+                return Err(held_id(id));
+            }
+        }
+        let previous = std::mem::replace(&mut *self.router.routes.write(), routes);
+        drop(previous);
+        Ok(())
+    }
+
     /// How many routes the table holds.
     pub fn routes(&self) -> usize {
         self.router.routes.read().len()
@@ -2113,6 +2132,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(proxy.routes(), 2);
+    }
+
+    #[tokio::test]
+    async fn complete_route_replacement_validates_before_swapping_in_order() {
+        let Pair { a, b, .. } = pair().await;
+        let proxy = ConnectProxy::bind_routed(vec![("old".into(), route(a.clone()))], loopback())
+            .await
+            .unwrap();
+        let ids = || {
+            proxy
+                .router
+                .routes
+                .read()
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        };
+        let duplicate = proxy
+            .replace_routes(vec![
+                ("same".into(), route(a.clone())),
+                ("same".into(), route(b.clone())),
+            ])
+            .unwrap_err();
+        assert_eq!(duplicate.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(ids(), ["old"]);
+        let invalid = proxy
+            .replace_routes(vec![
+                ("first".into(), route(a.clone())),
+                (
+                    "bad".into(),
+                    mapped(a.clone(), vec![host("bad.invalid", &["10.9.9.9"])]),
+                ),
+            ])
+            .unwrap_err();
+        assert_eq!(invalid.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            ids(),
+            ["old"],
+            "a valid prefix must not be published on refusal"
+        );
+        proxy
+            .replace_routes(vec![
+                ("second".into(), route(b)),
+                ("first".into(), route(a)),
+            ])
+            .unwrap();
+        assert_eq!(ids(), ["second", "first"]);
+        proxy.replace_routes(Vec::new()).unwrap();
+        assert_eq!(proxy.routes(), 0);
     }
 
     #[tokio::test]
