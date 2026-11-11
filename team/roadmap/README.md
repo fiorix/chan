@@ -60,7 +60,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [local devserver calls go through a proxy][cliproxy] | landed | GA |
 | [one WireGuard ingress per proxy node][wgnode] | gateway landed | desktop |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
-| [wrapped ghostty copies paste broken][gcopy] | not started | design |
+| [wrapped ghostty copies paste broken][gcopy] | partly built | build |
 | [a theme switch leaves ghostty colours][livetheme] | built | owner |
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
@@ -83,7 +83,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [a file dropped on the Linux desktop hands the page a URI][linuxdrop] | landed | GA |
 | [a save that meets its file gone opens the external edit dialog][savegone] | landed | GA |
 | [the tag-scoped graph never refits its nodes][taglens] | landed | GA |
-| [ghostty sends a pasted line break as LF][ghosttylf] | not started | design |
+| [ghostty sends a pasted line break as LF][ghosttylf] | landed | GA |
 | [a local close outlasts its CLI reply window][closebudget] | landed | GA |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
