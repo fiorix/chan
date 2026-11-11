@@ -42,7 +42,7 @@
   } from "@lucide/svelte";
   import { chordFor, currentOS } from "../state/shortcuts";
   import { windowCaps } from "../state/windowCaps";
-  import { parentDir } from "../state/format";
+  import { formatSize, parentDir } from "../state/format";
   import { builtInChordSuperseded } from "../state/keymapOverrides.svelte";
   import FindBar from "./FindBar.svelte";
   import Inspector from "./Inspector.svelte";
@@ -408,7 +408,7 @@
   );
   const loadingText = $derived(
     tab.loadProgress?.totalBytes
-      ? `loading ${formatBytes(tab.loadProgress.loadedBytes)} / ${formatBytes(tab.loadProgress.totalBytes)}`
+      ? `loading ${formatSize(tab.loadProgress.loadedBytes)} / ${formatSize(tab.loadProgress.totalBytes)}`
       : "loading...",
   );
   /// Why the buffer was not saved, while the file lacks it: the tab differs
@@ -840,12 +840,6 @@
     }
     setMode(tab, next);
     closeTabMenu();
-  }
-
-  function formatBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
   const markdownToolsEnabled = $derived(tab.fileKind !== "text");

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { basename, fmtCost, fmtDevs, fmtMonths, parentDir } from "./format";
+import { basename, fmtCost, fmtDevs, fmtMonths, formatSize, parentDir } from "./format";
 
 describe("parentDir", () => {
   test.each([
@@ -71,5 +71,33 @@ describe("fmtCost", () => {
 
   test("an estimate that is not a number reads as a dash", () => {
     expect(fmtCost(NaN)).toBe(" - ");
+  });
+});
+
+describe("formatSize", () => {
+  const KB = 1024;
+  const MB = 1024 * KB;
+  const GB = 1024 * MB;
+  const TB = 1024 * GB;
+  // Each step starts at 1024 of the one below it, so both sides of every
+  // boundary are pinned, the terabyte step's most closely.
+  test.each([
+    [0, "0 B"],
+    [1023, "1023 B"],
+    [KB, "1.0 KB"],
+    [1023 * KB, "1023.0 KB"],
+    [MB, "1.0 MB"],
+    [1.5 * MB, "1.5 MB"],
+    [1023 * MB, "1023.0 MB"],
+    [GB, "1.0 GB"],
+    [1023 * GB, "1023.0 GB"],
+    [1023.9 * GB, "1023.9 GB"],
+    [TB, "1.0 TB"],
+    [1.5 * TB, "1.5 TB"],
+    [3 * TB + 512 * GB, "3.5 TB"],
+    [12.25 * TB, "12.3 TB"],
+    [2048 * TB, "2048.0 TB"],
+  ])("%d bytes read %j", (bytes, expected) => {
+    expect(formatSize(bytes)).toBe(expected);
   });
 });
