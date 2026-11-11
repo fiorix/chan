@@ -3,11 +3,11 @@
 //! A gateway whose discovery offers enrollment gets a key pair of its own:
 //! the private half in `<gateway id>.key` under the desktop's `wireguard`
 //! directory (base64 and a newline), the public half on the gateway row,
-//! where the launcher shows it and a sign-in sends it. The client file a
-//! sign-in writes from the key sits beside it as `<gateway id>.conf`. The
+//! where the launcher shows it and a sign-in sends it. Public tunnel
+//! parameters live on the row and configurations are built in memory. The
 //! directory is owner-only (0700) and so is each file (0600) on Unix; on
 //! Windows the profile directory's ACL applies, as the file reader accepts.
-//! The private key is read back only to write the client file, so it never
+//! The private key is read back only to build a tunnel, so it never
 //! reaches the config, a log, the projection or a request.
 
 use std::io;
@@ -19,7 +19,7 @@ use chan_wireguard::config::{parse_public_key, Cidr, Config, Endpoint, Peer};
 use chan_wireguard::x25519::{PublicKey, StaticSecret};
 use serde::Deserialize;
 
-use crate::config::{WireguardHost, WireguardIngress};
+use crate::config::{WireguardEnrollment, WireguardHost, WireguardIngress};
 use crate::devserver::WireguardDiscovery;
 
 /// Synthetic identity for a single-peer answer. A real node can have this
@@ -98,7 +98,6 @@ pub struct Enrollment {
     /// The enrolled public key, base64 as it was sent.
     pub public_key: String,
     pub config: Config,
-    pub hosts: Vec<WireguardHost>,
     pub ingresses: Vec<WireguardIngress>,
 }
 
@@ -110,6 +109,100 @@ impl std::fmt::Debug for Enrollment {
             .field("ingresses", &self.ingresses)
             .finish()
     }
+}
+
+impl Enrollment {
+    pub fn parameters(&self, key_file: PathBuf) -> WireguardEnrollment {
+        WireguardEnrollment {
+            key_file,
+            addresses: self
+                .config
+                .addresses
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            allowed_ips: self
+                .config
+                .peer
+                .allowed_ips
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            persistent_keepalive: self.config.peer.persistent_keepalive,
+            ingresses: self.ingresses.clone(),
+        }
+    }
+}
+
+impl WireguardEnrollment {
+    /// Build each node's tunnel from one key read. No file is written.
+    pub fn configs(&self, enrolled_key: &str) -> Result<Vec<Config>, String> {
+        let invalid = || "WireGuard: invalid enrolled tunnel parameters".to_string();
+        let addresses = cidrs(&self.addresses)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(invalid)?;
+        let allowed_ips = cidrs(&self.allowed_ips)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(invalid)?;
+        if self.persistent_keepalive == Some(0) {
+            return Err(invalid());
+        }
+        validate_ingresses(&self.ingresses, &allowed_ips).map_err(|_| invalid())?;
+        let private_key = read_key_file(&self.key_file)?;
+        if encode(PublicKey::from(&private_key).as_bytes()) != enrolled_key {
+            return Err("WireGuard: the key file does not hold the enrolled key; connect again to enroll it".into());
+        }
+        self.ingresses
+            .iter()
+            .map(|ingress| {
+                Ok(Config {
+                    private_key: private_key.clone(),
+                    addresses: addresses.clone(),
+                    mtu: None,
+                    peer: Peer {
+                        public_key: parse_public_key(&ingress.public_key).map_err(|_| invalid())?,
+                        preshared_key: None,
+                        endpoint: Endpoint::parse(&ingress.endpoint).map_err(|_| invalid())?,
+                        allowed_ips: allowed_ips.clone(),
+                        persistent_keepalive: self.persistent_keepalive,
+                    },
+                })
+            })
+            .collect()
+    }
+}
+
+/// Read an owned legacy enrollment without changing either key file.
+pub(crate) fn migrate_file(
+    dir: &Path,
+    gateway_id: &str,
+    enrolled_key: &str,
+    hosts: &[WireguardHost],
+) -> Result<Option<WireguardEnrollment>, String> {
+    let config = chan_wireguard::config::read_file(&conf_path(dir, gateway_id))
+        .map_err(|e| format!("WireGuard: {e}"))?;
+    let key = read_key(dir, gateway_id)?;
+    if config.private_key.to_bytes() != key.to_bytes()
+        || encode(PublicKey::from(&key).as_bytes()) != enrolled_key
+        || config.mtu.is_some()
+        || config.peer.preshared_key.is_some()
+    {
+        return Ok(None);
+    }
+    let ingress = WireguardIngress {
+        id: LEGACY_INGRESS_ID.into(),
+        endpoint: config.peer.endpoint.to_string(),
+        public_key: encode(config.peer.public_key.as_bytes()),
+        hosts: hosts.to_vec(),
+    };
+    let enrollment = Enrollment {
+        public_key: enrolled_key.into(),
+        config,
+        ingresses: vec![ingress],
+    };
+    let parameters = enrollment.parameters(key_path(dir, gateway_id));
+    parameters.configs(enrolled_key)?;
+    Ok(Some(parameters))
 }
 
 /// The refusal of a redeem whose peer is not the one discovery named.
@@ -217,7 +310,6 @@ pub fn prepare(
                 persistent_keepalive: params.persistent_keepalive,
             },
         },
-        hosts: params.hosts.clone(),
         ingresses,
     })
 }
@@ -292,21 +384,9 @@ pub(crate) fn validate_ingresses(
     Ok(())
 }
 
-/// Write an enrollment's client file for `gateway_id` under `dir`, owner-only
-/// like the key beside it, and answer its path.
-pub fn write_client_file(
-    dir: &Path,
-    gateway_id: &str,
-    enrollment: &Enrollment,
-) -> Result<PathBuf, String> {
-    let path = conf_path(dir, gateway_id);
-    chan_wireguard::config::write_file(&path, &enrollment.config)
-        .map_err(|e| format!("WireGuard: {e}"))?;
-    Ok(path)
-}
-
 /// The bytes of the client file at `path`, `None` when there is none. They
-/// hold a private key: they are kept only to put the file back, never shown.
+/// hold a private key: they are kept only to recognize an obsolete file
+/// before removing it, never shown.
 pub fn read_client_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -315,31 +395,30 @@ pub fn read_client_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// Put the client file at `path` inside `dir` back to `bytes`, owner-only
-/// like the key beside it, or delete it when `bytes` is `None` (a file that
-/// is not there is not an error).
-pub fn put_back_client_file(dir: &Path, path: &Path, bytes: Option<&[u8]>) -> Result<(), String> {
-    let result = match bytes {
-        Some(bytes) => write_owner_only(dir, path, bytes),
-        None => match std::fs::remove_file(path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        },
-    };
-    result.map_err(|e| format!("WireGuard: putting back {}: {e}", path.display()))
-}
-
 /// The private key in `gateway_id`'s key file under `dir`.
 fn read_key(dir: &Path, gateway_id: &str) -> Result<StaticSecret, String> {
     let path = key_path(dir, gateway_id);
+    read_key_file(&path)
+}
+
+fn read_key_file(path: &Path) -> Result<StaticSecret, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| format!("WireGuard: reading {}: {e}", path.display()))?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!("WireGuard: {} must be owner-only", path.display()));
+        }
+    }
     let unreadable = || {
         format!(
-            "sign-in failed: WireGuard: {} does not hold a key; generate one again",
+            "WireGuard: {} does not hold a key; generate one again",
             path.display()
         )
     };
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("sign-in failed: WireGuard: reading {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("WireGuard: reading {}: {e}", path.display()))?;
     let bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
         .decode(text.trim_end_matches('\n'))
         .ok()
@@ -531,16 +610,22 @@ mod tests {
     }
 
     #[test]
-    fn enrolled_file_parses_with_read_file() {
+    fn enrollment_builds_configs_without_writing_private_material() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join("wireguard");
         let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
         let enrollment = prepare(&dir, "gw-1a2b3c4d", &sent, &entry(), &params()).unwrap();
         assert_eq!(enrollment.public_key, sent);
-        assert_eq!(enrollment.hosts, params().hosts);
-        let conf = write_client_file(&dir, "gw-1a2b3c4d", &enrollment).unwrap();
-        assert_eq!(conf, conf_path(&dir, "gw-1a2b3c4d"));
-        let read = chan_wireguard::config::read_file(&conf).unwrap();
+        assert_eq!(LEGACY_INGRESS_ID, "legacy");
+        assert_eq!(enrollment.ingresses[0].id, LEGACY_INGRESS_ID);
+        assert_eq!(enrollment.ingresses[0].hosts, params().hosts);
+        let key = key_path(&dir, "gw-1a2b3c4d");
+        let read = enrollment
+            .parameters(key.clone())
+            .configs(&sent)
+            .unwrap()
+            .remove(0);
+        assert!(!conf_path(&dir, "gw-1a2b3c4d").exists());
         assert_eq!(encode(PublicKey::from(&read.private_key).as_bytes()), sent);
         let addresses: Vec<String> = read
             .addresses
@@ -562,8 +647,7 @@ mod tests {
         let mut quiet = params();
         quiet.persistent_keepalive = None;
         let enrollment = prepare(&dir, "gw-1a2b3c4d", &sent, &entry(), &quiet).unwrap();
-        write_client_file(&dir, "gw-1a2b3c4d", &enrollment).unwrap();
-        let read = chan_wireguard::config::read_file(&conf).unwrap();
+        let read = enrollment.parameters(key).configs(&sent).unwrap().remove(0);
         assert_eq!(read.peer.persistent_keepalive, None);
         // The enrollment's Debug carries no key material.
         let key_text = std::fs::read_to_string(key_path(&dir, "gw-1a2b3c4d")).unwrap();
@@ -668,6 +752,47 @@ mod tests {
     }
 
     #[test]
+    fn two_ingress_redeem_compares_sets_and_builds_configs_from_one_key() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let key = key_path(&dir, "gw-1a2b3c4d");
+        let before = std::fs::read(&key).unwrap();
+        let (entry, mut params) = two_ingresses();
+        params.ingresses.as_mut().unwrap().reverse();
+        let first = &params.ingresses.as_ref().unwrap()[0];
+        params.server_public_key = first.server_public_key.clone();
+        params.endpoint = first.endpoint.clone();
+        params.hosts = first.hosts.clone();
+        let enrollment = prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &params).unwrap();
+        let stored = enrollment.parameters(key.clone());
+        assert_eq!(stored.ingresses, entry.ingresses.clone().unwrap());
+        let configs = stored.configs(&sent).unwrap();
+        assert_eq!(configs.len(), 2);
+        for (config, ingress) in configs.iter().zip(stored.ingresses.iter()) {
+            assert_eq!(encode(config.public_key().as_bytes()), sent);
+            assert_eq!(config.addresses, cidrs(&params.addresses).unwrap());
+            assert_eq!(config.peer.allowed_ips, cidrs(&params.allowed_ips).unwrap());
+            assert_eq!(
+                config.peer.persistent_keepalive,
+                params.persistent_keepalive
+            );
+            assert_eq!(
+                encode(config.peer.public_key.as_bytes()),
+                ingress.public_key
+            );
+            assert_eq!(config.peer.endpoint.to_string(), ingress.endpoint);
+        }
+        assert_eq!(std::fs::read(&key).unwrap(), before);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(!serde_json::to_string(&stored)
+            .unwrap()
+            .contains(std::str::from_utf8(&before).unwrap().trim()));
+        #[cfg(unix)]
+        assert_eq!(mode(&key), 0o600);
+    }
+
+    #[test]
     fn two_ingress_redeem_refuses_each_changed_identity_and_one_sided_lists() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join("wireguard");
@@ -704,20 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn second_ingress_hosts_are_validated_before_storage() {
-        let home = tempfile::tempdir().unwrap();
-        let dir = home.path().join("wireguard");
-        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
-        let (entry, mut params) = two_ingresses();
-        params.ingresses.as_mut().unwrap()[1].hosts[0].addresses =
-            vec!["10.7.0.2".parse().unwrap()];
-        assert!(prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &params)
-            .unwrap_err()
-            .contains("ingresses is invalid"));
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-    }
-
-    #[test]
     fn redeem_requires_the_first_ingress_to_match_the_single_peer() {
         let home = tempfile::tempdir().unwrap();
         let sent = generate(home.path(), "gw-single").unwrap();
@@ -736,6 +847,88 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn second_ingress_hosts_are_validated_before_storage() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let (entry, mut params) = two_ingresses();
+        params.ingresses.as_mut().unwrap()[1].hosts[0].addresses =
+            vec!["10.7.0.2".parse().unwrap()];
+        assert!(prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &params)
+            .unwrap_err()
+            .contains("ingresses is invalid"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn persisted_configs_refuse_a_replaced_or_shared_key() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let (entry, params) = two_ingresses();
+        let stored = prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &params)
+            .unwrap()
+            .parameters(key_path(&dir, "gw-1a2b3c4d"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stored.key_file, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            assert!(stored.configs(&sent).unwrap_err().contains("owner-only"));
+            assert!(prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &params)
+                .unwrap_err()
+                .starts_with("sign-in failed: WireGuard:"));
+        }
+        generate(&dir, "gw-1a2b3c4d").unwrap();
+        assert!(stored
+            .configs(&sent)
+            .unwrap_err()
+            .contains("does not hold the enrolled key"));
+        std::fs::remove_file(&stored.key_file).unwrap();
+        assert!(stored
+            .configs(&sent)
+            .unwrap_err()
+            .starts_with("WireGuard: reading"));
+    }
+
+    #[test]
+    fn legacy_migration_checks_both_key_sources_and_keeps_extra_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let enrollment = prepare(&dir, "gw-1a2b3c4d", &sent, &entry(), &params()).unwrap();
+        let path = conf_path(&dir, "gw-1a2b3c4d");
+        chan_wireguard::config::write_file(&path, &enrollment.config).unwrap();
+        assert!(
+            migrate_file(&dir, "gw-1a2b3c4d", SERVER_KEY, &params().hosts)
+                .unwrap()
+                .is_none(),
+            "the enrolled key must match"
+        );
+        let mut changed = enrollment.config;
+        changed.private_key = StaticSecret::from([12u8; 32]);
+        chan_wireguard::config::write_file(&path, &changed).unwrap();
+        assert!(
+            migrate_file(&dir, "gw-1a2b3c4d", &sent, &params().hosts)
+                .unwrap()
+                .is_none(),
+            "the client file must match the generated key"
+        );
+        changed.private_key = read_key(&dir, "gw-1a2b3c4d").unwrap();
+        changed.mtu = Some(1280);
+        chan_wireguard::config::write_file(&path, &changed).unwrap();
+        assert!(migrate_file(&dir, "gw-1a2b3c4d", &sent, &params().hosts)
+            .unwrap()
+            .is_none());
+        changed.mtu = None;
+        changed.peer.preshared_key = Some([13u8; 32]);
+        chan_wireguard::config::write_file(&path, &changed).unwrap();
+        assert!(migrate_file(&dir, "gw-1a2b3c4d", &sent, &params().hosts)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

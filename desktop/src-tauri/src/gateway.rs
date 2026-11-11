@@ -227,6 +227,8 @@ pub(super) trait CredentialWrites {
     /// Whether what the writes were for is gone by the time they end (the
     /// gateway's row removed), which undoes them as a withdrawal does.
     fn abandoned(&self) -> bool;
+    /// Cleanup that may run only once the writes are irrevocably kept.
+    fn kept(&mut self) {}
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -254,7 +256,7 @@ impl GatewayAttempt {
     /// when cancelled, `Err` when a write failed, which `writes` takes back
     /// itself. A cancel before the writes start refuses them. One that lands
     /// while they run lets them finish, since a write abandoned midway could
-    /// leave a client file without its token, and then undoes them before
+    /// leave an enrolled row without its token, and then undoes them before
     /// the lock is released. Every cancellation waits for this lock in
     /// [`Self::finish_cancellation`], through the attempts the cancelled one
     /// replaced, so it returns only once nothing of the commit is left. The
@@ -275,6 +277,7 @@ impl GatewayAttempt {
             *commit = CredentialCommit::Cancelled;
             return Ok(false);
         }
+        writes.kept();
         Ok(true)
     }
 
@@ -926,13 +929,12 @@ fn adopt_wireguard(
         .into_iter()
         .find(|g| g.id == gateway_id)
         .ok_or_else(|| format!("no gateway {gateway_id}"))?;
-    let (Some(file), Some(fabric)) = (
-        gateway.wireguard.as_deref(),
-        state.gateway_manager.wireguard(),
-    ) else {
+    let Some(fabric) = state.gateway_manager.wireguard() else {
         return Ok(None);
     };
-    let adopted = fabric.adopt(&gateway.id, file, gateway.host_routes());
+    let Some(adopted) = fabric.adopt_gateway(&gateway) else {
+        return Ok(None);
+    };
     drop(store);
     match adopted {
         Ok(_) => Ok(None),
@@ -1186,7 +1188,7 @@ fn publish_discovery<R: tauri::Runtime>(
                 .gateways
                 .into_iter()
                 .find(|gateway| gateway.id == gateway_id)
-                .and_then(|gateway| gateway.wireguard)
+                .and_then(|gateway| gateway.wireguard_source().map(std::path::Path::to_path_buf))
         });
         state
             .gateway_manager
@@ -2917,15 +2919,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn redeem_with_wireguard_writes_the_file_and_updates_the_row() {
+    async fn redeem_keeps_private_material_only_in_the_generated_key_file() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run = enrolling_signin(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), true).await;
+        assert!(run.stored_pat());
+        assert!(
+            !run.conf().exists(),
+            "enrollment must not duplicate the private key"
+        );
+        let row = serde_json::to_value(run.row()).unwrap();
+        assert!(
+            row["wireguard_enrollment"].is_object(),
+            "the row holds the tunnel parameters"
+        );
+        assert_eq!(
+            row["wireguard_enrollment"]["addresses"],
+            serde_json::json!(["10.7.0.23/32", "fd00:7::23/128"])
+        );
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn redeem_with_wireguard_stores_parameters_and_adopts_the_row() {
         let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
         let lines = crate::devserver::log_capture::Lines::default();
         let _capture = lines.install();
         let run = enrolling_signin(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), true).await;
         let conf = crate::wireguard_keys::conf_path(&run.keys, "gw-keychain");
 
-        // The client file holds what the redeem answered.
-        let read = chan_wireguard::config::read_file(&conf).expect("the enrolled file reads");
+        // The row and key build exactly what the redeem answered.
+        let row = run.row();
+        let parameters = row.wireguard_enrollment.as_ref().unwrap();
+        let read = parameters.configs(&run.sent).unwrap().remove(0);
         let cidrs = |list: &[chan_wireguard::config::Cidr]| -> Vec<String> {
             list.iter()
                 .map(|c| format!("{}/{}", c.addr, c.prefix))
@@ -2944,16 +2969,18 @@ pub(crate) mod tests {
                 run.sent
             );
         }
-        // The row names it, with the enrolled key and the host map, and the
-        // projection reads the key as enrolled.
-        let row = run.row();
-        assert_eq!(row.wireguard.as_deref(), Some(conf.as_path()));
+        // The row stores only public parameters and the one key-file path.
+        assert_eq!(row.wireguard, None);
+        assert_eq!(
+            row.wireguard_source(),
+            Some(crate::wireguard_keys::key_path(&run.keys, "gw-keychain").as_path())
+        );
         assert_eq!(
             row.wireguard_enrolled_key.as_deref(),
             Some(run.sent.as_str())
         );
-        let hosts: Vec<(String, Vec<std::net::IpAddr>)> = row
-            .wireguard_hosts
+        let hosts: Vec<(String, Vec<std::net::IpAddr>)> = parameters.ingresses[0]
+            .hosts
             .iter()
             .map(|h| (h.name.clone(), h.addresses.clone()))
             .collect();
@@ -2974,21 +3001,19 @@ pub(crate) mod tests {
         assert_eq!(adopts, 1);
         assert_eq!(run.fabric.tunnels(), 1);
         assert_eq!(
-            run.fabric.status("gw-keychain", Some(&conf)).as_deref(),
+            run.fabric
+                .status("gw-keychain", row.wireguard_source())
+                .as_deref(),
             Some("connecting")
         );
         assert!(run.stored_pat(), "the token is stored as before");
 
-        // The private key is in its file and the client file, and nowhere
-        // else: not the config, not the log, not a request.
+        // Only the generated key file holds private material.
         let key_text =
             std::fs::read_to_string(crate::wireguard_keys::key_path(&run.keys, "gw-keychain"))
                 .unwrap();
         let private = key_text.trim_end();
-        assert!(
-            std::fs::read_to_string(&conf).unwrap().contains(private),
-            "the grep finds the key where it is"
-        );
+        assert!(!conf.exists(), "no duplicate key file");
         let config = std::fs::read_to_string(run.keys.with_file_name("config.json")).unwrap();
         assert!(config.contains(&run.sent), "the grep reads the config");
         assert!(!config.contains(private));
@@ -3033,19 +3058,18 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn redeem_whose_client_file_cannot_be_written_stores_no_token() {
+    async fn redeem_whose_key_file_is_gone_stores_no_token() {
         let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
-        // A directory where the client file goes: the write fails on every
-        // platform.
+        // A missing generated key cannot be reconstructed from public parameters.
         let run = enrolling_signin_with(
             redeem_answer(Some(redeem_params(WG_SERVER_KEY))),
             true,
             |keys| {
-                std::fs::create_dir(crate::wireguard_keys::conf_path(keys, "gw-keychain")).unwrap()
+                std::fs::remove_file(crate::wireguard_keys::key_path(keys, "gw-keychain")).unwrap()
             },
         )
         .await;
-        assert!(!run.stored_pat(), "no token without its peer's client file");
+        assert!(!run.stored_pat(), "no token without its enrolled key");
         let row = run.row();
         assert_eq!(row.wireguard, None);
         assert_eq!(row.wireguard_enrolled_key, None);
@@ -3275,15 +3299,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn failed_store_after_the_client_file_takes_the_enrollment_back_and_revokes() {
+    async fn failed_store_after_the_row_takes_the_enrollment_back_and_revokes() {
         let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
         let lines = crate::devserver::log_capture::Lines::default();
         let _capture = lines.install();
         let run =
             enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
         let before = run.row();
-        // The store fails once the enrollment is recorded: the client file
-        // written, the row naming it, its tunnel adopted.
+        // The store fails after the row is saved and its tunnel adopted.
         let (recorded, at_store) = std::sync::mpsc::channel();
         let state = Arc::clone(&run.f.state);
         let fabric = Arc::clone(&run.fabric);
@@ -3292,8 +3315,8 @@ pub(crate) mod tests {
             let row = gateway_row(&state, "gw-keychain").unwrap();
             recorded
                 .send((
-                    conf.exists(),
-                    row.wireguard == Some(conf.clone()),
+                    !conf.exists(),
+                    row.wireguard_enrollment.is_some(),
                     row.wireguard_enrolled_key.is_some(),
                     fabric.tunnels(),
                 ))
@@ -3309,7 +3332,7 @@ pub(crate) mod tests {
         assert_eq!(
             at_store.try_recv().unwrap(),
             (true, true, true, 1),
-            "the store ran after the client file, the row and the tunnel"
+            "the store ran after the row and tunnel, without a client file"
         );
         let view = run.f.state.gateway_manager.view("gw-keychain").unwrap();
         assert_eq!(view.status, GatewayStatus::Disconnected);
@@ -3400,7 +3423,7 @@ pub(crate) mod tests {
         let (entered, in_store) = tokio::sync::oneshot::channel();
         let (release_store, store_release) = std::sync::mpsc::channel();
         let stored_origin = run.f.discovery.identity_origin.clone();
-        let conf = run.conf();
+        let committed_state = Arc::clone(&run.f.state);
         let account = auth::gateway_account(&stored_origin);
         *run.f.attempt.signin_hooks.store.lock().unwrap() =
             Some(Box::new(move |stored_as, pat| {
@@ -3408,7 +3431,14 @@ pub(crate) mod tests {
                     stored_as, account,
                     "the token is stored under its gateway's account"
                 );
-                entered.send(conf.exists()).unwrap();
+                entered
+                    .send(
+                        gateway_row(&committed_state, "gw-keychain")
+                            .unwrap()
+                            .wireguard_enrollment
+                            .is_some(),
+                    )
+                    .unwrap();
                 store_release.recv_timeout(Duration::from_secs(5)).unwrap();
                 auth::test_gateway_pats()
                     .lock()
@@ -3417,7 +3447,7 @@ pub(crate) mod tests {
                 Ok(())
             }));
         let callback = tokio::spawn(run.callback(true));
-        let file_written = tokio::time::timeout(Duration::from_secs(5), in_store)
+        let row_written = tokio::time::timeout(Duration::from_secs(5), in_store)
             .await
             .unwrap()
             .unwrap();
@@ -3440,7 +3470,10 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        assert!(file_written, "the cancel lands after the client file");
+        assert!(
+            row_written,
+            "the cancel lands after the enrollment row is saved"
+        );
         assert!(commit_locked, "the store holds the attempt's commit lock");
         assert!(
             disappeared,
@@ -3450,13 +3483,14 @@ pub(crate) mod tests {
             cancel_pending,
             "the cancel waits for the commit and its undo"
         );
-        // Nothing of the commit is left: no client file, no enrolled key, no
+        // Nothing of the commit is left: no enrolled parameters or key marker, no
         // stored token, and the token is revoked.
         assert!(!run.conf().exists(), "the client file is removed");
         let row = run.row();
         assert_eq!(row.wireguard, None);
         assert_eq!(row.wireguard_enrolled_key, None, "no enrolled key");
         assert!(row.wireguard_hosts.is_empty());
+        assert!(row.wireguard_enrollment.is_none());
         assert_eq!(
             row.wireguard_public_key, key,
             "the key stays to enroll again"
@@ -3681,7 +3715,8 @@ pub(crate) mod tests {
         .await
         .expect("the later callback settles");
         assert_eq!(run.stored().map(|pat| pat.id).as_deref(), Some("pat-wg-2"));
-        assert!(run.conf().exists());
+        assert!(run.row().wireguard_enrollment.is_some());
+        assert!(!run.conf().exists());
         assert_eq!(run.row().wireguard_enrolled_key, Some(run.sent.clone()));
         assert_eq!(
             run.revokes(),
@@ -3733,6 +3768,271 @@ pub(crate) mod tests {
         let row = row.clone();
         store.save(&cfg).unwrap();
         (row, text.into_bytes(), prior)
+    }
+
+    #[tokio::test]
+    async fn reenrollment_removes_the_owned_old_file_only_after_the_commit_is_kept() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let mut run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let (_, old_bytes, _) = with_prior_enrollment(&mut run);
+        let key_file = crate::wireguard_keys::key_path(&run.keys, "gw-keychain");
+        let key_bytes = std::fs::read(&key_file).unwrap();
+        let conf = run.conf();
+        let store = run.storing();
+        let state = Arc::clone(&run.f.state);
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |account, pat| {
+            assert_eq!(
+                std::fs::read(&conf).unwrap(),
+                old_bytes,
+                "rollback still owns the old file until token storage succeeds"
+            );
+            let row = gateway_row(&state, "gw-keychain").unwrap();
+            assert!(row.wireguard_enrollment.is_some());
+            assert_eq!(row.wireguard, None);
+            store(account, pat)
+        }));
+        run.callback(true).await;
+        assert_eq!(run.stored().unwrap().id, "pat-wg");
+        assert!(!run.conf().exists());
+        assert!(run.row().wireguard_enrollment.is_some());
+        assert_eq!(std::fs::read(&key_file).unwrap(), key_bytes);
+        assert_eq!(std::fs::read_dir(&run.keys).unwrap().count(), 1);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn kept_enrollment_preserves_a_hand_written_prior_file() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let mut run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let (_, old_bytes, _) = with_prior_enrollment(&mut run);
+        let manual = run.keys.parent().unwrap().join("manual.conf");
+        std::fs::rename(run.conf(), &manual).unwrap();
+        {
+            let mut store = run.f.state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].wireguard = Some(manual.clone());
+            store.save(&cfg).unwrap();
+        }
+        // A leftover owned file is not owned by this row's credential commit.
+        std::fs::write(run.conf(), b"unrelated owned-path contents").unwrap();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(run.storing());
+        run.callback(true).await;
+        assert_eq!(run.stored().unwrap().id, "pat-wg");
+        assert_eq!(std::fs::read(&manual).unwrap(), old_bytes);
+        assert_eq!(
+            std::fs::read(run.conf()).unwrap(),
+            b"unrelated owned-path contents"
+        );
+        assert!(run.row().wireguard_enrollment.is_some());
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn kept_enrollment_leaves_a_legacy_file_replaced_during_token_storage() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let mut run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        with_prior_enrollment(&mut run);
+        let conf = run.conf();
+        let store = run.storing();
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |account, pat| {
+            std::fs::write(&conf, b"operator replacement").unwrap();
+            store(account, pat)
+        }));
+        run.callback(true).await;
+        assert_eq!(run.stored().unwrap().id, "pat-wg");
+        assert_eq!(std::fs::read(run.conf()).unwrap(), b"operator replacement");
+        assert!(run.row().wireguard_enrollment.is_some());
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn regenerated_enrollment_at_cold_start_can_connect_and_enroll_the_new_key() {
+        use tauri::Manager;
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let mut run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let params: crate::wireguard_keys::EnrollmentParams =
+            serde_json::from_value(redeem_params(WG_SERVER_KEY)).unwrap();
+        let prepared = crate::wireguard_keys::prepare(
+            &run.keys,
+            "gw-keychain",
+            &run.sent,
+            &run.enrolling().entry,
+            &params,
+        )
+        .unwrap();
+        let key_file = crate::wireguard_keys::key_path(&run.keys, "gw-keychain");
+        let row = {
+            let mut guard = run.f.state.store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            let row = &mut cfg.gateways[0];
+            row.wireguard_enrolled_key = Some(run.sent.clone());
+            row.wireguard_enrollment = Some(prepared.parameters(key_file.clone()));
+            run.sent = crate::wireguard_keys::generate(&run.keys, "gw-keychain").unwrap();
+            row.wireguard_public_key = Some(run.sent.clone());
+            let row = row.clone();
+            guard.save(&cfg).unwrap();
+            row
+        };
+        let key_bytes = std::fs::read(&key_file).unwrap();
+        // Fresh process state: no tunnel still holds the previous key.
+        let fabric = Arc::new(crate::wireguard::start(&[row]).await);
+        assert_eq!(fabric.tunnels(), 0);
+        let state = Arc::new(
+            AppState::with_store(Arc::clone(&run.f.state.store))
+                .with_wireguard(Arc::clone(&fabric)),
+        );
+        let app = tauri::test::mock_app();
+        app.manage(Arc::clone(&state));
+        let (opened, urls) = std::sync::mpsc::channel();
+        let hooked = Arc::clone(&state);
+        let store = run.storing();
+        *state.gateway_manager.before_discovery.lock().unwrap() = Some(Box::new(move || {
+            let live = hooked.gateway_manager.state.lock().unwrap();
+            let attempt = &live.attempts["gw-keychain"];
+            *attempt.signin_hooks.opener.lock().unwrap() = Some(Box::new(move |url| {
+                opened.send(url.to_owned()).unwrap();
+                Ok(())
+            }));
+            *attempt.signin_hooks.store.lock().unwrap() = Some(store);
+        }));
+        connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            true,
+        )
+        .await
+        .expect("replacement key must be able to sign in");
+        let opened = url::Url::parse(&urls.try_recv().expect("Connect opens sign-in")).unwrap();
+        assert!(opened
+            .query_pairs()
+            .any(|(name, value)| name == "wireguard_public_key" && value == run.sent));
+        let query: std::collections::HashMap<_, _> = opened.query_pairs().into_owned().collect();
+        let mut callback = url::Url::parse(&query["redirect_uri"]).unwrap();
+        callback
+            .query_pairs_mut()
+            .append_pair("code", "test-code")
+            .append_pair("state", &query["state"]);
+        let response = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(callback)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SEE_OTHER);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if state
+                    .gateway_manager
+                    .view("gw-keychain")
+                    .is_some_and(|view| view.status == GatewayStatus::Connected)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the callback commits and connects");
+        assert!(
+            !auth::tests::take_pending_for_test(),
+            "the real callback consumes its pending slot"
+        );
+        assert_eq!(run.stored().unwrap().id, "pat-wg");
+        assert_eq!(fabric.tunnels(), 1);
+        let row = gateway_row(&state, "gw-keychain").unwrap();
+        assert_eq!(
+            row.wireguard_enrolled_key.as_deref(),
+            Some(run.sent.as_str())
+        );
+        assert!(row
+            .wireguard_enrollment
+            .as_ref()
+            .unwrap()
+            .configs(&run.sent)
+            .is_ok());
+        assert!(!run.conf().exists());
+        assert_eq!(std::fs::read(&key_file).unwrap(), key_bytes);
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn multi_ingress_redeem_persists_every_peer_and_refuses_a_changed_second_peer() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        for changed in [false, true] {
+            let mut params = redeem_params(WG_SERVER_KEY);
+            let second_key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+            let hosts = params["hosts"].clone();
+            params["ingresses"] = serde_json::json!([
+                {"id":"p1", "endpoint": WG_ENDPOINT, "server_public_key": WG_SERVER_KEY, "hosts": hosts},
+                {"id":"p2", "endpoint": "p2.chan.invalid:51820", "server_public_key": second_key,
+                 "hosts":[{"name":"*.p2.chan.invalid", "addresses":["10.7.0.1"]}]}
+            ]);
+            let entry: crate::devserver::WireguardDiscovery = serde_json::from_value(serde_json::json!({
+                "endpoint": WG_ENDPOINT, "public_key": WG_SERVER_KEY, "allowed_ips": ["10.7.0.1/32"], "persistent_keepalive": 25,
+                "ingresses": [
+                    {"id":"p1", "endpoint": WG_ENDPOINT, "public_key": WG_SERVER_KEY, "hosts": hosts},
+                    {"id":"p2", "endpoint": "p2.chan.invalid:51820", "public_key": second_key,
+                     "hosts":[{"name":"*.p2.chan.invalid", "addresses":["10.7.0.1"]}]}
+                ]
+            })).unwrap();
+            if changed {
+                params["ingresses"][1]["endpoint"] = serde_json::json!("p2.chan.invalid:51821");
+            }
+            let run = enrolling_fixture(redeem_answer(Some(params)), |_| {}).await;
+            *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(run.storing());
+            let before = run.row();
+            let key = crate::wireguard_keys::key_path(&run.keys, "gw-keychain");
+            let bytes = std::fs::read(&key).unwrap();
+            run.f
+                .enrolling_callback(
+                    "code=test-code&state=nonce-1",
+                    Some(auth::Enrolling {
+                        public_key: run.sent.clone(),
+                        entry,
+                    }),
+                )
+                .await;
+            if changed {
+                assert_eq!(run.row(), before);
+                assert!(!run.stored_pat());
+                assert_eq!(run.fabric.tunnels(), 0);
+                assert_eq!(
+                    run.f
+                        .state
+                        .gateway_manager
+                        .view("gw-keychain")
+                        .unwrap()
+                        .last_error
+                        .as_deref(),
+                    Some(crate::wireguard_keys::PEER_CHANGED)
+                );
+                assert_eq!(run.revokes(), ["DELETE /desktop/v1/token pat-wg"]);
+            } else {
+                assert!(run.stored_pat());
+                let row = run.row();
+                let parameters = row.wireguard_enrollment.as_ref().unwrap();
+                assert_eq!(parameters.ingresses.len(), 2);
+                assert_eq!(parameters.configs(&run.sent).unwrap().len(), 2);
+                assert_eq!(run.fabric.tunnels(), 1, "the fabric adopts the first peer");
+            }
+            assert_eq!(std::fs::read(&key).unwrap(), bytes);
+            assert_eq!(std::fs::read_dir(&run.keys).unwrap().count(), 1);
+            run.finish().await;
+        }
     }
 
     #[tokio::test]
@@ -3820,6 +4120,63 @@ pub(crate) mod tests {
             }
             run.finish().await;
         }
+    }
+
+    #[tokio::test]
+    async fn enrollment_commit_rechecks_the_rows_generated_key() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let state = Arc::clone(&run.f.state);
+        *run.f.attempt.signin_hooks.before_commit.lock().unwrap() = Some(Box::new(move || {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0].wireguard_public_key = Some("later generated key".into());
+            store.save(&cfg).unwrap();
+        }));
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(run.storing());
+        run.callback(true).await;
+        assert!(!run.stored_pat());
+        assert!(run.row().wireguard_enrollment.is_none());
+        assert_eq!(
+            run.row().wireguard_public_key.as_deref(),
+            Some("later generated key")
+        );
+        assert_eq!(run.fabric.tunnels(), 0);
+        assert_eq!(run.revokes(), ["DELETE /desktop/v1/token pat-wg"]);
+        run.finish().await;
+    }
+
+    #[tokio::test]
+    async fn enrollment_undo_preserves_later_parameters_for_the_same_key() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let run =
+            enrolling_fixture(redeem_answer(Some(redeem_params(WG_SERVER_KEY))), |_| {}).await;
+        let state = Arc::clone(&run.f.state);
+        *run.f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, _| {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways[0]
+                .wireguard_enrollment
+                .as_mut()
+                .unwrap()
+                .ingresses[0]
+                .endpoint = "operator.chan.invalid:51821".into();
+            store.save(&cfg).unwrap();
+            Err("test store failure after a later parameter save".into())
+        }));
+        run.callback(true).await;
+        let row = run.row();
+        assert_eq!(
+            row.wireguard_enrollment.unwrap().ingresses[0].endpoint,
+            "operator.chan.invalid:51821"
+        );
+        assert_eq!(
+            row.wireguard_enrolled_key.as_deref(),
+            Some(run.sent.as_str())
+        );
+        assert_eq!(run.revokes(), ["DELETE /desktop/v1/token pat-wg"]);
+        run.finish().await;
     }
 
     #[tokio::test]
@@ -4138,7 +4495,8 @@ pub(crate) mod tests {
             .await
             .expect("the callback settles");
         assert_eq!(run.stored().map(|pat| pat.id).as_deref(), Some("pat-wg"));
-        assert!(run.conf().exists());
+        assert!(run.row().wireguard_enrollment.is_some());
+        assert!(!run.conf().exists());
         assert!(run.revokes().is_empty());
         assert!(
             !announced
@@ -4486,6 +4844,7 @@ pub(crate) mod tests {
             wireguard: None,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -6788,6 +7147,7 @@ pub(crate) mod tests {
             wireguard: None,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -6836,6 +7196,7 @@ pub(crate) mod tests {
             wireguard: Some(file.to_path_buf()),
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         };
         // The start refused the first row's file and ran the second row's
@@ -7456,6 +7817,7 @@ pub(crate) mod tests {
                 wireguard: Some(far.conf.clone()),
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: vec![config::WireguardHost {
                     name: "tenant.chan.invalid".into(),
                     addresses: vec!["10.7.0.2".parse().unwrap()],
@@ -7517,6 +7879,7 @@ pub(crate) mod tests {
                 wireguard: None,
                 wireguard_public_key: public_key.map(str::to_string),
                 wireguard_enrolled_key: enrolled.map(str::to_string),
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
@@ -7698,6 +8061,7 @@ pub(crate) mod tests {
                 wireguard: None,
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
@@ -7778,6 +8142,7 @@ pub(crate) mod tests {
             wireguard: None,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -7920,6 +8285,7 @@ pub(crate) mod tests {
                 wireguard: None,
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();

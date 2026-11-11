@@ -1135,13 +1135,10 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
     }
 }
 
-/// What a sign-in's credential commit writes, as one unit the commit takes
-/// back whole: the WireGuard enrollment the redeem answered (the client file
-/// and the row naming it, with the tunnel adopted from it), then the token in
-/// the store. The enrollment goes first, so no token is ever stored without
-/// its peer's file and row. What each write replaces is read first, so the
-/// undo puts back the earlier token, row and client file rather than leaving
-/// nothing, and only while no later write has replaced them again.
+/// One credential commit: public WireGuard parameters and their active
+/// tunnel, then the token. Undo restores the prior row and token while this
+/// commit still owns them. The generated key is never written, and an old
+/// enrollment file remains available until the commit is kept.
 struct SigninWrites {
     state: Arc<crate::AppState>,
     gateway_id: String,
@@ -1183,7 +1180,7 @@ impl crate::gateway::CredentialWrites for SigninWrites {
         }
         if let Err(error) = self.store() {
             // A token that cannot be stored takes its enrollment with it, or
-            // the next sign-in would find a file and a row for a token that
+            // the next sign-in would find an enrolled row for a token that
             // was never kept.
             self.undo_enrollment();
             return Err(error);
@@ -1224,6 +1221,18 @@ impl crate::gateway::CredentialWrites for SigninWrites {
             .unwrap()
             .get()
             .is_ok_and(|cfg| !cfg.gateways.iter().any(|g| g.id == self.gateway_id))
+    }
+
+    fn kept(&mut self) {
+        if let Some(recorded) = &self.recorded {
+            if let Err(error) = crate::config::finish_wireguard_enrollment(
+                &self.state.store,
+                &self.gateway_id,
+                recorded,
+            ) {
+                tracing::warn!(gateway = %self.gateway_id, %error, "removing the obsolete WireGuard enrollment file failed");
+            }
+        }
     }
 }
 
