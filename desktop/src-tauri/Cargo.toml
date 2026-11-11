@@ -117,6 +117,15 @@ url = { workspace = true }
 #   time), so a hide and restore keeps its size (titlebar_tabs.rs).
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }
 
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# The message a launch shows when it exits beside a desktop that does not
+# answer (src/single_instance.rs), shown before the Tauri app exists, so not
+# through tauri-plugin-dialog. The version and features are the plugin's, so
+# Cargo builds the one rfd the plugin links. The GTK desktops show it through
+# gtk instead (below), where rfd's blocking dialog never returns without a
+# display.
+rfd = { version = "0.16", default-features = false, features = ["common-controls-v6"] }
+
 # The desktop self-updater. FreeBSD has no signed updater feed, and the
 # plugin's AppImage code compiles on every BSD while declaring the crates it
 # uses for Linux only, so the plugin is compiled out there rather than patched.
@@ -127,6 +136,8 @@ tauri-plugin-updater = { workspace = true }
 # The in-window launcher (src/launcher_panel.rs) takes the window webview's
 # place in the window's GTK box on the GTK desktops (Linux and FreeBSD); the
 # widget calls that swap the two come from gtk, the version tauri and wry link.
+# It also shows the message of a launch that exits beside a desktop that does
+# not answer (src/single_instance.rs).
 gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -8,7 +8,10 @@
 //! Windows) before it touches anything, and keeps the claim until its
 //! listener serves it. A launch that finds the endpoint held asks the desktop
 //! holding it to come forward over the handoff socket and exits without
-//! opening a window, starting a watcher or reading any state. The CLI
+//! opening a window, starting a watcher or reading any state. When that
+//! desktop does not answer, or is still shutting down past the wait, the
+//! launch says so in a native message before it exits, unless its stderr is
+//! a terminal that has the log line. The CLI
 //! personalities and the default-terminal launch never reach this: they are
 //! dispatched before it in `main`.
 //!
@@ -16,6 +19,7 @@
 //! the pipe name on Windows), not per `CHAN_HOME`.
 
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -171,7 +175,24 @@ pub(crate) fn guard() -> Option<EndpointClaim> {
             why: "no owner-controlled runtime directory for the handoff endpoint".into(),
         },
     };
-    match &startup {
+    report(&startup, |notice| {
+        tell_user(notice, std::io::stderr().is_terminal(), show_message)
+    });
+    if let Some(code) = startup.exit_code() {
+        std::process::exit(code);
+    }
+    match startup {
+        Startup::Run(claim) => Some(claim),
+        _ => None,
+    }
+}
+
+/// Log what the launch came to. The two exits that leave no desktop
+/// answering for the launch also go to `tell_user`: started from the Dock,
+/// the Start menu or a launcher, the log line goes nowhere the user reads,
+/// and without the message nothing appears and nothing says why.
+fn report<C>(startup: &Startup<C>, tell_user: impl FnOnce(Notice)) {
+    match startup {
         Startup::Run(_) => {}
         Startup::RunWithoutListener { why } => {
             tracing::warn!(error = %why, "CLI-to-desktop handoff listener disabled")
@@ -185,25 +206,116 @@ pub(crate) fn guard() -> Option<EndpointClaim> {
             "another chan-desktop holds the handoff endpoint and did not come forward \
              (one older than this launch refuses the request as unknown); this launch exits"
         ),
-        Startup::StillShuttingDown => tracing::error!(
-            waited = ?DRAIN_GRACE,
-            "another chan-desktop said it is shutting down and still holds the handoff endpoint; \
-             this launch exits rather than start a second desktop"
-        ),
-        Startup::Unanswered => tracing::error!(
-            waited = ?ASK_BOUND,
-            "another chan-desktop holds the handoff endpoint but does not answer; this launch \
-             exits rather than start a second desktop"
-        ),
-    }
-    if let Some(code) = startup.exit_code() {
-        std::process::exit(code);
-    }
-    match startup {
-        Startup::Run(claim) => Some(claim),
-        _ => None,
+        Startup::StillShuttingDown => {
+            tracing::error!(
+                waited = ?DRAIN_GRACE,
+                "another chan-desktop said it is shutting down and still holds the handoff \
+                 endpoint; this launch exits rather than start a second desktop"
+            );
+            tell_user(Notice::StillShuttingDown);
+        }
+        Startup::Unanswered => {
+            tracing::error!(
+                waited = ?ASK_BOUND,
+                "another chan-desktop holds the handoff endpoint but does not answer; this \
+                 launch exits rather than start a second desktop"
+            );
+            tell_user(Notice::NotAnswering);
+        }
     }
 }
+
+/// What a launch that exits with no desktop answering for it tells the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Notice {
+    /// [`Startup::Unanswered`].
+    NotAnswering,
+    /// [`Startup::StillShuttingDown`].
+    StillShuttingDown,
+}
+
+impl Notice {
+    /// The message's heading, which is also its window title.
+    fn title(self) -> &'static str {
+        match self {
+            Notice::NotAnswering => "Chan is not responding",
+            Notice::StillShuttingDown => "Chan is still shutting down",
+        }
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Notice::NotAnswering => {
+                "A running copy of Chan is not answering, so this one did not open. Quit \
+                 that copy, or end its process if it does not quit, then start Chan again."
+            }
+            Notice::StillShuttingDown => {
+                "A running copy of Chan is still shutting down, so this one did not open. \
+                 Wait for it to exit, or end its process if it does not, then start Chan \
+                 again."
+            }
+        }
+    }
+}
+
+/// The hook the exiting arms call. A launch whose stderr is a terminal has
+/// the log line in front of whoever started it, so it shows nothing more: a
+/// modal there would hold that shell until dismissed, and over SSH there is
+/// no display to show it on. The Dock, the Start menu and a launcher leave
+/// stderr on `/dev/null`, a pipe or a file, and get the message.
+fn tell_user(notice: Notice, stderr_is_terminal: bool, show: impl FnOnce(Notice)) {
+    if !stderr_is_terminal {
+        show(notice);
+    }
+}
+
+/// Show `notice` as a native message and return once it is dismissed. The
+/// guard runs before the Tauri app is built, so the dialog plugin, which
+/// needs an app handle, is out of reach; rfd is the library under it, at the
+/// version it links. On macOS rfd shows a message that needs no window of
+/// the app's as a user notification alert, and on Windows a task dialog.
+#[cfg(any(target_os = "macos", windows))]
+fn show_message(notice: Notice) {
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(notice.title())
+        .set_description(notice.text())
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Show `notice` as a GTK message and return once it is dismissed. Not
+/// through rfd: its blocking GTK dialog waits for a GTK thread that ends at
+/// once when GTK cannot open a display, so it would never return and the
+/// launch would hang instead of exiting. `gtk::init` reports that, and the
+/// launch exits with the log line alone. The process exits right after, which
+/// takes the dialog's window with it.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn show_message(notice: Notice) {
+    use gtk::prelude::*;
+    if let Err(error) = gtk::init() {
+        tracing::warn!(%error, "no display to show the message on");
+        return;
+    }
+    let dialog = gtk::MessageDialog::new(
+        None::<&gtk::Window>,
+        gtk::DialogFlags::MODAL,
+        gtk::MessageType::Warning,
+        gtk::ButtonsType::Ok,
+        notice.title(),
+    );
+    dialog.set_title(notice.title());
+    dialog.set_secondary_text(Some(notice.text()));
+    dialog.run();
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    windows,
+    target_os = "linux",
+    target_os = "freebsd"
+)))]
+fn show_message(_: Notice) {}
 
 fn check_at(
     path: &Path,
@@ -691,6 +803,102 @@ mod tests {
         let startup = decide(Lock::Held, || Answer::Silent, never_waited);
         assert_eq!(startup, Startup::Unanswered);
         assert_eq!(startup.exit_code(), Some(1));
+    }
+
+    /// The two exits that leave no desktop answering for the launch, and only
+    /// they, tell the user: every other outcome boots, or exits beside a
+    /// desktop that came forward or is running.
+    #[test]
+    fn only_the_exits_with_no_desktop_answering_tell_the_user() {
+        let outcomes: [Startup<&str>; 6] = [
+            Startup::Run("claim"),
+            Startup::RunWithoutListener {
+                why: "no runtime directory".into(),
+            },
+            Startup::HandedOver {
+                version: "0.127.0".into(),
+            },
+            Startup::Refused {
+                reply: "unknown variant".into(),
+            },
+            Startup::StillShuttingDown,
+            Startup::Unanswered,
+        ];
+        for startup in outcomes {
+            // No wildcard: a new outcome is added here before it builds.
+            let expected = match &startup {
+                Startup::Run(_)
+                | Startup::RunWithoutListener { .. }
+                | Startup::HandedOver { .. }
+                | Startup::Refused { .. } => None,
+                Startup::StillShuttingDown => Some(Notice::StillShuttingDown),
+                Startup::Unanswered => Some(Notice::NotAnswering),
+            };
+            let mut told = Vec::new();
+            report(&startup, |notice| told.push(notice));
+            assert_eq!(told, Vec::from_iter(expected), "{startup:?}");
+            assert_eq!(
+                expected.is_some(),
+                startup.exit_code() == Some(1),
+                "the user is told exactly when the launch exits 1: {startup:?}"
+            );
+        }
+    }
+
+    /// The message names Chan, says what became of the running copy, and
+    /// says what to do.
+    #[test]
+    fn the_message_says_what_happened_and_what_to_do() {
+        for (notice, happened) in [
+            (Notice::NotAnswering, "is not answering"),
+            (Notice::StillShuttingDown, "is still shutting down"),
+        ] {
+            assert!(notice.title().starts_with("Chan "), "{notice:?}");
+            let text = notice.text();
+            assert!(
+                text.contains(&format!("A running copy of Chan {happened}")),
+                "{text}"
+            );
+            assert!(text.contains("end its process"), "{text}");
+            assert!(text.ends_with("then start Chan again."), "{text}");
+        }
+    }
+
+    /// A launch from a terminal has the log line there and shows nothing
+    /// more; any other launch shows the message.
+    #[test]
+    fn a_launch_from_a_terminal_keeps_the_line_and_shows_no_message() {
+        tell_user(Notice::NotAnswering, true, |notice| {
+            panic!("a launch from a terminal must show no message: {notice:?}")
+        });
+        let mut shown = None;
+        tell_user(Notice::NotAnswering, false, |notice| shown = Some(notice));
+        assert_eq!(shown, Some(Notice::NotAnswering));
+    }
+
+    /// The guard reports before it ends the process, since the message is
+    /// shown while `report` runs and an exit first would show none; and the
+    /// hook it passes reads the launch's own stderr and shows the message.
+    #[test]
+    fn the_guard_reports_through_the_hook_before_it_exits() {
+        let (production, _) = include_str!("single_instance.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let (_, guard) = production
+            .split_once("\npub(crate) fn guard() -> Option<EndpointClaim> {")
+            .expect("guard exists");
+        let (guard, _) = guard.split_once("\n}\n").expect("guard ends");
+        let reported = guard
+            .find("report(&startup, |notice| {")
+            .expect("the guard reports the outcome");
+        let exited = guard
+            .find("std::process::exit(code)")
+            .expect("the guard ends the process for an exit");
+        assert!(reported < exited, "the guard must report before it exits");
+        assert!(
+            guard.contains("tell_user(notice, std::io::stderr().is_terminal(), show_message)"),
+            "{guard}"
+        );
     }
 
     #[test]
