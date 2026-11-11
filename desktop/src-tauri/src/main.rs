@@ -12560,9 +12560,8 @@ mod tests {
         use super::*;
         use chan_workspace::paths::root_stall;
 
-        /// How long a test waits for the handoff's arm that registers a root
-        /// to mount it and mint its window.
-        const MOUNT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+        /// A missing mint reports a hang; registry events order successful mints.
+        const WINDOW_MINT_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
 
         fn own_home(test: &str) -> bool {
             embedded::in_own_chan_home(&format!("tests::handoff_row::{test}"))
@@ -12664,23 +12663,31 @@ mod tests {
                     .collect()
             }
 
-            /// The registry's workspace windows as `(window_id, path)` once
-            /// there are `count`, waiting up to [`MOUNT_BOUND`] for the arm
-            /// that registers a handed-off root.
+            /// Read the registry after each mint, registering before the snapshot
+            /// so a window created between the snapshot and the wait is not lost.
             fn wait_for_windows(&self, count: usize) -> Vec<(String, String)> {
-                let deadline = std::time::Instant::now() + MOUNT_BOUND;
-                loop {
-                    let windows = self.embedded().workspace_window_paths_for_tests();
-                    if windows.len() >= count {
-                        return windows;
-                    }
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "{} of {count} handed-off windows were minted within {MOUNT_BOUND:?}",
-                        windows.len()
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
+                let notify = self
+                    .embedded()
+                    .host_for_tests()
+                    .window_registry()
+                    .expect("the local window registry is installed")
+                    .change_notify();
+                self.runtime.block_on(async {
+                    tokio::time::timeout(WINDOW_MINT_HANG_GUARD, async {
+                        loop {
+                            let changed = notify.notified();
+                            tokio::pin!(changed);
+                            changed.as_mut().enable();
+                            let windows = self.embedded().workspace_window_paths_for_tests();
+                            if windows.len() >= count {
+                                return windows;
+                            }
+                            changed.await;
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|_| panic!("the handoff never minted {count} windows"))
+                })
             }
 
             /// The window `window_id` as the live feed serves it, if it does.
