@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use wiremock::matchers::{method as mock_method, path as mock_path};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
-use identity::api_tokens::{NewToken, RequestMeta, TokenOrigin};
+use identity::api_tokens::{GivenBack, NewToken, RequestMeta, TokenOrigin};
 use identity::config::Config;
 use identity::http;
 use identity::profile_client::ProfileClient;
@@ -324,6 +324,49 @@ async fn pat_create_validate_revoke_audit() {
     let actions: Vec<_> = entries.iter().map(|e| e.action.as_str()).collect();
     assert_eq!(actions, vec!["revoked", "used", "created"]);
 
+    env.cleanup().await;
+}
+
+#[tokio::test]
+async fn pat_give_back_reports_unused_before_validation() {
+    assert_given_back(false, GivenBack::Unused).await;
+}
+
+#[tokio::test]
+async fn pat_give_back_reports_used_after_validation() {
+    assert_given_back(true, GivenBack::Used).await;
+}
+
+async fn assert_given_back(validate: bool, expected: GivenBack) {
+    let env = TestEnv::new().await;
+    let uid = env.insert_user().await;
+    let service = env.api_tokens_service();
+    let created = service
+        .create(
+            NewToken {
+                user_id: uid,
+                label: "chan-desktop @ host",
+                expires_at: None,
+                scopes: &["desktop.account".into()],
+                origin: TokenOrigin::Desktop,
+            },
+            &RequestMeta::default(),
+        )
+        .await
+        .expect("create");
+    if validate {
+        service
+            .validate_no_audit(&created.secret)
+            .await
+            .expect("validate once");
+    }
+    assert_eq!(
+        service
+            .give_back(uid, created.token.id, &RequestMeta::default())
+            .await
+            .expect("give back"),
+        Some(expected)
+    );
     env.cleanup().await;
 }
 
