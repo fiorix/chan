@@ -368,3 +368,7 @@ At a3f196d68 (the fix round's code tip; the documents commit after it changes no
 ## Desktop reconciliation retirement logs
 
 Reconciliation logs each removed or replaced running ingress once after publishing the complete route table, with the gateway id, gateway-qualified ingress route id and source path. Unchanged and reordered tunnels remain silent, as do refused starts. The regression drives real fabric adoption, checks one drop across repeated discovery, a same-id replacement, and removal of a refused ingress; it fails on the missing retirement line before the fix. Native acceptance of the remaining row stays with the lead.
+
+## Idle ingress keepalive renewal
+
+Keepalive 25 is passed to the protocol core and sent while idle. A due keepalive now renews an initiator session at least 120 seconds old; responders keep sending keepalives, and the passive keepalive and unanswered-data rules remain payload-only. The desktop still projects the core's live/lost state without an independent timeout. The 650-second core clock regression reproduces session gaps with no payload before the fix, and checks ongoing renewal afterwards; boundary cases cover age, initiator role and no keepalive due. A loopback tunnel-driver regression advances the clock through ten idle minutes and checks fresh live status with zero payload counters. Real-gateway idle acceptance remains the lead's.
