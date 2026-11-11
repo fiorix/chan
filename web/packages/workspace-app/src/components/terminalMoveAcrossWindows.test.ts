@@ -145,6 +145,7 @@ function loadedTerminalTab(): TerminalTab {
       revision: 1,
       records: [{ source: "program", id: null, state: "working", kind: null, progress: 0, app: "test", title: null, msg: null, seen: false, update_order: 1 }],
     },
+    terminalProgram: { title: "build", command: "bash" },
     tmuxConsent: { revision: 2, question: { program: "ssh", command: "ssh host tmux -CC", timeout_secs: 60 } },
     tmuxPane: { connection: 1, pane: "%0" },
     tmuxHostGrid: { cols: 80, rows: 24 },
@@ -402,6 +403,7 @@ describe("a terminal moved to another window keeps its tab state", () => {
     expect(moved.terminalActivityPulsing).toBeUndefined();
     expect(moved.queueDepth).toBeUndefined();
     expect(moved.programStatus).toBeUndefined();
+    expect(moved.terminalProgram).toBeUndefined();
     expect(moved.tmuxConsent).toBeUndefined();
     expect(moved.tmuxPane).toBeUndefined();
     expect(moved.tmuxHostGrid).toBeUndefined();
