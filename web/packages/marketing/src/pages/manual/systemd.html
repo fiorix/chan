@@ -3,14 +3,14 @@
     <h2><a class="heading-anchor" href="#systemd">Run the devserver under systemd</a></h2>
   </div>
   <p>On Linux, <code>chan devserver start</code> runs the devserver as a systemd user service, <code>chan-devserver.service</code>. chan writes the unit itself and drives it with <code>systemctl --user</code>, so the service is also yours to inspect and manage with systemd's own tools. Under systemd the devserver can restart, and upgrade, without closing a single terminal.</p>
-  <p>Set up the devserver first as in <a href="/manual/devserver/">Devserver</a>. On macOS the devserver runs under launchd and elsewhere under chan's own daemon; both run it the same way, but a restart there closes its terminals.</p>
+  <p>Set up the devserver first as in <a href="/manual/devserver/">Devserver</a>. On macOS the devserver runs under launchd, and on Windows and FreeBSD under chan's own daemon, which a Linux machine without systemd uses too, with <code>--service=chan</code>. Both run it the same way, but a restart there closes its terminals.</p>
 
   <h3 id="service"><a class="heading-anchor" href="#service">The devserver service</a></h3>
   <p>The <code>chan devserver</code> actions map onto the unit:</p>
   <ul>
-    <li><code>chan devserver start</code> writes <code>~/.config/systemd/user/chan-devserver.service</code>, enables it so it starts at boot, starts it, and prints the launch URL and token. It turns on linger first, so the service survives logout. When the service is already running it only prints the token again.</li>
-    <li><code>chan devserver status</code> says whether the service is running, with the command the unit runs and the address it listens on. <code>--url</code> prints the launch URL instead of the address.</li>
-    <li><code>chan devserver restart</code> rewrites the unit for the <code>chan</code> binary you run it with, then restarts the service, or starts it when it is stopped. Your terminals keep running; see <a href="#restart">Restart without losing terminals</a>.</li>
+    <li><code>chan devserver start</code> writes <code>~/.config/systemd/user/chan-devserver.service</code>, enables it so it starts at boot, starts it, and prints the launch URL and token. It turns on linger first, so the service survives logout. When the service is already running it changes nothing and prints the launch URL and token again.</li>
+    <li><code>chan devserver status</code> says whether the service is running and shows the command the unit runs. In a terminal it then prints the launch URL with its token; through a pipe it prints the address instead, and <code>--url</code> prints the launch URL there too.</li>
+    <li><code>chan devserver restart</code> rewrites the unit for the <code>chan</code> binary you run it with, enables it, then restarts the service, or starts it when it is stopped. Your terminals keep running; see <a href="#restart">Restart without losing terminals</a>.</li>
     <li><code>chan devserver stop</code> closes every terminal, stops the service, and disables it so it does not come back at boot. The unit file stays, so <code>status</code> still shows its command.</li>
   </ul>
   <div class="command-copy" data-copy-block>
@@ -19,8 +19,7 @@
   </div>
   <pre class="sample-output"><code>chan devserver (systemd): running -- chan-devserver.service
   command: /home/user/.local/bin/chan devserver run --bind=127.0.0.1 --port=8787
-  address: 127.0.0.1:8787
-  run `chan devserver status --url` to print the launch URL.</code></pre>
+chan devserver: listening on http://127.0.0.1:8787/?t=Zr8mT2xQwN6vLb3HcY5dKp7sJf9aGe4u</code></pre>
   <p>The unit is an ordinary user unit. <code>systemctl --user cat chan-devserver</code> shows it, <code>systemctl --user status chan-devserver</code> shows the process tree, and <code>journalctl --user -u chan-devserver</code> has the devserver's log:</p>
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>systemctl --user cat chan-devserver</b></code>
@@ -45,16 +44,16 @@ WatchdogSec=30
 [Install]
 WantedBy=default.target</code></pre>
   <ul>
-    <li><code>Type=notify</code>: the devserver tells systemd it is ready only after it has rebuilt every terminal. <code>NotifyAccess=main</code> keeps the shells under it from talking to systemd in its name.</li>
+    <li><code>Type=notify</code>: the devserver tells systemd it is ready once it has rebuilt every terminal. When a workspace takes more than a minute to mount, it reports ready without waiting for it, and that workspace's terminals follow. <code>NotifyAccess=main</code> keeps the shells under it from talking to systemd in its name.</li>
     <li><code>WatchdogSec=30</code> and <code>Restart=on-failure</code>: the devserver checks in every 15 seconds. When it hangs or crashes, systemd restarts it, and the terminals come back as in any restart.</li>
     <li><code>KillMode=process</code>: a restart signals only the devserver process, never the shells.</li>
     <li><code>FileDescriptorStoreMax=1024</code>: room for 512 terminals in systemd's file descriptor store, two descriptors each.</li>
     <li><code>TimeoutStartSec=10min</code>: time to rebuild a large set of terminals before the devserver reports ready.</li>
-    <li><code>Environment=</code> carries the <code>PATH</code> of the shell that ran <code>start</code>, and <code>CHAN_HOME</code> when you set one, because a user service otherwise starts with the user manager's environment.</li>
+    <li><code>Environment=</code> carries <code>CHAN_HOME</code> when you set one, and the <code>PATH</code> of the terminal that last ran <code>start</code> or <code>restart</code>, because a user service otherwise starts with the user manager's environment. A run from a script, with no terminal, keeps the <code>PATH</code> already recorded.</li>
   </ul>
   <aside class="doc-note">
     <strong>Let chan own the unit</strong>
-    <p><code>start</code> and <code>restart</code> rewrite the unit, which keeps its directives current across chan releases, and refuse a unit they do not recognize. For your own settings, add a drop-in with <code>systemctl --user edit chan-devserver</code> instead of editing the file.</p>
+    <p><code>start</code>, when the service is not running, and <code>restart</code> rewrite the unit, which keeps its directives current across chan releases, and refuse a unit they do not recognize. For your own settings, add a drop-in with <code>systemctl --user edit chan-devserver</code> instead of editing the file.</p>
   </aside>
 
   <h3 id="restart"><a class="heading-anchor" href="#restart">Restart without losing terminals</a></h3>
@@ -67,8 +66,8 @@ WantedBy=default.target</code></pre>
     <code><span>$</span><b data-copy-value>systemctl --user restart chan-devserver</b></code>
     {{copyButton}}
   </div>
-  <p>Your terminals keep running through it. Every terminal in a window hands its PTY to systemd's file descriptor store when it opens, along with a memory file that holds its scrollback. A restart stops only the devserver process: the shells, and everything running in them, stay where they are, with the same process ids, the same process tree below each shell, and the same control group. Your systemd user instance adopts the shells when the old devserver process exits. The new devserver process receives the descriptors back from systemd, rebuilds each terminal with its scrollback and screen as they stood at the last byte read, and only then reports ready.</p>
-  <p>What you see is a pause. Open windows show <code>reconnecting to the chan server</code> and come back by themselves, and a desktop connected over ssh or Eternal Terminal stays connected. A coding agent in the middle of a turn keeps working through it, and <code>cs</code> keeps working in shells that are older than the new devserver process.</p>
+  <p>Your terminals keep running through it. Every terminal in a window hands its PTY to systemd's file descriptor store when it opens, along with a memory file that holds its scrollback. A restart stops only the devserver process: the shells, and everything running in them, stay where they are, with the same process ids, the same process tree below each shell, and the same control group. Your systemd user instance adopts the shells when the old devserver process exits. The new devserver process receives the descriptors back from systemd, rebuilds each terminal with its scrollback and screen as they stood at the last byte read, and then reports ready.</p>
+  <p>What you see is a pause. Open windows show <code>reconnecting to the chan server</code> and come back by themselves, and a desktop connected over ssh or Eternal Terminal stays connected when the devserver is back within 30 seconds. A coding agent in the middle of a turn keeps working through it, and <code>cs</code> keeps working in shells that are older than the new devserver process.</p>
   <p>The same restore follows a restart that systemd does on its own: the watchdog replacing a hung devserver, or a crashed one coming back.</p>
   <p>These end your terminals:</p>
   <ul>
@@ -85,8 +84,8 @@ WantedBy=default.target</code></pre>
     {{copyButton}}
   </div>
   <p><code>chan upgrade</code> replaces the binary in place and leaves the running devserver alone; it keeps serving the old release until it restarts. <code>chan devserver restart</code> then brings the unit up to date for the new release and restarts into it. Every terminal, and every program running in one, carries on under the new devserver. <code>systemctl --user restart chan-devserver</code> also starts the new binary, but it keeps the unit as it was; <code>chan devserver restart</code> is the one to use after an upgrade.</p>
-  <p>To check, run <code>chan devserver status</code> or open the <a href="/manual/dashboard/#metrics">Dashboard's Metrics slide</a>, which names the version, build, and process id of the devserver that serves the window.</p>
-  <p class="minor">A distribution package (deb, rpm, AUR) is upgraded by the system package manager, and <code>chan upgrade</code> refuses there. Upgrade the package, then run <code>chan devserver restart</code>.</p>
+  <p>To check, run <code>chan metrics</code> or open the <a href="/manual/dashboard/#metrics">Dashboard's Metrics slide</a>; both name the version, build, and process id of the running devserver.</p>
+  <p class="minor">A package from a distribution repository (the Ubuntu PPA, Fedora COPR, the AUR) or from Nix is upgraded by its package manager, and <code>chan upgrade</code> refuses there: upgrade the package, then run <code>chan devserver restart</code>. A <code>.deb</code> or <code>.rpm</code> downloaded from a release upgrades with <code>chan upgrade</code>. With Chan Desktop's <code>chan</code>, <code>chan upgrade</code> updates the desktop in the background instead; run <code>chan devserver restart</code> once it has relaunched.</p>
 
   <h3 id="metrics"><a class="heading-anchor" href="#metrics">Watch the devserver</a></h3>
   <p>The devserver samples itself once a second and keeps the last ten minutes in memory. Two places show it:</p>
@@ -99,14 +98,14 @@ WantedBy=default.target</code></pre>
     {{copyButton}}
   </div>
   <ul>
-    <li><code>--json</code> prints one JSON document; <code>--history</code> adds the retained samples.</li>
-    <li><code>--watch</code> prints once, then only newer samples, about once a second, until <code>Ctrl+C</code>. With <code>--json</code> it prints one JSON object per line.</li>
+    <li><code>--json</code> prints one JSON document, and <code>--history</code> with it adds the retained samples.</li>
+    <li><code>--watch</code> prints once, then only newer samples, about once a second, until <code>Ctrl+C</code>. With <code>--json</code> it prints one JSON object per line. A read that fails ends it, so a watch outlasts a devserver restart only when the devserver answers again by the next read, about a second later.</li>
     <li><code>--url</code> reads another chan server by a URL it printed, such as the URL of <code>chan serve</code>.</li>
   </ul>
   <p class="minor"><code>chan metrics --help</code> has the examples, and <a href="https://github.com/fiorix/chan/blob/main/docs/metrics.md">docs/metrics.md</a> says what each reading counts on each platform.</p>
 
   <h3 id="systemd-report"><a class="heading-anchor" href="#systemd-report">Report the devserver to systemd-report</a></h3>
-  <p><code>systemd-report</code>, in systemd 260 and later, collects metrics from the services on a machine into one time-stamped JSON report, which it can sign and upload to a server of yours; <a href="https://amutable.com/blog/it-starts-upstream-systemd-report">It starts upstream: systemd-report</a> explains the design, and <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html">systemd-report(1)</a> the command. The devserver can be one of its sources. An optional pair of user units serves the readings of <code>chan metrics</code> over systemd's metrics interface, <code>io.systemd.Metrics</code>, on a socket in the directory <code>systemd-report --user</code> reads: systemd starts <code>chan metrics --varlink</code> for each connection. A client needs no token: the source reads the devserver's token itself, as <code>chan metrics</code> does.</p>
+  <p><code>systemd-report</code>, in systemd 260 and later, collects metrics from the services on a machine. From systemd 261 it also builds them into one JSON report that it can upload to a server of yours, and from 262 it can sign the report; <a href="https://amutable.com/blog/it-starts-upstream-systemd-report">It starts upstream: systemd-report</a> explains the design, and <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html">systemd-report(1)</a> the command. The devserver can be one of its sources. An optional pair of user units serves the readings of <code>chan metrics</code> over systemd's metrics interface, <code>io.systemd.Metrics</code>, on a socket in the directory <code>systemd-report --user</code> reads: systemd starts <code>chan metrics --varlink</code> for each connection. A client needs no token: the source reads the devserver's token itself, as <code>chan metrics</code> does.</p>
   <p>Write the two units. The service runs the <code>chan</code> your shell finds, and the block prints that path so you can check it:</p>
   <div class="command-copy multiline" data-copy-block>
     <code><span>$</span><b data-copy-value>mkdir -p ~/.config/systemd/user &amp;&amp; cd ~/.config/systemd/user
@@ -147,13 +146,30 @@ cd - &gt;/dev/null</b></code>
 systemctl --user enable --now chan-metrics.socket</b></code>
     {{copyButton}}
   </div>
-  <p>systemd-report now lists the devserver as the source <code>io.chan.Devserver</code>, and every reading is a metric family named under it, such as <code>io.chan.Devserver.MemoryResidentBytes</code>:</p>
+  <p>systemd-report now lists the devserver as the source <code>io.chan.Devserver</code>, and every reading is a metric family named under it, such as <code>io.chan.Devserver.MemoryResidentBytes</code>. systemd installs <code>systemd-report</code> in <code>/usr/lib/systemd/</code>, outside <code>PATH</code>:</p>
   <div class="command-copy multiline" data-copy-block>
-    <code><span>$</span><b data-copy-value>systemd-report --user list-sources
-systemd-report --user describe-metrics io.chan.Devserver
-systemd-report --user metrics io.chan.Devserver</b></code>
+    <code><span>$</span><b data-copy-value>/usr/lib/systemd/systemd-report --user list-sources
+/usr/lib/systemd/systemd-report --user describe io.chan.Devserver
+/usr/lib/systemd/systemd-report --user metrics io.chan.Devserver</b></code>
     {{copyButton}}
   </div>
+  <pre class="sample-output"><code>FAMILY                                    OBJECT FIELDS                         VALUE
+io.chan.Devserver.Build                   -      -                              "git-8c41243ceda4"
+io.chan.Devserver.CPUUsageNSec            -      -                              30000000
+io.chan.Devserver.HomeLogicalBytes        -      -                              433
+io.chan.Devserver.IOWriteBytes            -      {"scope":"storage"}            122880
+io.chan.Devserver.InstanceId              -      -                              "097bb01d4868223afd6b6fd63ef1dd69"
+io.chan.Devserver.MemoryResidentBytes     -      -                              68210688
+io.chan.Devserver.PID                     -      -                              936
+io.chan.Devserver.TrafficReceivedBytes    -      {"layer":"network"}            804
+io.chan.Devserver.TrafficSentBytes        -      {"layer":"network"}            9891
+io.chan.Devserver.TransferJobs            -      {"outcome":"finished"}         0
+io.chan.Devserver.UptimeSec               -      -                              5
+io.chan.Devserver.Version                 -      -                              "0.127.0"
+...
+
+48 metrics listed.</code></pre>
+  <p class="minor">On systemd 260 the <code>describe</code> command is called <code>describe-metrics</code>. <code>--json=short</code> prints each metric as one JSON object.</p>
   <ul>
     <li>Counters and gauges, not rates: a report is a snapshot, and two reports give the rate. <code>chan metrics --json --history</code> has chan's own rates and the last ten minutes.</li>
     <li>Counters start over when the devserver restarts. <code>io.chan.Devserver.InstanceId</code> names the devserver process, so a reader can tell a restart from a counter that went down.</li>
