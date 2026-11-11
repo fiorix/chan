@@ -10,7 +10,7 @@
 /// session, the screen and scrollback, the selection, the scroll position
 /// and focus stay as they were.
 
-import type { ITheme, Terminal } from "ghostty-web";
+import type { ITheme, Terminal } from "@chan/ghostty-web-ng";
 import { VtTerminal, type VtTerminalConfig } from "./ghosttyVt";
 
 /// The widget's private builder of the core's config from

@@ -66,6 +66,7 @@ FONT_MODULE = WORKSPACE_APP / "src/terminal/font.ts"
 FONTS_CSS = WORKSPACE_APP / "src/fonts.css"
 GHOSTTY_COMPAT = WORKSPACE_APP / "src/terminal/ghosttyCompat.ts"
 PAGE_DIR = pathlib.Path(__file__).resolve().parent / "terminal-pixels"
+BUILD_GHOSTTY = PAGE_DIR / "build-ghostty.mjs"
 
 # The host element's size in index.html. The window is opened at exactly this
 # size so the whole grid is inside the snapshot.
@@ -131,7 +132,6 @@ def build_serve_dir(root: pathlib.Path) -> None:
         "fonts": WORKSPACE_APP / "src/fonts",
         "vendor/xterm": WEB / "node_modules/@xterm/xterm",
         "vendor/addon-webgl": WEB / "node_modules/@xterm/addon-webgl",
-        "vendor/ghostty-web": WEB / "node_modules/ghostty-web",
     }
     for name, target in links.items():
         if not target.exists():
@@ -146,6 +146,24 @@ def build_serve_dir(root: pathlib.Path) -> None:
         page.replace("<!--CHAN_FONT_FACE-->", font_face_block()),
         encoding="utf-8",
     )
+
+    # The ghostty widget is a workspace package of TypeScript sources, so it is
+    # bundled into the served tree rather than linked; build-ghostty.mjs says
+    # how.
+    node = shutil.which("node")
+    if node is None:
+        raise SystemExit("missing node; the ghostty widget is bundled with it")
+    widget = root / "vendor/ghostty-web-ng"
+    result = subprocess.run(
+        [node, str(BUILD_GHOSTTY), str(widget)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not (widget / "ghostty-web.js").exists():
+        raise SystemExit(
+            f"build-ghostty.mjs exited {result.returncode}\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
 
     # The ghostty adapters are the product's own TypeScript, compiled rather
     # than reimplemented: this harness exists to measure what TerminalTab

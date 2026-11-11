@@ -25,7 +25,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { env, hrtime, version } from "node:process";
-import { SelectionManager, type Terminal } from "ghostty-web";
+import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
 import { beforeAll, expect, test } from "vitest";
 import { type FindCount, type FrameScheduler, GhosttyFind, FIND_SCAN_BUDGET_MS } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";

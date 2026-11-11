@@ -1,6 +1,6 @@
 # @chan/ghostty-web-ng
 
-chan's terminal widget: the sources of [ghostty-web](https://github.com/coder/ghostty-web) (MIT, by Coder), imported into chan as a workspace package. It is consumed from source as `@chan/ghostty-web-ng`; nothing here is built or published on its own.
+chan's terminal widget: the sources of [ghostty-web](https://github.com/coder/ghostty-web) (MIT, by Coder), imported into chan as a workspace package. chan's workspace app imports it from source as `@chan/ghostty-web-ng`; nothing here is built or published on its own.
 
 ## Provenance
 
@@ -24,8 +24,9 @@ chan's terminal widget: the sources of [ghostty-web](https://github.com/coder/gh
 ## Notes for chan
 
 - TypeScript reads `index.d.ts` for the `.` export, while vite and vitest compile `lib/`, since neither resolves the `types` condition. Type-checked from `lib/` under the workspace app's rules, upstream's sources fail on unused names and on the default loader's `Bun` global and `fs/promises` import. `index.d.ts` describes `lib/` only while `lib/` is upstream's at `1858a5947`: a change to `lib/` retires it, and the type check then reads the sources, once they pass the app's own rules.
-- `tsconfig.json` is upstream's and is read by the build. Vite compiles each file with the nearest `tsconfig.json`, and this one's ES2020 target turns `useDefineForClassFields` off, so class fields are assigned in constructors as in upstream's npm build. Without it, vite emits native class fields: a field declared without an initializer, such as `Terminal`'s `selectionManager`, then exists as an own `undefined` property from construction.
-- Upstream's tests are not run. They import `bun:test`, and `bunfig.toml` preloads Happy DOM with a canvas mock (`happydom.ts`), so none of them runs under the workspace's vitest unchanged.
+- `tsconfig.json` is upstream's and is read by the build. Vite compiles each file with the nearest `tsconfig.json`, and this one's ES2020 target turns `useDefineForClassFields` off, so class fields are assigned in constructors as in upstream's npm build. Without it, vite emits native class fields: a field declared without an initializer, such as `Terminal`'s `selectionManager`, then exists as an own `undefined` property from construction. `src/terminal/ghosttyWidget.test.ts` in the workspace app pins the assigned form.
+- Upstream's tests are not run. They import `bun:test`, and `bunfig.toml` preloads Happy DOM with a canvas mock (`happydom.ts`), so none of them runs under the workspace's vitest unchanged. The workspace app's own terminal suites run against this package.
+- The workspace app uses `lib/` through its `.` export. Its binding's differential tests (`ghosttyVt.test.ts`), `ghosttyCompat.test.ts` and `secretMaskingGhostty.test.ts` (through `src/__tests__/ghosttyWidgetWasm.ts`) and the terminal pixel harness use `ghostty-vt.wasm`; the app itself runs chan's vendored libghostty-vt and never loads this wasm.
 
 ---
 

@@ -31,19 +31,22 @@ const svelteClient = join(dirname(require.resolve("svelte/package.json")), "src/
 const xtermSrc = join(dirname(require.resolve("@xterm/xterm/package.json")), "src");
 
 // Terminal receives chan's vendored core through its ghostty option; the
-// library's default loader is unused. Its published JS embeds its own wasm
-// as a URL literal, so a module alias cannot remove those bytes.
+// widget's default loader is unused. That loader names the widget's own wasm
+// as `new URL(..., import.meta.url)`, which vite would emit as a second wasm
+// asset, so the URL is blanked to "data:," before vite sees it.
+const ghosttyWidgetEntry = normalize(require.resolve("@chan/ghostty-web-ng"));
+
 function ghosttyExternalWasm(): Plugin {
-  const entry = join(dirname(require.resolve("ghostty-web")), "ghostty-web.js");
+  const loader = join(dirname(ghosttyWidgetEntry), "ghostty.ts");
+  const wasmUrl = "new URL('../ghostty-vt.wasm', import.meta.url)";
   return {
     name: "ghostty-external-wasm",
     apply: "build",
     enforce: "pre",
     transform(code, id) {
-      if (normalize(id) !== entry) return;
-      const inlineWasm = /"data:application\/wasm;base64,[A-Za-z0-9+/=]+"/g;
-      if (!inlineWasm.test(code)) this.error("ghostty-web's inline wasm was not found");
-      return { code: code.replace(inlineWasm, '"data:,"'), map: null };
+      if (normalize(id) !== loader) return;
+      if (code.split(wasmUrl).length !== 2) this.error("the ghostty widget's wasm URL was not found exactly once");
+      return { code: code.replace(wasmUrl, 'new URL("data:,", import.meta.url)'), map: null };
     },
   };
 }
@@ -170,6 +173,16 @@ export default defineConfig({
         // expected. Everything else still warns.
         if (warning.code === "INEFFECTIVE_DYNAMIC_IMPORT") return;
         warn(warning);
+      },
+      output: {
+        // The terminal widget's lazily loaded chunk is named ghostty-web:
+        // checks 211 and 223 reach the page's widget Terminal by finding
+        // that name in the entry module and importing the chunk. Bundled
+        // from the package's lib/index.ts, it would otherwise be named lib.
+        chunkFileNames: (chunk) =>
+          chunk.facadeModuleId !== null && normalize(chunk.facadeModuleId) === ghosttyWidgetEntry
+            ? "assets/ghostty-web-[hash].js"
+            : "assets/[name]-[hash].js",
       },
     },
   },

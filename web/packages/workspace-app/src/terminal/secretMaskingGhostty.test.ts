@@ -5,8 +5,9 @@
 // real-build suite runs the pinned wasm terminal and renderer over the
 // software canvas and reads the pixels back.
 
-import { CanvasRenderer, Ghostty, Terminal } from "ghostty-web";
+import { CanvasRenderer, Ghostty, Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { ghosttyWidgetWasmUrl } from "../__tests__/ghosttyWidgetWasm";
 import { expectPixel, SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { GhosttySecretMasker, type GhosttyMaskTerminal } from "./secretMaskingGhostty";
 
@@ -384,7 +385,7 @@ describe("ghostty secret masking over the pinned build", () => {
         return created as unknown as CanvasRenderingContext2D;
       } as unknown as typeof HTMLCanvasElement.prototype.getContext,
     );
-    const ghostty = await Ghostty.load();
+    const ghostty = await Ghostty.load(ghosttyWidgetWasmUrl());
     const term = new Terminal({ ghostty, cols: COLS, rows: ROWS });
     term.wasmTerm = ghostty.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
     const canvas = document.createElement("canvas");

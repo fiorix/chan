@@ -398,7 +398,7 @@ describe("choosing the backend", () => {
   test("the component reaches ghostty-web only through the lazy kit loader", async () => {
     vi.resetModules();
     let loads = 0;
-    vi.doMock("ghostty-web", () => {
+    vi.doMock("@chan/ghostty-web-ng", () => {
       loads += 1;
       return {};
     });

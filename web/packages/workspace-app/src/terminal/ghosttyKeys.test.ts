@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { InputHandler } from "ghostty-web";
+import { InputHandler } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { ghosttyKeydownAction, ghosttyTypesKey, installGhosttyKeyParity } from "./ghosttyKeys";
 import { GhosttyVt } from "./ghosttyVt";

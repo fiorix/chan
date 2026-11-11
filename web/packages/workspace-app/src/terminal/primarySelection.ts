@@ -1,5 +1,5 @@
 import type { Terminal as XtermTerminal } from "@xterm/xterm";
-import type { Terminal as GhosttyTerminal } from "ghostty-web";
+import type { Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { isTauriDesktop, readPrimarySelection, writePrimarySelection } from "../api/desktop";
 import { currentOS } from "../state/shortcuts";
 import { pasteIntoGhostty } from "./ghosttyPaste";

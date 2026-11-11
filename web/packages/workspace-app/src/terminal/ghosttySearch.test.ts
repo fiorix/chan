@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { GhosttyCell } from "ghostty-web";
+import type { GhosttyCell } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
 import { ABI, GhosttyVt, LAYOUT, type MatchRange, type VtSearch, VtTerminal } from "./ghosttyVt";
 

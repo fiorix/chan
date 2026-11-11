@@ -231,7 +231,7 @@ const ghostty = vi.hoisted(() => ({
 // element, then again on a zero-delay timer.
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
-  const { SelectionManager } = await import("ghostty-web");
+  const { SelectionManager } = await import("@chan/ghostty-web-ng");
   class Terminal {
     cols = 80;
     rows = 24;

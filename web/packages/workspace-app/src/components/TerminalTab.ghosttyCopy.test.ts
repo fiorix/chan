@@ -70,7 +70,7 @@ const ghostty = vi.hoisted(() => ({
 // element it opens in, and a viewport that stays at the bottom.
 vi.mock("../terminal/backend", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../terminal/backend")>();
-  const { SelectionManager } = await import("ghostty-web");
+  const { SelectionManager } = await import("@chan/ghostty-web-ng");
   class Terminal {
     cols = 80;
     rows = 24;

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Ghostty, Key, KeyEncoderOption, Mods, type GhosttyCell, type GhosttyTerminal } from "ghostty-web";
+import { Ghostty, Key, KeyEncoderOption, Mods, type GhosttyCell, type GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   ABI,
@@ -19,8 +19,9 @@ import { copyTerminalKeyboardProtocolState, createTerminalKeyboardProtocolState 
 /// Ghostty's release wasm, vendored beside the package (vitest runs in
 /// the package directory).
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
-/// ghostty-web's own build, the behavior this binding has to keep.
-const GHOSTTY_WEB = "../../node_modules/ghostty-web/ghostty-vt.wasm";
+/// ghostty-web's own build, the behavior this binding has to keep: the
+/// ghostty widget package's wasm, from the npm build at its pinned commit.
+const GHOSTTY_WEB = "../ghostty-web-ng/ghostty-vt.wasm";
 
 let vendored: WebAssembly.Module;
 let legacy: WebAssembly.Module;
