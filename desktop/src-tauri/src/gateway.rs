@@ -3971,6 +3971,7 @@ pub(crate) mod tests {
             }));
             *attempt.signin_hooks.store.lock().unwrap() = Some(store);
         }));
+        let absent = auth::absent_gateway_pat_for_test(&run.f.discovery.identity_origin);
         connect_gateway(
             app.handle().clone(),
             Arc::clone(&state),
@@ -3979,6 +3980,8 @@ pub(crate) mod tests {
         )
         .await
         .expect("replacement key must be able to sign in");
+        // The callback stores its PAT for subsequent roster reads.
+        drop(absent);
         let opened = url::Url::parse(&urls.try_recv().expect("Connect opens sign-in")).unwrap();
         assert!(opened
             .query_pairs()
