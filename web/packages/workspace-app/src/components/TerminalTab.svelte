@@ -181,7 +181,7 @@
   import { GhosttySecretMasker } from "../terminal/secretMaskingGhostty";
   import { TerminalSecretMasker } from "../terminal/secretMaskingXterm";
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
-  import type { Ghostty, Terminal as GhosttyTerminal } from "ghostty-web";
+  import type { Ghostty, Terminal as GhosttyTerminal } from "@chan/ghostty-web-ng";
   import {
     createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,

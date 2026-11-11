@@ -48,6 +48,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { buildGhostty } from "./terminal-pixels/build-ghostty.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
@@ -167,12 +168,14 @@ const CONTENT_TYPES = {
  * rather than the Python driver's symlink tree: creating a symlink on Windows
  * needs Developer Mode or an elevated process, and the harness must not.
  */
-async function serve(productDir, page) {
+async function serve(productDir, ghosttyDir, page) {
   const mounts = [
     ["/fonts/", path.join(WORKSPACE_APP, "src/fonts")],
     ["/vendor/xterm/", path.join(WEB, "node_modules/@xterm/xterm")],
     ["/vendor/addon-webgl/", path.join(WEB, "node_modules/@xterm/addon-webgl")],
-    ["/vendor/ghostty-web/", path.join(WEB, "node_modules/ghostty-web")],
+    // The widget is bundled into the run directory, not linked: its package
+    // holds TypeScript sources only (see terminal-pixels/build-ghostty.mjs).
+    ["/vendor/ghostty-web-ng/", ghosttyDir],
     ["/product/", productDir],
   ];
   for (const [, root] of mounts) {
@@ -941,10 +944,12 @@ async function main() {
   try {
     const productDir = path.join(work, "product");
     await buildProductModules(productDir);
+    const ghosttyDir = path.join(work, "ghostty-web-ng");
+    await buildGhostty(ghosttyDir);
     const page = fs
       .readFileSync(path.join(PAGE_DIR, "index.html"), "utf8")
       .replace("<!--CHAN_FONT_FACE-->", fontFaceBlock());
-    server = await serve(productDir, page);
+    server = await serve(productDir, ghosttyDir, page);
 
     const launched = await launch(host, path.join(work, "profile"));
     child = launched.child;

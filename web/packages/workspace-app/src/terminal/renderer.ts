@@ -1,4 +1,4 @@
-import type { GhosttyTerminal } from "ghostty-web";
+import type { GhosttyTerminal } from "@chan/ghostty-web-ng";
 
 /// What a repaint of the visible rows needs from either backend. xterm.js
 /// queues the row range through refresh(). ghostty-web has no refresh(): its

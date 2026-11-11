@@ -1,4 +1,4 @@
-import type { CanvasRenderer, IRenderable } from "ghostty-web";
+import type { CanvasRenderer, IRenderable } from "@chan/ghostty-web-ng";
 import {
   findSecretMaskSpans,
   SecretAssignmentMatcher,

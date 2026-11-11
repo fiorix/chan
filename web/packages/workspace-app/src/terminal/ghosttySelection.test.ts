@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
-import { CanvasRenderer, SelectionManager, Terminal } from "ghostty-web";
+import { CanvasRenderer, SelectionManager, Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { installGhosttyClickExtents, installGhosttySelection } from "./ghosttySelection";

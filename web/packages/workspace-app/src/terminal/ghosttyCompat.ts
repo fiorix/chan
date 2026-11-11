@@ -3,7 +3,7 @@ import type {
   FontMetrics,
   GhosttyCell,
   IRenderable,
-} from "ghostty-web";
+} from "@chan/ghostty-web-ng";
 
 export type CellDimensions = {
   width: number;

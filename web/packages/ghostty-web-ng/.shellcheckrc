@@ -1,0 +1,5 @@
+# Upstream's shell scripts (demo/showcase.sh, scripts/build-wasm.sh) are
+# imported as they are and nothing in chan runs them, so the repository's
+# shell lint, which covers every tracked *.sh, does not hold them to chan's
+# rules.
+disable=all

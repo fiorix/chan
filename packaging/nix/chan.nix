@@ -31,7 +31,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   npmDeps = fetchNpmDeps {
     name = "${finalAttrs.pname}-${finalAttrs.version}-npm-deps";
     src = "${finalAttrs.src}/web";
-    hash = "sha256-sckIAojmext7lJ+wPdDe09RcUNsA3+zjX9pffxw4Lzw=";
+    hash = "sha256-b+1WtFZDqv4l13FH5qIsGi/QBR3cICxWQh2KsHArsas=";
   };
   npmRoot = "web";
 

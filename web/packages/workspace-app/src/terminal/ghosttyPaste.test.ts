@@ -7,7 +7,7 @@
 // what its onData fires.
 
 import { readFileSync } from "node:fs";
-import { Terminal } from "ghostty-web";
+import { Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import {

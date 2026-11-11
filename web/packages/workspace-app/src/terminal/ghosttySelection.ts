@@ -1,4 +1,4 @@
-import type { GhosttyCell, Terminal } from "ghostty-web";
+import type { GhosttyCell, Terminal } from "@chan/ghostty-web-ng";
 import { copiedText } from "./ghosttyCopy";
 import { VtTerminal } from "./ghosttyVt";
 

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Terminal, type Ghostty, type GhosttyTerminal } from "ghostty-web";
+import { Terminal, type Ghostty, type GhosttyTerminal } from "@chan/ghostty-web-ng";
 import { describe, expect, test } from "vitest";
 import type { TerminalPreferences } from "../api/types";
 import { ghosttyKitFrom, terminalBackendFromPrefs, type TerminalBackend } from "./backend";

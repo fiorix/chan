@@ -1,5 +1,6 @@
-import { CanvasRenderer, Ghostty, Terminal } from "ghostty-web";
+import { CanvasRenderer, Ghostty, Terminal } from "@chan/ghostty-web-ng";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { ghosttyWidgetWasmUrl } from "../__tests__/ghosttyWidgetWasm";
 import { expectPixel, SoftwareCanvasContext, sourceOver, type Rgba } from "../__tests__/softwareCanvas";
 import {
   alignGhosttyRendererToXterm,
@@ -499,7 +500,7 @@ describe("Ghostty overlay scrollbar clicks", () => {
 
   test("the pinned build still exposes the state the gate binds to", async () => {
     const terminal = new Terminal({
-      ghostty: await Ghostty.load(),
+      ghostty: await Ghostty.load(ghosttyWidgetWasmUrl()),
     }) as unknown as {
       handleMouseDown?: unknown;
     };

@@ -19,7 +19,7 @@ import { WebglAddon } from "/vendor/addon-webgl/lib/addon-webgl.mjs";
 import {
   Ghostty,
   Terminal as GhosttyTerminal,
-} from "/vendor/ghostty-web/dist/ghostty-web.js";
+} from "/vendor/ghostty-web-ng/ghostty-web.js";
 import {
   alignGhosttyRendererToXterm,
   installGhosttyCustomGlyphs,
@@ -229,7 +229,7 @@ let ghosttyKit = null;
 
 function loadGhostty() {
   if (!ghosttyKit) {
-    ghosttyKit = Ghostty.load("/vendor/ghostty-web/dist/ghostty-vt.wasm");
+    ghosttyKit = Ghostty.load("/vendor/ghostty-web-ng/ghostty-vt.wasm");
   }
   return ghosttyKit;
 }

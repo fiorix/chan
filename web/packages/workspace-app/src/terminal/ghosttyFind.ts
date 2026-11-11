@@ -88,7 +88,7 @@
 /// user makes while the bar is open is theirs: the controller moves and
 /// clears only the selection it wrote last.
 
-import type { Terminal } from "ghostty-web";
+import type { Terminal } from "@chan/ghostty-web-ng";
 import { selectionManagerOf, type SelectionManagerLike } from "./ghosttySelection";
 import type { GhosttyChange, GhosttyViewportController } from "./ghosttyViewport";
 import { type MatchRange, type SearchState, type VtSearch, VtTerminal, type VtTrackedCell } from "./ghosttyVt";

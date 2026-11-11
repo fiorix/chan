@@ -33,7 +33,7 @@
 /// cannot cure a failure of the instance. Callers fall back to xterm.js
 /// for each terminal whose load fails.
 
-import type { Ghostty, Terminal } from "ghostty-web";
+import type { Ghostty, Terminal } from "@chan/ghostty-web-ng";
 import { GhosttyVt, GhosttyVtRefusal, type VtHost } from "./ghosttyVt";
 import type { TerminalPreferences } from "../api/types";
 
@@ -114,7 +114,7 @@ export function loadGhosttyKit(): Promise<GhosttyKit> {
 /// compile failure goes through `forever`.
 async function compileGhosttyKit(forever: (error: unknown) => never): Promise<GhosttyKit> {
   const [mod, wasmUrl] = await Promise.all([
-    import("ghostty-web"),
+    import("@chan/ghostty-web-ng"),
     import("../../vendor/ghostty-vt/ghostty-vt.wasm?url"),
   ]);
   const response = await fetch(wasmUrl.default);

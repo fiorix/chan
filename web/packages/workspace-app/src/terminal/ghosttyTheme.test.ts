@@ -8,7 +8,7 @@
 // has to paint every pixel that terminal paints, and nothing else may change.
 
 import { readFileSync } from "node:fs";
-import { Terminal, type GhosttyCell, type ITheme } from "ghostty-web";
+import { Terminal, type GhosttyCell, type ITheme } from "@chan/ghostty-web-ng";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
 import { applyGhosttyTheme } from "./ghosttyTheme";

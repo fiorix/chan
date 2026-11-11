@@ -11,7 +11,7 @@
 // costs nothing unless a case makes it move during one.
 
 import { readFileSync } from "node:fs";
-import { SelectionManager, type Terminal } from "ghostty-web";
+import { SelectionManager, type Terminal } from "@chan/ghostty-web-ng";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { FIND_COST_PRIORS, FIND_FRAME_BUDGET_MS, FIND_SCAN_BUDGET_MS, FIND_WAIT_CAP_MS, type FindCount, type FrameScheduler, GhosttyFind } from "./ghosttyFind";
 import { GhosttyViewportController } from "./ghosttyViewport";

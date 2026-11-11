@@ -16,7 +16,7 @@
 /// against that JSON, so a re-pin that moves one fails there and not in
 /// a user's terminal.
 
-import type { Ghostty, GhosttyCell, GhosttyTerminal, KeyEncoder } from "ghostty-web";
+import type { Ghostty, GhosttyCell, GhosttyTerminal, KeyEncoder } from "@chan/ghostty-web-ng";
 import { copiedText } from "./ghosttyCopy";
 
 /// Enum values of the pinned build, by upstream C type.
