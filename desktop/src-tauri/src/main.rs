@@ -136,22 +136,6 @@ pub struct AppState {
     /// The windows whose title bar hosts their page's tab bar, keyed by
     /// window label (`titlebar_tabs.rs`). Dropped on window destroy.
     pub(crate) titlebar_windows: titlebar_tabs::TitlebarWindows,
-    /// Per-live-window display number, keyed by window label, with the
-    /// base title it was assigned under: the lowest free number among live
-    /// windows with the SAME base title, so a number freed by a closed
-    /// window gets reused. The build path assigns one to every window and
-    /// the destroy path frees it, but no title shows it: a watched
-    /// window's `Window N` is the library's ordinal, inside the base title
-    /// the library composes, and a control window's title has no number.
-    /// Freed on window destroy; a hidden-in-place control terminal keeps
-    /// its number until destruction.
-    pub window_numbers: Mutex<HashMap<String, (String, u64)>>,
-    /// OS-title overrides keyed by window label. The build path and the
-    /// watcher's retitle both let an entry win over the composed title, and
-    /// the destroy path keeps it so a reopen under the same label would
-    /// restore it, but nothing in this build writes an entry, so the map
-    /// stays empty and every window carries its composed title.
-    pub window_title_overrides: Mutex<HashMap<String, String>>,
     pub(crate) privacy_titles: Mutex<HashMap<String, String>>,
     /// Windows hidden ("buried") by the OS close button, in bury order (most
     /// recent last). Watcher-managed windows close their native surface but keep
@@ -331,8 +315,6 @@ impl AppState {
             local_watcher_view: OnceLock::new(),
             live_window_zooms: Mutex::new(HashMap::new()),
             titlebar_windows: titlebar_tabs::TitlebarWindows::default(),
-            window_numbers: Mutex::new(HashMap::new()),
-            window_title_overrides: Mutex::new(HashMap::new()),
             privacy_titles: Mutex::new(HashMap::new()),
             buried_windows: Mutex::new(Vec::new()),
             silent_hides: Mutex::new(std::collections::HashSet::new()),
@@ -435,26 +417,6 @@ pub struct BuriedWindow {
     /// Wall-clock millis at bury time; diagnostics only (the Vec's
     /// push order is the recency authority).
     pub buried_at: u64,
-}
-
-/// Lowest free display number (`>= 1`) for `base` among the live
-/// window-number entries, ignoring any slot already held by `label`
-/// itself (so a re-assign of the same window keeps its number stable).
-/// Split out as a free function so the reuse logic is unit-testable
-/// without constructing a full `AppState`.
-fn lowest_free_window_number(
-    numbers: &HashMap<String, (String, u64)>,
-    label: &str,
-    base: &str,
-) -> u64 {
-    let taken: std::collections::HashSet<u64> = numbers
-        .iter()
-        .filter(|(l, (b, _))| l.as_str() != label && b == base)
-        .map(|(_, (_, n))| *n)
-        .collect();
-    (1u64..)
-        .find(|n| !taken.contains(n))
-        .expect("the naturals always contain a free slot")
 }
 
 /// Replace `library_id`'s slice of the active-transfer label set: drop every
@@ -562,39 +524,6 @@ impl AppState {
             }
         };
         config::lookup_window_geometry(&cfg, label, current_sig)
-    }
-
-    /// Assign the lowest-free display number for `base` among live
-    /// windows that share the same base title, record it under
-    /// `label`, and return it. The first window of a given base is
-    /// `1`; a number freed by `release_window_number` is handed back
-    /// out on the next assign -- mirroring the lowest-free reuse of
-    /// `Registry::next_terminal_name`. Re-assigning the same `label`
-    /// (a defensive double-build) refreshes its slot.
-    pub fn assign_window_number(&self, label: &str, base: &str) -> u64 {
-        let mut numbers = self.window_numbers.lock().unwrap();
-        let n = lowest_free_window_number(&numbers, label, base);
-        numbers.insert(label.to_string(), (base.to_string(), n));
-        n
-    }
-
-    /// Release the display number held by `label` so it can be reused
-    /// by the next window with the same base title. Called from the
-    /// window-destroy handler. A no-op for an unknown label.
-    pub fn release_window_number(&self, label: &str) {
-        self.window_numbers.lock().unwrap().remove(label);
-        self.privacy_titles.lock().unwrap().remove(label);
-    }
-
-    /// The OS-title override for `label`, if any (read by
-    /// `build_workspace_window_with_completion` and the watcher's retitle);
-    /// always `None` today, since nothing writes one.
-    pub fn window_title_override(&self, label: &str) -> Option<String> {
-        self.window_title_overrides
-            .lock()
-            .unwrap()
-            .get(label)
-            .cloned()
     }
 
     /// Record `label` as buried (most recent). Re-burying a label
@@ -11074,34 +11003,6 @@ mod tests {
             devserver_url_token("http://127.0.0.1:8787/?token=tok_abc"),
             None
         );
-    }
-
-    #[test]
-    fn window_numbers_are_lowest_free_per_base_with_reuse() {
-        let mut numbers: HashMap<String, (String, u64)> = HashMap::new();
-        // Helper mirroring AppState::assign_window_number against the
-        // local map (the method just locks + delegates to the same
-        // free function).
-        let assign = |numbers: &mut HashMap<String, (String, u64)>, label: &str, base: &str| {
-            let n = lowest_free_window_number(numbers, label, base);
-            numbers.insert(label.to_string(), (base.to_string(), n));
-            n
-        };
-
-        // First two terminal windows get 1, 2.
-        assert_eq!(assign(&mut numbers, "local::w-t0", "Terminal"), 1);
-        assert_eq!(assign(&mut numbers, "local::w-t1", "Terminal"), 2);
-        // A different base title starts its own sequence at 1.
-        assert_eq!(assign(&mut numbers, "local::w-w0", "workspace w"), 1);
-
-        // Free the first terminal; the next terminal reuses 1, not 3.
-        numbers.remove("local::w-t0");
-        assert_eq!(assign(&mut numbers, "local::w-t2", "Terminal"), 1);
-        // The unrelated base is untouched by the terminal churn.
-        assert_eq!(assign(&mut numbers, "local::w-w1", "workspace w"), 2);
-
-        // Re-assigning a live label keeps its slot (ignores itself).
-        assert_eq!(assign(&mut numbers, "local::w-t1", "Terminal"), 2);
     }
 
     #[test]

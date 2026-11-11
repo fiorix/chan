@@ -815,11 +815,6 @@ impl TauriNativeSurface {
                 return;
             };
             let state = app.state::<Arc<AppState>>();
-            // A title override would own the titlebar outright and is not
-            // ours to overwrite; nothing writes one today.
-            if state.window_title_override(&label).is_some() {
-                return;
-            }
             // Already correct -- the build path composed it. Record that so the
             // next reconcile skips this round trip.
             let visible_title = crate::privacy::window_title(&state, &label, &desired);

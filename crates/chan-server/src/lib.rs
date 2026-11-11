@@ -1359,8 +1359,10 @@ fn terminal_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/sessions", get(api_list_sessions))
         .route("/api/session/resume", post(routes::api_resume_client))
-        // Window enumeration (connected / saved): the desktop's
-        // remote Window menu and `cs window list` read this.
+        // Window enumeration (connected / saved), each row stamped with
+        // the desktop's OS title. No desktop or web frontend fetches it:
+        // the desktop's Window menu and `cs window list` read the
+        // library's window records.
         .route("/api/windows", get(api_list_windows))
         // Blocked-CLI reply routes: the SPA completes `cs pane`
         // (window bus) and `cs terminal survey` (survey bus) round
@@ -2089,8 +2091,10 @@ fn router_with_extensions(
         )
         .route("/api/sessions", get(api_list_sessions))
         .route("/api/session/resume", post(routes::api_resume_client))
-        // Window enumeration (connected / saved): the desktop's remote
-        // Window menu and `cs window list` read this.
+        // Window enumeration (connected / saved), each row stamped with the
+        // desktop's OS title. No desktop or web frontend fetches it: the
+        // desktop's Window menu and `cs window list` read the library's
+        // window records.
         .route("/api/windows", get(api_list_windows))
         .route(
             "/api/attachments",

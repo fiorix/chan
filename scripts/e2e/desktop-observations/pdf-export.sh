@@ -85,7 +85,7 @@ PAGE="/workspace-"
 EXPORT_BOUND=960
 
 page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "$PAGE" "$1"; }
-workspace_xid() { obs_x_window_titled "$WS"; }
+workspace_xid() { obs_x_local_window_titled "$WS"; }
 page_answers() { page_eval "document.readyState" | grep -q complete; }
 
 chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
@@ -292,7 +292,7 @@ arm_deck() {
 
 arm_two_windows() {
     local second
-    two_windows() { [ "$(obs_x_windows | grep -c -F -- "$WS" || true)" -ge 2 ]; }
+    two_windows() { [ "$(obs_x_windows | grep -c -F -- "$(obs_local_window_fragment "$WS")" || true)" -ge 2 ]; }
     second="$(cs window new 2> "$OBS_WORK/two-windows.new.err" | sed -n 1p)" || obs_inconclusive "cs window new failed: $(cat "$OBS_WORK/two-windows.new.err")"
     [ -n "$second" ] || obs_inconclusive "cs window new printed no window id"
     obs_wait 60 "a second native window of the workspace" two_windows

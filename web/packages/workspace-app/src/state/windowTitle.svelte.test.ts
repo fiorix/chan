@@ -165,6 +165,16 @@ describe("live caption updates", () => {
     expect(document.title).toBe("Window 3 [another.private.example]");
   });
 
+  // A control terminal's name is fixed and carries no caption, so privacy
+  // mode has nothing to conceal in it; its generated name, "Terminal Window
+  // 0", is one the window goes by nowhere else.
+  test("privacy mode keeps a control terminal's fixed name in the window tab bar", async () => {
+    loadSnapshot.mockResolvedValue(snapshot([scopedWindow({ kind: "terminal", ordinal: 0, control: true })]));
+    privacy.enabled = true;
+    await loadWindowTitle();
+    expect(windowName()).toBe("Control terminal");
+  });
+
   test("retitles when the leader sets a caption", async () => {
     loadSnapshot.mockResolvedValue(snapshot([scopedWindow()]));
     await initWindowTitle();

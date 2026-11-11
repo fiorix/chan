@@ -225,6 +225,21 @@ obs_x_window_titled() {
     obs_x_windows | grep -F -- "$1" | sed -n 1p | cut -d' ' -f1 | grep .
 }
 
+# obs_local_window_fragment <workspace path>: the part of a local workspace
+# window's title that names it. The desktop titles that window
+# `<glyph> local / <folder> Window N`, the folder being the root's last path
+# component, and never with the path; a devserver's window reads
+# `<glyph> <devserver> / <folder> Window N` and does not hold the fragment.
+obs_local_window_fragment() {
+    printf ' local / %s Window' "${1##*/}"
+}
+
+# obs_x_local_window_titled <workspace path>: the id of the first viewable
+# local window of the workspace; fails when there is none.
+obs_x_local_window_titled() {
+    obs_x_window_titled "$(obs_local_window_fragment "$1")"
+}
+
 obs_shot() {
     import -window root "$OBS_WORK/shots/$1.png" 2>> "$OBS_WORK/shots/import.log" || obs_log "screenshot $1 failed"
 }

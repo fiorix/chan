@@ -595,7 +595,7 @@ pub async fn spawn_control_terminal_window(
                 // `control` (not `terminal`) puts the SPA in the singleton
                 // control sub-mode: terminal-only, but with the tab strip / pane
                 // chrome hidden and Cmd+T / splits disabled so it never spawns a
-                // second tab. It also tags the window kind in `cs window list`,
+                // second tab. It is also the kind `GET /api/windows` reports,
                 // keeping it distinct from persisted standalone terminals.
                 kind: Some("control"),
                 start_terminal: false,
@@ -1064,20 +1064,11 @@ fn build_workspace_window_with_completion(
         if let Some(old) = app_owned.get_webview_window(&label_owned) {
             let _ = old.destroy();
         }
-        // Reserve the window's slot in the local display-number counter,
-        // freed on close (Ok branch handler / Err branch below). No title
-        // shows that number: a watched window's `Window N` is the library's
-        // ordinal, already in its base title, and a control window's title
-        // has none.
         let state = app_owned.state::<Arc<AppState>>();
-        state.assign_window_number(&label_owned, &title_owned);
-        // An entry in the title overrides would win over the composed
-        // "{base} [caption]" title; nothing writes one today, so this is the
-        // composed title. It is registered below once the window builds, so
-        // `GET /api/windows` reports what the title bar shows.
-        let display_title = state
-            .window_title_override(&label_owned)
-            .unwrap_or_else(|| compose_window_title(&title_owned, &kind_owned, &caption_owned));
+        // The composed "{base} [caption]" title. It is registered below once
+        // the window builds, so `GET /api/windows` reports what the title bar
+        // shows.
+        let display_title = compose_window_title(&title_owned, &kind_owned, &caption_owned);
         // Resolve the desktop-local OS geometry to restore for this window
         // (keyed by the native label, matched against the live monitor
         // signature). When we will reposition / resize, the window builds HIDDEN
@@ -1198,11 +1189,13 @@ fn build_workspace_window_with_completion(
                 Ok(())
             }
             Err(e) => {
-                // Build failed: hand the just-assigned number back so it
-                // isn't leaked out of the live set.
-                app_owned
-                    .state::<Arc<AppState>>()
-                    .release_window_number(&label_owned);
+                // Build failed: forget the title privacy mode recorded for
+                // the window, as the destroy path does, so its refresh does
+                // not keep it.
+                crate::privacy::forget_window_title(
+                    &app_owned.state::<Arc<AppState>>(),
+                    &label_owned,
+                );
                 tracing::warn!(label = %label_owned, error = %e, "opening workspace window failed");
                 Err(format!("opening workspace window {label_owned}: {e}"))
             }
@@ -1382,7 +1375,7 @@ fn on_close_requested(
 
 /// Single cleanup point for EVERY destroy path: the
 /// real-close branch in `on_close_requested`, the SPA cascade destroy,
-/// workspace teardown, and app exit. Frees the display number,
+/// workspace teardown, and app exit. Forgets the window's privacy title,
 /// drops the zoom entry and the title bar mode, and clears a buried registry
 /// entry only when no watcher burial or pending hide keeps it in the hidden
 /// windows.
@@ -1393,11 +1386,9 @@ fn on_destroyed(app: &AppHandle, label: &str) {
     let state = app.state::<Arc<AppState>>();
     state.retarget_tickets.cancel(label);
     crate::clear_gateway_404_counts_for_window(&state.gateway_404_counts, label);
-    state.release_window_number(label);
+    crate::privacy::forget_window_title(&state, label);
     // Drop the registered OS title so `GET /api/windows`
-    // stops reporting one for a window that's gone. A
-    // title override, were one written, is KEPT: a reopen
-    // reuses the same label and would restore it.
+    // stops reporting one for a window that's gone.
     if let Some(embedded) = state.embedded.get() {
         embedded.window_titles().remove(label);
     }
@@ -4533,7 +4524,7 @@ mod tests {
         assert!(closure.contains("on_close_requested("));
         assert!(closure.contains("WindowEvent::Destroyed =>"));
         assert!(closure.contains("on_destroyed("));
-        for inlined in ["take_silent_hide", "prevent_close", "release_window_number"] {
+        for inlined in ["take_silent_hide", "prevent_close", "forget_window_title"] {
             assert!(
                 !closure.contains(inlined),
                 "the window-event closure must delegate, not carry {inlined} itself",

@@ -33,7 +33,7 @@ inspect() { node "$here/inspect.mjs" "$WEBKIT_INSPECTOR_HTTP_SERVER" "$@"; }
 web_pids() {
     pgrep -P "$OBS_DESKTOP_PID" -f WebKitWebProcess | sort -n || true
 }
-window_for() { obs_x_window_titled "$1"; }
+window_for() { obs_x_local_window_titled "$1"; }
 # A remote window's native title uses the devserver label and the workspace
 # basename, while its minted record keeps the absolute workspace path.
 dev_window() {

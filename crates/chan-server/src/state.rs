@@ -181,9 +181,9 @@ pub struct AppState {
     /// guard (`WorkspaceHost::tenant_has_active_transfer`).
     pub window_transfers: Arc<crate::window_transfers::WindowTransfers>,
     /// Desktop-written, server-read map of window id -> OS title + kind.
-    /// Empty unless chan-desktop is the embedder; `GET /api/windows` and
-    /// `cs window list` read it to show the real OS title alongside each
-    /// `{id, connected, saved}` row.
+    /// Empty unless chan-desktop is the embedder; `GET /api/windows` reads
+    /// it to show the real OS title alongside each `{id, connected, saved}`
+    /// row. `cs window list` prints the library's window records instead.
     pub window_titles: crate::window_titles::SharedWindowTitles,
     /// This tenant's admission handle onto the process-wide bulk transfer
     /// lane. Deliberately the tenant handle and not the lane itself: routes

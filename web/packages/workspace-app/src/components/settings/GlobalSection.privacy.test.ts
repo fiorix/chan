@@ -12,10 +12,13 @@ test("Global privacy hint names the concealed surfaces and the field reveal limi
     "computer and gateway names", "addresses", "connection scripts and tokens",
     "workspace paths in Computers", "WireGuard file paths and public keys", "connection errors",
     "launcher notices and action details", "window labels in Computers", "window titles",
-    "pane list's heading and terminal program details", "Metrics slide's host name and chan home path",
+    "window titles, terminal program details", "Metrics slide's host name and chan home path",
     "where an eye button is shown", "Shared across Chan desktop windows, or browser tabs at the same address",
     "Screen recording is not detected automatically",
   ]) expect.soft(hint).toContain(detail);
+  // The pane list has no heading: the window tab bar carries the window's
+  // title, which "window titles" covers.
+  expect.soft(hint).not.toContain("pane list");
 });
 
 test("Global privacy controls save on the viewing client without changing tenant preferences", async () => {

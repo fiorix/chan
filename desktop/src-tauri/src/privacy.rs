@@ -51,6 +51,13 @@ pub(crate) fn window_title(state: &AppState, label: &str, title: &str) -> String
     }
 }
 
+/// Forget the title [`window_title`] holds for `label`, so privacy mode's
+/// refresh no longer retitles a window that is gone. Called when a window is
+/// destroyed or fails to build.
+pub(crate) fn forget_window_title(state: &AppState, label: &str) {
+    state.privacy_titles.lock().unwrap().remove(label);
+}
+
 fn refresh_titles(app: &tauri::AppHandle) -> Result<(), String> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
@@ -164,6 +171,26 @@ mod tests {
         assert_eq!(
             window_title(&state, "window", "updated host"),
             "updated host"
+        );
+    }
+
+    /// A destroyed window's title leaves the set privacy mode's refresh
+    /// retitles, and only that window's.
+    #[test]
+    fn a_forgotten_window_leaves_the_refreshed_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = AppState::with_store(store);
+        window_title(&state, "local::w-1", "first");
+        window_title(&state, "local::w-2", "second");
+        forget_window_title(&state, "local::w-1");
+        forget_window_title(&state, "local::w-unknown");
+        let titles = state.privacy_titles.lock().unwrap().clone();
+        assert_eq!(
+            titles,
+            std::collections::HashMap::from([("local::w-2".to_string(), "second".to_string())])
         );
     }
 

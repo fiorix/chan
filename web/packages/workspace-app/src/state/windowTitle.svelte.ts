@@ -30,7 +30,7 @@
 // title. The tab title is a convenience, never a correctness surface, so every
 // failure here is silent.
 
-import { rowLabel, windowDisplayName, type WindowKind } from "@chan/web-shared/window-label";
+import { windowDisplayName, type WindowKind } from "@chan/web-shared/window-label";
 import { privacy } from "@chan/web-shared/privacy";
 import { sessionWindowId } from "../api/client";
 import { isTauriDesktop } from "../api/desktop";
@@ -51,14 +51,15 @@ let latestLabel: string | undefined;
 /**
  * The window tab bar's title for this window: the title chan-desktop gives it
  * when the desktop has sent one, else the launcher's name for it; unknown
- * until one of them is. Privacy mode shows the generated name alone, as
- * Computers does.
+ * until one of them is. Privacy mode drops the caption and shows the
+ * generated name alone, or a control terminal's fixed name, which holds
+ * nothing to conceal.
  */
 export function windowName(): string | null {
   // The page's own setting decides rather than the desktop's mask: the title
   // held from before privacy mode turned on is the full one until the masked
   // one arrives.
-  if (privacy.enabled) return naming ? rowLabel(naming.kind, naming.ordinal) : null;
+  if (privacy.enabled) return naming ? windowDisplayName({ ...naming, label: "" }) : null;
   if (windowTabBar.title !== "") return windowTabBar.title;
   return naming ? windowDisplayName(naming) : null;
 }
