@@ -23,7 +23,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use anyhow::Result;
 
 use crate::cli::{
-    cmd_completions, parse_cli, Command, ContactsAction, ImportSource, WorkspaceAction,
+    cmd_completions, parse_cli, parse_cli_with_arg0, Command, ContactsAction, ImportSource,
+    WorkspaceAction,
 };
 use crate::close::cmd_close_cli;
 use crate::config::cmd_config;
@@ -53,6 +54,7 @@ mod local_listener;
 mod mcp;
 mod metadata;
 mod metrics;
+mod opener;
 mod parentage;
 mod registry;
 mod remote;
@@ -251,8 +253,34 @@ where
     // can start one. chan-server cannot stamp this itself -- it is a library,
     // and the id belongs to the binary linking it.
     chan_server::set_build_id(BUILD_ID);
+    run_cli(parse_cli(args), personality).await
+}
 
-    let cli = parse_cli(args);
+/// [`run`] under an explicit program name, for chan-desktop: on a Linux
+/// AppImage the inner `AppRun` drops `argv[0]`, and the name a wrapper ran the
+/// image as (`chan-files`, `chan-edit`) arrives in `$ARGV0`, which the desktop
+/// reads for its own dispatch. A non-empty `arg0` is the name the invocation
+/// parses under; `args` keeps its program-name slot.
+pub async fn run_invoked_as<I, T>(
+    arg0: std::ffi::OsString,
+    args: I,
+    personality: Personality,
+) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    chan_server::set_build_id(BUILD_ID);
+    run_cli(parse_cli_with_arg0(Some(arg0), args), personality).await
+}
+
+/// Whether `arg0` is `chan-files` or `chan-edit`, the names chan-desktop
+/// dispatches into [`run_invoked_as`] beside `chan`.
+pub fn invoked_as_opener(arg0: &std::ffi::OsStr) -> bool {
+    cli::Opener::from_arg0(arg0).is_some()
+}
+
+async fn run_cli(cli: cli::Cli, personality: Personality) -> Result<()> {
     init_tracing(cli.verbose);
     let verbose = cli.verbose > 0;
 
@@ -303,6 +331,9 @@ where
             },
         },
         Command::Shell { action } => chan_shell::dispatch(action, dump_skill).await,
+        Command::OpenPaths { opener, paths } => {
+            opener::cmd_open_paths(opener, paths, personality).await
+        }
         Command::Completions { shell } => cmd_completions(shell),
         Command::DumpSkill { args } => dump_skill(args),
         Command::Close { args, forget } => {

@@ -3364,8 +3364,8 @@ fn linux_updater_refusal(appimage: Option<&std::path::Path>) -> Option<String> {
 /// it) without installing. Otherwise we kick off check -> download -> install
 /// on a background task and return `UpgradeStarted` at once (fire-and-return:
 /// the multi-MB download can't be awaited from the CLI socket round-trip);
-/// when it finishes we re-affirm the `~/.local/bin/{chan,cs}` shims and
-/// relaunch into the new version.
+/// when it finishes we re-affirm the `~/.local/bin` shims and relaunch into
+/// the new version.
 /// Desktop updater payloads are signed and published for the macOS `.app`,
 /// the Linux AppImage, and the Windows NSIS installer. A Linux build that is
 /// not running from an AppImage and a Windows build that is not an install
@@ -3639,7 +3639,7 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
                     .await
                 {
                     Ok(()) => {
-                        // Re-affirm the `~/.local/bin/{chan,cs}` shims to the
+                        // Re-affirm the `~/.local/bin` shims to the
                         // (possibly relocated) new binary, mirroring the
                         // `chan upgrade` install path.
                         match cs_install::install_bin_shims() {
@@ -5187,18 +5187,21 @@ fn run_as_cs_if_requested() -> Result<bool, String> {
 /// symlink or AppImage wrapper, `argv[0]` stem == "chan"), run the whole `chan`
 /// CLI in-process with the Desktop personality and EXIT instead of launching
 /// the GUI. This is what makes a desktop install also provide `chan` with no
-/// separate download. Mirrors `run_as_cs_if_requested`: a pre-GUI argv probe
-/// that short-circuits `main`. The Desktop personality makes `chan serve`
-/// integrate with the running desktop (handoff / GUI launch) and `chan
-/// upgrade` drive the desktop updater rather than replacing a CLI tarball.
-/// Returns `Ok(true)` when it handled the invocation, `Ok(false)` for a
-/// normal GUI launch.
+/// separate download. The `chan-files` and `chan-edit` names run the same CLI
+/// under their own usage. Mirrors `run_as_cs_if_requested`: a pre-GUI argv
+/// probe that short-circuits `main`. The Desktop personality makes `chan
+/// serve` and the two openers integrate with the running desktop (handoff /
+/// GUI launch) and `chan upgrade` drive the desktop updater rather than
+/// replacing a CLI tarball. Returns `Ok(true)` when it handled the
+/// invocation, `Ok(false)` for a normal GUI launch.
 fn run_as_chan_if_requested() -> Result<bool, String> {
     // Stem detection prefers `$ARGV0` (see `chan_shell::invoked_arg0`) so a
     // packaged AppImage invoked via `exec -a chan "$APPIMAGE"` (AppRun drops
-    // argv[0]) still dispatches the CLI instead of launching the GUI. The args
-    // passed to `chan::run` keep the real argv (clap ignores arg[0]).
-    if !chan_shell::invoked_as_chan(&chan_shell::invoked_arg0()) {
+    // argv[0]) still dispatches the CLI instead of launching the GUI. The name
+    // goes to the CLI's parse with the real argv, since an opener's usage is
+    // chosen by it and AppRun's argv[0] is the inner binary.
+    let arg0 = chan_shell::invoked_arg0();
+    if !chan_shell::invoked_as_chan(&arg0) && !chan::invoked_as_opener(&arg0) {
         return Ok(false);
     }
     // `chan serve` needs a multi-threaded runtime; everything else runs fine
@@ -5213,7 +5216,11 @@ fn run_as_chan_if_requested() -> Result<bool, String> {
         .enable_all()
         .build()
         .map_err(|e| format!("building chan runtime: {e}"))?;
-    let res = rt.block_on(chan::run(std::env::args_os(), chan::Personality::Desktop));
+    let res = rt.block_on(chan::run_invoked_as(
+        arg0,
+        std::env::args_os(),
+        chan::Personality::Desktop,
+    ));
     rt.shutdown_background();
     res.map_err(|e| format!("{e:#}"))?;
     Ok(true)
@@ -5241,7 +5248,10 @@ async fn run_mcp_proxy(socket: PathBuf) -> Result<(), String> {
 #[cfg(windows)]
 fn attach_parent_console_for_cli() {
     let arg0 = chan_shell::invoked_arg0();
-    if !chan_shell::invoked_as_chan(&arg0) && !chan_shell::invoked_as_cs(&arg0) {
+    if !chan_shell::invoked_as_chan(&arg0)
+        && !chan_shell::invoked_as_cs(&arg0)
+        && !chan::invoked_as_opener(&arg0)
+    {
         return;
     }
     win_console::attach_parent();
@@ -5617,8 +5627,9 @@ fn main() {
     // fabric or any window. The claim it returns is the endpoint the
     // listener serves once setup runs.
     let endpoint_claim = single_instance::guard(&launch_paths);
-    // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
-    // also provides the `chan` + `cs` CLI without a separate download. Real
+    // Best-effort on boot: own the `~/.local/bin` shims so a desktop install
+    // also provides the `chan` + `cs` CLI (and on unix `chan-files` and
+    // `chan-edit`) without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
     // idempotent + marker-guarded + never clobbers a user-written shim. No-op
     // for a dev build / unrecognized layout; never fatal to boot.

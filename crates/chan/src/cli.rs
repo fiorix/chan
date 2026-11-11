@@ -48,8 +48,83 @@ pub(super) struct Cli {
     pub(super) command: Command,
 }
 
+/// The two names of the chan binary that open paths in a window instead of
+/// parsing the `chan` tree. Both follow `cs open`'s per-path rule; the name
+/// chooses the usage text and, on Linux, the desktop entry that runs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Opener {
+    /// `chan-files`, the file browser's name.
+    Files,
+    /// `chan-edit`, the editor's name.
+    Edit,
+}
+
+impl Opener {
+    /// The opener `arg0` names, by the same file-stem rule as the `cs` alias,
+    /// so a link, an AppImage wrapper's `$ARGV0` and a `.exe` all match.
+    pub(super) fn from_arg0(arg0: &std::ffi::OsStr) -> Option<Self> {
+        match std::path::Path::new(arg0).file_stem()?.to_str()? {
+            "chan-files" => Some(Self::Files),
+            "chan-edit" => Some(Self::Edit),
+            _ => None,
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Files => "chan-files",
+            Self::Edit => "chan-edit",
+        }
+    }
+
+    /// Parse a full argv under this name. Each name is a clap command of its
+    /// own, so its usage line and `--help` read `chan-files` or `chan-edit`.
+    fn parse(self, argv: Vec<std::ffi::OsString>) -> OpenerArgs {
+        match self {
+            Self::Files => FilesCli::parse_from(argv).args,
+            Self::Edit => EditCli::parse_from(argv).args,
+        }
+    }
+}
+
+/// `chan-files PATH...`.
+#[derive(Parser, Debug)]
+#[command(name = "chan-files", version = CHAN_VERSION, about = help::CHAN_FILES_ABOUT)]
+#[command(long_about = help::OPENER_LONG_ABOUT, after_long_help = help::OPENER_AFTER_HELP)]
+struct FilesCli {
+    #[command(flatten)]
+    args: OpenerArgs,
+}
+
+/// `chan-edit PATH...`.
+#[derive(Parser, Debug)]
+#[command(name = "chan-edit", version = CHAN_VERSION, about = help::CHAN_EDIT_ABOUT)]
+#[command(long_about = help::OPENER_LONG_ABOUT, after_long_help = help::OPENER_AFTER_HELP)]
+struct EditCli {
+    #[command(flatten)]
+    args: OpenerArgs,
+}
+
+/// What `chan-files` and `chan-edit` take: the global `-v` and the paths.
+#[derive(Args, Debug)]
+struct OpenerArgs {
+    /// Increase logging. -v = info, -vv = debug, -vvv = trace.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Paths or file:// URIs to open; defaults to the current directory.
+    #[arg(value_name = "PATH", value_hint = clap::ValueHint::AnyPath)]
+    paths: Vec<std::ffi::OsString>,
+}
+
 #[derive(Subcommand, Debug)]
 pub(super) enum Command {
+    /// `chan-files` and `chan-edit`, reached by the program name alone: no
+    /// `chan` subcommand spells them.
+    #[command(skip)]
+    OpenPaths {
+        opener: Opener,
+        paths: Vec<std::ffi::OsString>,
+    },
     /// Serve a workspace (same as `chan workspace serve`)
     #[command(long_about = SERVE_LONG_ABOUT, visible_alias = "open")]
     #[command(after_long_help = &*SERVE_AFTER_HELP)]
@@ -1122,15 +1197,23 @@ where
 /// passed `args`, never the process argv, so chan-desktop can preserve its own
 /// argument source. A `cs` stem parses through chan-shell's own `cs` parser,
 /// keeping every front end on the same help and action surface, so `cs terminal
-/// list` is `chan shell terminal list`. The original argv still goes to clap so
-/// its program-name slot is untouched.
-fn parse_cli_with_arg0<I, T>(argv0_env: Option<std::ffi::OsString>, args: I) -> Cli
+/// list` is `chan shell terminal list`. A `chan-files` or `chan-edit` stem
+/// parses that name's own usage into [`Command::OpenPaths`]. The original argv
+/// still goes to clap so its program-name slot is untouched.
+pub(super) fn parse_cli_with_arg0<I, T>(argv0_env: Option<std::ffi::OsString>, args: I) -> Cli
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
     let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
     let arg0 = chan_shell::resolve_arg0(argv0_env, || argv.first().cloned().unwrap_or_default());
+    if let Some(opener) = Opener::from_arg0(&arg0) {
+        let OpenerArgs { verbose, paths } = opener.parse(argv);
+        return Cli {
+            verbose,
+            command: Command::OpenPaths { opener, paths },
+        };
+    }
     if !chan_shell::invoked_as_cs(&arg0) {
         return Cli::parse_from(argv);
     }
@@ -1353,6 +1436,137 @@ mod tests {
             None,
             [r"C:/Program Files/chan/cs.exe", "terminal", "list"],
         ));
+    }
+
+    fn open_paths(cli: Cli) -> (u8, Opener, Vec<String>) {
+        let Command::OpenPaths { opener, paths } = cli.command else {
+            panic!("expected an opener, got {:?}", cli.command);
+        };
+        let paths = paths
+            .into_iter()
+            .map(|path| path.into_string().unwrap())
+            .collect();
+        (cli.verbose, opener, paths)
+    }
+
+    /// The program name alone picks an opener, by the `cs` alias's stem rule:
+    /// a bare name, a link's path and a `.exe`. The first path is also a
+    /// `chan` subcommand, so a name the dispatch misses parses as `chan ps`
+    /// and fails here rather than exiting on a usage error.
+    #[test]
+    fn parse_cli_dispatches_the_opener_names() {
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(None, ["chan-files", "ps"])),
+            (0, Opener::Files, vec!["ps".into()])
+        );
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(
+                None,
+                ["chan-files", "docs", "/srv/notes"]
+            )),
+            (0, Opener::Files, vec!["docs".into(), "/srv/notes".into()])
+        );
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(
+                None,
+                ["/usr/bin/chan-edit", "-v", "todo.md"]
+            )),
+            (1, Opener::Edit, vec!["todo.md".into()])
+        );
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(
+                None,
+                [r"C:/Program Files/chan/chan-edit.exe"]
+            )),
+            (0, Opener::Edit, vec![])
+        );
+    }
+
+    /// An AppImage's `AppRun` drops `argv[0]`, and a Windows shim cannot set
+    /// it: the name comes from `$ARGV0`, which a non-empty value makes win.
+    #[test]
+    fn parse_cli_takes_the_opener_name_from_argv0_env() {
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(
+                Some(std::ffi::OsString::from("chan-files")),
+                ["/tmp/.mount_ChanXX/usr/bin/chan-desktop", "ps"],
+            )),
+            (0, Opener::Files, vec!["ps".into()])
+        );
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(
+                Some(std::ffi::OsString::from("chan-files")),
+                [
+                    "/tmp/.mount_ChanXX/usr/bin/chan-desktop",
+                    "file:///srv/a%20b"
+                ],
+            )),
+            (0, Opener::Files, vec!["file:///srv/a%20b".into()])
+        );
+        assert_eq!(
+            open_paths(parse_cli_with_arg0(
+                Some(std::ffi::OsString::from("chan-edit")),
+                [r"C:\Program Files\chan\chan.exe", "notes.md"],
+            )),
+            (0, Opener::Edit, vec!["notes.md".into()])
+        );
+    }
+
+    #[test]
+    fn only_the_two_opener_stems_are_openers() {
+        for arg0 in [
+            "chan",
+            "cs",
+            "chan-desktop",
+            "chan-file",
+            "chan-filesx",
+            "chan-editor",
+            "/usr/bin/chan-edit/x",
+        ] {
+            assert_eq!(Opener::from_arg0(arg0.as_ref()), None, "{arg0}");
+        }
+        assert!(matches!(
+            parse_cli_with_arg0(None, ["chan", "serve", "."]).command,
+            Command::Serve { .. }
+        ));
+    }
+
+    /// Each name is a command of its own: its usage and help name it, and
+    /// `chan --help` lists no subcommand for it.
+    #[test]
+    fn each_opener_has_its_own_usage() {
+        for (mut cmd, name, about) in [
+            (FilesCli::command(), "chan-files", help::CHAN_FILES_ABOUT),
+            (EditCli::command(), "chan-edit", help::CHAN_EDIT_ABOUT),
+        ] {
+            cmd.clone().debug_assert();
+            let usage = cmd.render_usage().to_string();
+            assert_eq!(usage, format!("Usage: {name} [OPTIONS] [PATH]..."));
+            assert_eq!(cmd.get_about().map(ToString::to_string), Some(about.into()));
+            let long = cmd.render_long_help().to_string();
+            assert!(
+                long.starts_with("Open each PATH in a chan window, as `cs open PATH` does"),
+                "{long}"
+            );
+            for needle in [
+                "`chan open` serves a workspace; `chan-files` and `chan-edit` open a path",
+                "both follow\n`cs open`'s rule for every path",
+                "xdg-mime default chan-edit.desktop text/markdown",
+            ] {
+                assert!(
+                    long.contains(needle),
+                    "{name} --help lacks {needle:?}:\n{long}"
+                );
+            }
+        }
+        let chan = Cli::command();
+        let names: Vec<&str> = chan.get_subcommands().map(|c| c.get_name()).collect();
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with("open-") || *name == "files"),
+            "{names:?}"
+        );
     }
 
     #[test]

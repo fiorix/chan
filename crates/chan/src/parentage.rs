@@ -47,6 +47,22 @@ pub(super) async fn detect_parentage() -> Parentage {
     }
 }
 
+/// Whether this shell runs in a chan terminal whose server answers, for a
+/// command that then acts through that server as `cs` does. A stale
+/// `$CHAN_CONTROL_SOCKET` (a tmux session reattached outside chan) or a wedged
+/// holder is not one, so the command can take the route a plain shell takes.
+pub(super) async fn chan_terminal_answers() -> bool {
+    match chan_control_socket() {
+        Some(socket) => socket_answers(Path::new(&socket), PARENTAGE_PROBE_TIMEOUT).await,
+        None => false,
+    }
+}
+
+async fn socket_answers(socket: &Path, timeout: Duration) -> bool {
+    let identify = chan_shell::send_control_request(socket, chan_shell::ControlRequest::Identify);
+    matches!(tokio::time::timeout(timeout, identify).await, Ok(Ok(_)))
+}
+
 /// Identify the serving kind behind `socket` with a `timeout`-bounded
 /// `Identify` round-trip. A wedged holder (accepts but never replies), a
 /// connect failure, a read error, or a non-desktop/devserver reply all resolve

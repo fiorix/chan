@@ -19,7 +19,7 @@ Out of scope, owned by the libraries this crate drives: the filesystem sandbox, 
 
 ## Where it sits
 
-Two binaries drive the same CLI. The standalone `chan` binary (`src/main.rs`) is a shim that builds the tokio runtime and calls `chan::run` with `Personality::Standalone`. chan-desktop links the `chan` library and calls `run` with `Personality::Desktop` when it is invoked through a `chan` name, which is how a desktop install is also the CLI. The whole command surface lives in the library so the two front ends cannot drift.
+Two binaries drive the same CLI. The standalone `chan` binary (`src/main.rs`) is a shim that builds the tokio runtime and calls `chan::run` with `Personality::Standalone`. chan-desktop links the `chan` library and calls `run_invoked_as` with `Personality::Desktop` when it is invoked through a `chan`, `chan-files` or `chan-edit` name, passing the name it read, because a Linux AppImage's `AppRun` drops `argv[0]` and leaves the name in `$ARGV0`; that is how a desktop install is also the CLI. The whole command surface lives in the library so the two front ends cannot drift.
 
 The standalone shim makes three choices at the process edge, each for a reason. It runs the CLI on a thread with an explicit 8 MiB stack, because the main thread's stack is the linker's choice and the debug-profile future of `run` does not fit the 1 MB Windows default. It builds one multi-threaded runtime with a small worker ceiling and a declared blocking-thread ceiling, because chan is a loopback single-user server whose heavy work (index walks, file transfers) runs on the blocking pool, and more async workers only make a thread dump unreadable. On exit it calls `shutdown_background()` so an uncancellable reindex in `chan-workspace` cannot hold the process after Ctrl-C. The runtime is built outside `run` because `run` is async and a runtime cannot be built from inside one.
 
@@ -29,10 +29,14 @@ The standalone shim makes three choices at the process edge, each for a reason. 
 flowchart TB
   Standalone["chan binary: Personality::Standalone"] --> Run
   Desktop["chan-desktop in-process: Personality::Desktop"] --> Run
-  Run["run(args, personality): parse_cli + tracing"] --> Alias{"invoked as cs?"}
+  Run["run(args, personality): parse_cli + tracing"] --> Opener{"invoked as chan-files / chan-edit?"}
+  Opener -->|"yes"| Open["the name's own parser -> Command::OpenPaths"]
+  Opener -->|"no"| Alias{"invoked as cs?"}
   Alias -->|"yes"| Cs["chan_shell::parse_cs -> Command::Shell"]
   Alias -->|"no"| Dispatch{"match Command"}
   Cs --> Dispatch
+  Open --> Dispatch
+  Dispatch --> OpenCmd["open paths: cs open in a chan terminal, else the desktop's open_path"]
   Dispatch --> ServeCmd["serve (alias open) / close"]
   Dispatch --> Ws["workspace: add ls serve close forget index reports search graph status metadata contacts"]
   Dispatch --> Dev["devserver: run start stop restart status join rotate-token | register ls connect disconnect forget"]
@@ -54,6 +58,8 @@ flowchart TB
 The top-level surface is deliberately narrow. The noun families `chan workspace` and `chan devserver` are the structural layer. Exactly two family verbs carry elevated top-level spellings, `serve` (with `open` as a visible alias) and `close`, each a flattened args struct shared with its family form so the two spellings cannot drift, and a test pins the elevation list so it does not grow by habit. `chan close --forget` dispatches to the same teardown-then-drop handler as `chan workspace forget`. Every noun family turns on `infer_subcommands`, so an unambiguous prefix resolves iproute2 style (`chan de status`, `chan w ls`), the same grammar `cs` speaks.
 
 `cs` is the same binary under another name. `parse_cli` reads the invocation name (`argv[0]`, or the `$ARGV0` a Windows shim passes) and, when its stem is `cs`, parses the argv with chan-shell's own `cs` parser and dispatches it as `Command::Shell`; `chan shell <action>` and `cs <action>` are one command with one help rendering.
+
+`chan-files` and `chan-edit` are two more names, and no `chan` subcommand spells them: `chan open` stays the alias of `chan serve`. Each name parses its own usage (`PATH...`, defaulting to the current directory, and `-v`) into `Command::OpenPaths`, a variant clap skips, and both run `opener::cmd_open_paths`, which follows `cs open`'s per-path rule for either name: the names choose only the usage and, on Linux, the desktop entry (`packaging/distros/shared/chan-files.desktop`, `chan-edit.desktop`) that runs them. Each argument becomes an absolute path by the handoff's `launch_arg_path`, which also reads a `file://` URI, as `chan-desktop PATH...` reads its own. In a chan terminal whose server answers an `Identify`, each path is a `cs open`, so a desktop terminal's path goes to the desktop and a devserver terminal's to that devserver. Anywhere else (a plain shell, a stale `$CHAN_CONTROL_SOCKET`, a desktop entry) each path is an `open_path` on the desktop's handoff endpoint, after `CHAN_NO_DESKTOP_HANDOFF` and the GUI-session check, each of which refuses with its own sentence. A desktop that answers none of them is absent: the desktop personality on unix starts chan-desktop with the paths, which its boot opens, and waits for the endpoint; the standalone CLI says no desktop is running. A path that cannot be opened is reported, the rest still open, and the command exits 1.
 
 The families:
 
@@ -132,9 +138,10 @@ The order of operations:
 
 ## The Personality split
 
-`Personality` exists because the same CLI runs from two binaries that must differ in exactly two places, and threading one enum is cheaper and clearer than two code paths or a build flag. `Standalone` is the `chan` binary from the install scripts, and its `cs` alias; `Desktop` is chan-desktop dispatching `chan` in-process through its shim.
+`Personality` exists because the same CLI runs from two binaries that must differ in exactly three places, and threading one enum is cheaper and clearer than two code paths or a build flag. `Standalone` is the `chan` binary from the install scripts, and its `cs` alias; `Desktop` is chan-desktop dispatching `chan` in-process through its shim.
 
 - `chan serve`: `Standalone` serves itself or registers with a local devserver and never launches a desktop; `Desktop` hands the workspace to the running desktop or launches it.
+- `chan-files` and `chan-edit` with no desktop running: `Desktop` starts chan-desktop with the paths on Unix; `Standalone` says no desktop is running, since its own executable is not one.
 - `chan upgrade`: `Standalone` replaces its own archive in place; `Desktop` drives the desktop's `tauri-plugin-updater`, since a desktop install is not a loose binary it may overwrite. The Windows NSIS install's console `chan.exe` is the standalone binary marked with `CHAN_DESKTOP_HANDOFF=1`, so it follows the desktop arm for both verbs; Windows publishes no CLI tarball for it to replace.
 
 Everywhere else the two personalities run identical code. Keeping the fork down to one threaded value is why the desktop shares the entire subcommand surface without forking the dispatcher.
