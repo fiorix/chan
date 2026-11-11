@@ -4130,10 +4130,19 @@ impl WorkspaceHost {
                 (record.window_id, true, target)
             }
         };
+        let open = match files.open_frame(&window_id, requested) {
+            Ok(open) => open,
+            Err(message) => {
+                // A window minted for a path that cannot be opened would show
+                // empty, since it seeds no terminal and its frame never comes.
+                if minted {
+                    let _ = pending.take(&window_id);
+                    let _ = self.discard_window(&window_id);
+                }
+                return Err(Error::BadRequest(message));
+            }
+        };
         self.remember_routed_standalone(&window_id);
-        let open = files
-            .open_frame(&window_id, requested)
-            .map_err(Error::BadRequest)?;
 
         // Deliver to a live window, or park for the one that is opening. The
         // re-check after the park closes the window between the liveness test

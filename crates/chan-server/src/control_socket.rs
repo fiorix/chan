@@ -14104,4 +14104,70 @@ position = { row = 0, col = 1 }
         );
         assert_eq!(names, vec!["@@Seat".to_string()]);
     }
+
+    /// A host whose shared terminal tenant is mounted by chan-server's own
+    /// builder, so its standalone filesystem surface is the one a desktop
+    /// mounts, with a window registry installed: what the handoff's open-path
+    /// request reaches. The returned directory holds the library and the
+    /// registry.
+    async fn standalone_host() -> (Arc<chan_library::WorkspaceHost>, tempfile::TempDir) {
+        let cfg = private_tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(chan_library::WorkspaceHost::new(
+            lib,
+            crate::route_builder(),
+        ));
+        // A durable tenant, one with a session directory as the desktop's
+        // has: only that one serves the standalone filesystem.
+        let sessions = cfg.path().join("terminal-sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        host.open_terminal_session(
+            chan_library::ServeConfig {
+                prefix: "/terminal".to_string(),
+                ..no_token_serve_config()
+            },
+            Some(sessions),
+            None,
+        )
+        .await
+        .expect("mount the shared terminal tenant");
+        host.install_window_registry(
+            Arc::new(chan_library::windows::WindowRegistry::open(
+                cfg.path().join("windows.json"),
+            )),
+            "local".into(),
+        );
+        (host, cfg)
+    }
+
+    /// The standalone windows in `host`'s registry.
+    fn standalone_windows(host: &chan_library::WorkspaceHost) -> Vec<String> {
+        host.window_registry()
+            .expect("a window registry")
+            .snapshot()
+            .into_iter()
+            .filter(|row| matches!(row.kind, chan_library::windows::WindowKind::Terminal))
+            .map(|row| row.window_id)
+            .collect()
+    }
+
+    /// An escaping `cs open` whose path the standalone surface cannot resolve
+    /// is refused, and the window minted for it is discarded: it seeds no
+    /// terminal and its frame never comes, so it would show empty.
+    #[tokio::test]
+    async fn an_escaping_open_its_surface_cannot_resolve_leaves_no_window() {
+        let (host, _cfg) = standalone_host().await;
+        let files = private_tempdir().unwrap();
+        let unreachable = files.path().join("gone").join("notes.md");
+        let error = host
+            .open_outside_workspace(&unreachable, "w-workspace-caller")
+            .await
+            .err()
+            .expect("an unreachable path is refused");
+        assert_eq!(
+            error.to_string(),
+            "canonicalize path: No such file or directory (os error 2)"
+        );
+        assert_eq!(standalone_windows(&host), Vec::<String>::new());
+    }
 }
