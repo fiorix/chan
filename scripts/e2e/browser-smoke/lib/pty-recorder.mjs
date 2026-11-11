@@ -12,14 +12,17 @@ async function waitFile(label, path, timeoutMs) {
 
 /// Turn the active terminal's shell into a recorder: in raw mode, dd writes
 /// every byte the PTY receives to `file`, one at a time, with no line editing
-/// that a stray byte could leave in a state of its own.
-export async function startRecorder(page, file) {
+/// that a stray byte could leave in a state of its own. With `bracketedPaste`
+/// the shell first asks the terminal for bracketed paste (DECSET 2004), as a
+/// line editor does, so a paste arrives between ESC[200~ and ESC[201~.
+export async function startRecorder(page, file, { bracketedPaste = false } = {}) {
   const host = await page.$eval(".pane .terminal-tab.active .terminal-host", (el) => {
     const r = el.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   });
   await page.mouse.click(host.x, host.y);
-  await page.keyboard.type(`stty raw -echo && exec dd bs=1 status=none of=${file}`);
+  const mode = bracketedPaste ? "printf '\\033[?2004h' && " : "";
+  await page.keyboard.type(`${mode}stty raw -echo && exec dd bs=1 status=none of=${file}`);
   await page.keyboard.press("Enter");
   await waitFile(`the recorder ${file}`, file, 30_000);
   await sleep(300);
