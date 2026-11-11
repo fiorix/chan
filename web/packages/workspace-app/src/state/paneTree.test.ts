@@ -155,6 +155,92 @@ describe("the model", () => {
   });
 });
 
+describe("what runs in a terminal", () => {
+  function readingLayout(): LayoutState {
+    const state = windowLayout();
+    const left = state.nodes.left as LeafNode;
+    const topRight = state.nodes["top-right"] as LeafNode;
+    (left.tabs[0] as TerminalTab).terminalProgram = { title: null, command: "bash" };
+    (left.bTabs![0] as TerminalTab).terminalProgram = { title: "tail -f app.log", command: "tail" };
+    (topRight.bTabs![0] as TerminalTab).terminalProgram = { title: "build", command: "cargo" };
+    return state;
+  }
+
+  function readings(state: LayoutState, options: Parameters<typeof paneTreeModel>[1] = {}): [string, string, string | null][] {
+    return paneTreeRows(paneTreeModel(state, options)).map((row) => [row.tab.id, row.title, row.program]);
+  }
+
+  test("each terminal row reads its program's title, else its command, beside a tab name the reading leaves alone", () => {
+    expect(readings(readingLayout())).toEqual([
+      ["shell", "Shell", "bash"],
+      ["plan", "plan.md", null],
+      ["logs", "Logs", "tail -f app.log"],
+      ["build", "Build", "build"],
+      ["readme", "README.md", null],
+      ["code", "code.md", null],
+    ]);
+  });
+
+  test("a reading of neither, and a tab from a server that sends none, show nothing", () => {
+    const state = readingLayout();
+    ((state.nodes.left as LeafNode).tabs[0] as TerminalTab).terminalProgram = { title: null, command: null };
+    ((state.nodes["top-right"] as LeafNode).bTabs![0] as TerminalTab).terminalProgram = undefined;
+    expect(readings(state).filter(([id]) => id === "shell" || id === "build")).toEqual([
+      ["shell", "Shell", null],
+      ["build", "Build", null],
+    ]);
+  });
+
+  test("tabs the window does not show read their own program: a tab behind another and one on a hidden side", () => {
+    const rows = paneTreeRows(paneTreeModel(readingLayout()));
+    const shell = rows.find((row) => row.tab.id === "shell")!;
+    const logs = rows.find((row) => row.tab.id === "logs")!;
+    expect([shell.active, shell.program]).toEqual([false, "bash"]);
+    expect([logs.side, logs.program]).toEqual(["b", "tail -f app.log"]);
+  });
+
+  test("two tabs of one session each show the reading their own socket delivered", () => {
+    const one = terminalTab({ id: "one", title: "Shell", terminalSessionId: "s1", terminalProgram: { title: null, command: "vim" } });
+    const two = terminalTab({ id: "two", title: "Shell", terminalSessionId: "s1", terminalProgram: { title: null, command: "vim" } });
+    const state: LayoutState = {
+      rootId: "root",
+      nodes: {
+        root: { id: "root", kind: "split", direction: "row", a: "p1", b: "p2", ratio: 0.5 },
+        p1: leaf("p1", [one]),
+        p2: leaf("p2", [two]),
+      },
+      activePaneId: "p1",
+      focusColor: "blue",
+    };
+    expect(readings(state)).toEqual([
+      ["one", "Shell", "vim"],
+      ["two", "Shell", "vim"],
+    ]);
+  });
+
+  test("a tmux pane gets no reading, whatever its tab holds", () => {
+    const pane = terminalTab({
+      id: "pane",
+      title: "editor",
+      tmuxPane: { connection: 1, pane: "%1" },
+      terminalProgram: { title: "should not show", command: "vim" },
+    });
+    const state: LayoutState = {
+      rootId: "solo",
+      nodes: { solo: leaf("solo", [pane]) },
+      activePaneId: "solo",
+      focusColor: "blue",
+    };
+    expect(readings(state, { sides: false })).toEqual([["pane", "editor", null]]);
+  });
+
+  test("the filter matches tab names only, never the reading", () => {
+    expect(readings(readingLayout(), { query: "build" })).toEqual([["build", "Build", "build"]]);
+    expect(readings(readingLayout(), { query: "bash" })).toEqual([]);
+    expect(readings(readingLayout(), { query: "tail" })).toEqual([]);
+  });
+});
+
 describe("program status marks", () => {
   test("a tab's mark is the strip's: an attention record's state, else working, else none", () => {
     expect(tabProgramMark(fileTab())).toBeNull();

@@ -75,6 +75,7 @@
   import { isExcalidraw } from "../state/fileTypes";
   import { windowTabBar } from "../state/windowTabBar.svelte";
   import { loadWindowTitle, windowName, windowNameReading } from "../state/windowTitle.svelte";
+  import { privateText } from "@chan/web-shared/privacy";
 
   const LIST_ID = "chan-pane-tree-list";
   const TITLE_ID = "chan-pane-tree-window";
@@ -465,7 +466,14 @@
                     onclick={() => activate(row)}
                   >
                     <span class="kind-icon">{@render kindIcon(row.tab)}</span>
-                    <span class="title">{row.title}</span>
+                    <span class="label" class:with-program={row.program !== null}>
+                      <span class="title">{row.title}</span>
+                      {#if row.program !== null}
+                        <!-- Masked in privacy mode as a whole: a program's
+                             title can name a host, a path or a document. -->
+                        <span class="program">{privateText(row.program)}</span>
+                      {/if}
+                    </span>
                     <span class="kind">{tabKindLabel(row.tab)}</span>
                     {@render mark(row.tab)}
                     {#if row.active}
@@ -671,8 +679,15 @@
   .row.current .kind-icon {
     color: var(--text);
   }
-  .title {
+  .label {
     flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .title {
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -680,6 +695,21 @@
   }
   .row.current .title {
     font-weight: 500;
+  }
+  /* The tab's name keeps its room, up to most of the row: a long reading
+     gives way first. */
+  .with-program .title {
+    flex-shrink: 0;
+    max-width: 70%;
+  }
+  .program {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
   .kind {
     flex: 0 0 auto;

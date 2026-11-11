@@ -8,6 +8,7 @@ import { flushSync } from "svelte";
 import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import type { TmuxConsent } from "./tmuxConsent";
 import type { TmuxPaneRef } from "./tmux";
+import type { TerminalProgram } from "./terminalProgram";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -502,6 +503,11 @@ export type TerminalTab = {
   inspectorWidth?: number;
   /// Current server snapshot for this attached page. Never serialized.
   programStatus?: ProgramStatus;
+  /// What runs in this terminal, as the server reads it: the `session` frame
+  /// sets it for each attachment, a `program` frame of the same session and
+  /// generation replaces it, and it is gone when the session ends. Never
+  /// serialized.
+  terminalProgram?: TerminalProgram;
   /// The tmux control-mode question the server has open on this session,
   /// shown as a banner over the terminal. Server-owned and never
   /// serialized: the `session` frame replaces it for each attachment.
@@ -1605,6 +1611,7 @@ function tabForReopen(src: Tab): Tab {
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
     tab.programStatus = undefined;
+    tab.terminalProgram = undefined;
     tab.terminalActivity = undefined;
     tab.terminalActivityPulsing = undefined;
     tab.teamWorkPending = undefined;
@@ -2611,6 +2618,12 @@ export function setTerminalProgramStatus(tab: TerminalTab, status: ProgramStatus
   tab.programStatus = status;
 }
 
+/// Replace what the terminal is known to run; undefined when the server sent
+/// no reading.
+export function setTerminalProgram(tab: TerminalTab, program: TerminalProgram | undefined): void {
+  tab.terminalProgram = program;
+}
+
 /// The server's tmux consent state for the attached page, applied for the
 /// `session` frame of each attachment and for a later snapshot with a
 /// greater revision.
@@ -2773,6 +2786,9 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
   tab.terminalSessionId = undefined;
   tab.cliCommandPending = undefined;
   if (!retainProgramStatus) tab.programStatus = undefined;
+  // Unlike the final status, the reading never outlives the session: nothing
+  // runs in an ended one.
+  tab.terminalProgram = undefined;
   tab.tmuxConsent = undefined;
   tab.tmuxPane = undefined;
   tab.submitAgent = undefined;
@@ -4544,6 +4560,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   profile: "carry",
   queueDepth: "carry",
   programStatus: "carry",
+  terminalProgram: "carry",
   tmuxConsent: "carry",
   tmuxPane: "carry",
   tmuxHostGrid: "carry",
@@ -4634,6 +4651,7 @@ function cloneTab(src: Tab): Tab {
     if (clone.programStatus) {
       clone.programStatus = { ...clone.programStatus, records: clone.programStatus.records.map((record) => ({ ...record })) };
     }
+    if (clone.terminalProgram) clone.terminalProgram = { ...clone.terminalProgram };
     if (clone.tmuxHostGrid) clone.tmuxHostGrid = { ...clone.tmuxHostGrid };
     if (clone.tmuxConsent) {
       clone.tmuxConsent = {
@@ -7909,6 +7927,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   // the first frame to arrive.
   queueDepth: "drop",
   programStatus: "drop",
+  terminalProgram: "drop",
   tmuxConsent: "drop",
   tmuxPane: "drop",
   tmuxHostGrid: "drop",

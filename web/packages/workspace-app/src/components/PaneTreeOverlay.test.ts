@@ -20,6 +20,7 @@ import {
   type LeafNode,
   type Node,
   type Tab,
+  type TerminalTab,
 } from "../state/tabs.svelte";
 import {
   NO_TITLEBAR_CHROME,
@@ -745,5 +746,112 @@ describe("opening", () => {
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.pane.tree" } }));
     await tick();
     expect(paneTree.open).toBe(false);
+  });
+});
+
+describe("what runs in a terminal", () => {
+  /// The live tab `id` in the seeded layout, as the store holds it, so a
+  /// write through it is what a frame handler's write is.
+  function liveTerminal(id: string): TerminalTab {
+    for (const node of Object.values(layout.nodes)) {
+      if (node.kind !== "leaf") continue;
+      const found = [...node.tabs, ...(node.bTabs ?? [])].find((tab) => tab.id === id);
+      if (found?.kind === "terminal") return found;
+    }
+    throw new Error(`no terminal ${id}`);
+  }
+
+  function row(title: string): HTMLElement {
+    const found = rows().find((candidate) => candidate.querySelector(".title")?.textContent?.trim() === title);
+    if (!found) throw new Error(`no row ${title}`);
+    return found;
+  }
+
+  function reading(title: string): string | null {
+    return row(title).querySelector(".program")?.textContent?.trim() ?? null;
+  }
+
+  test("a terminal row shows its reading beside an unchanged tab name, inside the row", async () => {
+    liveTerminal("shell").terminalProgram = { title: null, command: "bash" };
+    liveTerminal("build").terminalProgram = { title: "build", command: "cargo" };
+    await open();
+    expect(rowTitles()).toEqual(["Shell", "plan.md", "Logs", "Build"]);
+    expect([reading("Shell"), reading("plan.md"), reading("Logs"), reading("Build")]).toEqual(["bash", null, null, "build"]);
+    const shell = row("Shell");
+    expect(shell.querySelector(".label > .title + .program")).not.toBeNull();
+    expect(shell.querySelector("button"), "no control nested inside the row").toBeNull();
+    expect(shell.getAttribute("title")).not.toContain("bash");
+  });
+
+  test("follows a change while open, and a reopen reads the latest", async () => {
+    liveTerminal("shell").terminalProgram = { title: null, command: "bash" };
+    await open();
+    liveTerminal("shell").terminalProgram = { title: null, command: "vim" };
+    await tick();
+    expect(reading("Shell")).toBe("vim");
+    liveTerminal("logs").terminalProgram = { title: "tail -f app.log", command: "tail" };
+    await tick();
+    expect(reading("Logs"), "a tab on the hidden side follows too").toBe("tail -f app.log");
+    closePaneTree();
+    await tick();
+    liveTerminal("shell").terminalProgram = { title: null, command: "bash" };
+    await open();
+    expect(reading("Shell")).toBe("bash");
+    liveTerminal("shell").terminalProgram = undefined;
+    await tick();
+    expect(reading("Shell")).toBeNull();
+  });
+
+  test("privacy mode shows Hidden and keeps the reading out of the panel, before and during updates, and off restores the latest", async () => {
+    const first = "deploy@prod-db-7";
+    const second = "secret-plan.md - vim";
+    privacy.enabled = true;
+    liveTerminal("shell").terminalProgram = { title: first, command: "ssh" };
+    await open();
+    expect(reading("Shell")).toBe("Hidden");
+    expect(reading("plan.md"), "nothing stands in where there is no reading").toBeNull();
+    expect(panel()!.outerHTML).not.toContain(first);
+    expect(panel()!.outerHTML).not.toContain("ssh");
+
+    liveTerminal("shell").terminalProgram = { title: second, command: "vim" };
+    await tick();
+    expect(reading("Shell")).toBe("Hidden");
+    for (const secret of [first, second, "vim", "ssh"]) expect(panel()!.outerHTML).not.toContain(secret);
+    await type("secret");
+    expect(rowTitles(), "the filter never reads the reading").toEqual([]);
+    await type("");
+
+    privacy.enabled = false;
+    await tick();
+    expect(reading("Shell")).toBe(second);
+    await type("secret");
+    expect(rowTitles(), "nor with privacy off").toEqual([]);
+  });
+
+  test("privacy turned on while open hides a shown reading at once", async () => {
+    liveTerminal("build").terminalProgram = { title: "build", command: "cargo" };
+    await open();
+    expect(reading("Build")).toBe("build");
+    privacy.enabled = true;
+    await tick();
+    expect(reading("Build")).toBe("Hidden");
+    expect(row("Build").textContent).not.toContain("cargo");
+  });
+
+  test("a tmux window's rows show no reading, whatever their tabs hold", async () => {
+    const tab = terminalTab({
+      id: "t0",
+      title: "tmux %0",
+      terminalSessionId: "s0",
+      tmuxPane: { connection: 1, pane: "%0" },
+      terminalProgram: { title: "not tmux's name", command: "vim" },
+    });
+    layout.nodes = { solo: leaf("solo", [tab]) };
+    layout.rootId = "solo";
+    layout.activePaneId = "solo";
+    await open();
+    expect(rowTitles()).toEqual(["tmux %0"]);
+    expect(document.querySelector(".pane-tree .program")).toBeNull();
+    expect(panel()!.outerHTML).not.toContain("not tmux's name");
   });
 });

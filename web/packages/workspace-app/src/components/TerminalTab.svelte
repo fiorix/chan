@@ -80,6 +80,7 @@
     setTerminalPendingGlobalName,
     clearTerminalSeedInput,
     setTerminalQueueDepth,
+    setTerminalProgram,
     setTerminalProgramStatus,
     setTerminalTmuxConsent, setTerminalTmuxHostGrid, setTerminalTmuxPane,
     setTabInspectorOpen,
@@ -117,6 +118,7 @@
   import TmuxConsentBanner from "./TmuxConsentBanner.svelte";
   import type { TmuxAnswer, TmuxConsent } from "../state/tmuxConsent";
   import type { TmuxPaneRef } from "../state/tmux";
+  import { terminalProgramFromWire, type TerminalProgram } from "../state/terminalProgram";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -278,6 +280,9 @@
         /// MESSAGE depth of the shared write queue at attach time, so every
         /// (re)attach re-syncs the badge (the tab field is never persisted).
         queue_depth?: number;
+        /// What runs in the terminal, title and foreground command, both
+        /// nullable. Absent from an older server.
+        program?: TerminalProgram;
         program_status?: ProgramStatus;
         /// The tmux control-mode consent state, with the question that
         /// stands, if any; the attachment's authoritative value.
@@ -304,6 +309,8 @@
     | { type: "renamed"; name: string; group: string }
     | { type: "rename_failed"; message: string }
     | { type: "activity"; bytes_since_focus: number }
+    /// A changed reading of what runs in the terminal, the whole pair.
+    | { type: "program"; id: string; generation: number; program: TerminalProgram }
     | { type: "program-status"; id: string; generation: number; program_status: ProgramStatus }
     | { type: "tmux-consent"; id: string; generation: number; tmux_consent: TmuxConsent }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
@@ -1846,6 +1853,7 @@
         // Replace, including with undefined, on every session frame. Restart
         // and reattach preludes are authoritative for the current PTY life.
         setTerminalSubmitAgent(tab, frame.submit_agent);
+        setTerminalProgram(tab, terminalProgramFromWire(frame.program));
         setTerminalActivity(tab, !focused && (frame.bytes_since_focus ?? 0) > 0);
         // Re-sync the queue badge on every (re)attach: the depth is absolute
         // server truth, never persisted client-side.
@@ -1889,6 +1897,12 @@
         terminalCwdVirtual = frame.cwd_rel ?? null;
       } else if (frame.type === "activity") {
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
+      } else if (frame.type === "program") {
+        // A reading from another session or an earlier incarnation of this
+        // one describes a program that is not running here.
+        if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
+          setTerminalProgram(tab, terminalProgramFromWire(frame.program));
+        }
       } else if (frame.type === "program-status") {
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
           showProgramStatus(applyProgramStatus(tab.programStatus, frame.program_status));

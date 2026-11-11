@@ -73,6 +73,7 @@ function loadedTerminalTab(): TerminalTab {
         { source: "chan", id: "survey/1", state: "done", kind: null, progress: null, app: "cs", title: "Answered", msg: null, seen: true, update_order: 2 },
       ],
     },
+    terminalProgram: { title: "build", command: "bash" },
     tmuxConsent: { revision: 2, question: { program: "ssh", command: "ssh host tmux -CC", timeout_secs: 60 } },
     tmuxPane: { connection: 1, pane: "%0" },
     tmuxHostGrid: { cols: 80, rows: 24 },
@@ -386,8 +387,8 @@ describe("a Hybrid Nav commit keeps every field it was not told to drop", () => 
 // session blob and does not come back on reload.
 //
 // Only the fields the serializer is meant to keep are asserted here.
-// `submitAgent`, `queueDepth`, `programStatus`, `terminalActivity`, `terminalActivityPulsing`,
-// `externalChange`, `doc` and `openedEmpty` have no `SerTab` key at all: the
+// `submitAgent`, `queueDepth`, `programStatus`, `terminalProgram`, `terminalActivity`,
+// `terminalActivityPulsing`, `externalChange`, `doc` and `openedEmpty` have no `SerTab` key at all: the
 // type's own comments call them transient, re-synced from the attach prelude,
 // or ephemeral. A clone carries them and a reload does not, so asserting they
 // persist would pin the wrong contract.
@@ -436,6 +437,24 @@ test("program status is copied by value but stays out of a saved layout and a re
   expect(reopened.tmuxConsent).toBeUndefined();
   expect(reopened.tmuxPane).toBeUndefined();
   expect(reopened.tmuxHostGrid).toBeUndefined();
+});
+
+test("the program reading is copied by value but stays out of a saved layout and a reopened session", async () => {
+  const source = loadedTerminalTab();
+  source.terminalSessionId = undefined;
+  resetLayout([source, neighbour("program-neighbour")]);
+  const before = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
+  const saved = JSON.stringify(serializeLayout({ terminalSessions: true }));
+  expect(saved).not.toContain("terminalProgram");
+  expect(saved).not.toContain('"build"');
+  reorderTab(PANE_ID, source.id, 1);
+  const moved = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
+  expect(moved.terminalProgram).toEqual({ title: "build", command: "bash" });
+  expect(moved.terminalProgram).not.toBe(before.terminalProgram);
+  await closeTab(PANE_ID, source.id, { force: true });
+  expect(reopenClosedTab()).toBe(true);
+  const reopened = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
+  expect(reopened.terminalProgram).toBeUndefined();
 });
 
 function serializedFile(): SerTab {
