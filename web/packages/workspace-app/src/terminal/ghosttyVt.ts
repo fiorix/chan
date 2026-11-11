@@ -758,6 +758,17 @@ export class VtTerminal {
     return { background: { ...this.bg }, foreground: { ...this.fg }, cursor: null };
   }
 
+  /// Replaces the default colors, the cursor color and the 16-color
+  /// palette with `config`'s, so the terminal resolves its cells as one
+  /// created with `config` and fed the same output would. Colors the
+  /// program set itself (OSC 4, 10, 11, 12) stay over the new defaults, as
+  /// in Ghostty. The next update reads the new colors and reports a full
+  /// redraw.
+  setColors(config?: VtTerminalConfig): void {
+    this.writeColors(config);
+    this.stale = true;
+  }
+
   isRowDirty(y: number): boolean {
     return this.dirty === ABI.GhosttyRenderStateDirty.FULL || this.rowDirty[y] === 1;
   }
@@ -1029,6 +1040,15 @@ export class VtTerminal {
     } else {
       fn.ghostty_terminal_set(this.handle, O.SCROLLBACK_MAX_LINES, 0);
     }
+    this.writeColors(config);
+  }
+
+  /// Writes `config`'s colors as the core's defaults; zero keeps the
+  /// built-in default, as in ghostty-web's binding.
+  private writeColors(config?: VtTerminalConfig): void {
+    const fn = this.wasm.fn;
+    const s = this.scratch;
+    const O = ABI.GhosttyTerminalOption;
     const setColor = (option: number, rgb: number) => {
       const view = this.wasm.view();
       view.setUint8(s + SCRATCH.rgb, (rgb >> 16) & 0xff);
@@ -1038,7 +1058,12 @@ export class VtTerminal {
     };
     setColor(O.COLOR_FOREGROUND, config?.fgColor || DEFAULT_FG);
     setColor(O.COLOR_BACKGROUND, config?.bgColor || DEFAULT_BG);
+    // A null value clears the cursor color and puts the built-in palette
+    // back, so on a live terminal a color the config leaves at zero takes
+    // upstream's default rather than the one an earlier config wrote.
     if (config?.cursorColor) setColor(O.COLOR_CURSOR, config.cursorColor);
+    else fn.ghostty_terminal_set(this.handle, O.COLOR_CURSOR, 0);
+    fn.ghostty_terminal_set(this.handle, O.COLOR_PALETTE, 0);
     const overrides = config?.palette ?? [];
     if (overrides.some((c) => c)) {
       const palette = this.wasm.alloc(768);

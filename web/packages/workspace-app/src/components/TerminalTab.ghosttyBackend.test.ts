@@ -6,7 +6,7 @@
 // handling. A TerminalTab is mounted with the ghostty kit and its hooks
 // stubbed; each stand-in records what the component asked of it, in order.
 
-import { mount, tick, unmount } from "svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { VtHost } from "../terminal/ghosttyVt";
 
@@ -36,6 +36,9 @@ const ghostty = vi.hoisted(() => {
     // When set, focus() does what ghostty-web's does: it focuses the element
     // the terminal opened in, and again on a zero-delay timer.
     realFocus: false,
+    // Every theme the component handed the live-switch hook, with the
+    // terminal it named.
+    themes: [] as Array<{ term: unknown; theme: Record<string, string> }>,
   };
   /// ghostty-web's own render, as the painter finds it on the renderer.
   function fakeRender(_buffer: unknown, forceAll?: boolean) {
@@ -177,6 +180,12 @@ vi.mock("../terminal/ghosttyCompat", () => ({
     return () => ghostty.record.events.push("ungate");
   },
 }));
+vi.mock("../terminal/ghosttyTheme", () => ({
+  applyGhosttyTheme: (term: unknown, theme: Record<string, string>) => {
+    ghostty.record.themes.push({ term, theme });
+    return true;
+  },
+}));
 vi.mock("../terminal/ghosttyViewport", () => ({
   GhosttyViewportController: class {
     write(bytes: Uint8Array) {
@@ -203,7 +212,7 @@ vi.mock("../terminal/resize", async (importOriginal) => ({
 
 import TerminalTab from "./TerminalTab.svelte";
 import { terminalPreferences } from "../__tests__/standalone";
-import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
+import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
 import { bumpTabFocusPulse } from "../state/tabs.svelte";
 import {
   attach,
@@ -253,6 +262,7 @@ beforeEach(() => {
     bracketedPaste: false,
     pastes: [],
     realFocus: false,
+    themes: [],
   });
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
 });
@@ -921,5 +931,31 @@ describe("paste", () => {
     const event = pasteOn(target.querySelector(".terminal-tab")!, "");
     expect(event.defaultPrevented).toBe(false);
     expect(ghostty.record.pastes).toEqual([]);
+  });
+});
+
+describe("a theme switch", () => {
+  afterEach(() => {
+    delete hybridSurfaceThemes.terminal;
+  });
+
+  test("reaches the live terminal through the binding, not through the option ghostty-web ignores after open", async () => {
+    ui.theme = "dark";
+    const { term } = await mountGhostty();
+    const openedWith = term.options.theme as Record<string, string>;
+    expect(openedWith.red, "opened dark").toBe("#ff6b6b");
+
+    hybridSurfaceThemes.terminal = "light";
+    flushSync();
+    await tick();
+    const switched = ghostty.record.themes.at(-1);
+    expect(switched?.term).toBe(term);
+    expect(switched?.theme.red, "the light palette").toBe("#cf222e");
+    expect(term.options.theme, "the option is not reassigned").toBe(openedWith);
+
+    delete hybridSurfaceThemes.terminal;
+    flushSync();
+    await tick();
+    expect(ghostty.record.themes.at(-1)?.theme.red, "back to dark").toBe("#ff6b6b");
   });
 });
