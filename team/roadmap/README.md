@@ -61,7 +61,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [one WireGuard ingress per proxy node][wgnode] | gateway landed | desktop |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
-| [a theme switch leaves ghostty colours][livetheme] | partly built | build |
+| [a theme switch leaves ghostty colours][livetheme] | built | owner |
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | built | owner |
