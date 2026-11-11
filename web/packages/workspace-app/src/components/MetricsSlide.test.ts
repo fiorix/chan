@@ -19,7 +19,10 @@ afterEach(async () => {
 
 test("receiving a snapshot does not retrigger the visibility effect or bypass the poll interval", async () => {
   vi.useFakeTimers();
-  const view = { schemaVersion: 1, identity: { instanceId: "a", version: "1", build: "abc", pid: 42, hostname: "devserver.example" }, latest: null, history: [] } as unknown as MetricsView;
+  const view: MetricsView = {
+    schemaVersion: 1, identity: { instanceId: "a", version: "1", build: "abc", pid: 42, hostname: "devserver.example" }, latest: null, history: [],
+    storage: { path: "/home/test/.chan", logicalBytes: null, allocatedBytes: null, files: null, sampledAtMs: null, scanMs: null, error: null },
+  };
   const request = vi.spyOn(api, "metrics").mockResolvedValue(view);
   const target = document.createElement("div"); document.body.append(target);
   mounted = mount(MetricsSlide, { target });
@@ -124,8 +127,19 @@ test("a failed storage scan shows its error and names a last completed total onl
   metrics.samples = [sample];
   const target = document.createElement("div"); document.body.append(target);
   mounted = mount(MetricsSlide, { target, props: { active: false } });
+  await tick();
+  expect(target.textContent).toContain("Waiting for server metrics...");
+  const waitingCards = [...target.querySelectorAll("article")];
+  expect(waitingCards).toHaveLength(8);
+  expect(target.querySelector("section")?.getAttribute("aria-busy")).toBe("true");
+  expect(target.querySelectorAll('svg[role="img"]')).toHaveLength(6);
+  expect(target.querySelectorAll("tbody tr")).toHaveLength(3);
+  expect(target.textContent).not.toContain("0 running");
   // The first scan failed: there is no total, and the reason is the server's.
   let card = await show({ ...pending, error: "Permission denied (os error 13)" });
+  expect(target.querySelector("section")?.getAttribute("aria-busy")).toBe("false");
+  expect(target.textContent).not.toContain("Waiting for server metrics...");
+  expect([...target.querySelectorAll("article")]).toEqual(waitingCards);
   expect(card).not.toContain("last completed total");
   expect(card).toContain("Storage scan failed: Permission denied (os error 13).");
   expect(card).toContain("Scan pending");
