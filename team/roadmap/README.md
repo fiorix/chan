@@ -66,7 +66,7 @@ A second intake came from the owner on 2026-11-11, from a screenshot of a window
 | [the Rust TLS clients ignore the system's CA store][systemca] | built | gate |
 | [wrapped ghostty copies paste broken][gcopy] | landed | GA |
 | [a theme switch leaves ghostty colours][livetheme] | landed | GA |
-| [the system cannot open files in chan][openwith] | partly built | build |
+| [the system cannot open files in chan][openwith] | built | gate |
 | [find loses its match on a resize][findresize] | landed | GA |
 | [the pane tree hides what a terminal runs][termcmd] | landed | GA |
 | [tests still red under the heaviest load][loadres] | built | gate |
