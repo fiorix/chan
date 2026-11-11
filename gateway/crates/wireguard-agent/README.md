@@ -47,7 +47,7 @@ Each node generates a private key of its own, and every node gives its interface
 | `WIREGUARD_WG_BIN`          | no       | the `wg` executable               |
 | `STATE_DIRECTORY`           | yes      | where `peers.json` is kept        |
 
-- `IDENTITY_URL` is, for example, `http://127.0.0.1:7004`. Cleartext is accepted only to a loopback IP literal or with `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`.
+- `IDENTITY_URL` is, for example, `http://127.0.0.1:7004`. Cleartext is accepted only to a loopback IP literal or with `CHAN_GATEWAY_INTERNAL_TRANSPORT=protected-overlay`. An `https://` URL is verified with the trust decision the desktop and the devserver's tunnel share ([chan-tls](../../../crates/chan-tls/design.md)): the host's CA bundle beside the bundled Mozilla roots, so a listener behind a private CA verifies once that CA is in the host's store (`update-ca-certificates` on Debian). The bundle is read once at startup; restart the agent after adding a CA.
 - `WIREGUARD_AGENT_TOKEN` is the bearer identity checks on `/internal/v1/wireguard/peers`, equal to identity's `WIREGUARD_AGENT_TOKEN` (`openssl rand -hex 32`). Every node's agent presents the same value: the lists are the same, so one bearer per node would protect nothing more.
 - `WIREGUARD_AGENT_HOST_ID` is the node's `DEVSERVER_PROXY_ID`, one lowercase DNS label, which is the id of the node's entry in identity's `WIREGUARD_INGRESSES`. identity answers 404 to an id that is not in that list; [A host id identity does not list](#a-host-id-identity-does-not-list) says what the agent does then.
 - `WIREGUARD_INTERFACE` is the kernel interface the agent changes peers on. It is not `all` or `interfaces`, which `wg show` reads as words.

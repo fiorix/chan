@@ -37,6 +37,7 @@ sudo certbot certonly --dns-cloudflare \
     {{copyButton}}
   </div>
   <p>The certificate lands in <code>/etc/letsencrypt/live/gw.example.com/</code>, and certbot renews it on its own.</p>
+  <p>A certificate from a CA of your own works too, for a gateway on an internal network: install that CA in the system trust store of every machine that runs Chan Desktop, a devserver or the WireGuard agent. On macOS and Windows chan verifies the gateway through the system, as the browser does. On Linux it reads the system's CA bundle (<code>update-ca-certificates</code> on Debian and Ubuntu, <code>update-ca-trust</code> on Fedora) beside the public roots it carries, when it starts, so restart a running desktop, devserver or agent after installing the CA.</p>
 </section>
 
 <section class="manual-block" id="oauth">
