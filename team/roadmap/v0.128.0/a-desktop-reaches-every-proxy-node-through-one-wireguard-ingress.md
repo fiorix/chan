@@ -4,7 +4,7 @@ Status: raised by the owner on 2026-11-08 while planning the chan.app WireGuard 
 
 Asked by the owner on 2026-11-08 after reading what a second proxy node would need under v0.125.0 ("with gw, are we funneling bidirectional traffic through that host? it'll become a bottleneck quickly"), and decided the same day: no v0.125.0 rollout on chan.app; each devserver-proxy node terminates its own WireGuard and the desktop reaches the node a devserver is connected to directly, in v0.126.0 ("i prefer to make the changes and release v126").
 
-Line numbers below are at `c998d0327` (v0.125.0 plus docs). v0.126.0 carries v0.125.0's enrollment and migrations unchanged, so a v0.125.0 desktop, gateway or enrolled row below stands for either release.
+Line numbers below are at `c998d0327` (v0.125.0 plus docs). v0.126.0 and v0.127.0 carry v0.125.0's enrollment and migrations unchanged, so a v0.125.0 desktop, gateway or enrolled row below stands for any of the three releases.
 
 ## What is there now
 
@@ -41,7 +41,7 @@ What already fits per-node ingress:
    - `addresses`: the peer's one address set, valid on every ingress;
    - `allowed_ips` and `persistent_keepalive`: unchanged.
    - It gains `ingresses: [{id, endpoint, server_public_key, hosts}]`, equal to discovery's list.
-   - Consequences: a v0.125.0 desktop enrolls against the first ingress and reaches the other nodes over their public path, and a v0.127.0 desktop starts one tunnel per ingress.
+   - Consequences: a v0.125.0 desktop enrolls against the first ingress and reaches the other nodes over their public path, and a v0.128.0 desktop starts one tunnel per ingress.
 5. **One peer per key, gateway-wide.** Profile enrolls a peer once, independent of hosts, with one address set unique across the gateway, under one gateway-wide advisory lock. `GET /v1/wireguard/peers?host=` returns every active peer whatever the host, and still echoes `host` in the body (the agent requires it). Migration 18 drops `host` from `wireguard_peers` and its per-host uniques, and adds `UNIQUE (public_key)`, `UNIQUE (address_v4)` and `UNIQUE (address_v6)`. It keeps `token_id UNIQUE` (one peer per PAT). Before the new uniques, it deletes the older of any duplicate rows by `updated_at`; a desktop whose row it deletes signs in again. The sweeper releases gateway-wide with the same grace rules. Revoke, expiry and block drop the peer from every ingress at once.
 6. **Identity guards the agent route.** While enrollment is configured, `GET /internal/v1/wireguard/peers?host=` answers 404 for a host that is not a configured ingress id, so an agent whose host id identity's list lacks keeps its last list, and both sides log it at warn. While enrollment is not configured, the route relays profile's list for any well-formed host, so a revoke still reaches every interface. One `WIREGUARD_AGENT_TOKEN` stays shared by every agent (decision D5). Identity keeps sending `host` (the first ingress id) in profile's enroll body for one release, so a profile one release behind still accepts it; profile selects nothing by it, checks it as a label and echoes it.
    - Amended on 2026-11-10 by the owner's ruling during the build ("i take your recommendation"). The first text answered 404 when enrollment is off as well. Read against the built code, that froze every agent's list on a gateway that turned enrollment off, so a revoked PAT stayed a kernel peer on every node; and since every host's list is now the same, a mistyped host id no longer wipes peers under either answer.
@@ -237,7 +237,7 @@ Each has a recommendation; the build can start on the recommended answers. The g
    - **Add a node:** `p3` added to `WIREGUARD_INGRESSES` (identity restarted) and brought up becomes reachable from the same desktop at its next connect, with no sign-in.
    - **Revoke:** revoking the PAT removes the peer from all three nodes within two agent polls, and every tenant load fails.
    - **Node outage:** stopping p2's interface makes only `*.p2` names fail (502 after 3 s) while `*.p1` keeps loading.
-   - **Mixed versions:** a v0.125.0 desktop against this gateway enrolls, reaches `*.p1` through the tunnel, and reaches `*.p2` over the public path. A v0.127.0 desktop against a v0.125.0 gateway enrolls and runs one tunnel as v0.125.0 does.
+   - **Mixed versions:** a v0.125.0 desktop against this gateway enrolls, reaches `*.p1` through the tunnel, and reaches `*.p2` over the public path. A v0.128.0 desktop against a v0.125.0 gateway enrolls and runs one tunnel as v0.125.0 does.
 5. `make gateway-packaging-isolation-test` green with the new configure.sh and env templates, and `make shell-check` green.
 
 ## Evidence

@@ -45,7 +45,7 @@ Two more came from the fixes of the owner's Mac checks that day, found beside th
 
 The owner then closed v0.127.0 to new work ("just close off the current in-flight items and the rest moves to v128"), and the small findings of the reading and its fixes that had no row yet are collected in one: `ci.yml` without `permissions`, the gateway roles' `TEMPORARY` grant through `PUBLIC`, and the rest ([leftovers]).
 
-Also on 2026-11-10 the owner had the gateway lane of the per-node WireGuard ingress built directly with an agent outside the round's seats: identity's ingress list, discovery, redeem, consent and peers route, profile's gateway-wide peers and migration 18, the packaging and the documents, on `feat/wireguard-ingress-per-node-gateway`, gated and not merged. The desktop lane is not started ([wgnode]).
+Also on 2026-11-10 the owner had the gateway lane of the per-node WireGuard ingress built directly with an agent outside the round's seats: identity's ingress list, discovery, redeem, consent and peers route, profile's gateway-wide peers and migration 18, the packaging and the documents, on `feat/wireguard-ingress-per-node-gateway`, gated, then reviewed and merged into the release's integration branch on 2026-11-11; the desktop lane follows ([wgnode]).
 
 The owner added one more on 2026-11-11, after reading v0.127.0's centered Metrics slide on his Mac: the Dashboard's About, Workspace and Search slides sit in the middle of a large tab as the Metrics slide does, where today they start at its top ([dashslides]).
 
@@ -56,7 +56,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
 | [find frames run long at max scrollback][findfeed] | not started | design |
 | [local devserver calls go through a proxy][cliproxy] | not started | design |
-| [one WireGuard ingress per proxy node][wgnode] | gateway built | owner |
+| [one WireGuard ingress per proxy node][wgnode] | gateway landed | desktop |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
 | [a theme switch leaves ghostty colours][livetheme] | not started | design |
