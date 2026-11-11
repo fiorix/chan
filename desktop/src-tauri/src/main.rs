@@ -8526,6 +8526,38 @@ mod tests {
         ));
     }
 
+    /// The read behind the editor's and the Rich Prompt's paste recovery on the
+    /// X11 desktop: a PNG another program holds on the CLIPBOARD comes back as
+    /// the same pixels. It needs a display and an owner, so it runs on demand
+    /// (in the desktop guest, under Xvfb, with the basic-flows clipboard owner
+    /// or xclip serving the file `CHAN_DESKTOP_CLIPBOARD_PNG` names), and
+    /// without them it fails rather than passing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs an X display and an owner serving CHAN_DESKTOP_CLIPBOARD_PNG"]
+    fn clipboard_read_image_returns_the_pixels_another_program_holds() {
+        let fixture = std::env::var_os("CHAN_DESKTOP_CLIPBOARD_PNG")
+            .expect("CHAN_DESKTOP_CLIPBOARD_PNG names the PNG the owner serves");
+        assert!(
+            std::env::var_os("DISPLAY").is_some(),
+            "the read needs an X display"
+        );
+        let expected = image::open(&fixture)
+            .expect("the fixture decodes")
+            .to_rgba8();
+        let png = clipboard_read_image()
+            .expect("the clipboard read succeeds")
+            .expect("the clipboard holds an image");
+        let read = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("the read returns a PNG")
+            .to_rgba8();
+        assert_eq!(read.dimensions(), expected.dimensions());
+        assert!(
+            read.as_raw() == expected.as_raw(),
+            "the clipboard's pixels differ from the fixture's"
+        );
+    }
+
     /// An absent representation is a successful read, so the cached Linux
     /// handle remains the selection owner for the next representation probe.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
