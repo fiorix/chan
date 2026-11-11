@@ -73,6 +73,7 @@
   </figure>
   <h3 id="copy-paste"><a class="heading-anchor" href="#copy-paste">Copy and paste freely</a></h3>
   <p>The commands <code>cs copy</code> and <code>cs paste</code> integrate every chan terminal, standalone or workspace, local or on a devserver, with your clipboard: <code>cs copy &lt; photo.png</code> puts stdin on the clipboard (plain text, HTML, or an image), and <code>cs paste &gt; file.png</code> writes it back out as raw bytes. The clipboard belongs to the machine viewing the window, while the command runs wherever the terminal lives: use it locally like <code>pbcopy</code>/<code>pbpaste</code>, copy on a devserver and paste into any app, or move content across devservers by copying on one and pasting on another.</p>
+  <p>On the Linux desktop, selecting terminal text sets the PRIMARY selection, and a middle click pastes PRIMARY in either terminal backend, including text selected in another application. Ghostty keeps its automatic clipboard copy alongside PRIMARY; copy chords and the menu's Copy actions use the regular clipboard. In a browser, selection and middle click follow the browser's behavior.</p>
   <figure class="inline-shot">
     <video controls muted playsinline preload="none" poster="/assets/manual/video-posters/copy-paste.jpg" aria-label="Copy text from one terminal and paste it into a file in another.">
       <source src="/assets/home/videos/copy-paste.mp4" type="video/mp4" />
