@@ -83,11 +83,27 @@ describe("All windows", () => {
     const rows = render();
     expect(rows.map((row) => row.dataset.windowId)).toEqual(windows.map((w) => w.window_id));
     expect(rows.map((row) => row.querySelector(".row-sub")?.textContent)).toEqual([
-      "This machine · Shown", "This machine · Hidden", "lima / notes · Hidden", "Connecting · Shown",
+      "local · Shown", "local · Hidden", "lima / notes · Hidden", "Connecting · Shown",
     ]);
     expect(target.querySelectorAll('[aria-label="Focus window"]')).toHaveLength(4);
     expect(target.querySelectorAll('[aria-label="Show window"]')).toHaveLength(2);
     expect(target.querySelectorAll('[aria-label="Hide window"]')).toHaveLength(2);
+  });
+
+  it("names this machine local ahead of a workspace, as the window's title does", () => {
+    target = document.createElement("div");
+    document.body.append(target);
+    resetDeck();
+    app = mount(AllWindowsDeck, { target, props: {
+      tree: buildMachineTree([remote], [], [
+        windowRecord("local-ws", "local", { kind: "workspace", workspace_path: "/Users/hacker/src/chan" }),
+        windowRecord("remote-ws", "remote", { kind: "workspace", workspace_path: "/home/lima/chan" }),
+      ]),
+    } });
+    flushSync();
+    expect([...target.querySelectorAll("li .row-sub")].map((sub) => sub.textContent)).toEqual([
+      "local / chan · Shown", "lima / chan · Shown",
+    ]);
   });
 
   it("moves and clamps selection without focusing a native window; Enter focuses the selected row", async () => {
