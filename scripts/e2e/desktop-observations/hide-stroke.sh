@@ -80,7 +80,7 @@ PAGE="/workspace-"
 STROKE="freedraw"
 
 page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "$PAGE" "$1"; }
-workspace_xid() { obs_x_window_titled "$WS"; }
+workspace_xid() { obs_x_local_window_titled "$WS"; }
 no_workspace_window() { ! workspace_xid; }
 page_answers() { page_eval "document.readyState" | grep -q complete; }
 

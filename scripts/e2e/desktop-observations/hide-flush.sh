@@ -94,7 +94,7 @@ RESULTS="$OBS_WORK/results.jsonl"
 PAGE="/workspace-"
 
 page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "$PAGE" "$1"; }
-workspace_xid() { obs_x_window_titled "$WS"; }
+workspace_xid() { obs_x_local_window_titled "$WS"; }
 no_workspace_window() { ! workspace_xid; }
 
 # 1. One workspace window, handed to the running desktop.

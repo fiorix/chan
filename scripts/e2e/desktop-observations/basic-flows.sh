@@ -161,7 +161,7 @@ fi
 magick compare -metric AE "$FIXTURE" "$FIXTURE" null: 2>/dev/null || obs_inconclusive "the pixel comparison does not match the fixture to itself"
 
 page_eval() { node "$HERE/inspect.mjs" "$INSPECTOR" eval "$PAGE" "$1"; }
-workspace_xid() { obs_x_window_titled "$WS"; }
+workspace_xid() { obs_x_local_window_titled "$WS"; }
 
 # One workspace window, handed to the running desktop.
 chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"

@@ -110,7 +110,7 @@ mkdir -p "$WS"
 printf 'Native welcome observation\n' > "$WS/a.md"
 chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
 if [ "$reading" = gpu-less ]; then
-    workspace_xid() { obs_x_window_titled "$WS"; }
+    workspace_xid() { obs_x_local_window_titled "$WS"; }
     obs_wait 60 "the native workspace window" workspace_xid
     xid="$(workspace_xid)"
     xdotool windowactivate --sync "$xid"

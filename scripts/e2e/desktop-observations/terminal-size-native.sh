@@ -46,7 +46,7 @@ obs_start_desktop
 WS="$OBS_WORK/ws"
 mkdir -p "$WS"
 chan serve "$WS" > "$OBS_WORK/serve.out" 2>&1 || obs_inconclusive "chan serve was not handed off: $(obs_masked < "$OBS_WORK/serve.out")"
-workspace_xid() { obs_x_window_titled "$WS"; }
+workspace_xid() { obs_x_local_window_titled "$WS"; }
 obs_wait 60 "the native workspace window" workspace_xid
 xid="$(workspace_xid)"
 xdotool getwindowgeometry --shell "$xid" > "$output/window-geometry.txt"
