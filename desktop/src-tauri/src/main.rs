@@ -6145,7 +6145,7 @@ fn main() {
                 let _boot_settled = single_instance::BootSettled::when_dropped(&state_for_restore);
                 // Held as long, so a boot that never gets to the files macOS
                 // asked to open hands them on rather than leave them waiting.
-                let boot_opens = open_events::BootOpens::held(&state_for_restore);
+                let boot_opens = open_events::Opening::boot(&state_for_restore);
                 // Mount the shared terminal tenant FIRST so persisted terminal
                 // windows resolve and the watcher reopens them on relaunch.
                 if let Some(embedded) = state_for_restore.embedded() {

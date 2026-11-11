@@ -18,8 +18,9 @@
 //! then find the window the files opened in rather than open one beside it.
 //! After the boot an event's paths open in a task, one task at a time and in
 //! the order the events came, so two opens close together cannot each mint a
-//! window of their own.
+//! window of their own; a holder that panics hands the queue on.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, MutexGuard};
 
@@ -28,67 +29,48 @@ use tauri::Manager;
 
 use crate::{launch_paths, serve, AppState};
 
-/// The paths open-file events delivered that are still to open, and what
-/// opens them.
+/// The paths open-file events delivered that are still to open, and whether
+/// an [`Opening`] holds the queue.
 #[derive(Debug)]
 pub(crate) struct OpenEvents {
-    paths: Vec<String>,
-    opener: Opener,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Opener {
-    /// The boot, from the process's start until it has opened its launch's
-    /// paths: the event that launched the desktop waits for it.
-    Boot,
-    /// A task an event started, until the queue runs dry.
-    Task,
-    /// Nothing: the next event's paths start a task.
-    Idle,
+    paths: VecDeque<String>,
+    /// Held by the boot from the process's start, so the event that launched
+    /// the desktop waits for it, then by one task at a time.
+    held: bool,
 }
 
 impl OpenEvents {
     /// The queue a desktop starts with, held by its boot.
     pub(crate) fn awaiting_boot() -> Self {
         Self {
-            paths: Vec::new(),
-            opener: Opener::Boot,
+            paths: VecDeque::new(),
+            held: true,
         }
     }
 
-    /// Queue an event's paths. True when nothing is opening the queue, so
-    /// the caller starts the task that does.
+    /// Queue an event's paths. True when nothing holds the queue, so the
+    /// caller starts the task that opens it, which then holds it.
     fn queue(&mut self, paths: Vec<String>) -> bool {
         self.paths.extend(paths);
-        let start = self.opener == Opener::Idle && !self.paths.is_empty();
+        let start = !self.held && !self.paths.is_empty();
         if start {
-            self.opener = Opener::Task;
+            self.held = true;
         }
         start
     }
 
-    /// The paths to open next, for the boot or the task opening the queue.
-    /// None left ends its turn: the next event's paths start a task.
-    fn next(&mut self) -> Vec<String> {
-        let paths = std::mem::take(&mut self.paths);
-        if paths.is_empty() {
-            self.opener = Opener::Idle;
-        }
-        paths
+    /// The path to open next, for the queue's holder. One at a time, so a
+    /// holder that panics loses the path it was opening and no other.
+    fn next(&mut self) -> Option<String> {
+        self.paths.pop_front()
     }
 
-    /// The boot is gone without having opened the queue: true when paths
-    /// wait, and the caller starts the task that opens them.
-    fn boot_gone(&mut self) -> bool {
-        if self.opener != Opener::Boot {
-            return false;
-        }
-        if self.paths.is_empty() {
-            self.opener = Opener::Idle;
-            return false;
-        }
-        self.opener = Opener::Task;
-        true
+    /// The holder is done, or gone by a panic: true when paths wait, and the
+    /// caller starts the task that opens them, which then holds the queue;
+    /// with none waiting, the next event's paths start one.
+    fn hand_on(&mut self) -> bool {
+        self.held = !self.paths.is_empty();
+        self.held
     }
 }
 
@@ -96,28 +78,46 @@ fn lock(state: &AppState) -> MutexGuard<'_, OpenEvents> {
     state.open_events.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Held by the boot's task from its start. [`BootOpens::open`] opens what
-/// the events queued before the boot reached its paths; a boot that ends
-/// without getting there, by a panic too, hands the queue to a task on drop,
-/// so no event waits for a boot that is gone.
-pub(crate) struct BootOpens(Arc<AppState>);
+/// The hold on the queue: the boot's from its task's start, then one task's
+/// at a time. Its holder opens the queue dry ([`Opening::open`]). Dropped at
+/// the end of that or before it, by a panic too, it hands the queue to a new
+/// task when paths wait and leaves it to the next event otherwise, so no
+/// event waits for a holder that is gone. The queue changes hands only here:
+/// an event that comes while the holder finishes joins the queue the drop
+/// then reads.
+pub(crate) struct Opening(Arc<AppState>);
 
-impl BootOpens {
-    pub(crate) fn held(state: &Arc<AppState>) -> Self {
+impl Opening {
+    /// The boot's hold, the one the queue starts with.
+    pub(crate) fn boot(state: &Arc<AppState>) -> Self {
         Self(Arc::clone(state))
     }
 
-    /// Open the queue, and what events add to it meanwhile, until it is dry;
-    /// later events then open their own.
+    /// Open the queued paths one after the other, in the order the events
+    /// delivered them, and what events add meanwhile, until none is left. A
+    /// path that cannot be opened is logged and the rest still open.
     pub(crate) async fn open(self) {
-        open_queued(Arc::clone(&self.0)).await;
+        loop {
+            let next = lock(&self.0).next();
+            let Some(path) = next else {
+                return;
+            };
+            match serve::open_path_in_standalone_window(Arc::clone(&self.0), &path).await {
+                Response::PathOpened { message, .. } => {
+                    tracing::info!(%message, "opened a file macOS asked this desktop to open")
+                }
+                other => {
+                    tracing::warn!(%path, reply = ?other, "could not open a file macOS asked this desktop to open")
+                }
+            }
+        }
     }
 }
 
-impl Drop for BootOpens {
+impl Drop for Opening {
     fn drop(&mut self) {
-        if lock(&self.0).boot_gone() {
-            tauri::async_runtime::spawn(open_queued(Arc::clone(&self.0)));
+        if lock(&self.0).hand_on() {
+            tauri::async_runtime::spawn(Opening(Arc::clone(&self.0)).open());
         }
     }
 }
@@ -134,9 +134,9 @@ pub(crate) fn deliver(app: &tauri::AppHandle, urls: Vec<tauri::Url>) {
 }
 
 /// Queue an event's paths, and return the task that opens the queue when
-/// nothing opens it yet, for the caller to spawn. Until the boot has opened
-/// its launch's paths it opens the queue itself, so nothing is returned. A
-/// URL that names nothing this desktop can open is logged and skipped.
+/// nothing holds it, for the caller to spawn. Until the boot has opened its
+/// launch's paths it holds the queue, so nothing is returned. A URL that
+/// names nothing this desktop can open is logged and skipped.
 fn opened(
     state: &Arc<AppState>,
     urls: Vec<tauri::Url>,
@@ -146,29 +146,7 @@ fn opened(
         tracing::warn!(%url, "skipping a file macOS asked this desktop to open: {why}");
     }
     let start = lock(state).queue(event.paths);
-    start.then(|| open_queued(Arc::clone(state)))
-}
-
-/// Open the queued paths one after the other, in the order the events
-/// delivered them, until none is left. A path that cannot be opened is
-/// logged and the rest still open.
-async fn open_queued(state: Arc<AppState>) {
-    loop {
-        let paths = lock(&state).next();
-        if paths.is_empty() {
-            return;
-        }
-        for path in paths {
-            match serve::open_path_in_standalone_window(Arc::clone(&state), &path).await {
-                Response::PathOpened { message, .. } => {
-                    tracing::info!(%message, "opened a file macOS asked this desktop to open")
-                }
-                other => {
-                    tracing::warn!(%path, reply = ?other, "could not open a file macOS asked this desktop to open")
-                }
-            }
-        }
-    }
+    start.then(|| Opening(Arc::clone(state)).open())
 }
 
 #[cfg(test)]
@@ -180,53 +158,68 @@ mod tests {
     }
 
     /// The event that launches the desktop can come before the boot reaches
-    /// its paths: it waits, and so does every event until the boot has opened
-    /// the queue dry. The next event starts a task; one that comes while the
-    /// task opens joins its queue.
+    /// its paths: it waits, and so does every event until the boot hands the
+    /// queue on, which starts a task for what came at its end. One task holds
+    /// the queue at a time; an event that comes meanwhile joins it.
     #[test]
     fn events_wait_for_the_boot_and_then_one_task_opens_them() {
         let mut events = OpenEvents::awaiting_boot();
-        assert!(!events.queue(paths(&["/a.md"])), "the boot opens it");
-        assert!(!events.queue(paths(&["/b.md"])), "the boot opens it");
-        assert_eq!(events.next(), paths(&["/a.md", "/b.md"]));
         assert!(
-            !events.queue(paths(&["/c.md"])),
-            "the boot is still opening"
+            !events.queue(paths(&["/a.md", "/b.md"])),
+            "the boot opens them"
         );
-        assert_eq!(events.next(), paths(&["/c.md"]));
-        assert_eq!(events.next(), Vec::<String>::new(), "the boot is done");
-
+        assert_eq!(events.next().as_deref(), Some("/a.md"));
+        assert!(!events.queue(paths(&["/c.md"])), "the boot holds the queue");
+        assert_eq!(events.next().as_deref(), Some("/b.md"));
+        assert_eq!(events.next().as_deref(), Some("/c.md"));
+        assert_eq!(events.next(), None, "the queue is dry");
+        assert!(
+            !events.queue(paths(&["/d.md"])),
+            "the boot holds the queue until it hands it on"
+        );
+        assert!(events.hand_on(), "a task opens what came at the boot's end");
+        assert!(
+            !events.queue(paths(&["/e.md"])),
+            "that task holds the queue"
+        );
+        assert_eq!(events.next().as_deref(), Some("/d.md"));
+        assert_eq!(events.next().as_deref(), Some("/e.md"));
+        assert_eq!(events.next(), None);
+        assert!(!events.hand_on(), "nothing waits");
         assert!(!events.queue(Vec::new()), "nothing to open starts nothing");
-        assert!(events.queue(paths(&["/d.md"])), "a task starts");
-        assert!(!events.queue(paths(&["/e.md"])), "the task opens it next");
-        assert_eq!(events.next(), paths(&["/d.md", "/e.md"]));
-        assert_eq!(events.next(), Vec::<String>::new(), "the task is done");
-        assert!(events.queue(paths(&["/f.md"])), "the next event starts one");
+        assert!(
+            events.queue(paths(&["/f.md"])),
+            "the next event starts a task"
+        );
     }
 
-    /// A boot that ends before it opened the queue hands what waits to a
-    /// task, and with nothing waiting leaves the next event to start one; a
-    /// boot that opened the queue leaves the task an event started alone.
+    /// A holder gone before the queue is dry, a boot that never reached its
+    /// paths or a task that panicked, hands what waits to a new task, the
+    /// path it was opening aside, and with nothing waiting leaves the next
+    /// event to start one.
     #[test]
-    fn a_boot_gone_without_opening_hands_the_queue_on() {
+    fn a_holder_gone_hands_the_queue_on() {
         let mut waiting = OpenEvents::awaiting_boot();
-        assert!(!waiting.queue(paths(&["/a.md"])));
-        assert!(waiting.boot_gone(), "a task opens what waits");
-        assert!(!waiting.queue(paths(&["/b.md"])), "that task opens it next");
-        assert_eq!(waiting.next(), paths(&["/a.md", "/b.md"]));
+        assert!(!waiting.queue(paths(&["/a.md", "/b.md"])));
+        assert_eq!(
+            waiting.next().as_deref(),
+            Some("/a.md"),
+            "the holder's last"
+        );
+        assert!(waiting.hand_on(), "a task opens what waits");
+        assert!(
+            !waiting.queue(paths(&["/c.md"])),
+            "that task holds the queue"
+        );
+        assert_eq!(waiting.next().as_deref(), Some("/b.md"));
+        assert_eq!(waiting.next().as_deref(), Some("/c.md"));
 
         let mut empty = OpenEvents::awaiting_boot();
-        assert!(!empty.boot_gone(), "nothing waits");
+        assert!(!empty.hand_on(), "nothing waits");
         assert!(
             empty.queue(paths(&["/a.md"])),
             "the next event starts a task"
         );
-
-        let mut opened = OpenEvents::awaiting_boot();
-        assert_eq!(opened.next(), Vec::<String>::new());
-        assert!(opened.queue(paths(&["/a.md"])));
-        assert!(!opened.boot_gone(), "the event's task opens the queue");
-        assert!(!opened.queue(paths(&["/b.md"])));
     }
 
     #[cfg(unix)]
@@ -264,7 +257,7 @@ mod tests {
                 .collect()
         };
 
-        let boot = BootOpens::held(&desktop.state);
+        let boot = Opening::boot(&desktop.state);
         assert!(
             opened(&desktop.state, vec![file_url(&notes), file_url(&early)]).is_none(),
             "the boot opens what comes before it reaches its paths"
@@ -298,7 +291,10 @@ mod tests {
         desktop.runtime.block_on(task);
         assert!(late.exists(), "the task opened the file");
         assert_eq!(standalone(), windows, "into the window the boot opened");
-        assert_eq!(lock(&desktop.state).opener, Opener::Idle);
+        assert!(
+            !lock(&desktop.state).held,
+            "the queue is left to the next event"
+        );
     }
 
     /// A boot that is gone before it reached its paths, as a panic in its
@@ -316,17 +312,71 @@ mod tests {
         let desktop = crate::tests::handoff_row::Desktop::new();
         let files = tempfile::tempdir().unwrap();
         let waiting = files.path().join("waiting.md");
-        let boot = BootOpens::held(&desktop.state);
+        let boot = Opening::boot(&desktop.state);
         assert!(opened(&desktop.state, vec![file_url(&waiting)]).is_none());
         drop(boot);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !(waiting.exists() && lock(&desktop.state).opener == Opener::Idle) {
+        while !waiting.exists() || lock(&desktop.state).held {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the task the guard handed the queue to opened nothing in 30 s"
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(
+            opened(
+                &desktop.state,
+                vec![file_url(&files.path().join("next.md"))]
+            )
+            .is_some(),
+            "the next event starts a task of its own"
+        );
+    }
+
+    /// A task that panics while it opens the queue, here on its first path,
+    /// hands what waits to a new task when its hold drops in the unwind: the
+    /// file after the one it was opening still opens, the queue is then left
+    /// to the next event, and that event starts a task of its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_task_that_panics_hands_the_queue_on() {
+        if !crate::embedded::in_own_chan_home(
+            "open_events::tests::a_task_that_panics_hands_the_queue_on",
+        ) {
+            return;
+        }
+        let desktop = crate::tests::handoff_row::Desktop::new();
+        let files = tempfile::tempdir().unwrap();
+        let first = files.path().join("first.md");
+        let second = files.path().join("second.md");
+        desktop
+            .runtime
+            .block_on(Opening::boot(&desktop.state).open());
+        assert!(!lock(&desktop.state).held, "the boot handed the queue on");
+
+        // The task an event starts, as `opened` hands it out, panicking on
+        // the first path it takes.
+        let event = vec![
+            first.to_str().unwrap().to_string(),
+            second.to_str().unwrap().to_string(),
+        ];
+        assert!(lock(&desktop.state).queue(event));
+        let hold = Opening(Arc::clone(&desktop.state));
+        let task = desktop.runtime.spawn(async move {
+            let path = lock(&hold.0).next();
+            panic!("opening {path:?} panicked");
+        });
+        assert!(desktop.runtime.block_on(task).is_err(), "the task panicked");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !second.exists() || lock(&desktop.state).held {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nothing opened the file after the panicked one in 30 s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!first.exists(), "the panicked path is not opened again");
         assert!(
             opened(
                 &desktop.state,
@@ -497,7 +547,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("the boot runs {needle}"))
         };
         let task = at("tauri::async_runtime::spawn(async move {");
-        let guard = at("let boot_opens = open_events::BootOpens::held(&state_for_restore);");
+        let guard = at("let boot_opens = open_events::Opening::boot(&state_for_restore);");
         let first_await = at(".await");
         assert!(
             task < guard && guard < first_await,
