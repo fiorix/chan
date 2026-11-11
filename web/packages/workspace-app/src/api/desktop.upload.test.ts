@@ -5,10 +5,11 @@
 // page asks the server to withdraw nothing.
 //
 // Its transfer row begins while the native picker is still open, before the
-// page knows any file. The row waits for the selection, then names what was
-// picked from the desktop's status, the file's name for one file and the
-// count for several, and never reads as a verb before a sentence. A picker
-// closed without a choice leaves no row, as a browser picker's does.
+// page knows any file. The row waits for the selection with no Cancel, which
+// could not close the dialog, then names what was picked from the desktop's
+// status, the file's name for one file and the count for several, and never
+// reads as a verb before a sentence. A picker closed without a choice leaves
+// no row, as a browser picker's does.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -81,6 +82,12 @@ describe("a desktop upload's transfer row", () => {
     return [...target!.querySelectorAll(".tb-line")].map((line) => line.textContent);
   }
 
+  /// The rows' buttons as the bubble renders them.
+  function actions(): (string | null)[] {
+    flushSync();
+    return [...target!.querySelectorAll(".tb-action")].map((button) => button.textContent);
+  }
+
   /// Wait until `check` passes, looking often. The page polls the desktop
   /// every 100 ms, and the bound leaves a loaded host room for a few polls.
   function eventually(check: () => void): Promise<void> {
@@ -89,11 +96,12 @@ describe("a desktop upload's transfer row", () => {
 
   /// A desktop whose picker is open: no selection in its status, and an
   /// upload that stays unsettled until the test ends it. `pick` is the
-  /// desktop validating a selection, `finish` and `fail` end the upload,
+  /// desktop recording a selection, `finish` and `fail` end the upload,
   /// `refuse` ends it with the value a desktop's refusal carries over IPC (a
-  /// bare reason, or a named failure), and a native cancel refuses it, as the
-  /// desktop does. `holdStatus` leaves the status polls asked from then on
-  /// unanswered until the test answers.
+  /// bare reason, or a named failure), and a native cancel refuses it with
+  /// the named failure the desktop answers a page that asks: marked as a
+  /// cancel, naming what was picked. `holdStatus` leaves the status polls
+  /// asked from then on unanswered until the test answers.
   function desktop() {
     let status: Status | null = { loaded: 0, total: null };
     let settle: { resolve: (files: unknown) => void; reject: (error: unknown) => void } | null = null;
@@ -104,8 +112,9 @@ describe("a desktop upload's transfer row", () => {
         return status;
       }
       if (cmd === "cancel_native_transfer") {
+        const picked = status?.picked;
         status = null;
-        settle?.reject(new Error("upload cancelled"));
+        settle?.reject({ message: "upload cancelled", cancelled: true, ...(picked ? { picked } : {}) });
         return true;
       }
       if (cmd === "upload_files_native") {
@@ -152,10 +161,11 @@ describe("a desktop upload's transfer row", () => {
 
     await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
     expect(target!.querySelector(".tb-bar.indeterminate"), "no bytes move yet").toBeNull();
-    expect(target!.querySelector(".tb-action")?.textContent).toBe("Cancel");
+    expect(actions(), "no Cancel while the native picker is open").toEqual([]);
 
     native.pick({ loaded: 50, total: 200, picked: { name: "report.pdf", count: 1 } });
     await eventually(() => expect(lines()).toEqual(["Uploading report.pdf (25%)"]));
+    expect(actions(), "the Cancel, once the picker has returned").toEqual(["Cancel"]);
 
     await native.finish([{ path: "dev/report.pdf", size: 200 }]);
     await expect(upload).resolves.toEqual([{ path: "dev/report.pdf", size: 200 }]);
@@ -198,9 +208,30 @@ describe("a desktop upload's transfer row", () => {
     native.pick({ loaded: 100, total: 200 });
     await eventually(() => expect(lines()).toEqual(["Uploading files (50%)"]));
 
-    await native.fail("upload failed: HTTP 503 Service Unavailable");
+    // The desktop's reason carries no "upload failed" of its own, so the
+    // row says the upload failed once.
+    await native.fail("HTTP 503 Service Unavailable");
     await expect(upload).rejects.toThrow("HTTP 503");
-    expect(lines()).toEqual(["Failed upload: upload failed: HTTP 503 Service Unavailable"]);
+    expect(lines()).toEqual(["Failed upload: HTTP 503 Service Unavailable"]);
+  });
+
+  // The desktop records a selection before it validates it, so a status can
+  // name the files before it has their total.
+  test.each([
+    ["a desktop that names the selection first", { loaded: 0, total: null, picked: { name: "report.pdf", count: 1 } }, "Uploading report.pdf..."],
+    ["a desktop that reports only the total", { loaded: 0, total: 200 }, "Uploading files (0%)"],
+  ])("the row offers its Cancel once a status says the picker returned: %s", async (_case, status, line) => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+    expect(actions()).toEqual([]);
+
+    native.pick(status);
+    await eventually(() => expect(lines()).toEqual([line]));
+    expect(actions()).toEqual(["Cancel"]);
+
+    await native.finish([{ path: "dev/report.pdf", size: 200 }]);
+    await upload;
   });
 
   test.each([
@@ -220,6 +251,8 @@ describe("a desktop upload's transfer row", () => {
     await expect(upload).rejects.toThrow("disk full");
   });
 
+  // The row offers no Cancel then; the page's own teardown cancels every
+  // active transfer, this one too.
   test("a cancel while the picker is open reads as a cancelled upload", async () => {
     desktop();
     const cancelled = runDesktopUpload({ dir: "dev", multiple: true }, null);
@@ -279,14 +312,40 @@ describe("a desktop upload's transfer row", () => {
     expect(lines()).toEqual(["Failed upload: HTTP 409 Conflict"]);
   });
 
-  test("a named failure that is a cancel reads as a cancel", async () => {
+  test("a named failure the desktop marks as a cancel reads as a cancel", async () => {
     const native = desktop();
     const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
     await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
 
-    await native.refuse({ message: "upload cancelled", picked: { name: "report.pdf", count: 1 } });
+    await native.refuse({ message: "upload cancelled", cancelled: true, picked: { name: "report.pdf", count: 1 } });
     await expect(upload).rejects.toMatchObject({ name: "AbortError", message: "upload cancelled" });
     expect(lines()).toEqual(["Cancelled report.pdf"]);
+  });
+
+  // Only the desktop's own cancel is marked, so a reason is read as a reason
+  // whatever it says.
+  test.each([
+    ["a reason that mentions a cancel", { message: "HTTP 409 Conflict: upload cancelled upstream", picked: { name: "report.pdf", count: 1 } }],
+    ["a cancel's reason with no mark", { message: "upload cancelled", picked: { name: "report.pdf", count: 1 } }],
+    ["a mark that is not true", { message: "upload cancelled", cancelled: "yes", picked: { name: "report.pdf", count: 1 } }],
+  ])("a named failure the desktop does not mark as a cancel reads as a failure: %s", async (_case, refusal) => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+
+    await native.refuse(refusal);
+    await expect(upload).rejects.toThrow(new Error(refusal.message));
+    expect(lines()).toEqual([`Failed report.pdf: ${refusal.message}`]);
+  });
+
+  test("a desktop that answers the bare reason says a cancel by that reason", async () => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+
+    await native.refuse("upload cancelled");
+    await expect(upload).rejects.toMatchObject({ name: "AbortError", message: "upload cancelled" });
+    expect(lines()).toEqual(["Cancelled upload"]);
   });
 
   test("a cancel and a failure after the pick name the picked file", async () => {
