@@ -62,7 +62,7 @@ One more came from the owner on 2026-11-11 and was built outside the team by his
 | [local devserver calls go through a proxy][cliproxy] | landed | GA |
 | [one WireGuard ingress per proxy node][wgnode] | partly built | build |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
-| [wrapped ghostty copies paste broken][gcopy] | built | build |
+| [wrapped ghostty copies paste broken][gcopy] | landed | GA |
 | [a theme switch leaves ghostty colours][livetheme] | landed | GA |
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | landed | GA |
