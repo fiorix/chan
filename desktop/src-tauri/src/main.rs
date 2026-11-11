@@ -11716,6 +11716,10 @@ mod tests {
                 runtime
                     .block_on(embedded.open_workspace(other_root.to_str().expect("utf-8 root")))
                     .expect("mount the other root");
+                embedded
+                    .workspace_overlay()
+                    .expect("the overlay is installed")
+                    .set(other_root.to_str().expect("utf-8 root"), true);
                 library
                     .register_workspace(hung.path())
                     .expect("register the hung root");
@@ -11749,6 +11753,27 @@ mod tests {
                     .and_then(|embedded| embedded.workspace_overlay())
                     .expect("the overlay is installed")
                     .on_paths()
+            }
+
+            fn wait_for_release(&self, runtime: &tokio::runtime::Runtime) {
+                let host = self.state.embedded().expect("embedded").host_for_tests();
+                let notify = host.library_change_notify();
+                runtime.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                        loop {
+                            let changed = notify.notified();
+                            tokio::pin!(changed);
+                            changed.as_mut().enable();
+                            if !host.answer_root_still_releasing(&self.other) {
+                                break;
+                            }
+                            changed.await;
+                        }
+                    })
+                    .await
+                    .expect("the healthy workspace's teardown never released");
+                });
+                assert!(!host.is_workspace_mounted_by_key(&self.other));
             }
         }
 
@@ -11822,15 +11847,77 @@ mod tests {
                     ))
                 })
             });
-            assert_eq!(
-                outcome,
-                Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+            let retry = format!(
+                "closing {}: {}",
+                desktop.other.display(),
+                chan_server::WORKSPACE_STILL_RELEASING
+            );
+            assert!(
+                outcome == Ok(chan_server::WorkspaceLifecycleOutcome::Completed)
+                    || outcome == Err(retry),
+                "the close neither completed nor reported its release in flight: {outcome:?}"
             );
             assert_within_reply_budget("the close", took, cli_reply_bound(), pace);
             assert_eq!(
                 desktop.on_paths(),
                 Vec::<String>::new(),
                 "the closed workspace still reads on"
+            );
+            desktop.wait_for_release(&runtime);
+        }
+
+        #[test]
+        fn a_close_reports_retry_until_its_held_workspace_releases() {
+            let (runtime, desktop) = HungRootDesktop::new();
+            let app = tauri::test::mock_app();
+            let host = desktop.state.embedded().expect("embedded").host_for_tests();
+            let held = host
+                .live_workspace(&desktop.other)
+                .expect("mounted workspace");
+            let lock_dir = held.paths().lock.clone();
+            let released = Arc::downgrade(&held);
+            let stall = root_stall::stall(&desktop.hung);
+            let handle = runtime.handle().clone();
+            let app_handle = app.handle().clone();
+            let state = Arc::clone(&desktop.state);
+            let other = desktop.other.clone();
+            let (outcome, took, pace) = timed_against_the_pace(runtime.handle(), || {
+                stall.finishes_beside("closing a held workspace", HEALTHY_ROOT_BOUND, move || {
+                    handle.block_on(close_workspace_from_handoff(
+                        app_handle, state, other, false,
+                    ))
+                })
+            });
+            assert_eq!(
+                outcome,
+                Err(format!(
+                    "closing {}: {}",
+                    desktop.other.display(),
+                    chan_server::WORKSPACE_STILL_RELEASING
+                ))
+            );
+            eprintln!(
+                "the held close: took {took:?}; CLI budget {:?}; pace {pace:?}",
+                cli_reply_bound()
+            );
+            assert!(host.answer_root_still_releasing(&desktop.other));
+            assert!(
+                desktop.on_paths().is_empty(),
+                "the close must record off before answering retry"
+            );
+            assert!(!chan_workspace::lock::is_free(&lock_dir));
+            drop(held);
+            desktop.wait_for_release(&runtime);
+            assert_eq!(released.strong_count(), 0);
+            assert!(chan_workspace::lock::is_free(&lock_dir));
+            assert_eq!(
+                runtime.block_on(close_workspace_from_handoff(
+                    app.handle().clone(),
+                    Arc::clone(&desktop.state),
+                    desktop.other.clone(),
+                    false,
+                )),
+                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound)
             );
         }
 
