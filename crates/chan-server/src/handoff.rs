@@ -1434,10 +1434,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(any(unix, windows))]
 const UPGRADE_IO_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Why a request to the endpoint got no answer line.
 #[cfg(any(unix, windows))]
 enum EndpointError {
+    /// Nothing listens: no endpoint, a stale socket, another account's.
     NoDesktop,
+    /// A listener took the request and wrote nothing within the budget.
     NoReply,
+    /// A listener took the request and closed, or failed, without a line.
+    Closed,
 }
 
 /// Shared gate for request clients and the connect-only liveness probe.
@@ -1572,7 +1577,7 @@ async fn request_endpoint(
     let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
-        Ok(_) => Err(EndpointError::NoDesktop),
+        Ok(_) => Err(EndpointError::Closed),
         Err(_) => Err(EndpointError::NoReply),
     }
 }
@@ -1831,7 +1836,9 @@ async fn try_devserver_control_at(socket_path: &Path, req: Request) -> Devserver
     let budget = req.reply_budget();
     let line = match request_endpoint(socket_path, &req, budget).await {
         Ok(line) => line,
-        Err(EndpointError::NoDesktop) => return DevserverControlOutcome::NoDesktop,
+        Err(EndpointError::NoDesktop | EndpointError::Closed) => {
+            return DevserverControlOutcome::NoDesktop
+        }
         Err(EndpointError::NoReply) => return DevserverControlOutcome::NoReply { budget },
     };
 
@@ -1891,7 +1898,9 @@ pub enum ActivateReply {
 pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
     match request_endpoint(socket_path, &activate_request(), budget).await {
         Ok(line) => map_activate_response(&line),
-        Err(EndpointError::NoDesktop | EndpointError::NoReply) => ActivateReply::NoReply,
+        Err(EndpointError::NoDesktop | EndpointError::NoReply | EndpointError::Closed) => {
+            ActivateReply::NoReply
+        }
     }
 }
 
@@ -1968,7 +1977,9 @@ pub async fn try_open_path_at(socket_path: &Path, path: &str, budget: Duration) 
     };
     match request_endpoint(socket_path, &req, budget).await {
         Ok(line) => map_open_path_response(&line),
-        Err(EndpointError::NoDesktop | EndpointError::NoReply) => OpenPathReply::NoReply,
+        Err(EndpointError::NoDesktop | EndpointError::NoReply | EndpointError::Closed) => {
+            OpenPathReply::NoReply
+        }
     }
 }
 
@@ -2000,21 +2011,62 @@ fn map_open_path_response(line: &str) -> OpenPathReply {
     }
 }
 
-/// Ask the running same-user desktop to open `path`, for the CLI's
-/// `chan-files` and `chan-edit` outside a chan terminal. `NoReply` when no
-/// desktop serves the endpoint. The caller reads `CHAN_NO_DESKTOP_HANDOFF`
-/// and the GUI-session check first, so it can say which of them stopped it.
+/// What an `OpenPath` from the CLI met at the well-known endpoint. Unlike
+/// [`OpenPathReply`], a desktop that is running and gave no answer is told
+/// apart from no desktop at all, since only the second lets the CLI start
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliOpenPath {
+    /// The desktop opened the path; `message` is its `PathOpened` line.
+    Opened { message: String },
+    /// It answered without opening; `reply` is its answer line.
+    Refused { reply: String },
+    /// Nothing listens on the endpoint: no socket, a stale one, or another
+    /// account's. No desktop is running, or one has not bound it yet.
+    NotListening,
+    /// A listener took the request and gave no answer within the budget, or
+    /// closed without one: a desktop is running and did not answer.
+    Silent,
+}
+
+/// Ask the running same-user desktop to open `path` within `budget`, for the
+/// CLI's `chan-files` and `chan-edit` outside a chan terminal. The caller
+/// reads `CHAN_NO_DESKTOP_HANDOFF` and the GUI-session check first, so it can
+/// say which of them stopped it.
 #[cfg(any(unix, windows))]
-pub async fn try_open_path(path: &str) -> OpenPathReply {
+pub async fn try_open_path(path: &str, budget: Duration) -> CliOpenPath {
     let Some(socket_path) = existing_well_known_socket_path() else {
-        return OpenPathReply::NoReply;
+        return CliOpenPath::NotListening;
     };
-    try_open_path_at(&socket_path, path, IO_TIMEOUT).await
+    try_open_path_from_cli_at(&socket_path, path, budget).await
 }
 
 #[cfg(not(any(unix, windows)))]
-pub async fn try_open_path(_path: &str) -> OpenPathReply {
-    OpenPathReply::NoReply
+pub async fn try_open_path(_path: &str, _budget: std::time::Duration) -> CliOpenPath {
+    CliOpenPath::NotListening
+}
+
+#[cfg(any(unix, windows))]
+async fn try_open_path_from_cli_at(
+    socket_path: &Path,
+    path: &str,
+    budget: Duration,
+) -> CliOpenPath {
+    let req = Request::OpenPath {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+        path: path.to_string(),
+    };
+    match request_endpoint(socket_path, &req, budget).await {
+        Ok(line) => match map_open_path_response(&line) {
+            OpenPathReply::Opened { message, .. } => CliOpenPath::Opened { message },
+            OpenPathReply::Refused { .. } | OpenPathReply::NoReply => CliOpenPath::Refused {
+                reply: line.trim().to_string(),
+            },
+        },
+        Err(EndpointError::NoDesktop) => CliOpenPath::NotListening,
+        Err(EndpointError::NoReply | EndpointError::Closed) => CliOpenPath::Silent,
+    }
 }
 
 /// The absolute path a launch argument names, the `path` of an `OpenPath` or
@@ -3712,7 +3764,7 @@ mod tests {
                 "status": "path_opened",
                 "desktop_version": CHAN_VERSION,
                 "message": format!(
-                    "open request queued for {} in standalone window {} (opening)",
+                    "open request queued for /{} in standalone window {} (opening)",
                     crate::control_socket::machine_path(&notes),
                     windows.first().map(String::as_str).unwrap_or("<none minted>"),
                 ),
@@ -3726,7 +3778,7 @@ mod tests {
             OpenPathReply::Opened {
                 desktop_version: CHAN_VERSION.into(),
                 message: format!(
-                    "open request queued for {} in standalone window {}",
+                    "open request queued for /{} in standalone window {}",
                     crate::control_socket::machine_path(&notes),
                     windows[0],
                 ),
@@ -3779,6 +3831,72 @@ mod tests {
             try_open_path_at(&sock, "/srv/notes.md", Duration::from_secs(3)).await,
             OpenPathReply::Refused {
                 reply: OLDER_DESKTOP_OPEN_PATH_REPLY.trim().to_string()
+            }
+        );
+    }
+
+    /// The CLI tells no desktop from one that is running and gave no answer:
+    /// only the first lets it start a desktop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_clis_open_path_tells_no_listener_from_a_silent_one() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Duration::from_millis(300);
+        let absent = dir.path().join("absent.sock");
+        assert_eq!(
+            try_open_path_from_cli_at(&absent, "/srv/a.md", budget).await,
+            CliOpenPath::NotListening
+        );
+
+        // Bound and never accepted on: the kernel completes the connect, and
+        // nothing ever reads the request.
+        let silent = dir.path().join("silent.sock");
+        let _held = std::os::unix::net::UnixListener::bind(&silent).unwrap();
+        assert_eq!(
+            try_open_path_from_cli_at(&silent, "/srv/a.md", budget).await,
+            CliOpenPath::Silent
+        );
+
+        let closing = dir.path().join("closing.sock");
+        let listener = tokio::net::UnixListener::bind(&closing).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        assert_eq!(
+            try_open_path_from_cli_at(&closing, "/srv/a.md", budget).await,
+            CliOpenPath::Silent
+        );
+
+        let answers = dir.path().join("answers.sock");
+        let listener = tokio::net::UnixListener::bind(&answers).unwrap();
+        tokio::spawn(async move {
+            for reply in [
+                r#"{"status":"path_opened","desktop_version":"0.0.0","message":"opened"}"#,
+                r#"{"status":"error","message":"not editable text"}"#,
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(
+            try_open_path_from_cli_at(&answers, "/srv/a.md", budget).await,
+            CliOpenPath::Opened {
+                message: "opened".into()
+            }
+        );
+        assert_eq!(
+            try_open_path_from_cli_at(&answers, "/srv/a.md", budget).await,
+            CliOpenPath::Refused {
+                reply: r#"{"status":"error","message":"not editable text"}"#.into()
             }
         );
     }

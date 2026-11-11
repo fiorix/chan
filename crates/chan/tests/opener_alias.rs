@@ -216,7 +216,8 @@ fn no_path_opens_the_working_directory() {
     let requests = fake_desktop(&f, opened);
     let output = f.command("chan-edit").output().unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(drain(&requests), [open_path(&f.path("."))]);
+    let cwd = std::fs::canonicalize(&f.files).unwrap();
+    assert_eq!(drain(&requests), [open_path(cwd.to_str().unwrap())]);
 }
 
 /// A fake chan terminal server: `Identify` answers as a desktop, an
@@ -379,13 +380,94 @@ fn a_path_that_cannot_be_opened_is_reported_and_the_rest_still_open() {
         stderr(&output),
         format!(
             "opened {notes}\n\
+             chan-files: chan-desktop did not open {bad}: create {bad}: not editable text\n\
              chan-files: smb://nas/share/x.md is not a file: chan opens files and directories, \
              given as paths or file:// URIs\n\
-             chan-files: chan-desktop did not open {bad}: create {bad}: not editable text\n\
              Error: 2 of 3 paths were not opened\n",
             notes = f.path("notes.md"),
         )
     );
+}
+
+/// A refusal that stops every path still reports the arguments that failed
+/// before it.
+#[test]
+fn a_refusal_of_every_path_keeps_the_arguments_that_failed() {
+    let f = fixture();
+    let requests = fake_desktop(&f, opened);
+    let output = f
+        .command("chan-files")
+        .args(["smb://nas/share/x.md", "notes.md"])
+        .env("CHAN_NO_DESKTOP_HANDOFF", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "chan-files: smb://nas/share/x.md is not a file: chan opens files and directories, \
+         given as paths or file:// URIs\n\
+         Error: CHAN_NO_DESKTOP_HANDOFF is set, so chan-files hands no path to chan-desktop; \
+         run chan-files in a chan terminal, or unset CHAN_NO_DESKTOP_HANDOFF\n"
+    );
+    assert_eq!(drain(&requests), Vec::<Value>::new());
+}
+
+/// A desktop whose listener is bound but never reads (still starting, or
+/// wedged) is running: the command does not say none is, starts no other,
+/// and reports that it did not answer once the 5 s it gets have passed.
+#[test]
+fn a_desktop_that_does_not_answer_is_reported_not_replaced() {
+    let f = fixture();
+    let _bound = UnixListener::bind(f.run.join("chan-desktop.sock")).unwrap();
+    let started = std::time::Instant::now();
+    let output = f
+        .command("chan-files")
+        .args(["docs", "notes.md"])
+        .output()
+        .unwrap();
+    let took = started.elapsed();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "chan-files: chan-desktop did not answer for {docs}\n\
+             chan-files: chan-desktop did not answer for {notes}\n\
+             Error: 2 of 2 paths were not opened\n",
+            docs = f.path("docs"),
+            notes = f.path("notes.md"),
+        )
+    );
+    assert!(
+        took >= Duration::from_millis(4500) && took < Duration::from_secs(9),
+        "the desktop gets its 5 s and no more: took {took:?}"
+    );
+}
+
+/// A listener that closes without an answer is asked again within the 5 s,
+/// and an answer that takes longer than the old 3 s still lands.
+#[test]
+fn a_busy_desktop_is_asked_again_and_waited_for() {
+    let f = fixture();
+    let listener = UnixListener::bind(f.run.join("chan-desktop.sock")).unwrap();
+    let (sent, requests) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut conns = listener.incoming();
+        // The first connection is closed unread.
+        drop(conns.next());
+        let Some(Ok(mut conn)) = conns.next() else {
+            return;
+        };
+        let mut line = String::new();
+        BufReader::new(&conn).read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        std::thread::sleep(Duration::from_millis(3500));
+        let _ = conn.write_all(format!("{}\n", opened(&request)).as_bytes());
+        let _ = sent.send(request);
+    });
+    let output = f.command("chan-edit").arg("notes.md").output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stderr(&output), format!("opened {}\n", f.path("notes.md")));
+    assert_eq!(drain(&requests), [open_path(&f.path("notes.md"))]);
 }
 
 /// One argument that cannot be opened is the error itself.

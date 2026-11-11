@@ -5587,7 +5587,12 @@ pub(crate) async fn open_path_for_handoff(
         return Err(format!("{} is not an absolute path", requested.display()));
     }
     match host.open_in_standalone_window(requested).await {
-        Ok(ack) => Ok(describe_outside_open(&ack)),
+        // The standalone surface spells a path from its `/` root without the
+        // slash; a line read outside chan names the absolute path it was given.
+        Ok(ack) => Ok(describe_outside_open(&chan_library::OpenOutsideAck {
+            path: format!("/{}", ack.path),
+            ..ack
+        })),
         Err(chan_library::Error::Config(_)) => Err(format!(
             "cannot open {}: this desktop serves no standalone filesystem",
             requested.display()
@@ -14258,7 +14263,7 @@ position = { row = 0, col = 1 }
         assert_eq!(
             reply,
             path_opened(format!(
-                "open request queued for {} in standalone window {window} (opening)",
+                "open request queued for /{} in standalone window {window} (opening)",
                 machine_path(&dir)
             ))
         );
@@ -14270,7 +14275,7 @@ position = { row = 0, col = 1 }
             assert_eq!(
                 crate::handoff::answer_open_path(&host, path.to_str().unwrap()).await,
                 path_opened(format!(
-                    "open request queued for {shown} in standalone window {window}"
+                    "open request queued for /{shown} in standalone window {window}"
                 )),
                 "{}",
                 path.display()
@@ -14321,7 +14326,7 @@ position = { row = 0, col = 1 }
         assert_eq!(
             crate::handoff::answer_open_path(&host, notes.to_str().unwrap()).await,
             path_opened(format!(
-                "open request queued for {} in standalone window {}",
+                "open request queued for /{} in standalone window {}",
                 machine_path(&notes),
                 record.window_id
             ))

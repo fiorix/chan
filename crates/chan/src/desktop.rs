@@ -255,18 +255,24 @@ async fn launch_desktop_and_handoff(root: &Path) -> Result<()> {
 /// Launch the chan-desktop GUI as a detached process.
 #[cfg(unix)]
 fn spawn_desktop_gui() -> std::io::Result<()> {
-    spawn_desktop_gui_opening(&[])
+    spawn_desktop_gui_opening(&[]).map(|_| ())
 }
 
 /// Launch the chan-desktop GUI as a detached process given `paths`, which its
-/// boot opens in a standalone window as `chan-desktop PATH...` does.
+/// boot opens in a standalone window as `chan-desktop PATH...` does. The
+/// process started is returned when it is the desktop's own, so a caller can
+/// read its exit: a launch that finds another desktop hands it the paths and
+/// exits from its single-instance guard. On macOS the process is `open`,
+/// which exits once LaunchServices has the app, so there is none to read.
 ///
 /// `current_exe()` is the chan-desktop binary (this only runs for the Desktop
 /// personality). We start it with a clean argv0 (NOT `chan`/`cs`) so the
 /// pre-GUI argv probe falls through to a normal GUI launch instead of
 /// re-dispatching as the CLI.
 #[cfg(unix)]
-pub(super) fn spawn_desktop_gui_opening(paths: &[String]) -> std::io::Result<()> {
+pub(super) fn spawn_desktop_gui_opening(
+    paths: &[String],
+) -> std::io::Result<Option<std::process::Child>> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -290,7 +296,7 @@ pub(super) fn spawn_desktop_gui_opening(paths: &[String]) -> std::io::Result<()>
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map(|_| ());
+                .map(|_| None);
         }
         // Not in a bundle (dev build): fall through to the direct exec below.
     }
@@ -317,7 +323,7 @@ pub(super) fn spawn_desktop_gui_opening(paths: &[String]) -> std::io::Result<()>
         // kill the desktop we just started.
         .process_group(0)
         .spawn()
-        .map(|_| ())
+        .map(Some)
 }
 
 /// Launch the chan-desktop GUI as a detached process.

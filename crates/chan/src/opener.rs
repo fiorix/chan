@@ -3,86 +3,122 @@
 //! the usage), and the server that receives a path decides what it opens.
 
 use std::ffi::OsString;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use chan_server::handoff::{self, OpenPathReply, Response};
+use chan_server::handoff::{self, CliOpenPath, Response};
 
 use crate::cli::Opener;
 use crate::Personality;
 
+/// How long a running desktop has to answer one path: the bound a second
+/// chan-desktop launch gives the desktop it finds (`ASK_BOUND` in
+/// `desktop/src-tauri/src/single_instance.rs`), which covers a desktop
+/// whose embedded server is still starting.
+const ANSWER_BOUND: Duration = Duration::from_secs(5);
+
+/// The pause before asking again a listener that closed without an answer.
+const ASK_AGAIN_AFTER: Duration = Duration::from_millis(200);
+
 /// How long a desktop this command started has to serve its endpoint, the
 /// bound `chan serve` gives the desktop it launches.
 #[cfg(unix)]
-const LAUNCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+const LAUNCH_DEADLINE: Duration = Duration::from_secs(20);
 
-/// Open each of `args` (the current directory when there are none). In a chan
-/// terminal whose server answers, each path goes through `cs open`; anywhere
-/// else, to the running desktop ([`open_in_desktop`]), which the desktop
-/// personality starts when none runs. An argument or path that cannot be
-/// opened is reported and the rest still open; the command then fails.
+/// Open each of `args` (the current directory itself when there are none).
+/// In a chan terminal whose server answers, each path goes through `cs
+/// open`; anywhere else, to the running desktop ([`open_in_desktop`]), which
+/// the desktop personality starts when none runs. An argument or path that
+/// cannot be opened is reported in argument order and the rest still open;
+/// the command then fails.
 pub(super) async fn cmd_open_paths(
     opener: Opener,
     args: Vec<OsString>,
     personality: Personality,
 ) -> Result<()> {
     let name = opener.name();
+    let cwd = std::env::current_dir().ok();
     let args = if args.is_empty() {
-        vec![OsString::from(".")]
+        vec![cwd
+            .clone()
+            .map_or_else(|| OsString::from("."), |cwd| cwd.into_os_string())]
     } else {
         args
     };
-    let cwd = std::env::current_dir().ok();
     let mut failures = Vec::new();
     let mut paths = Vec::with_capacity(args.len());
-    for arg in &args {
+    for (at, arg) in args.iter().enumerate() {
         match handoff::launch_arg_path(arg, cwd.as_deref()) {
-            Ok(path) => paths.push(path),
-            Err(why) => failures.push(why),
+            Ok(path) => paths.push((at, path)),
+            Err(why) => failures.push((at, why)),
         }
     }
+    let mut refusal = None;
     if !paths.is_empty() {
         if crate::parentage::chan_terminal_answers().await {
             failures.extend(open_in_terminal_window(&paths).await);
         } else {
-            failures.extend(open_in_desktop(name, &paths, personality).await?);
+            match open_in_desktop(name, &paths, personality).await {
+                Ok(more) => failures.extend(more),
+                Err(error) => refusal = Some(error),
+            }
         }
     }
-    match failures.as_slice() {
-        [] => Ok(()),
-        [only] if args.len() == 1 => bail!("{only}"),
-        _ => {
-            for why in &failures {
+    failures.sort_by_key(|(at, _)| *at);
+    report(name, args.len(), &failures, refusal)
+}
+
+/// The command's end: success, the one failure of a lone argument, or each
+/// failure in argument order and then the refusal that stopped the rest, or
+/// the count.
+fn report(
+    name: &str,
+    count: usize,
+    failures: &[(usize, String)],
+    refusal: Option<anyhow::Error>,
+) -> Result<()> {
+    match (failures, refusal) {
+        ([], None) => Ok(()),
+        ([], Some(refusal)) => Err(refusal),
+        ([(_, only)], None) if count == 1 => bail!("{only}"),
+        (failures, refusal) => {
+            for (_, why) in failures {
                 eprintln!("{name}: {why}");
             }
-            bail!("{} of {} paths were not opened", failures.len(), args.len())
+            match refusal {
+                Some(refusal) => Err(refusal),
+                None => bail!("{} of {count} paths were not opened", failures.len()),
+            }
         }
     }
 }
 
 /// `cs open PATH` for each path, from this chan terminal: the action prints
 /// its own line, so only a failure comes back.
-async fn open_in_terminal_window(paths: &[String]) -> Vec<String> {
+async fn open_in_terminal_window(paths: &[(usize, String)]) -> Vec<(usize, String)> {
     let mut failures = Vec::new();
-    for path in paths {
+    for (at, path) in paths {
         let action = chan_shell::ShellAction::Open {
             path: Some(path.clone()),
             destination: chan_shell::TabDestinationArgs::default(),
         };
         if let Err(error) = chan_shell::dispatch(action, crate::dump_skill).await {
-            failures.push(format!("{path}: {error:#}"));
+            failures.push((*at, format!("{path}: {error:#}")));
         }
     }
     failures
 }
 
-/// Hand each path to the running desktop. A desktop that answers none of
-/// them is taken as absent, and [`when_no_desktop`] says what follows; one
-/// that stops answering part way leaves the rest unsent.
+/// Hand each path to the running desktop. Nothing listening on the first is
+/// no desktop, and [`when_no_desktop`] says what follows; a desktop that does
+/// not answer one ([`ask_desktop`]) leaves the rest unsent. A refusal that
+/// stops every path (the opt-out, no display, no desktop to start) is the
+/// error.
 async fn open_in_desktop(
     name: &str,
-    paths: &[String],
+    paths: &[(usize, String)],
     personality: Personality,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(usize, String)>> {
     if handoff::handoff_opt_out() {
         bail!(
             "CHAN_NO_DESKTOP_HANDOFF is set, so {name} hands no path to chan-desktop; run {name} \
@@ -97,28 +133,56 @@ async fn open_in_desktop(
         );
     }
     let mut failures = Vec::new();
-    for (index, path) in paths.iter().enumerate() {
-        match handoff::try_open_path(path).await {
-            OpenPathReply::Opened { message, .. } => eprintln!("{message}"),
-            OpenPathReply::Refused { reply } => failures.push(format!(
-                "chan-desktop did not open {path}: {}",
-                refusal_reason(&reply)
+    for (index, (at, path)) in paths.iter().enumerate() {
+        match ask_desktop(path).await {
+            CliOpenPath::Opened { message } => eprintln!("{message}"),
+            CliOpenPath::Refused { reply } => failures.push((
+                *at,
+                format!(
+                    "chan-desktop did not open {path}: {}",
+                    refusal_reason(&reply)
+                ),
             )),
-            OpenPathReply::NoReply if index == 0 => {
-                launch_desktop(name, paths, when_no_desktop(personality)).await?;
+            CliOpenPath::NotListening if index == 0 => {
+                let all: Vec<String> = paths.iter().map(|(_, path)| path.clone()).collect();
+                launch_desktop(name, &all, when_no_desktop(personality)).await?;
                 return Ok(failures);
             }
-            OpenPathReply::NoReply => {
+            CliOpenPath::NotListening | CliOpenPath::Silent => {
                 failures.extend(
                     paths[index..]
                         .iter()
-                        .map(|path| format!("chan-desktop did not answer for {path}")),
+                        .map(|(at, path)| (*at, format!("chan-desktop did not answer for {path}"))),
                 );
                 break;
             }
         }
     }
     Ok(failures)
+}
+
+/// One path to the running desktop within [`ANSWER_BOUND`]: one request
+/// waits out the bound, and a listener that closes without an answer is
+/// asked again until it passes, when the desktop is silent. Nothing
+/// listening on the first ask is no desktop; once one was heard, its going
+/// away is silence too, since another may be on its way up.
+async fn ask_desktop(path: &str) -> CliOpenPath {
+    let deadline = Instant::now() + ANSWER_BOUND;
+    let mut heard = false;
+    loop {
+        let budget = deadline.saturating_duration_since(Instant::now());
+        match handoff::try_open_path(path, budget).await {
+            CliOpenPath::NotListening if !heard => return CliOpenPath::NotListening,
+            CliOpenPath::NotListening | CliOpenPath::Silent => {
+                heard = true;
+                if Instant::now() + ASK_AGAIN_AFTER >= deadline {
+                    return CliOpenPath::Silent;
+                }
+                tokio::time::sleep(ASK_AGAIN_AFTER).await;
+            }
+            answered => return answered,
+        }
+    }
 }
 
 /// What a command that found no desktop does.
@@ -140,19 +204,65 @@ fn when_no_desktop(personality: Personality) -> NoDesktop {
     }
 }
 
+/// Where a started chan-desktop is, read until it settles.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum Started {
+    /// Neither settled yet.
+    Waiting,
+    /// The endpoint is served: the started desktop, or one it handed to.
+    Up,
+    /// The started process exited 0 before the endpoint was served: it found
+    /// a desktop on its way up and handed it the paths.
+    HandedOver,
+    /// It exited non-zero: the desktop it found never answered it.
+    Unanswered,
+}
+
+/// The process the command started settles it first: a second launch exits
+/// from its single-instance guard, so its status says whether the desktop it
+/// found took the paths. `exited` is that status, when it has one.
+#[cfg(unix)]
+fn started(exited: Option<bool>, endpoint_served: bool) -> Started {
+    match (exited, endpoint_served) {
+        (Some(true), _) => Started::HandedOver,
+        (Some(false), _) => Started::Unanswered,
+        (None, true) => Started::Up,
+        (None, false) => Started::Waiting,
+    }
+}
+
 #[cfg(unix)]
 async fn launch_desktop(name: &str, paths: &[String], action: NoDesktop) -> Result<()> {
     if action == NoDesktop::Refuse {
         bail!(not_running(name));
     }
-    crate::desktop::spawn_desktop_gui_opening(paths)
+    let mut child = crate::desktop::spawn_desktop_gui_opening(paths)
         .map_err(|error| anyhow::anyhow!("starting chan-desktop: {error}"))?;
-    let deadline = std::time::Instant::now() + LAUNCH_DEADLINE;
-    while std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        if handoff::desktop_is_live().await {
-            eprintln!("started chan-desktop to open {}", paths.join(", "));
-            return Ok(());
+    let deadline = Instant::now() + LAUNCH_DEADLINE;
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let exited = child
+            .as_mut()
+            .and_then(|child| child.try_wait().ok().flatten())
+            .map(|status| status.success());
+        let served = exited.is_none() && handoff::desktop_is_live().await;
+        match started(exited, served) {
+            Started::Waiting => {}
+            Started::Up => {
+                eprintln!("started chan-desktop to open {}", paths.join(", "));
+                return Ok(());
+            }
+            Started::HandedOver => {
+                eprintln!(
+                    "handed {} to the chan-desktop that was starting",
+                    paths.join(", ")
+                );
+                return Ok(());
+            }
+            Started::Unanswered => bail!(
+                "a chan-desktop was starting and did not answer; run {name} again once it is up"
+            ),
         }
     }
     bail!(
@@ -208,6 +318,46 @@ mod tests {
             }
         );
         assert_eq!(when_no_desktop(Personality::Standalone), NoDesktop::Refuse);
+    }
+
+    /// The process a command started settles the launch before the endpoint
+    /// does: a second launch's exit says whether the desktop it found took
+    /// the paths, whatever the endpoint shows by then.
+    #[cfg(unix)]
+    #[test]
+    fn a_started_desktop_is_read_from_its_exit_first() {
+        assert_eq!(started(None, false), Started::Waiting);
+        assert_eq!(started(None, true), Started::Up);
+        assert_eq!(started(Some(true), false), Started::HandedOver);
+        assert_eq!(started(Some(true), true), Started::HandedOver);
+        assert_eq!(started(Some(false), false), Started::Unanswered);
+        assert_eq!(started(Some(false), true), Started::Unanswered);
+    }
+
+    #[test]
+    fn failures_come_in_argument_order_before_the_refusal() {
+        let failures = [(0, "first".to_string()), (2, "third".to_string())];
+        let error = report(
+            "chan-files",
+            3,
+            &failures,
+            Some(anyhow::anyhow!("the refusal")),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "the refusal");
+        assert_eq!(
+            report("chan-files", 3, &failures, None)
+                .unwrap_err()
+                .to_string(),
+            "2 of 3 paths were not opened"
+        );
+        assert_eq!(
+            report("chan-files", 1, &failures[..1], None)
+                .unwrap_err()
+                .to_string(),
+            "first"
+        );
+        assert!(report("chan-files", 2, &[], None).is_ok());
     }
 
     #[test]

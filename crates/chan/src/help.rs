@@ -865,25 +865,27 @@ pub(super) const OPENER_LONG_ABOUT: &str = r#"Open each PATH in a chan window, a
 `chan open` serves a workspace; `chan-files` and `chan-edit` open a path
 in a window, as `cs open` does inside chan.
 
-`chan-files` and `chan-edit` are names of the chan binary, and both follow
-`cs open`'s rule for every path: a directory opens in the file browser, a
-text file in the editor, any other file is revealed in its directory, and
-a missing path with a text file's name is created empty and opened in the
-editor. The two names
-differ only in this help and in the desktop entry that runs them, which
-makes chan a file browser or a Markdown editor to `xdg-open`. PATH
-defaults to the current directory; a file:// URI is read as the path it
-names.
+`chan-files` and `chan-edit` are names of the chan binary, and both
+follow `cs open`'s rule for every path: a directory opens in the file
+browser, a text file in the editor, any other file is revealed in its
+directory, and a missing path with a text file's name is created empty
+and opened in the editor. The two names differ only in this help and in
+the desktop entry that runs them, which makes chan a file browser or a
+Markdown editor to `xdg-open`. PATH defaults to the current directory; a
+file:// URI is read as the path it names.
 
 In a chan terminal each path goes where `cs open` sends it: a desktop
-terminal's to the desktop, a devserver terminal's to that devserver. From
-any other shell, or a desktop entry, each path opens in a standalone
-window of the running chan-desktop. With no desktop running, the
-desktop's own `chan-files` and `chan-edit` start it with the paths; the
-standalone chan CLI says no desktop is running and exits 1. So does
-CHAN_NO_DESKTOP_HANDOFF, and a session with no display (an SSH login or no
-DISPLAY or WAYLAND_DISPLAY). A path that cannot be opened is reported and
-the rest still open; the exit status is then 1.
+terminal's to the desktop, a devserver terminal's to that devserver.
+From any other shell, or a desktop entry, each path opens in a
+standalone window of the running chan-desktop, which has 5 s to answer
+each path; one that does not is reported (chan-desktop did not answer)
+and the rest are not sent. With no desktop running, the desktop's own
+`chan-files` and `chan-edit` start it with the paths; the standalone
+chan CLI says no desktop is running and exits 1. So does
+CHAN_NO_DESKTOP_HANDOFF, and a session with no display (an SSH login or
+no DISPLAY or WAYLAND_DISPLAY). A path that cannot be opened is
+reported, in argument order, and the rest still open; the exit status is
+then 1.
 "#;
 
 /// `chan-files` / `chan-edit` examples.
