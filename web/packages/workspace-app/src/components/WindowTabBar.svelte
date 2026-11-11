@@ -62,8 +62,8 @@
   // as the pane tree reads it. Null in any other pane.
   const tmuxName = $derived.by(() => {
     const id = viewLayout.activePaneId;
-    if (!paneShowsTmux(id)) return null;
     const pane = viewLayout.nodes[id];
+    if (!paneShowsTmux(pane)) return null;
     const tab = pane?.kind === "leaf" ? activeTabInPane(pane) : null;
     if (tab) return tabLabel(tab);
     return paneMode.tmux !== null ? "New tmux pane" : "Empty pane";

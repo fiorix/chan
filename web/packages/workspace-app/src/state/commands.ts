@@ -268,7 +268,7 @@ export function dashboardOpenAllowed(
 ): boolean {
   return (
     windowModeAllowsCommand("app.dashboard.open", mode) &&
-    !paneShowsTmux(layout.activePaneId)
+    !paneShowsTmux(layout.nodes[layout.activePaneId])
   );
 }
 

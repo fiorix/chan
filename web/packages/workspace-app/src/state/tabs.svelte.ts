@@ -5409,11 +5409,9 @@ export interface OpenDashboardOptions {
 
 /// Whether the pane shows a tmux pane, and so draws no tab strip: the pane
 /// is tmux's and its one tab is tmux's pane. So is every pane while Hybrid
-/// Nav stages a tmux window's layout. Pane.svelte hides the strip on the
-/// same two conditions.
-export function paneShowsTmux(paneId: string): boolean {
+/// Nav stages a tmux window's layout.
+export function paneShowsTmux(node: Node | undefined): boolean {
   if (paneMode.tmux !== null) return true;
-  const node = layout.nodes[paneId];
   if (!node || node.kind !== "leaf") return false;
   return allPaneTabs(node).some((tab) => tab.kind === "terminal" && Boolean(tab.tmuxPane));
 }
@@ -5429,7 +5427,7 @@ export function openDashboardInPane(
   opts?: OpenDashboardOptions,
 ): boolean {
   const node = layout.nodes[paneId];
-  if (!node || node.kind !== "leaf" || paneShowsTmux(paneId)) return false;
+  if (!node || node.kind !== "leaf" || paneShowsTmux(node)) return false;
   const side = opts?.side ?? paneSide(node);
   const tabs = mutablePaneTabs(node, side);
   const tab = newDashboardTab(opts);
