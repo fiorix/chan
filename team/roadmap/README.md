@@ -74,7 +74,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [the unused-token test reads too early][tokentest] | landed | GA |
 | [a desktop upload's cancel and error paths][uploadpaths] | built | owner |
 | [a moved tmux window may close its chan window][tmuxmove] | built | owner |
-| [small findings of the second reading are open][leftovers] | partly built | build |
+| [small findings of the second reading are open][leftovers] | built | owner |
 | [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | landed | GA |
