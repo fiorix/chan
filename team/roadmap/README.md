@@ -55,7 +55,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
 | [find frames run long at max scrollback][findfeed] | not started | design |
-| [local devserver calls go through a proxy][cliproxy] | partly built | build |
+| [local devserver calls go through a proxy][cliproxy] | landed | GA |
 | [one WireGuard ingress per proxy node][wgnode] | gateway landed | desktop |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
