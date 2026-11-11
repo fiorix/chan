@@ -73,11 +73,13 @@
 #                   URL carrying that key, which the identity records; the
 #                   walk is redirected to the desktop's callback, which
 #                   answers 303.
-#     adopt         the redeem's parameters become the row's client file, the
-#                   running fabric starts its tunnel and the peer handshakes,
-#                   the row reads enrolled and connected, in the same desktop
-#                   process with the same proxy address; the private key is
-#                   in the client file and in no other file of the run.
+#     adopt         the redeem's parameters are stored on the row with its
+#                   one owner-only key file and no client file, the running
+#                   fabric starts its tunnel from them and the peer
+#                   handshakes, the row reads enrolled and connected, in the
+#                   same desktop process with the same proxy address; the
+#                   private key is in the key file and in no other file of
+#                   the run.
 #     tenant        a second, disabled row whose gateway is at the name the
 #                   enrollment maps, which resolves nowhere: its connect's
 #                   discovery GET and a launcher fetch to a name under the
@@ -120,8 +122,7 @@
 # it as a credential until deleted. A kept --live-adopt work dir also
 # holds the launcher bearer of a desktop that is gone, in bearer.header,
 # read by curl so it is on no command line. A kept --enroll work dir holds
-# the desktop's key file and client file under chan-home, worthless once
-# the peer is gone.
+# the desktop's key file under chan-home, worthless once the peer is gone.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
