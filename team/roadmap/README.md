@@ -65,7 +65,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [the pane tree hides what a terminal runs][termcmd] | not started | design |
 | [tests still red under the heaviest load][loadres] | not started | design |
 | [tmux windows not on their machine card][tmuxcard] | built | owner |
-| [New Window in a devserver tmux window][tmuxnew] | not started | design |
+| [New Window in a devserver tmux window][tmuxnew] | built | owner |
 | [a launch beside a silent desktop shows nothing][silentlaunch] | not started | design |
 | [the Windows handoff pipe's early clients][winpipe] | not started | measure |
 | [a raised minimized window may stay behind][minraise] | not started | owner |

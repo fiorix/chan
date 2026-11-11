@@ -1,6 +1,6 @@
 # New Window in a devserver's tmux window opens a plain window
 
-Status: raised by the owner on 2026-11-10 and accepted for v0.128.0 the same day; not started.
+Status: raised by the owner on 2026-11-10 and accepted for v0.128.0 the same day; built on 2026-11-11 and merged into the release's integration branch; the section Built holds the evidence, and acceptance 2 is the owner's Mac check.
 
 ## What is there now
 
@@ -20,3 +20,9 @@ Cmd+Shift+N (New Window) opens a new window like the focused one (`open_new_wind
 
 1. Tests of the routing: a devserver window whose record carries a tmux mark goes to the tmux new-window path, its control terminal and plain devserver windows do not, alongside the existing local cases.
 2. On chan-desktop (owner): in a `tmux -CC` window on a devserver, Cmd+Shift+N three times opens three new tmux windows, each in its own chan window.
+
+## Built, 2026-11-11
+
+New Window's routing is one pure function, `new_window_route` in `desktop/src-tauri/src/main.rs`, over the focused window's label and the record it resolves to (`focused_window_record`: the embedded library's for a `local::` label, the window feed's for a `lib-` label). A tmux window, local or a devserver's, takes the page dispatch `app.tmux.newWindow`; the page sends its request to the server that serves it, so a devserver's tmux window asks that devserver's tmux, and the window tmux adds opens as a chan window through the watcher. The connection's control terminal still opens a plain terminal (a devserver terminal on a devserver), and every other window keeps its route (`8adc48e19`, `3009b0f09`, `1c3d9dcbc`, merged as `32e54395e`). The manual's tmux section and `desktop/design.md` say the new behaviour.
+
+Checks: five routing tests (the devserver tmux window of both kinds, its control terminal, plain devserver windows, labels with no record and the local cases), the devserver tmux case red at the former arm order and green after, four mutations each red at their own guard (the tmux arm behind the devserver arm, the tmux arm limited to local labels, the control exclusion removed, the feed lookup removed); fmt, clippy with warnings denied, the whole chan-desktop suite (907 tests), the marketing site's check. Acceptance 2 (three Cmd+Shift+N in a devserver's `tmux -CC` window) is the owner's Mac check.
