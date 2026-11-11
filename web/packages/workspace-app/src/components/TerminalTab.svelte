@@ -1456,7 +1456,7 @@
       host.addEventListener("focusin", onGhosttyFocusChange);
       host.addEventListener("focusout", onGhosttyFocusChange);
     }
-    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend);
+    primarySelectionCleanup = installTerminalPrimarySelection(host, term, backend, onTerminalContextMenu);
     // The masker logged and disabled itself; sync the toggle state so the
     // menu label stays truthful, and tell the user visibly.
     const onSecretMaskingFailure = () => {
