@@ -22,6 +22,10 @@ use serde::Deserialize;
 use crate::config::{WireguardHost, WireguardIngress};
 use crate::devserver::WireguardDiscovery;
 
+/// Synthetic identity for a single-peer answer. A real node can have this
+/// label too, so its spelling alone does not establish its provenance.
+pub(crate) const LEGACY_INGRESS_ID: &str = "legacy";
+
 /// The key file of `gateway_id` under the key directory `dir`.
 pub fn key_path(dir: &Path, gateway_id: &str) -> PathBuf {
     dir.join(format!("{gateway_id}.key"))
@@ -75,16 +79,27 @@ pub struct EnrollmentParams {
     pub persistent_keepalive: Option<u16>,
     #[serde(default)]
     pub hosts: Vec<WireguardHost>,
+    #[serde(default)]
+    pub ingresses: Option<Vec<EnrollmentIngress>>,
 }
 
-/// A client file ready to write for an enrollment, with the key it enrolled
-/// and the host map it routes. Built and checked before the sign-in stores
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EnrollmentIngress {
+    pub id: String,
+    pub server_public_key: String,
+    pub endpoint: String,
+    pub hosts: Vec<WireguardHost>,
+}
+
+/// Validated enrollment parameters with the key they enroll and the
+/// in-memory configuration of the first peer. Built and checked before the sign-in stores
 /// anything, so a refused enrollment writes nothing.
 pub struct Enrollment {
     /// The enrolled public key, base64 as it was sent.
     pub public_key: String,
     pub config: Config,
     pub hosts: Vec<WireguardHost>,
+    pub ingresses: Vec<WireguardIngress>,
 }
 
 impl std::fmt::Debug for Enrollment {
@@ -92,7 +107,7 @@ impl std::fmt::Debug for Enrollment {
         f.debug_struct("Enrollment")
             .field("public_key", &self.public_key)
             .field("config", &self.config)
-            .field("hosts", &self.hosts)
+            .field("ingresses", &self.ingresses)
             .finish()
     }
 }
@@ -101,8 +116,8 @@ impl std::fmt::Debug for Enrollment {
 pub const PEER_CHANGED: &str =
     "sign-in failed: the gateway's WireGuard peer changed during sign-in";
 
-/// Check a redeem's parameters against what the sign-in sent and build the
-/// client file for `gateway_id` from its key file under `dir`. The peer's
+/// Check a redeem's parameters against what the sign-in sent and build a
+/// configuration for `gateway_id` from its key file under `dir`. The peer's
 /// key and endpoint must be the discovery entry's, the key file must still
 /// hold the key that was sent (a key generated again during the sign-in is
 /// refused), and every address must read as the file's grammar reads it.
@@ -114,15 +129,59 @@ pub fn prepare(
     entry: &WireguardDiscovery,
     params: &EnrollmentParams,
 ) -> Result<Enrollment, String> {
+    entry.validate().map_err(|_| PEER_CHANGED.to_string())?;
     let peer_key = parse_public_key(&params.server_public_key).map_err(|_| PEER_CHANGED)?;
     let entry_key = parse_public_key(&entry.public_key).map_err(|_| PEER_CHANGED)?;
     let endpoint = Endpoint::parse(&params.endpoint).map_err(|_| PEER_CHANGED)?;
-    if peer_key.as_bytes() != entry_key.as_bytes()
-        || Endpoint::parse(&entry.endpoint).ok().as_ref() != Some(&endpoint)
+    if entry.ingresses.is_none()
+        && (peer_key.as_bytes() != entry_key.as_bytes()
+            || Endpoint::parse(&entry.endpoint).ok().as_ref() != Some(&endpoint))
     {
         return Err(PEER_CHANGED.to_string());
     }
-    let private_key = read_key(dir, gateway_id)?;
+    let ingresses = match (&entry.ingresses, &params.ingresses) {
+        (Some(offered), Some(redeemed))
+            if !redeemed.is_empty() && offered.len() == redeemed.len() =>
+        {
+            let first = &redeemed[0];
+            if first.server_public_key != params.server_public_key
+                || first.endpoint != params.endpoint
+            {
+                return Err(PEER_CHANGED.to_string());
+            }
+            let mut ids = std::collections::HashSet::new();
+            let mut result = Vec::with_capacity(redeemed.len());
+            for ingress in redeemed {
+                if !ids.insert(&ingress.id)
+                    || !offered.iter().any(|item| {
+                        item.id == ingress.id
+                            && item.public_key == ingress.server_public_key
+                            && item.endpoint == ingress.endpoint
+                    })
+                {
+                    return Err(PEER_CHANGED.to_string());
+                }
+                result.push(WireguardIngress {
+                    id: ingress.id.clone(),
+                    public_key: ingress.server_public_key.clone(),
+                    endpoint: ingress.endpoint.clone(),
+                    hosts: ingress.hosts.clone(),
+                });
+            }
+            // Discovery owns the order so reordering a redeem does not
+            // change the first route when AllowedIPs overlap.
+            result.sort_by_key(|item| offered.iter().position(|entry| entry.id == item.id));
+            result
+        }
+        (None, None) => vec![WireguardIngress {
+            id: LEGACY_INGRESS_ID.into(),
+            public_key: encode(peer_key.as_bytes()),
+            endpoint: endpoint.to_string(),
+            hosts: params.hosts.clone(),
+        }],
+        _ => return Err(PEER_CHANGED.to_string()),
+    };
+    let private_key = read_key(dir, gateway_id).map_err(|e| format!("sign-in failed: {e}"))?;
     if encode(PublicKey::from(&private_key).as_bytes()) != sent_key {
         return Err(
             "sign-in failed: the WireGuard key changed during sign-in; connect again to enroll it"
@@ -141,6 +200,9 @@ pub fn prepare(
     if params.persistent_keepalive == Some(0) {
         return Err(invalid("persistent_keepalive"));
     }
+    validate_ingresses(&ingresses, &allowed_ips).map_err(|_| invalid("ingresses"))?;
+    let peer_key = parse_public_key(&ingresses[0].public_key).map_err(|_| PEER_CHANGED)?;
+    let endpoint = Endpoint::parse(&ingresses[0].endpoint).map_err(|_| PEER_CHANGED)?;
     Ok(Enrollment {
         public_key: sent_key.to_string(),
         config: Config {
@@ -156,6 +218,7 @@ pub fn prepare(
             },
         },
         hosts: params.hosts.clone(),
+        ingresses,
     })
 }
 
@@ -454,6 +517,7 @@ mod tests {
 
     fn params() -> EnrollmentParams {
         EnrollmentParams {
+            ingresses: None,
             server_public_key: SERVER_KEY.into(),
             endpoint: "wg.chan.app:51820".into(),
             addresses: vec!["10.7.0.23/32".into(), "fd00:7::23/128".into()],
@@ -531,6 +595,147 @@ mod tests {
             .collect();
         prepare(&dir, "gw-1a2b3c4d", &sent, &entry(), &hex).unwrap();
         assert!(!conf_path(&dir, "gw-1a2b3c4d").exists());
+    }
+
+    #[test]
+    fn prepare_refuses_an_ingress_list_that_discovery_did_not_offer() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let mut value = serde_json::json!({
+            "server_public_key": SERVER_KEY, "endpoint": "wg.chan.app:51820",
+            "addresses": ["10.7.0.23/32"], "allowed_ips": ["10.7.0.1/32"],
+            "ingresses": [{"id": "p2", "server_public_key": SERVER_KEY,
+                "endpoint": "p2.chan.app:51820", "hosts": []}]
+        });
+        for list in [value["ingresses"].clone(), serde_json::json!([])] {
+            value["ingresses"] = list;
+            let params: EnrollmentParams = serde_json::from_value(value.clone()).unwrap();
+            let result = prepare(&dir, "gw-1a2b3c4d", &sent, &entry(), &params);
+            assert_eq!(result.unwrap_err(), PEER_CHANGED);
+            assert!(!conf_path(&dir, "gw-1a2b3c4d").exists());
+        }
+    }
+
+    #[test]
+    fn prepare_validates_hosts_before_an_enrollment_can_be_stored() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let mut bad = params();
+        bad.hosts[0].addresses = vec!["10.8.0.1".parse().unwrap()];
+        assert!(prepare(&dir, "gw-1a2b3c4d", &sent, &entry(), &bad).is_err());
+        assert!(!conf_path(&dir, "gw-1a2b3c4d").exists());
+    }
+
+    fn two_ingresses() -> (WireguardDiscovery, EnrollmentParams) {
+        let mut entry = entry();
+        let mut params = params();
+        entry.allowed_ips = Some(params.allowed_ips.clone());
+        entry.persistent_keepalive = params.persistent_keepalive;
+        entry.ingresses = Some(vec![
+            WireguardIngress {
+                id: "p1".into(),
+                endpoint: entry.endpoint.clone(),
+                public_key: SERVER_KEY.into(),
+                hosts: params.hosts.clone(),
+            },
+            WireguardIngress {
+                id: "p2".into(),
+                endpoint: "p2.chan.app:51821".into(),
+                public_key: "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=".into(),
+                hosts: vec![WireguardHost {
+                    name: "*.p2.chan.app".into(),
+                    addresses: vec!["10.7.0.1".parse().unwrap()],
+                }],
+            },
+        ]);
+        params.ingresses = Some(
+            entry
+                .ingresses
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|i| EnrollmentIngress {
+                    id: i.id.clone(),
+                    endpoint: i.endpoint.clone(),
+                    server_public_key: i.public_key.clone(),
+                    hosts: i.hosts.clone(),
+                })
+                .collect(),
+        );
+        (entry, params)
+    }
+
+    #[test]
+    fn two_ingress_redeem_refuses_each_changed_identity_and_one_sided_lists() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let (entry, params) = two_ingresses();
+        let mutations: [fn(&mut EnrollmentParams); 6] = [
+            |p| p.ingresses.as_mut().unwrap()[1].id = "p3".into(),
+            |p| p.ingresses.as_mut().unwrap()[1].server_public_key = SERVER_KEY.into(),
+            |p| p.ingresses.as_mut().unwrap()[1].endpoint = "p2.chan.app:51822".into(),
+            |p| {
+                p.ingresses.as_mut().unwrap().pop();
+            },
+            |p| {
+                let duplicate = p.ingresses.as_ref().unwrap()[0].clone();
+                p.ingresses.as_mut().unwrap()[1] = duplicate;
+            },
+            |p| p.ingresses = None,
+        ];
+        for mutate in mutations {
+            let mut bad = params.clone();
+            mutate(&mut bad);
+            assert_eq!(
+                prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &bad).unwrap_err(),
+                PEER_CHANGED
+            );
+        }
+        let mut legacy = entry;
+        legacy.ingresses = None;
+        assert_eq!(
+            prepare(&dir, "gw-1a2b3c4d", &sent, &legacy, &params).unwrap_err(),
+            PEER_CHANGED
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn second_ingress_hosts_are_validated_before_storage() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("wireguard");
+        let sent = generate(&dir, "gw-1a2b3c4d").unwrap();
+        let (entry, mut params) = two_ingresses();
+        params.ingresses.as_mut().unwrap()[1].hosts[0].addresses =
+            vec!["10.7.0.2".parse().unwrap()];
+        assert!(prepare(&dir, "gw-1a2b3c4d", &sent, &entry, &params)
+            .unwrap_err()
+            .contains("ingresses is invalid"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn redeem_requires_the_first_ingress_to_match_the_single_peer() {
+        let home = tempfile::tempdir().unwrap();
+        let sent = generate(home.path(), "gw-single").unwrap();
+        let (entry, params) = two_ingresses();
+        for change_key in [false, true] {
+            let mut bad = params.clone();
+            if change_key {
+                bad.server_public_key =
+                    bad.ingresses.as_ref().unwrap()[1].server_public_key.clone();
+            } else {
+                bad.endpoint = "wg.chan.app:51821".into();
+            }
+            assert_eq!(
+                prepare(home.path(), "gw-single", &sent, &entry, &bad).unwrap_err(),
+                PEER_CHANGED
+            );
+        }
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
     }
 
     #[test]

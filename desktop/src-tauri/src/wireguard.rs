@@ -1076,6 +1076,7 @@ pub(crate) mod tests {
             public_key: server_key.clone(),
         };
         let params = crate::wireguard_keys::EnrollmentParams {
+            ingresses: None,
             server_public_key: server_key,
             endpoint,
             addresses: vec!["10.7.0.1/32".into()],
