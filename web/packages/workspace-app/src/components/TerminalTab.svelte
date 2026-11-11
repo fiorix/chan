@@ -206,7 +206,7 @@
   } from "../terminal/backgroundOpacity";
   import { desktopTerminalOpacity } from "../terminal/desktopTerminalOpacity.svelte";
   import { handleGhosttyPaste, handleGhosttyPasteInput, pasteIntoGhostty } from "../terminal/ghosttyPaste";
-  import { installGhosttySelection } from "../terminal/ghosttySelection";
+  import { installGhosttyClickExtents, installGhosttySelection } from "../terminal/ghosttySelection";
   import { applyGhosttyTheme } from "../terminal/ghosttyTheme";
   import { ghosttyScrollbackText } from "../terminal/ghosttyVt";
   import type { SubmitAgent } from "../terminal/submitMode";
@@ -548,6 +548,7 @@
   // Removes the ghostty key listener (ghosttyKeys.ts). Non-null ONLY on the
   // ghostty backend.
   let ghosttyKeyParity: (() => void) | null = null;
+  let ghosttyClickExtents: (() => void) | null = null;
   let ghosttyReportedFocus: boolean | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path) and the one
@@ -1417,6 +1418,12 @@
       if (!installGhosttySelection(ghosttyTerm, (text) => void copyToClipboard(text))) {
         console.warn(
           "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
+        );
+      }
+      ghosttyClickExtents = installGhosttyClickExtents(ghosttyTerm);
+      if (!ghosttyClickExtents) {
+        console.warn(
+          "[chan] ghostty-web click hooks unavailable; a double or triple click selects within one screen row.",
         );
       }
       ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
@@ -2603,6 +2610,8 @@
     resizeObserver = null;
     ghosttyKeyParity?.();
     ghosttyKeyParity = null;
+    ghosttyClickExtents?.();
+    ghosttyClickExtents = null;
     ghosttyReportedFocus = null;
     host?.removeEventListener("focusin", onGhosttyFocusChange);
     host?.removeEventListener("focusout", onGhosttyFocusChange);

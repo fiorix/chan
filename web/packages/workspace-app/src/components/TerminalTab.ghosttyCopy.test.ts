@@ -3,19 +3,20 @@
 // Copying from and pasting into a ghostty terminal. Every copy path of a
 // mounted TerminalTab on the ghostty backend writes the same text through
 // chan's writer, `writeClipboardText`: the copy chord, the menu's Copy and Copy
-// Scrollback, and ghostty-web's own copies on mouse release and double click. A
-// command longer than the terminal is wide copies as one line. Every paste path
-// sends the program the same cleaned bytes. Each copy case runs in a browser,
-// where the writer is `navigator.clipboard.writeText`, and on chan-desktop,
-// where it is the native `write_clipboard_text` and any write to the web
-// clipboard went around it. ClipboardItem exists, as in Chrome and WebKit, so a
-// copy that writes the clipboard itself, the way ghostty-web's does, shows as a
-// `write`. The terminal is a stand-in for ghostty-web's Terminal over the
-// binding on the vendored core, carrying ghostty-web's own SelectionManager and
-// its mouse handling, as the find tests' stand-in does, and ghostty-web's
-// paste: its listeners on the element frame a native paste and an
-// `insertFromPaste` input as the clipboard holds them, as does its `paste`, and
-// `input` hands the program what it is given.
+// Scrollback, and ghostty-web's own copies on mouse release, double and triple
+// click. A command longer than the terminal is wide copies as one line, and a
+// double or triple click takes a word or a line across the wrap. Every paste
+// path sends the program the same cleaned bytes. Each copy case runs in a
+// browser, where the writer is `navigator.clipboard.writeText`, and on
+// chan-desktop, where it is the native `write_clipboard_text` and any write to
+// the web clipboard went around it. ClipboardItem exists, as in Chrome and
+// WebKit, so a copy that writes the clipboard itself, the way ghostty-web's
+// does, shows as a `write`. The terminal is a stand-in for ghostty-web's
+// Terminal over the binding on the vendored core, carrying ghostty-web's own
+// SelectionManager and its mouse handling, as the find tests' stand-in does,
+// and ghostty-web's paste: its listeners on the element frame a native paste
+// and an `insertFromPaste` input as the clipboard holds them, as does its
+// `paste`, and `input` hands the program what it is given.
 
 import { readFileSync } from "node:fs";
 import { mount, tick, unmount } from "svelte";
@@ -247,9 +248,13 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+/// A command whose path the 80 columns cut inside the word.
+const PATH = `/var/log/${"deep/".repeat(16)}messages.log`;
+const PATH_COMMAND = `$ cat ${PATH}`;
+
 /// Mount a terminal that spawns on ghostty, attach its session and print
 /// the command and a prompt after it.
-async function renderGhostty() {
+async function renderGhostty(command = COMMAND) {
   const [tab] = seatTerminals([terminalTab()]);
   const target = document.createElement("div");
   document.body.append(target);
@@ -263,7 +268,7 @@ async function renderGhostty() {
   const term = ghostty.terminals.at(-1)!;
   const socket = TerminalSocket.all[0]!;
   await attach(socket);
-  await output(socket, `\x1b[2J\x1b[3J\x1b[H${COMMAND}\r\n$ `);
+  await output(socket, `\x1b[2J\x1b[3J\x1b[H${command}\r\n$ `);
   await vi.waitFor(() => expect(term.wasmTerm.isRowWrapped(1), "the command wrapped on screen").toBe(true));
   return { target, term };
 }
@@ -352,6 +357,25 @@ describe.each(PLATFORMS)("every copy from a ghostty terminal in $name writes the
     term.canvas.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2, clientX: 3 * 8 + 1, clientY: 1 }));
     await tick();
     expect(platform.takeWrites()).toEqual(["curl"]);
+    platform.expectNoBypass();
+  });
+
+  test("a double click copies a word the wrap cut whole, and a triple click the whole wrapped command", async () => {
+    const { term } = await renderGhostty(PATH_COMMAND);
+    platform.enter();
+    const click = (detail: number, col: number, row: number) =>
+      term.canvas.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, detail, clientX: col * 8 + 1, clientY: row * 16 + 1 }),
+      );
+    click(2, 10, 0);
+    await tick();
+    expect(platform.takeWrites(), "a double click before the wrap").toEqual([PATH]);
+    click(2, 3, 1);
+    await tick();
+    expect(platform.takeWrites(), "a double click after the wrap").toEqual([PATH]);
+    click(3, 3, 1);
+    await tick();
+    expect(platform.takeWrites(), "a triple click").toEqual([PATH_COMMAND]);
     platform.expectNoBypass();
   });
 });
