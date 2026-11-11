@@ -9,6 +9,7 @@
 
 import { builtInChordSuperseded, commandIdForChord } from "./keymapOverrides.svelte";
 import { programVisual } from "./programStatus";
+import { terminalProgramText } from "./terminalProgram";
 import {
   chordsEqual,
   currentOS,
@@ -186,6 +187,10 @@ export type PaneTreeTab = {
   tab: Tab;
   /// The title the pane's strip shows for this tab.
   title: string;
+  /// What runs in the terminal, shown beside the title: the program's own
+  /// title, else its foreground command. Null for other kinds, for a reading
+  /// that holds neither, and for a tmux pane, which tmux names itself.
+  program: string | null;
   /// The tab is its side's active tab.
   active: boolean;
   /// The tab is the one the window shows focused: the active tab of the
@@ -226,6 +231,12 @@ export type PaneTreeOptions = {
   /// The label context the strip gives a tab, for a file browser's title.
   labelCtx?: (tab: Tab) => BrowserLabelCtx | undefined;
 };
+
+/// A row's `program` reading for `tab`.
+export function tabProgramReading(tab: Tab): string | null {
+  if (tab.kind !== "terminal" || tab.tmuxPane) return null;
+  return terminalProgramText(tab.terminalProgram);
+}
 
 function queryTerms(query: string | undefined): string[] {
   return (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
@@ -276,6 +287,7 @@ export function paneTreeModel(state: LayoutState, options: PaneTreeOptions = {})
             side,
             tab,
             title: tabLabelInPane(tab, tabs, options.labelCtx?.(tab)),
+            program: tabProgramReading(tab),
             active,
             current: active && activePane && side === visibleSide,
           };
