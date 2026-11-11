@@ -3976,6 +3976,7 @@ mod tests {
         let fx = fixture(&[("b.excalidraw", &seed)]);
         let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
         drain(&mut rxa);
+        ha.session().lock_state().disk_echo.test_freeze_at_seed();
 
         // Mutation confirmed and flushed: disk carries x and y.
         ha.push(vec![elem("y", 1, 1, "a2")], None, None).unwrap();

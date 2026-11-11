@@ -86,6 +86,8 @@ pub(crate) struct DiskEchoRing {
     inner: VecDeque<(u64, EchoOrigin, Instant)>,
     write_ttl: Duration,
     adopt_ttl: Duration,
+    #[cfg(test)]
+    frozen_at: Option<Instant>,
 }
 
 impl Default for DiskEchoRing {
@@ -106,17 +108,39 @@ impl DiskEchoRing {
             inner: VecDeque::new(),
             write_ttl,
             adopt_ttl,
+            #[cfg(test)]
+            frozen_at: None,
         }
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.frozen_at {
+            return now;
+        }
+        Instant::now()
+    }
+
+    /// Hold the ring at its seed event while a test drives a stale read. The
+    /// filesystem and blocking pool may take longer than the adopted TTL.
+    #[cfg(test)]
+    pub(crate) fn test_freeze_at_seed(&mut self) {
+        self.frozen_at = Some(
+            self.inner
+                .front()
+                .expect("the session seeded its echo ring")
+                .2,
+        );
     }
 
     /// Record content this session just wrote to disk.
     pub fn note_written(&mut self, hash: u64) {
-        self.note_at(hash, EchoOrigin::Written, Instant::now());
+        self.note_at(hash, EchoOrigin::Written, self.now());
     }
 
     /// Record content this session just adopted from disk.
     pub fn note_adopted(&mut self, hash: u64) {
-        self.note_at(hash, EchoOrigin::Adopted, Instant::now());
+        self.note_at(hash, EchoOrigin::Adopted, self.now());
     }
 
     fn note_at(&mut self, hash: u64, origin: EchoOrigin, now: Instant) {
@@ -132,7 +156,7 @@ impl DiskEchoRing {
     /// the entry: refreshing on match would let a repeating echo extend
     /// its own window indefinitely.
     pub fn contains(&mut self, hash: u64) -> bool {
-        self.contains_at(hash, Instant::now())
+        self.contains_at(hash, self.now())
     }
 
     fn contains_at(&mut self, hash: u64, now: Instant) -> bool {
@@ -146,7 +170,7 @@ impl DiskEchoRing {
     /// not count: reading bytes never put an upload queue in flight, so
     /// they are no reason to distrust a truncation.
     pub fn any_recent_write(&mut self) -> bool {
-        self.any_recent_write_at(Instant::now())
+        self.any_recent_write_at(self.now())
     }
 
     fn any_recent_write_at(&mut self, now: Instant) -> bool {

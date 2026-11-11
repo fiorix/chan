@@ -357,6 +357,11 @@ impl EmbeddedServer {
             .install_workspace_overlay(Arc::new(chan_server::WorkspaceOverlay::open(store)));
     }
 
+    #[cfg(test)]
+    pub(crate) fn host_for_tests(&self) -> &chan_server::WorkspaceHost {
+        &self.host
+    }
+
     /// Install the local window registry, which [`for_tests`](Self::for_tests)
     /// leaves out, at its production store under the chan home. That store is
     /// `CHAN_HOME`'s, and the user's `~/.chan/windows.json` when none is set,

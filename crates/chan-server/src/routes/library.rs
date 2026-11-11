@@ -2342,7 +2342,10 @@ async fn add_workspace(
             return crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
         }
     };
-    let registered = match host.register_workspace_keyed(root, &key, label).await {
+    let registration = host.register_workspace_keyed(root, &key, label);
+    #[cfg(test)]
+    let registration = registration_probe::observe(registration);
+    let registered = match registration.await {
         Ok(ws) => ws,
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             return workspace_still_releasing();
@@ -2385,6 +2388,34 @@ async fn add_workspace(
             crate::error::err(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
         Err(e) => crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod registration_probe {
+    use std::cell::RefCell;
+    use std::future::{poll_fn, Future};
+
+    tokio::task_local! {
+        pub(super) static PENDING: RefCell<Option<tokio::sync::oneshot::Sender<tokio::time::Instant>>>;
+    }
+
+    /// Tell the fixture when the registration has polled its permit wait. Key
+    /// resolution may use any amount of real time before that timer starts.
+    pub(super) async fn observe<F: Future>(future: F) -> F::Output {
+        tokio::pin!(future);
+        poll_fn(|cx| {
+            let result = future.as_mut().poll(cx);
+            if result.is_pending() {
+                let _ = PENDING.try_with(|pending| {
+                    if let Some(pending) = pending.borrow_mut().take() {
+                        let _ = pending.send(tokio::time::Instant::now());
+                    }
+                });
+            }
+            result
+        })
+        .await
     }
 }
 
@@ -4189,6 +4220,7 @@ mod devserver_route_tests {
 
         use chan_workspace::paths::root_stall::{self, RootStall};
 
+        use super::super::registration_probe;
         use super::*;
         use crate::devserver::hung_root_support::HEALTHY_ROOT_BOUND;
 
@@ -4476,38 +4508,33 @@ mod devserver_route_tests {
                     Some(body.clone()),
                 ));
                 held(&registration, "the first add's registration").await;
-                let started = tokio::time::Instant::now();
-                let second = tokio::spawn(send(
-                    router.clone(),
-                    "POST",
-                    "/api/library/workspaces".into(),
-                    Some(body.clone()),
+                let (pending, polled) = tokio::sync::oneshot::channel();
+                let second = tokio::spawn(registration_probe::PENDING.scope(
+                    std::cell::RefCell::new(Some(pending)),
+                    send(
+                        router.clone(),
+                        "POST",
+                        "/api/library/workspaces".into(),
+                        Some(body.clone()),
+                    ),
                 ));
-                // Give the key's blocking task time to finish between clock
-                // ticks; it must precede the permit's release-budget timer.
-                for _ in 0..110 {
-                    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
-                        .await
-                        .unwrap();
-                    settle().await;
-                    if second.is_finished() {
-                        break;
-                    }
-                    tokio::time::advance(Duration::from_millis(10)).await;
-                }
+                let started = polled
+                    .await
+                    .expect("the second registration polled its wait");
+                tokio::time::advance(Duration::from_secs(1) - JUST_SHORT).await;
                 settle().await;
+                assert!(
+                    !second.is_finished(),
+                    "the second add answered before the one-second release budget"
+                );
                 assert_eq!(
                     registration.entered().len(),
                     1,
                     "the second add started another registration"
                 );
-                assert!(
-                    second.is_finished(),
-                    "the second add exceeded the one-second release budget"
-                );
+                tokio::time::advance(JUST_SHORT).await;
                 let (status, retry_after, response) = second.await.unwrap();
-                assert!(started.elapsed() >= Duration::from_secs(1));
-                assert!(started.elapsed() <= Duration::from_millis(1100));
+                assert_eq!(started.elapsed(), Duration::from_secs(1));
                 assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {response}");
                 assert_eq!(retry_after.as_deref(), Some("1"));
                 assert_eq!(response, serde_json::json!({ "error": STILL_RELEASING }));
