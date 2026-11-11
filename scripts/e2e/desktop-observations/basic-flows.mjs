@@ -1078,6 +1078,17 @@ async function run() {
     });
   }
 
+  // Close Search if it is still up, by Escape in its input, so the next
+  // arm's input reaches the page and not the overlay.
+  const searchUp = () => page.evaluate(`Boolean(document.querySelector('[role="dialog"][aria-label="Search"]'))`);
+  async function closeSearch() {
+    if (!(await searchUp())) return null;
+    xdo("windowactivate", "--sync", args.xid);
+    await page.evaluate(`(() => { document.querySelector('[role="dialog"][aria-label="Search"] input')?.focus(); return true; })()`);
+    xdo("key", "Escape");
+    return (await poll(searchUp, (up) => !up, 3000)).met ? "closed" : "still up";
+  }
+
   if (want("search")) {
     await tryArm("search", "search", async () => {
       const token = `bfsearch${stamp}`;
@@ -1110,10 +1121,10 @@ async function run() {
         const hits = [...document.querySelectorAll(".search .hits li")];
         return { count: hits.length, paths: hits.slice(0, 5).map((li) => li.querySelector(".path")?.textContent.trim() ?? null),
           status: document.querySelector(".search .status-line")?.innerText.trim() ?? null, query: ${input}?.value ?? null };
-      })()`), (v) => v.paths.some((p) => p?.includes(basename(rel))), 15000);
+      })()`), (v) => v.query === token && !/searching/i.test(v.status ?? "") && v.paths.includes(rel), 15000);
       out.hits = { met: hits.met, waitedMs: hits.waitedMs, ...hits.value };
       shot("search-hits");
-      if (!hits.met) return out;
+      if (!hits.met) return { ...out, closed: await closeSearch() };
       xdo("key", "Return");
       const opened = await poll(async () => {
         const l = layout();
@@ -1121,7 +1132,7 @@ async function run() {
           dialog: await page.evaluate(`Boolean(document.querySelector('[role="dialog"][aria-label="Search"]'))`) };
       }, (v) => v.tab?.title === rel && v.hasToken, 10000);
       shot("search-opened");
-      return { ...out, hitOpened: opened.met, waitedMs: opened.waitedMs, after: opened.value };
+      return { ...out, hitOpened: opened.met, waitedMs: opened.waitedMs, after: opened.value, closed: await closeSearch() };
     });
   }
 
