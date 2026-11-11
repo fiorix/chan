@@ -149,9 +149,9 @@
   import { dispatchAllowsCommand } from "../state/commands";
   import { windowModeAllowsCommand } from "../state/windowMode";
   import { programSummary, programVisual } from "../state/programStatus";
-  import { windowTabBar } from "../state/windowTabBar.svelte";
+  import { windowTabBar, windowTabBarTitleSlot } from "../state/windowTabBar.svelte";
   import { portalTo } from "./portal";
-  import { TabStripScroll } from "./tabStripScroll.svelte";
+  import { TAB_STRIP_END_FADE_PX, TabStripScroll } from "./tabStripScroll.svelte";
 
   let { pane }: { pane: LeafNode } = $props();
 
@@ -644,6 +644,9 @@
   // In the desktop's title bar the strip's empty stretch drags the window;
   // Tauri's drag script reads the attribute on a direct press.
   const barDragRegion = $derived(stripInBar && isTauriDesktop() ? "" : undefined);
+  // A strip that shows in the bar offers the bar a place for the window's
+  // title, left of its actions.
+  const titleSlotHere = $derived(stripInBar && !(ui.terminalControl || tmuxPaneHere));
   // Only the strip's tabs scroll; see tabStripScroll.svelte.ts. A new active
   // tab, a flip and a move into or out of the bar bring the active tab into
   // view.
@@ -651,7 +654,8 @@
   $effect(() => {
     void visibleActiveTabId;
     void visibleSide;
-    void stripInBar;
+    // Only the strip in the bar fades its end (see the fade-end rule).
+    stripScroll.endFade = stripInBar ? TAB_STRIP_END_FADE_PX : 0;
     untrack(() => stripScroll.reveal());
   });
 
@@ -1531,7 +1535,13 @@
     <!-- The tabs' own viewport: only it scrolls, so the actions after it
          stay at the strip's end. In the desktop's title bar the space
          between tabs drags the window, as the strip's own does. -->
-    <div class="tab-scroll" data-tauri-drag-region={barDragRegion} {@attach stripScroll.attach}>
+    <div
+      class="tab-scroll"
+      class:fade-end={stripInBar && stripScroll.forward}
+      style:--tab-strip-end-fade={`${TAB_STRIP_END_FADE_PX}px`}
+      data-tauri-drag-region={barDragRegion}
+      {@attach stripScroll.attach}
+    >
     <div class="tab-row" data-tauri-drag-region={barDragRegion}>
     {#each visibleTabs as t, i (t.id)}
       {@const label = tabLabelInPane(t, visibleTabs, browserCtxFor(t))}
@@ -1786,6 +1796,11 @@
          tab bar, where it is the window's drag space. It keeps a minimum
          width while the tabs overflow, so the strip always has one. -->
     <div class="dead-zone" aria-hidden="true" data-tauri-drag-region={barDragRegion}></div>
+    {#if titleSlotHere}
+      <!-- The window tab bar moves the window's title in here while the
+           window has tabs (see WindowTabBar.svelte). -->
+      <div class="bar-title-slot" {@attach windowTabBarTitleSlot}></div>
+    {/if}
     <div class="actions">
       <button
         class="side-toggle"
@@ -2464,6 +2479,18 @@
   }
   .tabs.in-bar .tab-row {
     padding-left: 2px;
+  }
+  /* The title's place draws no box, so the title is the strip's own flex
+     item, between the dead zone and the actions. */
+  .bar-title-slot {
+    display: contents;
+  }
+  /* While tabs lie past the viewport's end, the last ones in view fade out
+     toward the window's title instead of ending at a hard edge. The active
+     tab is brought into view clear of the fade (tabStripScroll.svelte.ts). */
+  .tabs.in-bar .tab-scroll.fade-end {
+    mask-image: linear-gradient(to right, black calc(100% - var(--tab-strip-end-fade)), transparent);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--tab-strip-end-fade)), transparent);
   }
   /* A stale Hybrid Nav transaction takes no input; in place the pane's own
      rule covers the strip. */

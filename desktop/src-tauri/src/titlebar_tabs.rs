@@ -56,13 +56,13 @@
 //!
 //! With the title text hidden, the page is where a window in the mode is
 //! named, so it holds the window's title: the one the title bar shows, with
-//! the devserver's name and privacy mode's mask in it. The desktop sends it as
+//! the machine's name and privacy mode's mask in it. The desktop sends it as
 //! `TITLE_EVENT` when the page asks for the mode, which the page does once
 //! it listens for the event, and again on every retitle ([`title_changed`]),
 //! where the title sent is the one just set: a window does not report a new
 //! title at once on every host.
-//! The page's pane tree heads itself with it on both hosts, and on Windows,
-//! whose frameless window has no title of its own, the bar draws it while the
+//! The page's window tab bar shows it on both hosts, and on Windows, whose
+//! frameless window has no title of its own, the bar also draws it while the
 //! Computers launcher covers the page.
 //!
 //! A frameless window has no room for a menubar, so on Windows the launcher's
@@ -1496,8 +1496,8 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    /// The page of a window in the mode heads its pane tree with the window's
-    /// title, so it hears every retitle, whether or not the launcher shows,
+    /// The page of a window in the mode shows the window's title in its
+    /// window tab bar, so it hears every retitle, whether or not the launcher shows,
     /// and hears the title that was set. The window is not asked: on macOS a
     /// title is applied on a later turn of the main thread, so a window just
     /// retitled still reports the title before, and a page told that one
@@ -1593,7 +1593,7 @@ mod tests {
     /// Privacy mode re-applies every window's visible title when it turns on
     /// or off, outside the watcher, so that retitle tells the title bar too,
     /// before the new setting is announced: a page that hears privacy mode
-    /// turn off already holds the full title to head its pane tree with. The
+    /// turn off already holds the full title for its window tab bar. The
     /// refresh runs at once on the main thread, where the sync command runs,
     /// and is otherwise queued ahead of the announcement's delivery
     /// (tauri-runtime-wry's `send_user_message`).

@@ -1,28 +1,29 @@
-// The browser tab title and pane tree's window name for THIS window.
+// The browser tab title and the window tab bar's title for THIS window.
 //
-// The tab is titled the same way the launcher names the row and chan-desktop
-// titles the OS window -- "Terminal Window 2 [deploy shell]" -- so one window
-// reads identically wherever it is named. Composition is the shared
-// `windowDisplayName`; what lives here is where the naming fields come from.
+// A browser's tab is titled the way the launcher names the window's row: the
+// generated name and the caption, "Terminal Window 2 [deploy shell]".
+// Composition is the shared `windowDisplayName`; what lives here is where the
+// naming fields come from. chan-desktop titles the OS window with the machine
+// before that name, an arrow and "local" or the devserver's name, and for a
+// workspace window the workspace too ("local / chan Window 1").
 //
 // The workspace app has no view of the window feed: its only library access is
 // the short-lived, presence-bound command capability. So the naming fields are
-// read from that snapshot when first needed (at boot in a browser and, in title
-// bar tab mode, at each pane tree open until a read finds this window, which on
-// the desktop is the first open), and the caption is kept current afterwards by
-// the targeted `window_labeled` frame the server pushes to this window's own
-// socket on every surface (store.svelte.ts routes it here). `kind` and
-// `ordinal` are library-owned and fixed for a window's life, so one read is
-// enough for them.
+// read from that snapshot when first needed (at boot in a browser and, on the
+// desktop, when the window tab bar needs them for its title), and the caption
+// is kept current afterwards by the targeted `window_labeled` frame the server
+// pushes to this window's own socket on every surface (store.svelte.ts routes
+// it here). `kind` and `ordinal` are library-owned and fixed for a window's
+// life, so one read is enough for them.
 //
 // Only a browser's document title follows the naming fields. A chan-desktop
 // window's name is its OS titlebar, which the window watcher retitles, so its
-// document keeps the static title. In title bar tab mode the desktop also
-// sends the page that title (`windowTabBar.title`), which names the devserver
-// as no naming field can, so the pane tree heads itself with it there; the
-// fields give the pane tree its privacy form and stand in where no title has
-// arrived, from a desktop that predates it. A browser has no such title, so
-// its pane tree names the window as Computers does.
+// document keeps the static title. In title bar tab mode the title bar hides
+// that title, so the desktop sends it to the page (`windowTabBar.title`) and
+// the window tab bar shows it; it names the devserver as no naming field can.
+// The fields give the bar its privacy form and stand in where no title has
+// arrived. A browser has no such title, so a bar forced on there names the
+// window as Computers does.
 //
 // A window with no reachable library record (a capability mint that fails, a
 // plain browser tab that never had a record) simply keeps the document's static
@@ -45,17 +46,13 @@ interface WindowNaming {
 
 let naming = $state<WindowNaming | null>(null);
 let pending: Promise<void> | null = null;
-// Whether a read is in flight, for the pane tree to hold its heading's row.
-// Kept apart from `pending`, which stays plain so a caller inside an effect
-// does not track the read it starts.
-let reading = $state(false);
 let latestLabel: string | undefined;
 
 /**
- * The pane tree's name for this window: the title chan-desktop gives it when
- * the desktop has sent one, else the launcher's name for it; unknown until
- * one of them is. Privacy mode shows the generated name alone, as Computers
- * does.
+ * The window tab bar's title for this window: the title chan-desktop gives it
+ * when the desktop has sent one, else the launcher's name for it; unknown
+ * until one of them is. Privacy mode shows the generated name alone, as
+ * Computers does.
  */
 export function windowName(): string | null {
   // The page's own setting decides rather than the desktop's mask: the title
@@ -66,16 +63,11 @@ export function windowName(): string | null {
   return naming ? windowDisplayName(naming) : null;
 }
 
-/** Whether the naming fields are being read. */
-export function windowNameReading(): boolean {
-  return reading;
-}
-
 export function refreshWindowTitle(): void {
   if (typeof document === "undefined") return;
   if (privacy.enabled) document.title = "Chan (privacy mode)";
-  // A desktop document keeps the static title even once the pane tree has
-  // loaded the naming fields (see above).
+  // A desktop document keeps the static title even once the window tab bar
+  // has loaded the naming fields (see above).
   else if (!isTauriDesktop() && naming) document.title = windowDisplayName(naming);
   else document.title = "Chan";
 }
@@ -101,10 +93,8 @@ export function loadWindowTitle(): Promise<void> {
     // starts after a frame sees that caption or a newer one: only a frame
     // heard during this read outranks its snapshot.
     latestLabel = undefined;
-    reading = true;
     pending = readWindowNaming().finally(() => {
       pending = null;
-      reading = false;
     });
   }
   return pending;
@@ -140,6 +130,5 @@ export function applyWindowLabel(label: string): void {
 export function __resetWindowTitle(): void {
   naming = null;
   pending = null;
-  reading = false;
   latestLabel = undefined;
 }

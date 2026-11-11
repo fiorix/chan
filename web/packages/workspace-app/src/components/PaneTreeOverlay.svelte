@@ -73,12 +73,9 @@
   import { chordFor } from "../state/shortcuts";
   import { programSummary, programVisual } from "../state/programStatus";
   import { isExcalidraw } from "../state/fileTypes";
-  import { windowTabBar } from "../state/windowTabBar.svelte";
-  import { loadWindowTitle, windowName, windowNameReading } from "../state/windowTitle.svelte";
   import { privateText } from "@chan/web-shared/privacy";
 
   const LIST_ID = "chan-pane-tree-list";
-  const TITLE_ID = "chan-pane-tree-window";
   const optionId = (index: number): string => `chan-pane-tree-option-${index}`;
   // The dropdown's width and its margin from the window's edges.
   const WIDTH = 420;
@@ -116,15 +113,6 @@
   const rows = $derived(paneTreeRows(panes));
   const rects = $derived(paneTree.open ? Object.entries(paneRects(layout)) : []);
   const chord = $derived(chordFor(PANE_TREE_COMMAND_ID));
-  const title = $derived(windowTabBar.on ? windowName() : null);
-  // The heading's row is held while the name is read, so the filter and the
-  // list do not move under the pointer when the name arrives.
-  const titleRow = $derived(windowTabBar.on && (title !== null || windowNameReading()));
-
-  $effect(() => {
-    if (paneTree.open && windowTabBar.on) untrack(() => void loadWindowTitle());
-  });
-
   function rowKey(row: PaneTreeTab): string {
     return `${row.paneId}\u001f${row.tab.id}`;
   }
@@ -388,15 +376,10 @@
       role="dialog"
       aria-modal="false"
       aria-label="Panes and tabs"
-      aria-describedby={title ? TITLE_ID : undefined}
       style:top="{position.top}px"
       style:left="{position.left}px"
       style:max-height="calc(100vh - {position.top + EDGE}px)"
     >
-      {#if titleRow}
-        <!-- A no-break space gives the held row its full line height. -->
-        <div class="window-title" id={TITLE_ID} title={title ?? undefined}>{title ?? "\u00a0"}</div>
-      {/if}
       <div class="filter">
         <Search size={15} strokeWidth={1.75} aria-hidden="true" />
         <input
@@ -527,16 +510,6 @@
     box-shadow: 0 14px 44px rgba(0, 0, 0, 0.32);
     transform-origin: top left;
     animation: pane-tree-pop 160ms cubic-bezier(0.2, 0.85, 0.22, 1.05);
-  }
-  .window-title {
-    flex: 0 0 auto;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 13px;
-    font-weight: 600;
   }
   .filter {
     flex: 0 0 auto;

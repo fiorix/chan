@@ -1878,7 +1878,7 @@
        pane's own; fixed over the top of the window, inside the app so the
        strip it hosts reads the window's focus colour from here. -->
   {#if windowTabBar.on}
-    <WindowTabBar />
+    <WindowTabBar restored={bootstrapped} />
   {/if}
   <!-- The docked file browsers render wherever there is a filesystem to
        list: a workspace window's workspace, or a standalone window whose

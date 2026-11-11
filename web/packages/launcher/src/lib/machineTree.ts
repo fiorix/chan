@@ -188,12 +188,21 @@ export function machineName(node: MachineNode): string {
   return node.devserver ? devserverName(node.devserver) : "This machine";
 }
 
+/** A machine as a row in a list of every machine's windows names it, ahead of
+ * the row's workspace: `local` for this machine, the name the desktop's
+ * window titles give it, so a row reads `local / chan` as the window's title
+ * does; a devserver and a tmux connection by their card's name. The card
+ * itself stays This machine. */
+function windowMachineName(node: MachineNode): string {
+  if (node.kind === "tmux") return tmuxWindowMachine(node.tmux, node.tmuxHost);
+  return node.devserver ? devserverName(node.devserver) : "local";
+}
+
 /** The desktop overview keeps hidden, detached and not-yet-associated windows. */
 export function windowOverview(tree: MachineTree): { window: WindowRecord; machine: string }[] {
   return [
     ...tree.machines.flatMap((node) => {
-      const machine =
-        node.kind === "tmux" ? tmuxWindowMachine(node.tmux, node.tmuxHost) : machineName(node);
+      const machine = windowMachineName(node);
       return [...node.control, ...node.terminals, ...node.workspaces.flatMap((ws) => ws.windows), ...node.looseWindows]
         .sort(sortWindows)
         .map((window) => ({ window, machine }));

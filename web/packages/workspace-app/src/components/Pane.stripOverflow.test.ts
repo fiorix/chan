@@ -17,6 +17,7 @@ import Pane from "./Pane.svelte";
 import { cancelPaneMode, layout, selectTabInPane, type LeafNode } from "../state/tabs.svelte";
 import { persistStateToHash } from "../state/store.svelte";
 import { windowTabBar } from "../state/windowTabBar.svelte";
+import { TAB_STRIP_END_FADE_PX } from "./tabStripScroll.svelte";
 import { terminalTab } from "../__tests__/tabs";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
@@ -427,5 +428,31 @@ describe("the strip in the window tab bar", () => {
     await tick();
     expect(view.scrollLeft, "the last tab comes in by its right edge").toBe(view.scrollWidth - view.clientWidth);
     expect(button(inBar!, "right")?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  test("the active tab comes into view clear of the fade over the tabs' end", async () => {
+    const slot = document.createElement("div");
+    document.body.append(slot);
+    windowTabBar.slot = slot;
+    windowTabBar.on = true;
+    await renderPane(9);
+    const inBar = slot.querySelector<HTMLElement>(":scope > .tabs")!;
+    const { view, remeasure } = layOut(inBar, 300);
+    await remeasure();
+    expect(view.style.getPropertyValue("--tab-strip-end-fade")).toBe(`${TAB_STRIP_END_FADE_PX}px`);
+
+    // Tab 5 spans 504..604 and is not the last: its end stops short of the
+    // fade, which covers the viewport's last 32 px.
+    selectTabInPane("pane-overflow", "t5");
+    await tick();
+    expect(view.classList.contains("fade-end"), "more tabs lie past the end").toBe(true);
+    const tabEnd = view.querySelector<HTMLElement>(".tab.active")!.getBoundingClientRect().right;
+    expect(tabEnd).toBe(300 - TAB_STRIP_END_FADE_PX);
+    expect(view.scrollLeft).toBe(604 - (300 - TAB_STRIP_END_FADE_PX));
+
+    // A tab brought in by its start keeps the row's own margin.
+    selectTabInPane("pane-overflow", "t1");
+    await tick();
+    expect(view.scrollLeft).toBe(100);
   });
 });

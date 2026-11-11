@@ -565,9 +565,30 @@ describe("windowOverview", () => {
     ];
     const tree = buildMachineTree([], [], windows, [entry]);
     expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
-      ["plain", "This machine"],
+      ["plain", "local"],
       ["tm-1-w1", "tmux -CC from ssh geekom (main)"],
     ]);
+  });
+
+  it("names this machine local, as window titles do, and a devserver by its card", () => {
+    const devservers = [ds({ id: "ds-a", label: "geekom", library_id: "lib-a" })];
+    const workspaces = [
+      ws({ workspace_id: "w-local", path: "/Users/hacker/src/chan" }),
+      ws({ workspace_id: "w-remote", path: "/home/geekom/chan", library_id: "lib-a", devserver_id: "ds-a" }),
+    ];
+    const windows = [
+      win({ window_id: "local-term", library_id: "local" }),
+      win({ window_id: "local-ws", library_id: "local", kind: "workspace", workspace_path: "/Users/hacker/src/chan" }),
+      win({ window_id: "remote-ws", library_id: "lib-a", kind: "workspace", workspace_path: "/home/geekom/chan" }),
+    ];
+    const tree = buildMachineTree(devservers, workspaces, windows);
+    expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
+      ["local-term", "local"],
+      ["local-ws", "local"],
+      ["remote-ws", "geekom"],
+    ]);
+    // The card keeps its own name.
+    expect(machineName(tree.machines[0]!)).toBe("This machine");
   });
 
   it("tells two connections on one devserver apart by their sessions", () => {
@@ -755,7 +776,7 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     const tree = buildMachineTree([], [], windows, [entry]);
     expect(tree.machines[0]!.tmuxControls).toHaveLength(1);
     expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
-      ["plain", "This machine"],
+      ["plain", "local"],
       ["tm-1-control", "tmux -CC on this machine (main)"],
       ["tm-1-w1", "tmux -CC on this machine (main)"],
     ]);

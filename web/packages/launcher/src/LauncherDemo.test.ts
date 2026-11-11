@@ -43,7 +43,7 @@ const termWindow: WindowRecord = {
   window_id: "w-hint-term",
   library_id: "local",
   kind: "terminal",
-  title: "🏠 Terminal Window 1",
+  title: "Terminal Window 1",
   ordinal: 1,
   workspace_path: null,
   prefix: "t/hint-1",

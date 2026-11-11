@@ -15,12 +15,14 @@
 
 #[cfg(unix)]
 mod control_dir;
+mod window_title;
 mod wire;
 #[cfg(unix)]
 pub use control_dir::{
     control_socket_fallback_dir_at, effective_uid, ensure_control_socket_dir,
     validate_control_socket_dir, validate_control_socket_node,
 };
+pub use window_title::captioned_window_title;
 pub use wire::{
     ControlRequest, ControlResponse, Identity, PaneOp, PaneSide, PastePrefer, ServeKind, SplitDir,
     SurveyReply, SurveySpec, TabDestination, TeamOp, TermWriteSubmit, TunnelSpecRequest,

@@ -69,6 +69,43 @@ export const TITLEBAR_TABS_PREFERENCE_EVENT = "titlebar-tabs-preference";
 /// retitle. Its payload is `{ title }`.
 export const TITLEBAR_WINDOW_TITLE_EVENT = "titlebar-window-title";
 
+/// How the bar's window title changes place when the window's first tab
+/// opens or its last one closes: "slide" moves it across the bar, "cut" puts
+/// it there at once. Reduced motion always cuts.
+export type WindowTitleMove = "slide" | "cut";
+export const WINDOW_TITLE_MOVE: WindowTitleMove = "slide";
+
+/// How long the title's slide takes, in ms.
+export const WINDOW_TITLE_SLIDE_MS = 200;
+
+/// A read of the naming fields behind the title's privacy form fails while
+/// the window has no live presence, as at boot. The bar reads again when the
+/// window's socket changes state, and this many more times this far apart.
+export const WINDOW_TITLE_READ_RETRIES = 5;
+export const WINDOW_TITLE_READ_RETRY_MS = 1000;
+
+/// What a title wider than its room does. All three show its head with an
+/// ellipsis at rest and the whole title as a tooltip: "hover" also rolls the
+/// text to its tail and back while the pointer is over it, "auto" rolls it
+/// all the time, and "off" never rolls. Reduced motion never rolls.
+export type WindowTitleRoll = "hover" | "auto" | "off";
+export const WINDOW_TITLE_ROLL: WindowTitleRoll = "hover";
+
+/// How fast a rolling title moves, in CSS px per second.
+export const WINDOW_TITLE_ROLL_PX_PER_S = 40;
+
+/// The width in CSS px of a strip tab named `Terminal-1`: the pill's 10 px
+/// padding at each end, its 14 px icon, the name at the strip's 13 px type
+/// (about 64 px), its close button (about 14 px) and the two 6 px gaps
+/// between them.
+export const WINDOW_TITLE_REFERENCE_TAB_PX = 124;
+
+/// The room the title keeps from the strip while the window has tabs: two
+/// reference tabs and the 2 px the strip keeps between tabs. The title shows
+/// whole while the tabs leave it the room and gives way to them down to this
+/// width; a title shorter than this keeps its own width.
+export const WINDOW_TITLE_RESERVE_PX = 2 * WINDOW_TITLE_REFERENCE_TAB_PX + 2;
+
 /// The bar's height in CSS px where no window controls set it, in a browser:
 /// room for the strip's tab pills, side toggle and pane menu.
 export const WINDOW_TAB_BAR_MIN_HEIGHT = 38;
@@ -112,9 +149,10 @@ export const NO_TITLEBAR_CHROME: TitlebarChrome = {
 /// `preferred` the desktop's preference; `chrome` what the desktop reports
 /// about the title bar (all zero off the desktop); `height` the bar's height
 /// in CSS px; `slot` the bar element the active pane's strip moves into, null
-/// while no bar is mounted; `title` the window's title the desktop last sent,
-/// which heads the pane tree and which the bar draws while the Computers
-/// launcher covers a window whose controls it draws, empty until then.
+/// while no bar is mounted; `titleSlot` the element of the strip in the bar
+/// that takes the window's title while the window has tabs, null while no
+/// strip shows there; `title` the window's title the desktop last sent, which
+/// the bar shows, empty until then.
 export const windowTabBar = $state<{
   on: boolean;
   available: boolean;
@@ -122,6 +160,7 @@ export const windowTabBar = $state<{
   chrome: TitlebarChrome;
   height: number;
   slot: HTMLElement | null;
+  titleSlot: HTMLElement | null;
   title: string;
 }>({
   on: false,
@@ -130,6 +169,7 @@ export const windowTabBar = $state<{
   chrome: NO_TITLEBAR_CHROME,
   height: WINDOW_TAB_BAR_MIN_HEIGHT,
   slot: null,
+  titleSlot: null,
   title: "",
 });
 
@@ -218,6 +258,15 @@ export function windowTabBarSlot(node: HTMLElement): () => void {
   windowTabBar.slot = node;
   return () => {
     if (windowTabBar.slot === node) windowTabBar.slot = null;
+  };
+}
+
+/// Attach to the element of the strip in the bar that takes the window's
+/// title.
+export function windowTabBarTitleSlot(node: HTMLElement): () => void {
+  windowTabBar.titleSlot = node;
+  return () => {
+    if (windowTabBar.titleSlot === node) windowTabBar.titleSlot = null;
   };
 }
 

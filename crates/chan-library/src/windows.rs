@@ -39,13 +39,6 @@ use crate::terminal_sessions::{
 };
 use crate::workspace_persist::save_atomic;
 
-/// House glyph (⌂) for a local workspace under `$HOME`, mirroring the launcher's
-/// lucide House icon. Titles are library-owned, so this is their single source.
-const ICON_LOCAL_HOME: &str = "\u{2302}"; // ⌂ house
-/// Monochrome desktop-computer glyph for a local workspace outside `$HOME`. The
-/// U+FE0E text-presentation selector keeps it line-art alongside ⌂ / ⊕.
-const ICON_LOCAL_OTHER: &str = "\u{1F5A5}\u{FE0E}"; // 🖥︎ desktop computer
-
 /// Maximum user-supplied text appended to a non-control window's generated
 /// `Terminal Window N` / `Window N` label. Counted in Unicode scalar values by
 /// the authoritative server; the launcher's HTML `maxlength` is an earlier
@@ -105,9 +98,12 @@ pub struct WindowRecord {
     /// Window flavour.
     pub kind: WindowKind,
     /// Library-composed and persisted display title, auto-derived (no user
-    /// rename). Local perspective (`⌂ Terminal Window N` /
-    /// `⌂ {path} Window N`); the desktop re-decorates a remote library's rows
-    /// from `kind`/`ordinal`/`workspace_path`, never by parsing this string.
+    /// rename): [`window_title`]'s machine-neutral `chan Window 1` or
+    /// `Terminal Window 2`, or a control row's own title (`Control Terminal`,
+    /// a tmux connection's). A client that names the window's machine puts
+    /// the machine ahead of it ([`window_title_on_machine`]), composing from
+    /// `kind`/`ordinal`/`workspace_path` and never by parsing this string,
+    /// since another release's library may send it in another form.
     pub title: String,
     /// Per-(kind, workspace/library) "Window N": library-owned, persisted,
     /// stable. On the wire so a client can recompose the title fully.
@@ -632,7 +628,7 @@ impl WindowRegistry {
             let mut windows = self.lock();
             let window_id = mint_id(&windows, &self.unreadable);
             let ordinal = next_ordinal(&windows, kind, workspace_path.as_deref());
-            let title = compose_title(kind, ordinal, workspace_path.as_deref());
+            let title = window_title(kind, ordinal, workspace_path.as_deref());
             let row = PersistedWindow {
                 window_id,
                 kind,
@@ -669,7 +665,7 @@ impl WindowRegistry {
         let row = PersistedWindow {
             window_id,
             kind: WindowKind::Terminal,
-            title: compose_title(WindowKind::Terminal, ordinal, None),
+            title: window_title(WindowKind::Terminal, ordinal, None),
             ordinal,
             label: String::new(),
             workspace_path: None,
@@ -794,7 +790,7 @@ impl WindowRegistry {
             let ordinal = next_ordinal(&windows, kind, workspace_path.as_deref());
             let title = title
                 .map(str::to_owned)
-                .unwrap_or_else(|| compose_title(kind, ordinal, workspace_path.as_deref()));
+                .unwrap_or_else(|| window_title(kind, ordinal, workspace_path.as_deref()));
             let row = PersistedWindow {
                 window_id,
                 kind,
@@ -866,7 +862,7 @@ impl WindowRegistry {
                     w.control = false;
                     w.tmux = None;
                     w.hidden = false;
-                    w.title = compose_title(w.kind, w.ordinal, w.workspace_path.as_deref());
+                    w.title = window_title(w.kind, w.ordinal, w.workspace_path.as_deref());
                     w.clone()
                 });
             (released, self.save_snapshot(&windows))
@@ -1287,27 +1283,54 @@ fn next_ordinal(
     }
 }
 
-/// Compose the persisted, library-perspective title: `⌂ Terminal Window N` for
-/// a terminal; `{icon} {full path} Window N` for a workspace, where the icon is
-/// the house glyph under `$HOME` else the local-other glyph. The remote
-/// decoration (a remote arrow plus the devserver name) is the desktop's job for
-/// a remote library's rows; the library always composes from its own local view.
-fn compose_title(kind: WindowKind, ordinal: u32, workspace_path: Option<&str>) -> String {
-    match kind {
-        WindowKind::Terminal => format!("{ICON_LOCAL_HOME} Terminal Window {ordinal}"),
-        WindowKind::Workspace => {
-            let path = workspace_path.unwrap_or_default();
-            let icon = local_workspace_icon(Path::new(path));
-            format!("{icon} {path} Window {ordinal}")
-        }
+/// The machine-neutral title of a window, from its naming fields:
+/// `{workspace} Window N` for a workspace window, where the workspace is its
+/// root's last path component, and `Terminal Window N` for a terminal; a
+/// workspace root with no last component to name reads `Window N`. The library
+/// persists it as the row's [`WindowRecord::title`], which `cs window list`
+/// prints with the caption after it, and chan-desktop builds a watched
+/// window's OS title from [`window_title_on_machine`], so that OS title ends
+/// with what `cs window list` prints for the window. Other names differ: the
+/// browser tab and the launcher's rows name a window by its ordinal and
+/// caption alone (`Window 1 [notes]`), a control row's title is its minting's
+/// (`Control Terminal`, where the desktop shows `Control Terminal - NAME`),
+/// and a devserver of another release lists its rows under titles in its
+/// own form. No machine and no glyph: a library cannot tell how the client
+/// that lists its rows names it.
+pub fn window_title(kind: WindowKind, ordinal: u32, workspace_path: Option<&str>) -> String {
+    match (kind, workspace_name(kind, workspace_path)) {
+        (_, Some(workspace)) => format!("{workspace} Window {ordinal}"),
+        (WindowKind::Terminal, None) => format!("Terminal Window {ordinal}"),
+        (WindowKind::Workspace, None) => format!("Window {ordinal}"),
     }
 }
 
-/// ⌂ when `path` is under `$HOME`, else 🖥︎ (a local workspace elsewhere).
-fn local_workspace_icon(path: &Path) -> &'static str {
-    match dirs::home_dir() {
-        Some(home) if path.starts_with(&home) => ICON_LOCAL_HOME,
-        _ => ICON_LOCAL_OTHER,
+/// [`window_title`] behind `machine`, the name of the machine that serves the
+/// window: `geekom / chan Window 1` for a workspace window, the workspace set
+/// off by ` / `, and `geekom Terminal Window 2` for a terminal. The client
+/// adds its own glyph ahead of the machine and the caption after.
+pub fn window_title_on_machine(
+    machine: &str,
+    kind: WindowKind,
+    ordinal: u32,
+    workspace_path: Option<&str>,
+) -> String {
+    let title = window_title(kind, ordinal, workspace_path);
+    match workspace_name(kind, workspace_path) {
+        Some(_) => format!("{machine} / {title}"),
+        None => format!("{machine} {title}"),
+    }
+}
+
+/// The workspace a workspace window names: its root's last path component,
+/// the short name both a local and a remote root read by. `None` for a
+/// terminal and for a root with no last component (`/`).
+fn workspace_name(kind: WindowKind, workspace_path: Option<&str>) -> Option<&str> {
+    match kind {
+        WindowKind::Terminal => None,
+        WindowKind::Workspace => workspace_path
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str()),
     }
 }
 
@@ -1335,6 +1358,12 @@ fn read_store(path: &Path) -> Option<Vec<u8>> {
 /// store path and its `window_id`, or its index when even that is unreadable,
 /// and returned beside the readable rows so a save can write it back. A store
 /// that is not a JSON array holds no row this build can keep.
+///
+/// Every readable plain row's title is composed again from its naming fields
+/// ([`window_title`]), so a title another build stored in another form never
+/// reaches the window set. A control or tmux-marked row keeps the title it
+/// carries, since its title is not composed from those fields; no save writes
+/// such a row, so only a store this build did not write holds one.
 fn read_window_rows(store_path: &Path, bytes: &[u8]) -> (Vec<PersistedWindow>, Vec<UnreadableRow>) {
     let rows: Vec<serde_json::Value> = match serde_json::from_slice(bytes) {
         Ok(rows) => rows,
@@ -1351,7 +1380,12 @@ fn read_window_rows(store_path: &Path, bytes: &[u8]) -> (Vec<PersistedWindow>, V
     let mut unreadable = Vec::new();
     for (index, value) in rows.into_iter().enumerate() {
         match PersistedWindow::deserialize(&value) {
-            Ok(row) => windows.push(row),
+            Ok(mut row) => {
+                if !row.control && row.tmux.is_none() {
+                    row.title = window_title(row.kind, row.ordinal, row.workspace_path.as_deref());
+                }
+                windows.push(row);
+            }
             Err(error) => {
                 let window_id = value
                     .get("window_id")
@@ -1632,7 +1666,7 @@ mod tests {
             window_id: "w-1a2b3c4d5e6f7081".into(),
             library_id: "local".into(),
             kind: WindowKind::Terminal,
-            title: "🏠 Terminal Window 1".into(),
+            title: "Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),
             workspace_path: None,
@@ -1655,7 +1689,7 @@ mod tests {
                 "window_id": "w-1a2b3c4d5e6f7081",
                 "library_id": "local",
                 "kind": "terminal",
-                "title": "🏠 Terminal Window 1",
+                "title": "Terminal Window 1",
                 "ordinal": 1,
                 "prefix": "/api/terminal",
                 "token": "tok_term",
@@ -1673,12 +1707,12 @@ mod tests {
     #[test]
     fn window_record_workspace_off_wire() {
         // Devserver library, workspace OFF (empty token), no client. `title`
-        // carries the library's OWN-perspective ⌂ (the desktop re-decorates).
+        // is the machine-neutral one; a client names the machine.
         let rec = WindowRecord {
             window_id: "w-99aa88bb77cc66dd".into(),
             library_id: "lib-0f1e2d3c4b5a6978".into(),
             kind: WindowKind::Workspace,
-            title: "🏠 /home/u/notes Window 2".into(),
+            title: "notes Window 2".into(),
             ordinal: 2,
             label: "release checks".into(),
             workspace_path: Some("/home/u/notes".into()),
@@ -1700,7 +1734,7 @@ mod tests {
                 "window_id": "w-99aa88bb77cc66dd",
                 "library_id": "lib-0f1e2d3c4b5a6978",
                 "kind": "workspace",
-                "title": "🏠 /home/u/notes Window 2",
+                "title": "notes Window 2",
                 "ordinal": 2,
                 "label": "release checks",
                 "workspace_path": "/home/u/notes",
@@ -1718,7 +1752,7 @@ mod tests {
             "window_id": "w-99aa88bb77cc66dd",
             "library_id": "lib-0f1e2d3c4b5a6978",
             "kind": "workspace",
-            "title": "🏠 /home/u/notes Window 2",
+            "title": "notes Window 2",
             "ordinal": 2,
             "workspace_path": "/home/u/notes",
             "prefix": "/api/notes-1a2b3c",
@@ -1741,7 +1775,7 @@ mod tests {
             "window_id": "w-1a2b3c4d5e6f7081",
             "library_id": "lib-0f1e2d3c4b5a6978",
             "kind": "terminal",
-            "title": "🏠 Terminal Window 1",
+            "title": "Terminal Window 1",
             "ordinal": 1,
             "prefix": "/api/terminal",
             "token": "tok_term",
@@ -1792,7 +1826,7 @@ mod tests {
                 window_id: "w-1a2b3c4d5e6f7081".into(),
                 library_id: "local".into(),
                 kind: WindowKind::Terminal,
-                title: "🏠 Terminal Window 1".into(),
+                title: "Terminal Window 1".into(),
                 ordinal: 1,
                 label: String::new(),
                 workspace_path: None,
@@ -2005,7 +2039,7 @@ mod tests {
         let mut rec = PersistedWindow {
             window_id: "w-b".into(),
             kind: WindowKind::Workspace,
-            title: "🏠 /n Window 1".into(),
+            title: "n Window 1".into(),
             ordinal: 1,
             label: String::new(),
             workspace_path: Some("/n".into()),
@@ -2040,7 +2074,7 @@ mod tests {
         let p = PersistedWindow {
             window_id: "w-deadbeefdeadbeef".into(),
             kind: WindowKind::Workspace,
-            title: "🏠 /n Window 1".into(),
+            title: "n Window 1".into(),
             ordinal: 1,
             label: String::new(),
             workspace_path: Some("/n".into()),
@@ -2057,7 +2091,7 @@ mod tests {
             json!({
                 "window_id": "w-deadbeefdeadbeef",
                 "kind": "workspace",
-                "title": "🏠 /n Window 1",
+                "title": "n Window 1",
                 "ordinal": 1,
                 "workspace_path": "/n",
             })
@@ -2073,7 +2107,7 @@ mod tests {
         let t = PersistedWindow {
             window_id: "w-0".into(),
             kind: WindowKind::Terminal,
-            title: "🏠 Terminal Window 1".into(),
+            title: "Terminal Window 1".into(),
             ordinal: 1,
             label: String::new(),
             workspace_path: None,
@@ -2086,7 +2120,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&t).unwrap(),
-            json!({ "window_id": "w-0", "kind": "terminal", "title": "🏠 Terminal Window 1", "ordinal": 1 })
+            json!({ "window_id": "w-0", "kind": "terminal", "title": "Terminal Window 1", "ordinal": 1 })
         );
         // A control row carries `control` + the foreign `library_id`; all of
         // control/library_id/hidden are skip-if-default so they appear ONLY when set.
@@ -2122,7 +2156,7 @@ mod tests {
         let h = PersistedWindow {
             window_id: "w-1".into(),
             kind: WindowKind::Terminal,
-            title: "🏠 Terminal Window 2".into(),
+            title: "Terminal Window 2".into(),
             ordinal: 2,
             label: String::new(),
             workspace_path: None,
@@ -2334,7 +2368,7 @@ mod tests {
             .expect("the control window is released");
         assert!(!released.control);
         assert!(released.tmux.is_none());
-        assert_eq!(released.title, "⌂ Terminal Window 1");
+        assert_eq!(released.title, "Terminal Window 1");
         assert!(
             !released.hidden,
             "the released window is shown, so the shell that drew again is in front"
@@ -2693,30 +2727,156 @@ mod tests {
     }
 
     #[test]
-    fn terminal_title_is_home_terminal_window_n() {
+    fn a_minted_window_is_titled_without_a_machine() {
         let (reg, _d) = registry();
         let t = reg.create(WindowKind::Terminal, None);
-        assert_eq!(t.title, "⌂ Terminal Window 1");
+        assert_eq!(t.title, "Terminal Window 1");
+        let w = reg.create(WindowKind::Workspace, Some("/home/u/src/chan".into()));
+        assert_eq!(w.title, "chan Window 1");
+        let throwaway = reg.create_throwaway_terminal();
+        assert_eq!(throwaway.title, "Terminal Window 2");
     }
 
     #[test]
-    fn workspace_title_icon_follows_home_prefix() {
-        // Under $HOME → ⌂; elsewhere → 🖥︎. Drive both via compose_title so the
-        // test does not depend on a real registry path.
-        let home = dirs::home_dir().expect("home dir");
-        let under_home = home.join("notes");
-        let title = compose_title(WindowKind::Workspace, 1, Some(under_home.to_str().unwrap()));
-        assert!(
-            title.starts_with(ICON_LOCAL_HOME),
-            "under-home → ⌂: {title}"
-        );
-        assert!(title.ends_with("Window 1"));
-
-        let elsewhere = compose_title(WindowKind::Workspace, 3, Some("/opt/elsewhere"));
+    fn a_window_title_names_the_workspace_folder_and_no_machine() {
         assert_eq!(
-            elsewhere,
-            format!("{ICON_LOCAL_OTHER} /opt/elsewhere Window 3")
+            window_title(WindowKind::Workspace, 1, Some("/home/u/src/chan")),
+            "chan Window 1"
         );
+        // Wherever on disk the root lives, and with a trailing slash.
+        assert_eq!(
+            window_title(WindowKind::Workspace, 2, Some("/tmp/scratch/")),
+            "scratch Window 2"
+        );
+        // A root with no last component to name, and a row with no root.
+        assert_eq!(
+            window_title(WindowKind::Workspace, 3, Some("/")),
+            "Window 3"
+        );
+        assert_eq!(window_title(WindowKind::Workspace, 1, None), "Window 1");
+        assert_eq!(
+            window_title(WindowKind::Terminal, 2, None),
+            "Terminal Window 2"
+        );
+        for title in [
+            window_title(WindowKind::Workspace, 1, Some("/home/u/src/chan")),
+            window_title(WindowKind::Terminal, 1, None),
+        ] {
+            assert!(!title.contains('/'), "no path: {title}");
+            assert!(title.is_ascii(), "no glyph: {title}");
+        }
+    }
+
+    #[test]
+    fn a_title_on_a_machine_ends_with_the_window_title() {
+        let cases = [
+            (
+                WindowKind::Workspace,
+                1,
+                Some("/home/u/src/chan"),
+                "geekom / chan Window 1",
+            ),
+            (WindowKind::Terminal, 2, None, "geekom Terminal Window 2"),
+            (WindowKind::Workspace, 4, None, "geekom Window 4"),
+        ];
+        for (kind, ordinal, path, expected) in cases {
+            let on_machine = window_title_on_machine("geekom", kind, ordinal, path);
+            assert_eq!(on_machine, expected);
+            assert!(on_machine.ends_with(&window_title(kind, ordinal, path)));
+        }
+    }
+
+    /// A store another build wrote holds titles in another form: each row
+    /// loads with the title its fields compose, and the next save writes that.
+    #[test]
+    fn a_stored_title_in_another_form_loads_recomposed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        let rows = json!([
+            {
+                "window_id": "w-term",
+                "kind": "terminal",
+                "title": "\u{2302} Terminal Window 1",
+                "ordinal": 1,
+            },
+            {
+                "window_id": "w-notes",
+                "kind": "workspace",
+                "title": "\u{1F5A5}\u{FE0E} /opt/notes Window 3",
+                "ordinal": 3,
+                "workspace_path": "/opt/notes",
+                "label": "release checks",
+            },
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&rows).expect("encode")).expect("write store");
+        let reg = WindowRegistry::open(path.clone());
+        let titles: Vec<(String, String, String)> = reg
+            .snapshot()
+            .into_iter()
+            .map(|w| (w.window_id, w.title, w.label))
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                ("w-term".into(), "Terminal Window 1".into(), String::new()),
+                (
+                    "w-notes".into(),
+                    "notes Window 3".into(),
+                    "release checks".into()
+                ),
+            ],
+            "the title is composed again and the caption kept apart"
+        );
+        reg.create(WindowKind::Terminal, None);
+        let stored = std::fs::read_to_string(&path).expect("read store");
+        assert!(!stored.contains("/opt/notes Window"), "{stored}");
+        assert!(!stored.contains('\u{2302}'), "{stored}");
+        assert!(stored.contains("\"notes Window 3\""), "{stored}");
+        assert!(stored.contains("\"Terminal Window 1\""), "{stored}");
+    }
+
+    /// No save writes a control or tmux-marked row, but a store this build
+    /// did not write may hold one: it keeps the title it carries, which no
+    /// naming field composes, rather than `Terminal Window 0`.
+    #[test]
+    fn a_stored_control_or_tmux_row_keeps_its_title() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        let rows = json!([
+            {
+                "window_id": "control-terminal-ds1",
+                "kind": "terminal",
+                "title": "Control Terminal",
+                "ordinal": 0,
+                "control": true,
+                "library_id": "lib-f81913a8ca0a6ff6",
+            },
+            {
+                "window_id": "w-tmux",
+                "kind": "terminal",
+                "title": "tmux -CC on this machine",
+                "ordinal": 1,
+                "tmux": { "connection": "term-1", "control": true },
+            },
+            {
+                "window_id": "w-plain",
+                "kind": "terminal",
+                "title": "\u{2302} Terminal Window 2",
+                "ordinal": 2,
+            },
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&rows).expect("encode")).expect("write store");
+        let reg = WindowRegistry::open(path);
+        let title = |id: &str| {
+            reg.snapshot()
+                .into_iter()
+                .find(|w| w.window_id == id)
+                .map(|w| w.title)
+                .expect("the row loads")
+        };
+        assert_eq!(title("control-terminal-ds1"), "Control Terminal");
+        assert_eq!(title("w-tmux"), "tmux -CC on this machine");
+        assert_eq!(title("w-plain"), "Terminal Window 2");
     }
 
     // --- persistence / assembly --------------------------------------------
@@ -2783,7 +2943,7 @@ mod tests {
         let readable = json!({
             "window_id": "w-readable",
             "kind": "terminal",
-            "title": "⌂ Terminal Window 1",
+            "title": "Terminal Window 1",
             "ordinal": 1,
         });
         let unknown = json!({
@@ -2841,13 +3001,13 @@ mod tests {
             {
                 "window_id": "w-readable",
                 "kind": "terminal",
-                "title": "⌂ Terminal Window 1",
+                "title": "Terminal Window 1",
                 "ordinal": 1,
             },
             {
                 "window_id": "w-tablet",
                 "kind": "terminal",
-                "title": "⌂ Terminal Window 2",
+                "title": "Terminal Window 2",
                 "ordinal": 2,
                 "origin": "tablet",
             },
@@ -3068,7 +3228,7 @@ mod tests {
         let p = PersistedWindow {
             window_id: "w-abc".into(),
             kind: WindowKind::Workspace,
-            title: "🏠 /n Window 1".into(),
+            title: "n Window 1".into(),
             ordinal: 1,
             label: "release checks".into(),
             workspace_path: Some("/n".into()),

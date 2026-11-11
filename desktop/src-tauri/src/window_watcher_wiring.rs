@@ -815,8 +815,8 @@ impl TauriNativeSurface {
                 return;
             };
             let state = app.state::<Arc<AppState>>();
-            // An explicit title override owns the titlebar outright; it is not
-            // ours to overwrite.
+            // A title override would own the titlebar outright and is not
+            // ours to overwrite; nothing writes one today.
             if state.window_title_override(&label).is_some() {
                 return;
             }
@@ -837,7 +837,8 @@ impl TauriNativeSurface {
                 .unwrap()
                 .insert(label.clone(), desired.clone());
             // Keep the server-visible title map in step, so `GET /api/windows`
-            // and `cs window list` report what the title bar shows.
+            // reports what the title bar shows (`cs window list` prints the
+            // library's records, not this map).
             if let Some(embedded) = state.embedded() {
                 embedded.window_titles().set(
                     &label,
