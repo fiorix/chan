@@ -25,3 +25,21 @@ The tree keeps its buckets disjoint on purpose: a window id repeated inside one 
 1. `machineTree` tests: a local `tmux -CC` connection's windows and control terminal land on This machine's card and a devserver run's on that devserver's card, with no id repeated inside any one card, and All windows unchanged.
 2. A mounted launcher test of the card's rows, the buried control terminal's note included.
 3. On chan-desktop (owner): a `tmux -CC` window on this machine and one on a devserver each show on their machine's card.
+
+## Owner ruling, 2026-11-11
+
+Alex, on 2026-11-10, after reading this item: "i dont want all tmux windows on the source machine's card, just the control terminal that got buried; that is because each tmux -CC have their own card in the computers screen; i think from the source machine's card, we should have the button to detach on the buried terminal, while in the specific tmux -CC card we have the detach on the card title, the session - which is fine".
+
+The ruling supersedes contract 1 and settles contract 3:
+
+1. Each `tmux -CC` connection keeps its own card, which lists its windows and keeps the detach control on the card's title (the session), as today.
+2. The card of the machine where the connection runs (This machine for a local run, the devserver's card for a run on a devserver) lists only the connection's buried control terminal, marked as hidden as the connection's own card marks it, with a detach button on that row that detaches the connection. The connection's other windows do not move there.
+3. The control terminal is therefore the one window listed on two cards beside All windows (the connection's and its machine's); every other window stays on the connection's card alone, and no keyed list repeats an id within itself.
+4. Contracts 2 (All windows unchanged) and 4 (privacy mode) and the boundaries stand. A connection whose machine is not known stays on its own card alone.
+
+The acceptance checks, restated:
+
+1. `machineTree` tests: a local `tmux -CC` connection's control terminal lands on This machine's card and a devserver run's on that devserver's card, marked as the connection's control terminal; the connection's windows stay on the connection's card alone; no id is repeated inside any one card; All windows is unchanged.
+2. A mounted launcher test of the machine card's control terminal row: the buried note and the detach button, whose action is the connection's detach.
+3. A browser check in an isolated guest, beside check 195 (which runs a `tmux -CC` connection against a devserver and reads the launcher): the control terminal row shows on the machine's card with its detach button, the connection's windows do not, and detaching from that row ends the connection as the card title's detach does.
+4. On chan-desktop on macOS (owner, batched with the milestone's other Mac checks): a `tmux -CC` window on this machine and one on a devserver each show their buried control terminal on their machine's card with a detach button, and the connection's card reads as before.

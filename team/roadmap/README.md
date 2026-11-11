@@ -47,6 +47,8 @@ The owner then closed v0.127.0 to new work ("just close off the current in-fligh
 
 The owner added one more on 2026-11-11, after reading v0.127.0's centered Metrics slide on his Mac: the Dashboard's About, Workspace and Search slides sit in the middle of a large tab as the Metrics slide does, where today they start at its top ([dashslides]).
 
+Two more came from the owner on 2026-11-11, at the start of the release's round: `make clean` leaves `.build-tools/` and a stale `gateway/node_modules` behind ([makeclean]); and the basic flows (an image pasted or dropped into the Rich Prompt or the editor, typing and saving, a terminal's input and paste, opening a file, the search, the panes) have no end-to-end check that would have caught v0.127.0's lost image paste on WebKit, so an audit lists them and each gap gets a Chrome check and a WebKit check ([basicflows]). The same day he ruled on the tmux card row: a connection keeps its own card with the detach on its title, and the card of the machine it runs on lists only its buried control terminal, with a detach button on that row ([tmuxcard]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -60,7 +62,7 @@ The owner added one more on 2026-11-11, after reading v0.127.0's centered Metric
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | not started | design |
 | [tests still red under the heaviest load][loadres] | not started | design |
-| [tmux windows not on their machine card][tmuxcard] | not started | design |
+| [tmux windows not on their machine card][tmuxcard] | not started | build |
 | [New Window in a devserver tmux window][tmuxnew] | not started | design |
 | [a launch beside a silent desktop shows nothing][silentlaunch] | not started | design |
 | [the Windows handoff pipe's early clients][winpipe] | not started | measure |
@@ -70,6 +72,8 @@ The owner added one more on 2026-11-11, after reading v0.127.0's centered Metric
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
 | [other Dashboard slides sit at the top][dashslides] | not started | build |
+| [make clean leaves the build tools behind][makeclean] | not started | build |
+| [basic flows have no end-to-end check][basicflows] | not started | audit |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -92,6 +96,8 @@ The owner added one more on 2026-11-11, after reading v0.127.0's centered Metric
 [tmuxmove]: v0.128.0/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md
 [leftovers]: v0.128.0/small-findings-of-the-v0127-second-reading-are-still-open.md
 [dashslides]: v0.128.0/the-dashboards-about-workspace-and-search-slides-sit-at-the-top-of-a-large-tab.md
+[makeclean]: v0.128.0/make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind.md
+[basicflows]: v0.128.0/basic-flows-break-with-no-end-to-end-check-to-catch-them.md
 [reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
 [tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 
