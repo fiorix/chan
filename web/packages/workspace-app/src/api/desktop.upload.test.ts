@@ -7,7 +7,8 @@
 // Its transfer row begins while the native picker is still open, before the
 // page knows any file. The row waits for the selection, then names what was
 // picked from the desktop's status, the file's name for one file and the
-// count for several, and never reads as a verb before a sentence.
+// count for several, and never reads as a verb before a sentence. A picker
+// closed without a choice leaves no row, as a browser picker's does.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -88,12 +89,14 @@ describe("a desktop upload's transfer row", () => {
 
   /// A desktop whose picker is open: no selection in its status, and an
   /// upload that stays unsettled until the test ends it. `pick` is the
-  /// desktop validating a selection, `finish` and `fail` end the upload, and
-  /// a native cancel refuses it, as the desktop does. `holdStatus` leaves
-  /// the status polls asked from then on unanswered until the test answers.
+  /// desktop validating a selection, `finish` and `fail` end the upload,
+  /// `refuse` ends it with the value a desktop's refusal carries over IPC (a
+  /// bare reason, or a named failure), and a native cancel refuses it, as the
+  /// desktop does. `holdStatus` leaves the status polls asked from then on
+  /// unanswered until the test answers.
   function desktop() {
     let status: Status | null = { loaded: 0, total: null };
-    let settle: { resolve: (files: unknown) => void; reject: (error: Error) => void } | null = null;
+    let settle: { resolve: (files: unknown) => void; reject: (error: unknown) => void } | null = null;
     let held: ((status: Status | null) => void)[] | null = null;
     const invoke = vi.fn(async (cmd: string) => {
       if (cmd === "native_transfer_status") {
@@ -113,6 +116,7 @@ describe("a desktop upload's transfer row", () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { value: { invoke }, configurable: true });
     const started = (): Promise<void> => eventually(() => expect(settle).not.toBeNull());
     return {
+      invoke,
       pick(next: Status): void {
         status = next;
       },
@@ -125,6 +129,11 @@ describe("a desktop upload's transfer row", () => {
         await started();
         status = null;
         settle!.reject(new Error(message));
+      },
+      async refuse(refusal: unknown): Promise<void> {
+        await started();
+        status = null;
+        settle!.reject(refusal);
       },
       holdStatus(): { asked: () => number; answer: (late: Status) => void } {
         const polls: ((status: Status | null) => void)[] = [];
@@ -211,18 +220,73 @@ describe("a desktop upload's transfer row", () => {
     await expect(upload).rejects.toThrow("disk full");
   });
 
-  test("a cancel while the picker is open, and a dismissed picker, read as a cancelled upload", async () => {
-    const native = desktop();
+  test("a cancel while the picker is open reads as a cancelled upload", async () => {
+    desktop();
     const cancelled = runDesktopUpload({ dir: "dev", multiple: true }, null);
     await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
     transfers.items[0]!.cancel!();
-    await expect(cancelled).rejects.toThrow("upload cancelled");
+    await expect(cancelled).rejects.toMatchObject({ name: "AbortError", message: "upload cancelled" });
     expect(lines()).toEqual(["Cancelled upload"]);
+  });
 
+  test("a picker closed without a choice leaves no row", async () => {
+    const native = desktop();
     const dismissed = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+
     await native.finish([]);
     await expect(dismissed).resolves.toEqual([]);
-    expect(lines()).toEqual(["Cancelled upload", "Cancelled upload"]);
+    expect(lines()).toEqual([]);
+    expect(transfers.items, "no record either, so a reload restores none").toEqual([]);
+  });
+
+  test("the page asks the desktop for a named failure", async () => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+
+    await native.finish([{ path: "dev/report.pdf", size: 9 }]);
+    await upload;
+    expect(native.invoke).toHaveBeenCalledWith(
+      "upload_files_native",
+      expect.objectContaining({ namedFailure: true }),
+    );
+  });
+
+  // The pick and the failure land between two status polls, so no poll read
+  // the selection: only the failure can name the row.
+  test.each([
+    ["one file", { name: "report.pdf", count: 1 }, "Failed report.pdf: HTTP 409 Conflict"],
+    ["several files", { name: "a.md", count: 3 }, "Failed 3 files: HTTP 409 Conflict"],
+    ["no selection yet", undefined, "Failed upload: HTTP 409 Conflict"],
+    ["a selection of another shape", { name: "a.md", count: 0 }, "Failed upload: HTTP 409 Conflict"],
+  ])("a failure before any status named the row names it from the failure: %s", async (_case, picked, line) => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+
+    await native.refuse({ message: "HTTP 409 Conflict", picked });
+    await expect(upload).rejects.toThrow(new Error("HTTP 409 Conflict"));
+    expect(lines()).toEqual([line]);
+  });
+
+  test("a desktop that answers the bare reason leaves the row unnamed", async () => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+
+    await native.refuse("HTTP 409 Conflict");
+    await expect(upload).rejects.toThrow(new Error("HTTP 409 Conflict"));
+    expect(lines()).toEqual(["Failed upload: HTTP 409 Conflict"]);
+  });
+
+  test("a named failure that is a cancel reads as a cancel", async () => {
+    const native = desktop();
+    const upload = runDesktopUpload({ dir: "dev", multiple: true }, null);
+    await eventually(() => expect(lines()).toEqual(["Waiting for file selection"]));
+
+    await native.refuse({ message: "upload cancelled", picked: { name: "report.pdf", count: 1 } });
+    await expect(upload).rejects.toMatchObject({ name: "AbortError", message: "upload cancelled" });
+    expect(lines()).toEqual(["Cancelled report.pdf"]);
   });
 
   test("a cancel and a failure after the pick name the picked file", async () => {

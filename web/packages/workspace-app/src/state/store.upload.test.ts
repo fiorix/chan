@@ -310,6 +310,48 @@ describe("an upload lists its destination once, when it ends", () => {
       await vi.waitFor(() => expect(ui.status).toBe("Replaced 'docs/b.md'"));
       expect(transfers.items.map((t) => [t.filename, t.state])).toEqual([["b.md", "done"]]);
     });
+
+    const pickers = [
+      ["an upload", () => raiseUploadPicker("docs")],
+      ["a replace", () => raiseReplacePicker("docs/b.md")],
+    ] as const;
+    // A desktop that predates named failures refuses with the bare reason;
+    // one asked for a named failure refuses a cancel as one too.
+    const cancels = [
+      ["the bare reason", "upload cancelled"],
+      ["a named failure", { message: "upload cancelled", picked: { name: "n0.bin", count: 1 } }],
+    ] as const;
+
+    test.each(
+      pickers.flatMap(([picker, raise]) => cancels.map(([shape, refusal]) => [picker, shape, raise, refusal] as const)),
+    )("%s picker's cancel reads as a browser upload's, refused as %s", async (_picker, _shape, raise, refusal) => {
+      nativeUpload(() => Promise.reject(refusal));
+
+      raise();
+      await vi.waitFor(() => expect(ui.status).toBe("Upload cancelled"));
+      expect(ui.statusKind, "no failure line").toBe("transient");
+      expect(transfers.items.map((t) => t.state)).toEqual(["cancelled"]);
+    });
+
+    test.each(pickers)("%s picker closed without a choice leaves no row and no status line", async (_picker, raise) => {
+      const answers = heldNativeUploads();
+
+      raise();
+      await vi.waitFor(() => expect(answers).toHaveLength(1));
+      expect(transfers.items, "the row shows while the picker is open").toHaveLength(1);
+      answers[0]!([]);
+      await vi.waitFor(() => expect(transfers.items).toEqual([]));
+      expect(ui.status).toBeNull();
+    });
+
+    test("a named native failure keeps its failure line, by its reason, and names the row", async () => {
+      nativeUpload(() => Promise.reject({ message: "HTTP 409 Conflict", picked: { name: "n0.bin", count: 1 } }));
+
+      raiseUploadPicker("docs");
+      await vi.waitFor(() => expect(ui.status).toBe("upload failed: HTTP 409 Conflict"));
+      expect(ui.statusKind).toBe("persistent");
+      expect(transfers.items.map((t) => [t.filename, t.state])).toEqual([["n0.bin", "failed"]]);
+    });
   });
 });
 

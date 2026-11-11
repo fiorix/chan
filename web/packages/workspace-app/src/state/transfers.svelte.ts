@@ -439,7 +439,9 @@ export function failTransfer(
   emitSignal();
 }
 
-/// Remove a terminal transfer row (the bubble's per-row dismiss).
+/// Remove a transfer row: a terminal one by the bubble's per-row dismiss, or a
+/// desktop upload's whose picker closed without a choice, which transferred
+/// nothing.
 export function dismissTransfer(id: string): void {
   const i = transfers.items.findIndex((t) => t.id === id);
   if (i < 0) return;
