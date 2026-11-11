@@ -578,6 +578,70 @@ describe("the Linux desktop PRIMARY selection", () => {
     await nextTask();
     expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: PATH }]]);
   });
+  /// A right click as the engine dispatches it, at a cell of the terminal.
+  function rightClick(on: Element): MouseEvent {
+    const event = new MouseEvent("contextmenu", { button: 2, bubbles: true, cancelable: true, clientX: 25, clientY: 17 });
+    on.dispatchEvent(event);
+    return event;
+  }
+
+  test("a right click on ghostty opens chan's menu before ghostty-web selects its textarea", async () => {
+    const invoke = desktop();
+    const { term } = await renderGhostty(PATH_COMMAND);
+    drag(term, { col: 0, row: 0 }, { col: PATH_COMMAND.length - 81, row: 1 });
+    await tick();
+    invoke.mockClear();
+    const select = vi.spyOn(HTMLTextAreaElement.prototype, "select");
+    const range = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+    const event = rightClick(term.canvas);
+    await tick();
+    await tick();
+    expect(select, "a selected textarea is what WebKitGTK copies into PRIMARY").not.toHaveBeenCalled();
+    expect(range).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    menuRow("Copy").click();
+    await tick();
+    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: PATH_COMMAND }]]);
+  });
+
+  test("a right click on xterm opens chan's menu before xterm.js selects its textarea", async () => {
+    const invoke = desktop();
+    const term = await renderXterm();
+    // xterm.js's own right-click handler on its element, which the stand-in
+    // has none of: the selection goes into its textarea, selected, for a
+    // browser menu's Copy.
+    const widget = document.createElement("div");
+    const textarea = document.createElement("textarea");
+    term.element!.append(widget, textarea);
+    widget.addEventListener("contextmenu", () => {
+      textarea.value = term.getSelection();
+      textarea.select();
+    });
+    term.changeSelection(COMMAND);
+    invoke.mockClear();
+    const select = vi.spyOn(HTMLTextAreaElement.prototype, "select");
+    const event = rightClick(widget);
+    await tick();
+    await tick();
+    expect(select, "a selected textarea is what WebKitGTK copies into PRIMARY").not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    menuRow("Copy").click();
+    await tick();
+    expect(invoke.mock.calls).toEqual([["write_clipboard_text", { text: COMMAND }]]);
+  });
+
+  test("in a browser ghostty-web's right click still selects its textarea under chan's menu", async () => {
+    const { term } = await renderGhostty(PATH_COMMAND);
+    drag(term, { col: 0, row: 0 }, { col: PATH_COMMAND.length - 81, row: 1 });
+    await tick();
+    const select = vi.spyOn(HTMLTextAreaElement.prototype, "select");
+    const event = rightClick(term.canvas);
+    await tick();
+    await tick();
+    expect(select).toHaveBeenCalledOnce();
+    expect(event.defaultPrevented).toBe(true);
+    expect(menuRow("Copy")).toBeTruthy();
+  });
 
   test("an xterm drag that ends on its previous selection writes PRIMARY again", async () => {
     const invoke = desktop();
@@ -664,6 +728,10 @@ describe("the Linux desktop PRIMARY selection", () => {
     invoke.mockClear();
     expect(middle(host).defaultPrevented).toBe(false);
     expect(invoke).not.toHaveBeenCalled();
+    const reached = vi.fn();
+    host.addEventListener("contextmenu", reached);
+    rightClick(host);
+    expect(reached, "a right click reaches the host's own listeners again").toHaveBeenCalledOnce();
   });
 
   test.each([null, ""])("an absent or empty PRIMARY does not paste (%s)", async (text) => {

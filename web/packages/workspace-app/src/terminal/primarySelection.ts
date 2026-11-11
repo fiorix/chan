@@ -10,11 +10,14 @@ export function isPrimarySelectionDesktop(): boolean {
 
 /// Mouse-only PRIMARY integration. Ghostty's selection writer handles its
 /// automatic copies; xterm announces selection changes on document mouseup.
-/// Capture owns the middle button before the renderer or WebKit can paste it.
+/// Capture owns the middle button before the renderer or WebKit can paste
+/// it, and the right click before either widget can select its textarea;
+/// `openMenu` opens chan's terminal menu for that click.
 export function installTerminalPrimarySelection(
   host: HTMLElement,
   term: XtermTerminal | GhosttyTerminal,
   backend: "xterm" | "ghostty",
+  openMenu: (event: MouseEvent) => void,
 ): (() => void) | null {
   if (!isPrimarySelectionDesktop()) return null;
   let alive = true;
@@ -80,10 +83,20 @@ export function installTerminalPrimarySelection(
       else term.paste(text);
     });
   };
+  // Both widgets answer a right click by putting the selection in their
+  // textarea and selecting it there, for a browser menu's Copy, and
+  // WebKitGTK copies that selection into PRIMARY with line breaks as
+  // spaces and runs of spaces collapsed. chan's menu copies the terminal's
+  // own selection, so the click goes to it before the widgets see it.
+  const onContextMenu = (event: MouseEvent): void => {
+    event.stopImmediatePropagation();
+    openMenu(event);
+  };
   host.addEventListener("mousedown", onDown, true);
   host.addEventListener("mouseup", onUp, true);
   host.addEventListener("auxclick", onMiddle, true);
   if (backend === "xterm") host.addEventListener("mousemove", onMove, true);
+  host.addEventListener("contextmenu", onContextMenu, true);
   host.ownerDocument.addEventListener("mouseup", onRelease);
   return () => {
     alive = false;
@@ -92,6 +105,7 @@ export function installTerminalPrimarySelection(
     host.removeEventListener("mouseup", onUp, true);
     host.removeEventListener("auxclick", onMiddle, true);
     host.removeEventListener("mousemove", onMove, true);
+    host.removeEventListener("contextmenu", onContextMenu, true);
     host.ownerDocument.removeEventListener("mouseup", onRelease);
   };
 }
