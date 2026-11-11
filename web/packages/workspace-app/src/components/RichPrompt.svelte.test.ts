@@ -59,6 +59,7 @@ vi.mock("../api/client", async (importOriginal) => {
 import App from "../App.svelte";
 import RichPrompt from "./RichPrompt.svelte";
 import { draftPath } from "../__tests__/drafts";
+import { dispatchTrusted } from "../__tests__/trustedEvent";
 import { api } from "../api/client";
 import * as desktop from "../api/desktop";
 import { ApiError } from "../api/errors";
@@ -406,7 +407,14 @@ describe("the keymap", () => {
 });
 
 describe("a submit", () => {
-  test.each(["standalone", "workspace"])("renders a native clipboard image and submits its bare absolute path (%s)", async (kind) => {
+  // WKWebView's shape (Files with nothing exposed) and WebKitGTK's (a trusted
+  // paste with nothing at all) both reach the desktop's clipboard read.
+  test.each([
+    ["standalone", "files"],
+    ["workspace", "files"],
+    ["standalone", "empty"],
+    ["workspace", "empty"],
+  ])("renders a native clipboard image and submits its bare absolute path (%s, %s shape)", async (kind, shape) => {
     workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
     const path = kind === "workspace" ? draftPath("rp") : ".Drafts/rp/draft.md";
     const imagePath = kind === "workspace" ? draftPath("rp", "pasted-image.png") : ".Drafts/rp/pasted-image.png";
@@ -420,10 +428,12 @@ describe("a submit", () => {
     const { target, view, content } = await composer(makeTab({ richPromptDraftPath: path }));
     const event = new Event("paste", { bubbles: true, cancelable: true });
     Object.defineProperty(event, "clipboardData", {
-      value: { types: ["Files"], items: [], files: [], getData: () => "" },
+      value: { types: shape === "files" ? ["Files"] : [], items: [], files: [], getData: () => "" },
     });
     // WebKit targets the BR in an empty composer for this clipboard shape.
-    (content.querySelector("br") ?? content).dispatchEvent(event);
+    const pasteTarget = content.querySelector("br") ?? content;
+    if (shape === "empty") dispatchTrusted(pasteTarget, event);
+    else pasteTarget.dispatchEvent(event);
 
     await vi.waitFor(() => expect(view.state.doc.toString()).toBe("![](./pasted-image.png#w=250)\n"));
     await vi.waitFor(() => expect(target.querySelector(".cm-md-image-wrap img")).not.toBeNull());

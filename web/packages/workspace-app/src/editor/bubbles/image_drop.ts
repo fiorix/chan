@@ -131,30 +131,41 @@ export function imageDropHandlers(opts: ImageDropOptions): Extension {
         const f = item.getAsFile();
         if (f && isHeicFile(f)) images.push(f);
       }
-      // WKWebView can advertise Files while exposing neither items nor files.
-      // Only recover that shape natively; text and accessible files keep their
-      // normal paste behavior, without a second read of the OS clipboard.
-      const types = Array.from(clipboard.types ?? []);
-      const nativePaste = images.length === 0
-        && types.includes("Files")
-        && !types.some((type) => type.startsWith("text/"))
-        && !clipboard.items?.length
-        && !clipboard.files?.length
-        && isTauriDesktop();
-      if (images.length === 0 && !nativePaste) return false;
+      const shape = images.length === 0 && isTauriDesktop() ? nativePasteShape(event, clipboard) : null;
+      if (images.length === 0 && shape === null) return false;
       event.preventDefault();
       const pos = pasteInsertPos(view);
-      uploadAndInsertAll(view, nativePaste ? readNativePasteImages : images, pos, resolveInsertCtx(opts));
+      uploadAndInsertAll(view, shape ? () => readNativePasteImages(shape) : images, pos, resolveInsertCtx(opts));
       return true;
     },
   });
 }
 
-async function readNativePasteImages(): Promise<File[]> {
+/// How an engine hands the page a desktop image paste that carries no file the
+/// page can read, so the desktop reads the clipboard image instead. WKWebView
+/// advertises `Files` and exposes neither items nor files (`"files"`). WebKitGTK
+/// hands a trusted paste with no types, items or files at all (`"empty"`), which
+/// is also what it hands for a clipboard holding nothing it can expose. Anything
+/// else is null and keeps its normal paste behavior without a second read of the
+/// OS clipboard: text, an accessible file, and a paste a script dispatched,
+/// which is never trusted.
+export function nativePasteShape(
+  event: Pick<ClipboardEvent, "isTrusted">,
+  clipboard: Pick<DataTransfer, "types" | "items" | "files">,
+): "files" | "empty" | null {
+  if (clipboard.items?.length || clipboard.files?.length) return null;
+  const types = Array.from(clipboard.types ?? []);
+  if (types.includes("Files") && !types.some((type) => type.startsWith("text/"))) return "files";
+  if (types.length === 0 && event.isTrusted) return "empty";
+  return null;
+}
+
+async function readNativePasteImages(shape: "files" | "empty"): Promise<File[]> {
   try {
     const bytes = await readClipboardImage();
     if (!bytes?.length) {
-      notify("No image found on the clipboard");
+      // The empty shape is also an empty clipboard pasted, which says nothing.
+      if (shape === "files") notify("No image found on the clipboard");
       return [];
     }
     return [new File([new Uint8Array(bytes)], "pasted-image.png", { type: "image/png" })];
