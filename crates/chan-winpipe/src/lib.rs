@@ -325,6 +325,23 @@ mod tests {
             );
         }
 
+        /// A pipe's descriptor is its first instance's: an instance created
+        /// later with the default descriptor, and reached by a client of its
+        /// own, still grants this account alone.
+        #[tokio::test]
+        async fn a_later_instance_keeps_the_first_instances_descriptor() {
+            let name = test_pipe("later-instance");
+            let _first =
+                create_owner_only(ServerOptions::new().first_pipe_instance(true), &name).unwrap();
+            let _on_first = ClientOptions::new().open(&name).unwrap();
+            let _later = ServerOptions::new().create(&name).unwrap();
+            let on_later = ClientOptions::new().open(&name).unwrap();
+            assert_owner_only(
+                &security_sddl(&on_later).unwrap(),
+                current_account_sid().unwrap(),
+            );
+        }
+
         /// The answers callers read: a second first instance of this
         /// account's pipe of one instance meets pipe busy, and a pipe whose
         /// security grants this account nothing refuses it an instance, a

@@ -12,8 +12,9 @@
 //! without knowing its pid. On unix, same-user is enforced by the socket
 //! living in a per-user runtime dir with 0600 perms and owned by the
 //! user; on Windows, the pipe's name carries the account's SID, so each
-//! account has an endpoint of its own, and the pipe keeps the default
-//! named-pipe ACL, matching control_socket.
+//! account has an endpoint of its own, and the endpoint's pipe and its claim
+//! pipe grant that account alone, where the default named-pipe ACL would also
+//! grant LocalSystem and Administrators.
 //!
 //! INVARIANT: exactly one process owns a workspace's writes (the
 //! chan-workspace per-workspace flock). In a successful handoff the DESKTOP
@@ -785,16 +786,19 @@ pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError
 }
 
 /// Create the claim pipe of the endpoint at `socket_path`: the first, and
-/// only, instance of `<endpoint>.claim`, inbound, which nothing reads.
+/// only, instance of `<endpoint>.claim`, inbound, which nothing reads, and
+/// which grants this account alone.
 #[cfg(windows)]
 fn create_claim_pipe(
     socket_path: &Path,
 ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-    tokio::net::windows::named_pipe::ServerOptions::new()
-        .first_pipe_instance(true)
-        .access_outbound(false)
-        .max_instances(1)
-        .create(claim_pipe_name(socket_path))
+    chan_winpipe::create_owner_only(
+        tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .access_outbound(false)
+            .max_instances(1),
+        claim_pipe_name(socket_path),
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1172,7 +1176,8 @@ where
 /// The pipe is created here, not by the claim: until the listener starts,
 /// a client meets no pipe and answers at once, and nothing a client writes
 /// waits in an instance to be served after it gave up. The first instance
-/// refuses a name another process already serves.
+/// refuses a name another process already serves, and every instance grants
+/// this account alone.
 #[cfg(windows)]
 pub fn start_claimed_listener<F, Fut>(
     claim: EndpointClaim,
@@ -1183,7 +1188,10 @@ where
     Fut: std::future::Future<Output = Response> + Send + 'static,
 {
     start_listener_with_instances(claim, handler, |pipe_name| {
-        tokio::net::windows::named_pipe::ServerOptions::new().create(pipe_name)
+        chan_winpipe::create_owner_only(
+            &tokio::net::windows::named_pipe::ServerOptions::new(),
+            pipe_name,
+        )
     })
 }
 
@@ -1204,9 +1212,10 @@ where
 {
     use tokio::net::windows::named_pipe::ServerOptions;
 
-    let first = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(claim.socket_path.as_os_str());
+    let first = chan_winpipe::create_owner_only(
+        ServerOptions::new().first_pipe_instance(true),
+        claim.socket_path.as_os_str(),
+    );
     let mut next = match first {
         Ok(first) => first,
         Err(error) => return Err(ListenerStartError { claim, error }),
@@ -4349,6 +4358,49 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(claim_endpoint_at(&pipe).is_ok());
+    }
+
+    /// The claim pipe and the endpoint's pipe grant this account alone: owned
+    /// by its SID, with a protected DACL whose one entry is that SID, read
+    /// back from the claim's own end and from two clients of the listener, the
+    /// second reaching the instance armed after the first.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_claim_and_the_endpoint_grant_this_account_alone() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        const ERROR_PIPE_BUSY: i32 = 231;
+        let sid = chan_winpipe::current_account_sid().unwrap();
+        let owner_only = |sddl: String| {
+            assert!(
+                [
+                    format!("O:{sid}D:P(A;;FA;;;{sid})"),
+                    format!("O:{sid}D:P(A;;GA;;;{sid})"),
+                ]
+                .contains(&sddl),
+                "{sddl}"
+            )
+        };
+        let pipe = test_pipe("owner-only");
+        let claim = claim_endpoint_at(&pipe).unwrap();
+        owner_only(chan_winpipe::security_sddl(&claim.claim_pipe).unwrap());
+        let _handle = start_claimed_listener(claim, |_req| async { opened() }).unwrap();
+        for _ in 0..2 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let client = loop {
+                match ClientOptions::new().open(&pipe) {
+                    Ok(client) => break client,
+                    Err(e)
+                        if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await
+                    }
+                    Err(e) => panic!("open the endpoint: {e}"),
+                }
+            };
+            owner_only(chan_winpipe::security_sddl(&client).unwrap());
+        }
     }
 
     /// A desktop of the previous release claims by the endpoint pipe's first
