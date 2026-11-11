@@ -11868,6 +11868,15 @@ mod tests {
 
         #[test]
         fn a_close_reports_retry_until_its_held_workspace_releases() {
+            held_workspace_reports_retry_within_the_cli_budget(false);
+        }
+
+        #[test]
+        fn a_forget_reports_retry_until_its_held_workspace_releases() {
+            held_workspace_reports_retry_within_the_cli_budget(true);
+        }
+
+        fn held_workspace_reports_retry_within_the_cli_budget(remove: bool) {
             let (runtime, desktop) = HungRootDesktop::new();
             let app = tauri::test::mock_app();
             let host = desktop.state.embedded().expect("embedded").host_for_tests();
@@ -11884,22 +11893,20 @@ mod tests {
             let (outcome, took, pace) = timed_against_the_pace(runtime.handle(), || {
                 stall.finishes_beside("closing a held workspace", HEALTHY_ROOT_BOUND, move || {
                     handle.block_on(close_workspace_from_handoff(
-                        app_handle, state, other, false,
+                        app_handle, state, other, remove,
                     ))
                 })
             });
             assert_eq!(
                 outcome,
                 Err(format!(
-                    "closing {}: {}",
+                    "{} {}: {}",
+                    if remove { "removing" } else { "closing" },
                     desktop.other.display(),
                     chan_server::WORKSPACE_STILL_RELEASING
                 ))
             );
-            eprintln!(
-                "the held close: took {took:?}; CLI budget {:?}; pace {pace:?}",
-                cli_reply_bound()
-            );
+            assert_within_reply_budget("the held close or forget", took, cli_reply_bound(), pace);
             assert!(host.answer_root_still_releasing(&desktop.other));
             assert!(
                 desktop.on_paths().is_empty(),
