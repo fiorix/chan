@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "OAuth2 sign-in + session for the gateway identity origin gw.<domain>. Calls profile-service over HTTP."
 
+[features]
+test-util = []
+
 [[bin]]
 name = "identity-service"
 path = "src/main.rs"
@@ -53,6 +56,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+identity = { path = ".", features = ["test-util"] }
 serde_json = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"

@@ -1435,6 +1435,7 @@ dependencies = [
  "chrono",
  "devserver-control-proto",
  "gateway-common",
+ "identity",
  "ipnet",
  "mime_guess",
  "oauth2",

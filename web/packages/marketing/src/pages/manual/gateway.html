@@ -261,6 +261,7 @@ chan devserver start --port 8787 \
     <li>Press <code>g</code> to flip back to Computers. <code>build-host</code> is there, marked as reached via your gateway. Connect it like any devserver; its windows open as native windows.</li>
   </ol>
   <p>No connect script and no control terminal are involved: the gateway carries the connection. Tools that need your desktop, such as <code>cs tunnel</code>, work through it too.</p>
+  <p>The desktop gives back a sign-in token it cannot keep, including after a cancelled sign-in. Once the gateway revokes that token, closing the desktop connection cannot cancel the remaining cleanup. If the token was already used, that cleanup requests disconnection of the owner's tunnels and gateway sessions; an unused token needs only revocation.</p>
 </section>
 
 <section class="manual-block" id="share">

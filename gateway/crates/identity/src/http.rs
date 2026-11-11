@@ -1343,7 +1343,8 @@ async fn first_cut(state: &AppState, user_id: Uuid, username: &str) {
 /// kept), audited as `revoked_via_desktop` so the owner's history never
 /// shows it as their own revoke. A token nothing had used gets no more:
 /// it opened nothing. A used one gets the owner's revoke cut as well,
-/// through [`cut_given_back_token`], which runs detached from the request.
+/// through [`cut_given_back_token`]. A task owns both the revoke and the
+/// cut's spawn, so a client leaving at the commit cannot lose the cut.
 async fn desktop_token_revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1361,30 +1362,32 @@ async fn desktop_token_revoke(
         );
         return Err(Error::Unauthorized);
     }
+    use tracing::instrument::WithSubscriber as _;
+    use tracing::Instrument as _;
+
     let meta = request_meta(&headers);
-    let given_back = state
-        .api_tokens
-        .give_back(presented.user_id, presented.token_id, &meta)
-        .await?;
-    match given_back {
-        Some(GivenBack::Unused) => {}
-        Some(GivenBack::Used) => {
-            use tracing::instrument::WithSubscriber as _;
-            use tracing::Instrument as _;
-            // The give-back has committed, and the cut is a second
-            // transaction in profile and calls to devserver-control after
-            // it. Awaited here it would end with the request: a desktop that
-            // hangs up or gives up first would leave the token revoked and
-            // nothing cut. Spawned, it runs to its end whatever the client
-            // does, logging where the request logs.
-            let cut = cut_given_back_token(state.clone(), presented, meta);
-            tokio::spawn(cut.in_current_span().with_current_subscriber());
+    // Commit and cut dispatch share a task the request only joins. Dropping
+    // the request after the database commits cannot cancel the next step.
+    let give_back = async move {
+        let given_back = state
+            .api_tokens
+            .give_back(presented.user_id, presented.token_id, &meta)
+            .await?;
+        match given_back {
+            Some(GivenBack::Unused) => {}
+            Some(GivenBack::Used) => {
+                let cut = cut_given_back_token(state, presented, meta);
+                tokio::spawn(cut.in_current_span().with_current_subscriber());
+            }
+            // Another revoke landed between the lookup and this one: the
+            // token is already gone, which is the invalid-bearer answer.
+            None => return Err(Error::Unauthorized),
         }
-        // Another revoke landed between the lookup and this one: the token
-        // is already gone, which is the invalid-bearer answer.
-        None => return Err(Error::Unauthorized),
-    }
-    Ok(StatusCode::NO_CONTENT)
+        Ok(StatusCode::NO_CONTENT)
+    };
+    tokio::spawn(give_back.in_current_span().with_current_subscriber())
+        .await
+        .map_err(|error| Error::Anyhow(error.into()))?
 }
 
 /// The cut a used token's give-back owes. A desktop gives back only a token
@@ -1398,7 +1401,8 @@ async fn desktop_token_revoke(
 /// owner's live surface; the first cut then runs as the owner's revoke runs
 /// it. The owner's revoke can await both in its request, because profile
 /// commits that revoke and its reservation together; here the revoke has
-/// already committed in identity, so the handler spawns this and answers.
+/// already committed in identity, so the task owning that revoke spawns
+/// this before it returns the handler's answer.
 /// A failed reservation is logged and does not stop the first cut, but
 /// nothing durable repeats the cut then: the token authenticates nothing,
 /// a tunnel on it ends at its next lease refresh, and a proxy session the
