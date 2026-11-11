@@ -57,8 +57,9 @@ export interface Transfer {
   /// verb before it.
   filename: string | null;
   /// True while the desktop's native picker is open and nothing is chosen, so
-  /// no bytes are moving yet. NOT persisted: it is read only while active,
-  /// and a reload turns an active record into an interrupted one.
+  /// no bytes are moving yet and the row offers no Cancel, which could not
+  /// close the dialog. NOT persisted: it is read only while active, and a
+  /// reload turns an active record into an interrupted one.
   picking: boolean;
   /// 0..1 while a content-length is known; null for an indeterminate transfer.
   progress: number | null;

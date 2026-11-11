@@ -21,6 +21,7 @@ import {
   setTransferSignalSink,
   activeTransferCount,
   transferFinishedBeforeCancel,
+  transferFilesPicked,
 } from "../state/transfers.svelte";
 
 let target: HTMLElement | null = null;
@@ -219,9 +220,11 @@ describe("TransferBubble", () => {
     return [...el.querySelectorAll(".tb-line")].map((line) => line.textContent);
   }
 
-  test("a desktop upload whose picker is open waits for a selection, with a still bar and a Cancel", () => {
+  // Nothing closes an open native picker, so a Cancel then would leave the
+  // dialog up and drop what is picked in it afterwards.
+  test("a desktop upload whose picker is open waits for a selection, with a still bar and no Cancel until the picker returns", () => {
     const cancel = vi.fn();
-    beginTransfer({ kind: "upload", filename: null, cancel, picking: true });
+    const upload = beginTransfer({ kind: "upload", filename: null, cancel, picking: true });
     // A replace is named after its target from the start, and nothing of it
     // is uploading while its picker is open either.
     beginTransfer({ kind: "upload", filename: "a.md", cancel: vi.fn(), picking: true });
@@ -231,8 +234,13 @@ describe("TransferBubble", () => {
 
     expect(lines(el)).toEqual(["Waiting for file selection", "Waiting for file selection"]);
     expect(el.querySelector(".tb-bar.indeterminate"), "no bytes move, so no bar slides").toBeNull();
+    expect(actions(el), "no Cancel, and no Dismiss for a row still active").toEqual([]);
+
+    transferFilesPicked(upload, "report.pdf");
+    flushSync();
+    expect(lines(el)).toEqual(["Uploading report.pdf...", "Waiting for file selection"]);
     const buttons = actions(el);
-    expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Cancel"]);
+    expect(buttons.map((button) => button.textContent)).toEqual(["Cancel"]);
     buttons[0]!.click();
     expect(cancel).toHaveBeenCalledOnce();
   });

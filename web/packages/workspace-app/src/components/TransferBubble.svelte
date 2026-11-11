@@ -3,7 +3,9 @@
   // progress, opened from the status-bar transfers entry. One row per transfer
   // with a progress bar + a state-appropriate action -- Cancel while active,
   // Dismiss for any finished row, and Retry beside it for an interrupted or
-  // failed download.
+  // failed download. A desktop upload offers its Cancel once its native picker
+  // has returned: nothing here can close an open native dialog, and a file
+  // picked in it after a cancel would be dropped without a word.
   // Bound to browser XHR or desktop-native progress + cancellation; the bar
   // look mirrors the SPA's download-progress idiom (adapted, not cross-imported).
   import {
@@ -132,7 +134,9 @@
             <span class="tb-line">{statusLine(t)}</span>
             <span class="tb-actions">
               {#if t.state === "active" && t.cancel}
-                <button class="tb-action" type="button" onclick={() => t.cancel?.()}>Cancel</button>
+                {#if !t.picking}
+                  <button class="tb-action" type="button" onclick={() => t.cancel?.()}>Cancel</button>
+                {/if}
               {:else}
                 {#if t.retry}
                   <button class="tb-action" type="button" onclick={() => retry(t)}>Retry</button>

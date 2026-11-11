@@ -660,9 +660,9 @@ interface NativeTransferStatus {
   /// it. For an upload that is when it has validated the picked files, so a
   /// total also says the picker has closed.
   total: number | null;
-  /// An upload's selection once the desktop has validated it: the first
-  /// file's base name and how many files were picked. Absent while the picker
-  /// is open, for a download, and from a desktop that does not report it; the
+  /// An upload's selection once the picker has returned it: the first file's
+  /// base name and how many files were picked. Absent while the picker is
+  /// open, for a download, and from a desktop that does not report it; the
   /// status then gives the transfer's row no name.
   picked?: { name: string; count: number } | null;
 }
@@ -793,19 +793,34 @@ function storedUploadName(path: string): string {
   return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
 }
 
-/// What a desktop upload's refusal says: its reason, and the row name of what
-/// was picked when the desktop says so. Asked for a named failure, the desktop
-/// answers `{ message, picked }` once the transfer is registered; a desktop
-/// that predates the request, and any failure before the registration, answer
-/// the bare reason.
-function nativeUploadFailure(error: unknown): { message: string; picked: string | null } {
+/// What a desktop upload's refusal says: its reason, the row name of what was
+/// picked when the desktop says so, and whether it is a cancel. Asked for a
+/// named failure, the desktop answers `{ message, cancelled?, picked? }` once
+/// the transfer is registered, and only its own cancel sets `cancelled`, so a
+/// server reason that mentions a cancel stays a failure. A desktop that
+/// predates the request, and any failure before the registration, answer the
+/// bare reason, and an older desktop says a cancel by that reason alone.
+function nativeUploadFailure(error: unknown): {
+  message: string;
+  picked: string | null;
+  cancelled: boolean;
+} {
   if (error !== null && typeof error === "object" && !(error instanceof Error)) {
-    const failure = error as { message?: unknown; picked?: NativeTransferStatus["picked"] };
+    const failure = error as {
+      message?: unknown;
+      cancelled?: unknown;
+      picked?: NativeTransferStatus["picked"];
+    };
     if (typeof failure.message === "string") {
-      return { message: failure.message, picked: pickedUploadName(failure.picked) };
+      return {
+        message: failure.message,
+        picked: pickedUploadName(failure.picked),
+        cancelled: failure.cancelled === true,
+      };
     }
   }
-  return { message: errorText(error), picked: null };
+  const message = errorText(error);
+  return { message, picked: null, cancelled: message.includes("upload cancelled") };
 }
 
 /// The error a cancelled desktop upload rejects with, named as a browser
@@ -821,7 +836,10 @@ function desktopUploadCancelled(): Error {
 /// files to the server, so the page never holds their paths or bytes.
 ///
 /// The transfer row exists from the call on, while the picker is still open,
-/// so its Cancel and the window's close guard cover the whole operation.
+/// so the window's close guard covers the whole operation. The row offers its
+/// Cancel once the picker has returned: the desktop cannot close an open
+/// native dialog, and a file picked in one after a cancel would be dropped
+/// without a word.
 /// `name` is the row's display name when the caller knows it beforehand, as
 /// a replace knows its target; it is a file's name and never a sentence. With
 /// null the picked files name the row: the desktop's status says what they
@@ -882,7 +900,7 @@ export async function runDesktopUpload(
     // A failure soon after the pick can end the upload before a status poll
     // read the selection; the failure names the row then.
     if (failure.picked !== null) transferFilesPicked(xferId, failure.picked);
-    if (failure.message.includes("upload cancelled")) {
+    if (failure.cancelled) {
       cancelTransfer(xferId);
       throw desktopUploadCancelled();
     }

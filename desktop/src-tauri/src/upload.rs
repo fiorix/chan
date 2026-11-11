@@ -2,13 +2,14 @@
 //!
 //! The native picker returns paths only inside Rust. Each selected regular file
 //! becomes a streaming reqwest multipart part, so neither file paths nor bytes
-//! cross webview IPC. The page is told what to call the selection, the first
-//! file's base name and the file count, through the transfer's status, and,
-//! when the page asks for it, with the reason of a failure. The invoking
-//! origin, destination path, cookies, CSRF mirror, redirects, cancellation,
-//! and aggregate progress are validated here.
+//! cross webview IPC, and an error names a picked file by its base name. The
+//! page is told what to call the selection, the first file's base name and the
+//! file count, through the transfer's status, and, when the page asks for it,
+//! with the reason of a failure. The invoking origin, destination path,
+//! cookies, CSRF mirror, redirects, cancellation, and aggregate progress are
+//! validated here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -58,18 +59,25 @@ pub struct UploadedFile {
     size: u64,
 }
 
+/// The reason a cancelled upload answers with. A page older than the named
+/// failure reads a cancel by this text alone.
+const UPLOAD_CANCELLED: &str = "upload cancelled";
+
 /// How a failed upload answers the page. A page that asks for a named failure
 /// is told what was picked with the reason, once the selection is known, so a
 /// failure that ends the upload before any status poll read the selection
-/// still names its row. Any other page is told the bare reason, which is the
-/// only answer a page older than the request reads; so is a failure that
-/// comes before the transfer is registered.
+/// still names its row, and is told a cancel by `cancelled`, which no server
+/// reason can set. Any other page is told the bare reason, which is the only
+/// answer a page older than the request reads; so is a failure that comes
+/// before the transfer is registered.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum UploadFailure {
     Reason(String),
     Named {
         message: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         picked: Option<PickedFiles>,
     },
@@ -82,17 +90,38 @@ impl From<String> for UploadFailure {
 }
 
 impl UploadFailure {
-    /// The answer for an upload that failed with `message`, naming what
-    /// `progress` recorded as picked when the page asked for a named failure.
-    fn after_registration(message: String, progress: &TransferProgress, named: bool) -> Self {
+    /// The answer for an upload that `stopped` after its registration, naming
+    /// what `progress` recorded as picked when the page asked for a named
+    /// failure.
+    fn after_registration(stopped: Stopped, progress: &TransferProgress, named: bool) -> Self {
+        let (message, cancelled) = match stopped {
+            Stopped::Cancelled => (UPLOAD_CANCELLED.to_string(), true),
+            Stopped::Failed(reason) => (reason, false),
+        };
         if named {
             Self::Named {
                 message,
+                cancelled,
                 picked: progress.picked(),
             }
         } else {
             Self::Reason(message)
         }
+    }
+}
+
+/// Why a registered upload ended without its files: the page cancelled it, or
+/// it failed for a reason. Only the cancel arms produce `Cancelled`, so a
+/// reason that happens to say "upload cancelled" stays a failure.
+#[derive(Debug, PartialEq, Eq)]
+enum Stopped {
+    Cancelled,
+    Failed(String),
+}
+
+impl From<String> for Stopped {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
     }
 }
 
@@ -113,9 +142,9 @@ pub async fn upload_files_native(
     let registration = TransferRegistration::new(transfer_id, None)?;
     upload_picked(app, &target, &endpoint, headers, &registration.progress)
         .await
-        .map_err(|message| {
+        .map_err(|stopped| {
             UploadFailure::after_registration(
-                message,
+                stopped,
                 &registration.progress,
                 named_failure == Some(true),
             )
@@ -124,25 +153,28 @@ pub async fn upload_files_native(
 
 /// Raise the picker and upload what it returns, reporting through
 /// `progress`. An empty answer is a picker closed without a choice.
+///
+/// The page offers no Cancel while the picker is open, since nothing here can
+/// close a native dialog; a cancel that comes then anyway, from the page's
+/// own teardown, ends the upload at once.
 async fn upload_picked(
     app: AppHandle,
     target: &NativeUploadTarget,
     endpoint: &ValidatedEndpoint,
     headers: HeaderMap,
     progress: &Arc<TransferProgress>,
-) -> Result<Vec<UploadedFile>, String> {
+) -> Result<Vec<UploadedFile>, Stopped> {
     let paths = tokio::select! {
-        _ = progress.cancelled() => return Err("upload cancelled".into()),
+        _ = progress.cancelled() => return Err(Stopped::Cancelled),
         paths = pick_upload_paths(app, target.multiple) => paths?,
     };
     if paths.is_empty() {
         return Ok(Vec::new());
     }
     if progress.is_cancelled() {
-        return Err("upload cancelled".into());
+        return Err(Stopped::Cancelled);
     }
-    let files = validate_picked_files(paths).await?;
-    let total = announce_selection(progress, &files)?;
+    let (files, total) = take_selection(progress, paths).await?;
 
     let client = http_client()?;
     // Preflight before the first POST, so an over-cap selection sends no bytes
@@ -158,11 +190,9 @@ async fn upload_picked(
     let mut uploaded = Vec::with_capacity(files.len());
     for file in files {
         if progress.is_cancelled() {
-            return Err("upload cancelled".into());
+            return Err(Stopped::Cancelled);
         }
-        let opened = tokio::fs::File::open(&file.path)
-            .await
-            .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
+        let opened = open_picked(&file).await?;
         let body = reqwest::Body::wrap_stream(file_stream(opened, Arc::clone(progress), cap));
         let part = reqwest::multipart::Part::stream_with_length(body, file.size)
             .file_name(file.name.clone())
@@ -181,18 +211,18 @@ async fn upload_picked(
             .multipart(form)
             .send();
         let response = tokio::select! {
-            _ = progress.cancelled() => return Err("upload cancelled".into()),
+            _ = progress.cancelled() => return Err(Stopped::Cancelled),
             response = request => response,
         };
         let response = match response {
             Ok(response) => response,
-            Err(_error) if progress.is_cancelled() => {
-                return Err("upload cancelled".into());
-            }
-            Err(error) => return Err(format!("upload request failed: {error}")),
+            Err(_error) if progress.is_cancelled() => return Err(Stopped::Cancelled),
+            Err(error) => return Err(format!("upload request failed: {error}").into()),
         };
         if response.status().is_redirection() {
-            return Err("upload refused an unexpected redirect".into());
+            return Err(Stopped::Failed(
+                "upload refused an unexpected redirect".into(),
+            ));
         }
         if !response.status().is_success() {
             return Err(response_error(response, progress).await);
@@ -213,56 +243,85 @@ struct PickedFile {
     size: u64,
 }
 
-async fn validate_picked_files(paths: Vec<PathBuf>) -> Result<Vec<PickedFile>, String> {
-    tokio::task::spawn_blocking(move || {
-        paths
-            .into_iter()
-            .map(|path| {
-                let metadata = std::fs::symlink_metadata(&path)
-                    .map_err(|error| format!("stat {}: {error}", path.display()))?;
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    return Err(format!(
-                        "native upload accepts regular files only: {}",
-                        path.display()
-                    ));
-                }
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| {
-                        format!("picked path has no UTF-8 file name: {}", path.display())
-                    })?
-                    .to_string();
-                if matches!(name.as_str(), "" | "." | "..") || name.chars().any(char::is_control) {
-                    return Err(format!("picked file name is not allowed: {name:?}"));
-                }
-                Ok(PickedFile {
-                    path,
-                    name,
-                    size: metadata.len(),
-                })
-            })
-            .collect()
-    })
-    .await
-    .map_err(|error| format!("validating native upload selection: {error}"))?
+/// A picked file's name as the page may read it: the base name, never the
+/// directory it was picked in, with anything that is not UTF-8 replaced and
+/// control characters escaped. A path with no file name shows its last
+/// component.
+fn shown_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .or_else(|| path.components().next_back().map(|last| last.as_os_str()))
+        .unwrap_or_default()
+        .to_string_lossy();
+    let mut shown = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_control() {
+            shown.extend(c.escape_default());
+        } else {
+            shown.push(c);
+        }
+    }
+    shown
 }
 
-/// Publish a validated selection to the transfer's status and answer its byte
-/// total. The status gets the total its progress is measured against, and the
-/// first file's base name with the file count, which is all the page learns
-/// of what was picked. The selection goes first, so a poll that reads a total
-/// reads the selection with it.
-fn announce_selection(progress: &TransferProgress, files: &[PickedFile]) -> Result<u64, String> {
+async fn validate_picked_files(paths: Vec<PathBuf>) -> Result<Vec<PickedFile>, String> {
+    tokio::task::spawn_blocking(move || paths.into_iter().map(validate_picked_file).collect())
+        .await
+        .map_err(|error| format!("validating native upload selection: {error}"))?
+}
+
+fn validate_picked_file(path: PathBuf) -> Result<PickedFile, String> {
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| format!("stat {}: {error}", shown_name(&path)))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "native upload accepts regular files only: {}",
+            shown_name(&path)
+        ));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| "picked path has no file name".to_string())?
+        .to_str()
+        .ok_or_else(|| format!("picked file name is not UTF-8: {}", shown_name(&path)))?
+        .to_string();
+    if matches!(name.as_str(), "" | "." | "..") || name.chars().any(char::is_control) {
+        return Err(format!("picked file name is not allowed: {name:?}"));
+    }
+    Ok(PickedFile {
+        path,
+        name,
+        size: metadata.len(),
+    })
+}
+
+/// Take what the picker returned: record the selection in the transfer's
+/// status, validate it, and publish its byte total, answering the files and
+/// the total. The status gets the first file's base name with the file count,
+/// which is all the page learns of what was picked. The selection is recorded
+/// before the validation, so a failure answers what was picked even when the
+/// validation refuses a file, and before the total, so a poll that reads a
+/// total reads the selection with it.
+async fn take_selection(
+    progress: &TransferProgress,
+    paths: Vec<PathBuf>,
+) -> Result<(Vec<PickedFile>, u64), String> {
+    if let Some(first) = paths.first() {
+        progress.set_picked(&shown_name(first), paths.len());
+    }
+    let files = validate_picked_files(paths).await?;
     let total = files
         .iter()
         .try_fold(0u64, |sum, file| sum.checked_add(file.size))
         .ok_or_else(|| "native upload byte count overflow".to_string())?;
-    if let Some(first) = files.first() {
-        progress.set_picked(&first.name, files.len());
-    }
     progress.set_total(Some(total));
-    Ok(total)
+    Ok((files, total))
+}
+
+async fn open_picked(file: &PickedFile) -> Result<tokio::fs::File, String> {
+    tokio::fs::File::open(&file.path)
+        .await
+        .map_err(|error| format!("opening {}: {error}", file.name))
 }
 
 fn file_stream(
@@ -377,7 +436,10 @@ fn validate_workspace_rel(path: &str, allow_empty: bool) -> Result<(), String> {
     }
 }
 
-async fn response_error(response: reqwest::Response, progress: &TransferProgress) -> String {
+/// Why the server refused an upload request. The reason carries no "upload
+/// failed" of its own, since the page's status line and transfer row each say
+/// that the upload failed.
+async fn response_error(response: reqwest::Response, progress: &TransferProgress) -> Stopped {
     let status = response.status();
     let mut body = Vec::new();
     const REFUSAL_BODY_LIMIT: usize = 64 * 1024;
@@ -386,7 +448,7 @@ async fn response_error(response: reqwest::Response, progress: &TransferProgress
     loop {
         let chunk = tokio::select! {
             biased;
-            _ = progress.cancelled() => return "upload cancelled".to_string(),
+            _ = progress.cancelled() => return Stopped::Cancelled,
             chunk = stream.next() => chunk,
         };
         let bytes = match chunk {
@@ -411,12 +473,11 @@ async fn response_error(response: reqwest::Response, progress: &TransferProgress
     } else {
         format!("HTTP {status}: {}", detail.trim())
     };
-    let message = if complete {
+    Stopped::Failed(if complete {
         crate::devserver::refusal_message(status, &String::from_utf8_lossy(&body), &fallback)
     } else {
         fallback
-    };
-    format!("upload failed: {message}")
+    })
 }
 
 #[cfg(test)]
@@ -443,7 +504,7 @@ mod tests {
                     .body(body)
                     .unwrap(),
             );
-            assert_eq!(response_error(response, &TransferProgress::new_for_test(None)).await, format!("upload failed: HTTP 503 Service Unavailable: {expected}"), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
+            assert_eq!(response_error(response, &TransferProgress::new_for_test(None)).await, Stopped::Failed(format!("HTTP 503 Service Unavailable: {expected}")), "a refusal within 64 KiB is parsed whole; an oversized refusal keeps its plain-body excerpt");
         }
     }
 
@@ -465,10 +526,10 @@ mod tests {
         );
         assert!(crate::native_transfer::cancel_native_transfer(id));
         assert!(registration.progress.is_cancelled());
-        let message = tokio::time::timeout(std::time::Duration::from_secs(1), reading)
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(1), reading)
             .await
             .expect("cancellation must interrupt an unfinished refusal body");
-        assert_eq!(message, "upload cancelled");
+        assert_eq!(stopped, Stopped::Cancelled);
     }
 
     #[tokio::test]
@@ -492,8 +553,8 @@ mod tests {
             );
             assert_eq!(
                 response_error(response, &TransferProgress::new_for_test(None)).await,
-                format!("upload failed: HTTP 503 Service Unavailable{detail}"),
-                "transfers must show the sentence and preserve plain-body excerpts",
+                Stopped::Failed(format!("HTTP 503 Service Unavailable{detail}")),
+                "transfers must show the sentence and preserve plain-body excerpts, with no prefix the page adds again",
             );
         }
     }
@@ -601,11 +662,11 @@ mod tests {
         .unwrap()
     }
 
-    /// The page learns what was picked from the status alone. A validated
+    /// The page learns what was picked from the status alone. A taken
     /// selection puts the first file's base name and the file count there
     /// with the byte total, and nothing of the directory it was picked in.
     #[tokio::test]
-    async fn a_validated_selection_reaches_the_status_as_a_base_name_and_a_count() {
+    async fn a_taken_selection_reaches_the_status_as_a_base_name_and_a_count() {
         let dir = tempfile::tempdir().unwrap();
         let report = dir.path().join("report.pdf");
         let notes = dir.path().join("notes.md");
@@ -613,15 +674,15 @@ mod tests {
         std::fs::write(&notes, b"12").unwrap();
 
         let several = TransferRegistration::new("upload-picked-several".into(), None).unwrap();
-        let files = validate_picked_files(vec![report.clone(), notes])
-            .await
-            .unwrap();
         assert_eq!(
             status_payload("upload-picked-several"),
             serde_json::json!({ "loaded": 0, "total": null }),
-            "a selection is not in the status before it is announced"
+            "nothing is picked while the picker is open"
         );
-        assert_eq!(announce_selection(&several.progress, &files), Ok(7));
+        let (files, total) = take_selection(&several.progress, vec![report.clone(), notes])
+            .await
+            .unwrap();
+        assert_eq!((files.len(), total), (2, 7));
         assert_eq!(
             status_payload("upload-picked-several"),
             serde_json::json!({
@@ -633,8 +694,8 @@ mod tests {
         );
 
         let one = TransferRegistration::new("upload-picked-one".into(), None).unwrap();
-        let files = validate_picked_files(vec![report]).await.unwrap();
-        assert_eq!(announce_selection(&one.progress, &files), Ok(5));
+        let (_, total) = take_selection(&one.progress, vec![report]).await.unwrap();
+        assert_eq!(total, 5);
         assert_eq!(
             status_payload("upload-picked-one"),
             serde_json::json!({
@@ -642,6 +703,136 @@ mod tests {
                 "total": 5,
                 "picked": { "name": "report.pdf", "count": 1 },
             }),
+        );
+    }
+
+    /// A selection the validation refuses was recorded before it was
+    /// validated, so the failure still names what was picked, as the status
+    /// would have: the first file's base name and the count, whichever file
+    /// was refused. The refusal itself names the refused file.
+    #[tokio::test]
+    async fn a_selection_the_validation_refuses_still_names_what_was_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.pdf");
+        std::fs::write(&report, b"12345").unwrap();
+        let missing = dir.path().join("missing.pdf");
+
+        for (id, paths, refused, picked) in [
+            (
+                "upload-refused-one",
+                vec![missing.clone()],
+                "stat missing.pdf: ",
+                serde_json::json!({ "name": "missing.pdf", "count": 1 }),
+            ),
+            (
+                "upload-refused-second",
+                vec![report.clone(), missing.clone()],
+                "stat missing.pdf: ",
+                serde_json::json!({ "name": "report.pdf", "count": 2 }),
+            ),
+        ] {
+            let registration = TransferRegistration::new(id.into(), None).unwrap();
+            let reason = take_selection(&registration.progress, paths)
+                .await
+                .err()
+                .expect("the validation refuses the missing file");
+            assert!(reason.starts_with(refused), "{reason:?}");
+            assert_eq!(
+                status_payload(id),
+                serde_json::json!({ "loaded": 0, "total": null, "picked": picked }),
+                "the selection is recorded, and no total for a refused one"
+            );
+            let answer = serde_json::to_value(UploadFailure::after_registration(
+                Stopped::Failed(reason.clone()),
+                &registration.progress,
+                true,
+            ))
+            .unwrap();
+            assert_eq!(
+                answer,
+                serde_json::json!({ "message": reason, "picked": picked }),
+                "a refused selection's failure names what was picked"
+            );
+        }
+    }
+
+    /// Every error the command answers for a picked file names it by its base
+    /// name: the page can be a remote devserver's, and no local path crosses
+    /// the webview IPC. Each fixture sits in a temporary directory, whose path
+    /// and whose own name the error must not hold.
+    #[tokio::test]
+    async fn every_error_for_a_picked_file_names_it_by_its_base_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().to_string_lossy().into_owned();
+        let folder_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let holds_the_directory =
+            |error: &str| error.contains(&folder) || error.contains(&folder_name);
+
+        std::fs::create_dir(dir.path().join("photos")).unwrap();
+        #[allow(unused_mut)]
+        let mut refused = vec![
+            (
+                dir.path().join("missing.pdf"),
+                "stat missing.pdf: ".to_string(),
+            ),
+            (
+                dir.path().join("photos"),
+                "native upload accepts regular files only: photos".to_string(),
+            ),
+        ];
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.md");
+            std::os::unix::fs::symlink(dir.path().join("missing.pdf"), &link).unwrap();
+            refused.push((
+                link,
+                "native upload accepts regular files only: link.md".to_string(),
+            ));
+        }
+        // Names macOS and Windows filesystems do not store.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let latin1 = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+            std::fs::write(&latin1, b"x").unwrap();
+            refused.push((
+                latin1,
+                "picked file name is not UTF-8: caf\u{FFFD}.txt".to_string(),
+            ));
+            let newline = dir.path().join("line\nbreak.md");
+            std::fs::write(&newline, b"x").unwrap();
+            refused.push((
+                newline,
+                r#"picked file name is not allowed: "line\nbreak.md""#.to_string(),
+            ));
+        }
+        for (path, expected) in refused {
+            let error = validate_picked_files(vec![path.clone()])
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{path:?} is refused"));
+            assert!(error.starts_with(&expected), "{error:?} for {path:?}");
+            assert!(
+                !holds_the_directory(&error),
+                "{error:?} names the directory"
+            );
+        }
+
+        // A file that goes between the validation and the upload's open.
+        let gone = dir.path().join("gone.md");
+        std::fs::write(&gone, b"x").unwrap();
+        let files = validate_picked_files(vec![gone.clone()]).await.unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        let error = open_picked(&files[0]).await.unwrap_err();
+        assert!(error.starts_with("opening gone.md: "), "{error:?}");
+        assert!(
+            !holds_the_directory(&error),
+            "{error:?} names the directory"
         );
     }
 
@@ -653,7 +844,7 @@ mod tests {
         let progress = TransferProgress::new_for_test(None);
         let answer = |named| {
             serde_json::to_value(UploadFailure::after_registration(
-                "upload failed: HTTP 409 Conflict".into(),
+                Stopped::Failed("HTTP 409 Conflict".into()),
                 &progress,
                 named,
             ))
@@ -661,21 +852,21 @@ mod tests {
         };
         assert_eq!(
             answer(true),
-            serde_json::json!({ "message": "upload failed: HTTP 409 Conflict" }),
+            serde_json::json!({ "message": "HTTP 409 Conflict" }),
             "a failure before the selection is known names nothing"
         );
         progress.set_picked("report.pdf", 3);
         assert_eq!(
             answer(true),
             serde_json::json!({
-                "message": "upload failed: HTTP 409 Conflict",
+                "message": "HTTP 409 Conflict",
                 "picked": { "name": "report.pdf", "count": 3 },
             }),
             "the base name and the count the status would carry"
         );
         assert_eq!(
             answer(false),
-            serde_json::json!("upload failed: HTTP 409 Conflict"),
+            serde_json::json!("HTTP 409 Conflict"),
             "a page that did not ask reads the bare reason"
         );
         assert_eq!(
@@ -685,6 +876,49 @@ mod tests {
             .unwrap(),
             serde_json::json!("native transfer id is already active"),
             "a failure before the transfer is registered is the bare reason"
+        );
+    }
+
+    /// A named failure marks the command's own cancel, and nothing else: a
+    /// server reason that says "upload cancelled" is still a failure. A page
+    /// that did not ask reads the cancel by its reason, as it always has.
+    #[test]
+    fn a_named_failure_marks_only_the_command_s_own_cancel() {
+        let progress = TransferProgress::new_for_test(None);
+        let answer = |stopped, named| {
+            serde_json::to_value(UploadFailure::after_registration(stopped, &progress, named))
+                .unwrap()
+        };
+        assert_eq!(
+            answer(Stopped::Cancelled, true),
+            serde_json::json!({ "message": "upload cancelled", "cancelled": true }),
+            "a cancel while the picker is open"
+        );
+        progress.set_picked("report.pdf", 1);
+        assert_eq!(
+            answer(Stopped::Cancelled, true),
+            serde_json::json!({
+                "message": "upload cancelled",
+                "cancelled": true,
+                "picked": { "name": "report.pdf", "count": 1 },
+            }),
+            "a cancel after the pick names what was picked"
+        );
+        assert_eq!(
+            answer(
+                Stopped::Failed("HTTP 409 Conflict: upload cancelled upstream".into()),
+                true
+            ),
+            serde_json::json!({
+                "message": "HTTP 409 Conflict: upload cancelled upstream",
+                "picked": { "name": "report.pdf", "count": 1 },
+            }),
+            "a reason that says it is no cancel"
+        );
+        assert_eq!(
+            answer(Stopped::Cancelled, false),
+            serde_json::json!("upload cancelled"),
+            "the bare reason a page older than the marker reads"
         );
     }
 

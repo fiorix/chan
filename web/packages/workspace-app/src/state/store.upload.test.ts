@@ -316,10 +316,10 @@ describe("an upload lists its destination once, when it ends", () => {
       ["a replace", () => raiseReplacePicker("docs/b.md")],
     ] as const;
     // A desktop that predates named failures refuses with the bare reason;
-    // one asked for a named failure refuses a cancel as one too.
+    // one asked for a named failure refuses a cancel as one, marked.
     const cancels = [
       ["the bare reason", "upload cancelled"],
-      ["a named failure", { message: "upload cancelled", picked: { name: "n0.bin", count: 1 } }],
+      ["a named failure", { message: "upload cancelled", cancelled: true, picked: { name: "n0.bin", count: 1 } }],
     ] as const;
 
     test.each(
@@ -349,6 +349,16 @@ describe("an upload lists its destination once, when it ends", () => {
 
       raiseUploadPicker("docs");
       await vi.waitFor(() => expect(ui.status).toBe("upload failed: HTTP 409 Conflict"));
+      expect(ui.statusKind).toBe("persistent");
+      expect(transfers.items.map((t) => [t.filename, t.state])).toEqual([["n0.bin", "failed"]]);
+    });
+
+    test("a named native failure whose reason mentions a cancel keeps its failure line", async () => {
+      const reason = "HTTP 409 Conflict: upload cancelled upstream";
+      nativeUpload(() => Promise.reject({ message: reason, picked: { name: "n0.bin", count: 1 } }));
+
+      raiseUploadPicker("docs");
+      await vi.waitFor(() => expect(ui.status).toBe(`upload failed: ${reason}`));
       expect(ui.statusKind).toBe("persistent");
       expect(transfers.items.map((t) => [t.filename, t.state])).toEqual([["n0.bin", "failed"]]);
     });
