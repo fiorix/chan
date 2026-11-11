@@ -188,7 +188,7 @@ The outer server router owns a metrics runtime shared by its launcher and all te
 
 Every app-level write uses the same atomic-write discipline as workspace content.
 
-Privacy mode is a viewing-client policy, controlled in Settings > Global. Desktop windows share the desktop's persisted policy across local and remote origins; browser tabs share it only within one origin. It conceals connection details in the Computers UI and connection/retry screens, and the host name and chan home path on the Dashboard's Metrics slide, with explicit per-field reveals, and can opt into the existing terminal secret masker. It does not modify the serving tenant's preferences or detect recording automatically. The bridge and presentation contract are described in [desktop/design.md](desktop/design.md#privacy-mode).
+Privacy mode is a viewing-client policy, controlled in Settings > Global. Desktop windows share the desktop's persisted policy across local and remote origins; browser tabs share it only within one origin. It conceals connection details in the Computers UI and connection/retry screens, and the host name and chan home path on the Dashboard's Metrics slide and the workspace root path on its Workspace slide, with explicit per-field reveals; it names windows and workspaces generically in the workspace app's command launcher, and can opt into the existing terminal secret masker. It does not modify the serving tenant's preferences or detect recording automatically. The bridge and presentation contract are described in [desktop/design.md](desktop/design.md#privacy-mode).
 
 ## Invariants
 
