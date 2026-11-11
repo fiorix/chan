@@ -3,7 +3,7 @@ import { flushSync, mount, tick, unmount } from "svelte";
 import AllWindowsDeck from "../__tests__/AllWindowsDeck.svelte";
 import { decks, resetDeck, showCard } from "../state/deck.svelte";
 import { backend } from "../api/backend";
-import type { DevserverEntry, WindowRecord } from "../api/library";
+import type { DevserverEntry, TmuxConnectionEntry, WindowRecord } from "../api/library";
 import { buildMachineTree } from "../lib/machineTree";
 
 vi.mock("../api/backend", async () => {
@@ -104,6 +104,38 @@ describe("All windows", () => {
     expect([...target.querySelectorAll("li .row-sub")].map((sub) => sub.textContent)).toEqual([
       "local / chan · Shown", "lima / chan · Shown",
     ]);
+  });
+
+  it("leaves out a tmux connection's buried control terminal and lists its windows", () => {
+    const tmuxEntry = (connection: string, library_id: string, name: string): TmuxConnectionEntry => ({
+      connection, library_id, origin: { program: "tmux", command: "tmux -CC", local: true }, version: "3.5a",
+      session: { id: `$${name}`, name }, windows: [], window_cap: 8, errors: [], control_window: `${connection}-control`,
+    });
+    // A control terminal is minted hidden with both marks; a tmux window
+    // carries the connection's mark alone.
+    const marked = (connection: string, control: boolean): Partial<WindowRecord> => ({
+      control, hidden: control, persisted: false, ordinal: control ? 0 : 1, tmux: { connection, control },
+    });
+    target = document.createElement("div");
+    document.body.append(target);
+    resetDeck();
+    app = mount(AllWindowsDeck, { target, props: {
+      tree: buildMachineTree([remote], [], [
+        windowRecord("local-shown"),
+        windowRecord("tm-1-control", "local", marked("tm-1", true)),
+        windowRecord("tm-1-w1", "local", marked("tm-1", false)),
+        windowRecord("tm-2-control", "remote", marked("tm-2", true)),
+        windowRecord("tm-2-w1", "remote", marked("tm-2", false)),
+      ], [tmuxEntry("tm-1", "local", "main"), tmuxEntry("tm-2", "remote", "work")]),
+    } });
+    flushSync();
+    const rows = [...target.querySelectorAll<HTMLLIElement>("li")];
+    expect(rows.map((row) => row.dataset.windowId)).toEqual(["local-shown", "tm-1-w1", "tm-2-w1"]);
+    expect(rows.map((row) => row.querySelector(".row-sub")?.textContent)).toEqual([
+      "local · Shown", "tmux -CC on this machine (main) · Shown", "tmux -CC on lima (work) · Shown",
+    ]);
+    expect(target.querySelector(".all-windows .count")?.textContent).toBe("3");
+    expect(target.querySelector(".row-buried")).toBeNull();
   });
 
   it("moves and clamps selection without focusing a native window; Enter focuses the selected row", async () => {
