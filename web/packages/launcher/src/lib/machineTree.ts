@@ -164,8 +164,9 @@ export interface MachineNode {
  * the control terminal is the one window two cards list: its connection's
  * card, which lists every window of the connection, and its machine's. The
  * connection's other windows stay on the connection's card alone. The
- * flattened views of the tree (All windows, the command launcher) read the
- * disjoint buckets and never this list, so each still lists the window once. */
+ * command launcher's window list reads the disjoint buckets and never this
+ * list, so it lists the window once; All windows leaves it out
+ * (`windowOverview`). */
 export interface TmuxControlRow {
   window: WindowRecord;
   /** The connection's own node: its id is what the row's detach names, and
@@ -198,12 +199,17 @@ function windowMachineName(node: MachineNode): string {
   return node.devserver ? devserverName(node.devserver) : "local";
 }
 
-/** The desktop overview keeps hidden, detached and not-yet-associated windows. */
+/** The desktop overview keeps hidden, detached and not-yet-associated windows.
+ * It leaves out a tmux connection's buried control terminal, which offers no
+ * action of its own while the connection runs and which its connection's card
+ * and its machine's card already list; once the connection ends the library
+ * clears the mark and the overview lists it as a plain window. */
 export function windowOverview(tree: MachineTree): { window: WindowRecord; machine: string }[] {
   return [
     ...tree.machines.flatMap((node) => {
       const machine = windowMachineName(node);
       return [...node.control, ...node.terminals, ...node.workspaces.flatMap((ws) => ws.windows), ...node.looseWindows]
+        .filter((window) => window.tmux?.control !== true)
         .sort(sortWindows)
         .map((window) => ({ window, machine }));
     }),

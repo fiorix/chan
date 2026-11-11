@@ -766,19 +766,53 @@ describe("buildMachineTree: a tmux connection's control terminal on its machine"
     expect(holders.map((m) => m.kind)).toEqual(["local", "tmux"]);
   });
 
-  it("leaves All windows as it was: each window once, the control terminal under its connection", () => {
-    const entry = tmux({ connection: "tm-1" });
+  it("leaves the buried control terminals out of All windows and lists every other window once", () => {
+    const carrier = { program: "ssh", command: "ssh geekom", local: false };
+    const devservers = [ds({ id: "ds-a", label: "alpha", library_id: "lib-a", status: "connected" })];
+    const entries = [
+      tmux({ connection: "tm-local" }),
+      tmux({ connection: "tm-alpha", library_id: "lib-a", session: { id: "$1", name: "work" } }),
+      tmux({ connection: "tm-ssh", origin: carrier, session: { id: "$2", name: "far" } }),
+    ];
     const windows = [
       win({ window_id: "plain", library_id: "local", ordinal: 1 }),
-      tmuxRow("tm-1", "tm-1-control", true, 0),
-      tmuxRow("tm-1", "tm-1-w1", false, 1),
+      // The devserver's connect control terminal carries no tmux mark.
+      win({ window_id: "alpha-control", library_id: "lib-a", control: true, ordinal: 0 }),
+      win({ window_id: "alpha-term", library_id: "lib-a", ordinal: 1 }),
+      tmuxRow("tm-local", "tm-local-control", true, 0),
+      tmuxRow("tm-local", "tm-local-w1", false, 1),
+      tmuxRow("tm-alpha", "tm-alpha-control", true, 0, "lib-a"),
+      tmuxRow("tm-alpha", "tm-alpha-w1", false, 1, "lib-a"),
+      tmuxRow("tm-ssh", "tm-ssh-control", true, 0),
+      tmuxRow("tm-ssh", "tm-ssh-w1", false, 1),
     ];
-    const tree = buildMachineTree([], [], windows, [entry]);
-    expect(tree.machines[0]!.tmuxControls).toHaveLength(1);
+    const tree = buildMachineTree(devservers, [], windows, entries);
+    // The connections' cards and the machines' cards keep them.
+    const alpha = tree.machines.find((m) => m.devserver?.id === "ds-a")!;
+    expect(tree.machines[0]!.tmuxControls.map((row) => row.window.window_id)).toEqual([
+      "tm-local-control",
+      "tm-ssh-control",
+    ]);
+    expect(alpha.tmuxControls.map((row) => row.window.window_id)).toEqual(["tm-alpha-control"]);
+    for (const connection of ["tm-local", "tm-alpha", "tm-ssh"]) {
+      const node = tree.machines.find((m) => m.connection === connection)!;
+      expect(node.control.map((w) => w.window_id)).toEqual([`${connection}-control`]);
+    }
     expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([
       ["plain", "local"],
-      ["tm-1-control", "tmux -CC on this machine (main)"],
-      ["tm-1-w1", "tmux -CC on this machine (main)"],
+      ["alpha-control", "alpha"],
+      ["alpha-term", "alpha"],
+      ["tm-local-w1", "tmux -CC on this machine (main)"],
+      ["tm-ssh-w1", "tmux -CC from ssh geekom (far)"],
+      ["tm-alpha-w1", "tmux -CC on alpha (work)"],
     ]);
+  });
+
+  it("lists a control terminal in All windows again once its connection ends", () => {
+    // The library clears the mark when the connection ends, and the row
+    // returns as a plain terminal of the machine that ran it.
+    const windows = [win({ window_id: "tm-1-control", library_id: "local", ordinal: 2 })];
+    const tree = buildMachineTree([], [], windows, []);
+    expect(windowOverview(tree).map((r) => [r.window.window_id, r.machine])).toEqual([["tm-1-control", "local"]]);
   });
 });
