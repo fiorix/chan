@@ -412,6 +412,8 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     revalidate_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     #[cfg(test)]
+    root_health_reconciled: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
     blocking_thread_probe: std::sync::Mutex<Option<std::sync::mpsc::Sender<std::thread::ThreadId>>>,
     #[cfg(test)]
     open_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -1543,6 +1545,8 @@ impl WorkspaceHost {
             revalidate_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             revalidate_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            root_health_reconciled: std::sync::Mutex::new(None),
             #[cfg(test)]
             blocking_thread_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -6404,6 +6408,10 @@ impl WorkspaceHost {
                     self.notify_window_change();
                 }
             }
+        }
+        #[cfg(test)]
+        if let Some(reconciled) = self.root_health_reconciled.lock().unwrap().as_ref() {
+            let _ = reconciled.send(());
         }
         outcome
     }
@@ -16384,6 +16392,16 @@ mod tests {
         let root = parent.path().join("workspace");
         std::fs::create_dir(&root).expect("workspace");
         let host = mounted_host(cfg.path(), &root, "/moved").await;
+        let (reconciled, completed) = std::sync::mpsc::channel();
+        *host.root_health_reconciled.lock().unwrap() = Some(reconciled);
+        let probe = || {
+            host.probe_mounted_roots();
+            // A tick can return before its checking thread answers. Wait for
+            // reconciliation even when the answer leaves the row unchanged.
+            completed
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the root check never reconciled its answer");
+        };
 
         // Move the original directory aside rather than deleting it, so the
         // inode it was opened against can come back.
@@ -16391,9 +16409,9 @@ mod tests {
         std::fs::rename(&root, &aside).expect("move the original root aside");
         std::fs::create_dir(&root).expect("a different directory takes the path");
 
-        host.probe_mounted_roots();
+        probe();
         assert_eq!(host.workspace_status(&root).0, WorkspaceStatus::Unavailable);
-        host.probe_mounted_roots();
+        probe();
         assert_eq!(
             host.workspace_status(&root).0,
             WorkspaceStatus::Unavailable,
@@ -16402,7 +16420,7 @@ mod tests {
 
         std::fs::remove_dir(&root).expect("remove the impostor");
         std::fs::rename(&aside, &root).expect("put the original root back");
-        host.probe_mounted_roots();
+        probe();
         assert_eq!(
             host.workspace_status(&root).0,
             WorkspaceStatus::Running,
