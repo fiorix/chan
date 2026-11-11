@@ -43,6 +43,7 @@ export type CanvasProps = {
   visibleNodeIds: Set<string>;
   visibleEdges: Array<{ source: string; target: string; kind: string }>;
   focalIds: string[];
+  focalAnchor?: "center" | "bottom" | "bounds";
   selectedId: string | null;
   expansionFitRequest: { nonce: number; ids: string[] } | null;
   onSelect: (id: string | null) => void;

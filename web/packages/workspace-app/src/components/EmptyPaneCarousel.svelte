@@ -219,10 +219,11 @@
     return out;
   });
 
-  /// Workspace root is the focal anchor so the spine grows
-  /// upward from it (GraphCanvas's hierarchy `y` + `parentX`
-  /// forces lay the depth tiers vertically with focal pinning
-  /// at origin).
+  /// Workspace root is the focal, pinned at the layout's origin, so the
+  /// spine grows upward from it (GraphCanvas's hierarchy `y` + `parentX`
+  /// forces lay the depth tiers vertically above it). The view is framed
+  /// on the spine's box rather than on the root (`focalAnchor="bounds"`),
+  /// so the spine sits in the middle of the canvas.
   const indexingFocal = ["" as string];
 
   /// Clicks toggle the selected node so GraphCanvas surfaces the
@@ -557,7 +558,7 @@
                 visibleNodeIds={indexingNodeIds}
                 visibleEdges={indexingGraph.edges}
                 focalIds={indexingFocal}
-                focalAnchor="bottom"
+                focalAnchor="bounds"
                 selectedId={selectedIndexId}
                 onSelect={onIndexingSelect}
               />
@@ -913,15 +914,23 @@
   .slide-indexing .slide-title {
     align-self: center;
   }
+  /* A waiting, error or empty note takes the graph's place: auto margins put
+     it in the middle of the room under the title, across and down, as the
+     Metrics slide places its body. */
   .indexing-stub {
     text-align: center;
     max-width: 360px;
+    margin: auto;
     font-size: 13px;
     line-height: 1.45;
     color: var(--text-secondary);
   }
   .indexing-stub p {
     margin: 0 0 0.5rem;
+  }
+  /* The note's box ends at its last line, so its text is what is centered. */
+  .indexing-stub p:last-child {
+    margin-bottom: 0;
   }
   .indexing-state {
     color: var(--warn-text);
