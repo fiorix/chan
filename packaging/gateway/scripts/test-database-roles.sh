@@ -179,12 +179,27 @@ check_role_matrix() {
         "$(wc -l <<< "$expected")" "$(role_matrix | wc -l)"
 }
 
+# A script refusal must name its intended guard. A missing command, connection
+# failure or unrelated SQL error cannot stand in for that refusal.
+assert_refused() {
+    local name=$1 expected_status=$2 expected_message=$3 result status=0
+    shift 3
+    result=$("$@" 2>&1) || status=$?
+    if [[ $status != "$expected_status" ]] \
+        || ! grep -Fq -- "$expected_message" <<< "$result"; then
+        printf 'FAIL: %s expected status %s and message "%s", got status %s\n%s\n' \
+            "$name" "$expected_status" "$expected_message" "$status" "$result" >&2
+        return 1
+    fi
+    printf 'PASS: %s refused with status %s: %s\n' \
+        "$name" "$status" "$expected_message"
+}
+
 # An impossible target must fail and leave the durable marker invalid.
-if EXPECTED_SQLX_MIGRATION=$((latest_migration + 1)) \
-    "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null 2>&1; then
-    echo "reconcile accepted a missing latest migration" >&2
-    exit 1
-fi
+assert_refused 'missing latest migration' 3 \
+    "ERROR:  database is not exactly at successful sqlx migration $((latest_migration + 1))" \
+    env EXPECTED_SQLX_MIGRATION=$((latest_migration + 1)) \
+    "$SCRIPT_DIR/reconcile-database-roles.sh"
 [[ $(psql "$DATABASE_URL" --no-password -Atqc \
     'SELECT migration_version FROM public.chan_gateway_deployment_state WHERE singleton') == -1 ]]
 
@@ -373,17 +388,15 @@ assert_denied identity 'user policy insert' "$policy_insert"
 # fails closed, then repair ownership as the migration owner.
 psql "$DATABASE_URL" --no-password \
     -c 'ALTER TABLE public.api_tokens OWNER TO chan_gateway_identity' >/dev/null
-if "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null 2>&1; then
-    echo "reconcile accepted an app-owned database object" >&2
-    exit 1
-fi
+assert_refused 'app-owned database object' 3 \
+    'ERROR:  application database role owns an object' \
+    "$SCRIPT_DIR/reconcile-database-roles.sh"
 [[ $(psql "$DATABASE_URL" --no-password -Atqc \
     'SELECT migration_version FROM public.chan_gateway_deployment_state WHERE singleton') == -1 ]]
-if DATABASE_URL="postgres://chan_gateway_profile:${PROFILE_DATABASE_PASSWORD}@127.0.0.1:5432/$EXPECTED_TEST_DATABASE" \
-    "$SCRIPT_DIR/check-database-ready.sh" >/dev/null 2>&1; then
-    echo "app readiness accepted a failed ownership reconcile" >&2
-    exit 1
-fi
+assert_refused 'readiness after failed ownership reconcile' 1 \
+    'database migration/role-policy marker is not ready' \
+    env DATABASE_URL="postgres://chan_gateway_profile:${PROFILE_DATABASE_PASSWORD}@127.0.0.1:5432/$EXPECTED_TEST_DATABASE" \
+    "$SCRIPT_DIR/check-database-ready.sh"
 psql "$DATABASE_URL" --no-password \
     -c 'ALTER TABLE public.api_tokens OWNER TO CURRENT_USER' >/dev/null
 "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null
@@ -391,14 +404,30 @@ psql "$DATABASE_URL" --no-password \
 # Schema drift invalidates readiness until the unexpected object is removed and
 # the exact privilege reconcile succeeds again.
 psql "$DATABASE_URL" --no-password -c 'CREATE TABLE public.rogue_table (id int)' >/dev/null
-if "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null 2>&1; then
-    echo "reconcile accepted an unknown public table" >&2
-    exit 1
-fi
+assert_refused 'unknown public table' 3 \
+    'ERROR:  unexpected public table inventory:' \
+    "$SCRIPT_DIR/reconcile-database-roles.sh"
 [[ $(psql "$DATABASE_URL" --no-password -Atqc \
     'SELECT migration_version FROM public.chan_gateway_deployment_state WHERE singleton') == -1 ]]
 psql "$DATABASE_URL" --no-password -c 'DROP TABLE public.rogue_table' >/dev/null
 "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null
+
+# A view must not disappear from the inventory just because pg_tables omits
+# it. Neither schema has a view or materialized view in the runtime matrix.
+for schema in public tower_sessions; do
+    for kind in VIEW 'MATERIALIZED VIEW'; do
+        psql "$DATABASE_URL" --no-password --set=ON_ERROR_STOP=1 \
+            -c "CREATE $kind $schema.rogue_view AS SELECT 1 AS id" >/dev/null
+        assert_refused "unknown $schema $kind" 3 \
+            "ERROR:  unexpected view inventory: {$schema.rogue_view}" \
+            "$SCRIPT_DIR/reconcile-database-roles.sh"
+        [[ $(psql "$DATABASE_URL" --no-password -Atqc \
+            'SELECT migration_version FROM public.chan_gateway_deployment_state WHERE singleton') == -1 ]]
+        psql "$DATABASE_URL" --no-password --set=ON_ERROR_STOP=1 \
+            -c "DROP $kind $schema.rogue_view" >/dev/null
+        "$SCRIPT_DIR/reconcile-database-roles.sh" >/dev/null
+    done
+done
 
 # Reconciliation replaces missing and over-broad grants of every kind. Drift
 # one of each first and require the matrix check to name exactly those, which

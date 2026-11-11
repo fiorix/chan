@@ -56,7 +56,6 @@ DEVSERVER_ID="$(printf '%s' "$PAT" | sha256sum | awk '{print $1}')"
 DESKTOP_OWNER_PAT="chan_pat_e2e_desktop_owner"
 DESKTOP_GRANTEE_PAT="chan_pat_e2e_desktop_grantee"
 BROWSER_OWNER_SESSION="e2e-stub-identity-browser-owner"
-BROWSER_GRANTEE_SESSION="e2e-stub-identity-browser-grantee"
 CONTROL_OPERATOR_TOKEN="e2e-control-operator-00000000000001"
 CONTROL_IDENTITY_TOKEN="e2e-control-identity-00000000000001"
 CONTROL_PROFILE_TOKEN="e2e-control-profile-000000000000001"
@@ -181,7 +180,6 @@ $SDME exec "$C_PROXY" -- /usr/bin/systemd-run --unit=stub --collect \
   --setenv=STUB_DESKTOP_OWNER_PAT=$DESKTOP_OWNER_PAT \
   --setenv=STUB_DESKTOP_GRANTEE_PAT=$DESKTOP_GRANTEE_PAT \
   --setenv=STUB_BROWSER_OWNER_SESSION=$BROWSER_OWNER_SESSION \
-  --setenv=STUB_BROWSER_GRANTEE_SESSION=$BROWSER_GRANTEE_SESSION \
   "--setenv=STUB_ADMISSION_SIGNING_KEY=$ADMISSION_SIGNING_KEY" \
   "--setenv=STUB_ENTRY_SIGNING_KEY=$ENTRY_SIGNING_KEY" \
   /usr/bin/python3 /root/stub-identity.py || die "systemd-run stub identity"

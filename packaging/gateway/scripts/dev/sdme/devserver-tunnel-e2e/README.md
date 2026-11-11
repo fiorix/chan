@@ -41,7 +41,7 @@ The devserver also runs a declared local extension (`e2e-extension.py`, started 
 
 The controller, proxy, and chan binaries (including the tunnel-client and tunnel-proto crates) are real release builds. Two narrow pieces are fixtures because the rig does not stand up Postgres-backed identity and profile or an edge TLS proxy:
 
-- **stub identity** (`stub-identity.py`): accepts one exact internal bearer and tunnel PAT, signs a controller-bound admission lease for the proxy-generated registration UUID, exposes owner and grantee desktop entry responses (desktop credentials), and serves share-landing handoff pages for a fixed per-caller browser-session cookie (browser credentials). It runs on the proxy container's loopback.
+- **stub identity** (`stub-identity.py`): accepts one exact internal bearer and tunnel PAT, signs a controller-bound admission lease for the proxy-generated registration UUID, exposes owner and grantee desktop entry responses (desktop credentials), and serves share-landing handoff pages for the owner's fixed browser-session cookie (browser credentials); the real identity's grantee browser landing is covered by `scripts/e2e/gateway-zone.sh sharedroot`. It runs on the proxy container's loopback.
 - **credential helper** (`mint-signed-credential.py`): signs the current Ed25519 admission and entry wire formats with per-run keys; an entry credential takes the client (`--client desktop|browser`). The controller and proxy receive only verifying keys.
 - **TLS forwarders** (`tls-forward.py`): expose the proxy's loopback-only listeners through a per-run CA. Public HTTP negotiates only HTTP/1.1 and the tunnel negotiates only h2. No `protected-overlay` assertion is made for the ordinary sdme bridge.
 

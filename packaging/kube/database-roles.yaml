@@ -186,6 +186,7 @@ data:
         actual_public_sequences text[];
         actual_session_tables text[];
         actual_session_sequences text[];
+        actual_views text[];
     BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM public._sqlx_migrations
@@ -237,6 +238,18 @@ data:
         WHERE schemaname = 'tower_sessions';
         IF actual_session_sequences IS NOT NULL THEN
             RAISE EXCEPTION 'unexpected tower_sessions sequence inventory: %', actual_session_sequences;
+        END IF;
+
+        SELECT array_agg(schemaname || '.' || viewname ORDER BY schemaname, viewname)
+        INTO actual_views
+        FROM (
+            SELECT schemaname, viewname FROM pg_views
+            UNION ALL
+            SELECT schemaname, matviewname AS viewname FROM pg_matviews
+        ) AS views
+        WHERE schemaname IN ('public', 'tower_sessions');
+        IF actual_views IS NOT NULL THEN
+            RAISE EXCEPTION 'unexpected view inventory: %', actual_views;
         END IF;
 
         IF EXISTS (

@@ -21,7 +21,8 @@
 # and the suite runs inside it, where 127.0.0.1:5432 is the address its role
 # connections expect. The working tree's packaging/gateway/scripts and
 # gateway/migrations are bound read-only, so an uncommitted change is what
-# gets tested.
+# gets tested. The suite has a five-minute timeout inside the guest, with a
+# ten-second KILL fallback, so a stalled PostgreSQL cannot leave it hanging.
 #
 #   SDME                     how sdme is reached (default: sudo sdme)
 #   GATEWAY_ROLES_CONTAINER  guest name (default: chan-gateway-roles-test)
@@ -120,7 +121,8 @@ printf '==> server: %s\n' "$server"
 
 log=$(mktemp "${TMPDIR:-/tmp}/chan-gateway-roles.XXXXXX")
 status=0
-"${SDME_CMD[@]}" exec --user postgres "$CONTAINER" -- /usr/bin/env \
+"${SDME_CMD[@]}" exec --user postgres "$CONTAINER" -- \
+    /usr/bin/timeout --signal=TERM --kill-after=10s 5m /usr/bin/env \
     DATABASE_URL="$ADMIN_URL/chan_gateway_role_test" \
     MIGRATIONS_DIR="$GUEST/migrations" \
     CHAN_GATEWAY_DATABASE_TEST_ALLOW_DESTRUCTIVE=yes \
