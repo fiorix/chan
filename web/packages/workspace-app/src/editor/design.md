@@ -185,6 +185,12 @@ sequenceDiagram
     alt precondition met
         Srv-->>Save: saved, new token and version
         Note over Save: saved text updated, mirrored to sibling tabs
+    else the file is gone under a live root
+        Srv-->>Save: write_conflict with no time on disk
+        Save->>Srv: read the path
+        Srv-->>Save: not found
+        Save->>Tab: File moved or deleted, buffer kept, no dialog
+        User->>Save: Save here: write with no token, which recreates the file
     else precondition missing or version mismatch
         Srv-->>Save: write_conflict with the current version
         Save->>User: conflict dialog: Reload or Overwrite

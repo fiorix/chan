@@ -4,6 +4,12 @@
 <p>Use <strong>Show Source Code</strong> to switch a supported document between its source and rendered view. The default shortcut is <code>Cmd+E</code> on macOS or <code>Ctrl+E</code> elsewhere. JSON has a structured view, and CSV/TSV files have a table view.</p><figure class="inline-shot"><img src="/assets/manual/workspace-editor.png" alt="A repository file browser beside the Markdown editor showing a document and diagram" loading="lazy" /><figcaption>A workspace with its file browser and Markdown editor.</figcaption></figure>
 </section>
 
+<section class="manual-block" id="saving">
+  <h2><a class="heading-anchor" href="#saving">Saving</a></h2>
+<p>The editor saves a file shortly after you stop typing. When another program changed the file since the tab read it, the save stops and asks first: <strong>External edit detected</strong> offers <strong>Reload</strong>, which takes the file as it is on disk and discards the tab's unsaved edits, <strong>Overwrite</strong>, which writes the tab's text over it, and <strong>Cancel</strong>, which keeps the edits in the tab.</p>
+<p>When the file is deleted or moved while it is open, the tab shows <strong>File moved or deleted</strong>. Edits the tab had not saved yet stay in it, and the tab offers only choices that keep them: <strong>Save here</strong> writes them back to the same path, recreating the file and any folder that went with it; <strong>Find</strong> searches the workspace for a line of the file, to find where it went; <strong>Close</strong> asks before it discards them. A tab with nothing unsaved offers <strong>Re-open</strong>, which reads the file again or lets you pick where it moved in Files, and <strong>Re-open there</strong> when one file of the same name was found elsewhere.</p>
+</section>
+
 <section class="manual-block" id="editor">
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#editor">Editor</a></h2>

@@ -14,12 +14,16 @@
 // the seed document's tag, `#graph-smoke`; its tag row must be the first row,
 // and a double-click on it must open the tag-scoped graph tab, drawn as check
 // 110 reads it: a canvas with extent, a status line counting visible nodes,
-// and no error placeholder. Enter and the double-click are the panel's two
-// ways to open a row; a single click only selects.
+// no error placeholder, and once the layout settles every counted node
+// painted inside the canvas, framed in its middle. The document also names a
+// mention found nowhere else; its row opens the mention's graph the same way,
+// framed alike. Enter and the double-click are the panel's two ways to open a
+// row; a single click only selects.
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor } from "../lib/drafts.mjs";
+import { framingFailures, steadyGraphDiscs, traceGraphDiscs } from "../lib/graph-discs.mjs";
 
 const RUN = Date.now().toString(36);
 const PANEL = '[role="dialog"][aria-label="Search"]';
@@ -57,6 +61,44 @@ async function waitFirstRow(page, label, what) {
   return rows;
 }
 
+/// Open the panel's row for `query` with a double-click and read the lens it
+/// opens: the tab titled `scope`, its canvas and status line, and its node
+/// discs once they hold, which must sit framed in the canvas.
+async function openLens(ctx, page, query, scope, label) {
+  await openPanelWith(page, query);
+  const rows = await waitFirstRow(page, query, `the ${label} row ${query}`);
+  await ctx.shot(`218-${label}-hit`, page);
+  const row = await page.$(`${PANEL} .hits li[data-active="true"]`);
+  await row.click({ count: 2 });
+  await page.waitForSelector(PANEL, { hidden: true, timeout: 10_000 });
+  await page.waitForSelector(".graph-tab canvas", { timeout: 30_000 });
+  await waitFor(`the graph tab ${scope} active`, 15_000, () =>
+    page.evaluate((title) => [...document.querySelectorAll(".tab.active")].some((tab) => tab.textContent?.includes(title)), scope),
+  );
+  const graph = await page.waitForFunction(() => {
+    const host = document.querySelector(".graph-tab");
+    const canvas = host?.querySelector("canvas");
+    const stat = host?.querySelector(".statusbar .stat")?.textContent ?? "";
+    const match = stat.match(/(\d+)\/(\d+) nodes\s+·\s+(\d+)\/(\d+) edges/);
+    if (!canvas || !match || Number(match[1]) === 0) return false;
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      visibleNodes: Number(match[1]),
+      totalNodes: Number(match[2]),
+      visibleEdges: Number(match[3]),
+      totalEdges: Number(match[4]),
+    };
+  }, { timeout: 30_000, polling: 250 }).then((handle) => handle.jsonValue());
+  if (graph.width === 0 || graph.height === 0) throw new Error(`the ${label} graph's canvas has no extent: ${graph.width}x${graph.height}`);
+  if (await page.$(".graph-tab .placeholder.error")) throw new Error(`the ${label} graph drew its error placeholder`);
+  const framed = await steadyGraphDiscs(page, ".graph-tab");
+  await ctx.shot(`218-${label}-graph`, page);
+  const failures = framingFailures(framed, graph.visibleNodes);
+  if (failures.length) throw new Error(`the ${label} graph is not framed in its canvas: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
+  return { rows: rows.slice(0, 3), graph, framed };
+}
+
 function activeTabTitle(page) {
   return page.evaluate(() => document.querySelector(".tabs .tab.active")?.getAttribute("title") ?? "");
 }
@@ -68,6 +110,7 @@ export default {
     const seedDoc = readFileSync(join(ctx.workspaceDir, "doc.md"), "utf8");
     if (!seedDoc.includes(TAG)) throw new Error(`the seed document doc.md no longer carries ${TAG}`);
     const word = `zq218${RUN}`;
+    const mention = `@@smoke218${RUN}`;
     const dir = `smoke-search-${RUN}`;
     const doc = `${dir}/notes.md`;
     const page = await ctx.browser.newPage();
@@ -77,11 +120,12 @@ export default {
       await page.setViewport({ width: 1280, height: 800 });
       await page.bringToFront();
       mkdirSync(join(ctx.workspaceDir, dir));
-      writeFileSync(join(ctx.workspaceDir, doc), `# Search smoke\n\nThe word ${word} appears in this document only.\n`);
+      writeFileSync(join(ctx.workspaceDir, doc), `# Search smoke\n\nThe word ${word} appears in this document only, beside ${mention}.\n`);
       const url = new URL(ctx.serverUrl);
       url.searchParams.set("w", `search-218-${RUN}`);
       await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector(".pane .editor-wrap", { timeout: 30_000 });
+      await traceGraphDiscs(page, ".graph-tab");
 
       // The index answers the word with the new document before the panel is asked.
       const indexed = Date.now();
@@ -109,37 +153,13 @@ export default {
       });
       await ctx.shot("218-content-opened", page);
 
-      // A tag hit, opened by a double-click.
-      await openPanelWith(page, TAG);
-      result.tagRows = await waitFirstRow(page, TAG, `the tag row ${TAG}`);
-      await ctx.shot("218-tag-hit", page);
-      const row = await page.$(`${PANEL} .hits li[data-active="true"]`);
-      await row.click({ count: 2 });
-      await page.waitForSelector(PANEL, { hidden: true, timeout: 10_000 });
-      await page.waitForSelector(".graph-tab canvas", { timeout: 30_000 });
-      await waitFor(`the graph tab tag=${TAG} active`, 15_000, () =>
-        page.evaluate((title) => [...document.querySelectorAll(".tab.active")].some((tab) => tab.textContent?.includes(title)), `tag=${TAG}`),
-      );
-      const graph = await page.waitForFunction(() => {
-        const host = document.querySelector(".graph-tab");
-        const canvas = host?.querySelector("canvas");
-        const stat = host?.querySelector(".statusbar .stat")?.textContent ?? "";
-        const match = stat.match(/(\d+)\/(\d+) nodes\s+·\s+(\d+)\/(\d+) edges/);
-        if (!canvas || !match || Number(match[1]) === 0) return false;
-        return {
-          width: canvas.width,
-          height: canvas.height,
-          visibleNodes: Number(match[1]),
-          totalNodes: Number(match[2]),
-          visibleEdges: Number(match[3]),
-          totalEdges: Number(match[4]),
-        };
-      }, { timeout: 30_000, polling: 250 }).then((handle) => handle.jsonValue());
-      if (graph.width === 0 || graph.height === 0) throw new Error(`the tag graph's canvas has no extent: ${graph.width}x${graph.height}`);
-      if (await page.$(".graph-tab .placeholder.error")) throw new Error("the tag graph drew its error placeholder");
-      result.graph = graph;
-      await ctx.shot("218-tag-graph", page);
-      console.log(`[smoke]   ${result.browser}; indexed after ${result.indexedAfterMs}ms; content rows ${JSON.stringify(result.contentRows.slice(0, 3))}; tag rows ${JSON.stringify(result.tagRows.slice(0, 3))}; graph ${JSON.stringify(graph)}`);
+      // A tag hit, then a mention hit, each opened by a double-click. The tag's
+      // graph tab closes first, so the page holds one graph tab at a time.
+      result.tag = await openLens(ctx, page, TAG, `tag=${TAG}`, "tag");
+      await command(page, "app.tab.close");
+      await page.waitForSelector(".graph-tab", { hidden: true, timeout: 10_000 });
+      result.mention = await openLens(ctx, page, mention, `mention=${mention}`, "mention");
+      console.log(`[smoke]   ${result.browser}; indexed after ${result.indexedAfterMs}ms; content rows ${JSON.stringify(result.contentRows.slice(0, 3))}; tag ${JSON.stringify(result.tag)}; mention ${JSON.stringify(result.mention)}`);
       return result;
     } catch (error) {
       primary = error;

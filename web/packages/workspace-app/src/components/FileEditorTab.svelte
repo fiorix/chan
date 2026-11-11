@@ -59,6 +59,7 @@
     allPaneTabs,
     attemptInPlaceReopen,
     beginMissingFileReopen, endMissingFileReopen, MISSING_FILE_REOPEN_STATUS, missingFileReopenInstructionShows,
+    saveMissingTabHere,
     closeTab,
     chooseFirstAttachForTab,
     dismissExternalChange,
@@ -1060,6 +1061,14 @@
     void openInActivePane(suggested).finally(() => endMissingFileReopen(tab.id));
   }
 
+  /// A missing file's tab that still holds unsaved edits offers only choices
+  /// that keep them: both re-opens load another read over the buffer.
+  const missingHoldsEdits = $derived(tab.fileMissing !== null && isDirty(tab));
+
+  function doSaveMissingHere(): void {
+    void saveMissingTabHere(tab.id);
+  }
+
   function doFindMissing(): void {
     const fragment = tab.fileMissing?.fragment;
     if (fragment) searchPanel.query = fragment;
@@ -1508,6 +1517,11 @@
     <div class="missing-file-state">
       <div class="missing-title">File moved or deleted</div>
       <div class="missing-path">{tab.fileMissing.path}</div>
+      {#if missingHoldsEdits}
+        <div class="missing-suggest">
+          The unsaved edits are still in this tab. Save here writes them to this path again.
+        </div>
+      {/if}
       {#if tab.fileMissing.suggestedPath}
         <div class="missing-suggest">
           Looks like it moved to
@@ -1515,20 +1529,27 @@
         </div>
       {/if}
       <div class="missing-actions">
-        {#if tab.fileMissing.suggestedPath}
-          <button
-            type="button"
-            class="suggest-reopen"
-            onclick={doReopenAtSuggested}
-          >
+        {#if missingHoldsEdits}
+          <button type="button" onclick={doSaveMissingHere}>
+            <Save size={15} strokeWidth={1.75} aria-hidden="true" />
+            <span>Save here</span>
+          </button>
+        {:else}
+          {#if tab.fileMissing.suggestedPath}
+            <button
+              type="button"
+              class="suggest-reopen"
+              onclick={doReopenAtSuggested}
+            >
+              <Folder size={15} strokeWidth={1.75} aria-hidden="true" />
+              <span>Re-open there</span>
+            </button>
+          {/if}
+          <button type="button" onclick={doReopenMissing}>
             <Folder size={15} strokeWidth={1.75} aria-hidden="true" />
-            <span>Re-open there</span>
+            <span>Re-open</span>
           </button>
         {/if}
-        <button type="button" onclick={doReopenMissing}>
-          <Folder size={15} strokeWidth={1.75} aria-hidden="true" />
-          <span>Re-open</span>
-        </button>
         <button type="button" onclick={doFindMissing}>
           <SearchIcon size={15} strokeWidth={1.75} aria-hidden="true" />
           <span>Find</span>

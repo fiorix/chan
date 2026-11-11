@@ -77,19 +77,20 @@
     /// the parent owns the rescope (it has access to the current
     /// selection's `path` / `isDir` and to `graphFromHere`).
     onSetAsScope?: () => void;
-    /// Where the automatic fit places the view. "bottom" (default)
-    /// anchors the single focal node near the bottom edge so the cluster
-    /// grows upward from it, so the workspace-root spine reads
-    /// bottom-to-top; the main Graph tab uses it. "center" centers the
-    /// focal instead. "bounds" anchors no node: it frames the drawn
-    /// cluster's bounding box in the middle of the canvas, with equal
-    /// room on either side of it on both axes at the fit's zoom; the
-    /// layout still pins the focal, so the root stays at the bottom of
-    /// the spine. Since no node holds it in place, the "bounds" fit
-    /// follows the layout for as long as the layout moves, not only
-    /// through a refit window, and fits again when the canvas changes
-    /// size. The Dashboard's Search slide uses "bounds". A user's pan,
-    /// zoom or drag stops the automatic fit under every value.
+    /// Where the automatic fit places the view. "bottom" (default) anchors
+    /// the single focal node near the bottom edge so the cluster grows upward
+    /// from it, so the workspace-root spine reads bottom-to-top; the graph
+    /// tab's workspace, directory and file scopes use it. "center" centers
+    /// the focal instead. "bounds" anchors no node: it frames the drawn
+    /// cluster's bounding box in the middle of the canvas, with equal room on
+    /// either side of it on both axes at the fit's zoom; the layout still
+    /// pins the focal, so the root stays at the bottom of the spine. Since no
+    /// node holds it in place, the "bounds" fit follows the layout for as
+    /// long as the layout moves, not only through a refit window, and fits
+    /// again when the canvas changes size. The Dashboard's Search slide and
+    /// the graph tab's tag, mention, contact and language lenses use
+    /// "bounds". A user's pan, zoom or drag stops the automatic fit under
+    /// every value.
     focalAnchor?: "center" | "bottom" | "bounds";
     /// d3-force tuning. Defaults to DEFAULT_FORCE (../graph/force.ts),
     /// the values the live graph ships with. Only the standalone

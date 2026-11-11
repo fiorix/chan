@@ -17,7 +17,9 @@
   // mention, contact or language scope pins its own node; a file or
   // directory scope pins the file nodes at or under its path. One
   // focal node sits at the world origin, several fan around it.
-  // Workspace scope leaves all nodes free.
+  // Workspace scope leaves all nodes free. A lens that pins its own node
+  // frames the drawn box in the middle of the canvas (`focalAnchor`); the
+  // workspace, directory and file scopes keep the canvas's default framing.
 
   import { api } from "../api/client";
   import { isWorkspaceRootMissingError } from "../api/errors";
@@ -1855,6 +1857,22 @@
   // `setSelected` on tap, and `selectedId` goes back down as a prop,
   // so the inspector and the canvas's selection emphasis follow it.
 
+  /// Lens kinds that pin a node of their own. Their walk splays what they
+  /// show around that node in every direction, with the directory spine
+  /// below it, so the canvas's default framing, which seats the pinned node
+  /// near the bottom edge, leaves half the canvas empty and drops nodes
+  /// below it. They frame the drawn box in the middle of the canvas instead,
+  /// following the layout while it moves and refitting on a resize.
+  const BOUNDS_FRAMED_LENSES: ReadonlySet<ScopeOption["kind"]> = new Set([
+    "tag",
+    "mention",
+    "contact",
+    "language",
+  ]);
+  const focalAnchor = $derived<"bounds" | undefined>(
+    currentScope !== null && BOUNDS_FRAMED_LENSES.has(currentScope.kind) ? "bounds" : undefined,
+  );
+
   /// Node ids the canvas should pin at the world origin while the
   /// initial layout settles. Empty list = no anchor (workspace scope);
   /// the canvas falls back to a free force-directed layout.
@@ -2772,6 +2790,7 @@
         visibleNodeIds={canvasVisibleNodeIds}
         visibleEdges={canvasVisibleEdges}
         {focalIds}
+        {focalAnchor}
         {selectedId}
         {expansionFitRequest}
         onSelect={setSelected}
