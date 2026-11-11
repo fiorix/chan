@@ -745,26 +745,25 @@ mod tests {
     #[tokio::test]
     async fn mcp_unmount_releases_a_silent_clients_workspace() {
         use crate::doc_sessions::held_cell;
-        tokio::time::timeout(HANG_GUARD, async {
-            let config = private_tempdir().unwrap();
-            let root = private_tempdir().unwrap();
-            let library =
-                chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
-            library.register_workspace(root.path()).unwrap();
-            let mut released = Vec::new();
-            let mut controls = Vec::new();
-            for _ in 0..RELEASE_PAIRS {
+        let config = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(config.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let mut released = Vec::new();
+        let mut controls = Vec::new();
+        for _ in 0..RELEASE_PAIRS {
+            // Each pair has its own hang guard; setup and release work from
+            // earlier pairs must not consume a later pair's guard.
+            let (release, control) = tokio::time::timeout(HANG_GUARD, async {
                 let unreached = library.open_workspace(root.path()).unwrap();
                 let weak = Arc::downgrade(&unreached);
                 let lock_dir = unreached.paths().lock.clone();
                 let handle = start(pick_socket_path(), move || Some(unreached.clone())).unwrap();
                 let unmounted = std::time::Instant::now();
                 drop(handle);
-                controls.push(
-                    let_go_since(&weak, &lock_dir, unmounted)
-                        .await
-                        .expect("fixture: an unmount with no client kept its workspace"),
-                );
+                let control = let_go_since(&weak, &lock_dir, unmounted)
+                    .await
+                    .expect("fixture: an unmount with no client kept its workspace");
 
                 let workspace = library.open_workspace(root.path()).unwrap();
                 let weak = Arc::downgrade(&workspace);
@@ -785,19 +784,21 @@ mod tests {
                         weak.strong_count()
                     );
                 };
-                released.push(release);
                 drop(client);
-            }
-            let (released, control) = (held_cell::fastest(released), held_cell::median(controls));
-            assert!(
-                held_cell::at_the_controls_pace(released, control),
-                "the unmount let a silent client's workspace go {released:?} after it at \
-                 the fastest, against {control:?} with no client"
-            );
-            let _reopened = library.open_workspace(root.path()).unwrap();
-        })
-        .await
-        .expect("the test body did not end within its hang guard");
+                (release, control)
+            })
+            .await
+            .expect("the unmount probe pair did not end within its hang guard");
+            released.push(release);
+            controls.push(control);
+        }
+        let (released, control) = (held_cell::fastest(released), held_cell::median(controls));
+        assert!(
+            held_cell::at_the_controls_pace(released, control),
+            "the unmount let a silent client's workspace go {released:?} after it at \
+             the fastest, against {control:?} with no client"
+        );
+        let _reopened = library.open_workspace(root.path()).unwrap();
     }
 
     // Dropping the bridge's handle, as unmount does, cancels the requests of
