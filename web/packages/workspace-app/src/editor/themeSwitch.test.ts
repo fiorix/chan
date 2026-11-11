@@ -8,8 +8,11 @@
 // theme and highlight rules as a stylesheet jsdom applies; the app's own CSS
 // is not loaded, so token colours read as their var() text, which no theme
 // changes) and every rendered face, which the stand-in renderers stamp with
-// the theme they drew in.
+// the theme they drew in. Every paint is taken from a finished parse, since
+// the highlighter colours only what the parse has reached.
 
+import { forceParsing, syntaxTreeAvailable } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
 import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -79,6 +82,11 @@ type Theme = "light" | "dark";
 const startTheme = ui.theme;
 const realFetch = globalThis.fetch;
 
+/// The bound on every wait for a precondition: a language's first dynamic
+/// import in a cold worker, a face's render or a finished parse can take
+/// seconds on a loaded machine, past vi.waitFor's default of one second.
+const PRECONDITION = { timeout: 10_000 };
+
 beforeEach(() => {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -106,6 +114,27 @@ async function settle(): Promise<void> {
     await tick();
     await new Promise((r) => setTimeout(r, 0));
   }
+}
+
+/// Finish the parse of the editor in `target`, and wait until its tree covers
+/// the whole document. CodeMirror parses in slices bounded by wall-clock time
+/// (20 ms when a language arrives, then a slice per idle callback), so on a
+/// loaded machine an editor can paint from a tree that stops short of where
+/// another editor's reached, and the tokens past that point are coloured
+/// differently. A fence whose language is still loading stays unparsed until
+/// it arrives, so the parse is retried until the tree is whole.
+async function parsed(target: HTMLElement): Promise<void> {
+  const dom = target.querySelector<HTMLElement>(".cm-editor");
+  const view = dom ? EditorView.findFromDOM(dom) : null;
+  if (!view) throw new Error("no editor view");
+  await vi.waitFor(
+    () => {
+      forceParsing(view, view.state.doc.length, 1_000);
+      expect(syntaxTreeAvailable(view.state), "the whole document parsed").toBe(true);
+    },
+    PRECONDITION,
+  );
+  await settle();
 }
 
 /// What an editor paints, one line per element: its tag, its classes (less
@@ -146,8 +175,8 @@ async function mountSource(): Promise<HTMLElement> {
   document.body.append(target);
   sources.push(mount(Source, { target, props: { value: SOURCE_DOC, path: "greet.js", autoFocus: false } }));
   // The language loads lazily; the keyword is highlighted once it has.
-  await vi.waitFor(() => expect(tokenColour(target, "const")).not.toBe("missing"));
-  await settle();
+  await vi.waitFor(() => expect(tokenColour(target, "const")).not.toBe("missing"), PRECONDITION);
+  await parsed(target);
   return target;
 }
 
@@ -159,8 +188,8 @@ async function mountRich(): Promise<HTMLElement> {
     expect(target.querySelector("svg.face-mermaid")).not.toBeNull();
     expect(target.querySelector("svg.face-excalidraw")).not.toBeNull();
     expect(target.querySelector("img")).not.toBeNull();
-  });
-  await settle();
+  }, PRECONDITION);
+  await parsed(target);
   return target;
 }
 
@@ -180,7 +209,7 @@ async function waitForFaces(target: HTMLElement, theme: Theme): Promise<void> {
   await vi.waitFor(() => {
     for (const face of target.querySelectorAll("svg.face-mermaid")) expect(face.getAttribute("data-drawn"), "the Mermaid face").toBe(mermaid);
     for (const face of target.querySelectorAll("svg.face-excalidraw")) expect(face.getAttribute("data-drawn"), "the Excalidraw embed's face").toBe(theme);
-  });
+  }, PRECONDITION);
   await settle();
 }
 
