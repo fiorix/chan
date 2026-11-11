@@ -501,13 +501,36 @@ fn typing_into_the_control_terminal_reaches_nothing_while_connected() {
 #[test]
 fn a_pause_is_answered_and_a_window_close_ends_its_panes() {
     let (mut rig, pane) = attached();
+    let capture = rig.capture(0, 0, 24, &[b"$ "]);
+    rig.feed(&capture);
     rig.feed(b"%pause %0\r\n");
     assert_eq!(
         rig.inputs(),
         vec![b"refresh-client -A '%0:continue'\n".to_vec()]
     );
+    let continued = rig.reply(&[]);
+    rig.feed(&continued);
+    // A window of another session, which the connection holds nothing for.
+    rig.feed(b"%unlinked-window-close @7\r\n");
+    rig.work();
+    assert!(
+        rig.inputs().is_empty(),
+        "nothing is asked of a window not held"
+    );
     let mut handle = rig.registry.attach(&pane.id, None).unwrap();
     rig.feed(b"%window-close @0\r\n");
+    rig.work();
+    assert_eq!(
+        rig.inputs(),
+        vec![b"list-panes -t @0 -F '#{pane_id} #{pane_active}'\n".to_vec()],
+        "tmux reports a move as a close too, so it is asked whether the window lives on"
+    );
+    assert!(
+        rig.registry.attach(&pane.id, None).is_some(),
+        "the pane session lives until tmux answers"
+    );
+    let refused = rig.refuse(&[b"can't find window: @0"]);
+    rig.feed(&refused);
     rig.work();
     assert!(
         rig.registry.attach(&pane.id, None).is_none(),
@@ -1915,6 +1938,32 @@ fn replay(name: &str) -> Vec<Vec<String>> {
     closed
 }
 
+/// tmux reports a window moved to another index as added and then closed.
+#[test]
+fn a_window_moved_to_another_index_keeps_its_chan_window_and_pane_sessions() {
+    for version in CAPTURED_VERSIONS {
+        assert_eq!(
+            replay(&format!("{version}-move-window")),
+            vec![Vec::<String>::new()],
+            "tmux {version}"
+        );
+    }
+}
+
+/// A window that leaves for another session is reported closed and lives
+/// on there, with nothing reported for its panes meanwhile; its return is
+/// reported as added and closed again.
+#[test]
+fn a_window_moved_to_another_session_and_back_keeps_its_chan_window() {
+    for version in CAPTURED_VERSIONS {
+        assert_eq!(
+            replay(&format!("{version}-move-to-session-and-back")),
+            vec![Vec::<String>::new(); 3],
+            "tmux {version}"
+        );
+    }
+}
+
 /// A swap and a renumber move windows between indexes and keep each
 /// window's id; tmux reports neither.
 #[test]
@@ -1944,4 +1993,49 @@ fn a_window_tmux_kills_closes_its_chan_window_and_its_neighbours_stay() {
             );
         }
     }
+}
+
+/// The question a close raises waits for room in a full command queue, once
+/// however often tmux reports the close, and the window keeps its chan
+/// window meanwhile; a reply that frees a slot sends it, and tmux's refusal
+/// closes the window.
+#[test]
+fn a_close_asked_with_the_queue_full_is_asked_once_a_reply_frees_a_slot() {
+    let (mut rig, pane, hook) = attached_with_hook();
+    let pane_ref = pane.tmux_pane.expect("a pane");
+    for _ in 0..300 {
+        rig.registry
+            .tmux_request_for(&pane_ref, TmuxRequest::Focus { pane: "%0".into() });
+    }
+    let queued = rig.inputs().len();
+    assert!((1..300).contains(&queued), "the queue fills at {queued}");
+    rig.feed(b"%window-close @0\r\n%window-close @0\r\n");
+    rig.work();
+    assert!(rig.inputs().is_empty(), "no room to ask");
+    assert!(
+        rig.registry.attach(&pane.id, None).is_some(),
+        "the window waits for its answer"
+    );
+    assert_eq!(calls(&hook), Vec::<String>::new());
+    let freed = rig.reply(&[]);
+    rig.feed(&freed);
+    assert_eq!(
+        rig.inputs(),
+        vec![b"list-panes -t @0 -F '#{pane_id} #{pane_active}'\n".to_vec()],
+        "asked once a reply frees a slot"
+    );
+    for _ in 1..queued {
+        let reply = rig.reply(&[]);
+        rig.feed(&reply);
+    }
+    assert_eq!(
+        rig.inputs(),
+        Vec::<Vec<u8>>::new(),
+        "asked once for the two reports"
+    );
+    let refused = rig.refuse(&[b"can't find window: @0"]);
+    rig.feed(&refused);
+    rig.work();
+    assert!(rig.registry.attach(&pane.id, None).is_none());
+    assert_eq!(calls(&hook), vec!["remove w-1"]);
 }
