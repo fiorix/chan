@@ -298,6 +298,15 @@ identifier = "allow-read-dropped-paths"
 description = "Enables the read_dropped_paths command (drag-pasteboard read at drop time)."
 commands.allow = ["read_dropped_paths"]
 
+# Deliberately NOT in the workspace-window set: they read local files. Granted
+# with the native transfers (capabilities/local-upload.json and the gateway
+# runtime grant); the desktop answers only the files just dropped on the asking
+# window, which is what any window's drop hands its page.
+[[permission]]
+identifier = "allow-read-dropped-file"
+description = "Enables the dropped_files and read_dropped_file commands (the files just dropped on the window)."
+commands.allow = ["dropped_files", "read_dropped_file"]
+
 # Deliberately NOT in the workspace-window set: native transfers read or write
 # the user's local filesystem, so every command is granted only to locally
 # served windows plus authenticated exact gateway origins.

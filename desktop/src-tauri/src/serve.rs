@@ -1157,7 +1157,10 @@ fn build_workspace_window_with_completion(
         // guarantee for stray OS file drops, and the terminal
         // path-print reads the drag pasteboard via
         // `read_dropped_paths` (dropped_paths.rs) instead of
-        // native drag events.
+        // native drag events. On the GTK desktops the window's
+        // own drag signals are observed instead, so a page can
+        // read a file dropped on it from another application
+        // (dropped_files.rs).
         .disable_drag_drop_handler()
         // A page that hosts its tab bar in the title bar holds that mode for
         // its own origin only: a load from another origin gets the normal
@@ -1188,6 +1191,9 @@ fn build_workspace_window_with_completion(
                 // Apply the restored OS geometry (physical px) and reveal the
                 // window at its final size/position before anything else.
                 apply_geometry_plan(&window, &label_owned, geometry_plan);
+                // Record what other applications drop on the window, for the
+                // page that cannot read a dropped file itself.
+                crate::dropped_files::observe(&window);
                 // The window set changed, so the Window menu's open
                 // section is due a rebuild: the one menubar's on macOS,
                 // every launcher bar's off it.
@@ -1415,6 +1421,7 @@ fn on_close_requested(
 fn on_destroyed(app: &AppHandle, label: &str) {
     // The window's launcher, if it built one, goes with it.
     crate::launcher_panel::forget_host(app, label);
+    crate::dropped_files::forget(label);
     let state = app.state::<Arc<AppState>>();
     state.retarget_tickets.cancel(label);
     crate::clear_gateway_404_counts_for_window(&state.gateway_404_counts, label);

@@ -5,6 +5,7 @@ mod config;
 mod cs_install;
 mod devserver;
 mod download;
+mod dropped_files;
 mod dropped_paths;
 mod embedded;
 mod gateway;
@@ -5436,6 +5437,10 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         // ACL-scoped to locally-served windows (capabilities/
         // local-drop.json) -- the drag pasteboard is system-wide.
         dropped_paths::read_dropped_paths,
+        // The files just dropped on the window from another application, which
+        // WebKitGTK keeps from the page: listed by name, read once each.
+        dropped_files::dropped_files,
+        dropped_files::read_dropped_file,
         // Native upload picker + HTTP stream. Paths and bytes stay in Rust.
         upload::upload_files_native,
         // `cs tunnel` trigger: the SPA forwards the tunnel_open
