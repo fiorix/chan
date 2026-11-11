@@ -49,6 +49,8 @@ import {
 import {
   NO_TITLEBAR_CHROME,
   WINDOW_TAB_BAR_MIN_HEIGHT,
+  WINDOW_TITLE_READ_RETRIES,
+  WINDOW_TITLE_READ_RETRY_MS,
   WINDOW_TITLE_REFERENCE_TAB_PX,
   WINDOW_TITLE_RESERVE_PX,
   WINDOW_TITLE_ROLL,
@@ -59,6 +61,7 @@ import { applyWindowLabel, loadWindowTitle, __resetWindowTitle } from "../state/
 import { privacy } from "@chan/web-shared/privacy";
 import { loadScopedLibrarySnapshot, type ScopedLibrarySnapshot } from "../api/libraryCommand";
 import { sessionWindowId } from "../api/client";
+import { ui } from "../state/store.svelte";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
@@ -77,7 +80,10 @@ afterEach(async () => {
   windowTabBar.slot = null;
   windowTabBar.titleSlot = null;
   windowTabBar.title = "";
+  windowTabBar.available = false;
   privacy.enabled = false;
+  ui.ws = "connecting";
+  vi.useRealTimers();
   __resetWindowTitle();
   vi.mocked(loadScopedLibrarySnapshot).mockReset();
   delete (HTMLElement.prototype as Animated).animate;
@@ -91,10 +97,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function renderBar(): Promise<HTMLElement> {
+async function renderBar(props: { restored?: boolean } = {}): Promise<HTMLElement> {
   const target = document.createElement("div");
   document.body.append(target);
-  component = mount(WindowTabBar, { target }) as Record<string, unknown>;
+  component = mount(WindowTabBar, { target, props }) as Record<string, unknown>;
   await tick();
   const bar = target.querySelector<HTMLElement>(".window-tab-bar");
   if (!bar) throw new Error("no bar");
@@ -188,6 +194,30 @@ describe("under the Computers launcher", () => {
 
     await marked(false);
     expect(bar.querySelector(".window-title")).toBeNull();
+  });
+
+  test("the covered title is the bar's own, so privacy mode masks it before the desktop's mask arrives", async () => {
+    vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue({
+      library_id: "local",
+      workspaces: [],
+      windows: [{
+        window_id: sessionWindowId(), kind: "workspace", ordinal: 2,
+        label: "deploy", title: "", control: false, tmux: false, workspace_path: "/work",
+        connected: true, hidden: false, launch_path: "/",
+      }],
+    });
+    windowTabBar.chrome = { ...NO_TITLEBAR_CHROME, active: true, insetRight: 138, drawControls: true };
+    windowTabBar.title = "\u2197 geekom / work Window 2 [deploy]";
+    const bar = await renderBar();
+    await marked(true);
+    const covered = (): string | undefined => bar.querySelector(".window-title")?.textContent?.trim();
+    expect(covered()).toBe("\u2197 geekom / work Window 2 [deploy]");
+
+    // The page hears privacy mode turn on while it still holds the full title.
+    privacy.enabled = true;
+    await tick();
+    expect(covered() ?? "", "the full title is gone at once").not.toContain("geekom");
+    await vi.waitFor(() => expect(covered()).toBe("Window 2"));
   });
 
   test("a window with native controls leaves its title to the desktop", async () => {
@@ -710,6 +740,44 @@ describe("the window's title", () => {
     expect(animate, "reduced motion cuts").toHaveBeenCalledTimes(2);
   });
 
+  test("tabs the boot's layout restore brings cut the title to the end, and a tab opened after it slides", async () => {
+    const animate = vi.fn();
+    (HTMLElement.prototype as Animated).animate = animate;
+    windowTabBar.title = LOCAL;
+    const target = document.createElement("div");
+    document.body.append(target);
+    // The prop follows a reactive flag, as the app's own boot flag is; the
+    // bar itself reads nothing of the flag borrowed here.
+    windowTabBar.available = false;
+    const props = {
+      get restored() {
+        return windowTabBar.available;
+      },
+    };
+    component = mount(WindowTabBar, { target, props }) as Record<string, unknown>;
+    await tick();
+    const bar = target.querySelector<HTMLElement>(".window-tab-bar")!;
+    stripWithTitleSlot(bar.querySelector(".slot")!);
+    await tick();
+    const box = titleBox();
+    box.getBoundingClientRect = () =>
+      ({ left: box.parentElement === bar ? 40 : 600, width: 120 }) as DOMRect;
+
+    // The restore lays out the window's tabs, then the boot says so.
+    resetLayout([terminalTab()]);
+    await tick();
+    expect(box.dataset.place).toBe("end");
+    windowTabBar.available = true;
+    await tick();
+    expect(animate, "the restored tabs are not a first tab opening").not.toHaveBeenCalled();
+
+    resetLayout([]);
+    await tick();
+    resetLayout([terminalTab()]);
+    await tick();
+    expect(animate, "closing the last tab and opening a first one slide").toHaveBeenCalledTimes(2);
+  });
+
   test("a strip changing under a title that stays at the end does not slide it", async () => {
     const animate = vi.fn();
     (HTMLElement.prototype as Animated).animate = animate;
@@ -805,6 +873,47 @@ describe("the window's title", () => {
     applyWindowLabel("release checks");
     await tick();
     expect(shown(), "a rename shows").toBe("Terminal Window 2 [release checks]");
+  });
+
+  test("a window booted in privacy mode reads its name again until the read succeeds", async () => {
+    vi.useFakeTimers();
+    // The window has no live presence yet, so the first reads are refused.
+    vi.mocked(loadScopedLibrarySnapshot)
+      .mockRejectedValueOnce(new Error("no presence"))
+      .mockRejectedValueOnce(new Error("no presence"))
+      .mockResolvedValue(ownSnapshot());
+    privacy.enabled = true;
+    windowTabBar.title = "Chan (privacy mode)";
+    await renderBar();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(1);
+    expect(shown()).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(WINDOW_TITLE_READ_RETRY_MS);
+    expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(2);
+    expect(shown()).toBeNull();
+    await vi.advanceTimersByTimeAsync(WINDOW_TITLE_READ_RETRY_MS);
+    expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(3);
+    expect(shown()).toBe("Terminal Window 2");
+
+    await vi.advanceTimersByTimeAsync(WINDOW_TITLE_READ_RETRY_MS * 3);
+    expect(loadScopedLibrarySnapshot, "a named window reads no more").toHaveBeenCalledTimes(3);
+  });
+
+  test("the retries are bounded, and the window's socket opening reads again at once", async () => {
+    vi.useFakeTimers();
+    vi.mocked(loadScopedLibrarySnapshot).mockRejectedValue(new Error("no presence"));
+    privacy.enabled = true;
+    await renderBar();
+    await vi.advanceTimersByTimeAsync(WINDOW_TITLE_READ_RETRY_MS * (WINDOW_TITLE_READ_RETRIES + 5));
+    expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(1 + WINDOW_TITLE_READ_RETRIES);
+    expect(shown()).toBeNull();
+
+    vi.mocked(loadScopedLibrarySnapshot).mockResolvedValue(ownSnapshot());
+    ui.ws = "open";
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loadScopedLibrarySnapshot).toHaveBeenCalledTimes(2 + WINDOW_TITLE_READ_RETRIES);
+    expect(shown()).toBe("Terminal Window 2");
   });
 
   test("a browser's bar, which no title reaches, shows the name its boot read", async () => {

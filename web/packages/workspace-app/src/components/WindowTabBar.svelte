@@ -33,10 +33,13 @@
     togglePaneTree,
   } from "../state/paneTree.svelte";
   import { chordFor } from "../state/shortcuts";
+  import { ui } from "../state/store.svelte";
   import { activeLayout, activeTabInPane, paneMode, paneShowsTmux, tabLabel } from "../state/tabs.svelte";
   import {
     WINDOW_CONTROLS_Z_INDEX,
     WINDOW_TITLE_MOVE,
+    WINDOW_TITLE_READ_RETRIES,
+    WINDOW_TITLE_READ_RETRY_MS,
     WINDOW_TITLE_RESERVE_PX,
     WINDOW_TITLE_ROLL,
     WINDOW_TITLE_ROLL_PX_PER_S,
@@ -48,6 +51,11 @@
   import { loadWindowTitle, windowName } from "../state/windowTitle.svelte";
   import { privacy } from "@chan/web-shared/privacy";
   import { WINDOW_TITLE_END_ATTR, windowTitleMover, type WindowTitlePlace } from "./windowBarTitle";
+
+  // `restored` is false until the boot has restored the window's layout:
+  // the tabs that restore brings are not a first tab opening, so the title
+  // takes its place among them without a slide.
+  let { restored = true }: { restored?: boolean } = $props();
 
   // Tauri's drag script starts a window drag on a direct press on an element
   // carrying the attribute, and zooms the window on a double click there.
@@ -85,11 +93,38 @@
   const title = $derived(windowName());
   // The naming fields behind the privacy form, and behind the name of a
   // window no title has reached, are read once they are needed: when privacy
-  // mode is on, and at a pane tree open, which is also when a failed read is
-  // tried again.
+  // mode is on, and at a pane tree open. A read fails while the window has no
+  // live presence, as at boot, and leaves no title, so it is tried again when
+  // the window's socket changes state, a bounded number of times after that
+  // (the socket opens a moment before the server counts the presence), and
+  // at the next pane tree open.
+  let titleReadTick = $state(0);
+  let titleReadsLeft = WINDOW_TITLE_READ_RETRIES;
+  let titleReadSocket: string | null = null;
   $effect(() => {
     if (title !== null) return;
-    if (privacy.enabled || paneTree.open) untrack(() => void loadWindowTitle());
+    if (!(privacy.enabled || paneTree.open)) return;
+    void titleReadTick;
+    if (ui.ws !== titleReadSocket) {
+      titleReadSocket = ui.ws;
+      titleReadsLeft = WINDOW_TITLE_READ_RETRIES;
+    }
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    untrack(() => {
+      // A read that found the window names it, which ends this effect.
+      void loadWindowTitle().then(() => {
+        if (!live || titleReadsLeft <= 0) return;
+        titleReadsLeft -= 1;
+        timer = setTimeout(() => {
+          titleReadTick += 1;
+        }, WINDOW_TITLE_READ_RETRY_MS);
+      });
+    });
+    return () => {
+      live = false;
+      if (timer !== null) clearTimeout(timer);
+    };
   });
 
   // With no tab in any pane of the window, on either side, the title sits
@@ -152,9 +187,11 @@
   });
 
   // What the covered band holds: the menus the desktop lists, which only a
-  // window wearing no menubar gets, and the title of a frameless window.
+  // window wearing no menubar gets, and the title of a frameless window, the
+  // one the bar shows uncovered, so privacy mode masks it here as well from
+  // the moment the page hears of it.
   const menus = $derived(covered ? chrome.menus : []);
-  const titleShown = $derived(covered && chrome.drawControls && windowTabBar.title !== "");
+  const titleShown = $derived(covered && chrome.drawControls && title !== null);
 
   // The menu whose popup is up. The desktop answers once the menu has
   // closed, so its button stays pressed until then and another press waits.
@@ -284,7 +321,7 @@
     {@attach placeTitle(
       titlePlace,
       windowTabBar.titleSlot,
-      WINDOW_TITLE_MOVE === "slide" ? WINDOW_TITLE_SLIDE_MS : 0,
+      restored && WINDOW_TITLE_MOVE === "slide" ? WINDOW_TITLE_SLIDE_MS : 0,
     )}
   >
     <span class="bar-title-text" bind:this={titleText} data-tauri-drag-region={drag}>{title ?? ""}</span>
@@ -340,7 +377,7 @@
       {/if}
       {#if titleShown}
         <div class="window-title" aria-hidden="true">
-          <span>{windowTabBar.title}</span>
+          <span>{title}</span>
         </div>
       {/if}
     </div>
@@ -463,11 +500,13 @@
      bar's at the end. At the start it takes the room the strip leaves and
      ends in an ellipsis. At the end it takes its own width up to the
      reserve, and never more than two fifths of the row in a narrow window,
-     and the strip's tabs give way to it. */
+     and the strip's tabs give way to it. Both bounds are of the whole box,
+     its padding included. */
   .title-end {
     display: contents;
   }
   .bar-title {
+    box-sizing: border-box;
     flex: 0 1 auto;
     min-width: 0;
     padding: 0 8px;

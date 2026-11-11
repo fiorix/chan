@@ -1,9 +1,11 @@
 // The browser tab title and the window tab bar's title for THIS window.
 //
-// The tab is titled the same way the launcher names the row and chan-desktop
-// titles the OS window -- "Terminal Window 2 [deploy shell]" -- so one window
-// reads identically wherever it is named. Composition is the shared
-// `windowDisplayName`; what lives here is where the naming fields come from.
+// A browser's tab is titled the way the launcher names the window's row: the
+// generated name and the caption, "Terminal Window 2 [deploy shell]".
+// Composition is the shared `windowDisplayName`; what lives here is where the
+// naming fields come from. chan-desktop titles the OS window with the machine
+// before that name, an arrow and "local" or the devserver's name, and for a
+// workspace window the workspace too ("local / chan Window 1").
 //
 // The workspace app has no view of the window feed: its only library access is
 // the short-lived, presence-bound command capability. So the naming fields are

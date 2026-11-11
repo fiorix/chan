@@ -150,7 +150,7 @@
   import { programSummary, programVisual } from "../state/programStatus";
   import { windowTabBar, windowTabBarTitleSlot } from "../state/windowTabBar.svelte";
   import { portalTo } from "./portal";
-  import { TabStripScroll } from "./tabStripScroll.svelte";
+  import { TAB_STRIP_END_FADE_PX, TabStripScroll } from "./tabStripScroll.svelte";
 
   let { pane }: { pane: LeafNode } = $props();
 
@@ -659,7 +659,8 @@
   $effect(() => {
     void visibleActiveTabId;
     void visibleSide;
-    void stripInBar;
+    // Only the strip in the bar fades its end (see the fade-end rule).
+    stripScroll.endFade = stripInBar ? TAB_STRIP_END_FADE_PX : 0;
     untrack(() => stripScroll.reveal());
   });
 
@@ -1542,6 +1543,7 @@
     <div
       class="tab-scroll"
       class:fade-end={stripInBar && stripScroll.forward}
+      style:--tab-strip-end-fade={`${TAB_STRIP_END_FADE_PX}px`}
       data-tauri-drag-region={barDragRegion}
       {@attach stripScroll.attach}
     >
@@ -2489,10 +2491,11 @@
     display: contents;
   }
   /* While tabs lie past the viewport's end, the last ones in view fade out
-     toward the window's title instead of ending at a hard edge. */
+     toward the window's title instead of ending at a hard edge. The active
+     tab is brought into view clear of the fade (tabStripScroll.svelte.ts). */
   .tabs.in-bar .tab-scroll.fade-end {
-    mask-image: linear-gradient(to right, black calc(100% - 32px), transparent);
-    -webkit-mask-image: linear-gradient(to right, black calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - var(--tab-strip-end-fade)), transparent);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--tab-strip-end-fade)), transparent);
   }
   /* A stale Hybrid Nav transaction takes no input; in place the pane's own
      rule covers the strip. */

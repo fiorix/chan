@@ -11,6 +11,10 @@
 /// the row's own padding, so its ring and hover lift stay clear of the clip.
 const REVEAL_MARGIN_PX = 4;
 
+/// The width of the fade a strip in the window tab bar draws over its
+/// viewport's end while more tabs lie past it.
+export const TAB_STRIP_END_FADE_PX = 32;
+
 /// A button press pages by this share of the viewport, so the tab cut at
 /// the edge stays in view as the first one past it.
 const PAGE_SHARE = 0.8;
@@ -35,6 +39,11 @@ export class TabStripScroll {
   back = $state(false);
   /// The tabs can scroll toward the end.
   forward = $state(false);
+  /// The width at the viewport's end that the strip fades while the tabs can
+  /// scroll toward the end, 0 for a strip that fades nothing. A tab brought
+  /// into view by its end keeps clear of it, so no part of the active tab
+  /// sits under the fade.
+  endFade = 0;
 
   #view: HTMLElement | null = null;
   #width = -1;
@@ -105,7 +114,7 @@ export class TabStripScroll {
       const box = view.getBoundingClientRect();
       const rect = tab.getBoundingClientRect();
       const start = box.left + REVEAL_MARGIN_PX;
-      const end = box.left + view.clientWidth - REVEAL_MARGIN_PX;
+      const end = box.left + view.clientWidth - Math.max(REVEAL_MARGIN_PX, this.endFade);
       if (rect.left < start) view.scrollLeft -= start - rect.left;
       else if (rect.right > end) view.scrollLeft += Math.min(rect.right - end, rect.left - start);
     }

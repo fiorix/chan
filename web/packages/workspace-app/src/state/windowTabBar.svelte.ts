@@ -78,6 +78,12 @@ export const WINDOW_TITLE_MOVE: WindowTitleMove = "slide";
 /// How long the title's slide takes, in ms.
 export const WINDOW_TITLE_SLIDE_MS = 200;
 
+/// A read of the naming fields behind the title's privacy form fails while
+/// the window has no live presence, as at boot. The bar reads again when the
+/// window's socket changes state, and this many more times this far apart.
+export const WINDOW_TITLE_READ_RETRIES = 5;
+export const WINDOW_TITLE_READ_RETRY_MS = 1000;
+
 /// What a title wider than its room does. All three show its head with an
 /// ellipsis at rest and the whole title as a tooltip: "hover" also rolls the
 /// text to its tail and back while the pointer is over it, "auto" rolls it
