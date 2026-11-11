@@ -52,7 +52,7 @@ export type RepaintScheduler = {
   cancel(): void;
 };
 
-/// A repaint that is pending at most once per signal. A hidden page gets no
+/// A repaint that is pending at most once at a time. A hidden page gets no
 /// animation frame, so every repaint asked for while its window is off-screen
 /// waits for the frame in which the window comes back; each one is a full
 /// pass over the terminal's cells, and WebKit shows the window's content only
@@ -73,10 +73,16 @@ export function createRepaintScheduler(
   return {
     request() {
       if (frame === null) {
-        frame = host.requestFrame(() => {
+        // A host that runs the callback before returning (a test's
+        // synchronous frame) has nothing pending once it returns; keeping
+        // its handle would leave the frame path waiting on a frame that ran.
+        let ran = false;
+        const handle = host.requestFrame(() => {
+          ran = true;
           frame = null;
           repaint();
         });
+        if (!ran) frame = handle;
       }
       if (fontsPending) return;
       const ready = host.fontsReady();

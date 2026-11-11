@@ -168,6 +168,24 @@ describe("the terminal repaint scheduler", () => {
     expect(repaint).toHaveBeenCalledTimes(2);
   });
 
+  test("a host that runs the frame before returning repaints on every request", () => {
+    // jsdom's test stub runs the frame callback synchronously, as no browser
+    // does; the handle it returns names a frame that already ran.
+    const repaint = vi.fn();
+    const requestFrame = vi.fn((callback: () => void) => {
+      callback();
+      return 0;
+    });
+    const scheduler = createRepaintScheduler(repaint, {
+      requestFrame,
+      cancelFrame: () => {},
+      fontsReady: () => undefined,
+    });
+    for (let asked = 0; asked < 3; asked++) scheduler.request();
+    expect(requestFrame).toHaveBeenCalledTimes(3);
+    expect(repaint).toHaveBeenCalledTimes(3);
+  });
+
   test("the fonts are waited on once however often a repaint is asked for", async () => {
     const loading = page();
     loading.loadFonts();

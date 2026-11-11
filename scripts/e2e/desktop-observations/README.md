@@ -2,7 +2,7 @@
 
 Drivers that put a question to the real desktop app and read the answer from the app itself: a real `chan-desktop` under a virtual X display, real processes around it, and the page the user would see as the instrument. They exist for behavior that depends on the desktop's own engine or on its native windows, which a headless Chromium run cannot show.
 
-They speak for one engine, the WebKitGTK the Linux desktop ships on. WKWebView on macOS and WebView2 on Windows are different engines, and a result here says nothing about them.
+They speak for one engine, the WebKitGTK the Linux desktop ships on. WKWebView on macOS and WebView2 on Windows are different engines, and a result here says nothing about them. `macos-wake-blank.sh` is the exception to both: it runs on macOS alone, starts nothing, and reads what WKWebView's WebKit recorded in the unified log.
 
 Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make pre-push` or CI. The rules in [`../README.md`](../README.md) apply: a throwaway home and workspace for every run, bounded waits, evidence kept on failure, and only the run's own processes torn down.
 
