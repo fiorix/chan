@@ -15,7 +15,10 @@
 // / a workspace card / loose / orphan, so no window_id repeats inside a keyed
 // {#each} (a repeat throws Svelte each_key_duplicate and freezes the tree). A
 // tmux row goes to its connection's node before any library lookup, so the
-// library's own machine never lists it.
+// library's own machine never lists it in those buckets. The one exception is
+// a connection's control terminal, which its machine's node also carries in
+// `tmuxControls`, a list of its own that no flattened view reads (see
+// `TmuxControlRow`).
 
 import type {
   DevserverEntry,
@@ -150,6 +153,24 @@ export interface MachineNode {
   /** A tmux node's windows past the cap, with no chan window yet: rows with
    * no record, shown hidden; show asks the connection to open them. */
   unopened: TmuxWindowEntry[];
+  /** The control terminals of the tmux connections run in this machine's
+   * terminals, in the connections' card order; empty on a tmux node. */
+  tmuxControls: TmuxControlRow[];
+}
+
+/** A tmux connection's control terminal as the card of the machine whose
+ * terminal ran `tmux -CC` lists it. Running it buries that terminal, and the
+ * user looks for the terminal on the machine where they ran it, so
+ * the control terminal is the one window two cards list: its connection's
+ * card, which lists every window of the connection, and its machine's. The
+ * connection's other windows stay on the connection's card alone. The
+ * flattened views of the tree (All windows, the command launcher) read the
+ * disjoint buckets and never this list, so each still lists the window once. */
+export interface TmuxControlRow {
+  window: WindowRecord;
+  /** The connection's own node: its id is what the row's detach names, and
+   * its title tells two connections on one machine apart. */
+  node: MachineNode;
 }
 
 export interface MachineTree {
@@ -218,6 +239,7 @@ function machineNode(
     workspaces,
     looseWindows,
     unopened: [],
+    tmuxControls: [],
   };
 }
 
@@ -246,7 +268,19 @@ function tmuxNode(
     workspaces: [],
     looseWindows: [],
     unopened,
+    tmuxControls: [],
   };
+}
+
+/** The node of the machine whose terminal runs a connection's tmux client,
+ * read from the record's library: This machine for the local library, or the
+ * devserver card that holds the library's windows. A carrier's run (`ssh host
+ * tmux -CC`) counts too, since its control terminal is that machine's terminal
+ * wherever the tmux server runs. Null while the record has not arrived, and
+ * while no card holds the record's library yet. */
+function tmuxMachine(entry: TmuxConnectionEntry | null, machines: MachineNode[]): MachineNode | null {
+  if (entry === null) return null;
+  return machines.find((m) => m.kind !== "tmux" && m.libraryId === entry.library_id) ?? null;
 }
 
 /** The connections on this machine first, then the rest by title, then by id
@@ -263,11 +297,13 @@ function compareTmuxNodes(a: MachineNode, b: MachineNode): number {
 
 /** Total rows a machine card shows, summed across its disjoint buckets (control
  * + standalone terminals + per-workspace cards + loose, and a tmux node's
- * windows with no chan window yet). Orphans belong to no machine and are
+ * windows with no chan window yet) and the control terminals of the tmux
+ * connections run in its terminals. Orphans belong to no machine and are
  * excluded. Drives the machine card's count badge. */
 export function machineWindowCount(node: MachineNode): number {
   return (
     node.control.length +
+    node.tmuxControls.length +
     node.terminals.length +
     node.workspaces.reduce((sum, w) => sum + w.count, 0) +
     node.looseWindows.length +
@@ -357,6 +393,13 @@ export function buildMachineTree(
     if (!recorded.has(connection)) tmuxNodes.push(tmuxNode(connection, null, rows, devservers, localLibraryId));
   }
   tmuxNodes.sort(compareTmuxNodes);
+  // Each connection is one node and each control row one connection's (the
+  // feed and the records are deduplicated above), so a machine's list holds
+  // a control terminal once.
+  for (const node of tmuxNodes) {
+    const machine = tmuxMachine(node.tmux, machines);
+    if (machine) machine.tmuxControls.push(...node.control.map((window) => ({ window, node })));
+  }
   machines.push(...tmuxNodes);
 
   const orphans: WindowRecord[] = [];
