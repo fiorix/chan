@@ -1434,10 +1434,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(any(unix, windows))]
 const UPGRADE_IO_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Why a request to the endpoint got no answer line.
 #[cfg(any(unix, windows))]
 enum EndpointError {
+    /// Nothing listens: no endpoint, a stale socket, another account's.
     NoDesktop,
+    /// A listener took the request and wrote nothing within the budget.
     NoReply,
+    /// A listener took the request and closed, or failed, without a line.
+    Closed,
 }
 
 /// Shared gate for request clients and the connect-only liveness probe.
@@ -1572,7 +1577,7 @@ async fn request_endpoint(
     let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
-        Ok(_) => Err(EndpointError::NoDesktop),
+        Ok(_) => Err(EndpointError::Closed),
         Err(_) => Err(EndpointError::NoReply),
     }
 }
@@ -1831,7 +1836,9 @@ async fn try_devserver_control_at(socket_path: &Path, req: Request) -> Devserver
     let budget = req.reply_budget();
     let line = match request_endpoint(socket_path, &req, budget).await {
         Ok(line) => line,
-        Err(EndpointError::NoDesktop) => return DevserverControlOutcome::NoDesktop,
+        Err(EndpointError::NoDesktop | EndpointError::Closed) => {
+            return DevserverControlOutcome::NoDesktop
+        }
         Err(EndpointError::NoReply) => return DevserverControlOutcome::NoReply { budget },
     };
 
@@ -1891,7 +1898,9 @@ pub enum ActivateReply {
 pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
     match request_endpoint(socket_path, &activate_request(), budget).await {
         Ok(line) => map_activate_response(&line),
-        Err(EndpointError::NoDesktop | EndpointError::NoReply) => ActivateReply::NoReply,
+        Err(EndpointError::NoDesktop | EndpointError::NoReply | EndpointError::Closed) => {
+            ActivateReply::NoReply
+        }
     }
 }
 
@@ -1968,7 +1977,9 @@ pub async fn try_open_path_at(socket_path: &Path, path: &str, budget: Duration) 
     };
     match request_endpoint(socket_path, &req, budget).await {
         Ok(line) => map_open_path_response(&line),
-        Err(EndpointError::NoDesktop | EndpointError::NoReply) => OpenPathReply::NoReply,
+        Err(EndpointError::NoDesktop | EndpointError::NoReply | EndpointError::Closed) => {
+            OpenPathReply::NoReply
+        }
     }
 }
 
@@ -1998,6 +2009,148 @@ fn map_open_path_response(line: &str) -> OpenPathReply {
             reply: line.to_string(),
         },
     }
+}
+
+/// What an `OpenPath` from the CLI met at the well-known endpoint. Unlike
+/// [`OpenPathReply`], a desktop that is running and gave no answer is told
+/// apart from no desktop at all, since only the second lets the CLI start
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliOpenPath {
+    /// The desktop opened the path; `message` is its `PathOpened` line.
+    Opened { message: String },
+    /// It answered without opening; `reply` is its answer line.
+    Refused { reply: String },
+    /// Nothing listens on the endpoint: no socket, a stale one, or another
+    /// account's. No desktop is running, or one has not bound it yet.
+    NotListening,
+    /// A listener took the request and gave no answer within the budget, or
+    /// closed without one: a desktop is running and did not answer.
+    Silent,
+}
+
+/// Ask the running same-user desktop to open `path` within `budget`, for the
+/// CLI's `chan-files` and `chan-edit` outside a chan terminal. The caller
+/// reads `CHAN_NO_DESKTOP_HANDOFF` and the GUI-session check first, so it can
+/// say which of them stopped it.
+#[cfg(any(unix, windows))]
+pub async fn try_open_path(path: &str, budget: Duration) -> CliOpenPath {
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return CliOpenPath::NotListening;
+    };
+    try_open_path_from_cli_at(&socket_path, path, budget).await
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_open_path(_path: &str, _budget: std::time::Duration) -> CliOpenPath {
+    CliOpenPath::NotListening
+}
+
+#[cfg(any(unix, windows))]
+async fn try_open_path_from_cli_at(
+    socket_path: &Path,
+    path: &str,
+    budget: Duration,
+) -> CliOpenPath {
+    let req = Request::OpenPath {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+        path: path.to_string(),
+    };
+    match request_endpoint(socket_path, &req, budget).await {
+        Ok(line) => match map_open_path_response(&line) {
+            OpenPathReply::Opened { message, .. } => CliOpenPath::Opened { message },
+            OpenPathReply::Refused { .. } | OpenPathReply::NoReply => CliOpenPath::Refused {
+                reply: line.trim().to_string(),
+            },
+        },
+        Err(EndpointError::NoDesktop) => CliOpenPath::NotListening,
+        Err(EndpointError::NoReply | EndpointError::Closed) => CliOpenPath::Silent,
+    }
+}
+
+/// The absolute path a launch argument names, the `path` of an `OpenPath` or
+/// of `cs open`: an argument of `chan-desktop`, `chan-files` or `chan-edit`,
+/// typed or the file URIs a desktop entry's `%U` expands to. A relative path
+/// is made absolute against `cwd`, the launch's working directory, and a
+/// `file://` URI is percent-decoded. `Err` is the reason an argument names
+/// nothing chan can open, because a desktop entry hands over every URI a file
+/// manager selected (`smb://` and `sftp://` on a network mount among them): a
+/// URI of another scheme, a file URI naming another host or encoding a `/` or
+/// a NUL in a name, a relative path with no working directory, a path that is
+/// not UTF-8, which the request's JSON cannot carry.
+pub fn launch_arg_path(
+    arg: &std::ffi::OsStr,
+    cwd: Option<&std::path::Path>,
+) -> Result<String, String> {
+    launch_arg_pathbuf(arg, cwd)?
+        .into_os_string()
+        .into_string()
+        .map_err(|path| {
+            format!(
+                "{} is not valid UTF-8, so it cannot be sent to chan",
+                std::path::Path::new(&path).display()
+            )
+        })
+}
+
+fn launch_arg_pathbuf(
+    arg: &std::ffi::OsStr,
+    cwd: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
+    if let Some(text) = arg.to_str() {
+        if let Some(uri) = launch_arg_uri(text) {
+            return file_uri_path(text, &uri);
+        }
+    }
+    let path = std::path::Path::new(arg);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    match cwd {
+        Some(cwd) => Ok(cwd.join(path)),
+        None => Err(format!(
+            "{} is relative and this launch has no working directory to resolve it in",
+            path.display()
+        )),
+    }
+}
+
+/// `text` as a URI when it has a scheme of two letters or more, so a Windows
+/// drive letter (`C:\notes.md`) stays a path.
+fn launch_arg_uri(text: &str) -> Option<url::Url> {
+    url::Url::parse(text)
+        .ok()
+        .filter(|uri| uri.scheme().len() > 1)
+}
+
+/// The local path a `file://` URI names. The host is checked here rather than
+/// left to `to_file_path`, which on Windows makes `file://host/share/...` a UNC
+/// path; a `/` or a NUL encoded in a name (`%2F`, `%00`) is refused, since
+/// decoding it would split the name or end it.
+fn file_uri_path(text: &str, uri: &url::Url) -> Result<PathBuf, String> {
+    if uri.scheme() != "file" {
+        return Err(format!(
+            "{text} is not a file: chan opens files and directories, given as paths or \
+             file:// URIs"
+        ));
+    }
+    if let Some(host) = uri
+        .host_str()
+        .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("localhost"))
+    {
+        return Err(format!(
+            "{text} names the host {host}: chan opens files on this machine only"
+        ));
+    }
+    let encoded = uri.path().to_ascii_lowercase();
+    if encoded.contains("%2f") || encoded.contains("%00") {
+        return Err(format!(
+            "{text} encodes a / or a NUL inside a name, which no file name holds"
+        ));
+    }
+    uri.to_file_path()
+        .map_err(|()| format!("{text} names no local path"))
 }
 
 /// Map an `OpenDevserver` reply line to an [`Outcome`]. Shared by the unix +
@@ -3611,7 +3764,7 @@ mod tests {
                 "status": "path_opened",
                 "desktop_version": CHAN_VERSION,
                 "message": format!(
-                    "open request queued for {} in standalone window {} (opening)",
+                    "open request queued for /{} in standalone window {} (opening)",
                     crate::control_socket::machine_path(&notes),
                     windows.first().map(String::as_str).unwrap_or("<none minted>"),
                 ),
@@ -3625,7 +3778,7 @@ mod tests {
             OpenPathReply::Opened {
                 desktop_version: CHAN_VERSION.into(),
                 message: format!(
-                    "open request queued for {} in standalone window {}",
+                    "open request queued for /{} in standalone window {}",
                     crate::control_socket::machine_path(&notes),
                     windows[0],
                 ),
@@ -3679,6 +3832,180 @@ mod tests {
             OpenPathReply::Refused {
                 reply: OLDER_DESKTOP_OPEN_PATH_REPLY.trim().to_string()
             }
+        );
+    }
+
+    /// The CLI tells no desktop from one that is running and gave no answer:
+    /// only the first lets it start a desktop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_clis_open_path_tells_no_listener_from_a_silent_one() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Duration::from_millis(300);
+        let absent = dir.path().join("absent.sock");
+        assert_eq!(
+            try_open_path_from_cli_at(&absent, "/srv/a.md", budget).await,
+            CliOpenPath::NotListening
+        );
+
+        // Bound and never accepted on: the kernel completes the connect, and
+        // nothing ever reads the request.
+        let silent = dir.path().join("silent.sock");
+        let _held = std::os::unix::net::UnixListener::bind(&silent).unwrap();
+        assert_eq!(
+            try_open_path_from_cli_at(&silent, "/srv/a.md", budget).await,
+            CliOpenPath::Silent
+        );
+
+        let closing = dir.path().join("closing.sock");
+        let listener = tokio::net::UnixListener::bind(&closing).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        assert_eq!(
+            try_open_path_from_cli_at(&closing, "/srv/a.md", budget).await,
+            CliOpenPath::Silent
+        );
+
+        let answers = dir.path().join("answers.sock");
+        let listener = tokio::net::UnixListener::bind(&answers).unwrap();
+        tokio::spawn(async move {
+            for reply in [
+                r#"{"status":"path_opened","desktop_version":"0.0.0","message":"opened"}"#,
+                r#"{"status":"error","message":"not editable text"}"#,
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(
+            try_open_path_from_cli_at(&answers, "/srv/a.md", budget).await,
+            CliOpenPath::Opened {
+                message: "opened".into()
+            }
+        );
+        assert_eq!(
+            try_open_path_from_cli_at(&answers, "/srv/a.md", budget).await,
+            CliOpenPath::Refused {
+                reply: r#"{"status":"error","message":"not editable text"}"#.into()
+            }
+        );
+    }
+
+    fn arg_path(arg: &str, cwd: Option<&str>) -> Result<String, String> {
+        launch_arg_path(std::ffi::OsStr::new(arg), cwd.map(std::path::Path::new))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_argument_is_made_absolute_against_the_working_directory() {
+        assert_eq!(
+            arg_path("notes.md", Some("/home/u/work")),
+            Ok("/home/u/work/notes.md".into())
+        );
+        assert_eq!(
+            arg_path("./a b/c.md", Some("/home/u/work")),
+            Ok("/home/u/work/./a b/c.md".into())
+        );
+        assert_eq!(
+            arg_path("/srv/readme.md", None),
+            Ok("/srv/readme.md".into())
+        );
+        assert_eq!(
+            arg_path("notes.md", None),
+            Err(
+                "notes.md is relative and this launch has no working directory to resolve it in"
+                    .into()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_uri_launch_argument_is_percent_decoded() {
+        for (uri, path) in [
+            ("file:///tmp/a%20b.md", "/tmp/a b.md"),
+            ("file://localhost/srv/caf%C3%A9.md", "/srv/caf\u{e9}.md"),
+            ("file:///home/u/dir/", "/home/u/dir/"),
+        ] {
+            assert_eq!(arg_path(uri, None), Ok(path.into()), "{uri}");
+        }
+    }
+
+    #[test]
+    fn a_launch_argument_of_another_scheme_names_nothing_to_open() {
+        for uri in [
+            "smb://nas/share/notes.md",
+            "https://example.com/notes.md",
+            "mailto:someone@example.com",
+        ] {
+            assert_eq!(
+                arg_path(uri, None),
+                Err(format!(
+                    "{uri} is not a file: chan opens files and directories, given as paths or \
+                     file:// URIs"
+                ))
+            );
+        }
+    }
+
+    /// The host is read before the URI becomes a path, on every platform:
+    /// Windows would otherwise make `file://host/share/...` a UNC path.
+    #[test]
+    fn a_file_uri_on_another_host_names_nothing_to_open() {
+        assert_eq!(
+            arg_path("file://nas.local/share/notes.md", None),
+            Err(
+                "file://nas.local/share/notes.md names the host nas.local: chan opens files on \
+                 this machine only"
+                    .into()
+            )
+        );
+    }
+
+    /// Decoding `%2F` or `%00` would split a name or end it, so such a URI
+    /// names no file.
+    #[test]
+    fn a_file_uri_encoding_a_slash_or_a_nul_in_a_name_names_nothing_to_open() {
+        for uri in [
+            "file:///srv/a%2Fb.md",
+            "file:///srv/a%2fb.md",
+            "file:///srv/a%00b.md",
+        ] {
+            assert_eq!(
+                arg_path(uri, None),
+                Err(format!(
+                    "{uri} encodes a / or a NUL inside a name, which no file name holds"
+                ))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_argument_that_is_not_utf8_cannot_be_sent() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            launch_arg_path(std::ffi::OsStr::from_bytes(b"/tmp/bad-\xff.md"), None),
+            Err("/tmp/bad-\u{fffd}.md is not valid UTF-8, so it cannot be sent to chan".into())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_letter_launch_argument_is_a_path_not_a_uri() {
+        assert_eq!(
+            arg_path(r"C:\notes\a.md", None),
+            Ok(r"C:\notes\a.md".into())
         );
     }
 

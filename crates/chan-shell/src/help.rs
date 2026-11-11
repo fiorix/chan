@@ -383,7 +383,8 @@ Save the complete manual to a file:
 /// `cs open` long help (manpage head).
 pub(crate) const CS_OPEN: &str = r#"Open a path, directory, or chan://graph link in a window and side.
 
-`chan open` serves a workspace; `cs open` opens a file in a window.
+`chan open` serves a workspace; `chan-files` and `chan-edit` open a path
+in a window, as `cs open` does inside chan.
 
 A directory -- or no argument at all, which means the terminal's current
 directory -- opens the File Browser there. A text file opens in the

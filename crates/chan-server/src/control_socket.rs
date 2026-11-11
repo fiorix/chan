@@ -5587,7 +5587,17 @@ pub(crate) async fn open_path_for_handoff(
         return Err(format!("{} is not an absolute path", requested.display()));
     }
     match host.open_in_standalone_window(requested).await {
-        Ok(ack) => Ok(describe_outside_open(&ack)),
+        // The standalone surface spells a path from its `/` root without the
+        // slash, and the root itself as `/`; a line read outside chan names
+        // the absolute path it was given.
+        Ok(ack) => Ok(describe_outside_open(&chan_library::OpenOutsideAck {
+            path: if ack.path.starts_with('/') {
+                ack.path.clone()
+            } else {
+                format!("/{}", ack.path)
+            },
+            ..ack
+        })),
         Err(chan_library::Error::Config(_)) => Err(format!(
             "cannot open {}: this desktop serves no standalone filesystem",
             requested.display()
@@ -14258,14 +14268,16 @@ position = { row = 0, col = 1 }
         assert_eq!(
             reply,
             path_opened(format!(
-                "open request queued for {} in standalone window {window} (opening)",
+                "open request queued for /{} in standalone window {window} (opening)",
                 machine_path(&dir)
             ))
         );
+        let root = std::path::PathBuf::from("/");
         for (path, shown) in [
-            (&notes, machine_path(&notes)),
-            (&image, machine_path(&image)),
-            (&missing, missing_rel.clone()),
+            (&notes, format!("/{}", machine_path(&notes))),
+            (&image, format!("/{}", machine_path(&image))),
+            (&missing, format!("/{missing_rel}")),
+            (&root, "/".to_string()),
         ] {
             assert_eq!(
                 crate::handoff::answer_open_path(&host, path.to_str().unwrap()).await,
@@ -14279,7 +14291,7 @@ position = { row = 0, col = 1 }
         assert_eq!(
             standalone_windows(&host),
             vec![window.clone()],
-            "one window for all four"
+            "one window for all five"
         );
         assert_eq!(
             std::fs::read(&missing).expect("the missing path was created"),
@@ -14299,6 +14311,7 @@ position = { row = 0, col = 1 }
                     }
                 ),
                 cs_open_frame(&window, StandaloneOpenTarget::Editor(missing_rel)),
+                cs_open_frame(&window, StandaloneOpenTarget::Root),
             ]
         );
     }
@@ -14321,7 +14334,7 @@ position = { row = 0, col = 1 }
         assert_eq!(
             crate::handoff::answer_open_path(&host, notes.to_str().unwrap()).await,
             path_opened(format!(
-                "open request queued for {} in standalone window {}",
+                "open request queued for /{} in standalone window {}",
                 machine_path(&notes),
                 record.window_id
             ))

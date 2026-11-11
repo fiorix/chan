@@ -253,13 +253,27 @@ async fn launch_desktop_and_handoff(root: &Path) -> Result<()> {
 }
 
 /// Launch the chan-desktop GUI as a detached process.
+#[cfg(unix)]
+fn spawn_desktop_gui() -> std::io::Result<()> {
+    spawn_desktop_gui_opening(&[]).map(|_| ())
+}
+
+/// Launch the chan-desktop GUI as a detached process given `paths`, which its
+/// boot opens in a standalone window as `chan-desktop PATH...` does. The
+/// process started is returned when it is the desktop's own, so a caller can
+/// read its exit: a launch that finds another desktop hands it the paths and
+/// exits from its single-instance guard. On macOS the process is `open`,
+/// which exits once LaunchServices has the app, so there is none to read;
+/// with paths it asks for a new instance (`-n`), which runs that guard.
 ///
 /// `current_exe()` is the chan-desktop binary (this only runs for the Desktop
 /// personality). We start it with a clean argv0 (NOT `chan`/`cs`) so the
 /// pre-GUI argv probe falls through to a normal GUI launch instead of
 /// re-dispatching as the CLI.
 #[cfg(unix)]
-fn spawn_desktop_gui() -> std::io::Result<()> {
+pub(super) fn spawn_desktop_gui_opening(
+    paths: &[String],
+) -> std::io::Result<Option<std::process::Child>> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -273,13 +287,23 @@ fn spawn_desktop_gui() -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         if let Some(bundle) = macos_app_bundle(&exe) {
-            return Command::new("/usr/bin/open")
-                .arg(bundle)
+            let mut open = Command::new("/usr/bin/open");
+            // `-n` with paths: `open --args` aimed at an app that is already
+            // launching drops the arguments, where a new instance runs the
+            // single-instance guard and hands them to the one on its way up.
+            if !paths.is_empty() {
+                open.arg("-n");
+            }
+            open.arg(bundle);
+            if !paths.is_empty() {
+                open.arg("--args").args(paths);
+            }
+            return open
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map(|_| ());
+                .map(|_| None);
         }
         // Not in a bundle (dev build): fall through to the direct exec below.
     }
@@ -293,7 +317,12 @@ fn spawn_desktop_gui() -> std::io::Result<()> {
         .unwrap_or(exe);
     Command::new(&target)
         // Clean argv0 so the spawned process boots the GUI, not the alias.
+        // `$ARGV0` is the name an AppImage wrapper ran THIS process as, and
+        // the desktop's dispatch reads it ahead of argv[0], so it is not
+        // passed on either.
         .arg0(&target)
+        .env_remove("ARGV0")
+        .args(paths)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -301,7 +330,7 @@ fn spawn_desktop_gui() -> std::io::Result<()> {
         // kill the desktop we just started.
         .process_group(0)
         .spawn()
-        .map(|_| ())
+        .map(Some)
 }
 
 /// Launch the chan-desktop GUI as a detached process.

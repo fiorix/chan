@@ -286,6 +286,12 @@ build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/test-check-build-matrix.py
 	$(PYTHON) scripts/test-desktop-package-version.py
 
+.PHONY: desktop-entries-check
+desktop-entries-check: ## Check the chan-files and chan-edit desktop entries (Linux: desktop-file-validate).
+	$(LINUX_ONLY)
+	$(PYTHON) scripts/test-check-desktop-entries.py
+	$(PYTHON) scripts/check-desktop-entries.py
+
 .PHONY: rust-floor-check
 rust-floor-check: ## Check Linux package dependencies against the PPA builders' Rust.
 	$(PYTHON) scripts/test-check-rust-floor.py
@@ -391,10 +397,12 @@ ifeq ($(UNAME_S),Linux)
 	# rather than beside the gateway block below: it is seconds long and needs
 	# no compile, so a finding in it should not cost a full clippy + test +
 	# build first. The browser suite's Node pins are likewise quick once
-	# their locked dependencies are installed. The gateway steps stay below
-	# because they ARE compiles.
+	# their locked dependencies are installed, and the desktop entries' check
+	# needs only desktop-file-validate, which the desktop package step below
+	# needs too. The gateway steps stay below because they ARE compiles.
 	$(MAKE) sdme-contract-check
 	$(MAKE) browser-smoke-lib-test
+	$(MAKE) desktop-entries-check
 endif
 	# The Nix cargoHash pins are the one gate input a Cargo.lock change
 	# invalidates that no cargo step reads. The contract check proves the

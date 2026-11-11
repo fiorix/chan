@@ -56,6 +56,28 @@
   <p class="minor">xdg-terminal-exec maps its options onto Chan Desktop's own flags, which also work directly: <code>chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] [-e CMD ARGS... | -- CMD ARGS...]</code>.</p>
 </section>
 
+<section class="manual-block" id="default-file-browser">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#default-file-browser">File browser and Markdown editor on Linux</a></h2>
+  </div>
+  <p>Chan Desktop can be the application <code>xdg-open</code> and your file manager's Open With use for a directory or a Markdown file, which then opens in a standalone window of the running app: a directory in its file browser, a Markdown file in its editor. The Arch, Ubuntu, Fedora, and Nix packages install the two desktop entries this needs, <code>chan-files.desktop</code> for directories and <code>chan-edit.desktop</code> for Markdown, and the <code>chan-files</code> and <code>chan-edit</code> commands they run. The entries stay out of the application menu. Installing them sets no default: a desktop that names its own file manager and Markdown editor, as GNOME and KDE do, keeps them. A bare window manager whose <code>~/.config/mimeapps.list</code> names no application for a type leaves <code>xdg-open</code> to take the first one it finds, which can be Chan Desktop; choose with <code>xdg-mime default</code> either way.</p>
+  <p>Make Chan Desktop the default Markdown editor, the default file browser, or both:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>xdg-mime default chan-edit.desktop text/markdown</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>xdg-mime default chan-files.desktop inode/directory</b></code>
+    {{copyButton}}
+  </div>
+  <p>Check a choice. This prints <code>chan-edit.desktop</code>:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>xdg-mime query default text/markdown</b></code>
+    {{copyButton}}
+  </div>
+  <p>Then <code>xdg-open notes.md</code> opens the note in Chan Desktop, starting it when it is not running. To go back, run <code>xdg-mime default</code> with the entry you used before, such as your file manager's.</p>
+</section>
+
 <section class="manual-block" id="first-run">
   <div class="section-heading">
     <h2><a class="heading-anchor" href="#first-run">First run: a terminal and the Computers screen</a></h2>

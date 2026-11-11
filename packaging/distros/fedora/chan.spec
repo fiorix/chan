@@ -53,8 +53,11 @@ cargo build --release --frozen -p chan
 
 %install
 install -Dm755 target/release/chan %{buildroot}%{_bindir}/chan
-# The binary dispatches the `cs` CLI when invoked through a cs name (argv0).
+# The binary dispatches the `cs` CLI when invoked through a cs name, and opens
+# a path in a window as chan-files or chan-edit (argv0).
 ln -s chan %{buildroot}%{_bindir}/cs
+ln -s chan %{buildroot}%{_bindir}/chan-files
+ln -s chan %{buildroot}%{_bindir}/chan-edit
 install -Dm644 packaging/distros/shared/chan-devserver.service \
     %{buildroot}%{_userunitdir}/chan-devserver.service
 
@@ -69,6 +72,8 @@ install -Dm644 packaging/distros/shared/chan-devserver.service \
 %doc README.md CHANGELOG.md
 %{_bindir}/chan
 %{_bindir}/cs
+%{_bindir}/chan-files
+%{_bindir}/chan-edit
 %{_userunitdir}/chan-devserver.service
 
 %changelog

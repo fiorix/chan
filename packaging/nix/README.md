@@ -39,7 +39,7 @@ The headless output deliberately omits `chan-desktop`, GTK, WebKitGTK, the GTK r
 
 It deliberately does not install `chan-devserver.service`: a profile path is not a stable systemd `ExecStart` target, and service and module design is outside this package's scope.
 
-Both derivations export `CHAN_PACKAGED=nix` while compiling. That keeps the update probe and banner silent and makes every `chan upgrade` personality refuse with a Nix-specific package-manager hint. The desktop also recognizes a Nix store executable as an install it must not mirror into `~/.local/bin`; each output's own `chan` and `cs` paths are authoritative.
+Both derivations export `CHAN_PACKAGED=nix` while compiling. That keeps the update probe and banner silent and makes every `chan upgrade` personality refuse with a Nix-specific package-manager hint. The desktop also recognizes a Nix store executable as an install it must not mirror into `~/.local/bin`; each output's own `chan`, `cs`, `chan-files` and `chan-edit` paths are authoritative.
 
 ## Build and check
 

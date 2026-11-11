@@ -2,9 +2,11 @@
 //! (`$CHAN_HOME/.local/bin` when `CHAN_HOME` is set -- resolved via
 //! `chan_workspace::paths::local_bin_dir`, so a smoke instance stays isolated),
 //! so a chan-desktop install also gives you the `chan` / `cs` command line with
-//! nothing extra to download. Both names resolve to the running chan-desktop
+//! nothing extra to download, and on unix `chan-files` / `chan-edit`, which
+//! open a path in a window. Every name resolves to the running chan-desktop
 //! binary; the `argv[0]` dispatch (`chan_shell::invoked_as_chan` /
-//! `invoked_as_cs`) selects the CLI / control-client path before any GUI init.
+//! `invoked_as_cs`, `chan::invoked_as_opener`) selects the CLI / control-client
+//! path before any GUI init.
 //!
 //! The shape of the shim depends on how chan-desktop was installed:
 //!
@@ -23,8 +25,8 @@
 //!   (`chan serve .`, `cs upload .`) resolves inside the ephemeral mount.
 //!   [`restore_caller_cwd`] undoes that chdir at boot, before any dispatch.
 //! - **Nix store / dev build / `cargo run` / anything else**: no-op. Nix
-//!   installs the `chan` and `cs` output symlinks itself; unrecognized builds
-//!   never pollute `~/.local/bin`.
+//!   installs its output symlinks itself; unrecognized builds never pollute
+//!   `~/.local/bin`.
 //!
 //! Posture: best-effort + idempotent + self-healing. A failure is logged, never
 //! fatal. A shim WE wrote self-heals on the next launch when it goes stale (the
@@ -39,12 +41,14 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
-/// The two names we own. Both point at the same chan-desktop binary; `argv[0]`
-/// dispatch picks the behavior.
+/// The names we own. All point at the same chan-desktop binary; `argv[0]`
+/// dispatch picks the behavior. The Linux desktop entries run `chan-files` and
+/// `chan-edit` by name, so an install the packages do not link (an AppImage, a
+/// release deb or rpm) gets them here.
 #[cfg(unix)]
-const SHIM_NAMES: [&str; 2] = ["chan", "cs"];
+const SHIM_NAMES: [&str; 4] = ["chan", "cs", "chan-files", "chan-edit"];
 
-/// File stem of the chan-desktop binary. A symlink at `~/.local/bin/{chan,cs}`
+/// File stem of the chan-desktop binary. A symlink at `~/.local/bin/<name>`
 /// whose target ends in this stem is recognized as OURS (so a moved/upgraded
 /// install self-heals), while a user's own `cs -> chan` (stem "chan") is left
 /// alone.
@@ -394,11 +398,12 @@ pub(crate) fn shim_install_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Install the `~/.local/bin/{chan,cs}` shims for this install, self-healing any
-/// stale shim WE wrote. No-op for a dev build / unrecognized layout or when
-/// there is no home dir. Returns the number of shims written/updated.
+/// Install the `~/.local/bin` shims ([`SHIM_NAMES`]) for this install,
+/// self-healing any stale shim WE wrote. No-op for a dev build / unrecognized
+/// layout or when there is no home dir. Returns the number of shims
+/// written/updated.
 ///
-/// Best-effort: a per-shim failure is logged and the other shim is still
+/// Best-effort: a per-shim failure is logged and the other shims are still
 /// attempted; nothing here is fatal to boot.
 #[cfg(unix)]
 pub fn install_bin_shims() -> std::io::Result<u32> {
@@ -513,7 +518,9 @@ mod windows_shim {
     use super::user_path::{path_record, path_with_dir_appended, RegWrite, CREATED_PATH_KIND};
 
     /// The two names we own. Both re-exec the same chan-desktop.exe; the
-    /// `ARGV0` the wrapper sets picks the behavior.
+    /// `ARGV0` the wrapper sets picks the behavior. `chan-files` and
+    /// `chan-edit` are not among them: a standalone window has no file
+    /// surface on Windows, so they would only fail.
     pub(super) const SHIM_NAMES: [&str; 2] = ["chan", "cs"];
 
     /// File stem of the chan-desktop binary an installed exe must match (the
@@ -1762,6 +1769,36 @@ pub fn install_bin_shims() -> std::io::Result<u32> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The Linux desktop entries run `chan-files` and `chan-edit` by name, so
+    /// an install the packages do not link gets each name beside `chan` and
+    /// `cs`, as a wrapper pinning its `argv[0]` or a link to the binary.
+    #[test]
+    fn every_install_writes_the_opener_names_beside_chan_and_cs() {
+        assert_eq!(
+            &SHIM_NAMES[..],
+            &["chan", "cs", "chan-files", "chan-edit"][..]
+        );
+        let wrappers = tempfile::tempdir().unwrap();
+        let appimage = InstallKind::AppImage(PathBuf::from("/opt/Chan.AppImage"));
+        let links = tempfile::tempdir().unwrap();
+        let target = PathBuf::from("/usr/bin/chan-desktop");
+        let system = InstallKind::Symlink(target.clone());
+        for name in SHIM_NAMES {
+            assert!(
+                install_one(&appimage, wrappers.path(), name).unwrap(),
+                "{name}"
+            );
+            assert!(
+                std::fs::read_to_string(wrappers.path().join(name))
+                    .unwrap()
+                    .contains(&format!("exec -a {name} '/opt/Chan.AppImage' \"$@\"")),
+                "{name}"
+            );
+            assert!(install_one(&system, links.path(), name).unwrap(), "{name}");
+            assert_eq!(std::fs::read_link(links.path().join(name)).unwrap(), target);
+        }
+    }
 
     #[test]
     fn appimage_install_replaces_sibling_wrapper_symlink() {
