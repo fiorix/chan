@@ -64,6 +64,14 @@ tracing = { workspace = true }
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))'.dependencies]
 sysinfo = { workspace = true }
 
+# The PTY foreground group, read as the raw pid. rustix's `tcgetpgrp`
+# builds a non-zero `Pid` from the 0 a terminal with no foreground group
+# returns on macOS, and this crate forbids the unsafe code a libc call
+# needs; nix's safe call returns any pid. The version is portable-pty's,
+# so the tree builds one nix.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", default-features = false, features = ["process", "term"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # `terminal.profiles` is an array-of-tables, a shape only TOML has. The struct

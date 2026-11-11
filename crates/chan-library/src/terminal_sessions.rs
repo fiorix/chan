@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
@@ -7161,8 +7161,7 @@ impl Session {
     fn raw_foreground_group(&self) -> Option<u32> {
         #[cfg(unix)]
         {
-            let group = rustix::termios::tcgetpgrp(self.master_fd.as_ref()?).ok()?;
-            u32::try_from(group.as_raw_nonzero().get()).ok()
+            foreground_group_of(self.master_fd.as_ref()?.as_fd())
         }
         #[cfg(not(unix))]
         {
@@ -7483,19 +7482,15 @@ impl Session {
         }
         #[cfg(unix)]
         {
-            let Some(master) = self.master_fd.as_ref() else {
+            let Some(pid) = self
+                .master_fd
+                .as_ref()
+                .and_then(|master| foreground_group_of(master.as_fd()))
+            else {
                 return tmux_gate::Foreground::default();
             };
-            let Ok(group) = rustix::termios::tcgetpgrp(master) else {
-                return tmux_gate::Foreground::default();
-            };
-            match u32::try_from(group.as_raw_nonzero().get()) {
-                Ok(pid) => {
-                    self.tmux_foreground_group.store(pid, Ordering::Relaxed);
-                    tmux_gate::process_foreground(pid)
-                }
-                Err(_) => tmux_gate::Foreground::default(),
-            }
+            self.tmux_foreground_group.store(pid, Ordering::Relaxed);
+            tmux_gate::process_foreground(pid)
         }
         #[cfg(not(unix))]
         {
@@ -7725,6 +7720,23 @@ impl Read for ImportedPtyFd {
             other => other,
         }
     }
+}
+
+/// The process group in the foreground of the terminal behind `fd`, a PTY
+/// master. `None` when the read fails or no group holds the terminal yet:
+/// a PTY whose shell has not taken it reads 0.
+///
+/// The read goes through nix, not `rustix::termios::tcgetpgrp`. rustix
+/// turns that 0 into an error only on Linux; on macOS it builds its
+/// non-zero `Pid` from it, which panics in a debug build and is undefined
+/// behaviour in a release one.
+#[cfg(unix)]
+fn foreground_group_of(fd: BorrowedFd<'_>) -> Option<u32> {
+    let group = nix::unistd::tcgetpgrp(fd).ok()?.as_raw();
+    if group <= 0 {
+        return None;
+    }
+    u32::try_from(group).ok()
 }
 
 #[cfg(unix)]
@@ -11290,6 +11302,30 @@ mod tests {
             Some(1)
         );
         assert_eq!(TerminalExit::Unknown.wire_code(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pty_with_no_foreground_group_reads_as_none() {
+        // No child and no session ever claims this pair's slave, so no
+        // group holds the terminal and tcgetpgrp(3) on the master returns
+        // 0, as it does for a shell that has not taken its PTY yet. Both
+        // readers of the group answer "none" and neither panics.
+        let pair = native_pty_system().openpty(test_size()).unwrap();
+        let master_fd = clone_master_fd(pair.master.as_raw_fd().unwrap()).unwrap();
+        let template =
+            Arc::try_unwrap(test_agent_session(1024, "no-foreground", None, None, None, &[]).0)
+                .expect("a fresh test session has one owner");
+        let session = Session {
+            master_fd: Some(master_fd),
+            ..template
+        };
+        assert_eq!(session.raw_foreground_group(), None);
+        assert_eq!(
+            session.foreground_for_tmux(),
+            tmux_gate::Foreground::default()
+        );
+        drop(pair);
     }
 
     #[cfg(target_os = "linux")]
