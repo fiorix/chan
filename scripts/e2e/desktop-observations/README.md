@@ -2,7 +2,7 @@
 
 Drivers that put a question to the real desktop app and read the answer from the app itself: a real `chan-desktop` under a virtual X display, real processes around it, and the page the user would see as the instrument. They exist for behavior that depends on the desktop's own engine or on its native windows, which a headless Chromium run cannot show.
 
-They speak for one engine, the WebKitGTK the Linux desktop ships on. WKWebView on macOS and WebView2 on Windows are different engines, and a result here says nothing about them.
+They speak for one engine, the WebKitGTK the Linux desktop ships on. WKWebView on macOS and WebView2 on Windows are different engines, and a result here says nothing about them. `macos-wake-blank.sh` is the exception to both: it runs on macOS alone, starts nothing, and reads what WKWebView's WebKit recorded in the unified log.
 
 Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make pre-push` or CI. The rules in [`../README.md`](../README.md) apply: a throwaway home and workspace for every run, bounded waits, evidence kept on failure, and only the run's own processes torn down.
 
@@ -17,6 +17,8 @@ Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make p
 - **`gateway-signin.sh`** reads the gateway card while a browser sign-in is abandoned. It registers two guest-loopback discovery stubs, one for a control row and one for the row it abandons, intercepts the stock desktop's browser opener through a private `xdg-open`, and sends no callback for the abandonment arm. The browser page itself is not rendered. A native preflight must reach the sign-in wait and settle a matching `error=user_cancelled` callback before the abandonment arm starts; a second matching callback is the positive control after it. The driver records API and native DOM samples, the disabled-click attempt, the timeout notice, screenshots and monotonic recovery brackets. Its reader first exercises disconnected, disabled-connecting, live-cancel, missing-card and malformed constructed samples. The raw authorize URLs stay in the disposable guest directory; only `authorize-masked.jsonl` may be exported. Run inside a 600-second guest timeout with the usual binary variables. A completed disabled wait and successful callback control return fault status 1; an environment that cannot reach the sign-in wait is 2; any other incomplete reading is 3. This instrument describes the disabled-wait baseline; a live cancel control is a different observation and does not pass it.
 
 - **`basic-flows.sh`** asks whether the basic flows land on the desktop's own engine: an image pasted into the editor and into the Rich Prompt, with the clipboard shape WKWebView hands the page and with a real Ctrl+V under three clipboard owners, and an image file dropped there, synthetically and for real over XDND, through the desktop's native clipboard read and the real upload; and, by X input, the terminal's input, output and text paste on both backends, typing and saving in the editor, opening a file from Files and from a Search hit, and the panes. See [Basic flows](#basic-flows).
+
+- **`macos-wake-blank.sh`** is the one driver for macOS, and it drives nothing: it reads the unified log for how long each chan-desktop page stayed blank after it came back into view (a display or system wake, a switch back to its Space or tile) and fails over a limit. See "Blank after a wake on macOS" below.
 
 `lib.sh` is their shared setup. `inspect.mjs` and `hide-flush-step.mjs` are the page-level instrument and the timed step the two hide drivers share.
 
@@ -195,3 +197,25 @@ Each cancel mode returns 0 only after its selected arms complete, 1 when well-fo
 Before a native run, execute `python3 scripts/e2e/desktop-observations/gateway-signin-reader.py --preflight /tmp/gateway-reader.json` and `python3 scripts/e2e/desktop-observations/gateway-signin-preflight.py --output /tmp/gateway-status-cases` inside the owning guest, using a new output directory. The first exercises constructed delivery and state readings; the second runs each fault class, missing/malformed evidence and absent input through the driver's status mapping and checks invalid wrapper arguments without a desktop. Its temporary discovery listeners use guest loopback and are shut down after each case.
 
 Pointer input first measures the translation between two native X positions and their trusted page `mousemove` coordinates. It refuses inconsistent translations, non-unit pixel scale or changed geometry. A temporary isolated button then receives a click at the computed native position; the page must report that exact target and coordinate before any gateway action runs. The button and listeners are removed immediately. `pointer-preflight.json` retains the positions, inferred offset and trusted click read-back. Constructed wrong-offset and wrong-target controls must be refused by the same reader.
+
+## Blank after a wake on macOS
+
+Every chan window is transparent, so a page that has not committed a frame since its window came back shows the desktop under its traffic lights. WebKit records both ends in the unified log at the default level: the view turning visible and the content being hidden (`view visibility state changed 0 -> 1`, `hideContentUntilPendingUpdate`), and the layer tree being shown again (`Unhiding layer tree`). `macos-wake-blank.sh` pairs them per page and prints the blank, the delay to the next script the desktop evaluated in the page (the wake repaint among them), and how long after the last display sleep or wake the page turned visible. It needs no build, no inspector and no screen capture, and reads a wake that has already happened:
+
+```bash
+scripts/e2e/desktop-observations/macos-wake-blank.sh --last 15m
+scripts/e2e/desktop-observations/macos-wake-blank.sh --start "YYYY-MM-DD HH:MM:SS" --pid "$(pgrep -x chan-desktop | head -1)" --limit 2
+```
+
+The procedure it measures: open a window with several terminals that keep printing, hide it (another Space, a covering tile, or `pmset displaysleepnow`) for long enough, bring it back, run the script. WebKit asks a hidden page's web process to suspend about four minutes after its view turns not visible, and the fault this reading was written for grew with the time hidden, so ten minutes shows it and 45 minutes shows it at full size. A window on a devserver runs the page that devserver serves, so the build under test is the devserver's, and two devservers side by side (a baseline and a candidate, each with its own port and home) give both arms in one wake.
+
+`../wkwebview-stall-probe.js` names what a blank page was doing. Pasted into the window's Web Inspector console, it records every frame whose animation callbacks took over 50 ms: how many callbacks ran, how many Canvas 2D `fillText` calls they made, and the stack that scheduled each. `../wkwebview-wake-probe.js` is the companion that records what the page saw (visibility, focus and lifecycle events, late timers).
+
+A reading on macOS 27.0.1, across a 45 minute display sleep, with six terminals printing in a loop on a devserver in a local VM:
+
+| Page | Blank on return | Animation callbacks in the first frame |
+| --- | --- | --- |
+| without the repaint bound | 19.5 s | 8,419 (24.4 million `fillText`) |
+| with it | 0.20 s | not recorded |
+
+What the other desktops need. The cause is in the page, not in WKWebView: a hidden page runs no animation frame on any engine, so the repaints a terminal asked for while hidden ran together on return wherever the page was asked often enough. On Linux, `wake-present.sh` reads the first native frame after a hide and after a stop of the web process, and stays the reading for WebKitGTK. On Windows no reading exists. Whether WebView2 hides a returning view's content until a commit, as WKWebView does, is not established, so the same pile-up may show there as a window frozen on its last content instead of a blank one; a reading needs the stall probe in a WebView2 window after a long hide.

@@ -118,7 +118,24 @@ describe("the WebGL renderer", () => {
   });
 });
 
-describe("the repaints", () => {
+// Each repaint runs on the next frame and once the page's fonts are ready.
+// Fonts that never finish loading leave the frame alone to repaint, so the
+// second pass proves the frame path by itself.
+describe.each([
+  ["once the fonts are ready", false],
+  ["while the fonts are still loading", true],
+])("the repaints %s", (_when, fontsLoading) => {
+  let fontsReady: PropertyDescriptor | undefined;
+  beforeEach(() => {
+    if (!fontsLoading) return;
+    fontsReady = Object.getOwnPropertyDescriptor(document.fonts, "ready");
+    Object.defineProperty(document.fonts, "ready", { configurable: true, value: new Promise(() => {}) });
+  });
+  afterEach(() => {
+    if (fontsReady) Object.defineProperty(document.fonts, "ready", fontsReady);
+    fontsReady = undefined;
+  });
+
   test("gaining and losing focus repaints every row", async () => {
     const [tab] = seatTerminals([terminalTab()]);
     const props = $state({ tab: tab!, paneId: TERMINAL_PANE, side: "a" as const, active: true, focused: false });

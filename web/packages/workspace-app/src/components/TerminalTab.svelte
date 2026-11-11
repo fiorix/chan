@@ -183,6 +183,7 @@
   import { ReplayMaskScanBatch } from "../terminal/replayMasking";
   import type { Ghostty, Terminal as GhosttyTerminal } from "ghostty-web";
   import {
+    createRepaintScheduler,
     refreshTerminalRows as refreshTerminalRowsImpl,
     shouldUseWebglRenderer,
     webglRendererOverride,
@@ -953,16 +954,18 @@
   // same call forces a full pass of its canvas renderer, since its
   // frame loop repaints dirty rows only and the fit below is a no-op
   // while the grid is unchanged (refreshTerminalRows in renderer.ts).
+  //
+  // At most one repaint is pending at a time (createRepaintScheduler): the
+  // recovery runs on every focus, visibility and wake signal and on every
+  // PTY redial, and a window that is off-screen runs none of the frames those
+  // would otherwise queue until it comes back.
+  const rendererRepaint = createRepaintScheduler(() => {
+    if (!term) return;
+    refreshTerminalRows();
+  });
   function refreshTerminalRenderer(): void {
     if (!term) return;
-    requestAnimationFrame(() => {
-      if (!term) return;
-      refreshTerminalRows();
-    });
-    void document.fonts?.ready.then(() => {
-      if (!term) return;
-      refreshTerminalRows();
-    });
+    rendererRepaint.request();
   }
 
   function recoverTerminalRendererAfterHostResume(): void {
@@ -2606,6 +2609,7 @@
     }
     trailingFit.clear();
     clearHostResumeTimers();
+    rendererRepaint.cancel();
     hostResumeListenerCleanup?.();
     if (activityPulseTimer) {
       clearTimeout(activityPulseTimer);
