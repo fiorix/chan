@@ -94,6 +94,9 @@ repository = "https://github.com/fiorix/chan"
 chan-tunnel-client = { path = "../crates/chan-tunnel-client" }
 chan-tunnel-proto = { path = "../crates/chan-tunnel-proto" }
 chan-tunnel-server = { path = "../crates/chan-tunnel-server" }
+# The TLS trust decision the WireGuard agent shares with the desktop and the
+# devserver's tunnel dial.
+chan-tls = { path = "../crates/chan-tls" }
 gateway-common = { path = "crates/gateway-common" }
 devserver-control-proto = { path = "crates/devserver-control-proto" }
 
@@ -120,7 +123,10 @@ chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
 oauth2 = { version = "4.4", default-features = false, features = ["reqwest", "rustls-tls"] }
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# rustls on ring with no root policy of its own: a crate whose clients
+# trust reqwest's bundled roots names `rustls-tls` itself, and the WireGuard
+# agent hands its client chan-tls's config instead.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots", "stream"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

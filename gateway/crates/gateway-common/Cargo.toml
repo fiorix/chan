@@ -19,7 +19,7 @@ chan-tunnel-proto = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 mime_guess = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

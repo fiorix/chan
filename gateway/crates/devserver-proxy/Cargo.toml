@@ -37,7 +37,7 @@ tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 # reqwest is the transport for the identity-service token-validate client
 # only; the upstream tunnel reverse-proxy uses hyper over yamux substreams.
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 subtle = { workspace = true }

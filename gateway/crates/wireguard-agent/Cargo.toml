@@ -12,6 +12,9 @@ name = "wireguard-agent-service"
 path = "src/main.rs"
 
 [dependencies]
+# identity is verified with the trust decision chan's other gateway clients
+# share: the system store, the bundled roots on Linux.
+chan-tls = { workspace = true }
 devserver-control-proto = { workspace = true }
 gateway-common = { workspace = true }
 
@@ -26,6 +29,7 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+chan-tls = { workspace = true, features = ["test-support"] }
 wiremock = "0.6"
 
 [package.metadata.deb]

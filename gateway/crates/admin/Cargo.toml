@@ -15,7 +15,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 gateway-common = { workspace = true }
 chrono = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 tokio-stream = "0.1"
 futures-util = { workspace = true }
 serde = { workspace = true }

@@ -4090,6 +4090,7 @@ version = "0.127.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chan-tls",
  "devserver-control-proto",
  "gateway-common",
  "reqwest 0.12.28",
