@@ -1,7 +1,5 @@
 //! CLI diagnostics and the socket-activated Varlink adapter.
 
-#[cfg(any(target_os = "linux", test))]
-mod listener;
 #[cfg(unix)]
 mod varlink;
 
@@ -90,33 +88,9 @@ fn local_target() -> Result<(reqwest::Url, Option<String>)> {
     use crate::devserver::persisted;
     let addr = persisted::local_devserver_dial_addr()
         .context("no local devserver port; start a devserver or use --url")?;
-    // A wildcard bind is reached on loopback.
-    let addr = match addr.ip() {
-        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
-            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
-        }
-        std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
-            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
-        }
-        _ => addr,
-    };
     let token = chan_server::persisted_devserver_token()
         .context("no local devserver token; start a devserver or use --url")?;
-    // The persisted port outlives the devserver, so before the bearer goes
-    // out, Linux checks the listener there is this user's. The unit file
-    // outlives a stopped unit too, and a devserver started in a terminal
-    // afterwards listens on the port it recorded, so that port is the
-    // second address tried, under the same check. macOS, FreeBSD and
-    // Windows name socket owners only through binary sysctl records or
-    // per-process handle walks, none of them a small and sound check, so
-    // there the bearer goes to the first address unverified.
-    #[cfg(target_os = "linux")]
-    let addr = {
-        let mut candidates = vec![addr];
-        candidates
-            .extend(persisted::recorded_devserver_addr().filter(|recorded| *recorded != addr));
-        listener::callers_listener(&candidates)?
-    };
+    let addr = crate::local_listener::resolve(addr)?;
     let url = reqwest::Url::parse(&format!("http://{addr}/"))?;
     Ok((metrics_url(url), Some(token)))
 }

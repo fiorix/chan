@@ -23,6 +23,8 @@ use std::sync::{Mutex, MutexGuard};
 
 mod child_env;
 pub(crate) mod http_proxy;
+#[cfg(target_os = "linux")]
+pub(crate) mod local_listener;
 use child_env::is_chan_var;
 
 /// Serializes every in-process environment mutation behind one permit.
