@@ -1186,6 +1186,7 @@ pub(crate) mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         }
     }

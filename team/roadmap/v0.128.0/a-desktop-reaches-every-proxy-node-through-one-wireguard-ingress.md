@@ -349,7 +349,7 @@ Acceptance 2's fabric and reconcile cases are covered by desktop unit tests: two
 
 The fabric stage retained the summary status: the worst running ingress, with discovery order breaking ties, plus a refused ingress's reason in the row error. The projection and harness stage below adds contract 12 and the desktop end-to-end arms. This row is not done.
 
-Cleanup limit: an obsolete owned client file is removed only after a kept credential commit and only while its bytes still match. If removal fails after re-enrollment changes the key or public parameters, startup cannot prove the orphan belongs to the new enrollment and does not retry it; discovery can similarly change parameters before retry. This preserves operator replacements. The leftover file requires manual removal after checking it; no extra persisted cleanup state is added.
+Cleanup retry: an obsolete owned client file is removed only after a kept credential commit and only while its bytes match a persisted path/SHA-256 record beside the enrollment. Startup migration persists the same record with the converted row. Startup and successful connect retry it independently of later key or public parameter changes; missing files and digest mismatches clear the record and log the outcome once. A replacement or active manual file stays untouched. This removes the prior retry limit without a background retry loop. A failure to save the initial record still keeps the file and reports that persistence error.
 
 ## Desktop projection and enrollment harness built
 
