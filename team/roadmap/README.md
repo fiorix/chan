@@ -76,7 +76,7 @@ One more came from the owner on 2026-11-11 and was built outside the team by his
 | [the unused-token test reads too early][tokentest] | landed | GA |
 | [a desktop upload's cancel and error paths][uploadpaths] | built | owner |
 | [a moved tmux window may close its chan window][tmuxmove] | built | owner |
-| [small findings of the second reading are open][leftovers] | built | owner |
+| [small findings of the second reading are open][leftovers] | landed | GA |
 | [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | landed | GA |
