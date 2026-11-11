@@ -2579,11 +2579,14 @@ mod reindex_cancel_at_shutdown_tests {
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(r#"{"mode":"workspace"}"#))
             .expect("the reset's request");
-        let resetting = tokio::spawn(Arc::clone(&host).router().oneshot(reset));
-        tokio::time::timeout(HANG_GUARD, held)
-            .await
-            .expect("fixture: the reset never reached its hold")
-            .expect("fixture: the reset's gate was dropped");
+        let mut resetting = tokio::spawn(Arc::clone(&host).router().oneshot(reset));
+        // Admission and teardown before the gate can take arbitrarily long
+        // on a loaded host. Read its arrival, or a reset that ended without
+        // arriving, rather than timing that fixture work.
+        tokio::select! {
+            entered = held => entered.expect("fixture: the reset's gate was dropped"),
+            result = &mut resetting => panic!("fixture: the reset ended before its hold: {result:?}"),
+        }
 
         let mut beside = Vec::new();
         let mut answers = Vec::new();
