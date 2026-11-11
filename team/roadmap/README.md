@@ -59,7 +59,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [one WireGuard ingress per proxy node][wgnode] | gateway landed | desktop |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
-| [a theme switch leaves ghostty colours][livetheme] | not started | design |
+| [a theme switch leaves ghostty colours][livetheme] | partly built | build |
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
 | [the pane tree hides what a terminal runs][termcmd] | built | owner |
@@ -70,12 +70,12 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [the Windows handoff pipe's early clients][winpipe] | not started | measure |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
 | [the unused-token test reads too early][tokentest] | landed | GA |
-| [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
+| [a desktop upload's cancel and error paths][uploadpaths] | partly built | build |
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
 | [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
-| [basic flows have no end-to-end check][basicflows] | partly built | build |
+| [basic flows have no end-to-end check][basicflows] | landed | GA |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
