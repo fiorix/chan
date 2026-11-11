@@ -177,11 +177,13 @@ export default {
       }
       await ctx.shot("notice-bubble", page);
 
-      await page.click("[class*='nb-body']");
+      // The body's button carries aria-expanded; the `.nb-body-frame` around
+      // it would also match a class substring.
+      await page.click('[class*="notice-bubble"] button.nb-body');
       await page.waitForFunction(
         () =>
           document
-            .querySelector("[class*='nb-body']")
+            .querySelector('[class*="notice-bubble"] button.nb-body')
             ?.getAttribute("aria-expanded") === "true",
         { timeout: 10_000 },
       );

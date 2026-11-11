@@ -151,9 +151,13 @@ export default {
     }
     const page = await ctx.browser.newPage();
     const httpFailures = [];
-    const evidence = { apiTimeline: [], httpFailures };
+    const evidence = { apiTimeline: [], httpFailures, heldSaves: 0, saveAnswers: [] };
     let deleteStarted = null;
+    let saves = null;
     const recordHttpFailure = (response) => {
+      if (response.request().method() === "PUT" && new URL(response.url()).pathname === `/api/fs/${LARGE}`) {
+        evidence.saveAnswers.push(response.status());
+      }
       if (response.status() < 500) return;
       const url = new URL(response.url());
       const failure = {
@@ -287,6 +291,29 @@ export default {
         { timeout: 90_000, polling: 250 },
         LARGE,
       );
+      // The editor autosaves a dirty buffer 800 ms after its last change, so
+      // a save would race the deletion below: answered while `rm` runs, it
+      // finds the file gone under a live root, and the external-edit prompt
+      // it opens takes the next click. The editor's saves are held in the
+      // browser until the root is gone, so the loss is the one this check
+      // means: a dirty editor whose save meets a missing workspace.
+      saves = await page.createCDPSession();
+      const heldSaves = [];
+      let holdSaves = true;
+      saves.on("Fetch.requestPaused", ({ requestId, request }) => {
+        if (holdSaves && request.method === "PUT") heldSaves.push(requestId);
+        else saves.send("Fetch.continueRequest", { requestId }).catch(() => {});
+      });
+      await saves.send("Fetch.enable", {
+        patterns: [{ urlPattern: `*/api/fs/${LARGE}*`, requestStage: "Request" }],
+      });
+      const releaseSaves = async () => {
+        holdSaves = false;
+        evidence.heldSaves += heldSaves.length;
+        for (const requestId of heldSaves.splice(0)) {
+          await saves.send("Fetch.continueRequest", { requestId }).catch(() => {});
+        }
+      };
       await page.click(".editor-tab .cm-content");
       await page.keyboard.down("Control");
       await page.keyboard.press("Home");
@@ -386,6 +413,7 @@ export default {
       if (existsSync(canonicalRoot)) {
         throw new Error(`rm returned but workspace root still exists: ${canonicalRoot}`);
       }
+      await releaseSaves();
       const badIntermediate = apiTimeline.find(
         (sample) =>
           ![200, 404].includes(sample.files) ||
@@ -399,7 +427,11 @@ export default {
 
       // Inactive tabs are intentionally not mounted. Activate each retained
       // surface before inspecting its post-loss UI; this also proves switching
-      // back to it is safe after the backing workspace disappears.
+      // back to it is safe after the backing workspace disappears. A dialog
+      // open here would take the tab's click on its backdrop and close.
+      const dialog = await page.evaluate(() =>
+        document.querySelector('[role="dialog"][aria-modal="true"]')?.textContent?.trim().slice(0, 200) ?? null);
+      if (dialog !== null) throw new Error(`a dialog covers the page after the root loss: ${dialog}`);
       await showFiles(page);
       ctx.mark("root-loss:waiting-for-browser-unavailable");
       await page.waitForFunction(
@@ -556,6 +588,7 @@ export default {
 
       const uiTimeline = await uiTimelinePromise;
       evidence.uiTimeline = uiTimeline;
+      console.log(`[smoke:98] editor saves held until the root was gone: ${evidence.heldSaves}; save answers: ${JSON.stringify(evidence.saveAnswers)}`);
       await ctx.shot("root-unavailable", page);
       return {
         fixture: {
@@ -577,6 +610,8 @@ export default {
         ),
         dirtyEditorRetained: true,
         rootRemainedAbsent: true,
+        heldSaves: evidence.heldSaves,
+        saveAnswers: evidence.saveAnswers,
         httpFailures,
       };
     } catch (error) {
@@ -632,6 +667,7 @@ export default {
       throw error;
     } finally {
       page.off("response", recordHttpFailure);
+      await saves?.detach().catch(() => {});
       await page.close().catch(() => {});
     }
   },
