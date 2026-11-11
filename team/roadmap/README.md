@@ -53,6 +53,8 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 
 Seven more came from the round's own checks and readings on 2026-11-11, accepted by the owner the same day: a used token's cut is lost when the client hangs up before the spawn ([tokencut]); an image pasted by chord into the editor on the Linux desktop lands nothing ([linuxpaste]); a file dropped on the Linux desktop hands the page a URI, not a file ([linuxdrop]); a save that meets its file gone opens the external edit dialog ([savegone]); the tag-scoped graph never refits its nodes ([taglens]); ghostty sends a pasted line break as LF where xterm.js sends CR ([ghosttylf]); and a local close outlasts its CLI reply window ([closebudget]).
 
+One more came from the owner on 2026-11-11 and was built outside the team by his Mac agent from the lead's order, then taken in as an intake: in title-bar-tabs mode the window title moves back from the pane tree heading into the title bar, next to the pane tree button with no tabs and at the bar's right end once a tab opens, and a local window reads like a devserver's, `local / {workspace} Window N [label]`, with the library's own title the machine-neutral tail that `cs window list` prints ([titlebar]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -85,6 +87,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [the tag-scoped graph never refits its nodes][taglens] | landed | GA |
 | [ghostty sends a pasted line break as LF][ghosttylf] | landed | GA |
 | [a local close outlasts its CLI reply window][closebudget] | landed | GA |
+| [the window title moves back into the title bar][titlebar] | landed | GA |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -116,6 +119,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 [taglens]: v0.128.0/the-tag-scoped-graph-never-refits-its-nodes.md
 [ghosttylf]: v0.128.0/ghostty-sends-a-pasted-line-break-as-lf.md
 [closebudget]: v0.128.0/a-local-close-outlasts-its-cli-reply-window.md
+[titlebar]: v0.128.0/the-window-title-moves-back-into-the-title-bar.md
 [reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
 [tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 
