@@ -47,6 +47,7 @@ mod contacts;
 mod control;
 mod desktop;
 mod devserver;
+mod http_client;
 mod index;
 mod mcp;
 mod metadata;

@@ -551,7 +551,7 @@ async fn ready_record(
             record.addr
         );
     }
-    let client = reqwest::Client::new();
+    let client = crate::http_client::local_devserver(Duration::from_secs(2))?;
     let url = format!("http://{addr}/api/health");
     // Startup polls loop at 100ms under their own deadline; the short cap
     // keeps one hung probe from eating the whole readiness budget.
@@ -729,6 +729,34 @@ fn print_daemon_paths(lock_path: &Path, record_path: &Path, log_path: &Path) {
 #[cfg(test)]
 mod address_tests {
     use super::*;
+
+    #[test]
+    fn readiness_ignores_proxy() {
+        use crate::test_env::http_proxy::{check, Route};
+        check(
+            "devserver_daemon::address_tests::readiness_ignores_proxy",
+            vec![Route {
+                method: "GET",
+                path: "/api/health",
+                token: None,
+                body: "{}",
+            }],
+            0,
+            |addr| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let lock_path = dir.path().join("daemon.lock");
+                let record_path = dir.path().join("daemon.json");
+                let DaemonAcquire::Daemon(_lock) =
+                    DaemonLock::acquire(&lock_path, &record_path, &addr.to_string(), false)
+                        .unwrap()
+                else {
+                    panic!("test owns the daemon fixture lock");
+                };
+                let record = ready_record(addr, &lock_path, &record_path).await.unwrap();
+                assert_eq!(record.unwrap().pid, std::process::id());
+            },
+        );
+    }
 
     #[tokio::test]
     async fn address_mismatch_names_real_management_commands() {

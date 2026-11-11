@@ -44,7 +44,8 @@ async fn drain_devserver_terminals_with_token(
     token: &str,
 ) -> std::result::Result<(), String> {
     let url = format!("http://{addr}/api/devserver/terminal-sessions/drain");
-    let client = reqwest::Client::new();
+    let client = crate::http_client::local_devserver(Duration::from_secs(10))
+        .map_err(|error| error.to_string())?;
     let request = client.post(&url).bearer_auth(token).send();
     // The server-side child wait is bounded at 5s; leave headroom.
     let response = match tokio::time::timeout(Duration::from_secs(10), request).await {
@@ -126,7 +127,7 @@ async fn rotate_devserver_token_at(
     current: &str,
 ) -> Result<Option<chan_server::devserver_api::RotatedToken>> {
     let url = format!("http://{addr}/api/devserver/rotate-token");
-    let client = reqwest::Client::new();
+    let client = crate::http_client::local_devserver(Duration::from_secs(5))?;
     let request = client.post(&url).bearer_auth(current).send();
     match tokio::time::timeout(Duration::from_secs(5), request).await {
         Ok(Ok(response)) if response.status().is_success() => {
@@ -239,6 +240,48 @@ pub(crate) async fn emit_devserver_token_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_ignores_proxy() {
+        use crate::test_env::http_proxy::{check, Route};
+        check(
+            "devserver::management::tests::drain_ignores_proxy",
+            vec![Route {
+                method: "POST",
+                path: "/api/devserver/terminal-sessions/drain",
+                token: Some("test-token"),
+                body: r#"{"closed":2,"dead":2,"lingering":[]}"#,
+            }],
+            0,
+            |addr| async move {
+                drain_devserver_terminals_with_token(addr, "test-token")
+                    .await
+                    .unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn rotation_ignores_proxy() {
+        use crate::test_env::http_proxy::{check, Route};
+        check(
+            "devserver::management::tests::rotation_ignores_proxy",
+            vec![Route {
+                method: "POST",
+                path: "/api/devserver/rotate-token",
+                token: Some("test-token"),
+                body: r#"{"token":"rotated-test-token"}"#,
+            }],
+            0,
+            |addr| async move {
+                let rotated = rotate_devserver_token_at(addr, "test-token")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(rotated.token, "rotated-test-token");
+            },
+        );
+    }
 
     async fn devserver_refusal_peer(
         status: u16,
