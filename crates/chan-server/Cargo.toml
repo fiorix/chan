@@ -72,8 +72,8 @@ portable-pty = { workspace = true }
 rand = { workspace = true }
 # HTTP client for the extension reverse proxy (`routes/extensions.rs`).
 # Mirrors chan-tunnel-server / chan binary deps; rustls keeps the
-# build OpenSSL-free.
-reqwest = { workspace = true }
+# build OpenSSL-free, over reqwest's bundled roots.
+reqwest = { workspace = true, features = ["rustls-tls"] }
 rust-embed = "8"
 rustix = { workspace = true }
 tokio = { workspace = true }

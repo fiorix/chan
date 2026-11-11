@@ -84,6 +84,16 @@ cargo run -p chan -- devserver run \
   --tunnel-devserver-name=blog
 ```
 
+`SSL_CERT_FILE` is read on Linux and the other Unixes only. On macOS and Windows the system verifies the tunnel, so trust the stack's CA in your user's store instead of exporting the variable, and restart the devserver:
+
+```
+# macOS
+security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db \
+  packaging/gateway/scripts/dev/secrets/tls/ca.crt
+# Windows
+certutil -user -addstore Root packaging\gateway\scripts\dev\secrets\tls\ca.crt
+```
+
 One tunnel carries the devserver's whole library, so every workspace you add is reachable over the single registration. The client verifies the per-stack CA, then the tunnel TLS edge negotiates only h2 and forwards it to proxy p1's loopback h2c listener. Identity and proxy public edges negotiate only HTTP/1.1; keeping the ALPN sets disjoint prevents a public listener from receiving an h2 preface it does not serve. Once connected, clicking Open on a workspace targets `https://<user>--<disc>.p1.proxy.localtest.me:17002/<slug>-<8hex>/`, the workspace's tenant mount inside the devserver.
 
 ## Notes

@@ -1114,19 +1114,34 @@ fn ws_auth_shaped(e: &tokio_tungstenite::tungstenite::Error) -> bool {
 /// Open a feed's upgrade over the dial the process's WireGuard fabric
 /// decides: a CONNECT through the proxy for a host that is not loopback,
 /// with the TLS and WebSocket handshakes run over the opened stream, and
-/// the direct dial otherwise or when there is no fabric.
+/// the direct dial otherwise or when there is no fabric. Either way a
+/// `wss://` feed verifies its server with chan-tls's trust decision, the one
+/// the desktop's HTTP clients use.
 async fn ws_connect(
     request: tokio_tungstenite::tungstenite::handshake::client::Request,
 ) -> Result<GatewayWs, tokio_tungstenite::tungstenite::Error> {
-    match crate::wireguard::ws_route(request.uri()) {
-        None => tokio_tungstenite::connect_async(request)
-            .await
-            .map(|(ws, _)| ws),
+    let connector = crate::tls::ws_connector()
+        .map_err(|e| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(e)))?;
+    let route = crate::wireguard::ws_route(request.uri());
+    ws_connect_with(request, route, connector).await
+}
+
+async fn ws_connect_with(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    route: Option<crate::wireguard::WsRoute>,
+    connector: tokio_tungstenite::Connector,
+) -> Result<GatewayWs, tokio_tungstenite::tungstenite::Error> {
+    match route {
+        None => {
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+                .await
+                .map(|(ws, _)| ws)
+        }
         Some(route) => {
             let stream = crate::wireguard::connect_through(route.proxy, &route.host, route.port)
                 .await
                 .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
-            tokio_tungstenite::client_async_tls_with_config(request, stream, None, None)
+            tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
                 .await
                 .map(|(ws, _)| ws)
         }
@@ -4755,5 +4770,71 @@ mod tests {
         let result = keepalive_pump(&mut ws, Duration::from_secs(5), 2, |_| frames += 1).await;
         assert!(result.is_ok(), "a clean close returns Ok, got {result:?}");
         assert_eq!(frames, 2, "both text frames forwarded to on_text");
+    }
+
+    fn recorded_connector() -> (tokio_tungstenite::Connector, chan_tls::testing::Handshakes) {
+        let (config, handshakes) = chan_tls::testing::recording(chan_tls::client_config().unwrap());
+        (
+            tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)),
+            handshakes,
+        )
+    }
+
+    fn feed_request(url: &str) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        url.into_client_request().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_direct_feed_verifies_with_the_connector_it_is_given() {
+        let (connector, handshakes) = recorded_connector();
+        let sink = chan_tls::testing::Sink::start();
+        let request = feed_request(&format!("wss://{}/api/library/windows/watch", sink.addr));
+        let refused = ws_connect_with(request, None, connector).await;
+        assert!(refused.is_err(), "the sink never answers");
+        assert_eq!(handshakes.server_names(), ["127.0.0.1"]);
+        assert_eq!(
+            sink.alpn_offers(),
+            [Vec::<String>::new()],
+            "a feed offers no ALPN"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_proxied_feed_verifies_with_the_connector_it_is_given() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (connector, handshakes) = recorded_connector();
+        let sink = chan_tls::testing::Sink::start();
+        // A CONNECT proxy that answers 200 and carries the stream to the sink,
+        // whatever the authority, as the WireGuard proxy carries it to the
+        // gateway.
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let sink_addr = sink.addr;
+        tokio::spawn(async move {
+            let (mut client, _) = proxy.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(client.read_u8().await.unwrap());
+            }
+            assert!(head.starts_with(b"CONNECT gw.example.test:443 "));
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            let mut upstream = tokio::net::TcpStream::connect(sink_addr).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+        let route = crate::wireguard::WsRoute {
+            proxy: proxy_addr,
+            host: "gw.example.test".into(),
+            port: 443,
+        };
+        let request = feed_request("wss://gw.example.test/api/library/windows/watch");
+        let refused = ws_connect_with(request, Some(route), connector).await;
+        assert!(refused.is_err(), "the sink never answers");
+        assert_eq!(handshakes.server_names(), ["gw.example.test"]);
+        assert_eq!(sink.alpn_offers(), [Vec::<String>::new()]);
     }
 }

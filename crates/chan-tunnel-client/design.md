@@ -4,7 +4,7 @@ chan-tunnel-client is the dial side of the gateway tunnel. `chan devserver run -
 
 ## Where it sits
 
-chan-server's devserver mode is the one real caller: it builds a `ClientConfig` from the tunnel URL, the token and a display name, and runs `run(cfg, router)` as a long-lived future beside the local listener. The router is the devserver's own router, so a request through the tunnel is served by the same routes as a request over `ssh -L`, with one difference: the registration is attached to every request as an extension, and the devserver checks each request's gateway assertion against the owner id and devserver id it carries. The crate depends on chan-tunnel-proto and on hyper, axum (without optional features, since the gateway workspace also builds it), rustls and yamux. It owns no token acquisition and no server-side policy.
+chan-server's devserver mode is the one real caller: it builds a `ClientConfig` from the tunnel URL, the token and a display name, and runs `run(cfg, router)` as a long-lived future beside the local listener. The router is the devserver's own router, so a request through the tunnel is served by the same routes as a request over `ssh -L`, with one difference: the registration is attached to every request as an extension, and the devserver checks each request's gateway assertion against the owner id and devserver id it carries. The crate depends on chan-tunnel-proto and chan-tls and on hyper, axum (without optional features, since the gateway workspace also builds it), rustls and yamux. It owns no token acquisition and no server-side policy.
 
 ## The connection lifecycle
 
@@ -33,7 +33,7 @@ flowchart TD
 
 ## Dialing
 
-The dial is one attempt and the testable unit; `run` adds the retry loop. The TLS configuration uses the platform's native roots with ALPN forced to h2, and `run` builds it once and reuses it across reconnects, because walking the OS trust store (the macOS keychain in particular) is slow enough to matter on every retry.
+The dial is one attempt and the testable unit; `run` adds the retry loop. The TLS configuration is [chan-tls](../chan-tls/design.md)'s trust decision with ALPN forced to h2: the platform verifier on macOS and Windows, and elsewhere the system's CA bundle beside the bundled Mozilla roots, so a public CA verifies with an empty bundle and a gateway behind a private CA verifies once that CA is in the store. It is the decision the desktop's sign-in and feeds make, so a gateway the tunnel trusts is one they trust. `SSL_CERT_FILE` and `SSL_CERT_DIR` replace the system bundle on Linux and the other Unixes only; on macOS and Windows the platform verifier reads neither, and a CA is trusted through the keychain or the certificate store. `run` builds the config once, before its reconnect loop, and reuses it across attempts; a trust decision that cannot be built is a configuration error.
 
 Cleartext h2 is allowed only when the connected TCP peer is a loopback address, which is what a local gateway stack dials. The check is on the peer, not the host name: a private DNS name is not proof of a protected route. Userinfo in the tunnel URL is refused because the token is the credential; accepting both would create an ambiguous credential channel. A URL with no path gets the tunnel path filled in, so a caller can pass a bare base and the wire constant stays single-sourced, while an explicit path is kept verbatim so a typo surfaces as a visible 404 instead of being corrected silently.
 

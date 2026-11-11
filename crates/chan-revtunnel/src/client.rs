@@ -68,6 +68,10 @@ pub struct ClientConfig {
     pub spec: TunnelSpec,
     /// Whether the devserver advertised the half-close data-leg contract.
     pub half_close: bool,
+    /// The TLS connector of a `wss://` origin, so the tunnel's sockets verify
+    /// the gateway as the caller's other clients do. `None` keeps
+    /// tokio-tungstenite's own connector, over the bundled roots.
+    pub connector: Option<tokio_tungstenite::Connector>,
 }
 
 /// A running tunnel. Dropping the handle requests shutdown, as does [`TunnelHandle::stop`]. Await [`TunnelHandle::wait`] to join the task after a stop request or wait for the devserver to close it.
@@ -107,7 +111,7 @@ pub async fn open(cfg: ClientConfig) -> Result<TunnelHandle, String> {
         cfg.tunnel_id
     );
     let request = build_request(&cfg, &control_url)?;
-    let (mut control, _) = tokio_tungstenite::connect_async(request)
+    let (mut control, _) = dial(&cfg, request)
         .await
         .map_err(|e| format!("connect tunnel control socket: {e}"))?;
 
@@ -256,7 +260,7 @@ async fn serve_conn(
 ) -> Result<(), String> {
     let url = data_url(&cfg, &conn_id);
     let request = build_request(&cfg, &url)?;
-    let (ws, _) = tokio_tungstenite::connect_async(request)
+    let (ws, _) = dial(&cfg, request)
         .await
         .map_err(|e| format!("connect tunnel data socket: {e}"))?;
 
@@ -274,6 +278,20 @@ async fn serve_conn(
         );
     }
     Ok(())
+}
+
+async fn dial(
+    cfg: &ClientConfig,
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+) -> Result<
+    (
+        WsStream,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    tokio_tungstenite::connect_async_tls_with_config(request, None, false, cfg.connector.clone())
+        .await
 }
 
 fn data_url(cfg: &ClientConfig, conn_id: &str) -> String {
@@ -517,6 +535,7 @@ mod tests {
             tunnel_id: "tun-test".into(),
             spec,
             half_close: false,
+            connector: None,
         }
     }
 
@@ -628,6 +647,23 @@ mod tests {
     }
 
     type WsServer = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+    #[tokio::test]
+    async fn a_wss_origin_dials_with_the_connector_it_is_given() {
+        let (tls, handshakes) = chan_tls::testing::recording(chan_tls::client_config().unwrap());
+        let sink = chan_tls::testing::Sink::start();
+        let mut c = cfg(
+            &format!("wss://{}", sink.addr),
+            parse_spec("0:3000", Proto::Tcp).unwrap(),
+        );
+        c.connector = Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+            tls,
+        )));
+        let err = open(c).await.unwrap_err();
+        assert!(err.contains("connect tunnel control socket"), "{err}");
+        assert_eq!(handshakes.server_names(), ["127.0.0.1"]);
+        assert_eq!(sink.alpn_offers(), [Vec::<String>::new()]);
+    }
 
     #[tokio::test]
     async fn a_handle_dropped_without_a_stop_still_ends_the_tunnel() {

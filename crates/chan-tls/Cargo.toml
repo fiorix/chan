@@ -1,0 +1,36 @@
+[package]
+name = "chan-tls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The TLS trust decision chan's Rust clients share."
+publish = false
+
+[features]
+# Stand-ins for the tests of the clients that take the shared config: a
+# session store that records the handshakes a config starts and a loopback
+# listener that reads what each one offers. Enabled from dev-dependencies
+# only.
+test-support = []
+
+[dependencies]
+# `std` for the client session cache; `tls12` so a gateway behind an edge
+# that speaks only TLS 1.2 still connects when this crate is built alone.
+rustls = { workspace = true, features = ["std", "tls12"] }
+tracing = { workspace = true }
+
+# The operating system verifies each chain, its own distrust included.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rustls-platform-verifier = { workspace = true }
+
+# WebPKI verifies against the system bundle beside the bundled roots.
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+rustls-native-certs = { workspace = true }
+webpki-roots = { workspace = true }
+
+[dev-dependencies]
+# Signs the CA and the leaf the handshake tests make at run time
+# (tests/support), with the ring rustls already links.
+ring = { workspace = true }

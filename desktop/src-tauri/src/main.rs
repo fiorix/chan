@@ -25,6 +25,7 @@ mod single_instance;
 mod terminal_mode;
 mod terminal_opacity;
 mod titlebar_tabs;
+mod tls;
 // Reads the updater plugin's offered update, and FreeBSD builds without
 // the plugin (see Cargo.toml), so the module goes with it.
 #[cfg(not(target_os = "freebsd"))]
@@ -3381,19 +3382,32 @@ async fn desktop_handle_upgrade(
     }
 }
 
+/// The desktop's updater, whose check and download verify chan.app with
+/// chan-tls's trust decision, as every other TLS client here verifies a
+/// gateway.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn desktop_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let tls = chan_tls::client_config().map_err(|e| e.to_string())?;
+    app.updater_builder()
+        .configure_client(move |builder| crate::tls::updater_client(builder, &tls))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn desktop_handle_upgrade(
     app: tauri::AppHandle,
     check_only: bool,
 ) -> chan_server::handoff::Response {
     use chan_server::handoff::{Response, CHAN_VERSION};
-    use tauri_plugin_updater::UpdaterExt;
 
     if let Some(message) = desktop_updater_refusal() {
         return Response::Error { message };
     }
 
-    let updater = match app.updater() {
+    let updater = match desktop_updater(&app) {
         Ok(u) => u,
         Err(e) => {
             return Response::Error {
@@ -3485,7 +3499,6 @@ async fn desktop_handle_upgrade(
     check_only: bool,
 ) -> chan_server::handoff::Response {
     use chan_server::handoff::{Response, CHAN_VERSION};
-    use tauri_plugin_updater::UpdaterExt;
 
     if let Some(message) = desktop_updater_refusal() {
         return Response::Error { message };
@@ -3494,7 +3507,7 @@ async fn desktop_handle_upgrade(
         return Response::Error { message };
     }
 
-    let updater = match app.updater() {
+    let updater = match desktop_updater(&app) {
         Ok(u) => u,
         Err(e) => {
             return Response::Error {
@@ -3591,8 +3604,6 @@ async fn desktop_handle_upgrade(
 /// not an AppImage skips the check, and other platforms are explicit no-ops.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn spawn_launch_update_check(app: tauri::AppHandle) {
-    use tauri_plugin_updater::UpdaterExt;
-
     // Mirror the CLI opt-out exactly: only the literal "0" disables it.
     if matches!(std::env::var("CHAN_UPDATE_CHECK"), Ok(v) if v == "0") {
         tracing::info!("on-launch update check disabled by CHAN_UPDATE_CHECK=0");
@@ -3603,7 +3614,7 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
+        let updater = match desktop_updater(&app) {
             Ok(u) => u,
             Err(e) => {
                 tracing::warn!(error = %e, "on-launch update check: updater unavailable");
@@ -3660,8 +3671,6 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
 /// user restarts from the dialog (`restart_desktop_after_update`).
 #[cfg(windows)]
 fn spawn_launch_update_check(app: tauri::AppHandle) {
-    use tauri_plugin_updater::UpdaterExt;
-
     // Mirror the CLI opt-out exactly: only the literal "0" disables it.
     if matches!(std::env::var("CHAN_UPDATE_CHECK"), Ok(v) if v == "0") {
         tracing::info!("on-launch update check disabled by CHAN_UPDATE_CHECK=0");
@@ -3672,7 +3681,7 @@ fn spawn_launch_update_check(app: tauri::AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
+        let updater = match desktop_updater(&app) {
             Ok(u) => u,
             Err(e) => {
                 tracing::warn!(error = %e, "on-launch update check: updater unavailable");
@@ -3964,10 +3973,12 @@ async fn with_tunnel_reason(
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     let state = window.state::<Arc<AppState>>();
     let label = window.label();
-    let client = match crate::wireguard::client_builder()
-        .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
-        .build()
-    {
+    let client = match crate::wireguard::client_builder().and_then(|builder| {
+        builder
+            .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| e.to_string())
+    }) {
         Ok(c) => c,
         Err(e) => {
             let result = probe_result_for(

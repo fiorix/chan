@@ -506,10 +506,10 @@ pub async fn run(cfg: ClientConfig, router: axum::Router) -> Result<(), ClientEr
     }
     dial::validate_tunnel_url(&cfg)?;
 
-    // Build the TLS config once; rustls-native-certs walks the
-    // OS trust store on every call (slow on macOS keychain) and
-    // the reconnect loop would otherwise re-pay that on every
-    // attempt. Lazy: only build for https:// URLs.
+    // Build the TLS config once, before the loop: every attempt
+    // reuses it, and a trust decision that cannot be built is a
+    // configuration error no retry fixes. Lazy: only for https://
+    // URLs.
     let tls = if cfg.tunnel_url.scheme() == "https" {
         Some(std::sync::Arc::new(build_tls_config()?))
     } else {

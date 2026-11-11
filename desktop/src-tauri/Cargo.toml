@@ -79,7 +79,12 @@ notify-debouncer-mini = { workspace = true }
 keyring = { workspace = true }
 getrandom = { workspace = true }
 gethostname = { workspace = true }
+# No root feature: every client starts from `wireguard::client_builder`,
+# which hands reqwest chan-tls's config.
 reqwest = { workspace = true, features = ["multipart", "stream"] }
+# The trust decision of every TLS client here (src/tls.rs), shared with the
+# devserver's tunnel dial.
+chan-tls = { workspace = true }
 # PKCE: base64url-no-pad encode the 32-byte verifier and the
 # SHA256(verifier) challenge; subtle backs the constant-time state
 # compare in the loopback callback, matching the gateway's ct_eq.
@@ -131,6 +136,10 @@ rfd = { version = "0.16", default-features = false, features = ["common-controls
 # uses for Linux only, so the plugin is compiled out there rather than patched.
 [target.'cfg(not(target_os = "freebsd"))'.dependencies]
 tauri-plugin-updater = { workspace = true }
+# The updater's own reqwest, named so src/tls.rs can hand its builder
+# chan-tls's config. The plugin's version and a feature it already enables,
+# so Cargo builds no second copy.
+reqwest013 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 # The in-window launcher (src/launcher_panel.rs) takes the window webview's
@@ -167,6 +176,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSNotification", "NSProcessInfo", "NSString"] }
 
 [dev-dependencies]
+# The recorded config and the ClientHello sink that show each client takes
+# the shared config.
+chan-tls = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 # The ACL parity tests parse permissions/app.toml; no non-test code in this
 # crate parses TOML.

@@ -11,7 +11,7 @@ publish = false
 [dev-dependencies]
 chan-tunnel-client = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 url = { workspace = true }
 
 [dependencies]

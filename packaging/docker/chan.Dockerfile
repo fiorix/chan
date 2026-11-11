@@ -54,8 +54,9 @@ RUN if [ "$EMBED_MODEL" = "1" ]; then \
 # ---- runtime -------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
-# ca-certificates: chan-tunnel-client uses rustls-native-certs, so the outbound
-# tunnel TLS dial (and self-update checks) need the system root store.
+# ca-certificates: the outbound tunnel TLS dial verifies against this bundle
+# beside the Mozilla roots chan carries (chan-tls), so a gateway behind a CA
+# added to it verifies; a public CA verifies without it.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates && \

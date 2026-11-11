@@ -18,16 +18,45 @@ pub(crate) fn local_devserver(timeout: Duration) -> Result<reqwest::Client> {
         .context("building local devserver HTTP client")
 }
 
-/// An explicit metrics URL keeps the user's proxy settings, which a remote server may need.
+/// An explicit metrics URL keeps the user's proxy settings, which a remote server may need. The URL can name any server, a devserver behind a gateway included, so a TLS server is verified with chan-tls's trust decision, the one the desktop and the devserver's tunnel make.
 pub(crate) fn explicit_url(timeout: Duration) -> Result<reqwest::Client> {
-    bounded(timeout)
+    let tls = chan_tls::client_config().context("building the TLS trust for the metrics URL")?;
+    explicit_url_builder(timeout, tls)
         .build()
         .context("building explicit-URL HTTP client")
+}
+
+fn explicit_url_builder(
+    timeout: Duration,
+    mut tls: chan_tls::rustls::ClientConfig,
+) -> reqwest::ClientBuilder {
+    // reqwest uses a preconfigured config as it is, ALPN included, and this
+    // build has no HTTP/2, so the config offers HTTP/1.1 alone.
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    bounded(timeout).use_preconfigured_tls(tls)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_requests_verify_with_the_config_given_over_http1() {
+        let (tls, handshakes) = chan_tls::testing::recording(chan_tls::client_config().unwrap());
+        let sink = chan_tls::testing::Sink::start();
+        // No proxy from the environment either, so the dial is the sink's.
+        let client = explicit_url_builder(Duration::from_secs(5), tls)
+            .no_proxy()
+            .build()
+            .unwrap();
+        let refused = client
+            .get(format!("https://{}/api/metrics", sink.addr))
+            .send()
+            .await;
+        assert!(refused.is_err(), "the sink never answers");
+        assert_eq!(handshakes.server_names(), ["127.0.0.1"]);
+        assert_eq!(sink.alpn_offers(), [["http/1.1"]]);
+    }
 
     #[tokio::test]
     async fn local_requests_do_not_follow_redirects() {

@@ -98,6 +98,6 @@ For orchestration (Postgres plus the four services wired together) and the local
 ## Design notes
 
 - **Base images.** Builder `node:22-bookworm`, runtime `debian:bookworm-slim`. Both are Debian bookworm so the binary's glibc requirement never exceeds the runtime's glibc. The builder's Node major is the one the repository's `.nvmrc` declares; a `FROM` tag cannot read that file, so `make build-matrix-check` fails a `FROM node:` line under `packaging/docker/` that names another major. Pin by digest for reproducible production builds.
-- **No runtime dependencies beyond glibc and ca-certificates.** The gateway is sqlx plus rustls (no libpq, no openssl). chan-tunnel-client uses rustls-native-certs, so the chan image needs `ca-certificates` for the outbound tunnel TLS dial.
+- **No runtime dependencies beyond glibc and ca-certificates.** The gateway is sqlx plus rustls (no libpq, no openssl). The outbound tunnel TLS dial verifies against the system CA bundle beside the Mozilla roots chan carries (chan-tls), so the chan image ships `ca-certificates`: a gateway behind a public CA verifies without it, and one behind a CA of its own verifies once that CA is in the image's bundle.
 - **Non-root.** Runtime images create and run as a non-root user (`chan`, `chan-gateway`). Container boundaries isolate gateway workloads; the systemd packages use a distinct Unix identity for each service.
 - **Secrets stay out of the image.** Config and secrets arrive as environment variables or mounted files at runtime.

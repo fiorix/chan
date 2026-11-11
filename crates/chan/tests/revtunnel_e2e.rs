@@ -774,6 +774,7 @@ impl TunnelRig {
                 tunnel_id: trigger.tunnel_id.clone(),
                 spec,
                 half_close,
+                connector: None,
             }),
         )
         .await

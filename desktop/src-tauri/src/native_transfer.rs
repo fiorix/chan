@@ -392,8 +392,12 @@ pub async fn fetch_transfer_cap(
 
 pub fn http_client() -> Result<reqwest::Client, String> {
     crate::wireguard::client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
+        .and_then(|builder| {
+            builder
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| error.to_string())
+        })
         .map_err(|error| format!("building native transfer client: {error}"))
 }
 

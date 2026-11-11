@@ -59,6 +59,22 @@ pub struct IdentityClient {
 
 impl IdentityClient {
     pub fn new(identity_url: &Url, token: &str, host: ProxyId) -> anyhow::Result<Self> {
+        let tls = chan_tls::client_config().context("building the TLS trust for IDENTITY_URL")?;
+        Self::with_tls(identity_url, token, host, tls)
+    }
+
+    /// [`IdentityClient::new`] over `tls`, which the agent takes from
+    /// chan-tls, so identity is verified as the desktop and the devserver's
+    /// tunnel verify the gateway.
+    fn with_tls(
+        identity_url: &Url,
+        token: &str,
+        host: ProxyId,
+        mut tls: chan_tls::rustls::ClientConfig,
+    ) -> anyhow::Result<Self> {
+        // reqwest uses a preconfigured config as it is, ALPN included, and
+        // this build has no HTTP/2, so the config offers HTTP/1.1 alone.
+        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         let mut endpoint = identity_url
             .join(PEERS_PATH)
             .context("IDENTITY_URL cannot carry the peers path")?;
@@ -66,6 +82,7 @@ impl IdentityClient {
             .query_pairs_mut()
             .append_pair("host", host.as_str());
         let client = Client::builder()
+            .use_preconfigured_tls(tls)
             .timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(2))
             // An internal route has no reason to redirect, and following one
@@ -95,7 +112,7 @@ impl IdentityClient {
         let response = request
             .send()
             .await
-            .map_err(|e| FetchError::Upstream(format!("request failed: {e}")))?;
+            .map_err(|e| FetchError::Upstream(format!("request failed: {}", with_causes(&e))))?;
         match response.status() {
             StatusCode::OK => {}
             StatusCode::NOT_MODIFIED if etag.is_some() => return Ok(Fetched::NotModified),
@@ -135,6 +152,20 @@ impl IdentityClient {
         }
         Ok(peers)
     }
+}
+
+/// `error` and the causes under it. reqwest's own message names the URL and
+/// stops there, before the cause that says why, such as the certificate a
+/// handshake refused.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        cause = next.source();
+    }
+    text
 }
 
 /// The poll state: the last list identity served, the `ETag` that names
@@ -337,6 +368,32 @@ pub(crate) mod tests {
                 Polled::FailureRepeated
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn identity_is_verified_with_the_config_it_is_given_over_http1() {
+        let (tls, handshakes) = chan_tls::testing::recording(chan_tls::client_config().unwrap());
+        let sink = chan_tls::testing::Sink::start();
+        let client = IdentityClient::with_tls(
+            &format!("https://{}", sink.addr).parse().unwrap(),
+            "agent-bearer",
+            ProxyId::parse("p1").unwrap(),
+            tls,
+        )
+        .unwrap();
+        let Err(FetchError::Upstream(error)) = client.fetch(None).await else {
+            panic!("the sink never answers");
+        };
+        assert!(
+            error.starts_with("request failed: error sending request for url"),
+            "{error}"
+        );
+        assert!(
+            error.matches(": ").count() > 1,
+            "the message carries the cause under reqwest's own: {error}"
+        );
+        assert_eq!(handshakes.server_names(), ["127.0.0.1"]);
+        assert_eq!(sink.alpn_offers(), [["http/1.1"]]);
     }
 
     #[tokio::test]

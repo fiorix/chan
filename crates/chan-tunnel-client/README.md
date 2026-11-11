@@ -23,7 +23,7 @@ ClientError                   URL, TLS, I/O, handshake, refusal and
 dial(cfg)                     one TLS+h2 attempt; returns the registration
                               and the yamux connection
 dial_with_tls(cfg, tls)       same, with a caller-cached TLS config
-build_tls_config()            rustls with native roots, ALPN h2
+build_tls_config()            chan-tls's trust decision, ALPN h2
 
 handshake(cfg, socket)        Hello/HelloAck over any tokio duplex; used
                               by wire tests

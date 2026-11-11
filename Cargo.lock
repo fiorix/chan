@@ -1003,6 +1003,7 @@ dependencies = [
  "chan-server",
  "chan-shell",
  "chan-systemd",
+ "chan-tls",
  "chan-wireguard",
  "chan-workspace",
  "clap 4.6.1",
@@ -1038,6 +1039,7 @@ dependencies = [
  "chan-revtunnel",
  "chan-server",
  "chan-shell",
+ "chan-tls",
  "chan-wireguard",
  "chan-workspace",
  "dirs 5.0.1",
@@ -1053,6 +1055,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "reqwest 0.12.28",
+ "reqwest 0.13.3",
  "rfd",
  "serde",
  "serde_json",
@@ -1148,6 +1151,7 @@ name = "chan-revtunnel"
 version = "0.127.0"
 dependencies = [
  "chan-metrics",
+ "chan-tls",
  "futures",
  "serde",
  "serde_json",
@@ -1225,6 +1229,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chan-tls"
+version = "0.127.0"
+dependencies = [
+ "ring",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier",
+ "tracing",
+ "webpki-roots 1.0.7",
+]
+
+[[package]]
 name = "chan-tmux"
 version = "0.127.0"
 dependencies = [
@@ -1238,6 +1254,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chan-metrics",
+ "chan-tls",
  "chan-tunnel-proto",
  "futures",
  "h2",
@@ -1245,7 +1262,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "thiserror 1.0.69",
  "tokio",

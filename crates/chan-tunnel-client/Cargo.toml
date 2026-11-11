@@ -10,6 +10,9 @@ publish = false
 
 [dependencies]
 chan-metrics = { workspace = true }
+# The trust decision of the dial's TLS, shared with the desktop's clients
+# and the gateway's WireGuard agent.
+chan-tls = { workspace = true }
 chan-tunnel-proto = { workspace = true }
 
 # Router, Extension, and Body need no optional axum features. This crate is
@@ -23,7 +26,6 @@ hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["server", "server-auto", "service", "tokio"] }
 rustls = { workspace = true }
 thiserror = { workspace = true }
-rustls-native-certs = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
