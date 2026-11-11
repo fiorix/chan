@@ -706,16 +706,23 @@ describe("Gateways WireGuard key", () => {
     expect(card.querySelector(".gw-wg-file")).toBeNull();
   });
 
-  it("an enrolled key reads enrolled beside the file the sign-in wrote and its live state", () => {
-    const conf = "/home/u/.chan/desktop/wireguard/gw-test0001.conf";
+  it.each(["up", null])("an enrolled key keeps its WireGuard line without a file and status %s", (status) => {
     library.gateways = [
-      gw({ wireguard_public_key: KEY, wireguard_enrolled: true, wireguard: conf, wireguard_status: "up" }),
+      gw({ wireguard_public_key: KEY, wireguard_enrolled: true, wireguard: null, wireguard_status: status }),
     ];
     const el = render();
     const card = el.querySelector("section.gateway-card")!;
     expect(card.querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe("enrolled");
-    expect(card.querySelector(".gw-wg-file")!.textContent).toBe(conf);
-    expect(card.querySelector(".gw-wg-status")!.textContent).toBe("up");
+    expect(card.querySelector(".gw-wireguard")).not.toBeNull();
+    expect(card.querySelector(".gw-wg-file")).toBeNull();
+    expect(card.querySelector(".gw-wg-status")?.textContent ?? null).toBe(status);
+  });
+
+  it("keeps a running tunnel visible after its key is regenerated", () => {
+    library.gateways = [gw({ wireguard_public_key: KEY, wireguard_enrolled: false, wireguard_status: "up" })];
+    const el = render();
+    expect(el.querySelector(".gw-wg-status")?.textContent).toBe("up");
+    expect(el.querySelector(".gw-wg-file")).toBeNull();
   });
 
   it("the badge's copy action writes the whole public key", async () => {
@@ -758,8 +765,7 @@ describe("Gateways WireGuard key", () => {
     await settle();
     flushSync();
     expect(card().querySelector(".gw-wg-enrolled")!.textContent!.trim()).toBe("enrolled");
-    expect(card().querySelector(".gw-wg-file")!.textContent).toBe(
-      `~/.chan/desktop/wireguard/${id}.conf`,
-    );
+    expect(card().querySelector(".gw-wg-file")).toBeNull();
+    expect(card().querySelector(".gw-wg-status")?.textContent).toBe("connecting");
   });
 });

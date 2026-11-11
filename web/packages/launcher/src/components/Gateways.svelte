@@ -156,14 +156,16 @@
             </span>
           </span>
         {/if}
-        {#if gw.wireguard}
+        {#if gw.wireguard || gw.wireguard_status || gw.wireguard_enrolled}
           <span class="gw-addr-row gw-wireguard">
             <span class="gw-glyph"></span>
             <span class="chip">WireGuard</span>
             {#if gw.wireguard_status}
               <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
             {/if}
-            <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+            {#if gw.wireguard}
+              <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+            {/if}
           </span>
         {/if}
       </div>

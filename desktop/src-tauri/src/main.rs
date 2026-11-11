@@ -5625,10 +5625,13 @@ fn main() {
             None
         }
     };
+    if let Err(error) = config::migrate_wireguard_enrollments(&store) {
+        tracing::warn!(%error, "migrating WireGuard enrollment files failed");
+    }
     // The WireGuard fabric: the loopback proxy, bound here before any
     // webview or HTTP client exists and whatever the gateways say, and a
-    // tunnel per enabled gateway with a wg-quick file. The webview proxy is
-    // process-wide on Windows and the HTTP clients pin the proxy at their
+    // tunnel per enabled gateway with a file or enrolled parameters. The
+    // proxy is process-wide on Windows and HTTP clients pin it at their
     // first build, so the address cannot move later; the tunnels behind it
     // can, and later files join the running proxy.
     let gateways = match store.lock().unwrap().get() {
@@ -11430,6 +11433,7 @@ mod tests {
                 wireguard: None,
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
@@ -11528,6 +11532,7 @@ mod tests {
                 wireguard: None,
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();
@@ -11676,6 +11681,7 @@ mod tests {
                 wireguard: None,
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             });
             store.save(&cfg).unwrap();

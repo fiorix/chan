@@ -17,8 +17,8 @@
   // first and the form then stays open as that row's form: it shows the
   // public key, which the gateway's consent page shows again at sign-in, the
   // URL is fixed, and the primary button reads Done and saves any later
-  // edit to the label or the file. A sign-in that enrolls the key names the
-  // row's client file while the form may still be open, so Done and Save
+  // edit to the label or the file. A sign-in can replace a manual file with
+  // enrolled parameters while the form is open, so Done and Save
   // send the file field only when the user changed it, and otherwise the
   // row's file as the registry holds it then. The private key never reaches
   // the launcher. A gateway that enrolls no peers refuses with the desktop's

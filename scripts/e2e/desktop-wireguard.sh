@@ -73,11 +73,13 @@
 #                   URL carrying that key, which the identity records; the
 #                   walk is redirected to the desktop's callback, which
 #                   answers 303.
-#     adopt         the redeem's parameters become the row's client file, the
-#                   running fabric starts its tunnel and the peer handshakes,
-#                   the row reads enrolled and connected, in the same desktop
-#                   process with the same proxy address; the private key is
-#                   in the client file and in no other file of the run.
+#     adopt         the redeem's parameters are stored on the row with its
+#                   one owner-only key file and no client file, the running
+#                   fabric starts its tunnel from them and the peer
+#                   handshakes, the row reads enrolled and connected, in the
+#                   same desktop process with the same proxy address; the
+#                   private key is in the key file and in no other file of
+#                   the run.
 #     tenant        a second, disabled row whose gateway is at the name the
 #                   enrollment maps, which resolves nowhere: its connect's
 #                   discovery GET and a launcher fetch to a name under the
@@ -120,8 +122,7 @@
 # it as a credential until deleted. A kept --live-adopt work dir also
 # holds the launcher bearer of a desktop that is gone, in bearer.header,
 # read by curl so it is on no command line. A kept --enroll work dir holds
-# the desktop's key file and client file under chan-home, worthless once
-# the peer is gone.
+# the desktop's key file under chan-home, worthless once the peer is gone.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -723,12 +724,25 @@ row_connected() {
         [ "$(entry_field "$WORK/rows.json" status "$GATEWAY_ID")" = connected ]
 }
 
+enrollment_stored() {
+    node -e '
+        const [file, id, key] = process.argv.slice(1);
+        const row = JSON.parse(require("fs").readFileSync(file, "utf8")).gateways.find((row) => row.id === id);
+        const params = row?.wireguard_enrollment;
+        if (row?.wireguard != null || !params || params.key_file !== key ||
+            !Array.isArray(params.addresses) || params.addresses.length === 0 ||
+            !Array.isArray(params.allowed_ips) || params.allowed_ips.length === 0 ||
+            !Array.isArray(params.ingresses) || params.ingresses.length !== 1 ||
+            !params.ingresses[0].public_key || !params.ingresses[0].endpoint) process.exit(1);
+    ' "$@"
+}
+
 enroll_arms() {
     local arm_rc keys key_file conf key_status client_key enrolled key_mode dir_mode
     local control_connect control_404=no control_discoveries control_sent=no
     local peer_key peer_udp connect_status opened read_back sent_url sent_key recorded walk
     local pid_before pid_after listening addresses row_file row_enrolled row_wg row_status row_error
-    local conf_mode redeemed rostered private_key holder in_key=no in_conf=no leaked=""
+    local redeemed rostered private_key holder in_key=no in_conf=no leaked="" parameters=no
     local key_sent=no key_recorded=no tenant_status tenant_404=no
     keys="$CHAN_HOME/desktop/wireguard"
     key_file="$keys/$GATEWAY_ID.key"
@@ -789,10 +803,10 @@ enroll_arms() {
     [ "$walk" = 'browser: authorize=302 callback=303' ] || arm_rc=1
     verdict authorize "$arm_rc" "connect answered $connect_status (want 204), URLs opened ${opened:-0} (want 1) at ${sent_url:-none}, its key is the row's: $key_sent, the identity recorded it: $key_recorded, ${walk:-no walk} (want 302 then 303)"
 
-    # adopt: the redeem writes the row's client file and the running fabric
-    # adopts it, with no restart.
+    # adopt: the redeem stores public parameters and the running fabric
+    # reads the one key file, with no restart or duplicate private key.
     arm_rc=0
-    wait_for 30 "the enrolled tunnel's start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID .*file=$conf " || arm_rc=1
+    wait_for 30 "the enrolled tunnel's start line" logged "gateway WireGuard tunnel started.*gateway=$GATEWAY_ID .*file=$key_file " || arm_rc=1
     wait_for 30 "the handshake at the peer" peer_logged '^status: handshake=[0-9]' || arm_rc=1
     wait_for 30 "the row connected" row_connected || arm_rc=1
     row_file="$(entry_field "$WORK/rows.json" wireguard "$GATEWAY_ID")"
@@ -800,10 +814,13 @@ enroll_arms() {
     row_wg="$(entry_field "$WORK/rows.json" wireguard_status "$GATEWAY_ID")"
     row_status="$(entry_field "$WORK/rows.json" status "$GATEWAY_ID")"
     row_error="$(entry_field "$WORK/rows.json" last_error "$GATEWAY_ID")"
-    [ "$row_file" = "$conf" ] && [ "$row_enrolled" = true ] || arm_rc=1
+    case "$row_file" in absent|null) ;; *) arm_rc=1 ;; esac
+    [ "$row_enrolled" = true ] || arm_rc=1
+    if enrollment_stored "$CHAN_HOME/desktop/config.json" "$GATEWAY_ID" "$key_file"; then parameters=yes; else arm_rc=1; fi
+    [ ! -e "$conf" ] || arm_rc=1
     case "$row_wg" in connecting|up) ;; *) arm_rc=1 ;; esac
-    conf_mode="$(stat -c %a "$conf" 2>/dev/null || echo none)"
-    [ "$conf_mode" = 600 ] || arm_rc=1
+    key_mode="$(stat -c %a "$key_file" 2>/dev/null || echo none)"
+    [ "$key_mode" = 600 ] || arm_rc=1
     redeemed="$(grep -c '^identity: redeem pkce=ok wireguard=sent$' "$WORK/identity.log" || true)"
     rostered="$(grep -c '^identity: roster bearer=minted$' "$WORK/identity.log" || true)"
     [ "$redeemed" = 1 ] && [ "$rostered" -ge 1 ] || arm_rc=1
@@ -814,7 +831,7 @@ enroll_arms() {
     [ "$pid_before" != none ] && [ "$pid_after" = "$pid_before" ] || arm_rc=1
     # Every file of the run that holds the private key, read from its file
     # and handed to grep on a descriptor, never on a command line: the
-    # search must find the key file and the client file, and nothing else.
+    # search must find only the key file.
     private_key="$(head -1 "$key_file" 2>/dev/null || true)"
     if [ -n "$private_key" ]; then
         while IFS= read -r holder; do
@@ -826,8 +843,8 @@ enroll_arms() {
         done < <(grep -rlF -D skip -f <(printf '%s\n' "$private_key") "$WORK" 2>/dev/null || true)
     fi
     unset private_key
-    [ "$in_key" = yes ] && [ "$in_conf" = yes ] && [ -z "$leaked" ] || arm_rc=1
-    verdict adopt "$arm_rc" "tunnel start lines $STARTED_BEFORE -> $(count 'gateway WireGuard tunnel started'), the row's file $row_file (want $conf) mode $conf_mode, enrolled $row_enrolled, WireGuard $row_wg, status $row_status, last error $row_error; identity redeems $redeemed, roster reads $rostered; proxy lines $listening at ${addresses% }, desktop pid $pid_before -> $pid_after; peer $(grep -E '^status: ' "$WORK/peer.log" | tail -1 | cut -d' ' -f2-); the private key found in the key file: $in_key, the client file: $in_conf, any other file: ${leaked:-none}"
+    [ "$in_key" = yes ] && [ "$in_conf" = no ] && [ -z "$leaked" ] || arm_rc=1
+    verdict adopt "$arm_rc" "tunnel start lines $STARTED_BEFORE -> $(count 'gateway WireGuard tunnel started'), the row's file $row_file (want absent or null), public parameters $parameters, key mode $key_mode, enrolled $row_enrolled, WireGuard $row_wg, status $row_status, last error $row_error; identity redeems $redeemed, roster reads $rostered; proxy lines $listening at ${addresses% }, desktop pid $pid_before -> $pid_after; peer $(grep -E '^status: ' "$WORK/peer.log" | tail -1 | cut -d' ' -f2-); the private key found in the key file: $in_key, the client file: $in_conf, any other file: ${leaked:-none}"
 
     # tenant: the desktop's HTTP leg and the launcher's webview reach the
     # peer by the enrolled names through the adopted tunnel.

@@ -143,18 +143,14 @@ pub struct Gateway {
     /// removing the gateway removes the records with it.
     #[serde(default)]
     pub native_trust: Vec<NativeDevserverTrust>,
-    /// The wg-quick file this gateway is reached through, when it sits
-    /// behind WireGuard: at start the desktop runs a tunnel from it and
-    /// every leg to the gateway goes through that tunnel. Absent for a
-    /// gateway reached directly, and left off the file then, so a config
-    /// from before the field reads and writes unchanged.
+    /// A hand-written or unmigrated enrollment wg-quick file. It keeps
+    /// its single-tunnel meaning; enrolled parameters use their key file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard: Option<PathBuf>,
     /// The public half of the WireGuard key generated for this gateway,
     /// base64 as `wg` prints it; the private half is in the row's key file
     /// under the desktop's `wireguard` directory and nowhere else. Absent
-    /// until a key is generated, and left off the file then, like the three
-    /// enrollment fields below it.
+    /// until a key is generated, and left off the file then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard_public_key: Option<String>,
     /// The key the gateway enrolled at the last sign-in that sent one. A
@@ -162,12 +158,25 @@ pub struct Gateway {
     /// enrolled yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard_enrolled_key: Option<String>,
-    /// The host names the enrolling gateway routes through this row's
-    /// tunnel, with their tunnel addresses, so the proxy carries a request
-    /// for one of them through the tunnel with no lookup on the host. They
-    /// describe the file the enrollment wrote.
+    /// Host map accompanying an unmigrated enrollment file. Once migrated,
+    /// each ingress carries its own map in `wireguard_enrollment`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wireguard_hosts: Vec<WireguardHost>,
+    /// Enrolled tunnel parameters. The private key stays in its owner-only
+    /// file; `wireguard` is reserved for a hand-written or unmigrated file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_enrollment: Option<WireguardEnrollment>,
+}
+
+/// Shared client settings and each node's peer, without private material.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardEnrollment {
+    pub key_file: PathBuf,
+    pub addresses: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistent_keepalive: Option<u16>,
+    pub ingresses: Vec<WireguardIngress>,
 }
 
 /// One name of a gateway's host map as the row stores it: an exact
@@ -180,7 +189,24 @@ pub struct WireguardHost {
     pub addresses: Vec<std::net::IpAddr>,
 }
 
+/// One gateway node's WireGuard interface and the names it routes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardIngress {
+    pub id: String,
+    pub endpoint: String,
+    pub public_key: String,
+    pub hosts: Vec<WireguardHost>,
+}
+
 impl Gateway {
+    /// The source identifying the current tunnel for adoption and status.
+    pub fn wireguard_source(&self) -> Option<&Path> {
+        self.wireguard_enrollment
+            .as_ref()
+            .map(|enrollment| enrollment.key_file.as_path())
+            .or(self.wireguard.as_deref())
+    }
+
     pub fn trusts_native(&self, owner_user_id: uuid::Uuid, devserver_id: &str) -> bool {
         self.native_trust.iter().any(|trust| {
             trust.owner_user_id == Some(owner_user_id) && trust.devserver_id == devserver_id
@@ -190,7 +216,11 @@ impl Gateway {
     /// The row's host map as the proxy routes it, passed at every adopt of
     /// the row's file.
     pub fn host_routes(&self) -> Vec<chan_wireguard::HostRoute> {
-        self.wireguard_hosts
+        self.wireguard_enrollment
+            .as_ref()
+            .and_then(|enrollment| enrollment.ingresses.first())
+            .map(|ingress| &ingress.hosts)
+            .unwrap_or(&self.wireguard_hosts)
             .iter()
             .map(|host| chan_wireguard::HostRoute {
                 name: host.name.clone(),
@@ -1108,6 +1138,7 @@ fn entry_from_gateway(
 ) -> GatewayEntry {
     let view = view.unwrap_or_default();
     let file = g.wireguard.as_deref();
+    let source = g.wireguard_source();
     GatewayEntry {
         id: g.id.clone(),
         url: g.url.clone(),
@@ -1121,9 +1152,9 @@ fn entry_from_gateway(
         // does every row with a file while the proxy could not bind.
         last_error: view
             .last_error
-            .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, file))),
+            .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, source))),
         wireguard: file.map(|path| path.display().to_string()),
-        wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, file)),
+        wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, source)),
         wireguard_public_key: g.wireguard_public_key.clone(),
         wireguard_enrolled: g.wireguard_public_key.is_some()
             && g.wireguard_enrolled_key == g.wireguard_public_key,
@@ -1186,6 +1217,7 @@ impl GatewayRegistry for GatewayConfigRegistry {
             wireguard,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
@@ -1216,12 +1248,12 @@ impl GatewayRegistry for GatewayConfigRegistry {
         // The file is full-replace like the label, and the fabric follows
         // it once the row is saved.
         let previous = std::mem::replace(&mut gw.wireguard, wireguard);
-        // The host map and the enrolled key describe the file an enrollment
-        // wrote. Clearing the file drops both, so the key reads as not
-        // enrolled; another file drops the map, whose addresses belong to
-        // the enrolled tunnel. The key file and the public key stay.
+        // A changed manual file replaces the enrolled parameters and map.
+        // An unchanged empty field preserves an enrollment without a file.
+        // Clearing a file also clears its enrolled key marker.
         if gw.wireguard != previous {
             gw.wireguard_hosts.clear();
+            gw.wireguard_enrollment = None;
             if gw.wireguard.is_none() {
                 gw.wireguard_enrolled_key = None;
             }
@@ -1316,36 +1348,20 @@ pub(crate) async fn generate_wireguard_key(
     )))
 }
 
-/// What a sign-in's [`record_wireguard_enrollment`] wrote and what it
-/// replaced, kept so [`restore_wireguard_enrollment`] can put the replaced
-/// state back. The two byte strings hold private keys: no `Debug`, never
-/// logged, dropped with the commit.
+/// The row state a credential commit can restore. The optional legacy file
+/// bytes are retained only to recognize the file at cleanup, never logged.
 pub(crate) struct RecordedEnrollment {
-    /// The client file the record wrote.
-    pub(crate) conf: PathBuf,
-    /// The bytes it wrote there.
-    written: Vec<u8>,
-    /// The key it named as the row's enrolled key.
+    written: WireguardEnrollment,
     key: String,
-    /// The row's file, enrolled key and host map before the record.
     prior_file: Option<PathBuf>,
     prior_key: Option<String>,
     prior_hosts: Vec<WireguardHost>,
-    /// The client file's bytes before the record, `None` when it created it.
-    prior_bytes: Option<Vec<u8>>,
+    prior_enrollment: Option<WireguardEnrollment>,
+    legacy_file: Option<(PathBuf, Vec<u8>)>,
 }
 
-/// Record a sign-in's enrollment on gateway `id` and bring its tunnel up in
-/// the running process: write the client file beside the row's key, then,
-/// under the store's lock, name it as the row's file with the enrolled key
-/// and the host map in one save, and adopt it with that map. The row's
-/// previous tunnel is retired first, since the file is rewritten in place
-/// and an adopt leaves a row running from an unchanged path alone. Answers
-/// what it wrote and replaced, and the adopt's answer (`None` with no
-/// fabric); a refused adopt also stays on the fabric, where the projection
-/// reads it as the row's `last_error`. An error is the read's, the write's
-/// or the save's, and leaves the row, the client file and the fabric as
-/// they were: a failed save puts back the file the write replaced.
+/// Save public enrollment parameters atomically, then adopt the row. The
+/// generated key is read and validated but never rewritten by sign-in.
 pub(crate) fn record_wireguard_enrollment(
     store: &Arc<Mutex<ConfigStore>>,
     manager: &crate::gateway::GatewayManager,
@@ -1357,86 +1373,48 @@ pub(crate) fn record_wireguard_enrollment(
     let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
         return Err(format!("no gateway {id}"));
     };
+    if gw
+        .wireguard_public_key
+        .as_ref()
+        .is_some_and(|key| key != &enrollment.public_key)
+    {
+        return Err(
+            "sign-in failed: the WireGuard key changed during sign-in; connect again to enroll it"
+                .into(),
+        );
+    }
     let dir = guard.wireguard_dir();
-    let path = crate::wireguard_keys::conf_path(&dir, id);
-    let prior_bytes = crate::wireguard_keys::read_client_file(&path)?;
-    let conf = crate::wireguard_keys::write_client_file(&dir, id, &enrollment)?;
-    let written = match crate::wireguard_keys::read_client_file(&conf) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            let error = format!("WireGuard: {} vanished", conf.display());
-            return Err(put_back_failed_enrollment(
-                id,
-                &dir,
-                &conf,
-                prior_bytes.as_deref(),
-                error,
-            ));
-        }
-        Err(error) => {
-            return Err(put_back_failed_enrollment(
-                id,
-                &dir,
-                &conf,
-                prior_bytes.as_deref(),
-                error,
-            ));
-        }
+    let source = crate::wireguard_keys::key_path(&dir, id);
+    let parameters = enrollment.parameters(source);
+    parameters.configs(&enrollment.public_key)?;
+    let old_conf = crate::wireguard_keys::conf_path(&dir, id);
+    let legacy_file = if gw.wireguard.as_deref() == Some(old_conf.as_path()) {
+        crate::wireguard_keys::read_client_file(&old_conf)?.map(|bytes| (old_conf, bytes))
+    } else {
+        None
     };
     let recorded = RecordedEnrollment {
-        conf: conf.clone(),
-        written,
+        written: parameters.clone(),
         key: enrollment.public_key.clone(),
-        prior_file: gw.wireguard.replace(conf.clone()),
+        prior_file: gw.wireguard.take(),
         prior_key: gw.wireguard_enrolled_key.replace(enrollment.public_key),
-        prior_hosts: std::mem::replace(&mut gw.wireguard_hosts, enrollment.hosts),
-        prior_bytes,
+        prior_hosts: std::mem::take(&mut gw.wireguard_hosts),
+        prior_enrollment: gw.wireguard_enrollment.replace(parameters),
+        legacy_file,
     };
     let gw = gw.clone();
-    if let Err(e) = guard.save(&cfg) {
-        let prior = recorded.prior_bytes.as_deref();
-        return Err(put_back_failed_enrollment(
-            id,
-            &dir,
-            &conf,
-            prior,
-            e.to_string(),
-        ));
-    }
+    guard.save(&cfg).map_err(|e| e.to_string())?;
     let adopted = manager.wireguard().map(|fabric| {
         fabric.retire(id);
-        fabric.adopt(id, &conf, gw.host_routes())
+        fabric
+            .adopt_gateway(&gw)
+            .expect("an enrolled row has a source")
     });
-    drop(guard);
     Ok((recorded, adopted))
 }
 
-/// Put back the client file a failed record replaced, and answer the
-/// record's own error. A put-back that fails too is logged: the record's
-/// error is the one the sign-in reports.
-fn put_back_failed_enrollment(
-    id: &str,
-    dir: &Path,
-    conf: &Path,
-    prior: Option<&[u8]>,
-    error: String,
-) -> String {
-    if let Err(put) = crate::wireguard_keys::put_back_client_file(dir, conf, prior) {
-        tracing::warn!(gateway = %id, error = %put, "putting back the client file a failed enrollment replaced");
-    }
-    error
-}
-
-/// Take back a sign-in's [`record_wireguard_enrollment`] on gateway `id` by
-/// putting back what it replaced, under the store's lock as the record ran.
-/// While the row still names the record's file with the record's key, its
-/// file, enrolled key and host map return to what they were in one save,
-/// and its tunnel is retired, then run again from the earlier file when the
-/// row had one and is enabled. While the client file still holds the bytes
-/// the record wrote, the earlier bytes go back, or the file is deleted when
-/// the record created it. A row or a file a later write changed is left as
-/// it is, and so is a row that is gone. An error is the save's or the
-/// file's.
+/// Restore only the enrollment this commit still owns. Other row fields,
+/// a later enrollment and every key file are left as they are.
 pub(crate) fn restore_wireguard_enrollment(
     store: &Arc<Mutex<ConfigStore>>,
     manager: &crate::gateway::GatewayManager,
@@ -1445,37 +1423,143 @@ pub(crate) fn restore_wireguard_enrollment(
 ) -> Result<(), String> {
     let mut guard = store.lock().unwrap();
     let mut cfg = guard.get().map_err(|e| e.to_string())?;
-    let mut rerun = None;
-    if let Some(gw) = cfg.gateways.iter_mut().find(|g| {
-        g.id == id
-            && g.wireguard.as_deref() == Some(recorded.conf.as_path())
-            && g.wireguard_enrolled_key.as_deref() == Some(recorded.key.as_str())
-    }) {
+    if let Some(gw) = cfg
+        .gateways
+        .iter_mut()
+        .find(|g| g.id == id && owns_enrollment(g, recorded))
+    {
         gw.wireguard = recorded.prior_file.clone();
         gw.wireguard_enrolled_key = recorded.prior_key.clone();
         gw.wireguard_hosts = recorded.prior_hosts.clone();
+        gw.wireguard_enrollment = recorded.prior_enrollment.clone();
         let gw = gw.clone();
         guard.save(&cfg).map_err(|e| e.to_string())?;
         if let Some(fabric) = manager.wireguard() {
             fabric.retire(id);
             if gw.enabled {
-                rerun = gw.wireguard.clone().map(|file| (file, gw.host_routes()));
+                let _ = fabric.adopt_gateway(&gw);
             }
         }
     }
-    let current = crate::wireguard_keys::read_client_file(&recorded.conf)?;
-    if current.as_deref() == Some(recorded.written.as_slice()) {
-        crate::wireguard_keys::put_back_client_file(
-            &guard.wireguard_dir(),
-            &recorded.conf,
-            recorded.prior_bytes.as_deref(),
-        )?;
-    }
-    if let (Some((file, routes)), Some(fabric)) = (rerun, manager.wireguard()) {
-        // A refusal stays on the fabric, where the row's last_error reads it.
-        let _ = fabric.adopt(id, &file, routes);
+    Ok(())
+}
+
+fn owns_enrollment(gw: &Gateway, recorded: &RecordedEnrollment) -> bool {
+    gw.wireguard.is_none()
+        && gw.wireguard_enrolled_key.as_deref() == Some(recorded.key.as_str())
+        && gw.wireguard_enrollment.as_ref() == Some(&recorded.written)
+        && gw.wireguard_hosts.is_empty()
+}
+
+/// Once the token and row are kept, remove the obsolete owned client file
+/// only while both the row and those bytes still belong to this commit.
+pub(crate) fn finish_wireguard_enrollment(
+    store: &Arc<Mutex<ConfigStore>>,
+    id: &str,
+    recorded: &RecordedEnrollment,
+) -> Result<(), String> {
+    let Some((path, bytes)) = &recorded.legacy_file else {
+        return Ok(());
+    };
+    let guard = store.lock().unwrap();
+    let cfg = guard.get().map_err(|e| e.to_string())?;
+    if cfg
+        .gateways
+        .iter()
+        .any(|g| g.id == id && owns_enrollment(g, recorded))
+        && crate::wireguard_keys::read_client_file(path)?.as_ref() == Some(bytes)
+    {
+        fs::remove_file(path)
+            .map_err(|e| format!("WireGuard: removing {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// Convert owned enrollment files whose private key still matches the key
+/// file and enrolled key. Hand-written files and a regenerated or edited
+/// key keep their existing tunnel until a successful re-enrollment.
+pub(crate) fn migrate_wireguard_enrollments(
+    store: &Arc<Mutex<ConfigStore>>,
+) -> Result<usize, String> {
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    let dir = guard.wireguard_dir();
+    let mut files = Vec::new();
+    let mut converted_count = 0;
+    for gw in &mut cfg.gateways {
+        let owned = crate::wireguard_keys::conf_path(&dir, &gw.id);
+        if gw.wireguard_enrollment.is_some() {
+            if gw.wireguard.is_some() {
+                continue;
+            }
+        } else if gw.wireguard.as_deref()
+            != Some(crate::wireguard_keys::conf_path(&dir, &gw.id).as_path())
+        {
+            continue;
+        }
+        let Some(key) = &gw.wireguard_enrolled_key else {
+            continue;
+        };
+        let path = &owned;
+        let converted = || -> Result<_, String> {
+            let Some(before) = crate::wireguard_keys::read_client_file(path)? else {
+                return Ok(None);
+            };
+            let hosts = gw
+                .wireguard_enrollment
+                .as_ref()
+                .and_then(|parameters| parameters.ingresses.first())
+                .map(|ingress| ingress.hosts.as_slice())
+                .unwrap_or(&gw.wireguard_hosts);
+            let parameters = crate::wireguard_keys::migrate_file(&dir, &gw.id, key, hosts)?;
+            if gw
+                .wireguard_enrollment
+                .as_ref()
+                .is_some_and(|stored| Some(stored) != parameters.as_ref())
+            {
+                return Ok(None);
+            }
+            // The row must describe the same file whose bytes cleanup owns.
+            if Some(&before) != crate::wireguard_keys::read_client_file(path)?.as_ref() {
+                return Ok(None);
+            }
+            Ok(parameters.map(|parameters| (parameters, before)))
+        };
+        let (parameters, bytes) = match converted() {
+            Ok(Some(converted)) => converted,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(gateway = %gw.id, %error, "keeping the existing WireGuard enrollment file");
+                continue;
+            }
+        };
+        files.push((gw.id.clone(), path.clone(), bytes));
+        if gw.wireguard_enrollment.is_none() {
+            gw.wireguard = None;
+            gw.wireguard_hosts.clear();
+            gw.wireguard_enrollment = Some(parameters);
+            converted_count += 1;
+        }
+    }
+    if files.is_empty() {
+        return Ok(0);
+    }
+    if converted_count > 0 {
+        guard.save(&cfg).map_err(|e| e.to_string())?;
+    }
+    for (id, path, bytes) in &files {
+        let cleanup = || -> Result<(), String> {
+            if crate::wireguard_keys::read_client_file(path)?.as_ref() == Some(bytes) {
+                fs::remove_file(path)
+                    .map_err(|e| format!("WireGuard: removing {}: {e}", path.display()))?;
+            }
+            Ok(())
+        };
+        if let Err(error) = cleanup() {
+            tracing::warn!(gateway = %id, %error, "keeping the obsolete WireGuard enrollment file for a cleanup retry");
+        }
+    }
+    Ok(converted_count)
 }
 
 /// What the one-shot legacy migration did, for the startup log and the
@@ -1551,6 +1635,7 @@ fn split_legacy_gateway_rows(cfg: &mut Config) -> GatewayMigration {
             wireguard: None,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
@@ -1593,6 +1678,7 @@ pub fn convert_devserver_row_to_gateway(
             wireguard: None,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
@@ -2821,6 +2907,7 @@ mod tests {
                 wireguard: None,
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
+                wireguard_enrollment: None,
                 wireguard_hosts: Vec::new(),
             }],
             ..Default::default()
@@ -2966,6 +3053,7 @@ mod tests {
                     wireguard: None,
                     wireguard_public_key: None,
                     wireguard_enrolled_key: None,
+                    wireguard_enrollment: None,
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -3086,6 +3174,7 @@ mod tests {
                     wireguard: None,
                     wireguard_public_key: None,
                     wireguard_enrolled_key: None,
+                    wireguard_enrollment: None,
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -3189,6 +3278,7 @@ mod tests {
                     wireguard: None,
                     wireguard_public_key: None,
                     wireguard_enrolled_key: None,
+                    wireguard_enrollment: None,
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -3611,6 +3701,7 @@ mod tests {
             wireguard: wireguard.cloned(),
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         };
         // The start runs A's tunnel and refuses B's file.
@@ -3728,6 +3819,7 @@ mod tests {
             wireguard: None,
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         });
         guard.save(&cfg).unwrap();

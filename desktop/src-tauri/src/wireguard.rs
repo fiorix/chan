@@ -1,6 +1,6 @@
 //! The WireGuard fabric: in-process tunnels to the gateways configured with
-//! a wg-quick file, and the one loopback CONNECT proxy every outbound leg
-//! reaches those gateways through.
+//! a wg-quick file or enrolled parameters, and the loopback CONNECT proxy
+//! every outbound leg reaches those gateways through.
 //!
 //! The proxy is bound at start, before any HTTP client or webview exists,
 //! whether or not a gateway carries a file, and lives for the process. The
@@ -11,7 +11,7 @@
 //! because the webview proxy is: WebView2 takes it as a browser argument
 //! shared by every webview of the process, so the launcher and every window
 //! carry the same value. What the proxy routes is not decided at start: the
-//! tunnels are a live registry behind it, keyed by gateway id. A row's file
+//! tunnels are a live registry behind it, keyed by gateway id. A row's source
 //! is adopted when it is set or changed through the Gateways form, when the
 //! row connects, and at start for every enabled row, so its tunnel starts and
 //! is routed in the running proxy; a cleared file, a removed row and a user
@@ -83,7 +83,7 @@ enum Proxy {
 
 /// What the fabric holds for one gateway.
 enum Row {
-    /// The tunnel runs from `path` and its route is in the proxy.
+    /// The tunnel runs from `path` (a client file or enrolled key file).
     Running {
         path: PathBuf,
         tunnel: Tunnel,
@@ -94,11 +94,57 @@ enum Row {
         #[cfg(test)]
         test_status: Option<chan_wireguard::Status>,
     },
-    /// The file at `path` was refused, for `reason`; nothing runs.
+    /// The source at `path` was refused, for `reason`; nothing runs.
     Refused { path: PathBuf, reason: String },
 }
 
 impl WireguardFabric {
+    /// Adopt a hand-written file or the first peer of an enrolled row.
+    /// Enrolled configurations are built in memory from the one key file.
+    pub fn adopt_gateway(&self, gateway: &Gateway) -> Option<Result<String, String>> {
+        if gateway.wireguard.is_some() && gateway.wireguard_enrollment.is_some() {
+            self.retire(&gateway.id);
+            return Some(self.adopt_with(
+                &gateway.id,
+                gateway.wireguard_source().expect("both sources are present"),
+                Vec::new(),
+                || Err("WireGuard: a gateway cannot name both a manual file and enrolled parameters".into()),
+            ));
+        }
+        // Re-enrollment is the only way to use a regenerated key. Blocking
+        // discovery on the obsolete enrollment would block that sign-in.
+        // An already-running tunnel keeps its old key until it is replaced.
+        if gateway.wireguard_enrollment.is_some()
+            && gateway.wireguard_public_key.is_some()
+            && gateway.wireguard_public_key != gateway.wireguard_enrolled_key
+        {
+            let mut rows = self.rows.lock().unwrap();
+            if matches!(rows.get(&gateway.id), Some(Row::Refused { .. })) {
+                rows.remove(&gateway.id);
+            }
+            return None;
+        }
+        let source = gateway.wireguard_source()?;
+        if let Some(enrollment) = &gateway.wireguard_enrollment {
+            Some(
+                self.adopt_with(&gateway.id, source, gateway.host_routes(), || {
+                    let key = gateway
+                        .wireguard_enrolled_key
+                        .as_deref()
+                        .ok_or_else(|| "WireGuard: enrollment has no enrolled key".to_string())?;
+                    let config = enrollment
+                        .configs(key)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| "WireGuard: enrollment has no ingress".to_string())?;
+                    start_config(&gateway.id, config)
+                }),
+            )
+        } else {
+            Some(self.adopt(&gateway.id, source, gateway.host_routes()))
+        }
+    }
+
     /// The proxy as the legs name it, `http://127.0.0.1:<port>`; `None`
     /// when it could not bind.
     pub fn proxy_url(&self) -> Option<&Url> {
@@ -146,6 +192,16 @@ impl WireguardFabric {
         conf: &Path,
         hosts: Vec<HostRoute>,
     ) -> Result<String, String> {
+        self.adopt_with(gateway_id, conf, hosts, || start_tunnel(gateway_id, conf))
+    }
+
+    fn adopt_with(
+        &self,
+        gateway_id: &str,
+        conf: &Path,
+        hosts: Vec<HostRoute>,
+        start: impl FnOnce() -> Result<(Tunnel, String), String>,
+    ) -> Result<String, String> {
         let proxy = match &self.proxy {
             Proxy::Bound { proxy, .. } => proxy,
             Proxy::Unavailable(reason) => return Err(reason.clone()),
@@ -158,7 +214,7 @@ impl WireguardFabric {
         }
         let started = {
             let _runtime = self.runtime.enter();
-            start_tunnel(gateway_id, conf)
+            start()
         };
         let row_hosts = hosts.clone();
         let route_order = match rows.get(gateway_id) {
@@ -402,6 +458,13 @@ fn start_tunnel(gateway_id: &str, conf: &Path) -> Result<(Tunnel, String), Strin
         tracing::warn!(gateway = %gateway_id, error = %e, "gateway WireGuard file refused");
         format!("WireGuard: {e}")
     })?;
+    start_config(gateway_id, config)
+}
+
+fn start_config(
+    gateway_id: &str,
+    config: chan_wireguard::config::Config,
+) -> Result<(Tunnel, String), String> {
     let endpoint = config.peer.endpoint.to_string();
     match Tunnel::start(config) {
         Ok(tunnel) => Ok((tunnel, endpoint)),
@@ -531,10 +594,8 @@ async fn start_with_bind(gateways: &[Gateway], bind: SocketAddr) -> WireguardFab
         next_route_order: AtomicU64::new(0),
     };
     for gateway in gateways.iter().filter(|g| g.enabled) {
-        if let Some(path) = &gateway.wireguard {
-            // A refusal is logged and kept on the row by adopt itself.
-            let _ = fabric.adopt(&gateway.id, path, gateway.host_routes());
-        }
+        // A refusal is logged and kept on the row by adopt itself.
+        let _ = fabric.adopt_gateway(gateway);
     }
     fabric
 }
@@ -845,6 +906,7 @@ pub(crate) mod tests {
             wireguard: wireguard.map(Path::to_path_buf),
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
+            wireguard_enrollment: None,
             wireguard_hosts: Vec::new(),
         }
     }
@@ -1049,6 +1111,245 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn owned_enrollment_migration_preserves_the_tunnel_and_builds_an_added_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "far.conf", "10.7.0.1", "10.7.0.2").await;
+        let mut listener = far.tunnel.listen(0).unwrap();
+        let original = chan_wireguard::config::read_file(&far.conf).unwrap();
+        let public = base64_of(original.public_key().as_bytes());
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("desktop/config.json"),
+        )));
+        let keys = store.lock().unwrap().wireguard_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        let key = owner_only(&keys, "gw-migrate.key", &format!("{}\n", far.private_key));
+        let old = keys.join("gw-migrate.conf");
+        chan_wireguard::config::write_file(&old, &original).unwrap();
+        let key_bytes = std::fs::read(&key).unwrap();
+        let mut row = gateway("gw-migrate", Some(&old));
+        row.wireguard_public_key = Some(public.clone());
+        row.wireguard_enrolled_key = Some(public.clone());
+        row.wireguard_hosts = vec![host("tenant.chan.invalid", "10.7.0.2")];
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways.push(row);
+            guard.save(&cfg).unwrap();
+        }
+        assert_eq!(
+            crate::config::migrate_wireguard_enrollments(&store).unwrap(),
+            1
+        );
+        assert!(!old.exists());
+        let row = store.lock().unwrap().get().unwrap().gateways.remove(0);
+        assert_eq!(row.wireguard, None);
+        assert!(row.wireguard_hosts.is_empty());
+        let parameters = row.wireguard_enrollment.as_ref().unwrap();
+        let migrated = parameters.configs(&public).unwrap().remove(0);
+        assert_eq!(
+            migrated.private_key.to_bytes(),
+            original.private_key.to_bytes()
+        );
+        assert_eq!(migrated.addresses, original.addresses);
+        assert_eq!(migrated.peer.endpoint, original.peer.endpoint);
+        assert_eq!(
+            migrated.peer.public_key.as_bytes(),
+            original.peer.public_key.as_bytes()
+        );
+        assert_eq!(migrated.peer.allowed_ips, original.peer.allowed_ips);
+        assert_eq!(
+            migrated.peer.persistent_keepalive,
+            original.peer.persistent_keepalive
+        );
+        let fabric = start(std::slice::from_ref(&row)).await;
+        assert_eq!(fabric.tunnels(), 1);
+        carried_by_name(&fabric, &mut listener, "10.7.0.1", "tenant.chan.invalid").await;
+        let mut expanded = parameters.clone();
+        let mut second = expanded.ingresses[0].clone();
+        second.id = "p2".into();
+        second.endpoint = "127.0.0.1:51821".into();
+        second.public_key = base64_of(PublicKey::from(&StaticSecret::from([9u8; 32])).as_bytes());
+        second.hosts = vec![host("*.p2.chan.invalid", "10.7.0.2")];
+        expanded.ingresses.push(second.clone());
+        let configs = expanded.configs(&public).unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].peer.endpoint, migrated.peer.endpoint);
+        assert_eq!(configs[1].peer.endpoint.to_string(), second.endpoint);
+        assert_eq!(
+            base64_of(configs[1].peer.public_key.as_bytes()),
+            second.public_key
+        );
+        assert_eq!(
+            configs[0].private_key.to_bytes(),
+            configs[1].private_key.to_bytes()
+        );
+        assert_eq!(std::fs::read(&key).unwrap(), key_bytes);
+        assert_eq!(std::fs::read_dir(&keys).unwrap().count(), 1);
+        assert_eq!(
+            crate::config::migrate_wireguard_enrollments(&store).unwrap(),
+            0
+        );
+        let mut regenerated = row;
+        regenerated.wireguard_public_key =
+            Some(crate::wireguard_keys::generate(&keys, "gw-migrate").unwrap());
+        assert!(fabric.adopt_gateway(&regenerated).is_none());
+        assert_eq!(
+            fabric.tunnels(),
+            1,
+            "the live tunnel still owns its old key"
+        );
+        carried_by_name(&fabric, &mut listener, "10.7.0.1", "tenant.chan.invalid").await;
+    }
+
+    #[tokio::test]
+    async fn regenerated_enrollment_clears_a_refusal_but_conflicting_sources_refuse() {
+        let fabric = start(&[]).await;
+        let key = std::path::PathBuf::from("unused.key");
+        let mut row = gateway("gw-conflict", Some(std::path::Path::new("manual.conf")));
+        row.wireguard_public_key = Some("new-key".into());
+        row.wireguard_enrolled_key = Some("old-key".into());
+        row.wireguard_enrollment = Some(crate::config::WireguardEnrollment {
+            key_file: key.clone(),
+            addresses: Vec::new(),
+            allowed_ips: Vec::new(),
+            persistent_keepalive: None,
+            ingresses: Vec::new(),
+        });
+        assert!(fabric
+            .adopt_gateway(&row)
+            .unwrap()
+            .unwrap_err()
+            .contains("both a manual file"));
+        assert!(fabric.failure(&row.id, Some(&key)).is_some());
+        row.wireguard = None;
+        assert!(fabric.adopt_gateway(&row).is_none());
+        assert!(fabric.failure(&row.id, Some(&key)).is_none());
+        assert_eq!(fabric.tunnels(), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn migration_retries_owned_orphans_after_cleanup_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let lines = crate::devserver::log_capture::Lines::default();
+        let _capture = lines.install();
+        let dir = tempfile::tempdir().unwrap();
+        let far = peer(dir.path(), "far.conf", "10.7.0.1", "10.7.0.2").await;
+        let original = chan_wireguard::config::read_file(&far.conf).unwrap();
+        let public = base64_of(original.public_key().as_bytes());
+        let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+            dir.path().join("desktop/config.json"),
+        )));
+        let keys = store.lock().unwrap().wireguard_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        for id in ["gw-first", "gw-second"] {
+            owner_only(
+                &keys,
+                &format!("{id}.key"),
+                &format!("{}\n", far.private_key),
+            );
+            let old = keys.join(format!("{id}.conf"));
+            chan_wireguard::config::write_file(&old, &original).unwrap();
+            let mut row = gateway(id, Some(&old));
+            row.wireguard_public_key = Some(public.clone());
+            row.wireguard_enrolled_key = Some(public.clone());
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways.push(row);
+            guard.save(&cfg).unwrap();
+        }
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let migrated = crate::config::migrate_wireguard_enrollments(&store);
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            migrated.unwrap(),
+            2,
+            "cleanup failure must not fail conversion"
+        );
+        let cleanup_warnings: Vec<_> = lines
+            .warnings()
+            .into_iter()
+            .filter(|line| line.contains("cleanup retry"))
+            .collect();
+        assert_eq!(
+            cleanup_warnings.len(),
+            2,
+            "each failed cleanup must be attempted and logged"
+        );
+        assert!(keys.join("gw-first.conf").exists());
+        assert!(keys.join("gw-second.conf").exists());
+        // A valid edited configuration is kept while the unchanged orphan retries.
+        let mut replacement = chan_wireguard::config::read_file(&far.conf).unwrap();
+        replacement.peer.endpoint = chan_wireguard::config::Endpoint::parse("127.0.0.1:9").unwrap();
+        chan_wireguard::config::write_file(&keys.join("gw-first.conf"), &replacement).unwrap();
+        let replacement_bytes = std::fs::read(keys.join("gw-first.conf")).unwrap();
+        assert_eq!(
+            crate::config::migrate_wireguard_enrollments(&store).unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read(keys.join("gw-first.conf")).unwrap(),
+            replacement_bytes
+        );
+        assert!(!keys.join("gw-second.conf").exists());
+        let rows = store.lock().unwrap().get().unwrap().gateways;
+        assert!(rows.iter().all(|row| row.wireguard_enrollment.is_some()));
+        assert_eq!(
+            rows[0].wireguard_enrollment.as_ref().unwrap().ingresses[0].id,
+            crate::wireguard_keys::LEGACY_INGRESS_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_keeps_mismatched_and_hand_written_files_operational() {
+        for manual in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let far = peer(dir.path(), "far.conf", "10.7.0.1", "10.7.0.2").await;
+            let mut listener = far.tunnel.listen(0).unwrap();
+            let original = chan_wireguard::config::read_file(&far.conf).unwrap();
+            let store = Arc::new(Mutex::new(crate::config::ConfigStore::at_path(
+                dir.path().join("desktop/config.json"),
+            )));
+            let keys = store.lock().unwrap().wireguard_dir();
+            let generated = crate::wireguard_keys::generate(&keys, "gw-migrate").unwrap();
+            let old = if manual {
+                far.conf.clone()
+            } else {
+                keys.join("gw-migrate.conf")
+            };
+            chan_wireguard::config::write_file(&old, &original).unwrap();
+            let old_bytes = std::fs::read(&old).unwrap();
+            let mut row = gateway("gw-migrate", Some(&old));
+            if manual {
+                // A leftover owned file must not make an operator path an enrollment.
+                chan_wireguard::config::write_file(&keys.join("gw-migrate.conf"), &original)
+                    .unwrap();
+                owner_only(&keys, "gw-migrate.key", &format!("{}\n", far.private_key));
+                row.wireguard_public_key = Some(base64_of(original.public_key().as_bytes()));
+            } else {
+                row.wireguard_public_key = Some(generated);
+            }
+            row.wireguard_enrolled_key = Some(base64_of(original.public_key().as_bytes()));
+            row.wireguard_hosts = vec![host("tenant.chan.invalid", "10.7.0.2")];
+            {
+                let mut guard = store.lock().unwrap();
+                let mut cfg = guard.get().unwrap();
+                cfg.gateways.push(row.clone());
+                guard.save(&cfg).unwrap();
+            }
+            assert_eq!(
+                crate::config::migrate_wireguard_enrollments(&store).unwrap(),
+                0
+            );
+            assert_eq!(store.lock().unwrap().get().unwrap().gateways[0], row);
+            assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+            let fabric = start(&[row]).await;
+            assert_eq!(fabric.tunnels(), 1);
+            carried_by_name(&fabric, &mut listener, "10.7.0.1", "tenant.chan.invalid").await;
+        }
+    }
+
+    #[tokio::test]
     async fn an_enrollment_adopts_its_tunnel_and_routes_its_names_at_once() {
         let lines = crate::devserver::log_capture::Lines::default();
         let _capture = lines.install();
@@ -1069,10 +1370,14 @@ pub(crate) mod tests {
         let endpoint = client.peer.endpoint.to_string();
         let sent = base64_of(PublicKey::from(&client.private_key).as_bytes());
         let entry = crate::devserver::WireguardDiscovery {
+            allowed_ips: None,
+            persistent_keepalive: None,
+            ingresses: None,
             endpoint: endpoint.clone(),
             public_key: server_key.clone(),
         };
         let params = crate::wireguard_keys::EnrollmentParams {
+            ingresses: None,
             server_public_key: server_key,
             endpoint,
             addresses: vec!["10.7.0.1/32".into()],
@@ -1107,10 +1412,10 @@ pub(crate) mod tests {
 
         let enrollment =
             crate::wireguard_keys::prepare(&keys, "gw-enroll", &sent, &entry, &params).unwrap();
-        let (recorded, adopted) =
+        let (_recorded, adopted) =
             crate::config::record_wireguard_enrollment(&store, &manager, "gw-enroll", enrollment)
                 .unwrap();
-        let conf = recorded.conf;
+        let conf = crate::wireguard_keys::key_path(&keys, "gw-enroll");
         // The running fabric took it: the badge reads the adopt's answer,
         // and a name in the map reaches the peer through the tunnel at once.
         assert_eq!(adopted, Some(Ok("connecting".to_string())));
@@ -1122,18 +1427,19 @@ pub(crate) mod tests {
             Some("up")
         );
         let row = store.lock().unwrap().get().unwrap().gateways[0].clone();
-        assert_eq!(row.wireguard.as_deref(), Some(conf.as_path()));
+        assert_eq!(row.wireguard_source(), Some(conf.as_path()));
         assert_eq!(row.wireguard_enrolled_key.as_deref(), Some(sent.as_str()));
-        assert_eq!(row.wireguard_hosts, params.hosts);
+        assert_eq!(
+            row.wireguard_enrollment.as_ref().unwrap().ingresses[0].hosts,
+            params.hosts
+        );
 
-        // Enrolling again rewrites the file in place; the row's tunnel is
-        // retired and adopted again, so the new file runs.
+        // Enrolling again replaces the parameters and restarts the tunnel.
         let enrollment =
             crate::wireguard_keys::prepare(&keys, "gw-enroll", &sent, &entry, &params).unwrap();
-        let (again, adopted) =
+        let (_again, adopted) =
             crate::config::record_wireguard_enrollment(&store, &manager, "gw-enroll", enrollment)
                 .unwrap();
-        assert_eq!(again.conf, conf);
         assert_eq!(adopted, Some(Ok("connecting".to_string())));
         assert_eq!(started(), 2);
         assert_eq!(fabric.tunnels(), 1);
