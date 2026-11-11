@@ -1,6 +1,6 @@
 # A used token's cut is lost when the client hangs up between the commit and the spawn
 
-Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Not started.
+Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Landed on 2026-11-11 (d7ae24469, merged as 81101a577).
 
 Origin: proposed by the lead on 2026-11-11 from the tokentest row's guest trials; not accepted. Found by reading the handler and a flaky test, not yet reproduced against a client that hangs up.
 

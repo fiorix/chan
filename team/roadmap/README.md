@@ -78,7 +78,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | landed | GA |
-| [a used token's cut is lost when the client hangs up][tokencut] | not started | design |
+| [a used token's cut is lost when the client hangs up][tokencut] | landed | GA |
 | [an image pasted by chord on the Linux desktop lands nothing][linuxpaste] | not started | design |
 | [a file dropped on the Linux desktop hands the page a URI][linuxdrop] | not started | design |
 | [a save that meets its file gone opens the external edit dialog][savegone] | not started | design |
