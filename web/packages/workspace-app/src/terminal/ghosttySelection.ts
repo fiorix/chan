@@ -1,4 +1,5 @@
 import type { Terminal } from "ghostty-web";
+import { copiedText } from "./ghosttyCopy";
 import { VtTerminal } from "./ghosttyVt";
 
 // ghostty-web's selection has two defects over chan's binding, and no public
@@ -6,16 +7,19 @@ import { VtTerminal } from "./ghosttyVt";
 // its viewport offset counts (the lines scrolled back), so it selects one
 // screenful counted from the top of the history: the oldest rows, not the
 // rows in view and not the whole buffer. And its `getSelection` reads the
-// selected rows a cell at a time, a few wasm calls a cell, and writes a space
-// for each wide character's spacer cell. Every copy of a selection goes
-// through that `getSelection`: the copy chords, the menu, its own copy on
-// mouse release, double and triple click, and the context menu's textarea.
+// selected rows a cell at a time, a few wasm calls a cell, ends every row
+// with a line break, a soft wrap included, and writes a space for each wide
+// character's spacer cell. Every copy of a selection goes through that
+// `getSelection`: the copy chords, the menu, its own copy on mouse release,
+// double and triple click, and the context menu's textarea.
 //
 // This reaches the internal SelectionManager: Select all selects the history
 // and the screen, as xterm.js does, and a selection's text is the binding's
-// one formatter call over it (`VtTerminal.plainText`), what the rows show. A
-// read the core cannot format falls back to ghostty-web's own. The shape is
-// feature-detected, and an absent one leaves ghostty-web's selection as it is.
+// one formatter call over it (`VtTerminal.plainText`), what the rows show
+// with soft wraps joined, less what the screen does not draw (`copiedText`).
+// A read the core cannot format falls back to ghostty-web's own, stripped the
+// same. The shape is feature-detected, and an absent one leaves ghostty-web's
+// selection as it is.
 // Find writes its active match through the same anchors (ghosttyFind.ts).
 
 /// A cell of the selection: `absoluteRow` 0 is the oldest history row and the
@@ -80,7 +84,7 @@ export function installGhosttySelection(term: Terminal): boolean {
       endCol: end.col,
       endRow: end.absoluteRow,
     });
-    return text ?? ownRead();
+    return copiedText(text ?? ownRead());
   };
 
   manager.selectAll = (): void => {

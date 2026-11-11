@@ -86,6 +86,27 @@ describe("ghostty-web's selection over the pinned build", () => {
     expect(term.getSelection()).toBe("日本語 x\nab");
   });
 
+  test("a soft-wrapped command copies as the one line it is", async () => {
+    const command = "$ echo one two three four";
+    const { term, manager, wasmTerm } = await pinnedTerminal(`${command}\r\nok`);
+    expect(wasmTerm.isRowWrapped(1), "the command wrapped on screen").toBe(true);
+    manager.selectionStart = { col: 0, absoluteRow: 0 };
+    manager.selectionEnd = { col: COLS - 1, absoluteRow: 2 };
+    // ghostty-web's own read ends the wrapped row with a line break.
+    expect(term.getSelection()).toBe("$ echo one two three\n four\nok");
+    expect(installGhosttySelection(term)).toBe(true);
+    expect(term.getSelection()).toBe(`${command}\nok`);
+  });
+
+  test("a DEL a program printed reaches no copy", async () => {
+    const { term, manager } = await pinnedTerminal("ab\x7fcd");
+    manager.selectionStart = { col: 0, absoluteRow: 0 };
+    manager.selectionEnd = { col: COLS - 1, absoluteRow: 0 };
+    expect(term.getSelection(), "ghostty-web's own read carries it").toBe("ab\x7fcd");
+    expect(installGhosttySelection(term)).toBe(true);
+    expect(term.getSelection()).toBe("abcd");
+  });
+
   test("a selection is read the way round it was made", async () => {
     const { term, manager } = await pinnedTerminal("hello world\r\nsecond row");
     expect(installGhosttySelection(term)).toBe(true);
