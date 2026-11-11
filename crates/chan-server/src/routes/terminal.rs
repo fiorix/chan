@@ -5119,7 +5119,7 @@ mod tests {
     }
 
     /// One frame off a terminal socket: a control frame, or terminal bytes.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     enum WireFrame {
         Control(serde_json::Value),
         Bytes(Vec<u8>),
@@ -5146,7 +5146,81 @@ mod tests {
             .collect()
     }
 
-    /// Every frame of an attach prelude, `ready` included, in wire order.
+    fn prelude_frame(message: tokio_tungstenite::tungstenite::Message) -> Option<WireFrame> {
+        use tokio_tungstenite::tungstenite::Message;
+        let frame = match message {
+            Message::Binary(data) => WireFrame::Bytes(data.to_vec()),
+            Message::Text(text) => {
+                WireFrame::Control(serde_json::from_str(&text).expect("json control frame"))
+            }
+            _ => return None,
+        };
+        // Independently tested program updates can precede a restart prelude.
+        (frame.control_type() != Some("program")).then_some(frame)
+    }
+
+    #[test]
+    fn prelude_reader_ignores_program_frames_in_a_restart_sequence() {
+        use tokio_tungstenite::tungstenite::Message;
+        let session = serde_json::json!({ "type": "session", "generation": 2 });
+        let ready = serde_json::json!({ "type": "ready" });
+        let replay = b"__RESTARTED__\xc3\xa9\x1b[?1h";
+        let frames: Vec<_> = [
+            Message::text(
+                serde_json::json!({
+                    "type": "program", "generation": 1,
+                    "program": { "title": null, "command": null }
+                })
+                .to_string(),
+            ),
+            Message::binary(RESET_TERMINAL),
+            Message::text(session.to_string()),
+            Message::binary(replay.as_slice()),
+            Message::binary(b"\x1b[?1h".as_slice()),
+            Message::text(ready.to_string()),
+        ]
+        .into_iter()
+        .filter_map(prelude_frame)
+        .collect();
+        assert_eq!(
+            wire_shape(&frames),
+            wire_shape(&[
+                WireFrame::Bytes(RESET_TERMINAL.to_vec()),
+                WireFrame::Control(session),
+                WireFrame::Bytes(replay.to_vec()),
+                WireFrame::Bytes(b"\x1b[?1h".to_vec()),
+                WireFrame::Control(ready),
+            ]),
+            "an old program reading must not enter the restart prelude assertion"
+        );
+    }
+
+    #[test]
+    fn prelude_reader_keeps_other_controls_and_binary_bytes() {
+        use tokio_tungstenite::tungstenite::Message;
+        let status = serde_json::json!({ "type": "program-status", "program_status": {} });
+        let unknown = serde_json::json!({ "type": "future-control", "value": 42 });
+        let bytes = b"\x00program\xff\x1b[?1h";
+        let frames: Vec<_> = [
+            Message::text(status.to_string()),
+            Message::binary(bytes.as_slice()),
+            Message::text(unknown.to_string()),
+        ]
+        .into_iter()
+        .filter_map(prelude_frame)
+        .collect();
+        assert_eq!(
+            frames,
+            [
+                WireFrame::Control(status),
+                WireFrame::Bytes(bytes.to_vec()),
+                WireFrame::Control(unknown),
+            ],
+            "the prelude reader must preserve every non-program data frame"
+        );
+    }
+
+    /// Attach frames through `ready`, in wire order, excluding program updates.
     async fn read_prelude(socket: &mut TerminalClient) -> Vec<WireFrame> {
         use futures::StreamExt;
         let mut frames = Vec::new();
@@ -5156,14 +5230,8 @@ mod tests {
                 .expect("attach prelude arrives")
                 .expect("socket stays open through the prelude")
                 .expect("prelude frame");
-            let frame = match message {
-                tokio_tungstenite::tungstenite::Message::Binary(data) => {
-                    WireFrame::Bytes(data.to_vec())
-                }
-                tokio_tungstenite::tungstenite::Message::Text(text) => {
-                    WireFrame::Control(serde_json::from_str(&text).expect("json control frame"))
-                }
-                _ => continue,
+            let Some(frame) = prelude_frame(message) else {
+                continue;
             };
             let ready = frame.control_type() == Some("ready");
             frames.push(frame);
