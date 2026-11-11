@@ -2567,7 +2567,7 @@ mod tests {
             let (_lane, bulk) = crate::bulk_transfer::test_support::isolated_tenant();
             let bulk = bulk.with_stall_timeout(std::time::Duration::from_millis(250));
             let response = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+                crate::bulk_transfer::test_support::DOWNLOAD_HANG_GUARD,
                 stream_planned_download_tracked(
                     &bulk,
                     None,

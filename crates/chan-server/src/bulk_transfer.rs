@@ -878,59 +878,39 @@ pub(crate) mod test_support {
         (inner.active.len(), inner.queue.len())
     }
 
-    /// How long the lane's other jobs stay parked, and how long the test
-    /// waits for the unpolled download to give its slot back. The parked
-    /// jobs outlast the wait, so the slot can come back only from the
-    /// download, at its stall bound; a download that waits on its reader
-    /// keeps the slot until the wait runs out, red and not hung. A correct
-    /// run on a loaded host ends long before.
-    const PARKED: Duration = Duration::from_secs(60);
+    /// Bounds a missing release or body completion, not admission or setup.
+    /// The response stays unpolled until its private lane is empty, so a
+    /// producer that waits for its reader cannot end this wait itself.
+    pub(crate) const DOWNLOAD_HANG_GUARD: Duration = Duration::from_secs(60);
 
-    /// Hold a response unpolled while the rest of its private lane is full.
+    /// Hold a response unpolled until its job releases the private lane.
     pub(crate) async fn assert_stalled_download_releases_slot(
         tenant: &BulkTransferTenant,
         response: axum::response::Response,
     ) {
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let mut releases = Vec::new();
-        let mut held = Vec::new();
-        loop {
-            let (release, park) = std::sync::mpsc::channel::<()>();
-            match tenant.submit(move |_| {
-                let _ = park.recv_timeout(PARKED);
-            }) {
-                Ok(job) => {
-                    releases.push(release);
-                    held.push(job);
-                }
-                Err(_) => break,
-            }
-        }
-        assert_eq!(held.len(), ACTIVE_CAPACITY + WAITING_CAPACITY - 1);
-        assert!(tenant.submit(|_| ()).is_err());
-        let released = tokio::time::timeout(PARKED / 2, async {
-            loop {
-                if let Ok(job) = tenant.submit(|_| ()) {
-                    drop(job);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+        // Subscribe before reading the count so a release between the read
+        // and the wait is retained. An already released job is valid too:
+        // filling the lane here would race the download's stall timer.
+        let mut changes = lane_changes(tenant);
+        let released = tokio::time::timeout(DOWNLOAD_HANG_GUARD, async {
+            while lane_counts(tenant) != (0, 0) {
+                changes.changed().await.expect("the private lane is alive");
             }
         })
         .await;
-        // Cleanup also unblocks the unfixed sender before the lane joins it.
+        // Dropping the response unblocks a sender that missed its stall bound
+        // before the lane's owner joins that worker during unwinding.
         if released.is_err() {
             drop(response);
-            drop(releases);
             panic!("unpolled download kept its lane slot past the stall bound");
         }
         let body = tokio::time::timeout(
-            PARKED / 2,
+            DOWNLOAD_HANG_GUARD,
             axum::body::to_bytes(response.into_body(), usize::MAX),
         )
         .await
         .unwrap();
-        drop(releases);
         assert!(body.is_err(), "an aborted download must fail its body");
     }
 
