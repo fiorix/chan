@@ -236,6 +236,20 @@ pub enum Request {
     /// desktop shutting down answers `Error`; one that predates this request
     /// answers `Error` for its unknown type.
     Activate { protocol: u32, cli_version: String },
+    /// Open `path` as `cs open PATH` does in a standalone window: reuse or
+    /// mint a standalone window, raise it, and open a directory in the file
+    /// browser, a text file in the editor, reveal any other file, or create a
+    /// missing one empty. A launch given paths sends one per path; the desktop
+    /// answers `PathOpened`, or `Error` (a shutdown in progress, a path it
+    /// cannot open there). One that predates this request answers `Error` for
+    /// its unknown type.
+    OpenPath {
+        protocol: u32,
+        cli_version: String,
+        /// The absolute path. Sent as a string for stable JSON across
+        /// platforms.
+        path: String,
+    },
 }
 
 impl Request {
@@ -254,7 +268,8 @@ impl Request {
             | Request::CloseRemoteWorkspace { protocol, .. }
             | Request::ForgetRemoteWorkspace { protocol, .. }
             | Request::OpenTerminal { protocol, .. }
-            | Request::Activate { protocol, .. } => *protocol,
+            | Request::Activate { protocol, .. }
+            | Request::OpenPath { protocol, .. } => *protocol,
         }
     }
 
@@ -273,7 +288,8 @@ impl Request {
             | Request::CloseRemoteWorkspace { cli_version, .. }
             | Request::ForgetRemoteWorkspace { cli_version, .. }
             | Request::OpenTerminal { cli_version, .. }
-            | Request::Activate { cli_version, .. } => cli_version,
+            | Request::Activate { cli_version, .. }
+            | Request::OpenPath { cli_version, .. } => cli_version,
         }
     }
 
@@ -395,6 +411,14 @@ pub enum Response {
     /// The desktop took an `Activate`: it is raising its last focused
     /// window, or opening a standalone terminal when none shows.
     Activated { desktop_version: String },
+    /// The desktop opened an `OpenPath`'s path in a standalone window and
+    /// raised it. `message` is the line `cs open` prints for the same open:
+    /// the path, the window, whether that window is still opening, and the
+    /// workspace that holds the path when one does.
+    PathOpened {
+        desktop_version: String,
+        message: String,
+    },
 }
 
 impl Response {
@@ -1639,6 +1663,7 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
         | Ok(Response::Activated { .. })
+        | Ok(Response::PathOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1725,6 +1750,7 @@ fn map_close_response(line: &str) -> Outcome {
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
         | Ok(Response::Activated { .. })
+        | Ok(Response::PathOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -1898,6 +1924,82 @@ fn map_activate_response(line: &str) -> ActivateReply {
     }
 }
 
+/// The desktop's answer to an `OpenPath` for `path`: `PathOpened` once `host`
+/// has opened it in a standalone window as `cs open PATH` does there, `Error`
+/// with the reason otherwise.
+pub async fn answer_open_path(host: &chan_library::WorkspaceHost, path: &str) -> Response {
+    match crate::control_socket::open_path_for_handoff(host, std::path::Path::new(path)).await {
+        Ok(message) => Response::PathOpened {
+            desktop_version: CHAN_VERSION.into(),
+            message,
+        },
+        Err(message) => Response::Error { message },
+    }
+}
+
+/// What the desktop serving an endpoint answered to an `OpenPath`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenPathReply {
+    /// It opened the path; `message` is its `PathOpened` line.
+    Opened {
+        desktop_version: String,
+        message: String,
+    },
+    /// It answered without opening; `reply` is its answer line. A desktop
+    /// that predates `OpenPath` answers `Error` for an unknown type, one on
+    /// another protocol `VersionSkew`, and one shutting down or unable to
+    /// open the path `Error`.
+    Refused { reply: String },
+    /// Nothing answered: no endpoint to connect to, a connection closed
+    /// without a reply, or no reply within the budget.
+    NoReply,
+}
+
+/// Ask the desktop serving the endpoint at `socket_path` to open `path`. Like
+/// [`try_activate_at`] this ignores `CHAN_NO_DESKTOP_HANDOFF` and the
+/// GUI-session check: the sender is a desktop launch handing its arguments
+/// to the desktop it will not run beside.
+#[cfg(any(unix, windows))]
+pub async fn try_open_path_at(socket_path: &Path, path: &str, budget: Duration) -> OpenPathReply {
+    let req = Request::OpenPath {
+        protocol: PROTOCOL_VERSION,
+        cli_version: CHAN_VERSION.into(),
+        path: path.to_string(),
+    };
+    match request_endpoint(socket_path, &req, budget).await {
+        Ok(line) => map_open_path_response(&line),
+        Err(EndpointError::NoDesktop | EndpointError::NoReply) => OpenPathReply::NoReply,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_open_path_at(
+    _socket_path: &std::path::Path,
+    _path: &str,
+    _budget: std::time::Duration,
+) -> OpenPathReply {
+    OpenPathReply::NoReply
+}
+
+/// As with `Activate`, any line is an answer from a live desktop, so only
+/// `PathOpened` is an open and everything else is a refusal.
+#[cfg(any(unix, windows))]
+fn map_open_path_response(line: &str) -> OpenPathReply {
+    let line = line.trim();
+    match serde_json::from_str::<Response>(line) {
+        Ok(Response::PathOpened {
+            desktop_version,
+            message,
+        }) => OpenPathReply::Opened {
+            desktop_version,
+            message,
+        },
+        _ => OpenPathReply::Refused {
+            reply: line.to_string(),
+        },
+    }
+}
+
 /// Map an `OpenDevserver` reply line to an [`Outcome`]. Shared by the unix +
 /// windows arms so the response handling stays in one place: only
 /// `DevserverRegistered` is a success; a workspace/upgrade reply to a
@@ -1930,6 +2032,7 @@ fn map_devserver_response(line: &str) -> Outcome {
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
         | Ok(Response::Activated { .. })
+        | Ok(Response::PathOpened { .. })
         | Err(_) => Outcome::NoDesktop,
     }
 }
@@ -2033,6 +2136,7 @@ fn map_upgrade_response(line: &str) -> UpgradeOutcome {
         | Ok(Response::RemoteWorkspaceForgotten { .. })
         | Ok(Response::TerminalOpened { .. })
         | Ok(Response::Activated { .. })
+        | Ok(Response::PathOpened { .. })
         | Err(_) => UpgradeOutcome::NoDesktop,
     }
 }
@@ -3355,6 +3459,9 @@ mod tests {
                     Request::Activate { .. } => Response::Error {
                         message: "unexpected activate".into(),
                     },
+                    Request::OpenPath { .. } => Response::Error {
+                        message: "unexpected open_path".into(),
+                    },
                 }
             }
         })
@@ -3447,6 +3554,130 @@ mod tests {
             try_activate_at(&sock, Duration::from_secs(3)).await,
             ActivateReply::Activated {
                 desktop_version: "9.9.9".into()
+            }
+        );
+    }
+
+    /// The open-path request on the wire, as a launch given a path sends it:
+    /// the additive `open_path` tag (PROTOCOL_VERSION stays 1), answered by a
+    /// listener whose handler is the desktop's, `answer_open_path` over a host
+    /// with the real standalone surface, so the path lands in a standalone
+    /// window; the launch's client reads that answer as an open.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listener_round_trip_open_path() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (host, _cfg) = crate::control_socket::standalone_host().await;
+        let files = tempfile::tempdir().unwrap();
+        let notes = files.path().join("notes.md");
+        std::fs::write(&notes, "# notes\n").unwrap();
+        let notes_text = notes.to_str().unwrap().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hand.sock");
+        let serving = std::sync::Arc::clone(&host);
+        let _handle = start_listener(sock.clone(), move |req| {
+            let host = std::sync::Arc::clone(&serving);
+            async move {
+                match req {
+                    Request::OpenPath { path, .. } => answer_open_path(&host, &path).await,
+                    other => Response::Error {
+                        message: format!("unexpected {other:?}"),
+                    },
+                }
+            }
+        })
+        .unwrap();
+
+        let request = serde_json::json!({
+            "type": "open_path",
+            "protocol": 1,
+            "cli_version": "0.0.0",
+            "path": notes_text,
+        });
+        let stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(read).read_line(&mut line).await.unwrap();
+        let windows = crate::control_socket::standalone_windows(&host);
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "status": "path_opened",
+                "desktop_version": CHAN_VERSION,
+                "message": format!(
+                    "open request queued for {} in standalone window {} (opening)",
+                    crate::control_socket::machine_path(&notes),
+                    windows.first().map(String::as_str).unwrap_or("<none minted>"),
+                ),
+            }),
+            "{line}"
+        );
+        assert_eq!(windows.len(), 1, "{windows:?}");
+
+        assert_eq!(
+            try_open_path_at(&sock, &notes_text, Duration::from_secs(3)).await,
+            OpenPathReply::Opened {
+                desktop_version: CHAN_VERSION.into(),
+                message: format!(
+                    "open request queued for {} in standalone window {}",
+                    crate::control_socket::machine_path(&notes),
+                    windows[0],
+                ),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(Request::OpenPath {
+                protocol: PROTOCOL_VERSION,
+                cli_version: "0.0.0".into(),
+                path: notes_text.clone(),
+            })
+            .unwrap(),
+            request,
+            "the client sends the shape the listener reads"
+        );
+    }
+
+    /// The line a listener that predates `OpenPath` writes for one, read from
+    /// the listener of the release before it.
+    #[cfg(unix)]
+    const OLDER_DESKTOP_OPEN_PATH_REPLY: &str = concat!(
+        r#"{"status":"error","message":"invalid handoff request: unknown variant `open_path`, expected one of `open_workspace`, `upgrade`, `open_devserver`, `close_workspace`, `list_devservers`, `connect_devserver`, `disconnect_devserver`, `forget_devserver`, `serve_remote_workspace`, `close_remote_workspace`, `forget_remote_workspace`, `open_terminal`, `activate` at line 1 column 77"}"#,
+        "\n"
+    );
+
+    /// A desktop that predates `OpenPath` answers it the way every listener
+    /// answers a type it does not know, and the launch's client reads that
+    /// line as a refusal from a live desktop, not as no desktop at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_open_path_to_an_older_desktop_is_refused_not_unanswered() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("old.sock");
+        let _claim = claim_endpoint_at(&sock).unwrap();
+        let server = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = server.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"type\":\"open_path\""), "{line}");
+            write
+                .write_all(OLDER_DESKTOP_OPEN_PATH_REPLY.as_bytes())
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            try_open_path_at(&sock, "/srv/notes.md", Duration::from_secs(3)).await,
+            OpenPathReply::Refused {
+                reply: OLDER_DESKTOP_OPEN_PATH_REPLY.trim().to_string()
             }
         );
     }
@@ -3824,6 +4055,9 @@ mod tests {
                 },
                 Request::Activate { .. } => Response::Error {
                     message: "unexpected activate".into(),
+                },
+                Request::OpenPath { .. } => Response::Error {
+                    message: "unexpected open_path".into(),
                 },
             }
         })
@@ -4311,6 +4545,9 @@ mod tests {
                 },
                 Request::Activate { .. } => Response::Error {
                     message: "unexpected activate".into(),
+                },
+                Request::OpenPath { .. } => Response::Error {
+                    message: "unexpected open_path".into(),
                 },
             }
         })

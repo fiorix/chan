@@ -546,6 +546,35 @@ pub async fn spawn_throwaway_terminal_window(
     Ok(crate::window_watcher::native_label(&record))
 }
 
+/// Open `path` in a standalone window as `cs open PATH` does there, reusing
+/// or minting the window and raising it: the handoff's `OpenPath`, and the
+/// paths a launch that boots this desktop was given. Refused once a shutdown
+/// has started, as [`spawn_throwaway_terminal_window`] is, so a launch meeting
+/// a desktop on its way out waits for the endpoint and boots.
+pub async fn open_path_in_standalone_window(
+    state: Arc<AppState>,
+    path: &str,
+) -> chan_server::handoff::Response {
+    use chan_server::handoff::Response;
+    if state
+        .shutdown_started
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Response::Error {
+            message: crate::single_instance::SHUTTING_DOWN.to_string(),
+        };
+    }
+    let Some(embedded) = state.embedded.get() else {
+        return Response::Error {
+            message: "embedded local server is unavailable".to_string(),
+        };
+    };
+    if let Err(message) = embedded.open_terminal().await {
+        return Response::Error { message };
+    }
+    embedded.open_path_in_standalone_window(path).await
+}
+
 /// A spawned control terminal: its terminal tenant prefix, used to scrape the
 /// token the connect script prints, to mint the control window's chan-library
 /// registry row, and to reap the tenant on disconnect. The window is

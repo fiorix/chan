@@ -11,6 +11,7 @@ mod embedded;
 mod gateway;
 mod handoff_registrations;
 mod last_window;
+mod launch_paths;
 mod launcher_panel;
 mod linux_gui_stack;
 mod native_dialog;
@@ -5592,11 +5593,30 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // The paths a GUI launch was given (`chan-desktop PATH...`, the desktop
+    // entry's file URIs), read before the endpoint so a launch that hands
+    // over hands them over too.
+    let launch_paths = match launch_paths::from_args(
+        std::env::args_os().skip(1),
+        std::env::current_dir().ok().as_deref(),
+    ) {
+        Ok(launch) => {
+            for (arg, why) in &launch.skipped {
+                tracing::warn!(%arg, "skipping an argument this desktop cannot open: {why}");
+            }
+            launch.paths
+        }
+        Err(e) => {
+            eprintln!("chan-desktop: {e}");
+            std::process::exit(2);
+        }
+    };
     // One desktop per user: a GUI launch that finds another desktop serving
-    // the handoff endpoint asks it to come forward and exits here, before
-    // the shims, the config, the WireGuard fabric or any window. The claim
-    // it returns is the endpoint the listener serves once setup runs.
-    let endpoint_claim = single_instance::guard();
+    // the handoff endpoint asks it to come forward, or to open the launch's
+    // paths, and exits here, before the shims, the config, the WireGuard
+    // fabric or any window. The claim it returns is the endpoint the
+    // listener serves once setup runs.
+    let endpoint_claim = single_instance::guard(&launch_paths);
     // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
     // also provides the `chan` + `cs` CLI without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
@@ -5667,6 +5687,9 @@ fn main() {
     let app = app.plugin(tauri_plugin_updater::Builder::new().build());
     let app = app
         .manage(state)
+        // An update's relaunch starts the new process without this launch's
+        // paths, which the boot below has already opened.
+        .manage(launch_paths::relaunch_env())
         // A host page that loads under its shown launcher (a reload, the
         // connecting page reaching its live page) boots without the launcher
         // mark and focuses its terminal: re-mark it and give the launcher
@@ -6075,6 +6098,9 @@ fn main() {
                                 Request::Activate { .. } => {
                                     single_instance::come_forward(&app, &state)
                                 }
+                                Request::OpenPath { path, .. } => {
+                                    serve::open_path_in_standalone_window(state, &path).await
+                                }
                             }
                         }
                     })
@@ -6109,6 +6135,12 @@ fn main() {
                     }
                 }
                 restore_on_workspaces(handle, Arc::clone(&state_for_restore), queued).await;
+                // The launch's own paths open before the first-open rule and
+                // the boot window, which then find the window the paths opened
+                // in rather than open one beside it. A window the restore
+                // brought back takes an open only once it has connected, which
+                // at boot it has not, so the paths get a window of their own.
+                launch_paths::open_at_boot(Arc::clone(&state_for_restore), &launch_paths).await;
                 // First-open rule (library-owned): the very first time this local
                 // library is opened with an empty registry, mint one boot terminal
                 // and persist a marker. Once set, an emptied registry never
@@ -9018,8 +9050,12 @@ mod tests {
         );
         let main_body = source_region(production, "\nfn main() {", "\nfn install_app_menu(");
         let guard = main_body
-            .find("single_instance::guard()")
-            .expect("main runs the single-instance guard");
+            .find("single_instance::guard(&launch_paths)")
+            .expect("main runs the single-instance guard with the launch's paths");
+        let paths = main_body
+            .find("launch_paths::from_args(")
+            .expect("main reads the launch's paths");
+        assert!(paths < guard, "the guard hands over the paths it was given");
         for personality in [
             "run_hidden_mcp_proxy_if_requested()",
             "run_as_cs_if_requested()",
@@ -9031,8 +9067,8 @@ mod tests {
                 .find(personality)
                 .unwrap_or_else(|| panic!("main dispatches {personality}"));
             assert!(
-                at < guard,
-                "{personality} must return before the single-instance guard"
+                at < paths,
+                "{personality} must return before the launch reads its arguments as paths"
             );
         }
         for boot in [
@@ -9082,6 +9118,31 @@ mod tests {
         assert!(
             restore.is_some_and(|restore| restore < show) && show < focus,
             "an open window's row must restore a minimized window before it shows and focuses it"
+        );
+    }
+
+    /// The GUI app is built with the launch's argv less its paths, the `Env`
+    /// Tauri's restart relaunches with, so an update's relaunch does not open
+    /// the paths again.
+    #[test]
+    fn a_relaunch_does_not_replay_the_launch_paths() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let boundary = "\n#[cfg(test)]\nmod tests {";
+        let production = &MAIN_RS[..MAIN_RS.find(boundary).expect("the boundary is present")];
+        let main_body = source_region(production, "\nfn main() {", "\nfn install_app_menu(");
+        let builder = main_body
+            .find("let app = tauri::Builder::default()")
+            .expect("main builds the GUI app");
+        let managed = main_body
+            .find(".manage(launch_paths::relaunch_env())")
+            .expect("the GUI app manages the relaunch Env");
+        let setup = builder
+            + main_body[builder..]
+                .find(".setup(")
+                .expect("the GUI app has a setup");
+        assert!(
+            builder < managed && managed < setup,
+            "the Env is managed on the GUI builder, before it is built"
         );
     }
 

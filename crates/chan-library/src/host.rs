@@ -3600,6 +3600,23 @@ impl WorkspaceHost {
         )
     }
 
+    /// Test-only: take the frames parked for `window_id` on the shared
+    /// terminal tenant, as the window's first `/ws` attach would. Lets a test
+    /// read what a routed open sent to a window that never connected.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_take_parked_window_commands(&self, window_id: &str) -> Vec<String> {
+        let Some(prefix) = self.terminal_tenant_prefix.get() else {
+            return Vec::new();
+        };
+        let Ok(workspaces) = self.workspaces.read() else {
+            return Vec::new();
+        };
+        workspaces
+            .get(prefix)
+            .map(|runtime| runtime.artifacts.pending_window_commands.take(window_id))
+            .unwrap_or_default()
+    }
+
     /// Whether a persisted window row appears in the LIVE window feed. A workspace
     /// window shows only while its workspace is currently MOUNTED/ON: turning the
     /// workspace OFF leaves the record on disk (so ON restores the same
@@ -4081,6 +4098,39 @@ impl WorkspaceHost {
         requested: &Path,
         caller_window_id: &str,
     ) -> Result<OpenOutsideAck, Error> {
+        // A minted window is created by the surface that asked for it: a
+        // browser-origin caller gets a browser-origin row, which the desktop
+        // watcher deliberately never opens a native twin for, and which the
+        // calling page opens as a tab -- the browser's equivalent of a window.
+        // A native caller gets a native row, which the watcher opens for it.
+        let caller_origin = self
+            .assemble_window_records()
+            .into_iter()
+            .find(|row| row.window_id == caller_window_id)
+            .map(|row| row.origin)
+            .unwrap_or_default();
+        self.open_in_standalone_window_as(requested, caller_origin)
+            .await
+    }
+
+    /// Open an absolute path in a standalone window of this host for a caller
+    /// that has no window: the desktop's handoff open-path request, sent by a
+    /// launch given paths. The window it reuses or mints is native, and the
+    /// rules are those of [`open_outside_workspace`](Self::open_outside_workspace),
+    /// so the path lands as `cs open PATH` typed in that window would.
+    pub async fn open_in_standalone_window(
+        &self,
+        requested: &Path,
+    ) -> Result<OpenOutsideAck, Error> {
+        self.open_in_standalone_window_as(requested, WindowOrigin::Native)
+            .await
+    }
+
+    async fn open_in_standalone_window_as(
+        &self,
+        requested: &Path,
+        caller_origin: WindowOrigin,
+    ) -> Result<OpenOutsideAck, Error> {
         let (files, pending, session_registry, events_tx) =
             {
                 let prefix = self.terminal_tenant_prefix.get().ok_or_else(|| {
@@ -4104,17 +4154,6 @@ impl WorkspaceHost {
                 )
             };
 
-        // A minted window is created by the surface that asked for it: a
-        // browser-origin caller gets a browser-origin row, which the desktop
-        // watcher deliberately never opens a native twin for, and which the
-        // calling page opens as a tab -- the browser's equivalent of a window.
-        // A native caller gets a native row, which the watcher opens for it.
-        let caller_origin = self
-            .assemble_window_records()
-            .into_iter()
-            .find(|row| row.window_id == caller_window_id)
-            .map(|row| row.origin)
-            .unwrap_or_default();
         let (window_id, minted, browser_target) = match self.select_standalone_window() {
             Some(id) => (id, false, None),
             None => {
@@ -4130,10 +4169,19 @@ impl WorkspaceHost {
                 (record.window_id, true, target)
             }
         };
+        let open = match files.open_frame(&window_id, requested) {
+            Ok(open) => open,
+            Err(message) => {
+                // A window minted for a path that cannot be opened would show
+                // empty, since it seeds no terminal and its frame never comes.
+                if minted {
+                    let _ = pending.take(&window_id);
+                    let _ = self.discard_window(&window_id);
+                }
+                return Err(Error::BadRequest(message));
+            }
+        };
         self.remember_routed_standalone(&window_id);
-        let open = files
-            .open_frame(&window_id, requested)
-            .map_err(Error::BadRequest)?;
 
         // Deliver to a live window, or park for the one that is opening. The
         // re-check after the park closes the window between the liveness test

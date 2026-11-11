@@ -845,6 +845,17 @@ impl EmbeddedServer {
             .map_err(|e| format!("opening a terminal window: {e}"))
     }
 
+    /// Open `path` in a standalone window as `cs open PATH` does there,
+    /// answering as the handoff's `OpenPath` does. The shared terminal tenant
+    /// must be mounted ([`open_terminal`](Self::open_terminal)): its
+    /// filesystem surface resolves the path.
+    pub async fn open_path_in_standalone_window(
+        &self,
+        path: &str,
+    ) -> chan_server::handoff::Response {
+        chan_server::handoff::answer_open_path(&self.host, path).await
+    }
+
     /// Mint a native window of the workspace whose runtime `key` names, by
     /// its canonical root or by the root it was opened at. The record stores
     /// the root the runtime was opened at, the registry row's, which is the
