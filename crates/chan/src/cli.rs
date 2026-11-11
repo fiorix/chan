@@ -77,12 +77,22 @@ impl Opener {
         }
     }
 
-    /// Parse a full argv under this name. Each name is a clap command of its
-    /// own, so its usage line and `--help` read `chan-files` or `chan-edit`.
+    /// Parse a full argv under this name, exiting on a usage error or for
+    /// `--help` as clap does.
     fn parse(self, argv: Vec<std::ffi::OsString>) -> OpenerArgs {
+        self.try_parse(argv).unwrap_or_else(|error| error.exit())
+    }
+
+    /// Each name is a clap command of its own, and its name goes in the
+    /// program-name slot: clap names the usage line after `argv[0]`, which an
+    /// AppImage's `AppRun` leaves as the inner `chan-desktop` binary.
+    fn try_parse(self, mut argv: Vec<std::ffi::OsString>) -> Result<OpenerArgs, clap::Error> {
+        if let Some(arg0) = argv.first_mut() {
+            *arg0 = self.name().into();
+        }
         match self {
-            Self::Files => FilesCli::parse_from(argv).args,
-            Self::Edit => EditCli::parse_from(argv).args,
+            Self::Files => FilesCli::try_parse_from(argv).map(|cli| cli.args),
+            Self::Edit => EditCli::try_parse_from(argv).map(|cli| cli.args),
         }
     }
 }
@@ -1531,6 +1541,39 @@ mod tests {
         ));
     }
 
+    /// Under an AppImage the parse sees the inner binary in `argv[0]` and the
+    /// name in `$ARGV0`; the usage and help still name the opener.
+    #[test]
+    fn an_opener_names_itself_whatever_argv0_is() {
+        for name in ["chan-files", "chan-edit"] {
+            let opener = Opener::from_arg0(std::ffi::OsStr::new(name)).unwrap();
+            let argv = |rest: &str| {
+                vec![
+                    std::ffi::OsString::from("/tmp/.mount_ChanXX/usr/bin/chan-desktop"),
+                    std::ffi::OsString::from(rest),
+                ]
+            };
+            let help = opener.try_parse(argv("--help")).unwrap_err();
+            assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+            assert!(
+                help.render()
+                    .to_string()
+                    .contains(&format!("Usage: {name} [OPTIONS] [PATH]...")),
+                "{}",
+                help.render()
+            );
+            let usage = opener.try_parse(argv("--bogus")).unwrap_err();
+            assert!(
+                usage
+                    .render()
+                    .to_string()
+                    .contains(&format!("Usage: {name} ")),
+                "{}",
+                usage.render()
+            );
+        }
+    }
+
     /// Each name is a command of its own: its usage and help name it, and
     /// `chan --help` lists no subcommand for it.
     #[test]
@@ -1550,7 +1593,7 @@ mod tests {
             );
             for needle in [
                 "`chan open` serves a workspace; `chan-files` and `chan-edit` open a path",
-                "both follow\n`cs open`'s rule for every path",
+                "`cs open`'s rule for every path",
                 "xdg-mime default chan-edit.desktop text/markdown",
             ] {
                 assert!(
