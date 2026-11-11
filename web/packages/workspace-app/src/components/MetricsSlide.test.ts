@@ -144,5 +144,18 @@ test("a failed storage scan shows its error and names a last completed total onl
   card = await show({ ...pending, error: "<b>boom</b>" });
   expect(card).toContain("Storage scan failed: <b>boom</b>.");
   expect(target.querySelector("b")).toBeNull();
+
+  const pathError = "cannot scan /home/test/.chan/cache: permission denied";
+  card = await show({ ...scanned, error: pathError });
+  expect(card).toContain(pathError);
+  privacy.enabled = true;
+  await tick();
+  expect(target.innerHTML).not.toContain("/home/test/.chan");
+  expect(target.querySelector('[aria-label="storage scan error hidden"]')?.textContent).toBe("Hidden");
+  expect(target.textContent).toContain("Storage scan failed:");
+  expect(target.textContent).toContain("showing the last completed total.");
+  privacy.enabled = false;
+  await tick();
+  expect(target.textContent).toContain(pathError);
 });
 

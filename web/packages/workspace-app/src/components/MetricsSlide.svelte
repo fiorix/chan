@@ -1,7 +1,6 @@
 <script lang="ts">
-  // Privacy mode conceals the two readings that name the machine or its
-  // user: the host name and the chan home path. The rest are counts, rates
-  // and the build, which name nobody.
+  // Privacy mode conceals the host name, chan home path and scan errors,
+  // which may name files. The counts, rates and build name nobody.
   import PrivateField from "@chan/web-shared/PrivateField.svelte";
   import { metrics, watchMetrics } from "../state/metrics.svelte";
   import type { MetricSample } from "../api/metrics";
@@ -69,7 +68,7 @@
         <p class="path"><PrivateField field="metrics:chan-home" label="chan home path"><span title={view?.storage.path}>{view?.storage.path}</span></PrivateField></p>
         <p>{bytes(view?.storage.allocatedBytes)} allocated · {view?.storage.files ?? "n/a"} files</p>
         <p>{view?.storage.sampledAtMs ? `Scanned ${new Date(view.storage.sampledAtMs).toLocaleTimeString()}` : "Scan pending"} · refreshes every minute</p>
-        {#if view?.storage.error}<p class="error">Storage scan failed: {view.storage.error}{view.storage.logicalBytes == null ? "." : "; showing the last completed total."}</p>{/if}
+        {#if view?.storage.error}<p class="error">Storage scan failed: <PrivateField field="metrics:storage-error" label="storage scan error">{view.storage.error}</PrivateField>{view.storage.logicalBytes == null ? "." : "; showing the last completed total."}</p>{/if}
         <h3 class="transfer-heading">Transfer payload</h3>
         <p>RX {rate(sample.transferPayload.receivedBytesPerSecond)} · TX {rate(sample.transferPayload.sentBytesPerSecond)}</p>
         <p>{sample.transfers.finished} finished · {sample.transfers.cancelled} cancelled · {sample.transfers.stalled} stalled · {sample.transfers.panicked} panicked · {sample.transfers.refused} refused</p>
