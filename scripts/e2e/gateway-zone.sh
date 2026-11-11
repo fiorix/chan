@@ -180,6 +180,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+stop_service() {
+    local name="$1" pid
+    [ -f "$WORK/pids/$name.pid" ] || return 0
+    pid="$(cat "$WORK/pids/$name.pid")" || return 1
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" || return 1
+        for _ in $(seq 25); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -0 "$pid" 2>/dev/null && return 1
+    fi
+    wait "$pid" 2>/dev/null || true
+    rm -f "$WORK/pids/$name.pid"
+}
+
 # ---------------------------------------------------------------
 # Tooling
 # ---------------------------------------------------------------
@@ -1412,29 +1428,13 @@ scenario_sharedroot() {
         assert_fail "sharedroot: OAuth fixture has no identity"
     fi
 
-    sharedroot_stop_oauth() {
-        local pid
-        [ -f "$WORK/pids/stub-oauth.pid" ] || return 0
-        pid="$(cat "$WORK/pids/stub-oauth.pid")" || return 1
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" || return 1
-            for _ in $(seq 25); do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.2
-            done
-            kill -0 "$pid" 2>/dev/null && return 1
-        fi
-        wait "$pid" 2>/dev/null || true
-        rm -f "$WORK/pids/stub-oauth.pid"
-    }
-
     # Sign <email> in through the OAuth stub with curl alone: the stub's
     # authorize endpoint bounces straight back to identity's callback, so
     # following redirects with a cookie jar ends on the dashboard, and the
     # jar's session then answers /api/me as that account.
     sharedroot_sign_in() { # sharedroot_sign_in <email> <provider-subject> <jar>
         local end me
-        sharedroot_stop_oauth || return 1
+        stop_service stub-oauth || return 1
         spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$1" "$2"
         wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 || return 1
         : > "$3"
@@ -1485,7 +1485,7 @@ scenario_sharedroot() {
     link="/s/$ALICE_USER?d=$(disc "$DS_A")"
     unknown_link="/s/e2e-nobody-handle?d=$(disc "$DS_A")"
 
-    grant_id="$(curl -fsS -X POST -H "Authorization: Bearer $TOK_PROFILE" \
+    grant_id="$(curl --noproxy '*' -fsS -X POST -H "Authorization: Bearer $TOK_PROFILE" \
         -H 'content-type: application/json' -d "{\"grantee_email\":\"$grace_email\"}" \
         "http://127.0.0.1:$PROFILE_PORT/v1/users/$ALICE_ID/devservers/$DS_A/grants" | json_get id)"
     [ -n "$grant_id" ] || assert_fail "sharedroot: alice could not share devserver A"
@@ -1549,12 +1549,12 @@ console.log([claims.sub, claims.owner_user_id, claims.drv, claims.next_path, cla
         assert_fail "sharedroot: heidi could not sign in through the OAuth stub"
     sharedroot_refused_like_unknown heidi "heidi, signed in with no grant," "$WORK/sharedroot-heidi.jar"
 
-    curl -fsS -X DELETE -o /dev/null -H "Authorization: Bearer $TOK_PROFILE" \
+    curl --noproxy '*' -fsS -X DELETE -o /dev/null -H "Authorization: Bearer $TOK_PROFILE" \
         "http://127.0.0.1:$PROFILE_PORT/v1/users/$ALICE_ID/grants/$grant_id" ||
         assert_fail "sharedroot: alice could not revoke grace's grant"
     sharedroot_refused_like_unknown grace-revoked "grace, after alice revokes the grant," "$WORK/sharedroot-grace.jar"
 
-    sharedroot_stop_oauth || assert_fail "sharedroot: OAuth fixture did not stop"
+    stop_service stub-oauth || assert_fail "sharedroot: OAuth fixture did not stop"
     spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$stub_email" "$stub_subject"
     wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 ||
         assert_fail "sharedroot: previous OAuth fixture did not return"
@@ -1572,22 +1572,6 @@ console.log([claims.sub, claims.owner_user_id, claims.drv, claims.next_path, cla
 scenario_tunnelhint() {
     [ -x "$CHROME_BIN" ] || assert_fail "tunnelhint: headless Chrome not found (set E2E_CHROME_BIN)"
 
-    tunnelhint_stop() {
-        local name="$1" pid
-        [ -f "$WORK/pids/$name.pid" ] || return 0
-        pid="$(cat "$WORK/pids/$name.pid")" || return 1
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" || return 1
-            for _ in $(seq 25); do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.2
-            done
-            kill -0 "$pid" 2>/dev/null && return 1
-        fi
-        wait "$pid" 2>/dev/null || true
-        rm -f "$WORK/pids/$name.pid"
-    }
-
     # Other scenarios can change the OAuth fixture; restore it on completion.
     local stub_before stub_email stub_subject restore_stub=0
     stub_before="$(curl --noproxy '*' -fsS "http://127.0.0.1:$OAUTH_PORT/user")" ||
@@ -1597,7 +1581,7 @@ scenario_tunnelhint() {
     [ -n "$stub_email" ] && [ -n "$stub_subject" ] ||
         assert_fail "tunnelhint: OAuth fixture has no identity"
     if [ "$stub_email" != "$ALICE_EMAIL" ] || [ "$stub_subject" != 424242 ]; then
-        tunnelhint_stop stub-oauth || assert_fail "tunnelhint: OAuth fixture did not stop"
+        stop_service stub-oauth || assert_fail "tunnelhint: OAuth fixture did not stop"
         spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$ALICE_EMAIL"
         wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 ||
             assert_fail "tunnelhint: Alice's OAuth fixture did not start"
@@ -1665,11 +1649,11 @@ JS
     local resume_c=0
     if [ -f "$WORK/pids/ds-c.pid" ] && kill -0 "$(cat "$WORK/pids/ds-c.pid")" 2>/dev/null; then
         resume_c=1
-        tunnelhint_stop ds-c || assert_fail "tunnelhint: cap-probe devserver did not stop"
+        stop_service ds-c || assert_fail "tunnelhint: cap-probe devserver did not stop"
     fi
     [ -n "$(tunnel_field "$DS_B" proxy_id)" ] ||
         assert_fail "tunnelhint: devserver B is not registered before the slot is freed"
-    tunnelhint_stop ds-b || assert_fail "tunnelhint: devserver B did not stop"
+    stop_service ds-b || assert_fail "tunnelhint: devserver B did not stop"
     wait_tunnels 1 75 || assert_fail "tunnelhint: Alice's spare slot did not become available"
 
     # A malformed or failed registry read must not look like a removed row.
@@ -1703,7 +1687,7 @@ JS
     [ "$registered" = 1 ] || assert_fail "tunnelhint: the page's foreground command never registered"
     assert_pass "tunnelhint: the page's foreground command registered through the discovered tunnel URL"
 
-    tunnelhint_stop ds-hint || assert_fail "tunnelhint: copied-command devserver did not stop"
+    stop_service ds-hint || assert_fail "tunnelhint: copied-command devserver did not stop"
     for _ in $(seq 75); do
         if remaining="$(tunnelhint_node)" && [ -z "$remaining" ]; then
             stopped=1
@@ -1730,7 +1714,7 @@ JS
             assert_fail "tunnelhint: cannot restore the sharing override"
     fi
     if [ "$restore_stub" = 1 ]; then
-        tunnelhint_stop stub-oauth || assert_fail "tunnelhint: Alice's OAuth fixture did not stop"
+        stop_service stub-oauth || assert_fail "tunnelhint: Alice's OAuth fixture did not stop"
         spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$stub_email" "$stub_subject"
         wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 ||
             assert_fail "tunnelhint: previous OAuth fixture did not return"
@@ -3251,18 +3235,6 @@ scenario_ctrlplane() {
     local cp_log="$LOGS/ctrlplane-admin.log"
     : > "$cp_log"
 
-    cp_stop() {
-        local name="$1" pid
-        [ -f "$WORK/pids/$name.pid" ] || return 0
-        pid="$(cat "$WORK/pids/$name.pid")"
-        kill "$pid" 2>/dev/null || true
-        for _ in $(seq 25); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.2
-        done
-        rm -f "$WORK/pids/$name.pid"
-    }
-
     cp_policy_value() {
         node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const v=JSON.parse(d).policy[process.argv[1]];process.stdout.write(String(v))}catch{}})' "$1"
     }
@@ -3284,7 +3256,7 @@ scenario_ctrlplane() {
     # The core suite runs with the two-slot deployment ceiling. Raise it to
     # three for this isolated scenario, then reconstruct controller authority.
     MAX_DEVSERVERS=3
-    cp_stop controller
+    stop_service controller || assert_fail "ctrlplane: controller did not stop"
     spawn_controller
     if wait_ready controller "http://127.0.0.1:$CTL_ADMIN_PORT/readyz"; then
         assert_pass "ctrlplane: controller reconverged with deployment ceiling 3"
@@ -3336,7 +3308,7 @@ scenario_ctrlplane() {
     else
         assert_fail "ctrlplane: fourth admission was not refused: $(owner_tunnels "$ERIN_ID")"
     fi
-    cp_stop ds-cp4
+    stop_service ds-cp4 || assert_fail "ctrlplane: ds-cp4 did not stop"
 
     check_entry_routes ctrlplane-limit-1 "$CP_PAT1" "$ERIN_USER" "$ERIN_ID" "$CP_DS1"
     check_entry_routes ctrlplane-limit-2 "$CP_PAT2" "$ERIN_USER" "$ERIN_ID" "$CP_DS2"
@@ -3348,7 +3320,7 @@ scenario_ctrlplane() {
 
     local cp_oauth_enabled=0
     if [ -x "$CHROME_BIN" ]; then
-        cp_stop stub-oauth
+        stop_service stub-oauth || assert_fail "ctrlplane: stub-oauth did not stop"
         spawn stub-oauth node "$REPO/scripts/e2e/stub-oauth.mjs" "$OAUTH_PORT" "$ERIN_EMAIL" 424243
         if wait_http stub-oauth "http://127.0.0.1:$OAUTH_PORT/user" 25 &&
             cp_run_oauth_login; then
@@ -3503,7 +3475,7 @@ scenario_ctrlplane() {
         assert_pass "ctrlplane: existing PATs could not readmit while paused" ||
         assert_fail "ctrlplane: a tunnel readmitted while fleet was paused"
 
-    cp_stop identity
+    stop_service identity || assert_fail "ctrlplane: identity did not stop"
     spawn_identity
     wait_http identity "http://127.0.0.1:$ID_INNER_PORT/healthz" ||
         assert_fail "ctrlplane: identity did not restart"

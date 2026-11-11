@@ -3,10 +3,10 @@
 
 The real proxy still verifies signed admission and entry credentials. This
 fixture owns only the omitted postgres-backed identity boundary: one exact PAT,
-one immutable devserver owner, and two binary callers (owner or grantee). Each
-caller can enter as the desktop, through the desktop entry route, or as a
-browser, through a share landing; the credential names which, as identity's
-does.
+one immutable devserver owner, and owner/grantee desktop callers. The browser
+share landing admits only the owner, the caller this fixture exercises there;
+real grantee browser access is covered by gateway-zone.sh sharedroot. The
+credential names the client, as identity's does.
 """
 
 import base64
@@ -32,9 +32,8 @@ TUNNEL_PAT = os.environ["STUB_TUNNEL_PAT"]
 INTERNAL_TOKEN = os.environ["STUB_IDENTITY_INTERNAL_TOKEN"]
 OWNER_PAT = os.environ["STUB_DESKTOP_OWNER_PAT"]
 GRANTEE_PAT = os.environ["STUB_DESKTOP_GRANTEE_PAT"]
-# Stand-ins for identity's browser session cookie, one per caller.
+# Stand-in for the owner's identity browser session cookie.
 OWNER_BROWSER_SESSION = os.environ["STUB_BROWSER_OWNER_SESSION"]
-GRANTEE_BROWSER_SESSION = os.environ["STUB_BROWSER_GRANTEE_SESSION"]
 BROWSER_SESSION_COOKIE = "stub_identity_session"
 ADMISSION_SIGNING_KEY = os.environ["STUB_ADMISSION_SIGNING_KEY"]
 ENTRY_SIGNING_KEY = os.environ["STUB_ENTRY_SIGNING_KEY"]
@@ -209,13 +208,11 @@ class Handler(BaseHTTPRequestHandler):
     def share_landing(self):
         """`GET /s/{owner}` and `GET /s/{owner}/{workspace}`: identity's
         browser handoff, a no-store page whose form POSTs a browser credential
-        to the proxy. Both admit the owner and the grantee, as identity's do."""
+        to the proxy. This fixture exercises the owner's browser session."""
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
         session = cookie[BROWSER_SESSION_COOKIE].value if BROWSER_SESSION_COOKIE in cookie else ""
         if session and hmac.compare_digest(session, OWNER_BROWSER_SESSION):
             subject = USER_ID
-        elif session and hmac.compare_digest(session, GRANTEE_BROWSER_SESSION):
-            subject = GRANTEE_USER_ID
         else:
             return self.json_response(401, {"error": "unauthorized"})
         segments = self.path.split("?", 1)[0].split("/")[2:]
