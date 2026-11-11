@@ -8,6 +8,14 @@
 // the side alone, and the cheatsheet lists neither Tab nor the keys that would
 // stage a local tab or swap tiles.
 //
+// tmux keeps the window at its default 80 columns until the page asks for
+// the size its pane shows, 150 ms after the pane's box settles, and Hybrid
+// Nav holds that ask. A transaction started before tmux took the page's size
+// would either hold the ask until Enter or see it land mid-transaction, and
+// the widths read across the transaction would measure that instead of what
+// the transaction did. So the check records the window sizes the page asks
+// for and starts once tmux's window has taken the last one and keeps it.
+//
 // Skips when tmux is not installed or the launcher bundle is missing.
 
 import { execFileSync } from "node:child_process";
@@ -37,6 +45,9 @@ function tmuxInstalled() {
     return false;
   }
 }
+
+/// The tmux window's size, as `COLSxROWS`.
+const tmuxWindowSize = () => tmux("display-message", "-p", "-t", `${SESSION}:0`, "#{window_width}x#{window_height}");
 
 /// The tmux window's panes, left to right and top to bottom.
 const tmuxPanes = () =>
@@ -133,13 +144,32 @@ export default {
       }, 60_000);
       page = await popupFrom(launcher, () => openRow(launcher, `Terminal Window ${tmuxWindow.ordinal}${tmuxWindow.label ? ` [${tmuxWindow.label.trim()}]` : ""}`), "open the tmux window");
       pages.push(page);
+      // The window sizes the page asks tmux for, in the order it sends them.
+      const asks = [];
+      page.on("request", (request) => {
+        if (request.method() !== "POST" || !request.url().includes("/tmux-request")) return;
+        try {
+          const body = JSON.parse(request.postData() ?? "");
+          if (body.request === "window-size") asks.push({ cols: body.cols, rows: body.rows });
+        } catch {}
+      });
       await poll("the tmux window's attached pane", async () => {
         const state = await pageState(page);
         return state.panes.length === 1 && state.panes[0] ? state : null;
       }, 60_000);
       await page.bringToFront();
+      step("tmux takes the page's size");
+      const asked = await poll("tmux's window at the size the page last asked for, holding", async () => {
+        const ask = asks.at(-1);
+        if (!ask || tmuxWindowSize() !== `${ask.cols}x${ask.rows}`) return null;
+        const count = asks.length;
+        await wait(SETTLE_MS);
+        return asks.length === count && tmuxWindowSize() === `${ask.cols}x${ask.rows}` ? ask : null;
+      }, 30_000).catch((error) => {
+        throw new Error(`${error.message}; asks ${JSON.stringify(asks)}, tmux window ${tmuxWindowSize()}`);
+      });
       const before = tmuxPanes();
-      check(before.length === 1, `tmux starts with ${before.length} panes`);
+      check(before.length === 1 && before[0].width === asked.cols, `tmux starts with ${JSON.stringify(before)} for the page's ${asked.cols} columns`);
 
       // Entering and staging a split sends tmux nothing and stays fresh.
       step("stage a split");
@@ -254,7 +284,7 @@ export default {
       check(state.sides.every((side) => side === "A"), `the flip command flipped a side: ${JSON.stringify(state.sides)}`);
       check(tmuxPanes().length === 2 && state.panes.length === 2, `after the side checks: tmux ${tmuxPanes().length}, page ${JSON.stringify(state)}`);
       await ctx.shot("hybrid-nav-tmux", page);
-      return { steps, panes: tmuxPanes() };
+      return { steps, asks, before, panes: tmuxPanes() };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const state = page ? await pageState(page).catch((e) => String(e)) : null;
