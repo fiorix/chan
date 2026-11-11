@@ -8,6 +8,7 @@
 import {
   beginTransfer,
   cancelTransfer,
+  dismissTransfer,
   failTransfer,
   finishTransfer,
   setTransferProgress,
@@ -671,11 +672,10 @@ function nativeTransferId(): string {
   return random ? `native-${random}` : `native-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-/// The row name a status's selection gives, or null when it names none. A
-/// selection of any other shape reads as absent, so a change on the wire
-/// leaves the row unnamed instead of naming it wrongly.
-function pickedUploadName(status: NativeTransferStatus): string | null {
-  const picked = status.picked;
+/// The row name a selection gives, or null when it names none. A selection
+/// of any other shape reads as absent, so a change on the wire leaves the row
+/// unnamed instead of naming it wrongly.
+function pickedUploadName(picked: NativeTransferStatus["picked"]): string | null {
   if (!picked || typeof picked.name !== "string") return null;
   if (!Number.isInteger(picked.count) || picked.count < 1) return null;
   return uploadTransferName(picked.name, picked.count);
@@ -793,6 +793,30 @@ function storedUploadName(path: string): string {
   return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
 }
 
+/// What a desktop upload's refusal says: its reason, and the row name of what
+/// was picked when the desktop says so. Asked for a named failure, the desktop
+/// answers `{ message, picked }` once the transfer is registered; a desktop
+/// that predates the request, and any failure before the registration, answer
+/// the bare reason.
+function nativeUploadFailure(error: unknown): { message: string; picked: string | null } {
+  if (error !== null && typeof error === "object" && !(error instanceof Error)) {
+    const failure = error as { message?: unknown; picked?: NativeTransferStatus["picked"] };
+    if (typeof failure.message === "string") {
+      return { message: failure.message, picked: pickedUploadName(failure.picked) };
+    }
+  }
+  return { message: errorText(error), picked: null };
+}
+
+/// The error a cancelled desktop upload rejects with, named as a browser
+/// upload's abort is, so a caller tells a cancel from a failure the same way
+/// on both.
+function desktopUploadCancelled(): Error {
+  const error = new Error("upload cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
 /// Desktop-native upload: Rust raises the native picker and streams the picked
 /// files to the server, so the page never holds their paths or bytes.
 ///
@@ -801,11 +825,12 @@ function storedUploadName(path: string): string {
 /// `name` is the row's display name when the caller knows it beforehand, as
 /// a replace knows its target; it is a file's name and never a sentence. With
 /// null the picked files name the row: the desktop's status says what they
-/// are once it has validated them, and the upload's own answer names a row
-/// that ended before a status reached the page.
+/// are once it has validated them, and the upload's own answer, or its
+/// failure, names a row that ended before a status reached the page.
 ///
 /// Resolves to the files the server stored, empty when the picker was
-/// dismissed; rejects when the desktop reports an error or a cancel.
+/// dismissed, which leaves no row; rejects with an `AbortError` for a cancel
+/// and with the desktop's reason for a failure.
 export async function runDesktopUpload(
   target: { dir?: string; path?: string; multiple: boolean },
   name: string | null,
@@ -824,7 +849,7 @@ export async function runDesktopUpload(
   try {
     if (!(await waitForTransferSlot(xferId))) return [];
     stopProgress = pollNativeProgress(nativeId, xferId, (status) => {
-      const picked = pickedUploadName(status);
+      const picked = pickedUploadName(status.picked);
       if (picked !== null || status.total !== null) transferFilesPicked(xferId, picked);
     });
     // Files pickers need the route that supports Replace and rejects links.
@@ -837,9 +862,12 @@ export async function runDesktopUpload(
       transferId: nativeId,
       url,
       target: root === "filesystem" ? { ...target, root } : target,
+      namedFailure: true,
     });
     if (uploaded.length === 0) {
-      cancelTransfer(xferId);
+      // A picker closed without a choice transferred nothing, and a browser
+      // picker's dismissal leaves no row either.
+      dismissTransfer(xferId);
       return [];
     }
     // A short upload ends between two polls, before any status named it.
@@ -850,10 +878,16 @@ export async function runDesktopUpload(
     finishTransfer(xferId);
     return uploaded;
   } catch (err) {
-    const message = errorText(err);
-    if (message.includes("upload cancelled")) cancelTransfer(xferId);
-    else failTransfer(xferId, message);
-    throw err instanceof Error ? err : new Error(message);
+    const failure = nativeUploadFailure(err);
+    // A failure soon after the pick can end the upload before a status poll
+    // read the selection; the failure names the row then.
+    if (failure.picked !== null) transferFilesPicked(xferId, failure.picked);
+    if (failure.message.includes("upload cancelled")) {
+      cancelTransfer(xferId);
+      throw desktopUploadCancelled();
+    }
+    failTransfer(xferId, failure.message);
+    throw err instanceof Error ? err : new Error(failure.message);
   } finally {
     stopProgress?.();
   }

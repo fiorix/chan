@@ -2097,10 +2097,10 @@ async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | un
         : `Uploaded ${uploaded.length} files`,
     );
   } catch (err) {
-    // A failed native batch cannot say which of its files landed first.
+    // A failed or cancelled native batch cannot say which of its files
+    // landed first.
     if (uploadShowsInTree(root)) await refreshTreeAtOrAbove(destDir);
-    ui.status = `upload failed: ${errorText(err)}`;
-    ui.statusKind = "persistent";
+    reportDesktopUploadError(err);
   }
 }
 
@@ -2119,9 +2119,19 @@ async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
     revealAndSelect(targetPath, selection);
     setTransientStatus(`Replaced '${targetPath}'`);
   } catch (err) {
-    ui.status = `upload failed: ${errorText(err)}`;
-    ui.statusKind = "persistent";
+    reportDesktopUploadError(err);
   }
+}
+
+/// A desktop upload's cancel reads as a browser upload's: the transient
+/// "Upload cancelled" and no failure line. A failure keeps its line.
+function reportDesktopUploadError(err: unknown): void {
+  if (err instanceof Error && err.name === "AbortError") {
+    setTransientStatus("Upload cancelled");
+    return;
+  }
+  ui.status = `upload failed: ${errorText(err)}`;
+  ui.statusKind = "persistent";
 }
 
 /// The terminal tab of this window attached to `sessionId`, with its pane.
