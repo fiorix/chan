@@ -251,7 +251,8 @@ mod tests {
 
     /// An open-file event's URLs read as the same URIs given to a launch do:
     /// percent-decoded, another host, another scheme and an encoded `/` or
-    /// NUL skipped with the launch's own reasons, in event order.
+    /// NUL skipped with the launch's own reasons, in event order, on every
+    /// platform.
     #[test]
     fn an_open_file_events_urls_read_as_a_launchs_file_uris() {
         let uris = [
@@ -263,9 +264,17 @@ mod tests {
             "https://example.com/notes.md",
             "file:///srv/a%2Fb.md",
             "file:///srv/a%00b.md",
+            "file://localhost/srv/c%2Fd.md",
         ];
-        let event = from_urls(uris.iter().map(|uri| tauri::Url::parse(uri).unwrap()));
-        assert_eq!(event, from_args(args(&uris), None).unwrap());
+        let urls: Vec<tauri::Url> = uris
+            .iter()
+            .map(|uri| tauri::Url::parse(uri).unwrap())
+            .collect();
+        // The url crate spells `file://localhost/...` as `file:///...`, which
+        // an event's skip names, so the launch is given each URL so spelled.
+        let spelled: Vec<OsString> = urls.iter().map(|url| url.as_str().into()).collect();
+        let event = from_urls(urls);
+        assert_eq!(event, from_args(spelled, None).unwrap());
         // A Unix path has no drive letter, so Windows names none of these.
         #[cfg(unix)]
         {
@@ -279,7 +288,14 @@ mod tests {
                     .iter()
                     .map(|(uri, _)| uri.as_str())
                     .collect::<Vec<_>>(),
-                uris[3..]
+                [
+                    "file://nas.local/share/notes.md",
+                    "smb://nas/share/notes.md",
+                    "https://example.com/notes.md",
+                    "file:///srv/a%2Fb.md",
+                    "file:///srv/a%00b.md",
+                    "file:///srv/c%2Fd.md",
+                ]
             );
         }
     }
