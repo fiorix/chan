@@ -9,7 +9,8 @@
 //! listener starts) before it touches anything,
 //! and keeps the claim until its listener serves it. A launch that finds the
 //! endpoint held asks the desktop holding it to come forward over the
-//! handoff socket and exits without opening a window, starting a watcher or
+//! handoff socket, or, given paths, to open each of them in a standalone
+//! window, and exits without opening a window, starting a watcher or
 //! reading any state; on Windows a holder still booting, its claim held and
 //! its pipe not created yet, is waited for first. When that desktop does not
 //! answer, or is still shutting down past the wait, the launch says so in a
@@ -28,7 +29,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chan_server::handoff::{
-    self, ActivateReply, ClaimError, EndpointClaim, ListenerHandle, ListenerStartError, Response,
+    self, ActivateReply, ClaimError, EndpointClaim, ListenerHandle, ListenerStartError,
+    OpenPathReply, Response,
 };
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -202,12 +204,14 @@ pub(crate) fn decide<C>(
     }
 }
 
-/// Run the check for a GUI launch: the claimed endpoint for the listener, or
-/// `None` to boot without one. A launch another desktop answers for ends the
-/// process here.
-pub(crate) fn guard() -> Option<EndpointClaim> {
+/// Run the check for a GUI launch given `paths` (absolute, from
+/// `launch_paths`): the claimed endpoint for the listener, or `None` to boot
+/// without one. A launch another desktop answers for ends the process here,
+/// its paths handed to that desktop; a launch that boots keeps its paths for
+/// its own boot to open.
+pub(crate) fn guard(paths: &[String]) -> Option<EndpointClaim> {
     let startup = match handoff::ensure_well_known_socket_path() {
-        Some(path) => check_at(&path, BOUNDS),
+        Some(path) => check_at(&path, BOUNDS, paths),
         None => Startup::RunWithoutListener {
             why: "no handoff endpoint for this account (no owner-controlled runtime directory \
                   on unix, no readable account SID on Windows)"
@@ -356,10 +360,10 @@ fn show_message(notice: Notice) {
 )))]
 fn show_message(_: Notice) {}
 
-fn check_at(path: &Path, bounds: Bounds) -> Startup<EndpointClaim> {
+fn check_at(path: &Path, bounds: Bounds, paths: &[String]) -> Startup<EndpointClaim> {
     decide(
         claim(path),
-        || ask(path, bounds),
+        || ask(path, bounds, paths),
         |wait| {
             let grace = match wait {
                 Wait::Drain => bounds.drain,
@@ -384,16 +388,92 @@ fn claim(path: &Path) -> Lock<EndpointClaim> {
     }
 }
 
-fn ask(path: &Path, bounds: Bounds) -> Answer<EndpointClaim> {
+fn ask(path: &Path, bounds: Bounds, paths: &[String]) -> Answer<EndpointClaim> {
     ask_with(
         bounds,
         || handoff::endpoint_is_booting_at(path),
-        |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+        |budget| {
+            forward_with(
+                paths,
+                budget,
+                bounds.ask,
+                |open, budget| {
+                    tauri::async_runtime::block_on(handoff::try_open_path_at(path, open, budget))
+                },
+                |budget| tauri::async_runtime::block_on(handoff::try_activate_at(path, budget)),
+            )
+        },
         || match claim(path) {
             Lock::Taken(claim) => Some(claim),
             Lock::Held | Lock::Unavailable(_) => None,
         },
     )
+}
+
+/// Hand the launch to the holder: an `Activate` for a launch without paths,
+/// an `OpenPath` for each path otherwise. A path the holder opened raised the
+/// window it landed in, so the holder came forward.
+///
+/// The first path is sent within `budget`, the attempt `ask_with` repeats
+/// until the holder answers or the ask's bound passes. Each later path gets
+/// `each`, and the first one the holder leaves unanswered ends the run: the
+/// rest are not sent, so a holder that stops answering costs one `each` past
+/// its last answer, and one that answers every path, however slowly, at most
+/// `each` per path. A holder that opened none of the paths, one that predates
+/// the request or could open none of them there, is asked to come forward as
+/// a launch without paths would; when that goes unanswered too it is still a
+/// desktop that answered, so it reads as a refusal and the paths are never
+/// sent again. A holder that says it is shutting down, on any path, is
+/// answered for at once: the launch waits for it and boots with all its
+/// paths.
+fn forward_with(
+    paths: &[String],
+    budget: Duration,
+    each: Duration,
+    mut open: impl FnMut(&str, Duration) -> OpenPathReply,
+    activate: impl FnOnce(Duration) -> ActivateReply,
+) -> ActivateReply {
+    if paths.is_empty() {
+        return activate(budget);
+    }
+    let mut opened = None;
+    let mut refused = None;
+    for (at, path) in paths.iter().enumerate() {
+        match open(path, if at == 0 { budget } else { each }) {
+            OpenPathReply::NoReply if at == 0 => return ActivateReply::NoReply,
+            OpenPathReply::NoReply => {
+                tracing::warn!(
+                    %path,
+                    unsent = paths.len() - at - 1,
+                    "the running chan-desktop stopped answering; the remaining paths are not sent"
+                );
+                break;
+            }
+            OpenPathReply::Refused { reply } if is_shutting_down(&reply) => {
+                return ActivateReply::Refused { reply }
+            }
+            OpenPathReply::Refused { reply } => {
+                tracing::warn!(%path, %reply, "the running chan-desktop did not open the path");
+                refused = Some(reply);
+            }
+            OpenPathReply::Opened {
+                desktop_version,
+                message,
+            } => {
+                tracing::info!(%path, %message, "the running chan-desktop opened the path");
+                opened.get_or_insert(desktop_version);
+            }
+        }
+    }
+    match opened {
+        Some(desktop_version) => ActivateReply::Activated { desktop_version },
+        None => match activate(budget) {
+            ActivateReply::NoReply => ActivateReply::Refused {
+                reply: refused.unwrap_or_default(),
+            },
+            answered => answered,
+        },
+    }
 }
 
 /// Ask the holder to come forward, with the endpoint's probes passed in so
@@ -438,10 +518,18 @@ fn ask_with<C>(
 /// Read a holder's refusal: the answer of a desktop that is shutting down
 /// ([`shutting_down`]), or any other.
 fn refusal<C>(reply: String) -> Answer<C> {
-    match serde_json::from_str::<Response>(&reply) {
-        Ok(Response::Error { message }) if message == SHUTTING_DOWN => Answer::ShuttingDown,
-        _ => Answer::Refused { reply },
+    if is_shutting_down(&reply) {
+        Answer::ShuttingDown
+    } else {
+        Answer::Refused { reply }
     }
+}
+
+fn is_shutting_down(reply: &str) -> bool {
+    matches!(
+        serde_json::from_str::<Response>(reply),
+        Ok(Response::Error { message }) if message == SHUTTING_DOWN
+    )
 }
 
 /// The refusal of a desktop that is shutting down.
@@ -1095,7 +1183,7 @@ mod tests {
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("the test module separates the production code");
         let (_, guard) = production
-            .split_once("\npub(crate) fn guard() -> Option<EndpointClaim> {")
+            .split_once("\npub(crate) fn guard(paths: &[String]) -> Option<EndpointClaim> {")
             .expect("guard exists");
         let (guard, _) = guard.split_once("\n}\n").expect("guard ends");
         let reported = guard
@@ -1341,6 +1429,7 @@ mod tests {
                 Duration::from_millis(200),
                 Duration::from_millis(200),
             ),
+            &[],
         );
         assert_eq!(
             startup.exit_code(),
@@ -1364,6 +1453,7 @@ mod tests {
         let startup = check_at(
             &sock,
             bounds(Duration::from_secs(5), Duration::ZERO, Duration::ZERO),
+            &[],
         );
         assert!(matches!(startup, Startup::StillShuttingDown), "{startup:?}");
         assert_eq!(startup.exit_code(), Some(1));
@@ -1384,6 +1474,7 @@ mod tests {
                 Duration::from_millis(200),
                 Duration::from_millis(200),
             ),
+            &[],
         );
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
         assert_eq!(startup.exit_code(), Some(1));
@@ -1424,6 +1515,7 @@ mod tests {
                 Duration::from_millis(200),
                 Duration::from_millis(200),
             ),
+            &[],
         );
         assert!(
             matches!(startup, Startup::Unanswered),
@@ -1460,6 +1552,7 @@ mod tests {
                 Duration::from_millis(200),
                 Duration::from_millis(200),
             ),
+            &[],
         );
         release.join().unwrap();
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
@@ -1515,6 +1608,7 @@ mod tests {
                 release: Duration::from_millis(200),
                 drain: Duration::from_millis(200),
             },
+            &[],
         );
         let _listener = serving.join().unwrap().unwrap();
         assert!(
@@ -1541,6 +1635,7 @@ mod tests {
                 release: Duration::from_millis(200),
                 drain: Duration::from_millis(200),
             },
+            &[],
         );
         assert!(matches!(startup, Startup::Unanswered), "{startup:?}");
         assert_eq!(startup.exit_code(), Some(1));
@@ -1549,6 +1644,335 @@ mod tests {
             "a claim with no pipe is waited for as a boot: {:?}",
             started.elapsed()
         );
+    }
+
+    /// A launch given paths beside a desktop that opens them: each path goes
+    /// over as an `OpenPath`, in order, and the launch hands over without
+    /// booting and without an `Activate` besides.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_with_paths_beside_a_serving_desktop_hands_them_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = Arc::clone(&seen);
+        let _listener = tauri::async_runtime::block_on(async {
+            handoff::start_listener(sock.clone(), move |req| {
+                let record = Arc::clone(&record);
+                async move {
+                    let (seen, answer) = match req {
+                        handoff::Request::OpenPath { path, .. } => (
+                            format!("open_path {path}"),
+                            Response::PathOpened {
+                                desktop_version: "9.9.9".into(),
+                                message: format!("open request queued for {path}"),
+                            },
+                        ),
+                        handoff::Request::Activate { .. } => (
+                            "activate".to_string(),
+                            Response::Activated {
+                                desktop_version: "9.9.9".into(),
+                            },
+                        ),
+                        other => (
+                            format!("{other:?}"),
+                            Response::Error {
+                                message: "unexpected request".into(),
+                            },
+                        ),
+                    };
+                    record.lock().unwrap().push(seen);
+                    answer
+                }
+            })
+        })
+        .unwrap();
+        let startup = check_at(
+            &sock,
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
+            &["/srv/notes.md".into(), "/srv/docs".into()],
+        );
+        assert!(
+            matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
+            "{startup:?}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["open_path /srv/notes.md", "open_path /srv/docs"]
+        );
+    }
+
+    /// A launch given paths with no desktop running claims the endpoint and
+    /// boots: nothing is sent, and the paths stay with the launch for its
+    /// own boot to open.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_with_paths_and_no_desktop_boots() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let startup = check_at(
+            &sock,
+            bounds(
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+                Duration::from_millis(200),
+            ),
+            &["/srv/notes.md".into()],
+        );
+        assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
+    }
+
+    fn launch(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| path.to_string()).collect()
+    }
+
+    fn opened(path: &str) -> OpenPathReply {
+        OpenPathReply::Opened {
+            desktop_version: "9.9.9".into(),
+            message: format!("open request queued for {path}"),
+        }
+    }
+
+    /// What a desktop that predates `OpenPath` answers it: the listener's line
+    /// for a type it does not know, read from the listener of the release
+    /// before it.
+    const OLDER_DESKTOP_REPLY: &str = r#"{"status":"error","message":"invalid handoff request: unknown variant `open_path`, expected one of `open_workspace`, `upgrade`, `open_devserver`, `close_workspace`, `list_devservers`, `connect_devserver`, `disconnect_devserver`, `forget_devserver`, `serve_remote_workspace`, `close_remote_workspace`, `forget_remote_workspace`, `open_terminal`, `activate` at line 1 column 77"}"#;
+
+    #[test]
+    fn a_launch_without_paths_asks_the_holder_to_come_forward() {
+        let reply = forward_with(
+            &[],
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            |_, _| panic!("there is no path to open"),
+            |budget| {
+                assert_eq!(budget, Duration::from_secs(2));
+                activated()
+            },
+        );
+        assert_eq!(reply, activated());
+    }
+
+    #[test]
+    fn a_launch_hands_each_path_over_and_the_holder_comes_forward() {
+        let mut sent = Vec::new();
+        let reply = forward_with(
+            &launch(&["/srv/notes.md", "/srv/docs", "/srv/image.png"]),
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            |path, budget| {
+                sent.push((path.to_string(), budget));
+                opened(path)
+            },
+            |_| panic!("a holder that opened a path came forward"),
+        );
+        assert_eq!(reply, activated());
+        assert_eq!(
+            sent,
+            [
+                ("/srv/notes.md".to_string(), Duration::from_secs(2)),
+                ("/srv/docs".to_string(), Duration::from_secs(1)),
+                ("/srv/image.png".to_string(), Duration::from_secs(1)),
+            ]
+        );
+    }
+
+    /// An older desktop refuses every `OpenPath` as an unknown type, and a
+    /// current one refuses a path it cannot open. Either is a live desktop
+    /// the launch must not run beside, so once no path opened it is asked to
+    /// come forward as a launch without paths would.
+    #[test]
+    fn a_holder_that_opens_no_path_is_asked_to_come_forward() {
+        let unopenable = serde_json::to_string(&Response::Error {
+            message: "cannot open /gone/notes.md: canonicalize path: No such file or directory \
+                      (os error 2)"
+                .into(),
+        })
+        .unwrap();
+        for refusal in [OLDER_DESKTOP_REPLY.trim().to_string(), unopenable] {
+            let mut sent = 0;
+            let mut asked = false;
+            let reply = forward_with(
+                &launch(&["/srv/notes.md", "/srv/docs"]),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                |_, _| {
+                    sent += 1;
+                    OpenPathReply::Refused {
+                        reply: refusal.clone(),
+                    }
+                },
+                |_| {
+                    asked = true;
+                    activated()
+                },
+            );
+            assert_eq!(reply, activated(), "{refusal}");
+            assert_eq!(sent, 2, "every path is offered: {refusal}");
+            assert!(asked, "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_holder_that_opens_some_of_the_paths_came_forward() {
+        let reply = forward_with(
+            &launch(&["/gone/notes.md", "/srv/docs"]),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            |path, _| {
+                if path == "/srv/docs" {
+                    opened(path)
+                } else {
+                    OpenPathReply::Refused {
+                        reply: "{\"status\":\"error\",\"message\":\"cannot open\"}".into(),
+                    }
+                }
+            },
+            |_| panic!("a holder that opened a path came forward"),
+        );
+        assert_eq!(reply, activated());
+    }
+
+    /// A holder shutting down is answered for at once: the launch waits for
+    /// it and boots with every path, so none is offered to the desktop on its
+    /// way out.
+    #[test]
+    fn a_holder_shutting_down_takes_no_path() {
+        let shutting = serde_json::to_string(&shutting_down()).unwrap();
+        let reply = forward_with(
+            &launch(&["/srv/notes.md", "/srv/docs"]),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            |path, _| {
+                assert_eq!(path, "/srv/notes.md", "only the first path is offered");
+                OpenPathReply::Refused {
+                    reply: shutting.clone(),
+                }
+            },
+            |_| panic!("a holder shutting down is not asked to come forward"),
+        );
+        assert_eq!(
+            reply,
+            ActivateReply::Refused {
+                reply: shutting.clone()
+            }
+        );
+        assert!(matches!(refusal::<()>(shutting), Answer::ShuttingDown));
+    }
+
+    /// Nothing answered the first path: `ask_with` asks again, or claims the
+    /// endpoint the holder left, so the rest wait.
+    #[test]
+    fn a_holder_that_does_not_answer_is_asked_again() {
+        let reply = forward_with(
+            &launch(&["/srv/notes.md", "/srv/docs"]),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            |path, _| {
+                assert_eq!(path, "/srv/notes.md", "only the first path is offered");
+                OpenPathReply::NoReply
+            },
+            |_| panic!("an unanswered launch is not asked to come forward"),
+        );
+        assert_eq!(reply, ActivateReply::NoReply);
+    }
+
+    /// A holder that answers a path and then stops answering gets no more:
+    /// the rest are not sent, and the path it opened is its coming forward.
+    #[test]
+    fn a_holder_that_stops_answering_gets_no_more_paths() {
+        let mut sent = Vec::new();
+        let reply = forward_with(
+            &launch(&["/srv/notes.md", "/srv/docs", "/srv/image.png"]),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            |path, _| {
+                sent.push(path.to_string());
+                if path == "/srv/notes.md" {
+                    opened(path)
+                } else {
+                    OpenPathReply::NoReply
+                }
+            },
+            |_| panic!("a holder that opened a path came forward"),
+        );
+        assert_eq!(reply, activated());
+        assert_eq!(sent, ["/srv/notes.md", "/srv/docs"]);
+    }
+
+    /// A holder that starts shutting down partway takes no more paths, and
+    /// the launch waits for it and boots with all of them, as it does when
+    /// the first path meets the shutdown.
+    #[test]
+    fn a_holder_shutting_down_on_a_later_path_takes_no_more() {
+        let shutting = serde_json::to_string(&shutting_down()).unwrap();
+        let mut sent = Vec::new();
+        let reply = forward_with(
+            &launch(&["/srv/notes.md", "/srv/docs", "/srv/image.png"]),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            |path, _| {
+                sent.push(path.to_string());
+                if path == "/srv/notes.md" {
+                    opened(path)
+                } else {
+                    OpenPathReply::Refused {
+                        reply: shutting.clone(),
+                    }
+                }
+            },
+            |_| panic!("a holder shutting down is not asked to come forward"),
+        );
+        assert_eq!(
+            reply,
+            ActivateReply::Refused {
+                reply: shutting.clone()
+            }
+        );
+        assert_eq!(sent, ["/srv/notes.md", "/srv/docs"]);
+        assert!(matches!(refusal::<()>(shutting), Answer::ShuttingDown));
+    }
+
+    /// A holder that refused every path has answered, so an `Activate` it
+    /// then leaves unanswered reads as a refusal: `ask_with` asks once, and
+    /// the paths are not sent a second time.
+    #[test]
+    fn a_holder_that_refuses_every_path_and_then_is_silent_is_not_asked_again() {
+        let mut sent = 0;
+        let mut forward = |budget| {
+            forward_with(
+                &launch(&["/srv/notes.md", "/srv/docs"]),
+                budget,
+                Duration::from_secs(1),
+                |_, _| {
+                    sent += 1;
+                    OpenPathReply::Refused {
+                        reply: OLDER_DESKTOP_REPLY.to_string(),
+                    }
+                },
+                |_| ActivateReply::NoReply,
+            )
+        };
+        let answer = ask_with(
+            Bounds {
+                boot: Duration::ZERO,
+                ask: Duration::from_secs(5),
+                release: Duration::ZERO,
+                drain: Duration::ZERO,
+            },
+            || false,
+            &mut forward,
+            || None::<()>,
+        );
+        assert!(
+            matches!(&answer, Answer::Refused { reply } if reply == OLDER_DESKTOP_REPLY),
+            "{answer:?}"
+        );
+        assert_eq!(sent, 2, "each path is sent once");
     }
 
     /// The Windows twin of `a_launch_beside_a_serving_desktop_hands_over`.
@@ -1568,6 +1992,7 @@ mod tests {
                 release: Duration::from_millis(200),
                 drain: Duration::from_millis(200),
             },
+            &[],
         );
         assert!(
             matches!(&startup, Startup::HandedOver { version } if version == "9.9.9"),
@@ -1595,6 +2020,7 @@ mod tests {
                 release: Duration::from_millis(200),
                 drain: Duration::from_millis(200),
             },
+            &[],
         );
         release.join().unwrap();
         assert!(matches!(startup, Startup::Run(_)), "{startup:?}");
@@ -1629,6 +2055,7 @@ mod tests {
                 release: Duration::from_millis(200),
                 drain: Duration::from_millis(200),
             },
+            &[],
         );
         assert!(
             matches!(&startup, Startup::RunWithoutListener { why } if why.contains("another account")),
@@ -1679,6 +2106,7 @@ mod tests {
                 release: Duration::from_millis(200),
                 drain: Duration::from_millis(200),
             },
+            &[],
         );
         assert!(
             matches!(startup, Startup::Unanswered),

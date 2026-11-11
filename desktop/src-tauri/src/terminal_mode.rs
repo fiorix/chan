@@ -46,8 +46,8 @@ pub struct TerminalLaunch {
 }
 
 /// Parse argv (without `argv[0]`). `Ok(None)` is not a terminal launch: the GUI
-/// runs as it always has, so positional arguments (the entry's `%U`) and
-/// unknown options before any terminal flag keep today's meaning. Once a
+/// runs, and reads positional arguments (the entry's `%U`) as paths to open
+/// (`launch_paths`) and leaves unknown options alone. Once a
 /// terminal flag has been seen the grammar is strict, and `-e` or `--` ends
 /// it: everything after is the command's argv, verbatim.
 pub fn parse_terminal_launch(
@@ -142,6 +142,17 @@ fn option_value<'a>(arg: &'a OsStr, name: &str) -> Option<Option<&'a OsStr>> {
         let rest = text.strip_prefix(name)?;
         rest.strip_prefix('=').map(|value| Some(OsStr::new(value)))
     }
+}
+
+/// Whether `arg` is an option of this launch's grammar: `-e`, `--`, or
+/// `--hold`, `--dir`, `--app-id` or `--title`, bare or with `=value`. A GUI
+/// launch that names a path refuses one beside it (`launch_paths`).
+pub(crate) fn is_terminal_option(arg: &OsStr) -> bool {
+    arg == "-e"
+        || arg == "--"
+        || ["--hold", "--dir", "--app-id", "--title"]
+            .iter()
+            .any(|name| option_value(arg, name).is_some())
 }
 
 fn utf8(name: &str, value: OsString) -> Result<String, String> {
