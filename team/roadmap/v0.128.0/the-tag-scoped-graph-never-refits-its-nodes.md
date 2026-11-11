@@ -1,6 +1,6 @@
 # The tag-scoped graph never refits its nodes
 
-Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Not started.
+Status: raised on 2026-11-11 by the round's own checks and readings (the draft's origin is kept below); accepted for v0.128.0 by the owner the same day (survey 5). Landed on 2026-11-11.
 
 Origin: drafted on 2026-11-11 from the v0.128.0 basic-flows browser checks (218 and 110), for the owner to accept, move or drop. Not started.
 
@@ -23,3 +23,9 @@ This is the framing family the v0.127.0 and v0.128.0 Dashboard slide rows fixed 
 
 1. A unit test of the refit (the painted extent inside the canvas after settle) and a browser check reading the painted box, as probe 917 did, green at the tip and red on the current framing.
 2. Check 110 and 218's screenshots show the nodes centered.
+
+## Built, 2026-11-11
+
+The tag, mention, contact and language lenses frame what they show in the middle of the canvas. The graph tab handed its canvas no framing, so every scope took the default "bottom" anchor, which seats the pinned node near the canvas's bottom edge; a lens pins its own node and its walk splays nodes around it in every direction, the directory spine below it. Those four lenses now pass `focalAnchor="bounds"`, the Dashboard Search slide's framing: the drawn box sits in the middle with equal room on both axes, follows the layout while it moves and fits again when the canvas changes size (contracts 1 and 2). The layout is unchanged, and the workspace, directory and file scopes keep "bottom" (ruled 2026-11-11: the sibling lenses had the same defect for the same reason).
+
+Fixed as 154f80b50 and 514551885, merged as 4be97e69a. Tests: `components/GraphPanel.lensFraming.test.ts` (the painted discs inside and centered once the layout rests and after a resize; at the base a node 133 px below the canvas) and the per-scope cases in `GraphPanel.lens.test.ts`. Checks 110 (the tag lens, then a resize) and 218 (a tag hit and a mention hit from Search) read the node discs the canvas paints (`scripts/e2e/browser-smoke/lib/graph-discs.mjs`): as many as the status line counts, every one inside, centered within 3 px. At the base they fail with a node 4.6 px (110) and 166 px (218) below the canvas; at the tip both pass ten runs alone each. The contact and language lenses are covered by the unit test, not a browser check.
