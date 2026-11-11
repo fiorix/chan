@@ -917,12 +917,15 @@ describe("paste", () => {
     expect(ghostty.record.pastes).toEqual([""]);
   });
 
-  test("without bracketed paste an empty paste sends nothing; a paste with text stays ghostty-web's", async () => {
+  test("without bracketed paste an empty paste sends nothing; a paste with text is chan's, line ends converted", async () => {
     const { target } = await mountGhostty();
     const host = target.querySelector(".terminal-host")!;
     expect(pasteOn(host, "").defaultPrevented).toBe(true);
-    expect(pasteOn(host, "hello").defaultPrevented).toBe(false);
     expect(ghostty.record.pastes).toEqual([]);
+    // The stand-in runs no core of chan's binding, so the cleaned paste goes
+    // through ghostty-web's own (ghosttyPaste.test.ts covers the core's).
+    expect(pasteOn(host, "hello\nworld").defaultPrevented).toBe(true);
+    expect(ghostty.record.pastes).toEqual(["hello\rworld"]);
   });
 
   test("a paste outside the renderer host, the composer's, is not the terminal's", async () => {

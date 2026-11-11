@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { CanvasRenderer, SelectionManager, Terminal } from "ghostty-web";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { SoftwareCanvasContext } from "../__tests__/softwareCanvas";
-import { installGhosttySelection } from "./ghosttySelection";
+import { installGhosttyClickExtents, installGhosttySelection } from "./ghosttySelection";
 import { GhosttyVt, VtTerminal } from "./ghosttyVt";
 
 const VENDORED = "vendor/ghostty-vt/ghostty-vt.wasm";
@@ -19,6 +19,7 @@ beforeAll(async () => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  document.body.innerHTML = "";
 });
 
 type Anchor = { col: number; absoluteRow: number };
@@ -35,8 +36,9 @@ type Manager = {
 
 /// ghostty-web's Terminal and its own SelectionManager, wired as open()
 /// wires them, over the binding's terminal on the vendored core, without
-/// the DOM render loop. `install` installs chan's selection with a writer
-/// that records each text in `writes`.
+/// the DOM render loop, its canvas in the host element open() would take.
+/// `install` installs chan's selection with a writer that records each text
+/// in `writes`, and `installClicks` chan's double and triple click.
 async function pinnedTerminal(input: string) {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
     function (this: HTMLCanvasElement) {
@@ -49,6 +51,10 @@ async function pinnedTerminal(input: string) {
   wasmTerm.write(input);
   term.wasmTerm = wasmTerm;
   const canvas = document.createElement("canvas");
+  const host = document.createElement("div");
+  host.append(canvas);
+  document.body.append(host);
+  (term as unknown as { element: HTMLElement }).element = host;
   const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1 });
   renderer.resize(COLS, ROWS);
   term.renderer = renderer;
@@ -63,6 +69,7 @@ async function pinnedTerminal(input: string) {
     cell: renderer.getMetrics(),
     writes,
     install: () => installGhosttySelection(term, (text) => void writes.push(text)),
+    installClicks: () => installGhosttyClickExtents(term),
   };
 }
 
@@ -211,10 +218,107 @@ describe("ghostty-web's own copies write through chan's writer", () => {
   });
 });
 
+describe("a double or triple click selects across a soft wrap, as xterm.js's do", () => {
+  /// A path that wraps at 20 columns inside its word: "$ cat /var/log/messa"
+  /// and "ges.1", then a short row.
+  const PATH = "/var/log/messages.1";
+  const COMMAND = `$ cat ${PATH}`;
+  const SCREEN = `${COMMAND}\r\nok`;
+
+  function click(canvas: HTMLCanvasElement, cell: { width: number; height: number }, detail: number, col: number, row: number) {
+    const event = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      detail,
+      clientX: col * cell.width + 1,
+      clientY: row * cell.height + 1,
+    });
+    canvas.dispatchEvent(event);
+    return event;
+  }
+
+  async function clicks(screen: string) {
+    const pinned = await pinnedTerminal(screen);
+    expect(pinned.install()).toBe(true);
+    expect(pinned.installClicks()).not.toBeNull();
+    return pinned;
+  }
+
+  test("a double click on either side of the wrap selects and copies the whole word, once", async () => {
+    const { term, canvas, cell, writes, wasmTerm } = await clicks(SCREEN);
+    expect(wasmTerm.isRowWrapped(1), "the command wrapped inside the path").toBe(true);
+    click(canvas, cell, 2, 9, 0);
+    expect(writes).toEqual([PATH]);
+    expect(term.getSelection()).toBe(PATH);
+    click(canvas, cell, 2, 1, 1);
+    expect(writes).toEqual([PATH, PATH]);
+  });
+
+  test("a triple click on either row selects and copies the whole wrapped line, once", async () => {
+    const { term, canvas, cell, writes } = await clicks(SCREEN);
+    click(canvas, cell, 3, 0, 1);
+    expect(writes).toEqual([COMMAND]);
+    expect(term.getSelection()).toBe(COMMAND);
+    click(canvas, cell, 3, 15, 0);
+    expect(writes).toEqual([COMMAND, COMMAND]);
+    click(canvas, cell, 3, 1, 2);
+    expect(writes).toEqual([COMMAND, COMMAND, "ok"]);
+  });
+
+  test("a line that wrapped over history rows onto the screen selects whole from the screen", async () => {
+    // A command over three rows on a screen of four: its first two rows
+    // scroll into the history, wrapped one into the other.
+    const path = "/srv/backups/nightly/archive-2026-11-11-full.tar.gz";
+    const command = `$ cat ${path}`;
+    const { canvas, cell, writes, wasmTerm } = await clicks(`${command}\r\n1\r\n2\r\n3`);
+    expect(wasmTerm.getScrollbackLength()).toBe(2);
+    expect(wasmTerm.isScrollbackRowWrapped(1), "the history's second row continues its first").toBe(true);
+    expect(wasmTerm.isRowWrapped(0), "the screen's first row continues the history").toBe(true);
+    click(canvas, cell, 2, 2, 0);
+    click(canvas, cell, 3, 2, 0);
+    expect(writes).toEqual([path, command]);
+  });
+
+  test("a word or a line stops at a hard line break and at a word that does not cross the wrap", async () => {
+    const full = "abcdefghijklmnopqrst";
+    const { canvas, cell, writes, wasmTerm } = await clicks(`${full}\r\nuvw\r\n$ echo one two three four`);
+    expect(wasmTerm.isRowWrapped(1), "a full row then a line break").toBe(false);
+    expect(wasmTerm.isRowWrapped(3), "the echo wrapped at a space").toBe(true);
+    click(canvas, cell, 2, 19, 0);
+    click(canvas, cell, 3, 0, 1);
+    click(canvas, cell, 2, 16, 2);
+    expect(writes).toEqual([full, "uvw", "three"]);
+  });
+
+  test("a click on no word or an empty line is ghostty-web's, and finds nothing", async () => {
+    const { canvas, cell, writes } = await clicks(SCREEN);
+    expect(click(canvas, cell, 2, 1, 0).defaultPrevented).toBe(false);
+    click(canvas, cell, 3, 0, 3);
+    expect(writes).toEqual([]);
+  });
+
+  test("its cleanup gives the clicks back to ghostty-web, which cuts at the wrap", async () => {
+    const { canvas, cell, writes, installClicks } = await pinnedTerminal(SCREEN);
+    const remove = installClicks();
+    expect(remove).not.toBeNull();
+    remove!();
+    click(canvas, cell, 2, 9, 0);
+    click(canvas, cell, 3, 0, 1);
+    expect(writes).toEqual([]);
+  });
+});
+
 describe("installGhosttySelection fails open", () => {
   test("a terminal with no selection manager keeps ghostty-web's selection", () => {
     const term = { wasmTerm: undefined } as unknown as Terminal;
     expect(installGhosttySelection(term, () => {})).toBe(false);
+  });
+
+  test("the click extents need ghostty-web's selection manager, its canvas and chan's core", async () => {
+    expect(installGhosttyClickExtents({ wasmTerm: undefined } as unknown as Terminal)).toBeNull();
+    const { term } = await pinnedTerminal("text");
+    term.wasmTerm = {} as unknown as Terminal["wasmTerm"];
+    expect(installGhosttyClickExtents(term)).toBeNull();
   });
 
   test("a selection manager over another core keeps ghostty-web's read and copy", async () => {
