@@ -18,6 +18,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 type Anchor = { col: number; absoluteRow: number };
@@ -34,7 +35,8 @@ type Manager = {
 
 /// ghostty-web's Terminal and its own SelectionManager, wired as open()
 /// wires them, over the binding's terminal on the vendored core, without
-/// the DOM render loop. `scrolledBack` is the viewport offset in lines.
+/// the DOM render loop. `install` installs chan's selection with a writer
+/// that records each text in `writes`.
 async function pinnedTerminal(input: string) {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
     function (this: HTMLCanvasElement) {
@@ -46,12 +48,34 @@ async function pinnedTerminal(input: string) {
   const wasmTerm = vt.createTerminal(COLS, ROWS, { scrollbackLimit: 100 });
   wasmTerm.write(input);
   term.wasmTerm = wasmTerm;
-  const renderer = new CanvasRenderer(document.createElement("canvas"), { devicePixelRatio: 1 });
+  const canvas = document.createElement("canvas");
+  const renderer = new CanvasRenderer(canvas, { devicePixelRatio: 1 });
   renderer.resize(COLS, ROWS);
   term.renderer = renderer;
   const manager = new SelectionManager(term, renderer, wasmTerm, document.createElement("textarea"));
   (term as unknown as { selectionManager: SelectionManager }).selectionManager = manager;
-  return { term, manager: manager as unknown as Manager, wasmTerm: wasmTerm as unknown as VtTerminal };
+  const writes: string[] = [];
+  return {
+    term,
+    manager: manager as unknown as Manager,
+    wasmTerm: wasmTerm as unknown as VtTerminal,
+    canvas,
+    cell: renderer.getMetrics(),
+    writes,
+    install: () => installGhosttySelection(term, (text) => void writes.push(text)),
+  };
+}
+
+/// A browser clipboard whose every write is recorded: ghostty-web's own
+/// copies write through ClipboardItem where it exists, as in Chrome and
+/// WebKit, and writeText otherwise.
+function browserClipboard() {
+  const clipboard = { write: vi.fn(async () => {}), writeText: vi.fn(async () => {}) };
+  vi.stubGlobal("ClipboardItem", class {
+    constructor(readonly items: Record<string, Blob>) {}
+  });
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  return clipboard;
 }
 
 const ROWS_0_TO_11 = Array.from({ length: 12 }, (_, i) => `row ${i}`).join("\r\n");
@@ -67,8 +91,8 @@ describe("ghostty-web's selection over the pinned build", () => {
   });
 
   test("Select all selects the history and the screen, and copies them as shown", async () => {
-    const { term, manager } = await pinnedTerminal(ROWS_0_TO_11);
-    expect(installGhosttySelection(term)).toBe(true);
+    const { term, manager, install } = await pinnedTerminal(ROWS_0_TO_11);
+    expect(install()).toBe(true);
     term.selectAll();
     expect(manager.selectionStart).toEqual({ col: 0, absoluteRow: 0 });
     expect(manager.selectionEnd).toEqual({ col: COLS - 1, absoluteRow: 8 + ROWS - 1 });
@@ -77,39 +101,39 @@ describe("ghostty-web's selection over the pinned build", () => {
   });
 
   test("a selection copies what its rows show, a wide character once", async () => {
-    const { term, manager } = await pinnedTerminal("日本語 x\r\nab");
+    const { term, manager, install } = await pinnedTerminal("日本語 x\r\nab");
     manager.selectionStart = { col: 0, absoluteRow: 0 };
     manager.selectionEnd = { col: COLS - 1, absoluteRow: 1 };
     // ghostty-web's own read puts a space after each wide character.
     expect(term.getSelection()).toBe("日 本 語  x\nab");
-    expect(installGhosttySelection(term)).toBe(true);
+    expect(install()).toBe(true);
     expect(term.getSelection()).toBe("日本語 x\nab");
   });
 
   test("a soft-wrapped command copies as the one line it is", async () => {
     const command = "$ echo one two three four";
-    const { term, manager, wasmTerm } = await pinnedTerminal(`${command}\r\nok`);
+    const { term, manager, wasmTerm, install } = await pinnedTerminal(`${command}\r\nok`);
     expect(wasmTerm.isRowWrapped(1), "the command wrapped on screen").toBe(true);
     manager.selectionStart = { col: 0, absoluteRow: 0 };
     manager.selectionEnd = { col: COLS - 1, absoluteRow: 2 };
     // ghostty-web's own read ends the wrapped row with a line break.
     expect(term.getSelection()).toBe("$ echo one two three\n four\nok");
-    expect(installGhosttySelection(term)).toBe(true);
+    expect(install()).toBe(true);
     expect(term.getSelection()).toBe(`${command}\nok`);
   });
 
   test("a DEL a program printed reaches no copy", async () => {
-    const { term, manager } = await pinnedTerminal("ab\x7fcd");
+    const { term, manager, install } = await pinnedTerminal("ab\x7fcd");
     manager.selectionStart = { col: 0, absoluteRow: 0 };
     manager.selectionEnd = { col: COLS - 1, absoluteRow: 0 };
     expect(term.getSelection(), "ghostty-web's own read carries it").toBe("ab\x7fcd");
-    expect(installGhosttySelection(term)).toBe(true);
+    expect(install()).toBe(true);
     expect(term.getSelection()).toBe("abcd");
   });
 
   test("a selection is read the way round it was made", async () => {
-    const { term, manager } = await pinnedTerminal("hello world\r\nsecond row");
-    expect(installGhosttySelection(term)).toBe(true);
+    const { term, manager, install } = await pinnedTerminal("hello world\r\nsecond row");
+    expect(install()).toBe(true);
     manager.selectionStart = { col: 4, absoluteRow: 0 };
     manager.selectionEnd = { col: 0, absoluteRow: 0 };
     expect(term.getSelection()).toBe("hello");
@@ -118,36 +142,90 @@ describe("ghostty-web's selection over the pinned build", () => {
     expect(term.getSelection()).toBe("world\nsecond");
   });
 
-  test("ghostty-web's own copies read the same text", async () => {
-    const { term, manager } = await pinnedTerminal("日本語");
-    expect(installGhosttySelection(term)).toBe(true);
+  test("no selection copies nothing", async () => {
+    const { term, install } = await pinnedTerminal("text");
+    expect(install()).toBe(true);
+    expect(term.getSelection()).toBe("");
+  });
+});
+
+describe("ghostty-web's own copies write through chan's writer", () => {
+  /// A command that wraps at 20 columns, its two rows, and a short row.
+  const COMMAND = "$ echo one two three four";
+  const SCREEN = `${COMMAND}\r\nok`;
+
+  /// The text the copy chord and the menu's Copy read for the current
+  /// selection, the way TerminalTab reads it.
+  const chordText = (term: Terminal) => term.getSelection();
+
+  test("copySelection writes the selection's text, and the browser clipboard is not touched", async () => {
+    const clipboard = browserClipboard();
+    const { term, manager, writes, install } = await pinnedTerminal(SCREEN);
+    expect(install()).toBe(true);
     manager.selectionStart = { col: 0, absoluteRow: 0 };
-    manager.selectionEnd = { col: COLS - 1, absoluteRow: 0 };
-    const copied = vi.spyOn(manager, "copyToClipboard").mockImplementation(() => {});
+    manager.selectionEnd = { col: 4, absoluteRow: 1 };
     expect(manager.copySelection()).toBe(true);
-    expect(copied).toHaveBeenCalledWith("日本語");
+    expect(writes).toEqual([COMMAND]);
+    expect(writes[0]).toBe(chordText(term));
+    expect(clipboard.write).not.toHaveBeenCalled();
+    expect(clipboard.writeText).not.toHaveBeenCalled();
   });
 
-  test("no selection copies nothing", async () => {
-    const { term } = await pinnedTerminal("text");
-    expect(installGhosttySelection(term)).toBe(true);
-    expect(term.getSelection()).toBe("");
+  test("a drag over the wrapped command copies it on release as one line", async () => {
+    const clipboard = browserClipboard();
+    const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
+    expect(install()).toBe(true);
+    const at = (col: number, row: number) => ({ clientX: col * cell.width + 1, clientY: row * cell.height + 1 });
+    canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ...at(0, 0) }));
+    canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(4, 1) }));
+    // ghostty-web hears the release on the document.
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(4, 1) }));
+    expect(writes).toEqual([COMMAND]);
+    expect(writes[0]).toBe(chordText(term));
+    expect(clipboard.write).not.toHaveBeenCalled();
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+  });
+
+  test("a double click copies the word under it", async () => {
+    const clipboard = browserClipboard();
+    const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
+    expect(install()).toBe(true);
+    canvas.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, detail: 2, clientX: 8 * cell.width + 1, clientY: 1 }),
+    );
+    expect(writes).toEqual(["one"]);
+    expect(writes[0]).toBe(chordText(term));
+    expect(clipboard.write).not.toHaveBeenCalled();
+  });
+
+  test("a triple click copies the row under it", async () => {
+    const clipboard = browserClipboard();
+    const { term, canvas, cell, writes, install } = await pinnedTerminal(SCREEN);
+    expect(install()).toBe(true);
+    canvas.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, detail: 3, clientX: 1, clientY: 2 * cell.height + 1 }),
+    );
+    expect(writes).toEqual(["ok"]);
+    expect(writes[0]).toBe(chordText(term));
+    expect(clipboard.write).not.toHaveBeenCalled();
   });
 });
 
 describe("installGhosttySelection fails open", () => {
   test("a terminal with no selection manager keeps ghostty-web's selection", () => {
     const term = { wasmTerm: undefined } as unknown as Terminal;
-    expect(installGhosttySelection(term)).toBe(false);
+    expect(installGhosttySelection(term, () => {})).toBe(false);
   });
 
-  test("a selection manager over another core keeps ghostty-web's read", async () => {
+  test("a selection manager over another core keeps ghostty-web's read and copy", async () => {
     const { term, manager } = await pinnedTerminal("text");
     term.wasmTerm = {} as unknown as Terminal["wasmTerm"];
     const read = manager.getSelection;
     const selectAll = manager.selectAll;
-    expect(installGhosttySelection(term)).toBe(false);
+    const copy = manager.copyToClipboard;
+    expect(installGhosttySelection(term, () => {})).toBe(false);
     expect(manager.getSelection).toBe(read);
     expect(manager.selectAll).toBe(selectAll);
+    expect(manager.copyToClipboard).toBe(copy);
   });
 });

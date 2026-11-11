@@ -1412,9 +1412,11 @@
           "[chan] ghostty-web scrollbar hooks unavailable; its overlay erases the last columns it covers.",
         );
       }
-      if (!installGhosttySelection(ghosttyTerm)) {
+      // ghostty-web's own copies (mouse release, double and triple click)
+      // write through the same writer as the chord and the menu.
+      if (!installGhosttySelection(ghosttyTerm, (text) => void copyToClipboard(text))) {
         console.warn(
-          "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history and copies read a cell at a time.",
+          "[chan] ghostty-web selection hooks unavailable; Select all takes a screenful from the top of the history, copies read a cell at a time with soft wraps as line breaks, and its own copies write the clipboard themselves.",
         );
       }
       ghosttyScrollbarClickGate = gateGhosttyScrollbarClicks(ghosttyTerm, host);
