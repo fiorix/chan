@@ -4124,6 +4124,85 @@ fn clipboard_write_text(text: String) -> Result<(), String> {
     on_clipboard(|c| c.set_text(text)).map_err(|e| e.to_string())
 }
 
+/// Choose PRIMARY explicitly; arboard's default is CLIPBOARD. The operation
+/// is injected so the selection choice and absent-text handling can be tested
+/// without connecting to a display server.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn primary_selection_read(
+    read: impl FnOnce(arboard::LinuxClipboardKind) -> Result<String, arboard::Error>,
+) -> Result<Option<String>, arboard::Error> {
+    optional_content(read(arboard::LinuxClipboardKind::Primary))
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn primary_selection_write(
+    text: String,
+    write: impl FnOnce(arboard::LinuxClipboardKind, String) -> Result<(), arboard::Error>,
+) -> Result<(), arboard::Error> {
+    write(arboard::LinuxClipboardKind::Primary, text)
+}
+
+/// A compositor may support CLIPBOARD without PRIMARY. That refusal must
+/// reach the caller without dropping the handle that still owns CLIPBOARD;
+/// connection failures keep the cache's usual reconnect-on-next-use rule.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn primary_selection_attempt<T>(
+    result: Result<T, arboard::Error>,
+) -> Result<Result<T, arboard::Error>, arboard::Error> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(e @ arboard::Error::ClipboardNotSupported) => Ok(Err(e)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read the Linux PRIMARY selection without asking the webview to paste.
+/// An absent text representation is None; unsupported platforms refuse.
+#[tauri::command]
+async fn read_primary_selection() -> Result<Option<String>, String> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        use arboard::GetExtLinux;
+        run_clipboard_op(|| {
+            on_clipboard(|c| {
+                primary_selection_attempt(primary_selection_read(|kind| {
+                    c.get().clipboard(kind).text()
+                }))
+            })
+            .and_then(|result| result)
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    Err("PRIMARY selection is not supported on this platform".into())
+}
+
+/// Own PRIMARY through the same long-lived handle as CLIPBOARD, without
+/// replacing CLIPBOARD. Dropping a temporary owner would lose the selection.
+#[tauri::command]
+async fn write_primary_selection(text: String) -> Result<(), String> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        use arboard::SetExtLinux;
+        run_clipboard_op(move || {
+            on_clipboard(|c| {
+                primary_selection_attempt(primary_selection_write(text, |kind, text| {
+                    c.set().clipboard(kind).text(text)
+                }))
+            })
+            .and_then(|result| result)
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        let _ = text;
+        Err("PRIMARY selection is not supported on this platform".into())
+    }
+}
+
 /// Read a PNG image off the OS clipboard for `cs paste` of an image, bypassing
 /// WKWebView's paste button like the text read. arboard returns raw RGBA
 /// (`ImageData`), so encode it to PNG (what the terminal deals in). An
@@ -5399,6 +5478,8 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         platform_os,
         read_clipboard_text,
         write_clipboard_text,
+        read_primary_selection,
+        write_primary_selection,
         read_clipboard_image,
         write_clipboard_image,
         read_clipboard_html,
@@ -8529,6 +8610,101 @@ mod tests {
             optional_content::<u32>(Err(arboard::Error::ClipboardNotSupported)),
             Err(arboard::Error::ClipboardNotSupported)
         ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn primary_selection_reads_and_writes_only_primary() {
+        use arboard::LinuxClipboardKind;
+        let clipboard = "explicit clipboard copy".to_string();
+        let mut primary = "another application's selection".to_string();
+        let read = primary_selection_read(|kind| match kind {
+            LinuxClipboardKind::Primary => Ok(primary.clone()),
+            _ => Ok(clipboard.clone()),
+        })
+        .unwrap();
+        assert_eq!(read.as_deref(), Some("another application's selection"));
+        let text = "a wrapped command\nwith a hard break";
+        primary_selection_write(text.into(), |kind, text| {
+            assert!(
+                matches!(kind, LinuxClipboardKind::Primary),
+                "the write must leave CLIPBOARD alone"
+            );
+            primary = text;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(primary, text);
+        assert_eq!(clipboard, "explicit clipboard copy");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn primary_selection_absence_keeps_the_cached_owner() {
+        let mut slot = Some(());
+        let result = with_cached_clipboard(
+            &mut slot,
+            || panic!("must reuse the cached owner"),
+            |_| primary_selection_read(|_| Err(arboard::Error::ContentNotAvailable)),
+        )
+        .unwrap();
+        assert_eq!(result, None);
+        assert!(
+            slot.is_some(),
+            "a missing PRIMARY must not release CLIPBOARD"
+        );
+        assert!(matches!(
+            primary_selection_read(|_| Err(arboard::Error::ClipboardNotSupported)),
+            Err(arboard::Error::ClipboardNotSupported)
+        ));
+        assert!(matches!(
+            primary_selection_write("text".into(), |_, _| Err(
+                arboard::Error::ClipboardNotSupported
+            )),
+            Err(arboard::Error::ClipboardNotSupported)
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn primary_selection_unsupported_keeps_clipboard_but_connection_failure_reconnects() {
+        let mut slot = Some(());
+        let result = with_cached_clipboard(
+            &mut slot,
+            || panic!("must reuse the cached owner"),
+            |_| primary_selection_attempt::<()>(Err(arboard::Error::ClipboardNotSupported)),
+        )
+        .and_then(|result| result);
+        assert!(matches!(result, Err(arboard::Error::ClipboardNotSupported)));
+        assert!(
+            slot.is_some(),
+            "unsupported PRIMARY must not release CLIPBOARD"
+        );
+        let result = with_cached_clipboard(
+            &mut slot,
+            || panic!("must reuse the cached owner"),
+            |_| {
+                primary_selection_attempt::<()>(Err(arboard::Error::Unknown {
+                    description: "lost display connection".into(),
+                }))
+            },
+        )
+        .and_then(|result| result);
+        assert!(result.is_err());
+        assert!(slot.is_none(), "a broken connection must reconnect");
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    #[tokio::test]
+    async fn primary_selection_commands_refuse_unsupported_platforms() {
+        assert_eq!(
+            read_primary_selection().await.unwrap_err(),
+            "PRIMARY selection is not supported on this platform"
+        );
+        assert_eq!(
+            write_primary_selection("text".into()).await.unwrap_err(),
+            "PRIMARY selection is not supported on this platform"
+        );
     }
 
     /// The read behind the editor's and the Rich Prompt's paste recovery on the

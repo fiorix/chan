@@ -108,6 +108,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "read_clipboard_image",
     "read_clipboard_text",
     "read_dropped_file",
+    "read_primary_selection",
     "reconnect_devserver_for_window",
     "reload_window",
     "request_app_quit",
@@ -127,6 +128,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "write_clipboard_html",
     "write_clipboard_image",
     "write_clipboard_text",
+    "write_primary_selection",
     "zoom_in",
     "zoom_out",
     "zoom_reset",
@@ -286,6 +288,16 @@ mod tests {
         "stub-focus"
     }
 
+    #[tauri::command]
+    fn read_primary_selection() -> &'static str {
+        "stub-primary"
+    }
+
+    #[tauri::command]
+    fn write_primary_selection() -> &'static str {
+        "stub-primary-write"
+    }
+
     /// Stub for `read_dropped_paths` - the one command a loopback
     /// workspace window holds that `lib-*` windows never get, on any
     /// origin. Registered so the out-of-set denial pin cannot pass
@@ -309,7 +321,9 @@ mod tests {
                 read_dropped_paths,
                 open_reverse_tunnel,
                 create_library_window,
-                focus_library_window
+                focus_library_window,
+                read_primary_selection,
+                write_primary_selection
             ])
             .build(crate::app_context())
             .expect("mock app builds from the real context")
@@ -496,6 +510,25 @@ mod tests {
             invoke_from(&non_lib, GATEWAY_PAGE, "gateway_csrf_token").is_err(),
             "window labels outside lib-* cannot read the gateway CSRF token"
         );
+    }
+
+    #[test]
+    fn primary_selection_commands_follow_clipboard_authority() {
+        let app = mock_desktop_app();
+        app.add_capability(production_json()).unwrap();
+        let gateway = lib_window(&app, WATCHED_LABEL, WATCHED_PAGE);
+        let local = lib_window(&app, "local::primary", "http://127.0.0.1:12345/");
+        for (cmd, reply) in [
+            ("read_primary_selection", "stub-primary"),
+            ("write_primary_selection", "stub-primary-write"),
+        ] {
+            assert_eq!(invoke_from(&gateway, WATCHED_PAGE, cmd), Ok(reply.into()));
+            assert_eq!(
+                invoke_from(&local, "http://127.0.0.1:12345/", cmd),
+                Ok(reply.into())
+            );
+            assert!(invoke_from(&gateway, SIBLING_PAGE, cmd).is_err());
+        }
     }
 
     /// The shapes production presents, which no other pin here uses: every
