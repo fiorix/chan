@@ -712,7 +712,12 @@ pub async fn fetch_roster(roster_url: &str, pat_secret: &str, etag: Option<&str>
     }
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(e) => return RosterFetch::Upstream(format!("roster request failed: {e}")),
+        Err(e) => {
+            return RosterFetch::Upstream(format!(
+                "roster request failed: {}",
+                crate::native_transfer::reason_without_url(e)
+            ))
+        }
     };
     match resp.status() {
         reqwest::StatusCode::NOT_MODIFIED => RosterFetch::NotModified,
@@ -4957,6 +4962,22 @@ pub(crate) mod tests {
             b = b.header(axum::http::header::ETAG, etag);
         }
         b.body(axum::body::Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_failed_roster_request_names_its_cause() {
+        let sink = chan_tls::testing::Sink::start();
+        let url = format!("https://{}/desktop/v1/roster", sink.addr);
+        match fetch_roster(&url, "pat-secret", None).await {
+            RosterFetch::Upstream(error) => {
+                assert!(
+                    error.starts_with("roster request failed: error sending request: "),
+                    "{error}"
+                );
+                assert!(error.contains("client error (Connect)"), "{error}");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
     }
 
     #[tokio::test]

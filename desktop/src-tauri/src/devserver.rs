@@ -782,8 +782,13 @@ pub async fn discover_gateway(url: &str) -> Result<GatewayDiscovery, GatewayDisc
         .get(u)
         .send()
         .await
+        // reqwest's own message stops before the cause, which for a gateway
+        // behind a CA in neither trust store is the refused certificate.
         .map_err(|e| {
-            GatewayDiscoveryError::Transport(format!("checking chan-gateway discovery: {e}"))
+            GatewayDiscoveryError::Transport(format!(
+                "checking chan-gateway discovery: {}",
+                crate::native_transfer::reason_without_url(e)
+            ))
         })?;
     if !resp.status().is_success() {
         return Err(GatewayDiscoveryError::Other(format!(
@@ -3097,6 +3102,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("pinned proxy origin"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_discovery_names_the_cause_of_its_transport_error() {
+        let sink = chan_tls::testing::Sink::start();
+        let Err(GatewayDiscoveryError::Transport(error)) =
+            discover_gateway(&format!("https://{}", sink.addr)).await
+        else {
+            panic!("the sink never answers");
+        };
+        assert!(
+            error.starts_with("checking chan-gateway discovery: error sending request: "),
+            "{error}"
+        );
+        assert!(error.contains("client error (Connect)"), "{error}");
     }
 
     #[tokio::test]
