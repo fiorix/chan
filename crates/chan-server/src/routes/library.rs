@@ -4213,8 +4213,10 @@ mod devserver_route_tests {
     /// reported.
     #[cfg(unix)]
     mod mount_bound {
+        use std::cell::RefCell;
         use std::future::Future;
         use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::mpsc::RecvTimeoutError;
         use std::time::{Duration, Instant};
 
@@ -4222,61 +4224,129 @@ mod devserver_route_tests {
 
         use super::super::registration_probe;
         use super::*;
-        use crate::devserver::hung_root_support::HEALTHY_ROOT_BOUND;
 
         /// The bound, written out so that moving it is a deliberate edit here.
         const MOUNT_BOUND: Duration = Duration::from_secs(60);
         const JUST_SHORT: Duration = Duration::from_millis(1);
         pub(super) const STILL_RELEASING: &str = "workspace is still releasing; retry";
 
+        /// How long a scenario may go with neither it nor a request it sent
+        /// polled before it counts as hung. It bounds one wait, not the
+        /// scenario: each step of a request, a blocking call returning or a
+        /// task it waits on ending, polls it again, so a loaded host that
+        /// stretches every step never adds the steps up here. A request that
+        /// waits for good on a call the root holds, on a clock only the test
+        /// moves, is not polled again and ends here, red and not hung. The
+        /// runtime's own wakes do not count: on a paused clock its timer
+        /// driver still wakes it after each pending timer's distance in real
+        /// time, with nothing to run.
+        const HANG_GUARD: Duration = Duration::from_secs(60);
+
+        thread_local! {
+            /// The poll count of the scenario this thread runs, if it runs one.
+            static PROGRESS: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
+        }
+
+        /// `future`, each poll of which counts as progress of the scenario
+        /// running on this thread.
+        async fn counted<F: Future>(future: F) -> F::Output {
+            tokio::pin!(future);
+            std::future::poll_fn(|cx| {
+                PROGRESS.with(|progress| {
+                    if let Some(progress) = progress.borrow().as_ref() {
+                        progress.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+                future.as_mut().poll(cx)
+            })
+            .await
+        }
+
         /// Run `scenario` on a current-thread runtime whose clock starts
         /// paused, on a thread of its own, and panic naming `what` and the
-        /// calls `stall` holds when it has not ended within
-        /// [`HEALTHY_ROOT_BOUND`] of real time. The stall goes before the
-        /// thread is joined: dropping the scenario's runtime waits for its
-        /// blocking tasks, and a held call is one.
+        /// calls `stall` holds once a whole [`HANG_GUARD`] of real time has
+        /// passed with neither the scenario nor a request it sent polled. The
+        /// stall goes before the thread is joined: dropping the scenario's
+        /// runtime waits for its blocking tasks, and a held call is one.
         fn on_a_paused_clock(
             stall: Arc<RootStall>,
             what: &str,
             scenario: impl Future<Output = ()> + Send + 'static,
         ) {
+            let progress = Arc::new(AtomicU64::new(0));
+            let polls = Arc::clone(&progress);
             let (done, finished) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
+                // The runtime has one thread, this one, so every task it
+                // polls sees this count.
+                PROGRESS.with(|progress| *progress.borrow_mut() = Some(polls));
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .start_paused(true)
                     .build()
                     .expect("paused runtime");
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    runtime.block_on(scenario)
+                    runtime.block_on(counted(scenario))
                 }));
                 let _ = done.send(outcome);
             });
-            match finished.recv_timeout(HEALTHY_ROOT_BOUND) {
-                Ok(outcome) => {
-                    drop(stall);
-                    worker.join().expect("scenario thread");
-                    if let Err(panic) = outcome {
-                        std::panic::resume_unwind(panic);
+            let mut seen = progress.load(Ordering::SeqCst);
+            let outcome = loop {
+                match finished.recv_timeout(HANG_GUARD) {
+                    Ok(outcome) => break outcome,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        panic!("{what} ended without an outcome")
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        let now = progress.load(Ordering::SeqCst);
+                        assert_ne!(
+                            now,
+                            seen,
+                            "{what} did not finish: neither it nor a request it sent was \
+                             polled for {HANG_GUARD:?}; calls held on the root: {:#?}",
+                            stall.entered()
+                        );
+                        seen = now;
                     }
                 }
-                Err(RecvTimeoutError::Disconnected) => panic!("{what} ended without an outcome"),
-                Err(RecvTimeoutError::Timeout) => panic!(
-                    "{what} did not finish; calls held on the root: {:#?}",
-                    stall.entered()
-                ),
+            };
+            drop(stall);
+            worker.join().expect("scenario thread");
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
             }
         }
 
-        /// Wait until a call on the root is held, from a blocking thread, so
-        /// the runtime's one thread keeps serving the request that makes it.
-        async fn held(stall: &Arc<RootStall>, what: &str) {
-            let waiting = Arc::clone(stall);
-            let entered =
-                tokio::task::spawn_blocking(move || waiting.wait_entered(Duration::from_secs(10)))
-                    .await
-                    .expect("wait task");
-            assert!(entered, "fixture: {what} never reached its root");
+        /// Wait until `calls` calls on the root have reached the stall,
+        /// watching from a blocking thread so the runtime's one thread keeps
+        /// serving `request`, which makes them; panic naming `what` when
+        /// `request` answers first. The wait has no deadline of its own: a
+        /// request that never gets there is not polled again, and the
+        /// fixture's [`HANG_GUARD`] reports it.
+        async fn held<T: std::fmt::Debug>(
+            stall: &Arc<RootStall>,
+            calls: usize,
+            request: &mut tokio::task::JoinHandle<T>,
+            what: &str,
+        ) {
+            // Weak, so the watch of a scenario that failed ends once the
+            // fixture drops the stall, and the runtime can wind down.
+            let watched = Arc::downgrade(stall);
+            let reached = tokio::task::spawn_blocking(move || {
+                while let Some(stall) = watched.upgrade() {
+                    if stall.entered().len() >= calls {
+                        return;
+                    }
+                    drop(stall);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            tokio::select! {
+                reached = reached => reached.expect("wait task"),
+                answer = request => {
+                    panic!("{what} answered before its call on the root was held: {answer:?}")
+                }
+            }
         }
 
         /// Let the calls `stall` holds go, one round at a time, until the call
@@ -4311,7 +4381,8 @@ mod devserver_route_tests {
 
         /// One request through `router`: its status, its `Retry-After` and its
         /// JSON body. It owns its arguments, so a test can run it as a task of
-        /// its own and watch whether it has answered.
+        /// its own and watch whether it has answered, and its polls count as
+        /// progress of the scenario that sends it.
         pub(super) async fn send(
             router: axum::Router,
             method: &'static str,
@@ -4326,7 +4397,9 @@ mod devserver_route_tests {
                 }
                 None => Body::empty(),
             };
-            let response = router.oneshot(req.body(body).unwrap()).await.unwrap();
+            let response = counted(router.oneshot(req.body(body).unwrap()))
+                .await
+                .unwrap();
             let status = response.status();
             let retry_after = response
                 .headers()
@@ -4411,13 +4484,13 @@ mod devserver_route_tests {
             let open = Arc::clone(&stall);
             on_a_paused_clock(stall, "an on whose open hangs", async move {
                 let (host, router) = mutable_router(lib);
-                let on = tokio::spawn(send(
+                let mut on = tokio::spawn(send(
                     router.clone(),
                     "POST",
                     format!("/api/library/workspaces/{id}/on"),
                     None,
                 ));
-                held(&open, "the on").await;
+                held(&open, 1, &mut on, "fixture: the on").await;
                 tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
                 settle().await;
                 assert!(!on.is_finished(), "the on answered before the mount bound");
@@ -4451,13 +4524,13 @@ mod devserver_route_tests {
             on_a_paused_clock(stall, "an add whose steps hang", async move {
                 let (host, router) = mutable_router(lib);
                 let body = serde_json::json!({ "path": requested.to_string_lossy() }).to_string();
-                let add = tokio::spawn(send(
+                let mut add = tokio::spawn(send(
                     router.clone(),
                     "POST",
                     "/api/library/workspaces".into(),
                     Some(body),
                 ));
-                held(&steps, "the add's registration").await;
+                held(&steps, 1, &mut add, "fixture: the add").await;
                 assert!(
                     steps.entered()[0].contains("register_workspace_with_name"),
                     "fixture: the first held call is not the registration: {:#?}",
@@ -4501,13 +4574,13 @@ mod devserver_route_tests {
             let registration = Arc::clone(&stall);
             on_a_paused_clock(stall, "an add beside a held registration", async move {
                 let (host, router) = mutable_router(lib);
-                let first = tokio::spawn(send(
+                let mut first = tokio::spawn(send(
                     router.clone(),
                     "POST",
                     "/api/library/workspaces".into(),
                     Some(body.clone()),
                 ));
-                held(&registration, "the first add's registration").await;
+                held(&registration, 1, &mut first, "fixture: the first add").await;
                 let (pending, polled) = tokio::sync::oneshot::channel();
                 let second = tokio::spawn(registration_probe::PENDING.scope(
                     std::cell::RefCell::new(Some(pending)),
@@ -4545,20 +4618,13 @@ mod devserver_route_tests {
                 registration.release_held();
                 let (status, _, response) = first.await.unwrap();
                 assert_eq!(status, StatusCode::OK, "first add: {response}");
-                let third = tokio::spawn(send(
+                let mut third = tokio::spawn(send(
                     router,
                     "POST",
                     "/api/library/workspaces".into(),
                     Some(body),
                 ));
-                let deadline = Instant::now() + HEALTHY_ROOT_BOUND;
-                while registration.entered().len() < 2 {
-                    assert!(
-                        Instant::now() < deadline,
-                        "the next add never reached registration"
-                    );
-                    tokio::task::yield_now().await;
-                }
+                held(&registration, 2, &mut third, "the next add").await;
                 registration.release_held();
                 let (status, _, response) = third.await.unwrap();
                 assert_eq!(status, StatusCode::OK, "third add: {response}");
@@ -4598,8 +4664,8 @@ mod devserver_route_tests {
                         revalidation.entered().is_empty(),
                         "fixture: the mount met the held revalidation"
                     );
-                    let on = tokio::spawn(send(router.clone(), "POST", on_uri, None));
-                    held(&revalidation, "the on's revalidation").await;
+                    let mut on = tokio::spawn(send(router.clone(), "POST", on_uri, None));
+                    held(&revalidation, 1, &mut on, "fixture: the on").await;
                     tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
                     settle().await;
                     assert!(!on.is_finished(), "the on answered before the mount bound");
