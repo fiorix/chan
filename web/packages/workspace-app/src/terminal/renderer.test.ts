@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+  createRepaintScheduler,
   type RefreshableTerminal,
   refreshTerminalRows,
   shouldUseWebglRenderer,
@@ -107,5 +108,93 @@ describe("terminal renderer helpers", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("the terminal repaint scheduler", () => {
+  /// A page whose frames and fonts the test releases by hand: a hidden page
+  /// runs no frame, so nothing fires until `frame()`.
+  function page() {
+    let next = 1;
+    const frames = new Map<number, () => void>();
+    let fontsReady: (() => void) | null = null;
+    let fonts: Promise<void> | undefined;
+    return {
+      host: {
+        requestFrame: (callback: () => void) => {
+          frames.set(next, callback);
+          return next++;
+        },
+        cancelFrame: (handle: number) => void frames.delete(handle),
+        fontsReady: () => fonts,
+      },
+      pendingFrames: () => frames.size,
+      frame() {
+        const due = [...frames.values()];
+        frames.clear();
+        for (const callback of due) callback();
+      },
+      loadFonts() {
+        fonts = new Promise<void>((resolve) => (fontsReady = resolve));
+      },
+      async fontsLoaded() {
+        fontsReady?.();
+        await fonts;
+      },
+    };
+  }
+
+  test("every repaint asked for while no frame runs is one repaint in the frame that does", () => {
+    const hidden = page();
+    const repaint = vi.fn();
+    const scheduler = createRepaintScheduler(repaint, hidden.host);
+    for (let asked = 0; asked < 544; asked++) scheduler.request();
+    expect(hidden.pendingFrames()).toBe(1);
+    expect(repaint).not.toHaveBeenCalled();
+    hidden.frame();
+    expect(repaint).toHaveBeenCalledTimes(1);
+    expect(hidden.pendingFrames()).toBe(0);
+  });
+
+  test("a request after the frame ran schedules the next repaint", () => {
+    const shown = page();
+    const repaint = vi.fn();
+    const scheduler = createRepaintScheduler(repaint, shown.host);
+    scheduler.request();
+    shown.frame();
+    scheduler.request();
+    expect(shown.pendingFrames()).toBe(1);
+    shown.frame();
+    expect(repaint).toHaveBeenCalledTimes(2);
+  });
+
+  test("the fonts are waited on once however often a repaint is asked for", async () => {
+    const loading = page();
+    loading.loadFonts();
+    const repaint = vi.fn();
+    const scheduler = createRepaintScheduler(repaint, loading.host);
+    for (let asked = 0; asked < 10; asked++) scheduler.request();
+    await loading.fontsLoaded();
+    expect(repaint).toHaveBeenCalledTimes(1);
+    scheduler.request();
+    await Promise.resolve();
+    expect(repaint).toHaveBeenCalledTimes(2);
+  });
+
+  test("cancel drops the pending frame and the fonts wait, and a later request schedules again", async () => {
+    const closing = page();
+    closing.loadFonts();
+    const repaint = vi.fn();
+    const scheduler = createRepaintScheduler(repaint, closing.host);
+    scheduler.request();
+    scheduler.cancel();
+    expect(closing.pendingFrames()).toBe(0);
+    await closing.fontsLoaded();
+    closing.frame();
+    expect(repaint).not.toHaveBeenCalled();
+    scheduler.request();
+    closing.frame();
+    await Promise.resolve();
+    expect(repaint).toHaveBeenCalledTimes(2);
   });
 });
