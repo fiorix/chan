@@ -595,7 +595,7 @@ pub async fn spawn_control_terminal_window(
                 // `control` (not `terminal`) puts the SPA in the singleton
                 // control sub-mode: terminal-only, but with the tab strip / pane
                 // chrome hidden and Cmd+T / splits disabled so it never spawns a
-                // second tab. It also tags the window kind in `cs window list`,
+                // second tab. It is also the kind `GET /api/windows` reports,
                 // keeping it distinct from persisted standalone terminals.
                 kind: Some("control"),
                 start_terminal: false,

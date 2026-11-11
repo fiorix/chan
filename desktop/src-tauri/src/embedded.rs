@@ -394,7 +394,7 @@ impl EmbeddedServer {
     }
 
     /// The shared window-title map the desktop writes (on window build /
-    /// rename / destroy) and the server reads for `cs window list`.
+    /// rename / destroy) and the server reads back for `GET /api/windows`.
     pub fn window_titles(&self) -> SharedWindowTitles {
         self.host.desktop_bridge().window_titles.clone()
     }
