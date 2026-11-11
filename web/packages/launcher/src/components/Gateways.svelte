@@ -162,8 +162,12 @@
             <span class="gw-addr-row gw-wireguard gw-wg-ingress">
               <span class="gw-glyph"></span>
               <span class="chip">WireGuard</span>
-              <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:id`} label="WireGuard ingress"><span class="gw-url gw-wg-id" title={ingress.id}>{ingress.id}</span></PrivateField>
-              <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={ingress.status}>{ingress.status}</span></PrivateField>
+              <span class="gw-wg-fixed">
+                <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:id`} label="WireGuard ingress"><span class="gw-url gw-wg-id" title={ingress.id}>{ingress.id}</span></PrivateField>
+              </span>
+              <span class="gw-wg-detail">
+                <PrivateField field={`gateway:${gw.id}:ingress:${ingress.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={ingress.status}>{ingress.status}</span></PrivateField>
+              </span>
             </span>
           {/each}
         {:else if gw.wireguard || gw.wireguard_status || gw.wireguard_enrolled}
@@ -171,10 +175,14 @@
             <span class="gw-glyph"></span>
             <span class="chip">WireGuard</span>
             {#if gw.wireguard_status}
-              <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
+              <span class="gw-wg-summary">
+                <PrivateField field={`gateway:${gw.id}:status`} label="connection details"><span class="gw-url gw-wg-status" title={gw.wireguard_status}>{gw.wireguard_status}</span></PrivateField>
+              </span>
             {/if}
             {#if gw.wireguard}
-              <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+              <span class="gw-wg-detail">
+                <PrivateField field={`gateway:${gw.id}:path`} label="WireGuard path"><span class="gw-url gw-wg-file" title={gw.wireguard}>{gw.wireguard}</span></PrivateField>
+              </span>
             {/if}
           </span>
         {/if}
@@ -344,6 +352,23 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Size the privacy wrapper too, so revealing a long status cannot steal the id's width. */
+  .gw-wg-fixed {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+
+  .gw-wg-summary,
+  .gw-wg-detail {
+    display: inline-flex;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .gw-wg-detail {
+    flex: 1;
   }
 
   /* The file is a path the user typed, so it reads as literal text. */

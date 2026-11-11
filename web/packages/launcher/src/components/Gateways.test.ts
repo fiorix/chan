@@ -809,6 +809,53 @@ describe("Gateways WireGuard ingresses", () => {
     expect([...el.querySelectorAll(".gw-wireguard .chip")].map((node) => node.textContent)).toEqual(["WireGuard", "WireGuard"]);
   });
 
+  it("uses one summary line for an enrolled legacy row with no listed ingresses", () => {
+    library.gateways = [gw({
+      wireguard_enrolled: true,
+      wireguard_status: "up",
+      wireguard_ingresses: [],
+    })];
+    const el = render();
+    expect(ingressRows(el)).toEqual([]);
+    expect(el.querySelectorAll(".gw-wireguard")).toHaveLength(1);
+    expect(el.querySelectorAll(".gw-wg-status")).toHaveLength(1);
+    expect(el.querySelector(".gw-wg-status")?.textContent).toBe("up");
+    expect(el.querySelector(".gw-wg-file")).toBeNull();
+    expect(el.textContent).not.toContain("legacy");
+  });
+
+  it.each([false, true])("keeps ingress identity fixed beside a long status with privacy %s", async (privateView) => {
+    const status = "connecting; endpoint did not resolve: p2-endpoint.example: retrying";
+    library.gateways = [gw({ wireguard_ingresses: [{ id: "p2", status }] })];
+    await setPrivacy({ enabled: privateView });
+    const el = render();
+    if (privateView) {
+      expect(el.querySelector(".gw-wg-id")).toBeNull();
+      expect(el.querySelector(".gw-wg-status")).toBeNull();
+      (el.querySelector('[aria-label="Reveal WireGuard ingress"]') as HTMLButtonElement).click();
+      (el.querySelector('[aria-label="Reveal connection details"]') as HTMLButtonElement).click();
+      flushSync();
+    }
+    const id = el.querySelector(".gw-wg-id")!;
+    const detail = el.querySelector(".gw-wg-status")!;
+    expect(id.textContent).toBe("p2");
+    expect(id.closest(".gw-wg-fixed")).not.toBeNull();
+    expect(detail.closest(".gw-wg-detail")).not.toBeNull();
+    expect(detail.getAttribute("title")).toBe(status);
+  });
+
+  it("lets the manual path take remaining width beside its short summary", () => {
+    const file = "/a/long/operator/configuration/directory/with/a/wireguard.conf";
+    library.gateways = [gw({ wireguard: file, wireguard_status: "up" })];
+    const el = render();
+    const status = el.querySelector(".gw-wg-status")!;
+    const path = el.querySelector(".gw-wg-file")!;
+    expect(status.textContent).toBe("up");
+    expect(status.closest(".gw-wg-summary")).not.toBeNull();
+    expect(path.closest(".gw-wg-detail")).not.toBeNull();
+    expect(path.getAttribute("title")).toBe(file);
+  });
+
   it("refreshes and reorders each ingress on the same card and removes retired ingresses", () => {
     library.gateways = [gw({ wireguard_ingresses: [{ id: "p1", status: "up" }, { id: "p2", status: "connecting" }] })];
     const el = render();
