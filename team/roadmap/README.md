@@ -73,7 +73,7 @@ A second intake came from the owner on 2026-11-11, from a screenshot of a window
 | [tmux windows not on their machine card][tmuxcard] | landed | GA |
 | [New Window in a devserver tmux window][tmuxnew] | landed | GA |
 | [a launch beside a silent desktop shows nothing][silentlaunch] | landed | GA |
-| [the Windows handoff pipe's early clients][winpipe] | partly built | build |
+| [the Windows handoff pipe's early clients][winpipe] | landed | GA |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
 | [the unused-token test reads too early][tokentest] | landed | GA |
 | [a desktop upload's cancel and error paths][uploadpaths] | landed | GA |
