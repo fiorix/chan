@@ -8,7 +8,14 @@ use super::{Source, Subscription};
 
 const INTERFACE: &str = "io.chan.Metrics";
 const IDL: &str = include_str!("io.chan.Metrics.varlink");
-const SERVICE_IDL: &str = "interface org.varlink.service\nmethod GetInfo() -> (vendor: string, product: string, version: string, url: string, interfaces: []string)\nmethod GetInterfaceDescription(interface: string) -> (description: string)\nerror InterfaceNotFound(interface: string)\nerror MethodNotFound(method: string)\nerror MethodNotImplemented(method: string)\nerror InvalidParameter(parameter: string)\n";
+const SERVICE_IDL: &str = "interface org.varlink.service\n\
+    method GetInfo() -> (vendor: string, product: string, version: string, \
+    url: string, interfaces: []string)\n\
+    method GetInterfaceDescription(interface: string) -> (description: string)\n\
+    error InterfaceNotFound(interface: string)\n\
+    error MethodNotFound(method: string)\n\
+    error MethodNotImplemented(method: string)\n\
+    error InvalidParameter(parameter: string)\n";
 const MAX_FRAME: u64 = 65536;
 /// How long a connection may wait for its client's next call.
 const IDLE: Duration = Duration::from_secs(60);
@@ -488,7 +495,10 @@ mod tests {
             serve(&runtime, input, output).await
         });
         client
-            .write_all(b"{\"method\":\"io.chan.Metrics.Get\",\"parameters\":{\"history\":true},\"more\":true}\0")
+            .write_all(
+                b"{\"method\":\"io.chan.Metrics.Get\",\
+                \"parameters\":{\"history\":true},\"more\":true}\0",
+            )
             .await
             .unwrap();
         let mut input = BufReader::new(client);

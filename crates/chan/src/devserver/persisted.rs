@@ -370,12 +370,20 @@ mod tests {
     /// launchd ProgramArguments joined (with plist `<string>` values unescaped).
     #[test]
     fn status_command_extracts_per_backend() {
-        let unit = "[Service]\nExecStart=/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000\nRestart=on-failure\n";
+        let unit = concat!(
+            "[Service]\nExecStart=/usr/bin/chan devserver run ",
+            "--bind=0.0.0.0 --port=9000\nRestart=on-failure\n",
+        );
         assert_eq!(
             systemd_execstart_line(unit).as_deref(),
             Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")
         );
-        let plist = "<array>\n  <string>/usr/bin/chan</string>\n  <string>devserver</string>\n  <string>run</string>\n  <string>--bind=0.0.0.0</string>\n  <string>--port=9000</string>\n</array>";
+        let plist = concat!(
+            "<array>\n  <string>/usr/bin/chan</string>\n",
+            "  <string>devserver</string>\n  <string>run</string>\n",
+            "  <string>--bind=0.0.0.0</string>\n",
+            "  <string>--port=9000</string>\n</array>",
+        );
         assert_eq!(
             launchd_program_arguments(plist).as_deref(),
             Some("/usr/bin/chan devserver run --bind=0.0.0.0 --port=9000")

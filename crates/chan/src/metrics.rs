@@ -940,7 +940,10 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer tok"));
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\n\
+                     content-type: application/json\r\n\
+                     content-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket.write_all(response.as_bytes()).await.unwrap();
@@ -955,7 +958,10 @@ mod tests {
             })
             .unwrap();
             let read = client.read(false, None).await;
-            assert!(!proxied.load(Ordering::SeqCst), "the bearer went to the proxy");
+            assert!(
+                !proxied.load(Ordering::SeqCst),
+                "the bearer went to the proxy"
+            );
             assert_eq!(read.unwrap().schema_version, 1);
         });
         println!("local read answered directly");
