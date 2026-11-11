@@ -2000,6 +2000,107 @@ fn map_open_path_response(line: &str) -> OpenPathReply {
     }
 }
 
+/// Ask the running same-user desktop to open `path`, for the CLI's
+/// `chan-files` and `chan-edit` outside a chan terminal. `NoReply` when no
+/// desktop serves the endpoint. The caller reads `CHAN_NO_DESKTOP_HANDOFF`
+/// and the GUI-session check first, so it can say which of them stopped it.
+#[cfg(any(unix, windows))]
+pub async fn try_open_path(path: &str) -> OpenPathReply {
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return OpenPathReply::NoReply;
+    };
+    try_open_path_at(&socket_path, path, IO_TIMEOUT).await
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_open_path(_path: &str) -> OpenPathReply {
+    OpenPathReply::NoReply
+}
+
+/// The absolute path a launch argument names, the `path` of an `OpenPath` or
+/// of `cs open`: an argument of `chan-desktop`, `chan-files` or `chan-edit`,
+/// typed or the file URIs a desktop entry's `%U` expands to. A relative path
+/// is made absolute against `cwd`, the launch's working directory, and a
+/// `file://` URI is percent-decoded. `Err` is the reason an argument names
+/// nothing chan can open, because a desktop entry hands over every URI a file
+/// manager selected (`smb://` and `sftp://` on a network mount among them): a
+/// URI of another scheme, a file URI naming another host or encoding a `/` or
+/// a NUL in a name, a relative path with no working directory, a path that is
+/// not UTF-8, which the request's JSON cannot carry.
+pub fn launch_arg_path(
+    arg: &std::ffi::OsStr,
+    cwd: Option<&std::path::Path>,
+) -> Result<String, String> {
+    launch_arg_pathbuf(arg, cwd)?
+        .into_os_string()
+        .into_string()
+        .map_err(|path| {
+            format!(
+                "{} is not valid UTF-8, so it cannot be sent to chan",
+                std::path::Path::new(&path).display()
+            )
+        })
+}
+
+fn launch_arg_pathbuf(
+    arg: &std::ffi::OsStr,
+    cwd: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
+    if let Some(text) = arg.to_str() {
+        if let Some(uri) = launch_arg_uri(text) {
+            return file_uri_path(text, &uri);
+        }
+    }
+    let path = std::path::Path::new(arg);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    match cwd {
+        Some(cwd) => Ok(cwd.join(path)),
+        None => Err(format!(
+            "{} is relative and this launch has no working directory to resolve it in",
+            path.display()
+        )),
+    }
+}
+
+/// `text` as a URI when it has a scheme of two letters or more, so a Windows
+/// drive letter (`C:\notes.md`) stays a path.
+fn launch_arg_uri(text: &str) -> Option<url::Url> {
+    url::Url::parse(text)
+        .ok()
+        .filter(|uri| uri.scheme().len() > 1)
+}
+
+/// The local path a `file://` URI names. The host is checked here rather than
+/// left to `to_file_path`, which on Windows makes `file://host/share/...` a UNC
+/// path; a `/` or a NUL encoded in a name (`%2F`, `%00`) is refused, since
+/// decoding it would split the name or end it.
+fn file_uri_path(text: &str, uri: &url::Url) -> Result<PathBuf, String> {
+    if uri.scheme() != "file" {
+        return Err(format!(
+            "{text} is not a file: chan opens files and directories, given as paths or \
+             file:// URIs"
+        ));
+    }
+    if let Some(host) = uri
+        .host_str()
+        .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("localhost"))
+    {
+        return Err(format!(
+            "{text} names the host {host}: chan opens files on this machine only"
+        ));
+    }
+    let encoded = uri.path().to_ascii_lowercase();
+    if encoded.contains("%2f") || encoded.contains("%00") {
+        return Err(format!(
+            "{text} encodes a / or a NUL inside a name, which no file name holds"
+        ));
+    }
+    uri.to_file_path()
+        .map_err(|()| format!("{text} names no local path"))
+}
+
 /// Map an `OpenDevserver` reply line to an [`Outcome`]. Shared by the unix +
 /// windows arms so the response handling stays in one place: only
 /// `DevserverRegistered` is a success; a workspace/upgrade reply to a
@@ -3679,6 +3780,114 @@ mod tests {
             OpenPathReply::Refused {
                 reply: OLDER_DESKTOP_OPEN_PATH_REPLY.trim().to_string()
             }
+        );
+    }
+
+    fn arg_path(arg: &str, cwd: Option<&str>) -> Result<String, String> {
+        launch_arg_path(std::ffi::OsStr::new(arg), cwd.map(std::path::Path::new))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_argument_is_made_absolute_against_the_working_directory() {
+        assert_eq!(
+            arg_path("notes.md", Some("/home/u/work")),
+            Ok("/home/u/work/notes.md".into())
+        );
+        assert_eq!(
+            arg_path("./a b/c.md", Some("/home/u/work")),
+            Ok("/home/u/work/./a b/c.md".into())
+        );
+        assert_eq!(
+            arg_path("/srv/readme.md", None),
+            Ok("/srv/readme.md".into())
+        );
+        assert_eq!(
+            arg_path("notes.md", None),
+            Err(
+                "notes.md is relative and this launch has no working directory to resolve it in"
+                    .into()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_uri_launch_argument_is_percent_decoded() {
+        for (uri, path) in [
+            ("file:///tmp/a%20b.md", "/tmp/a b.md"),
+            ("file://localhost/srv/caf%C3%A9.md", "/srv/caf\u{e9}.md"),
+            ("file:///home/u/dir/", "/home/u/dir/"),
+        ] {
+            assert_eq!(arg_path(uri, None), Ok(path.into()), "{uri}");
+        }
+    }
+
+    #[test]
+    fn a_launch_argument_of_another_scheme_names_nothing_to_open() {
+        for uri in [
+            "smb://nas/share/notes.md",
+            "https://example.com/notes.md",
+            "mailto:someone@example.com",
+        ] {
+            assert_eq!(
+                arg_path(uri, None),
+                Err(format!(
+                    "{uri} is not a file: chan opens files and directories, given as paths or \
+                     file:// URIs"
+                ))
+            );
+        }
+    }
+
+    /// The host is read before the URI becomes a path, on every platform:
+    /// Windows would otherwise make `file://host/share/...` a UNC path.
+    #[test]
+    fn a_file_uri_on_another_host_names_nothing_to_open() {
+        assert_eq!(
+            arg_path("file://nas.local/share/notes.md", None),
+            Err(
+                "file://nas.local/share/notes.md names the host nas.local: chan opens files on \
+                 this machine only"
+                    .into()
+            )
+        );
+    }
+
+    /// Decoding `%2F` or `%00` would split a name or end it, so such a URI
+    /// names no file.
+    #[test]
+    fn a_file_uri_encoding_a_slash_or_a_nul_in_a_name_names_nothing_to_open() {
+        for uri in [
+            "file:///srv/a%2Fb.md",
+            "file:///srv/a%2fb.md",
+            "file:///srv/a%00b.md",
+        ] {
+            assert_eq!(
+                arg_path(uri, None),
+                Err(format!(
+                    "{uri} encodes a / or a NUL inside a name, which no file name holds"
+                ))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_argument_that_is_not_utf8_cannot_be_sent() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            launch_arg_path(std::ffi::OsStr::from_bytes(b"/tmp/bad-\xff.md"), None),
+            Err("/tmp/bad-\u{fffd}.md is not valid UTF-8, so it cannot be sent to chan".into())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_letter_launch_argument_is_a_path_not_a_uri() {
+        assert_eq!(
+            arg_path(r"C:\notes\a.md", None),
+            Ok(r"C:\notes\a.md".into())
         );
     }
 

@@ -6,10 +6,10 @@
 //! standalone window would.
 
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use chan_server::handoff::Response;
+use chan_server::handoff::{self, Response};
 
 use crate::{serve, terminal_mode, AppState};
 
@@ -25,18 +25,13 @@ pub(crate) struct LaunchArgs {
 
 /// Read a GUI launch's arguments. An argument that starts with `-` is an
 /// option and is left alone, as a GUI launch has always left its options (an
-/// old macOS Finder passes `-psn_...`); an empty argument is ignored. A
-/// relative path is made absolute against `cwd`, the launch's working
-/// directory, and a `file://` URI is percent-decoded. An argument that names
-/// nothing this desktop can open is skipped with its reason, because a desktop
-/// entry hands over every URI a file manager selected (`smb://` and `sftp://`
-/// on a network mount among them): a URI of another scheme, a file URI naming
-/// another host or encoding a `/` or a NUL in a name, a relative path with no
-/// working directory, a path that is not UTF-8, which the request's JSON
-/// cannot carry. `Err` is the sentence for a usage error: a terminal-mode
-/// option (`-e`, `--`, `--dir` and the rest) beside a path, since a launch
-/// either opens paths or runs a terminal, and that one is a mistake rather
-/// than a path.
+/// old macOS Finder passes `-psn_...`); an empty argument is ignored. Every
+/// other one is read as `chan-files` reads its paths
+/// ([`handoff::launch_arg_path`]), and one that names nothing this desktop can
+/// open is skipped with its reason. `Err` is the sentence for a usage error: a
+/// terminal-mode option (`-e`, `--`, `--dir` and the rest) beside a path,
+/// since a launch either opens paths or runs a terminal, and that one is a
+/// mistake rather than a path.
 pub(crate) fn from_args(
     args: impl IntoIterator<Item = OsString>,
     cwd: Option<&Path>,
@@ -56,14 +51,7 @@ pub(crate) fn from_args(
     }
     let mut launch = LaunchArgs::default();
     for arg in args.iter().filter(|arg| !is_option(arg)) {
-        match resolve(arg, cwd).and_then(|path| {
-            path.into_os_string().into_string().map_err(|path| {
-                format!(
-                    "{} is not valid UTF-8, so it cannot be sent to chan-desktop",
-                    Path::new(&path).display()
-                )
-            })
-        }) {
+        match handoff::launch_arg_path(arg, cwd) {
             Ok(path) => launch.paths.push(path),
             Err(why) => launch
                 .skipped
@@ -75,62 +63,6 @@ pub(crate) fn from_args(
 
 fn is_option(arg: &OsStr) -> bool {
     arg.to_string_lossy().starts_with('-')
-}
-
-fn resolve(arg: &OsStr, cwd: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(text) = arg.to_str() {
-        if let Some(uri) = as_uri(text) {
-            return file_uri_path(text, &uri);
-        }
-    }
-    let path = Path::new(arg);
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    match cwd {
-        Some(cwd) => Ok(cwd.join(path)),
-        None => Err(format!(
-            "{} is relative and this launch has no working directory to resolve it in",
-            path.display()
-        )),
-    }
-}
-
-/// `text` as a URI when it has a scheme of two letters or more, so a Windows
-/// drive letter (`C:\notes.md`) stays a path.
-fn as_uri(text: &str) -> Option<url::Url> {
-    url::Url::parse(text)
-        .ok()
-        .filter(|uri| uri.scheme().len() > 1)
-}
-
-/// The local path a `file://` URI names. The host is checked here rather than
-/// left to `to_file_path`, which on Windows makes `file://host/share/...` a UNC
-/// path; a `/` or a NUL encoded in a name (`%2F`, `%00`) is refused, since
-/// decoding it would split the name or end it.
-fn file_uri_path(text: &str, uri: &url::Url) -> Result<PathBuf, String> {
-    if uri.scheme() != "file" {
-        return Err(format!(
-            "{text} is not a file: chan-desktop opens files and directories, given as paths or \
-             file:// URIs"
-        ));
-    }
-    if let Some(host) = uri
-        .host_str()
-        .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("localhost"))
-    {
-        return Err(format!(
-            "{text} names the host {host}: chan-desktop opens files on this machine only"
-        ));
-    }
-    let encoded = uri.path().to_ascii_lowercase();
-    if encoded.contains("%2f") || encoded.contains("%00") {
-        return Err(format!(
-            "{text} encodes a / or a NUL inside a name, which no file name holds"
-        ));
-    }
-    uri.to_file_path()
-        .map_err(|()| format!("{text} names no local path"))
 }
 
 /// The environment the GUI app is built with, for Tauri's restart after an
@@ -180,6 +112,7 @@ mod tests {
         list.iter().map(OsString::from).collect()
     }
 
+    #[cfg(unix)]
     fn skipped(arg: &str, why: &str) -> (String, String) {
         (arg.to_string(), why.to_string())
     }
@@ -204,25 +137,6 @@ mod tests {
         assert_eq!(launch.skipped, Vec::<(String, String)>::new());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn file_uris_are_percent_decoded() {
-        let launch = from_args(
-            args(&[
-                "file:///tmp/a%20b.md",
-                "file://localhost/srv/caf%C3%A9.md",
-                "file:///home/u/dir/",
-            ]),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            launch.paths,
-            ["/tmp/a b.md", "/srv/caf\u{e9}.md", "/home/u/dir/"]
-        );
-        assert_eq!(launch.skipped, Vec::<(String, String)>::new());
-    }
-
     /// A desktop entry hands over every URI a file manager selected; one of
     /// another scheme is skipped with its reason and the rest are delivered,
     /// and a launch left with no path is a launch without paths.
@@ -233,8 +147,8 @@ mod tests {
             skipped(
                 uri,
                 &format!(
-                    "{uri} is not a file: chan-desktop opens files and directories, given as \
-                     paths or file:// URIs"
+                    "{uri} is not a file: chan opens files and directories, given as paths or \
+                     file:// URIs"
                 ),
             )
         };
@@ -271,43 +185,6 @@ mod tests {
         );
     }
 
-    /// The host is read before the URI becomes a path, on every platform:
-    /// Windows would otherwise make `file://host/share/...` a UNC path.
-    #[test]
-    fn a_file_uri_on_another_host_is_skipped() {
-        let launch = from_args(args(&["file://nas.local/share/notes.md"]), None).unwrap();
-        assert_eq!(launch.paths, Vec::<String>::new());
-        assert_eq!(
-            launch.skipped,
-            [skipped(
-                "file://nas.local/share/notes.md",
-                "file://nas.local/share/notes.md names the host nas.local: chan-desktop opens \
-                 files on this machine only"
-            )]
-        );
-    }
-
-    /// Decoding `%2F` or `%00` would split a name or end it, so such a URI
-    /// names no file and is skipped.
-    #[test]
-    fn a_file_uri_encoding_a_slash_or_a_nul_in_a_name_is_skipped() {
-        for uri in [
-            "file:///srv/a%2Fb.md",
-            "file:///srv/a%2fb.md",
-            "file:///srv/a%00b.md",
-        ] {
-            let launch = from_args(args(&[uri]), None).unwrap();
-            assert_eq!(launch.paths, Vec::<String>::new(), "{uri}");
-            assert_eq!(
-                launch.skipped,
-                [skipped(
-                    uri,
-                    &format!("{uri} encodes a / or a NUL inside a name, which no file name holds")
-                )]
-            );
-        }
-    }
-
     #[test]
     fn options_and_empty_arguments_are_left_alone() {
         assert_eq!(
@@ -341,44 +218,6 @@ mod tests {
             from_args(args(&["--hold"]), None).unwrap(),
             LaunchArgs::default(),
             "with no path there is nothing to refuse"
-        );
-    }
-
-    #[test]
-    fn a_relative_path_without_a_working_directory_is_skipped() {
-        let launch = from_args(args(&["notes.md"]), None).unwrap();
-        assert_eq!(launch.paths, Vec::<String>::new());
-        assert_eq!(
-            launch.skipped,
-            [skipped(
-                "notes.md",
-                "notes.md is relative and this launch has no working directory to resolve it in"
-            )]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_path_that_is_not_utf8_is_skipped() {
-        use std::os::unix::ffi::OsStringExt;
-        let arg = OsString::from_vec(b"/tmp/bad-\xff.md".to_vec());
-        let launch = from_args([arg], None).unwrap();
-        assert_eq!(launch.paths, Vec::<String>::new());
-        assert_eq!(
-            launch.skipped,
-            [skipped(
-                "/tmp/bad-\u{fffd}.md",
-                "/tmp/bad-\u{fffd}.md is not valid UTF-8, so it cannot be sent to chan-desktop"
-            )]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn a_drive_letter_path_is_a_path_not_a_uri() {
-        assert_eq!(
-            from_args(args(&[r"C:\notes\a.md"]), None).unwrap().paths,
-            [r"C:\notes\a.md"]
         );
     }
 
