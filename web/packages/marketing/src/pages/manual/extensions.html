@@ -17,6 +17,7 @@
 <section class="manual-block" id="configure">
   <h2><a class="heading-anchor" href="#configure">Configure an extension</a></h2>
   <p>Follow the extension's installation instructions. Its declaration lives at <code>&lt;chan-home&gt;/extensions/&lt;id&gt;.toml</code>, normally under <code>~/.chan/extensions/</code>, and specifies the name, command, arguments, and host capabilities. Restart the serving Chan process after installing or changing a declaration, then open the extension from <strong>Apps</strong>.</p>
+  <p>Chan stops all extensions together when it shuts down. Extension supervisors share a three-second grace period, so installing more extensions does not add a separate shutdown wait for each one.</p>
   <p>Declarations run local programs as your user. The tab is sandboxed from Chan's browser state; the extension process has the same machine access as other programs you run.</p>
 </section>
 

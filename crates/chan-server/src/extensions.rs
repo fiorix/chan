@@ -275,24 +275,25 @@ impl ExtensionRuntime {
         self.catalog.clone()
     }
 
-    /// Stop every child process and wait for its supervisor to reap it. Safe to
-    /// call more than once; the first caller takes the join handles.
+    /// Stop every child process and give all supervisors one shared grace to
+    /// reap them. Abort supervisors still pending at the deadline without
+    /// extending the wait. Safe to call more than once; the first caller takes
+    /// the join handles.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
-        let supervisors = {
+        let mut supervisors = {
             let mut guard = self
                 .supervisors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::mem::take(&mut *guard)
         };
-        for mut supervisor in supervisors {
-            if timeout(SUPERVISOR_SHUTDOWN_GRACE, &mut supervisor)
-                .await
-                .is_err()
-            {
+        if timeout(SUPERVISOR_SHUTDOWN_GRACE, join_all(supervisors.iter_mut()))
+            .await
+            .is_err()
+        {
+            for supervisor in supervisors {
                 supervisor.abort();
-                let _ = supervisor.await;
             }
         }
     }
@@ -802,6 +803,56 @@ pub(crate) fn empty_catalog() -> Arc<ExtensionCatalog> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_shares_one_grace_across_stuck_supervisors() {
+        let supervisors: Vec<_> = (0..8)
+            .map(|_| tokio::spawn(std::future::pending::<()>()))
+            .collect();
+        let aborts: Vec<_> = supervisors.iter().map(JoinHandle::abort_handle).collect();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let runtime = ExtensionRuntime {
+            catalog: ExtensionCatalog::empty(),
+            shutdown_tx,
+            supervisors: Mutex::new(supervisors),
+        };
+        let started = tokio::time::Instant::now();
+        runtime.shutdown().await;
+        let elapsed = started.elapsed();
+        assert!(*shutdown_rx.borrow_and_update());
+        tokio::task::yield_now().await;
+        assert!(aborts.iter().all(tokio::task::AbortHandle::is_finished));
+        assert_eq!(elapsed, SUPERVISOR_SHUTDOWN_GRACE);
+        runtime.shutdown().await;
+        assert_eq!(
+            started.elapsed(),
+            elapsed,
+            "a second shutdown must not wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_reaps_cooperative_supervisors_before_the_deadline() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let supervisors = [1, 2]
+            .into_iter()
+            .map(|seconds| {
+                let mut shutdown_rx = shutdown_rx.clone();
+                tokio::spawn(async move {
+                    shutdown_rx.changed().await.unwrap();
+                    tokio::time::sleep(Duration::from_secs(seconds)).await;
+                })
+            })
+            .collect();
+        let runtime = ExtensionRuntime {
+            catalog: ExtensionCatalog::empty(),
+            shutdown_tx,
+            supervisors: Mutex::new(supervisors),
+        };
+        let started = tokio::time::Instant::now();
+        runtime.shutdown().await;
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+    }
 
     /// Collects one line per event on the calling thread, `LEVEL name=value`
     /// per field, so a test can read the warning an operator would find in

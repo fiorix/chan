@@ -549,7 +549,7 @@ pub async fn spawn_throwaway_terminal_window(
         .shutdown_started
         .load(std::sync::atomic::Ordering::SeqCst)
     {
-        return Err("chan-desktop is shutting down".to_string());
+        return Err(crate::single_instance::SHUTTING_DOWN.to_string());
     }
     if !cwd.is_absolute() {
         return Err(format!("{} is not an absolute path", cwd.display()));
