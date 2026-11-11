@@ -311,7 +311,14 @@ impl Tunn {
             }
         }
 
-        if handshake_initiation_required {
+        // A keepalive is authenticated transport too: an initiator renews
+        // its key when one is due after REKEY_AFTER_TIME, even with no IP
+        // payload. It still does not start the unanswered-data timer.
+        if handshake_initiation_required
+            || (keepalive_required
+                && self.timers.is_initiator()
+                && now - session_established >= REKEY_AFTER_TIME)
+        {
             return self.format_handshake_initiation(dst, true);
         }
 

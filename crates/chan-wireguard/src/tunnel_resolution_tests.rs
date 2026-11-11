@@ -50,6 +50,10 @@ impl Fixture {
     /// and its peer. With `known` the client starts with the peer's
     /// address, as `start_on` gives it one.
     async fn build(known: bool) -> Self {
+        Self::build_with_keepalive(known, None).await
+    }
+
+    async fn build_with_keepalive(known: bool, keepalive: Option<u16>) -> Self {
         let a_key = StaticSecret::random_from_rng(OsRng);
         let b_key = StaticSecret::random_from_rng(OsRng);
         let a_pub = PublicKey::from(&a_key);
@@ -60,6 +64,7 @@ impl Fixture {
         let b_at = b_udp.local_addr().unwrap();
         let mut config = config(a_key, b_pub, A_ADDR, B_ADDR, b_at);
         config.peer.endpoint.host = "peer.test".into();
+        config.peer.persistent_keepalive = keepalive;
         let (lookup, queries) = controlled_lookup();
         let resolver = Resolver::with_lookup(config.peer.endpoint.clone(), lookup);
         let mut sockets = Sockets::default();
@@ -478,6 +483,35 @@ async fn walk_past_reject(f: &mut Fixture, mut answer: impl FnMut(Answer)) -> us
         tokio::time::sleep(2 * TICK).await;
     }
     lookups
+}
+
+#[tokio::test]
+async fn idle_persistent_keepalive_keeps_driver_status_live() {
+    let _clock = clock::test_offset_guard();
+    let mut f = Fixture::build_with_keepalive(true, Some(25)).await;
+    f.query().await.send(Ok(f.b_at)).unwrap();
+    clock::advance(Duration::from_secs(25));
+    until(|| fresh_handshake(&f.a, REKEY_TIMEOUT)).await;
+    for step in 1..=24 {
+        clock::advance(Duration::from_secs(25));
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < 2 * TICK {
+            while let Ok(query) = f.queries.try_recv() {
+                query.send(Ok(f.b_at)).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let status = f.a.status();
+        assert!(
+            matches!(status.handshake, HandshakeState::Live(age) if age < Duration::from_secs(150)),
+            "idle step {step}: keepalives must renew the live session: {status:?}"
+        );
+        assert_eq!(
+            (status.tx_bytes, status.rx_bytes),
+            (0, 0),
+            "no payload drives this renewal"
+        );
+    }
 }
 
 #[tokio::test]

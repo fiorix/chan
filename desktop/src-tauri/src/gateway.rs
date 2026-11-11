@@ -1451,6 +1451,7 @@ async fn finish_first_fetch<R: tauri::Runtime>(
             interactive,
         );
     }
+    let successful = matches!(fetch, RosterFetch::Fresh { .. } | RosterFetch::NotModified);
     let effect = {
         let mut live = state.gateway_manager.state.lock().unwrap();
         if !live.owns(gateway_id, attempt) {
@@ -1462,6 +1463,11 @@ async fn finish_first_fetch<R: tauri::Runtime>(
             .or_insert_with(|| new_runtime(discovery.clone()));
         apply_roster_fetch(rt, fetch)
     };
+    if successful {
+        if let Err(error) = config::retry_wireguard_cleanup(&state.store, gateway_id) {
+            tracing::warn!(gateway = %gateway_id, %error, "retrying obsolete WireGuard client file cleanup failed");
+        }
+    }
     apply_roster_policy_diff(state, gateway_id, &effect.diff).await;
     // Cascade waits for this policy section before its teardown, and a new
     // Connect waits for that teardown before it can publish a successor.
@@ -4929,6 +4935,7 @@ pub(crate) mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -6805,7 +6812,6 @@ pub(crate) mod tests {
                 }
                 chan_wireguard::config::write_file(&orphan, &changed).unwrap();
             }
-            let config_before = age_file(&run.config_path());
             let key_before = age_file(&run.full.key_file);
             assert_eq!(
                 config::migrate_wireguard_enrollments(&run.f.state.store).unwrap(),
@@ -6813,9 +6819,12 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 orphan.exists(),
-                edited != "none",
+                edited != "none" && edited != "key_file",
                 "only an operator replacement survives retry"
             );
+            assert!(run.row().wireguard_cleanup.is_none());
+            let config_before = age_file(&run.config_path());
+            config::migrate_wireguard_enrollments(&run.f.state.store).unwrap();
             assert_file_unchanged(&run.config_path(), &config_before);
             assert_file_unchanged(&run.full.key_file, &key_before);
         }
@@ -6913,6 +6922,67 @@ pub(crate) mod tests {
             "stale failure must be refused"
         );
         f.assert_unchanged();
+    }
+
+    #[tokio::test]
+    async fn enrollment_cleanup_retries_only_after_a_current_successful_connect() {
+        use sha2::Digest;
+        for (stale, fetch, removed) in [
+            (
+                false,
+                RosterFetch::Fresh {
+                    username: "test".into(),
+                    rows: Vec::new(),
+                    etag: None,
+                },
+                true,
+            ),
+            (false, RosterFetch::NotModified, true),
+            (false, RosterFetch::Upstream("unavailable".into()), false),
+            (true, RosterFetch::NotModified, false),
+        ] {
+            let f = StaleAttempt::new();
+            let app = tauri::test::mock_app();
+            let path = {
+                let mut store = f.state.store.lock().unwrap();
+                let dir = store.wireguard_dir();
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = crate::wireguard_keys::conf_path(&dir, "gw-keychain");
+                let bytes = b"obsolete owned client file";
+                std::fs::write(&path, bytes).unwrap();
+                let mut cfg = store.get().unwrap();
+                cfg.gateways[0].wireguard_cleanup = Some(config::WireguardCleanup {
+                    path: path.clone(),
+                    sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+                });
+                store.save(&cfg).unwrap();
+                path
+            };
+            finish_first_fetch(
+                app.handle(),
+                &f.state,
+                "gw-keychain",
+                if stale { &f.stale } else { &f.current },
+                &f.discovery,
+                fetch,
+                false,
+            )
+            .await
+            .unwrap();
+            f.current.cancel.cancel();
+            assert_eq!(
+                !path.exists(),
+                removed,
+                "only current successful connects retry cleanup"
+            );
+            assert_eq!(
+                gateway_row(&f.state, "gw-keychain")
+                    .unwrap()
+                    .wireguard_cleanup
+                    .is_none(),
+                removed
+            );
+        }
     }
 
     async fn assert_stale_first_fetch_refused(fetch: RosterFetch) {
@@ -7878,6 +7948,7 @@ pub(crate) mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -7927,6 +7998,7 @@ pub(crate) mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         };
         // The start refused the first row's file and ran the second row's
@@ -8548,6 +8620,7 @@ pub(crate) mod tests {
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
+                wireguard_cleanup: None,
                 wireguard_hosts: vec![config::WireguardHost {
                     name: "tenant.chan.invalid".into(),
                     addresses: vec!["10.7.0.2".parse().unwrap()],
@@ -8610,6 +8683,7 @@ pub(crate) mod tests {
                 wireguard_public_key: public_key.map(str::to_string),
                 wireguard_enrolled_key: enrolled.map(str::to_string),
                 wireguard_enrollment: None,
+                wireguard_cleanup: None,
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
@@ -8792,6 +8866,7 @@ pub(crate) mod tests {
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
+                wireguard_cleanup: None,
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();
@@ -8873,6 +8948,7 @@ pub(crate) mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         });
         store.lock().unwrap().save(&cfg).unwrap();
@@ -9016,6 +9092,7 @@ pub(crate) mod tests {
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
+                wireguard_cleanup: None,
                 wireguard_hosts: Vec::new(),
             });
             store.lock().unwrap().save(&cfg).unwrap();

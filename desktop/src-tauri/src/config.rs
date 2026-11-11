@@ -166,6 +166,26 @@ pub struct Gateway {
     /// file; `wireguard` is reserved for a hand-written or unmigrated file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard_enrollment: Option<WireguardEnrollment>,
+    /// An obsolete owned client file whose removal follows a kept enrollment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_cleanup: Option<WireguardCleanup>,
+}
+
+/// Byte ownership survives later changes to the enrolled key or parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireguardCleanup {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+impl WireguardCleanup {
+    fn new(path: PathBuf, bytes: &[u8]) -> Self {
+        use sha2::Digest;
+        Self {
+            path,
+            sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+        }
+    }
 }
 
 /// Shared client settings and each node's peer, without private material.
@@ -1138,7 +1158,9 @@ fn entry_from_gateway(
 ) -> GatewayEntry {
     let view = view.unwrap_or_default();
     let file = g.wireguard.as_deref();
-    let source = g.wireguard_source();
+    let wireguard = wireguard
+        .map(|fabric| fabric.view(&g.id, g.wireguard_source()))
+        .unwrap_or_default();
     GatewayEntry {
         id: g.id.clone(),
         url: g.url.clone(),
@@ -1150,14 +1172,10 @@ fn entry_from_gateway(
         // A row whose file was refused has no runtime to carry the reason,
         // so the projection carries it until a connect sets its own; so
         // does every row with a file while the proxy could not bind.
-        last_error: view
-            .last_error
-            .or_else(|| wireguard.and_then(|fabric| fabric.connect_refusal(&g.id, source))),
+        last_error: view.last_error.or(wireguard.connect_refusal),
         wireguard: file.map(|path| path.display().to_string()),
-        wireguard_status: wireguard.and_then(|fabric| fabric.status(&g.id, source)),
-        wireguard_ingresses: wireguard
-            .map(|fabric| fabric.ingress_statuses(&g.id, source))
-            .unwrap_or_default(),
+        wireguard_status: wireguard.status,
+        wireguard_ingresses: wireguard.ingresses,
         wireguard_public_key: g.wireguard_public_key.clone(),
         wireguard_enrolled: g.wireguard_public_key.is_some()
             && g.wireguard_enrolled_key == g.wireguard_public_key,
@@ -1221,6 +1239,7 @@ impl GatewayRegistry for GatewayConfigRegistry {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
@@ -1354,7 +1373,7 @@ pub(crate) async fn generate_wireguard_key(
 }
 
 /// The row state a credential commit can restore. The optional legacy file
-/// bytes are retained only to recognize the file at cleanup, never logged.
+/// digest identifies the obsolete file without retaining private material.
 pub(crate) struct RecordedEnrollment {
     written: WireguardEnrollment,
     key: String,
@@ -1362,7 +1381,7 @@ pub(crate) struct RecordedEnrollment {
     prior_key: Option<String>,
     prior_hosts: Vec<WireguardHost>,
     prior_enrollment: Option<WireguardEnrollment>,
-    legacy_file: Option<(PathBuf, Vec<u8>)>,
+    legacy_file: Option<WireguardCleanup>,
 }
 
 /// Save public enrollment parameters atomically, then adopt the row. The
@@ -1394,7 +1413,8 @@ pub(crate) fn record_wireguard_enrollment(
     parameters.configs(&enrollment.public_key)?;
     let old_conf = crate::wireguard_keys::conf_path(&dir, id);
     let legacy_file = if gw.wireguard.as_deref() == Some(old_conf.as_path()) {
-        crate::wireguard_keys::read_client_file(&old_conf)?.map(|bytes| (old_conf, bytes))
+        crate::wireguard_keys::read_client_file(&old_conf)?
+            .map(|bytes| WireguardCleanup::new(old_conf, &bytes))
     } else {
         None
     };
@@ -1456,26 +1476,88 @@ fn owns_enrollment(gw: &Gateway, recorded: &RecordedEnrollment) -> bool {
         && gw.wireguard_hosts.is_empty()
 }
 
-/// Once the token and row are kept, remove the obsolete owned client file
-/// only while both the row and those bytes still belong to this commit.
+/// Once the token and row are kept, persist byte ownership before removing
+/// the obsolete client file. A later enrollment cannot lose this retry.
 pub(crate) fn finish_wireguard_enrollment(
     store: &Arc<Mutex<ConfigStore>>,
     id: &str,
     recorded: &RecordedEnrollment,
 ) -> Result<(), String> {
-    let Some((path, bytes)) = &recorded.legacy_file else {
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    let Some(gw) = cfg
+        .gateways
+        .iter_mut()
+        .find(|g| g.id == id && owns_enrollment(g, recorded))
+    else {
         return Ok(());
     };
-    let guard = store.lock().unwrap();
-    let cfg = guard.get().map_err(|e| e.to_string())?;
-    if cfg
-        .gateways
-        .iter()
-        .any(|g| g.id == id && owns_enrollment(g, recorded))
-        && crate::wireguard_keys::read_client_file(path)?.as_ref() == Some(bytes)
+    if let Some(pending) = &recorded.legacy_file {
+        gw.wireguard_cleanup = Some(pending.clone());
+        guard.save(&cfg).map_err(|e| e.to_string())?;
+    }
+    retry_wireguard_cleanup_locked(&mut guard, &mut cfg, id)
+}
+
+/// Retry a kept enrollment's obsolete file after a successful connect.
+pub(crate) fn retry_wireguard_cleanup(
+    store: &Arc<Mutex<ConfigStore>>,
+    id: &str,
+) -> Result<(), String> {
+    let mut guard = store.lock().unwrap();
+    let mut cfg = guard.get().map_err(|e| e.to_string())?;
+    retry_wireguard_cleanup_locked(&mut guard, &mut cfg, id)
+}
+
+fn retry_wireguard_cleanup_locked(
+    store: &mut ConfigStore,
+    cfg: &mut Config,
+    id: &str,
+) -> Result<(), String> {
+    let Some(gw) = cfg.gateways.iter_mut().find(|g| g.id == id) else {
+        return Ok(());
+    };
+    let Some(pending) = &gw.wireguard_cleanup else {
+        return Ok(());
+    };
+    // A saved path is never authority to remove another file, or a file
+    // the operator has selected as the row's active manual source.
+    let replaced = if pending.path != crate::wireguard_keys::conf_path(&store.wireguard_dir(), id)
+        || gw.wireguard.as_deref() == Some(pending.path.as_path())
     {
-        fs::remove_file(path)
-            .map_err(|e| format!("WireGuard: removing {}: {e}", path.display()))?;
+        true
+    } else if let Some(bytes) = crate::wireguard_keys::read_client_file(&pending.path)? {
+        if WireguardCleanup::new(pending.path.clone(), &bytes).sha256 != pending.sha256 {
+            true
+        } else {
+            match fs::remove_file(&pending.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "WireGuard: removing {}: {error}",
+                        pending.path.display()
+                    ))
+                }
+            }
+            false
+        }
+    } else {
+        false
+    };
+    let pending = gw.wireguard_cleanup.take();
+    if let Err(error) = store.save(cfg) {
+        cfg.gateways
+            .iter_mut()
+            .find(|gw| gw.id == id)
+            .expect("cleanup row remains present")
+            .wireguard_cleanup = pending;
+        return Err(error.to_string());
+    }
+    if replaced {
+        tracing::warn!(gateway = %id, "keeping a replaced or active WireGuard client file; obsolete cleanup cleared");
+    } else {
+        tracing::info!(gateway = %id, "obsolete WireGuard client file gone; cleanup cleared");
     }
     Ok(())
 }
@@ -1489,55 +1571,26 @@ pub(crate) fn migrate_wireguard_enrollments(
     let mut guard = store.lock().unwrap();
     let mut cfg = guard.get().map_err(|e| e.to_string())?;
     let dir = guard.wireguard_dir();
-    let mut files = Vec::new();
     let mut converted_count = 0;
     for gw in &mut cfg.gateways {
         let owned = crate::wireguard_keys::conf_path(&dir, &gw.id);
-        if gw.wireguard_enrollment.is_some() {
-            if gw.wireguard.is_some() {
-                continue;
-            }
-        } else if gw.wireguard.as_deref()
-            != Some(crate::wireguard_keys::conf_path(&dir, &gw.id).as_path())
-        {
+        if gw.wireguard_enrollment.is_some() || gw.wireguard.as_deref() != Some(owned.as_path()) {
             continue;
         }
         let Some(key) = &gw.wireguard_enrolled_key else {
             continue;
         };
-        let path = &owned;
         let converted = || -> Result<_, String> {
-            let Some(before) = crate::wireguard_keys::read_client_file(path)? else {
+            let Some(before) = crate::wireguard_keys::read_client_file(&owned)? else {
                 return Ok(None);
             };
-            let hosts = gw
-                .wireguard_enrollment
-                .as_ref()
-                .and_then(|parameters| parameters.ingresses.first())
-                .map(|ingress| ingress.hosts.as_slice())
-                .unwrap_or(&gw.wireguard_hosts);
-            let Some(parameters) = crate::wireguard_keys::migrate_file(&dir, &gw.id, key, hosts)?
+            let Some(parameters) =
+                crate::wireguard_keys::migrate_file(&dir, &gw.id, key, &gw.wireguard_hosts)?
             else {
                 return Ok(None);
             };
-            if let Some(stored) = &gw.wireguard_enrollment {
-                // Discovery changes synthetic ids and host maps. Ownership
-                // follows the client settings and a peer still enrolled;
-                // changed file settings may belong to an operator.
-                let peer = &parameters.ingresses[0];
-                if parameters.key_file != stored.key_file
-                    || parameters.addresses != stored.addresses
-                    || parameters.allowed_ips != stored.allowed_ips
-                    || parameters.persistent_keepalive != stored.persistent_keepalive
-                    || !stored.ingresses.iter().any(|ingress| {
-                        ingress.public_key == peer.public_key && ingress.endpoint == peer.endpoint
-                    })
-                {
-                    return Ok(None);
-                }
-            }
             // The row must describe the same file whose bytes cleanup owns.
-            if Some(&before) != crate::wireguard_keys::read_client_file(path)?.as_ref() {
+            if Some(&before) != crate::wireguard_keys::read_client_file(&owned)?.as_ref() {
                 return Ok(None);
             }
             Ok(Some((parameters, before)))
@@ -1550,29 +1603,23 @@ pub(crate) fn migrate_wireguard_enrollments(
                 continue;
             }
         };
-        files.push((gw.id.clone(), path.clone(), bytes));
-        if gw.wireguard_enrollment.is_none() {
-            gw.wireguard = None;
-            gw.wireguard_hosts.clear();
-            gw.wireguard_enrollment = Some(parameters);
-            converted_count += 1;
-        }
-    }
-    if files.is_empty() {
-        return Ok(0);
+        gw.wireguard = None;
+        gw.wireguard_hosts.clear();
+        gw.wireguard_enrollment = Some(parameters);
+        gw.wireguard_cleanup = Some(WireguardCleanup::new(owned, &bytes));
+        converted_count += 1;
     }
     if converted_count > 0 {
         guard.save(&cfg).map_err(|e| e.to_string())?;
     }
-    for (id, path, bytes) in &files {
-        let cleanup = || -> Result<(), String> {
-            if crate::wireguard_keys::read_client_file(path)?.as_ref() == Some(bytes) {
-                fs::remove_file(path)
-                    .map_err(|e| format!("WireGuard: removing {}: {e}", path.display()))?;
-            }
-            Ok(())
-        };
-        if let Err(error) = cleanup() {
+    let pending: Vec<_> = cfg
+        .gateways
+        .iter()
+        .filter(|gw| gw.wireguard_cleanup.is_some())
+        .map(|gw| gw.id.clone())
+        .collect();
+    for id in pending {
+        if let Err(error) = retry_wireguard_cleanup_locked(&mut guard, &mut cfg, &id) {
             tracing::warn!(gateway = %id, %error, "keeping the obsolete WireGuard enrollment file for a cleanup retry");
         }
     }
@@ -1653,6 +1700,7 @@ fn split_legacy_gateway_rows(cfg: &mut Config) -> GatewayMigration {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
@@ -1696,6 +1744,7 @@ pub fn convert_devserver_row_to_gateway(
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         };
         cfg.gateways.push(gw.clone());
@@ -2925,6 +2974,7 @@ mod tests {
                 wireguard_public_key: None,
                 wireguard_enrolled_key: None,
                 wireguard_enrollment: None,
+                wireguard_cleanup: None,
                 wireguard_hosts: Vec::new(),
             }],
             ..Default::default()
@@ -3071,6 +3121,7 @@ mod tests {
                     wireguard_public_key: None,
                     wireguard_enrolled_key: None,
                     wireguard_enrollment: None,
+                    wireguard_cleanup: None,
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -3192,6 +3243,7 @@ mod tests {
                     wireguard_public_key: None,
                     wireguard_enrolled_key: None,
                     wireguard_enrollment: None,
+                    wireguard_cleanup: None,
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -3296,6 +3348,7 @@ mod tests {
                     wireguard_public_key: None,
                     wireguard_enrolled_key: None,
                     wireguard_enrollment: None,
+                    wireguard_cleanup: None,
                     wireguard_hosts: Vec::new(),
                 }],
                 ..Default::default()
@@ -3719,6 +3772,7 @@ mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         };
         // The start runs A's tunnel and refuses B's file.
@@ -3844,6 +3898,100 @@ mod tests {
             ])
         );
         assert_eq!(projected()["wireguard_status"], lost);
+    }
+
+    #[tokio::test]
+    async fn gateway_list_keeps_one_fabric_view_across_reconcile() {
+        for refused_before in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut gateway, _peers) =
+                crate::wireguard::tests::enrolled_peers(dir.path(), "gw-multi").await;
+            let (_store, fabric, reg) =
+                gateway_registry_over(dir.path(), vec![gateway.clone()]).await;
+            if refused_before {
+                fabric.retire(&gateway.id);
+                fabric.refuse_start("gw-multi/p1");
+                fabric.refuse_start("gw-multi/p2");
+                fabric.adopt_gateway(&gateway).unwrap().unwrap_err();
+            }
+            let before = reg.list().remove(0);
+            for (index, ingress) in gateway
+                .wireguard_enrollment
+                .as_mut()
+                .unwrap()
+                .ingresses
+                .iter_mut()
+                .enumerate()
+            {
+                ingress.id = format!("p{}", index + 3);
+                if !refused_before {
+                    fabric.refuse_start(&format!("{}/{}", gateway.id, ingress.id));
+                }
+            }
+            let reconciled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer = Arc::new(Mutex::new(None));
+            let writer_slot = Arc::clone(&writer);
+            let lock_observed = Arc::clone(&locked);
+            let ran = Arc::clone(&reconciled);
+            let changing = Arc::clone(&fabric);
+            fabric.on_next_summary_read(move || {
+                let held = changing.view_lock_is_held();
+                lock_observed.store(held, std::sync::atomic::Ordering::SeqCst);
+                let reconcile = move || {
+                    let result = changing.adopt_gateway(&gateway).unwrap();
+                    assert_eq!(result.is_ok(), refused_before);
+                    ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                };
+                if held {
+                    let (started, ready) = std::sync::mpsc::channel();
+                    *writer_slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                        started.send(()).unwrap();
+                        reconcile();
+                    }));
+                    ready
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                } else {
+                    reconcile();
+                }
+            });
+            let answer = reg.list().remove(0);
+            if let Some(writer) = writer.lock().unwrap().take() {
+                writer.join().unwrap();
+            }
+            assert!(
+                reconciled.load(std::sync::atomic::Ordering::SeqCst),
+                "the competing reconcile completed"
+            );
+            assert_eq!(
+                answer.wireguard_ingresses, before.wireguard_ingresses,
+                "one list answer must keep its ingress snapshot across reconcile"
+            );
+            assert_eq!(
+                answer.wireguard_status, before.wireguard_status,
+                "one list answer must keep its summary snapshot across reconcile"
+            );
+            assert_eq!(
+                answer.last_error, before.last_error,
+                "one list answer must keep its refusal snapshot across reconcile"
+            );
+            assert!(
+                locked.load(std::sync::atomic::Ordering::SeqCst),
+                "the fabric registry must stay locked between summary and ingress reads"
+            );
+            let after = reg.list().remove(0);
+            assert_eq!(
+                after
+                    .wireguard_ingresses
+                    .iter()
+                    .map(|ingress| ingress.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["p3", "p4"]
+            );
+            assert_ne!(after.wireguard_status, before.wireguard_status);
+            assert_ne!(after.last_error, before.last_error);
+        }
     }
 
     #[tokio::test]
@@ -4033,6 +4181,7 @@ mod tests {
             wireguard_public_key: None,
             wireguard_enrolled_key: None,
             wireguard_enrollment: None,
+            wireguard_cleanup: None,
             wireguard_hosts: Vec::new(),
         });
         guard.save(&cfg).unwrap();
@@ -4184,6 +4333,252 @@ mod tests {
         server.abort();
     }
 
+    fn cleanup_enrollment(store: &Arc<Mutex<ConfigStore>>) -> crate::wireguard_keys::Enrollment {
+        let dir = store.lock().unwrap().wireguard_dir();
+        let key = fs::read_to_string(dir.join("gw-cleanup.key")).unwrap();
+        let config = chan_wireguard::config::Config::parse(
+            &wg_text()
+                .replace(WG_PRIVATE_KEY, key.trim())
+                .replace("192.0.2.1", "192.0.2.2"),
+        )
+        .unwrap();
+        crate::wireguard_keys::Enrollment {
+            public_key: public_of_key_file(&dir.join("gw-cleanup.key")),
+            ingresses: vec![WireguardIngress {
+                id: "p1".into(),
+                endpoint: config.peer.endpoint.to_string(),
+                public_key: WG_PEER_KEY.into(),
+                hosts: Vec::new(),
+            }],
+            config,
+        }
+    }
+
+    fn cleanup_store(home: &Path) -> (Arc<Mutex<ConfigStore>>, PathBuf) {
+        let store = store_with_gateway(home, "gw-cleanup", "https://gw.invalid");
+        let dir = store.lock().unwrap().wireguard_dir();
+        fs::create_dir_all(&dir).unwrap();
+        wg_file(&dir, "gw-cleanup.key", &format!("{WG_PRIVATE_KEY}\n"));
+        let old = wg_file(&dir, "gw-cleanup.conf", &wg_text());
+        let mut guard = store.lock().unwrap();
+        let mut cfg = guard.get().unwrap();
+        cfg.gateways[0].wireguard = Some(old.clone());
+        cfg.gateways[0].wireguard_public_key =
+            Some(public_of_key_file(&dir.join("gw-cleanup.key")));
+        cfg.gateways[0].wireguard_enrolled_key = cfg.gateways[0].wireguard_public_key.clone();
+        guard.save(&cfg).unwrap();
+        drop(guard);
+        (store, old)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enrollment_cleanup_retries_after_key_change_and_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let (store, old) = cleanup_store(home.path());
+        let manager = crate::gateway::GatewayManager::default();
+        let (recorded, _) =
+            record_wireguard_enrollment(&store, &manager, "gw-cleanup", cleanup_enrollment(&store))
+                .unwrap();
+        let dir = old.parent().unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = finish_wireguard_enrollment(&store, "gw-cleanup", &recorded);
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.unwrap_err().contains("removing"));
+        assert!(old.exists(), "failed removal keeps the old file");
+        let pending = stored_gateway(&store, "gw-cleanup")
+            .wireguard_cleanup
+            .unwrap();
+        assert_eq!(
+            pending,
+            WireguardCleanup::new(old.clone(), &fs::read(&old).unwrap())
+        );
+        let persisted = fs::read_to_string(home.path().join("desktop/config.json")).unwrap();
+        assert!(
+            !persisted.contains(WG_PRIVATE_KEY),
+            "the cleanup stores no private material"
+        );
+        let public = crate::wireguard_keys::generate(dir, "gw-cleanup").unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways[0].wireguard_public_key = Some(public);
+            guard.save(&cfg).unwrap();
+        }
+        let (next, _) =
+            record_wireguard_enrollment(&store, &manager, "gw-cleanup", cleanup_enrollment(&store))
+                .unwrap();
+        // A crash after this enrollment's save cannot lose an older kept cleanup.
+        drop(next);
+        drop(store);
+        let restarted = Arc::new(Mutex::new(ConfigStore::at_path(
+            home.path().join("desktop/config.json"),
+        )));
+        assert_eq!(migrate_wireguard_enrollments(&restarted).unwrap(), 0);
+        assert!(
+            !old.exists(),
+            "startup must retry the kept removal across key changes"
+        );
+    }
+
+    #[test]
+    fn enrollment_cleanup_replacement_is_kept_and_reported_once() {
+        for case in ["changed", "gone", "active", "other-path"] {
+            let lines = crate::devserver::log_capture::Lines::default();
+            let _capture = lines.install();
+            let home = tempfile::tempdir().unwrap();
+            let (store, old) = cleanup_store(home.path());
+            let manager = crate::gateway::GatewayManager::default();
+            let (recorded, _) = record_wireguard_enrollment(
+                &store,
+                &manager,
+                "gw-cleanup",
+                cleanup_enrollment(&store),
+            )
+            .unwrap();
+            let other = old.with_file_name("operator.conf");
+            fs::copy(&old, &other).unwrap();
+            {
+                let mut guard = store.lock().unwrap();
+                let mut cfg = guard.get().unwrap();
+                cfg.gateways[0].wireguard_cleanup = recorded.legacy_file.clone();
+                match case {
+                    "changed" => {
+                        fs::write(&old, wg_text().replace("192.0.2.1", "192.0.2.3")).unwrap();
+                    }
+                    "gone" => fs::remove_file(&old).unwrap(),
+                    "active" => cfg.gateways[0].wireguard = Some(old.clone()),
+                    "other-path" => {
+                        cfg.gateways[0].wireguard_cleanup.as_mut().unwrap().path = other.clone()
+                    }
+                    _ => unreachable!(),
+                }
+                guard.save(&cfg).unwrap();
+            }
+            let before = fs::read(&old).ok();
+            retry_wireguard_cleanup(&store, "gw-cleanup").unwrap();
+            assert_eq!(
+                fs::read(&old).ok(),
+                before,
+                "{case}: a replacement stays untouched"
+            );
+            assert!(
+                other.exists(),
+                "a saved cleanup path cannot name another file"
+            );
+            assert!(stored_gateway(&store, "gw-cleanup")
+                .wireguard_cleanup
+                .is_none());
+            let config = home.path().join("desktop/config.json");
+            let bytes = fs::read(&config).unwrap();
+            let modified = fs::metadata(&config).unwrap().modified().unwrap();
+            migrate_wireguard_enrollments(&store).unwrap();
+            retry_wireguard_cleanup(&store, "gw-cleanup").unwrap();
+            assert_eq!(
+                fs::read(&old).ok(),
+                before,
+                "a later startup must not rediscover a discarded cleanup"
+            );
+            assert_eq!(fs::read(&config).unwrap(), bytes);
+            assert_eq!(fs::metadata(&config).unwrap().modified().unwrap(), modified);
+            let log = [lines.infos(), lines.warnings()].concat();
+            assert_eq!(
+                log.iter()
+                    .filter(|line| line.contains("cleanup cleared"))
+                    .count(),
+                1,
+                "completion is logged once: {log:?}"
+            );
+            assert!(!log.join(" ").contains(WG_PRIVATE_KEY));
+        }
+    }
+
+    #[test]
+    fn enrollment_cleanup_requires_a_kept_current_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let (store, old) = cleanup_store(home.path());
+        let manager = crate::gateway::GatewayManager::default();
+        let (recorded, _) =
+            record_wireguard_enrollment(&store, &manager, "gw-cleanup", cleanup_enrollment(&store))
+                .unwrap();
+        assert!(old.exists());
+        assert!(
+            stored_gateway(&store, "gw-cleanup")
+                .wireguard_cleanup
+                .is_none(),
+            "unkept credentials cannot schedule removal"
+        );
+        restore_wireguard_enrollment(&store, &manager, "gw-cleanup", &recorded).unwrap();
+        finish_wireguard_enrollment(&store, "gw-cleanup", &recorded).unwrap();
+        assert!(
+            old.exists(),
+            "a rolled-back commit cannot remove its prior file"
+        );
+        assert!(stored_gateway(&store, "gw-cleanup")
+            .wireguard_cleanup
+            .is_none());
+        let mut next = cleanup_enrollment(&store);
+        next.ingresses[0].endpoint = "192.0.2.9:51820".into();
+        record_wireguard_enrollment(&store, &manager, "gw-cleanup", next).unwrap();
+        finish_wireguard_enrollment(&store, "gw-cleanup", &recorded).unwrap();
+        assert!(
+            old.exists(),
+            "a superseded commit cannot remove the pending commit's rollback file"
+        );
+        assert!(stored_gateway(&store, "gw-cleanup")
+            .wireguard_cleanup
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enrollment_cleanup_save_failures_preserve_the_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let (store, old) = cleanup_store(home.path());
+        let manager = crate::gateway::GatewayManager::default();
+        let (recorded, _) =
+            record_wireguard_enrollment(&store, &manager, "gw-cleanup", cleanup_enrollment(&store))
+                .unwrap();
+        let directory = home.path().join("desktop");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = finish_wireguard_enrollment(&store, "gw-cleanup", &recorded);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "cleanup must first persist its ownership");
+        assert!(old.exists(), "a failed record save cannot remove the file");
+        {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            cfg.gateways[0].wireguard_cleanup = recorded.legacy_file.clone();
+            guard.save(&cfg).unwrap();
+        }
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = {
+            let mut guard = store.lock().unwrap();
+            let mut cfg = guard.get().unwrap();
+            let result = retry_wireguard_cleanup_locked(&mut guard, &mut cfg, "gw-cleanup");
+            assert!(
+                cfg.gateways[0].wireguard_cleanup.is_some(),
+                "failed persistence must retain the in-memory retry too"
+            );
+            result
+        };
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            result.is_err(),
+            "clearing a completed removal must be persisted"
+        );
+        assert!(!old.exists());
+        assert!(stored_gateway(&store, "gw-cleanup")
+            .wireguard_cleanup
+            .is_some());
+        retry_wireguard_cleanup(&store, "gw-cleanup").unwrap();
+        assert!(stored_gateway(&store, "gw-cleanup")
+            .wireguard_cleanup
+            .is_none());
+    }
+
     #[test]
     fn gateway_row_writes_its_enrollment_fields_only_when_set() {
         // A row from before the fields reads with them empty.
@@ -4194,12 +4589,14 @@ mod tests {
         assert_eq!(old.wireguard_public_key, None);
         assert_eq!(old.wireguard_enrolled_key, None);
         assert!(old.wireguard_hosts.is_empty());
+        assert!(old.wireguard_cleanup.is_none());
         // A row without a key writes none of them.
         let json = serde_json::to_value(&old).unwrap();
         for key in [
             "wireguard_public_key",
             "wireguard_enrolled_key",
             "wireguard_hosts",
+            "wireguard_cleanup",
         ] {
             assert!(json.get(key).is_none(), "{key} in {json}");
         }

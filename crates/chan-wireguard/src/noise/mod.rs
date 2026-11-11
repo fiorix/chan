@@ -766,6 +766,101 @@ mod tests {
         update_timer_results_in_handshake(&mut my_tun);
     }
 
+    #[test]
+    fn persistent_keepalives_rekey_idle_sessions_without_payload() {
+        let _clock = clock::test_offset_guard();
+        let (mut client, mut peer) = create_two_tuns();
+        client.timers = Timers::new(Some(25), true);
+        let mut work = [0u8; 2048];
+        let mut keepalives = 0;
+        let mut handshakes = Vec::new();
+        let mut missing = Vec::new();
+        for second in 1..=650 {
+            clock::advance(Duration::from_secs(1));
+            for from_client in [true, false] {
+                let result = if from_client {
+                    client.update_timers(&mut work)
+                } else {
+                    peer.update_timers(&mut work)
+                };
+                let mut packet = match result {
+                    TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
+                    TunnResult::Done => None,
+                    other => panic!("healthy idle timer at {second}: {other:?}"),
+                };
+                let mut from_client = from_client;
+                while let Some(bytes) = packet {
+                    if from_client && bytes[0] == 1 {
+                        handshakes.push(second);
+                    }
+                    if from_client && bytes[0] == 4 {
+                        assert_eq!(bytes.len(), 32);
+                        keepalives += 1;
+                    }
+                    let target = if from_client { &mut peer } else { &mut client };
+                    packet = match target.decapsulate(None, &bytes, &mut work) {
+                        TunnResult::WriteToNetwork(packet) => Some(packet.to_vec()),
+                        TunnResult::Done => None,
+                        other => panic!("healthy peer accepts protocol packet: {other:?}"),
+                    };
+                    from_client = !from_client;
+                }
+            }
+            if second >= 25 && client.time_since_last_handshake().is_none() {
+                missing.push(second);
+            }
+        }
+        assert!(keepalives >= 20, "idle keepalives must reach the peer");
+        assert!(
+            missing.is_empty(),
+            "healthy idle keepalives must keep the session live: {missing:?}"
+        );
+        assert!(
+            handshakes.len() >= 5,
+            "idle keepalives must renew the session every two minutes: {handshakes:?}"
+        );
+        for pair in handshakes.windows(2) {
+            assert!(
+                (120..=145).contains(&(pair[1] - pair[0])),
+                "rekey at the first due keepalive after two minutes: {handshakes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_keepalive_rekey_requires_an_old_initiator_session() {
+        let _clock = clock::test_offset_guard();
+        for (is_initiator, age, keepalive, expected_type) in [
+            (true, 119, Some(25), Some(4)),
+            (true, 120, Some(25), Some(1)),
+            (false, 120, Some(25), Some(4)),
+            (true, 120, None, None),
+        ] {
+            let (mut client, mut peer) = create_two_tuns();
+            client.timers = Timers::new(keepalive, true);
+            peer.timers = Timers::new(keepalive, true);
+            let mut work = [0u8; 2048];
+            clock::advance(Duration::from_secs(1));
+            assert!(matches!(client.update_timers(&mut work), TunnResult::Done));
+            assert!(matches!(peer.update_timers(&mut work), TunnResult::Done));
+            let init = create_handshake_init(&mut client);
+            let response = create_handshake_response(&mut peer, &init);
+            let confirmation = parse_handshake_resp(&mut client, &response);
+            parse_keepalive(&mut peer, &confirmation);
+            clock::advance(Duration::from_secs(age));
+            let side = if is_initiator { &mut client } else { &mut peer };
+            let emitted = match side.update_timers(&mut work) {
+                TunnResult::WriteToNetwork(packet) => Some(packet[0]),
+                TunnResult::Done => None,
+                other => panic!("a live idle timer: {other:?}"),
+            };
+            assert_eq!(
+                emitted, expected_type,
+                "initiator={is_initiator}, age={age}, keepalive={keepalive:?}"
+            );
+        }
+    }
+
     /// The initiator whose first exchange happened in the tick that
     /// established the session still rekeys at REKEY_AFTER_TIME. chan's
     /// connect queues the SYN before the handshake and sends it the moment
