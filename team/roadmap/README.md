@@ -65,7 +65,7 @@ One more came from the owner on 2026-11-11 and was built outside the team by his
 | [wrapped ghostty copies paste broken][gcopy] | built | owner |
 | [a theme switch leaves ghostty colours][livetheme] | built | owner |
 | [the system cannot open files in chan][openwith] | not started | design |
-| [find loses its match on a resize][findresize] | not started | design |
+| [find loses its match on a resize][findresize] | landed | GA |
 | [the pane tree hides what a terminal runs][termcmd] | built | owner |
 | [tests still red under the heaviest load][loadres] | built | gate |
 | [tmux windows not on their machine card][tmuxcard] | built | owner |
