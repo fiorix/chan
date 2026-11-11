@@ -4771,6 +4771,7 @@ mod tests {
         let fx = fixture(&[("a.md", "v1")]);
         let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
         drain(&mut rxa);
+        ha.session().lock_state().disk_echo.test_freeze_at_seed();
 
         // Typed + confirmed + flushed: disk has "v1 typed".
         ha.push(0, vec![update("c1", json!([2, [0, " typed"]]))])
