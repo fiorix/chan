@@ -47,6 +47,7 @@ import {
   terminalTab,
   xterm,
   pressInTerminal,
+  type FakeTerminal,
 } from "../__tests__/terminalTab";
 
 /// What a case reads of the ghostty terminal stand-in.
@@ -281,7 +282,7 @@ async function renderGhostty(command = COMMAND) {
 function drag(term: GhosttyStandIn, from: { col: number; row: number }, to: { col: number; row: number }): void {
   const at = (cell: { col: number; row: number }) => ({ clientX: cell.col * 8 + 1, clientY: cell.row * 16 + 1 });
   term.canvas.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ...at(from) }));
-  term.canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, ...at(to) }));
+  term.canvas.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1, ...at(to) }));
   term.canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, ...at(to) }));
 }
 
@@ -444,12 +445,17 @@ describe("the Linux desktop PRIMARY selection", () => {
     return sentFrames(TerminalSocket.all[0]!).filter((f) => f.type === "input").map((f) => f.data as string);
   }
 
+  /// A task after the current one: what chan defers past a release has run.
+  function nextTask(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
   test("ghostty mouse copies also write PRIMARY, while chord and menu copies leave PRIMARY alone", async () => {
     const invoke = desktop();
     const { term, target } = await renderGhostty(PATH_COMMAND);
     invoke.mockClear();
     drag(term, { col: 0, row: 0 }, { col: PATH_COMMAND.length - 81, row: 1 });
-    await tick();
+    await nextTask();
     expect(invoke.mock.calls).toEqual([
       ["write_clipboard_text", { text: PATH_COMMAND }], ["write_primary_selection", { text: PATH_COMMAND }],
     ]);
@@ -515,7 +521,7 @@ describe("the Linux desktop PRIMARY selection", () => {
     expect(invoke).not.toHaveBeenCalled();
     term.changeSelection(COMMAND);
     document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await tick();
+    await nextTask();
     expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: COMMAND }]]);
     invoke.mockClear();
     pressInTerminal(term, { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true });
@@ -525,7 +531,76 @@ describe("the Linux desktop PRIMARY selection", () => {
     term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
     term.changeSelection("");
     document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
-    await tick();
+    await nextTask();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  /// A release in the order WebKitGTK runs a trusted mouseup. xterm adds its
+  /// document mouseup listener when a drag starts, after chan's, and
+  /// announces the final selection from it; the engine runs a microtask
+  /// checkpoint after each listener of an event it dispatches, so microtasks
+  /// chan's listener queued run before xterm's listener does. A script's
+  /// dispatchEvent runs every listener first. Here chan's listener runs, then
+  /// its microtasks, then xterm's announcement.
+  async function releaseAsTheEngineDoes(term: FakeTerminal, selection: string): Promise<void> {
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    await Promise.resolve();
+    term.changeSelection(selection);
+  }
+
+  function pressLeft(term: FakeTerminal): void {
+    term.element!.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+  }
+
+  test("xterm writes PRIMARY once with the selection it announces on a trusted release, line break kept", async () => {
+    const invoke = desktop();
+    const term = await renderXterm();
+    invoke.mockClear();
+    const text = `primary-${"x".repeat(160)}-end\nwide:\u754c end`;
+    pressLeft(term);
+    await releaseAsTheEngineDoes(term, text);
+    await nextTask();
+    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text }]]);
+  });
+
+  test("a press before the deferred read leaves the write to its own release", async () => {
+    const invoke = desktop();
+    const term = await renderXterm();
+    invoke.mockClear();
+    // The first click of a double click clears the selection; the second
+    // press arrives before that release's read runs, and its release
+    // announces the word.
+    pressLeft(term);
+    await releaseAsTheEngineDoes(term, "");
+    pressLeft(term);
+    await nextTask();
+    await releaseAsTheEngineDoes(term, PATH);
+    await nextTask();
+    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: PATH }]]);
+  });
+
+  test("an xterm drag that ends on its previous selection writes PRIMARY again", async () => {
+    const invoke = desktop();
+    const term = await renderXterm();
+    pressLeft(term);
+    await releaseAsTheEngineDoes(term, COMMAND);
+    await nextTask();
+    invoke.mockClear();
+    // The same cells dragged again: on the way xterm puts the selection in
+    // its textarea, which WebKitGTK copies into PRIMARY, and its release
+    // announces nothing, since the selection did not change.
+    pressLeft(term);
+    term.element!.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, bubbles: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    await nextTask();
+    expect(invoke.mock.calls).toEqual([["write_primary_selection", { text: COMMAND }]]);
+    invoke.mockClear();
+    // A press and release with no move and no announcement writes nothing,
+    // whatever selection is left.
+    pressLeft(term);
+    term.element!.dispatchEvent(new MouseEvent("mousemove", { buttons: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    await nextTask();
     expect(invoke).not.toHaveBeenCalled();
   });
 

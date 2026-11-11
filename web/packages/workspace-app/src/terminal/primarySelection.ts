@@ -18,15 +18,19 @@ export function installTerminalPrimarySelection(
 ): (() => void) | null {
   if (!isPrimarySelectionDesktop()) return null;
   let alive = true;
+  let gesture = 0;
   let selecting = false;
   let changed = false;
+  let dragged = false;
   const selection = backend === "xterm" ? (term as XtermTerminal).onSelectionChange(() => {
     if (selecting) changed = true;
   }) : null;
   const onDown = (event: MouseEvent): void => {
     if (event.button === 0) {
+      gesture += 1;
       selecting = true;
       changed = false;
+      dragged = false;
     } else if (event.button === 1) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -38,19 +42,32 @@ export function installTerminalPrimarySelection(
       event.stopImmediatePropagation();
     }
   };
+  // A drag that ends on the cells of the previous selection announces no
+  // change, yet xterm put that selection in its textarea again on the way,
+  // which WebKitGTK copied into PRIMARY; the drag itself is the signal.
+  const onMove = (event: MouseEvent): void => {
+    if (selecting && (event.buttons & 1) !== 0) dragged = true;
+  };
   const onRelease = (event: MouseEvent): void => {
     if (event.button !== 0 || !selecting) return;
-    // xterm registers its document mouseup listener when the drag starts,
-    // after ours. Read once it has fired the final selection change.
-    queueMicrotask(() => {
-      if (!alive) return;
-      if (changed) {
+    // xterm adds its document mouseup listener when the drag starts, after
+    // this one, and announces the final selection from it. WebKitGTK runs
+    // microtasks between the listeners of a real release, so the read waits
+    // for a task of its own. Writing then also lands after WebKitGTK's copy
+    // of the selection xterm keeps in its textarea, which turns line breaks
+    // into spaces, so PRIMARY ends with the copy's text. A press before the
+    // read starts a new gesture, whose release writes instead.
+    const released = gesture;
+    setTimeout(() => {
+      if (!alive || released !== gesture) return;
+      if (changed || dragged) {
         const text = term.getSelection();
         if (text) void writePrimarySelection(text);
       }
       selecting = false;
       changed = false;
-    });
+      dragged = false;
+    }, 0);
   };
   const onMiddle = (event: MouseEvent): void => {
     if (event.button !== 1) return;
@@ -66,6 +83,7 @@ export function installTerminalPrimarySelection(
   host.addEventListener("mousedown", onDown, true);
   host.addEventListener("mouseup", onUp, true);
   host.addEventListener("auxclick", onMiddle, true);
+  if (backend === "xterm") host.addEventListener("mousemove", onMove, true);
   host.ownerDocument.addEventListener("mouseup", onRelease);
   return () => {
     alive = false;
@@ -73,6 +91,7 @@ export function installTerminalPrimarySelection(
     host.removeEventListener("mousedown", onDown, true);
     host.removeEventListener("mouseup", onUp, true);
     host.removeEventListener("auxclick", onMiddle, true);
+    host.removeEventListener("mousemove", onMove, true);
     host.ownerDocument.removeEventListener("mouseup", onRelease);
   };
 }
