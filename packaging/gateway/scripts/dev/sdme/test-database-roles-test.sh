@@ -104,10 +104,15 @@ case "$SDME_STUB_COMMAND" in
                 : >"$state/database-created"
                 printf 'CREATE DATABASE\n'
                 ;;
-            '/usr/bin/env '*'/scripts/test-database-roles.sh')
+            *'/usr/bin/env '*'/scripts/test-database-roles.sh')
                 [ -e "$state/database-created" ] || refuse 'database "chan_gateway_role_test" does not exist'
                 printf '%s\n' "$SDME_STUB_USER" >"$state/suite-user"
                 printf '%s\n' "${SDME_STUB_PAYLOAD[@]}" >"$state/suite-args"
+                if [ "${STUB_SUITE_TIMEOUT:-0}" = 1 ]; then
+                    [[ $payload == '/usr/bin/timeout --signal=TERM --kill-after=10s 5m /usr/bin/env '* ]] \
+                        || refuse 'suite is not bounded inside the guest' 2
+                    exit 124
+                fi
                 cat "${STUB_SUITE_OUTPUT:?}"
                 exit "${STUB_SUITE_EXIT:-0}"
                 ;;
@@ -201,6 +206,10 @@ if grep -Fxq -- --disk "$state/create-args"; then
 fi
 assert_line postgres "$state/psql-user" 'the server probe does not run as postgres'
 assert_line postgres "$state/suite-user" 'the suite does not run as postgres'
+assert_line /usr/bin/timeout "$state/suite-args" 'the suite has no in-guest timeout'
+assert_line --signal=TERM "$state/suite-args" 'the timeout does not send TERM'
+assert_line --kill-after=10s "$state/suite-args" 'the timeout has no bounded KILL fallback'
+assert_line 5m "$state/suite-args" 'the suite does not have its five-minute limit'
 assert_line 'DATABASE_URL=postgres://chan:chan@127.0.0.1:5432/chan_gateway_role_test' "$state/suite-args" 'the suite is not pointed at the role test database'
 assert_line "MIGRATIONS_DIR=$guest/migrations" "$state/suite-args" 'the suite does not read the bound migrations'
 assert_line 'CHAN_GATEWAY_DATABASE_TEST_ALLOW_DESTRUCTIVE=yes' "$state/suite-args" 'the suite is not allowed to run'
@@ -213,6 +222,14 @@ assert_status 7 "$status" 'a suite that exits 7 after its PASS line fails with 7
 assert_line "database-roles-test: FAIL (status 7) in $container" "$state/driver.log" 'a failed suite names its status'
 assert_removed 'failed suite'
 assert_no_log_left 'failed suite'
+
+# A timed-out suite has no final verdict and still has its guest removed.
+suite_prints 'PASS: identity user FOR UPDATE'
+run_driver absent STUB_SUITE_TIMEOUT=1
+assert_status 124 "$status" 'the in-guest timeout fails the run with 124'
+assert_line "database-roles-test: FAIL (status 124) in $container" "$state/driver.log" 'the timeout status is reported'
+assert_removed 'timed-out suite'
+assert_no_log_left 'timed-out suite'
 
 # A FAIL line fails the run even when the suite exits 0 on its PASS line.
 suite_prints 'FAIL: chan_gateway_identity lacks UPDATE on table public.api_tokens' "$suite_pass"
