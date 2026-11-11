@@ -11,13 +11,11 @@ CI and the gateway's database roles:
 - The roles suite's three "reconcile must refuse" checks and its readiness refusal pass on any non-zero exit; the sdme driver's suite run has no timeout; and the reconcile script inventories `pg_tables`, so a view in `public` is outside what it reconciles.
 - `scripts/e2e/gateway-zone.sh` holds three copies of one service-stop helper and two loopback curls without `--noproxy`, and the tunnel end-to-end stub (`stub-identity.py`) admits a grantee at the root landing that no run presents.
 
-The Dashboard and privacy mode:
+The Dashboard and privacy mode (the check 114 label and the About slide's 4 px overhang that were listed here closed with the Dashboard slides row):
 
 - The Metrics slide prints sizes as KiB and MiB with its own formatter (`components/MetricsSlide.svelte` in the workspace app) while the file browser prints KB and MB for the same divisor (`state/format.ts`): one window shows two spellings of one unit, and which one stays is the owner's choice.
 - The slide's transfers line omits the panicked and finished counts that `chan metrics` prints.
 - The scan error the slide shows holds no path today (a fixed message, or an operating-system error without one); no test fails if the server later puts the chan home path in it, which privacy mode hides elsewhere on the slide.
-- Browser check 114 (`scripts/e2e/browser-smoke/checks/114-about-slide-margin.mjs`) has failed since the Metrics slide named the carousel's dots: it looks for a dot labelled "slide 3" where the dot reads "About" (run in a guest at v0.127.0's tip; with that one word changed it passes). It also stops the carousel's rotation preference and never resumes it. No gate runs the browser checks, so nothing reported it.
-- The About slide is 728 px wide in its 720 px column, because its side padding adds to `width: 100%`, so its content sits 4 px right of the middle (measured in the same guest).
 - On a first open the Metrics slide is short while it waits for the server's first answer and is centered then too, so its heading moves up when the first sample arrives; a waiting state that holds the loaded slide's height would keep it still.
 - With privacy mode on, the workspace app's command launcher lists windows by the labels the user gave them (`components/CommandLauncher.svelte`), where the launcher's own deck masks the same rows, and the Dashboard's Workspace slide shows the workspace's root path.
 

@@ -73,7 +73,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
-| [other Dashboard slides sit at the top][dashslides] | partly built | build |
+| [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | not started | audit |
 
