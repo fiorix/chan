@@ -43,7 +43,7 @@ limactl shell default sudo sdme fs import docker.io/ubuntu --name ubuntu
 
 ## Core: run the CI gate in a Linux container
 
-CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri build dependencies and the Windows Rust target. The target runs `make pre-push`, then the CLI, library, server and workspace suites under a symlinked `TMPDIR` (`make test-symlink-tmpdir`), then the Windows test-target check. Mirror it locally:
+CI runs `make ci-linux` on `ubuntu-latest` after installing the Tauri build dependencies and the Windows Rust target. The target runs `make pre-push`, then the CLI, library, server and workspace suites under a symlinked `TMPDIR` (`make test-symlink-tmpdir`), then `make check-windows-test-target`: Windows GNU clippy over chan-workspace, chan-server and chan-library with `--tests`, and chan-desktop with `--all-targets`. The desktop's production targets expose platform-gated code that is otherwise kept alive only by tests. The cross-target check requires MinGW and lints without running a Windows binary. Mirror it locally:
 
 ```sh
 # create + start a build container from the ubuntu base
