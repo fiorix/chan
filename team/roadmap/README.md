@@ -51,6 +51,8 @@ The owner added one more on 2026-11-11, after reading v0.127.0's centered Metric
 
 Two more came from the owner on 2026-11-11, at the start of the release's round: `make clean` leaves `.build-tools/` and a stale `gateway/node_modules` behind ([makeclean]); and the basic flows (an image pasted or dropped into the Rich Prompt or the editor, typing and saving, a terminal's input and paste, opening a file, the search, the panes) have no end-to-end check that would have caught v0.127.0's lost image paste on WebKit, so an audit lists them and each gap gets a Chrome check and a WebKit check ([basicflows]). The same day he ruled on the tmux card row: a connection keeps its own card with the detach on its title, and the card of the machine it runs on lists only its buried control terminal, with a detach button on that row ([tmuxcard]).
 
+Seven more came from the round's own checks and readings on 2026-11-11, accepted by the owner the same day: a used token's cut is lost when the client hangs up before the spawn ([tokencut]); an image pasted by chord into the editor on the Linux desktop lands nothing ([linuxpaste]); a file dropped on the Linux desktop hands the page a URI, not a file ([linuxdrop]); a save that meets its file gone opens the external edit dialog ([savegone]); the tag-scoped graph never refits its nodes ([taglens]); ghostty sends a pasted line break as LF where xterm.js sends CR ([ghosttylf]); and a local close outlasts its CLI reply window ([closebudget]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -76,6 +78,13 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | landed | GA |
+| [a used token's cut is lost when the client hangs up][tokencut] | not started | design |
+| [an image pasted by chord on the Linux desktop lands nothing][linuxpaste] | not started | design |
+| [a file dropped on the Linux desktop hands the page a URI][linuxdrop] | not started | design |
+| [a save that meets its file gone opens the external edit dialog][savegone] | not started | design |
+| [the tag-scoped graph never refits its nodes][taglens] | not started | design |
+| [ghostty sends a pasted line break as LF][ghosttylf] | not started | design |
+| [a local close outlasts its CLI reply window][closebudget] | not started | design |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -100,6 +109,13 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 [dashslides]: v0.128.0/the-dashboards-about-workspace-and-search-slides-sit-at-the-top-of-a-large-tab.md
 [makeclean]: v0.128.0/make-clean-leaves-the-gateways-node-modules-and-the-build-tools-behind.md
 [basicflows]: v0.128.0/basic-flows-break-with-no-end-to-end-check-to-catch-them.md
+[tokencut]: v0.128.0/a-used-tokens-cut-is-lost-when-the-client-hangs-up-before-the-spawn.md
+[linuxpaste]: v0.128.0/an-image-pasted-by-chord-into-the-editor-on-the-linux-desktop-lands-nothing.md
+[linuxdrop]: v0.128.0/a-file-dropped-on-the-linux-desktop-hands-the-page-a-uri-not-a-file.md
+[savegone]: v0.128.0/a-save-that-meets-its-file-gone-opens-the-external-edit-dialog.md
+[taglens]: v0.128.0/the-tag-scoped-graph-never-refits-its-nodes.md
+[ghosttylf]: v0.128.0/ghostty-sends-a-pasted-line-break-as-lf.md
+[closebudget]: v0.128.0/a-local-close-outlasts-its-cli-reply-window.md
 [reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
 [tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 
