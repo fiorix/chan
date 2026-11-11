@@ -44,7 +44,7 @@ RP-06 and RP-08 state behavior the product does not have yet. The server side of
 The automated coverage that exists today runs from two places. The component cases run under the normal frontend test command from `web/packages/workspace-app`; the browser cases run through the smoke harness:
 
 ```sh
-XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=104 node scripts/e2e/browser-smoke/run.mjs
+XDG_RUNTIME_DIR="$(mktemp -d)" SMOKE_ONLY=104,214,215 node scripts/e2e/browser-smoke/run.mjs
 ```
 
 ---
@@ -99,9 +99,9 @@ A blank draft is the one honest exception. When the message is queued but its dr
 
 **Expectation.** Pasting an image or media file into the composer embeds it as markdown and renders it immediately. On submit, only the bare absolute on-disk path reaches the agent, while the composer keeps showing the embed. A recall after a stop restores the markdown embed, never the delivered path form.
 
-**Run.** Browser check `104-rich-prompt-paste-submit.mjs`.
+**Run.** Browser check `214-image-paste.mjs` in headless Chrome; on chan-desktop's WebKitGTK, `desktop-observations/basic-flows.sh`.
 
-**Backing.** That check.
+**Backing.** `214-image-paste.mjs` pastes a PNG from Chrome's own clipboard into the composer over a terminal running `cat`, as a trusted paste, and asserts the embed renders and the image lands in the composer's draft directory with the fixture's pixels; after Ctrl+Enter it reads the terminal's scrollback through `cs terminal scrollback` for the bare absolute path of that file and no markdown. `215-image-drop.mjs` drops an image file onto a row of the composer and asserts the embed on that row and the file in the draft directory. `104-rich-prompt-paste-submit.mjs` covers only the submit chord after a paste: it pastes a synthetic event and reads neither the terminal nor the disk. `RichPrompt.svelte.test.ts` covers the path rewriting at component level, including WKWebView's clipboard shape read through the desktop, and `desktop-observations/basic-flows.sh` drives that shape and the delivery on WebKitGTK. No check recalls a prompt that holds an image, so the recall clause stays manual.
 
 **Evidence.** The delivered text as the agent received it, and a screenshot of the composer still showing the embed.
 
