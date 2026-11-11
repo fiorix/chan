@@ -35,11 +35,23 @@
 ///
 /// Output keeps arriving while the bar is open. The viewport controller
 /// reports every change to the terminal, each write (output and the lines
-/// chan prints itself) and each resize; the search is fed once per
+/// chan prints itself) and each resize; the search catches up once per
 /// animation frame however many came, and the count and the highlight
 /// follow it. Across output the core keeps the active match on its text,
 /// so the highlight moves only when pruned history has moved the match's
 /// rows.
+///
+/// Catching up is a feed: one wasm call that takes in every row moved into
+/// the history since the last one and, while the scan is complete, checks
+/// every match the search holds against the history's pages. At the
+/// largest scrollback with a needle that matches often either part can
+/// outlast a frame, and no budget can split the call. So each frame
+/// predicts its feed from what this search has measured, never under what
+/// it assumes before measuring (`catchUp`), and, past the frame's budget,
+/// restarts the search instead: the same needle
+/// on a fresh scan, budgeted as any scan is, the count partial until it
+/// ends. The core then has no match selected, as after a resize, and the
+/// active match is kept the same way.
 ///
 /// A resize is different: the core forgets its selected match on every
 /// resize, one that reflows nothing too, and scans again from scratch. So
@@ -121,6 +133,42 @@ export const FIND_SCAN_BUDGET_MS = 4;
 /// rather than all at once when the output stops.
 export const FIND_WAIT_CAP_MS = 1000;
 
+/// The work one find frame plans for: a feed of the output that arrived,
+/// then a scan step that leaves room for the unit completing the scan.
+/// 4 ms under the 16 of a 60 Hz frame, for the error of the cost estimates
+/// and the frame's other work (the count, the highlight).
+export const FIND_FRAME_BUDGET_MS = 12;
+
+/// The costs a find frame predicts before it feeds, as this terminal's own
+/// feeds and scans measure them, and what they start from before any has,
+/// which is also the least they are taken at (`learned`). A feed reads every
+/// cell of the rows moved into the history since the last one (`read`, per
+/// cell). While the scan is complete it also checks each match the search
+/// holds against the terminal's pages (`check`, per match held per cell of
+/// history), and the unit that completes a scan does the same check over the
+/// results it has just made (`complete`), a third to two thirds dearer as
+/// measured. The starting values sit above what `seq` output measured on a
+/// desktop (a Ryzen 9 8945HS): reads of 1.6 to 2.8 ns a cell, checks of 1.1
+/// to 2.3 times 10^-11 ms. With them, at the default scrollback and up to
+/// 200 columns no feed predicts over the budget (the whole history, 10,922
+/// lines, reads in about 9 ms), and at the largest scrollback a burst that
+/// fills the history at 200 columns predicts over it from its first frame.
+export const FIND_COST_PRIORS = { read: 4e-6, check: 2e-11, complete: 3e-11 } as const;
+
+/// A feed is learned from only when it took in at least this many rows, and
+/// a check, a feed's or a completing unit's, only when the matches times
+/// the history's cells reach this many, a check of about 2 ms at the
+/// assumed cost: below them the clock's grain and the call's other work
+/// (the unit reads its page, the feed the screen) decide its time. At the
+/// default scrollback no check reaches it, and the assumed costs stand.
+const FIND_LEARN_ROWS = 64;
+const FIND_LEARN_CHECK = 1e11;
+
+/// The least a scan step runs for when it leaves room for a completion: with
+/// less, a scan whose completion nearly fills the frame would advance a
+/// unit a frame and take seconds.
+const FIND_STEP_FLOOR_MS = 1;
+
 const animationFrames: FrameScheduler = {
   request: (run) => requestAnimationFrame(() => run()),
   cancel: (id) => cancelAnimationFrame(id),
@@ -136,7 +184,8 @@ export type GhosttyFindOptions = {
   frames?: FrameScheduler;
   budgetMs?: number;
   /// Milliseconds on a clock that never steps back, read for the cap on a
-  /// waiting step; `performance.now` unless given.
+  /// waiting step and to time a frame's work; `performance.now` unless
+  /// given.
   clock?: () => number;
 };
 
@@ -192,6 +241,21 @@ export class GhosttyFind {
   /// it: the way it steps and how many selects it has made.
   private walk: { direction: Direction; selects: number } | null = null;
   private readonly stopResizing: () => void;
+  /// A tracked cell on the first row of the screen as of the last feed or
+  /// restart: the rows above it now moved into the history since, and are
+  /// what the next feed takes in. Made with the search, freed with it.
+  private backlogCell: VtTrackedCell | null = null;
+  /// The terminal was resized since the last feed.
+  private resized = false;
+  /// The costs of `FIND_COST_PRIORS` as this search has measured them; they
+  /// depend on how often the needle matches.
+  private readMs: number = FIND_COST_PRIORS.read;
+  private checkMs: number = FIND_COST_PRIORS.check;
+  private completeMs: number = FIND_COST_PRIORS.complete;
+  /// The matches the search holds, as last read, or, while a rescan runs,
+  /// as many as it held before when that is more: the unit that completes
+  /// the rescan checks about as many.
+  private held = 0;
 
   constructor(core: VtTerminal, options: GhosttyFindOptions) {
     this.core = core;
@@ -231,11 +295,10 @@ export class GhosttyFind {
       this.close();
       return;
     }
-    if (this.prepare(query)) {
-      // The terminal is read now, as a frame would, so that a step that
-      // does not wrap selects at once.
-      this.search!.feed();
-    }
+    // The terminal is read now, as a frame would, so that a step that does
+    // not wrap selects at once; a fresh search costs only its first unit.
+    if (this.prepare(query)) this.search!.feed();
+    else this.catchUp();
     this.waiting.push({ step: direction, at: this.clock() });
     this.askedOver = this.selectionRange();
     const selected = this.applyWaiting();
@@ -254,12 +317,18 @@ export class GhosttyFind {
     this.search = null;
     this.keptStart?.free();
     this.keptEnd?.free();
-    this.keptStart = this.keptEnd = null;
+    this.backlogCell?.free();
+    this.keptStart = this.keptEnd = this.backlogCell = null;
     this.forget();
     this.needle = "";
     this.waiting = [];
     this.askedOver = null;
     this.dirty = false;
+    this.resized = false;
+    this.readMs = FIND_COST_PRIORS.read;
+    this.checkMs = FIND_COST_PRIORS.check;
+    this.completeMs = FIND_COST_PRIORS.complete;
+    this.held = 0;
   }
 
   /// The terminal is going away.
@@ -270,7 +339,8 @@ export class GhosttyFind {
   }
 
   /// Makes the search on first use and sets its needle; true when the
-  /// needle changed, which drops the steps still waiting and the kept match.
+  /// needle changed, which drops the steps still waiting, the kept match
+  /// and the feed cost model, which depends on how often the needle matches.
   private prepare(query: string): boolean {
     this.search ??= this.core.createSearch();
     if (query === this.needle) return false;
@@ -278,14 +348,124 @@ export class GhosttyFind {
     this.needle = query;
     this.waiting = [];
     this.forget();
+    this.readMs = FIND_COST_PRIORS.read;
+    this.checkMs = FIND_COST_PRIORS.check;
+    this.completeMs = FIND_COST_PRIORS.complete;
+    this.held = 0;
+    this.markBacklog();
     return true;
   }
 
   private onChange(change: GhosttyChange): void {
     if (!this.search) return;
-    if (change === "resize") this.onResized();
+    if (change === "resize") {
+      this.onResized();
+      this.resized = true;
+    }
     this.dirty = true;
     this.schedule();
+  }
+
+  /// Brings the search up to date with the terminal before anything reads
+  /// it: a feed when one is predicted to fit the frame, otherwise a restart.
+  /// The core takes in every row moved into the history since the last feed
+  /// in one call, which no budget can split, and while the scan is complete
+  /// the feed also checks every match the search holds again. A restart
+  /// costs little, and the fresh scan catches up in budgeted units from the
+  /// newest output up, so the count shows a partial total meanwhile.
+  ///
+  /// The predictions are `FIND_COST_PRIORS`' costs, as measured and never
+  /// under the assumed ones. A complete scan's feed
+  /// reads the rows' cells and checks the matches held; it restarts only
+  /// when that is over the budget and dearer than the check the rescan's
+  /// completing unit will make, since the restart moves that check to a
+  /// later frame rather than saving it, and saves only what the feed costs
+  /// beyond it (the reading, and the dropping of matches the output
+  /// pruned, which the read cost carries). A running scan's feed only
+  /// reads, but this frame's step may complete the scan, so it restarts
+  /// when the reading and that completion would not fit and the reading is
+  /// at least a scan step's budget: output that heavy keeps the scan from
+  /// completing until it eases, while a lighter write, or one that moves no
+  /// row into the history, would lose the scan's progress to save next to
+  /// nothing, so it is fed and the step goes on. Two cases always feed:
+  /// after a resize, where the core scans again from scratch by itself, and
+  /// a backlog that spans the whole history, where the core starts its
+  /// history search over by itself; neither costs more than a restart.
+  private catchUp(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
+    const search = this.search!;
+    const resized = this.resized;
+    this.resized = false;
+    const rows = this.backlogRows();
+    const cells = rows * this.core.cols;
+    const check = this.checkCost();
+    const complete = search.caughtUp();
+    if (!resized && Number.isFinite(rows)) {
+      const read = cells * this.readMs;
+      const completion = this.completionCost();
+      const restart = complete
+        ? check + read > FIND_FRAME_BUDGET_MS && completion < check + read
+        : read >= FIND_SCAN_BUDGET_MS && read + completion > FIND_FRAME_BUDGET_MS;
+      if (restart) {
+        this.restart();
+        return;
+      }
+    }
+    const checked = this.checked();
+    const started = this.clock();
+    search.feed();
+    const took = this.clock() - started;
+    this.markBacklog();
+    // A feed under the clock's grain reads 0 and says nothing of its cost.
+    // Only a complete scan's feed is learned from: it also drops the matches
+    // whose rows the output pruned, one at a time from a list that is
+    // shifted down for each, which grows faster than the backlog. A running
+    // scan's feed skips that, and learning from it would underestimate the
+    // feed that follows once the scan completes.
+    if (resized || !Number.isFinite(rows) || took <= 0 || !complete) return;
+    if (rows >= FIND_LEARN_ROWS) this.readMs = learned(this.readMs, Math.max(0, took - check) / cells, FIND_COST_PRIORS.read);
+    else if (checked >= FIND_LEARN_CHECK) this.checkMs = learned(this.checkMs, took / checked, FIND_COST_PRIORS.check);
+  }
+
+  /// The matches held times the history's cells: what a check walks.
+  private checked(): number {
+    return this.held * this.core.getScrollbackLength() * this.core.cols;
+  }
+
+  /// What a complete scan's feed costs to check the matches held now, as
+  /// measured or assumed.
+  private checkCost(): number {
+    return this.checked() * this.checkMs;
+  }
+
+  /// What the unit completing a scan of as many matches costs now.
+  private completionCost(): number {
+    return this.checked() * this.completeMs;
+  }
+
+  /// Gives the search's results up for a fresh scan of the same needle.
+  /// The core selects nothing after it, so the active match is kept as a
+  /// resize keeps it (`onRestarted`).
+  private restart(): void {
+    this.search!.restart();
+    this.markBacklog();
+    this.onRestarted();
+  }
+
+  /// Puts the backlog cell on the first row of the screen.
+  private markBacklog(): void {
+    this.backlogCell = this.retrack(this.backlogCell, this.core.getScrollbackLength(), 0);
+  }
+
+  /// The rows moved into the history since the backlog cell was put;
+  /// infinite once its row was pruned, when they are the whole history, and
+  /// none when the cell could not be made.
+  private backlogRows(): number {
+    if (!this.backlogCell) return 0;
+    const point = this.backlogCell.point();
+    if (!point) return Infinity;
+    return Math.max(0, this.core.getScrollbackLength() - point.row);
   }
 
   /// A resize begins and the core still holds the old grid, `rows` high.
@@ -322,6 +502,36 @@ export class GhosttyFind {
     const reselect: Waiting = { step: "kept", at: this.clock() };
     if (this.waiting[0]?.step === "kept") this.waiting[0] = reselect;
     else this.waiting.unshift(reselect);
+  }
+
+  /// The search restarted and the core has no match selected, as after a
+  /// resize, so the kept match is selected again the same way, once the
+  /// rescan finds it, with the steps pressed earlier behind it. Nothing
+  /// reflowed: the highlight moves only when pruned history moved the
+  /// match's rows. With no match kept, or its row pruned, the steps go as
+  /// they go on a resize. A reselect that already waits keeps its time, so
+  /// output that restarts the search frame after frame cannot hold the
+  /// steps behind it past its cap, at which the match is lost as on a
+  /// resize.
+  private onRestarted(): void {
+    const range = this.kept ? this.keptRange() : null;
+    if (!range) {
+      this.forget();
+      this.dropHighlight();
+      this.waiting = this.waiting.filter(({ step }) => step === "newest");
+      return;
+    }
+    this.follow(range);
+    this.walk = null;
+    if (this.waiting[0]?.step !== "kept") this.waiting.unshift({ step: "kept", at: this.clock() });
+  }
+
+  /// The kept match is at `range` now: the highlight follows it while the
+  /// selection is still the controller's own.
+  private follow(range: MatchRange): void {
+    if (sameRange(range, this.kept)) return;
+    this.kept = range;
+    if (this.ownsSelection()) this.highlight(range);
   }
 
   /// The kept match where its cells are now; null when either is gone.
@@ -371,18 +581,31 @@ export class GhosttyFind {
     this.frames.cancel(this.frameId);
   }
 
-  /// One frame of work: feed the output that arrived, scan for the budget,
-  /// apply the steps the scan now allows, and show what the search holds.
+  /// One frame of work: catch up with the output that arrived, scan for
+  /// what is left of the frame, apply the steps the scan now allows, and
+  /// show what the search holds.
   private pump(): void {
     const search = this.search;
     if (!search) return;
-    // Fed before the step: a feed is bounded work that can leave the scan
-    // running, and the step spends this frame's budget finishing it.
-    if (this.dirty) {
-      this.dirty = false;
-      search.feed();
+    const started = this.clock();
+    // Caught up before the step: a feed can leave the scan running, and the
+    // step spends this frame's budget finishing it. The step's budget leaves
+    // room for the unit that completes the scan, which checks the matches it
+    // holds, down to FIND_STEP_FLOOR_MS; a completion over the whole frame
+    // cannot be given room, so then the step runs its full budget. It always
+    // runs at least one unit.
+    this.catchUp();
+    const scanning = !search.caughtUp();
+    const completion = this.completionCost();
+    const left = FIND_FRAME_BUDGET_MS - (this.clock() - started) - completion;
+    const budget = completion >= FIND_FRAME_BUDGET_MS ? this.budgetMs : Math.min(this.budgetMs, Math.max(FIND_STEP_FLOOR_MS, left));
+    const running = search.step(budget, this.clock) === "running";
+    if (scanning && !running && search.completingUnitMs) {
+      const state = search.state();
+      this.held = state.total;
+      const checked = this.checked();
+      if (checked >= FIND_LEARN_CHECK) this.completeMs = learned(this.completeMs, search.completingUnitMs / checked, FIND_COST_PRIORS.complete);
     }
-    const running = search.step(this.budgetMs) === "running";
     const selected = this.applyWaiting();
     this.show(selected && this.askStands());
     // A walk to the kept match goes on after the scan completes.
@@ -437,7 +660,7 @@ export class GhosttyFind {
       this.walk = { direction: index + 1 <= state.total - index ? "older" : "newer", selects: 0 };
     }
     const walk = this.walk;
-    const deadline = performance.now() + this.budgetMs;
+    const deadline = this.clock() + this.budgetMs;
     do {
       const moved = walk.direction === "older" ? search.selectNext() : search.selectPrev();
       walk.selects++;
@@ -445,7 +668,7 @@ export class GhosttyFind {
       if (moved && at(now.active)) return this.land();
       // Once round every match found without meeting it.
       if (!moved || walk.selects > now.total) return this.lose();
-    } while (performance.now() < deadline);
+    } while (this.clock() < deadline);
     return false;
   }
 
@@ -463,8 +686,8 @@ export class GhosttyFind {
     const walked = this.walk !== null && this.walk.selects > 0;
     this.forget();
     if (walked) {
-      this.search!.setNeedle("");
-      this.search!.setNeedle(this.needle);
+      this.search!.restart();
+      this.markBacklog();
       this.schedule();
     }
     return true;
@@ -484,10 +707,14 @@ export class GhosttyFind {
   /// controller's own, and goes when no match is active any more.
   private show(reveal: boolean): void {
     const state = this.search!.state();
+    this.held = state.complete ? state.total : Math.max(state.total, this.held);
     const count = findCount(state);
     if (this.waiting[0]?.step === "kept") {
       // The core has no match selected, or one a walk is passing; the
-      // highlight stays on the kept match until it is selected again.
+      // highlight stays on the kept match until it is selected again, and
+      // follows its cells when pruned history moves its rows.
+      const range = this.keptRange();
+      if (range) this.follow(range);
       this.onCount(state.total > 0 ? { ...count, index: null } : count);
       return;
     }
@@ -547,6 +774,25 @@ export class GhosttyFind {
 function landsAsComplete(step: Waiting["step"], { index, total }: SearchState): boolean {
   if (step === "newer") return index !== null && index > 0;
   return index === null ? total > 0 : index < total - 1;
+}
+
+/// A cost estimate moved halfway to a new measure, the measure taken at
+/// most at one and a half times the estimate, and never under `floor`, the
+/// cost assumed before any measure. A stream whose cost rises is followed
+/// within a few frames, while one feed that ran long raises the estimate by
+/// a quarter at most: a feed runs long when the scheduler or a collection
+/// stretched it, and when the rows the output pruned were dense with
+/// matches, which the core drops one at a time; the next feed seldom prunes
+/// as many. Without that bound one such feed could raise the estimate past
+/// the budget for good, since a restart measures no feed to bring it down
+/// again. The floor keeps measures from lowering a prediction under the
+/// costs the first decisions are made on: a read measured cheap on small
+/// feeds, or on a history not yet full, says nothing of a burst into a full
+/// one, whose pruned matches cost more than its rows, and a feed is timed as
+/// a whole, so a check predicted too high would make its read measure too
+/// low.
+function learned(estimate: number, measured: number, floor: number): number {
+  return Math.max(floor, (estimate + Math.min(measured, 1.5 * estimate)) / 2);
 }
 
 function sameRange(a: MatchRange | null, b: MatchRange | null): boolean {

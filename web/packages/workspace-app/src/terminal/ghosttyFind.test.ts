@@ -1095,7 +1095,7 @@ describe("a resize while the bar is open", () => {
   });
 });
 
-describe("the kept match's tracked cells", () => {
+describe("the tracked cells", () => {
   /// The cells the core tracks for `core`, by their handles: each one made
   /// and not freed yet; `made` counts every one made.
   function tracked(core: VtTerminal): Set<number> & { made: number } {
@@ -1117,23 +1117,24 @@ describe("the kept match's tracked cells", () => {
     return live;
   }
 
-  test("are two, follow the active match through a search's life, and go with the search and the terminal", async () => {
-    const { core, frames, find, view } = await fixture(SHORT);
+  test("are three, the kept match's two and the backlog's, moved through a search's life and gone with the search and the terminal", async () => {
+    const { core, frames, find, view, viewport } = await fixture(SHORT);
     const live = tracked(core);
     find.find("needle");
     frames.settle();
-    expect(live.size, "the newest match's first and last cells").toBe(2);
+    expect(live.size, "the newest match's first and last cells, and the backlog's").toBe(3);
     find.step("needle", "older");
     find.step("needle", "older");
+    viewport.write("more output\r\n");
     view.resize(30, 10);
     frames.settle();
-    expect(live.size).toBe(2);
-    expect(live.made, "moved from match to match, not made again").toBe(2);
+    expect(live.size).toBe(3);
+    expect(live.made, "moved from match to match and feed to feed, not made again").toBe(3);
     find.close();
     expect(live.size, "freed with the search").toBe(0);
     find.find("needle");
     frames.settle();
-    expect(live.size).toBe(2);
+    expect(live.size).toBe(3);
     find.dispose();
     expect(live.size, "freed when the terminal goes").toBe(0);
   });
@@ -1143,7 +1144,7 @@ describe("the kept match's tracked cells", () => {
     const live = tracked(core);
     find.find("needle");
     frames.settle();
-    expect(live.size).toBe(2);
+    expect(live.size).toBe(3);
     core.free();
     expect(live.size).toBe(0);
     expect(() => find.dispose()).not.toThrow();
