@@ -62,7 +62,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [a theme switch leaves ghostty colours][livetheme] | not started | design |
 | [the system cannot open files in chan][openwith] | not started | design |
 | [find loses its match on a resize][findresize] | not started | design |
-| [the pane tree hides what a terminal runs][termcmd] | not started | design |
+| [the pane tree hides what a terminal runs][termcmd] | partly built | build |
 | [tests still red under the heaviest load][loadres] | not started | design |
 | [tmux windows not on their machine card][tmuxcard] | built | owner |
 | [New Window in a devserver tmux window][tmuxnew] | built | owner |
