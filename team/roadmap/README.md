@@ -55,7 +55,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
 | [find frames run long at max scrollback][findfeed] | not started | design |
-| [local devserver calls go through a proxy][cliproxy] | not started | design |
+| [local devserver calls go through a proxy][cliproxy] | partly built | build |
 | [one WireGuard ingress per proxy node][wgnode] | gateway landed | desktop |
 | [the Rust TLS clients ignore the system's CA store][systemca] | not started | design |
 | [wrapped ghostty copies paste broken][gcopy] | not started | design |
@@ -73,7 +73,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
-| [other Dashboard slides sit at the top][dashslides] | not started | build |
+| [other Dashboard slides sit at the top][dashslides] | partly built | build |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
 | [basic flows have no end-to-end check][basicflows] | not started | audit |
 
