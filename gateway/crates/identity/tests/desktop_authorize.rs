@@ -1390,6 +1390,63 @@ async fn self_revoke(app: &TestApp, bearer: Option<&str>) -> (StatusCode, Vec<u8
     send_as(app, Method::DELETE, "/desktop/v1/token", bearer, None, None).await
 }
 
+/// The handler carries its subscriber into each detached cut with
+/// `with_current_subscriber`. Its last drop therefore follows both the
+/// request and every cut, even when the cut has not yet been polled.
+async fn with_cuts_settled<F: std::future::Future>(request: F) -> F::Output {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Finished {}
+
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            if let Some(finished) = self.0.take() {
+                let _ = finished.send(());
+            }
+        }
+    }
+
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let subscriber = tracing_subscriber::registry().with(Finished(Some(finished)));
+    let response = request.with_subscriber(subscriber).await;
+    tokio::time::timeout(Duration::from_secs(10), completion)
+        .await
+        .expect("the request and its detached cuts finish")
+        .expect("the last subscriber drop signals completion");
+    response
+}
+
+#[tokio::test]
+async fn cut_observer_waits_for_detached_work() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    use tracing::instrument::WithSubscriber as _;
+
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let request = async move {
+        tokio::spawn(
+            async move { released.await.expect("the test releases the cut") }
+                .with_current_subscriber(),
+        );
+    };
+    let mut observed = Box::pin(with_cuts_settled(request));
+    poll_fn(|cx| {
+        assert!(
+            observed.as_mut().poll(cx).is_pending(),
+            "the observer must wait for the blocked detached cut"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    observed.await;
+
+    assert_eq!(with_cuts_settled(async { 42 }).await, 42);
+}
+
 /// The answer the PAT auth gives a bearer identity has never minted, read
 /// from the roster, the desktop's other PAT-only read.
 async fn invalid_bearer_answer(app: &TestApp) -> (StatusCode, Vec<u8>) {
@@ -1581,7 +1638,7 @@ async fn redeemed_pat_revokes_itself_and_keeps_its_row() {
     let (token_id, secret) = redeem_account_pat(&app, &mut c, uid).await;
     let cut = OwnerCut::mount(&app, uid, token_id).await;
 
-    let (status, body) = self_revoke(&app, Some(&secret)).await;
+    let (status, body) = with_cuts_settled(self_revoke(&app, Some(&secret))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(body.is_empty());
     // Nothing presented the token before, so it opened nothing to cut.
@@ -1710,13 +1767,13 @@ async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
     let used_cut = OwnerCut::mount(&app, uid, used.token.id).await;
     let unused_cut = OwnerCut::mount(&app, uid, unused.token.id).await;
 
-    let (status, body) = self_revoke(&app, Some(&used.secret)).await;
+    let (status, body) = with_cuts_settled(self_revoke(&app, Some(&used.secret))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(body.is_empty());
     assert!(!active(&app, used.token.id).await);
     // Profile reserved its durable cut for the token, and the first cut of
     // the owner's tunnels and of the sessions they are the subject of ran.
-    assert_eq!(used_cut.settled(&app, (1, 1, 1)).await, (1, 1, 1));
+    assert_eq!(used_cut.counts(&app).await, (1, 1, 1));
     let drain = &received_at(&app.control, "/admin/v1/sessions/revoke").await[0];
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&drain.body).unwrap(),
@@ -1733,7 +1790,7 @@ async fn self_revoke_of_a_used_token_gets_the_owner_cut() {
 
     // An unused token of the same owner is revoked with no cut at all: no
     // reservation for it, and no second tunnel kill or session drain.
-    let (status, _) = self_revoke(&app, Some(&unused.secret)).await;
+    let (status, _) = with_cuts_settled(self_revoke(&app, Some(&unused.secret))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(!active(&app, unused.token.id).await);
     assert_eq!(unused_cut.counts(&app).await.0, 0);
