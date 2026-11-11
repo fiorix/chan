@@ -496,6 +496,28 @@ describe("the laid-out body", () => {
     }
   }
 
+  /// A computed value with each var() replaced by the custom property's
+  /// value on that element (or the fallback), recursively.
+  function resolved(el: Element, value: string, depth = 0): string {
+    if (depth > 10 || !value.includes("var(")) return value.trim();
+    const styles = getComputedStyle(el);
+    const out = value.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)/g, (_m, name: string, fallback?: string) => {
+      return styles.getPropertyValue(name).trim() || (fallback ?? "").trim();
+    });
+    return resolved(el, out, depth + 1);
+  }
+
+  /// WCAG contrast ratio of two #rrggbb colours.
+  function contrast(a: string, b: string): number {
+    const luminance = (hex: string) => {
+      const [r, g, bl] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+      const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * lin(r!) + 0.7152 * lin(g!) + 0.0722 * lin(bl!);
+    };
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi! + 0.05) / (lo! + 0.05);
+  }
+
   test("the root path is one left-to-right run inside a cell that clips its start", async () => {
     (workspace as { info: unknown }).info = { root: "/work/tmp/chan-smoke-X", label: "chan-smoke-X" };
     const target = await render({ variant: "dashboard" });
@@ -547,5 +569,26 @@ describe("the laid-out body", () => {
       language: rule(languageInfoSource),
       tag: rule(tagInfoSource),
     }).toEqual({ workspace: report, file: report, language: report, tag: report });
+  });
+
+  test.each(["light", "dark"] as const)("the workspace chip's label takes the theme's text colour on its card fill in the %s theme", async (theme) => {
+    document.documentElement.dataset.theme = theme;
+    const target = await render({ variant: "dashboard" });
+    injectCss(target);
+    const chip = target.querySelector<HTMLElement>(".kind-chip.workspace")!;
+    expect(chip.textContent).toBe("workspace");
+    const style = getComputedStyle(chip);
+
+    // Tokens, not literals, so the label follows the theme the way the
+    // fill already does.
+    expect(style.color).toBe("var(--text)");
+    // jsdom does not expand a shorthand that holds a var(): the fill is
+    // read from the shorthand itself.
+    expect(style.background).toBe("var(--bg-card)");
+    const color = resolved(chip, style.color);
+    const fill = resolved(chip, style.background);
+    expect(color).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(fill).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(contrast(color, fill)).toBeGreaterThanOrEqual(4.5);
   });
 });

@@ -440,10 +440,9 @@
     gap: 0.4rem;
     margin-bottom: 0.4rem;
   }
-  /* Workspace kind chip: black bg, white text. Sits alongside the
-     existing doc / image / contact / view-only chips defined in
-     FileInfoBody so the inspector's per-kind cue is consistent
-     across selections. */
+  /* Workspace kind chip. Sits alongside the doc / image / contact /
+     view-only chips defined in FileInfoBody so the inspector's per-kind
+     cue is consistent across selections. */
   .kind-chip {
     color: #fff;
     text-transform: uppercase;
@@ -457,9 +456,11 @@
   }
   .kind-chip.workspace {
     /* Match the graph canvas workspace-root fill (theme.bgCard) so the
-       root chip and the root node read the same colour. */
+       root chip and the root node read the same colour. That fill is near
+       white in the light theme and near black in the dark one, so the
+       label takes the theme's text colour, as other text on a card does. */
     background: var(--bg-card);
-    color: #fff;
+    color: var(--text);
   }
   .title {
     margin: 0 0 0.5rem 0;
