@@ -192,7 +192,7 @@ function startWorkspacePolling(): void {
     if (document.visibilityState !== "visible") return;
     void refreshWorkspacesLive();
     // Tunnel state changes without a registry mutation or window-feed push.
-    if (library.gateways.some((gateway) => gateway.wireguard)) {
+    if (library.gateways.some((gateway) => gateway.wireguard || gateway.wireguard_status || gateway.wireguard_enrolled)) {
       void refreshGatewaysLive();
     }
   }, WORKSPACE_POLL_MS);

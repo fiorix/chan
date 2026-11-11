@@ -237,7 +237,7 @@ describe("GatewayForm WireGuard key", () => {
     expect(onsaved).toHaveBeenCalledWith(id);
   });
 
-  it("Done after a sign-in enrolled the key keeps the client file the sign-in named", async () => {
+  it("Done after sign-in keeps enrolled parameters without restoring a manual file", async () => {
     // With the file field blank, and with a file typed before the key
     // action, which the add saved.
     for (const typed of ["", FILE]) {
@@ -250,18 +250,19 @@ describe("GatewayForm WireGuard key", () => {
       await settle();
       const id = (await backend.listGateways()).find((g) => g.url === URL_)!.id;
       // The badge's Connect signs in while the form is open, and the
-      // redeem names the row's client file.
+      // redeem replaces any manual file with enrolled parameters.
       await backend.connectGateway(id);
       const enrolled = (await backend.listGateways()).find((g) => g.id === id)!.wireguard;
-      expect(enrolled, typed).toMatch(/\.conf$/);
+      expect(enrolled, typed).toBeNull();
       const update = vi.spyOn(backend, "updateGateway");
       setInput(nameField(el), "prod");
       primary(el).click();
       await settle();
       expect(wireBody(update.mock.calls[0][1]), typed).toBe(
-        wireBody({ url: URL_, label: "prod", wireguard: enrolled }),
+        wireBody({ url: URL_, label: "prod" }),
       );
       expect((await backend.listGateways()).find((g) => g.id === id)!.wireguard).toBe(enrolled);
+      expect((await backend.listGateways()).find((g) => g.id === id)!.wireguard_enrolled).toBe(true);
       expect(onsaved).toHaveBeenCalledWith(id);
       update.mockRestore();
       unmount(app!);
@@ -271,18 +272,19 @@ describe("GatewayForm WireGuard key", () => {
     }
   });
 
-  it("an edit saved after a sign-in keeps the row's file unless the field was changed", async () => {
+  it("an edit after sign-in preserves enrollment unless a manual file is selected", async () => {
     const id = await backend.addGateway({ url: URL_ }).then((g) => g.id);
     const row = (await backend.generateWireguardKey(id))!;
     const { el } = render(row);
     await backend.connectGateway(id);
     const enrolled = (await backend.listGateways()).find((g) => g.id === id)!.wireguard;
+    expect(enrolled).toBeNull();
     const update = vi.spyOn(backend, "updateGateway");
     setInput(nameField(el), "prod");
     btn(el, "Save changes").click();
     await settle();
     expect(wireBody(update.mock.calls[0][1])).toBe(
-      wireBody({ url: URL_, label: "prod", wireguard: enrolled }),
+      wireBody({ url: URL_, label: "prod" }),
     );
     // A file typed into the field is what the user asked for.
     unmount(app!);

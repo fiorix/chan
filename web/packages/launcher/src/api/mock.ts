@@ -664,7 +664,7 @@ export const mockApi: LibraryApi = {
   // The mock has no desktop to discover/sign in through, so connect just marks
   // the gateway connected (and disconnect back), mirroring the devserver mock.
   // A key not enrolled yet is enrolled by it, as the desktop's sign-in does:
-  // the row then names the file the redeem writes, and its tunnel connects.
+  // the row then keeps public parameters, and its tunnel connects.
   connectGateway: (id) => {
     const gw = gateways.find((g) => g.id === id);
     if (gw) {
@@ -672,7 +672,7 @@ export const mockApi: LibraryApi = {
       gw.enabled = true;
       if (gw.wireguard_public_key && !gw.wireguard_enrolled) {
         gw.wireguard_enrolled = true;
-        gw.wireguard = `~/.chan/desktop/wireguard/${gw.id}.conf`;
+        gw.wireguard = null;
         gw.wireguard_status = "connecting";
       }
       notify();

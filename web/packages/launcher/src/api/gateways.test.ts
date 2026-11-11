@@ -224,9 +224,13 @@ describe("mock gateway registry", () => {
     await mockApi.connectGateway(gw.id);
     let row = (await mockApi.listGateways()).find((g) => g.id === gw.id)!;
     expect(row.wireguard_enrolled).toBe(true);
-    expect(row.wireguard).toBe(`~/.chan/desktop/wireguard/${gw.id}.conf`);
+    expect(row.wireguard).toBeNull();
     expect(row.wireguard_status).toBe("connecting");
-    // Clearing the file drops the enrollment and keeps the key.
+    const renamed = await mockApi.updateGateway(gw.id, { url: gw.url, label: "renamed" });
+    expect(renamed.wireguard_enrolled).toBe(true);
+    expect(renamed.wireguard_status).toBe("connecting");
+    // Clearing a selected manual file drops its marker and keeps the key.
+    await mockApi.updateGateway(gw.id, { url: gw.url, wireguard: "/w/manual.conf" });
     const cleared = await mockApi.updateGateway(gw.id, { url: gw.url });
     expect(cleared.wireguard_enrolled).toBe(false);
     expect(cleared.wireguard_public_key).toBe(again.wireguard_public_key);

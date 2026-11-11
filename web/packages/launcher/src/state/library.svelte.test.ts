@@ -518,14 +518,17 @@ describe("workspace polling", () => {
     vi.restoreAllMocks();
   });
 
-  it("refreshes live WireGuard state while visible without a registry event", async () => {
+  it.each([
+    { wireguard: "/tmp/gateway.conf", wireguard_status: "connecting", wireguard_enrolled: false },
+    { wireguard: null, wireguard_status: "connecting", wireguard_enrolled: false },
+    { wireguard: null, wireguard_status: null, wireguard_enrolled: true },
+  ])("refreshes live WireGuard state while visible without a registry event: %j", async (wireguard) => {
     stopWatching();
     vi.useFakeTimers();
     const { backend } = await import("../api/backend");
     const row = {
       ...library.gateways[0]!,
-      wireguard: "/tmp/gateway.conf",
-      wireguard_status: "connecting",
+      ...wireguard,
     };
     const list = vi.spyOn(backend, "listGateways").mockResolvedValue([row]);
     vi.spyOn(backend, "watchWindows").mockReturnValue(() => {});
