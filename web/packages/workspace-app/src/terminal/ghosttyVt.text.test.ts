@@ -22,8 +22,7 @@ function write(t: VtTerminal, input: string): void {
 }
 
 /// What a row shows, read cell by cell: a blank cell is a space, a wide
-/// character's spacer is nothing, a cluster is its whole text, and trailing
-/// spaces go.
+/// character's spacer is nothing, and a cluster is its whole text.
 function shownRow(cells: GhosttyCell[] | null, cluster: (x: number) => string): string {
   let text = "";
   (cells ?? []).forEach((cell, x) => {
@@ -31,20 +30,40 @@ function shownRow(cells: GhosttyCell[] | null, cluster: (x: number) => string): 
     if (cell.codepoint === 0) text += " ";
     else text += cell.grapheme_len > 0 ? cluster(x) : String.fromCodePoint(cell.codepoint);
   });
-  return text.replace(/ +$/, "");
+  return text;
 }
 
-/// The text a terminal shows, history first, rows on separate lines,
-/// trailing blank rows dropped.
+type ShownRow = { text: string; continues: boolean };
+
+/// Rows as a copy reads them: a row that continues the row above joins it
+/// (the first row read starts a line whatever it continues), each line's
+/// trailing spaces go, and so do the trailing blank lines.
+function shownLines(rows: ShownRow[]): string {
+  const lines: string[] = [];
+  for (const { text, continues } of rows) {
+    if (continues && lines.length > 0) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  return lines.map((line) => line.replace(/ +$/, "")).join("\n").replace(/\n+$/, "");
+}
+
+/// Row `y` of a terminal counted history first, and whether it continues
+/// the row above it.
+function shownRowAt(t: VtTerminal, y: number, keep: (x: number) => boolean = () => true): ShownRow {
+  const len = t.getScrollbackLength();
+  const history = y < len;
+  const cells = history ? t.getScrollbackLine(y) : t.getLine(y - len);
+  const kept = (cells ?? []).map((cell, x) => (keep(x) ? cell : { ...cell, width: 0 }));
+  return {
+    text: shownRow(kept, (x) => (history ? t.getScrollbackGraphemeString(y, x) : t.getGraphemeString(y - len, x))),
+    continues: history ? t.isScrollbackRowWrapped(y) : t.isRowWrapped(y - len),
+  };
+}
+
+/// The text a terminal shows, history first, as a copy reads it.
 function shownText(t: VtTerminal): string {
-  const rows: string[] = [];
-  for (let y = 0; y < t.getScrollbackLength(); y++) {
-    rows.push(shownRow(t.getScrollbackLine(y), (x) => t.getScrollbackGraphemeString(y, x)));
-  }
-  for (let y = 0; y < t.rows; y++) {
-    rows.push(shownRow(t.getLine(y), (x) => t.getGraphemeString(y, x)));
-  }
-  return rows.join("\n").replace(/\n+$/, "");
+  const total = t.getScrollbackLength() + t.rows;
+  return shownLines(Array.from({ length: total }, (_, y) => shownRowAt(t, y)));
 }
 
 describe("the terminal's text in one core call", () => {
@@ -86,21 +105,90 @@ describe("the terminal's text in one core call", () => {
   });
 });
 
+describe("a copy joins the rows a program soft-wrapped", () => {
+  const COMMAND = "$ git log --oneline --graph --decorate --all -- web/packages";
+
+  test("a command longer than the width reads as one line, on screen and in history", async () => {
+    const t = await terminal(24, 6);
+    write(t, `${COMMAND}\r\nnext`);
+    expect([t.isRowWrapped(1), t.isRowWrapped(2), t.isRowWrapped(3)], "the core wrapped it over three rows").toEqual([true, true, false]);
+    expect(t.plainText()).toBe(`${COMMAND}\nnext`);
+    expect(t.plainText({ startCol: 0, startRow: 0, endCol: 23, endRow: 2 })).toBe(COMMAND);
+    write(t, "\r\n".repeat(6));
+    expect(t.getScrollbackLength()).toBe(4);
+    expect(t.isScrollbackRowWrapped(1)).toBe(true);
+    expect(t.plainText()).toBe(`${COMMAND}\nnext`);
+    expect(t.plainText({ startCol: 0, startRow: 0, endCol: 23, endRow: 2 })).toBe(COMMAND);
+  });
+
+  test("a hard line break stays one, after a full row as well", async () => {
+    const t = await terminal(10, 4);
+    write(t, "x".repeat(10) + "\r\ny\r\n" + "z".repeat(10) + "\rw");
+    expect(t.isRowWrapped(1)).toBe(false);
+    expect(t.plainText()).toBe("x".repeat(10) + "\ny\nw" + "z".repeat(9));
+  });
+
+  test("a space where the row wrapped stays, and a line's trailing spaces go", async () => {
+    const t = await terminal(10, 4);
+    write(t, "echo 1234 67890   \r\ndone   ");
+    expect(t.isRowWrapped(1)).toBe(true);
+    expect(t.plainText()).toBe("echo 1234 67890\ndone");
+  });
+
+  test("a wide character that did not fit the last column reads once, with nothing before it", async () => {
+    const t = await terminal(10, 3);
+    write(t, "x".repeat(9) + "日本語");
+    expect(t.getLine(0)?.[9]?.width, "a spacer holds the last column").toBe(0);
+    expect(t.plainText()).toBe("x".repeat(9) + "日本語");
+  });
+
+  test("a range that ends where a wide character did not fit takes the character", async () => {
+    const t = await terminal(10, 3);
+    write(t, "x".repeat(9) + "日本語");
+    expect(t.plainText({ startCol: 0, startRow: 0, endCol: 9, endRow: 0 })).toBe("x".repeat(9) + "日");
+    expect(t.plainText({ startCol: 0, startRow: 0, endCol: 8, endRow: 0 })).toBe("x".repeat(9));
+  });
+
+  test("a range from the middle of a wrapped line reads its rest as one line", async () => {
+    const t = await terminal(10, 5);
+    write(t, "a".repeat(10) + "b".repeat(10) + "c".repeat(5) + "\r\nz");
+    expect(t.plainText()).toBe("a".repeat(10) + "b".repeat(10) + "c".repeat(5) + "\nz");
+    expect(t.plainText({ startCol: 5, startRow: 1, endCol: 0, endRow: 3 })).toBe("b".repeat(5) + "c".repeat(5) + "\nz");
+  });
+});
+
 describe("a range of rows in one core call", () => {
   /// What the rows from (startCol, startRow) to (endCol, endRow) show, both
-  /// ends included, rows counted history first.
+  /// ends included, rows counted history first, as a copy reads them.
   function shownRange(t: VtTerminal, startCol: number, startRow: number, endCol: number, endRow: number): string {
-    const len = t.getScrollbackLength();
-    const rows: string[] = [];
+    // A range that ends on a spacer head, the last column of a row where a
+    // wide character did not fit, ends on that character at the start of
+    // the next row, as the core's formatter reads it.
+    if (endsOnSpacerHead(t, endCol, endRow)) {
+      endCol = 0;
+      endRow += 1;
+    }
+    const rows: ShownRow[] = [];
     for (let y = startRow; y <= endRow; y++) {
-      const history = y < len;
-      const cells = history ? t.getScrollbackLine(y) : t.getLine(y - len);
       const from = y === startRow ? startCol : 0;
       const to = y === endRow ? endCol : t.cols - 1;
-      const slice = (cells ?? []).map((cell, x) => (x < from || x > to ? { ...cell, width: 0 } : cell));
-      rows.push(shownRow(slice, (x) => (history ? t.getScrollbackGraphemeString(y, x) : t.getGraphemeString(y - len, x))));
+      rows.push(shownRowAt(t, y, (x) => x >= from && x <= to));
     }
-    return rows.join("\n").replace(/\n+$/, "");
+    return shownLines(rows);
+  }
+
+  function endsOnSpacerHead(t: VtTerminal, col: number, row: number): boolean {
+    const len = t.getScrollbackLength();
+    const cells = (y: number) => (y < len ? t.getScrollbackLine(y) : t.getLine(y - len));
+    const here = cells(row);
+    const next = row + 1 < len + t.rows ? shownRowAt(t, row + 1) : null;
+    return (
+      col === t.cols - 1 &&
+      here?.[col]?.width === 0 &&
+      here?.[col - 1]?.width !== 2 &&
+      next?.continues === true &&
+      cells(row + 1)?.[0]?.width === 2
+    );
   }
 
   test.each(Object.entries({ ...SCREEN_STREAMS, ...TEXT_STREAMS }))(
@@ -152,6 +240,13 @@ describe("Copy scrollback's text", () => {
     expect(ghosttyScrollbackText(term)).toBe("one\ntwo\n\nthree");
   });
 
+  test("joins a wrapped command and leaves out what the screen does not draw", async () => {
+    const t = await terminal(10, 4);
+    write(t, "$ ab\x7fcdefghijkl\r\nnext");
+    const term: Source = { wasmTerm: t, buffer: { active: { length: 0, getLine: () => undefined } } };
+    expect(ghosttyScrollbackText(term)).toBe("$ abcdefghijkl\nnext");
+  });
+
   test("reads the buffer row by row from a terminal the binding does not drive", () => {
     const rows = ["first  ", "", "last", "", ""];
     const term: Source = {
@@ -164,6 +259,15 @@ describe("Copy scrollback's text", () => {
       },
     };
     expect(ghosttyScrollbackText(term)).toBe("first\n\nlast");
+  });
+
+  test("leaves out what the screen does not draw from a buffer read too", () => {
+    const rows = ["fir\x7fst", "\u200blast"];
+    const term: Source = {
+      wasmTerm: undefined,
+      buffer: { active: { length: rows.length, getLine: (y) => ({ translateToString: () => rows[y] }) } },
+    };
+    expect(ghosttyScrollbackText(term)).toBe("first\nlast");
   });
 });
 

@@ -17,6 +17,7 @@
 /// a user's terminal.
 
 import type { Ghostty, GhosttyCell, GhosttyTerminal, KeyEncoder } from "ghostty-web";
+import { copiedText } from "./ghosttyCopy";
 
 /// Enum values of the pinned build, by upstream C type.
 export const ABI = {
@@ -56,7 +57,7 @@ export const ABI = {
     BG_COLOR_RGB: 3,
   },
   GhosttyCellWide: { NARROW: 0, WIDE: 1, SPACER_TAIL: 2, SPACER_HEAD: 3 },
-  GhosttyFormatterOption: { SELECTION: 4 },
+  GhosttyFormatterOption: { UNWRAP: 2, TRIM: 3, SELECTION: 4 },
   GhosttyKeyEncoderOption: {
     CURSOR_KEY_APPLICATION: 1,
     KEYPAD_KEY_APPLICATION: 2,
@@ -855,12 +856,13 @@ export class VtTerminal {
   // Scrollback and grid lookups
   // ------------------------------------------------------------------
 
-  /// The text of the active screen in one core call, rows on separate
-  /// lines: on the primary screen its history and then its rows, on the
-  /// alternate screen its rows alone. It is the text the rows show: a blank
-  /// cell is a space, a wide character appears once, a cluster whole; each
-  /// row's trailing spaces and the trailing blank rows go (other whitespace
-  /// a program printed stays), and a soft wrap stays a line break. A
+  /// The text of the active screen in one core call, as a copy takes it:
+  /// on the primary screen its history and then its rows, on the alternate
+  /// screen its rows alone. It is the text the rows show: a blank cell is a
+  /// space, a wide character appears once, a cluster whole; a row the
+  /// program soft-wrapped joins the row it continues, as xterm.js copies,
+  /// and a hard line break stays; each line's trailing spaces and the
+  /// trailing blank rows go (other whitespace a program printed stays). A
   /// row-by-row read of the history costs a few wasm calls a cell; this is
   /// one formatter call for all of it. The text is built in the instance's
   /// memory, which keeps its high-water mark, so a long history's first copy
@@ -879,13 +881,17 @@ export class VtTerminal {
         selection = this.selection(range, last);
         if (!selection) return null;
       }
-      // A new formatter's defaults are this read: plain text, soft wraps
-      // kept, trailing spaces trimmed, the whole screen. A range narrows it
-      // to the selection, which the formatter copies.
+      // A new formatter emits plain text of the whole screen. Its default
+      // keeps a soft wrap as a line break, which pastes a wrapped command as
+      // several, so unwrapping is set; trimming is its default and is set
+      // too, since a copy's text depends on it. A range narrows it to the
+      // selection, which the formatter copies.
       formatter = this.wasm.newHandle(
         (slot) => fn.ghostty_formatter_terminal_new(0, slot, this.handle),
         "formatter",
       );
+      if (!this.setFormatterFlag(formatter, ABI.GhosttyFormatterOption.UNWRAP, true)) return null;
+      if (!this.setFormatterFlag(formatter, ABI.GhosttyFormatterOption.TRIM, true)) return null;
       if (selection && fn.ghostty_formatter_set(formatter, ABI.GhosttyFormatterOption.SELECTION, selection) !== ABI.GhosttyResult.SUCCESS) {
         return null;
       }
@@ -906,6 +912,13 @@ export class VtTerminal {
       if (formatter) fn.ghostty_formatter_free(formatter);
       this.wasm.free(selection, LAYOUT.GhosttySelection.size);
     }
+  }
+
+  /// Set the bool `option` of `formatter`; false when the core refuses it.
+  private setFormatterFlag(formatter: number, option: number, on: boolean): boolean {
+    const ptr = this.scratch + SCRATCH.slot;
+    this.wasm.view().setUint8(ptr, on ? 1 : 0);
+    return this.wasm.fn.ghostty_formatter_set(formatter, option, ptr) === ABI.GhosttyResult.SUCCESS;
   }
 
   /// A `GhosttySelection` over `range`, its rows clamped to `last`, in a
@@ -957,7 +970,17 @@ export class VtTerminal {
   /// Whether row `row` continues the row above it, the meaning xterm's
   /// `isWrapped` has and ghostty-web's buffer API passes on.
   isRowWrapped(row: number): boolean {
-    if (!this.gridRef(ABI.GhosttyPointTag.ACTIVE, 0, row)) return false;
+    return this.continuesRowAbove(ABI.GhosttyPointTag.ACTIVE, row);
+  }
+
+  /// Whether history row `offset`, 0 the oldest, continues the row above
+  /// it. ghostty-web's buffer reads every history row as unwrapped.
+  isScrollbackRowWrapped(offset: number): boolean {
+    return this.continuesRowAbove(ABI.GhosttyPointTag.HISTORY, offset);
+  }
+
+  private continuesRowAbove(tag: number, y: number): boolean {
+    if (!this.gridRef(tag, 0, y)) return false;
     const fn = this.wasm.fn;
     const s = this.scratch;
     if (fn.ghostty_grid_ref_row(s + SCRATCH.gridRef, s + SCRATCH.raw) !== ABI.GhosttyResult.SUCCESS) return false;
@@ -1782,16 +1805,17 @@ export type ScrollbackSource = {
   };
 };
 
-/// Copy scrollback's text of a ghostty terminal. The binding's terminal
-/// formats its history and rows in one core call (`VtTerminal.plainText`),
-/// where reading them through ghostty-web's buffer costs a few wasm calls a
-/// cell and blocks the page for seconds over a long history. Any other
-/// terminal, or a format that fails, is read row by row through the buffer.
+/// Copy scrollback's text of a ghostty terminal, without what the screen
+/// does not draw (`copiedText`). The binding's terminal formats its history
+/// and rows in one core call (`VtTerminal.plainText`), where reading them
+/// through ghostty-web's buffer costs a few wasm calls a cell and blocks the
+/// page for seconds over a long history. Any other terminal, or a format
+/// that fails, is read row by row through the buffer.
 export function ghosttyScrollbackText(term: ScrollbackSource): string {
   const text = term.wasmTerm instanceof VtTerminal ? term.wasmTerm.plainText() : null;
-  if (text !== null) return text;
+  if (text !== null) return copiedText(text);
   const buf = term.buffer.active;
   const lines: string[] = [];
   for (let y = 0; y < buf.length; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
-  return lines.join("\n").trimEnd();
+  return copiedText(lines.join("\n").trimEnd());
 }
