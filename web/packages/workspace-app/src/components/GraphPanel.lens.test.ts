@@ -235,3 +235,21 @@ describe("a file scope", () => {
     expect(ids, "a is two links on, past depth 1").not.toContain(A);
   });
 });
+
+describe("the framing each scope hands the canvas", () => {
+  // A lens that pins a node of its own splays its nodes around it in every
+  // direction, so it frames the drawn box in the middle of the canvas; the
+  // scopes that read as a spine keep the canvas's default.
+  test.each([
+    ["tag:#t", "bounds"],
+    ["mention:@@alice", "bounds"],
+    ["contact:notes/a.md", "bounds"],
+    ["language:rust", "bounds"],
+    ["workspace", undefined],
+    ["dir:notes", undefined],
+    ["file:notes/a.md", undefined],
+  ] as const)("%s frames by %s", async (scopeId, anchor) => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId }));
+    expect(canvas.props?.focalAnchor).toBe(anchor);
+  });
+});
