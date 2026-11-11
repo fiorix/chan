@@ -55,6 +55,8 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 
 One more came from the owner on 2026-11-11 and was built outside the team by his Mac agent from the lead's order, then taken in as an intake: in title-bar-tabs mode the window title moves back from the pane tree heading into the title bar, next to the pane tree button with no tabs and at the bar's right end once a tab opens, and a local window reads like a devserver's, `local / {workspace} Window N [label]`, with the library's own title the machine-neutral tail that `cs window list` prints ([titlebar]).
 
+A second intake came from the owner on 2026-11-11, from a screenshot of a window that came back as its traffic lights alone after a display sleep and a Space switch: his Mac agent, from the lead's order, measured the blank from WebKit's unified log and found every terminal repaint asked for while the window was hidden queued its own animation frame, all run in the first frame back, which the page now bounds to one pending repaint per terminal; 19.5 s blank against 0.20 s ([wakeblank]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -88,6 +90,7 @@ One more came from the owner on 2026-11-11 and was built outside the team by his
 | [ghostty sends a pasted line break as LF][ghosttylf] | landed | GA |
 | [a local close outlasts its CLI reply window][closebudget] | landed | GA |
 | [the window title moves back into the title bar][titlebar] | landed | GA |
+| [a window comes back as traffic lights after a sleep][wakeblank] | landed | GA |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -120,6 +123,7 @@ One more came from the owner on 2026-11-11 and was built outside the team by his
 [ghosttylf]: v0.128.0/ghostty-sends-a-pasted-line-break-as-lf.md
 [closebudget]: v0.128.0/a-local-close-outlasts-its-cli-reply-window.md
 [titlebar]: v0.128.0/the-window-title-moves-back-into-the-title-bar.md
+[wakeblank]: v0.128.0/a-chan-window-comes-back-as-traffic-lights-alone-after-a-display-sleep-and-a-space-switch-on-macos.md
 [reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
 [tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 
