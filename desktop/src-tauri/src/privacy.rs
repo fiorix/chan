@@ -212,6 +212,67 @@ mod tests {
         );
     }
 
+    /// Privacy mode masks a composed title whole, the machine and the
+    /// workspace with the rest, and turning it off restores the full title.
+    #[test]
+    fn privacy_mode_masks_the_machine_and_workspace_with_the_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let state = AppState::with_store(store);
+        let record = chan_server::WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "local".into(),
+            kind: chan_server::WindowKind::Workspace,
+            title: "library title".into(),
+            ordinal: 1,
+            label: "my own title".into(),
+            workspace_path: Some("/home/hacker/src/chan".into()),
+            prefix: "/w".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: false,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        };
+        let local = crate::serve::watched_window_title(&record, None);
+        let remote = crate::serve::watched_window_title(&record, Some("geekom"));
+        write(
+            &state.store,
+            PrivacyPatch {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (label, title) in [("local::w-1", &local), ("lib-a::w-1", &remote)] {
+            assert_eq!(window_title(&state, label, title), "Chan (privacy mode)");
+            assert_eq!(&state.privacy_titles.lock().unwrap()[label], title);
+        }
+        write(
+            &state.store,
+            PrivacyPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            window_title(&state, "local::w-1", &local),
+            "\u{2193}\u{FE0E} local / chan Window 1 [my own title]"
+        );
+        assert_eq!(
+            window_title(&state, "lib-a::w-1", &remote),
+            "\u{2197}\u{FE0E} geekom / chan Window 1 [my own title]"
+        );
+    }
+
     #[test]
     fn privacy_persists_without_replacing_other_desktop_settings() {
         let dir = tempfile::tempdir().unwrap();

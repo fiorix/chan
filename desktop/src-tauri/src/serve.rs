@@ -28,14 +28,17 @@ use crate::AppState;
 /// frontend reacts by re-fetching the workspace list.
 pub const SERVES_CHANGED: &str = "serves-changed";
 
-/// Window-title kind glyphs. A workspace window's title leads with one of
-/// these so the OS title bar + window switcher encode the kind at a glance,
-/// then the locator (path / URL). Emoji render as color glyphs in the macOS
-/// title bar; named constants so swapping the glyph set is a one-line change
-/// each. Monochrome line-art: the house mirrors the launcher's lucide House; the
-/// remote is an up-right arrow that stays legible in title-bar fonts.
-const ICON_LOCAL_HOME: &str = "\u{2302}"; // ⌂ house: any local-disk workspace
-const ICON_REMOTE: &str = "\u{2197}\u{FE0E}"; // ↗ up-right arrow: a remote devserver
+/// Window-title machine glyphs. A watched window's title leads with one of
+/// these and the machine's name, so the OS title bar and window switcher say
+/// at a glance which machine serves the window. Each carries the U+FE0E
+/// text-presentation selector, so a font with an emoji form for the arrow
+/// still draws it as monochrome text that stays legible in title-bar fonts.
+const ICON_LOCAL: &str = "\u{2193}\u{FE0E}"; // down arrow: this desktop's own library
+const ICON_REMOTE: &str = "\u{2197}\u{FE0E}"; // up-right arrow: a remote devserver
+
+/// The machine name a local window's title carries where a devserver's title
+/// carries the devserver's name. Lower case, as a host name reads.
+const LOCAL_MACHINE: &str = "local";
 
 /// Whether mounting a workspace should also mint a native window.
 ///
@@ -186,57 +189,43 @@ pub fn workspace_window_prefix(key: &str) -> String {
     format!("workspace-{:016x}", h.finish())
 }
 
-/// Window title for a local-workspace webview: the house glyph then the
-/// workspace path. Every local-disk workspace uses the house glyph regardless
-/// of where on disk it lives. The path is the locator (the disambiguating
-/// signal in the OS window switcher); the glyph prefix makes the kind read at
-/// a glance.
-fn workspace_title(key: &str) -> String {
-    format!("{ICON_LOCAL_HOME} {key}")
-}
-
-/// Title for a devserver (remote) webview, per spec `icon devserver / repo`:
-/// the remote glyph, the devserver's display name, then the workspace's repo
-/// (the path basename). `build_workspace_window_with_completion` appends
-/// ` Window {N}`. A terminal carries no workspace, so it reads
-/// `icon devserver Terminal`. The
-/// full remote path is NOT used (it would read as a meaningless local path --
-/// `workspace_title`'s local house glyph is wrong for a remote box).
-fn devserver_window_title(devserver_name: &str, record: &WindowRecord) -> String {
+/// The base title of a window on `machine`, led by the machine's glyph:
+/// `{icon} {machine} / {workspace}` for a workspace window and
+/// `{icon} {machine} Terminal` for a terminal; [`compose_window_title`]
+/// appends ` Window {N}` and the caption. The workspace is its root's last
+/// path component, not the whole root: a remote root means nothing as a path
+/// on this desktop, and a local one is long, so both name the workspace the
+/// same short way. A workspace record with no root to name reads
+/// `{icon} {machine}`.
+fn machine_window_title(icon: &str, machine: &str, record: &WindowRecord) -> String {
     match record.kind {
-        WindowKind::Terminal => format!("{ICON_REMOTE} {devserver_name} Terminal"),
+        WindowKind::Terminal => format!("{icon} {machine} Terminal"),
         WindowKind::Workspace => {
-            let repo = record
+            let workspace = record
                 .workspace_path
                 .as_deref()
                 .and_then(|p| Path::new(p).file_name())
                 .and_then(|n| n.to_str());
-            match repo {
-                Some(repo) => format!("{ICON_REMOTE} {devserver_name} / {repo}"),
-                None => format!("{ICON_REMOTE} {devserver_name}"),
+            match workspace {
+                Some(workspace) => format!("{icon} {machine} / {workspace}"),
+                None => format!("{icon} {machine}"),
             }
         }
     }
 }
 
-/// The base title of a watcher-opened window: the devserver form when the
-/// window belongs to a connected devserver (`devserver_name`), else the local
-/// form. Shared by the open path and the watcher's retitle so both start from
-/// the same base.
+/// The base title of a watcher-opened window: the remote glyph and the
+/// devserver's name when the window belongs to a connected devserver
+/// (`devserver_name`), else the local glyph and `local`, so a local window and
+/// a remote one read in the same shape. Shared by the open path and the
+/// watcher's retitle so both start from the same base.
 pub(crate) fn watched_window_base_title(
     record: &WindowRecord,
     devserver_name: Option<&str>,
 ) -> String {
     match devserver_name {
-        Some(name) => devserver_window_title(name, record),
-        None => match record.kind {
-            WindowKind::Terminal => "Terminal".to_string(),
-            WindowKind::Workspace => record
-                .workspace_path
-                .as_deref()
-                .map(workspace_title)
-                .unwrap_or_else(|| "Workspace".to_string()),
-        },
+        Some(name) => machine_window_title(ICON_REMOTE, name, record),
+        None => machine_window_title(ICON_LOCAL, LOCAL_MACHINE, record),
     }
 }
 
@@ -2425,27 +2414,42 @@ mod tests {
         // The unlabelled shape is what every existing window carries; adding a
         // caption must not disturb it.
         assert_eq!(
-            compose_window_title("\u{2302} /w/notes", "workspace", 2, ""),
-            "\u{2302} /w/notes Window 2",
+            compose_window_title("\u{2193}\u{FE0E} local / notes", "workspace", 2, ""),
+            "\u{2193}\u{FE0E} local / notes Window 2",
         );
         assert_eq!(
-            compose_window_title("\u{2302} /w/notes", "workspace", 2, "release checks"),
-            "\u{2302} /w/notes Window 2 [release checks]",
+            compose_window_title(
+                "\u{2193}\u{FE0E} local / notes",
+                "workspace",
+                2,
+                "release checks"
+            ),
+            "\u{2193}\u{FE0E} local / notes Window 2 [release checks]",
         );
         assert_eq!(
-            compose_window_title("Terminal", "terminal", 1, "deploy shell"),
-            "Terminal Window 1 [deploy shell]",
+            compose_window_title(
+                "\u{2193}\u{FE0E} local Terminal",
+                "terminal",
+                1,
+                "deploy shell"
+            ),
+            "\u{2193}\u{FE0E} local Terminal Window 1 [deploy shell]",
         );
         // The server trims before persisting, but the desktop composes from
         // whatever the record carries, so whitespace-only must not open an empty
         // pair of brackets.
         assert_eq!(
-            compose_window_title("Terminal", "terminal", 1, "   "),
-            "Terminal Window 1",
+            compose_window_title("\u{2193}\u{FE0E} local Terminal", "terminal", 1, "   "),
+            "\u{2193}\u{FE0E} local Terminal Window 1",
         );
         assert_eq!(
-            compose_window_title("Terminal", "terminal", 1, "  spaced  "),
-            "Terminal Window 1 [spaced]",
+            compose_window_title(
+                "\u{2193}\u{FE0E} local Terminal",
+                "terminal",
+                1,
+                "  spaced  "
+            ),
+            "\u{2193}\u{FE0E} local Terminal Window 1 [spaced]",
         );
         // The control-window shape is pinned by
         // `control_terminal_titles_do_not_use_window_number_suffix`.
@@ -3930,20 +3934,118 @@ mod tests {
         );
     }
 
+    /// A watched window's record, as the window feed carries it.
+    fn titled_record(kind: WindowKind, workspace: Option<&str>, ordinal: u32) -> WindowRecord {
+        WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "local".into(),
+            kind,
+            title: "library title".into(),
+            ordinal,
+            label: String::new(),
+            workspace_path: workspace.map(str::to_string),
+            prefix: "/w".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: false,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            tmux: None,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+            start_terminal: false,
+        }
+    }
+
     #[test]
-    fn workspace_title_prefixes_house_glyph_then_path() {
-        // Every local-disk workspace leads with the house glyph then the path
-        // verbatim (the path is the disambiguating window-switcher signal),
-        // regardless of where on disk it lives.
+    fn a_local_window_title_names_this_machine_and_the_workspace_folder() {
+        let root = "/home/hacker/dev/github.com/fiorix/chan";
+        let mut workspace = titled_record(WindowKind::Workspace, Some(root), 1);
         assert_eq!(
-            workspace_title("/home/hacker/dev/github.com/fiorix/chan"),
-            format!("{ICON_LOCAL_HOME} /home/hacker/dev/github.com/fiorix/chan"),
+            watched_window_title(&workspace, None),
+            "\u{2193}\u{FE0E} local / chan Window 1",
         );
-        // Outside $HOME still gets the house glyph. Trailing slash passed through.
+        workspace.label = "my own title".into();
         assert_eq!(
-            workspace_title("/tmp/scratch/"),
-            format!("{ICON_LOCAL_HOME} /tmp/scratch/"),
+            watched_window_title(&workspace, None),
+            "\u{2193}\u{FE0E} local / chan Window 1 [my own title]",
         );
+        // The folder's name, never the root: no house glyph, no path.
+        let title = watched_window_title(&workspace, None);
+        assert!(!title.contains("/home"), "{title}");
+        assert!(!title.contains('\u{2302}'), "{title}");
+        // A root with a trailing slash still names its folder, wherever on
+        // disk it lives.
+        let scratch = titled_record(WindowKind::Workspace, Some("/tmp/scratch/"), 2);
+        assert_eq!(
+            watched_window_title(&scratch, None),
+            "\u{2193}\u{FE0E} local / scratch Window 2",
+        );
+        // A record with no root to name keeps the machine.
+        let rootless = titled_record(WindowKind::Workspace, None, 1);
+        assert_eq!(
+            watched_window_title(&rootless, None),
+            "\u{2193}\u{FE0E} local Window 1",
+        );
+    }
+
+    #[test]
+    fn a_local_terminal_title_names_this_machine() {
+        let mut terminal = titled_record(WindowKind::Terminal, None, 2);
+        assert_eq!(
+            watched_window_title(&terminal, None),
+            "\u{2193}\u{FE0E} local Terminal Window 2",
+        );
+        terminal.label = "deploy shell".into();
+        assert_eq!(
+            watched_window_title(&terminal, None),
+            "\u{2193}\u{FE0E} local Terminal Window 2 [deploy shell]",
+        );
+    }
+
+    #[test]
+    fn a_remote_window_title_names_the_devserver_and_the_workspace_folder() {
+        let mut workspace = titled_record(WindowKind::Workspace, Some("/home/geekom/src/chan"), 1);
+        workspace.library_id = "lib-a".into();
+        assert_eq!(
+            watched_window_title(&workspace, Some("geekom")),
+            "\u{2197}\u{FE0E} geekom / chan Window 1",
+        );
+        workspace.label = "my own title".into();
+        assert_eq!(
+            watched_window_title(&workspace, Some("geekom")),
+            "\u{2197}\u{FE0E} geekom / chan Window 1 [my own title]",
+        );
+        let mut terminal = titled_record(WindowKind::Terminal, None, 3);
+        terminal.library_id = "lib-a".into();
+        assert_eq!(
+            watched_window_title(&terminal, Some("geekom")),
+            "\u{2197}\u{FE0E} geekom Terminal Window 3",
+        );
+        terminal.label = "logs".into();
+        assert_eq!(
+            watched_window_title(&terminal, Some("geekom")),
+            "\u{2197}\u{FE0E} geekom Terminal Window 3 [logs]",
+        );
+    }
+
+    #[test]
+    fn local_and_remote_titles_differ_only_in_the_glyph_and_the_machine() {
+        let mut workspace = titled_record(WindowKind::Workspace, Some("/srv/notes"), 4);
+        workspace.label = "release checks".into();
+        let terminal = titled_record(WindowKind::Terminal, None, 1);
+        for record in [&workspace, &terminal] {
+            let local = watched_window_title(record, None);
+            let remote = watched_window_title(record, Some("box"));
+            let local_rest = local
+                .strip_prefix(&format!("{ICON_LOCAL} {LOCAL_MACHINE}"))
+                .expect("a local title leads with its machine");
+            let remote_rest = remote
+                .strip_prefix(&format!("{ICON_REMOTE} box"))
+                .expect("a remote title leads with its machine");
+            assert_eq!(local_rest, remote_rest);
+        }
     }
 
     // Watcher-opened webviews host the SPA, which

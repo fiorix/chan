@@ -426,8 +426,9 @@ pub struct ControlTerminalRun {
 pub struct BuriedWindow {
     /// Tauri window label. Also the Window-menu item id suffix.
     pub label: String,
-    /// The window's title at bury time ("🏠 /path Window 2",
-    /// "Terminal Window 1"), never privacy mode's mask
+    /// The window's title at bury time (`serve::watched_window_title`'s
+    /// "local / chan Window 2" behind its machine glyph, or a control
+    /// terminal's "Control Terminal - box"), never privacy mode's mask
     /// (`AppState::bury_window`) -- the Window menu's last resort for the
     /// row's text.
     pub title: String,

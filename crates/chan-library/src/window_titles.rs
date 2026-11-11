@@ -1,7 +1,8 @@
 //! Desktop-written, server-read map of window label -> OS title + kind.
 //!
-//! The OS window title (`"Terminal Window 1"`, `"🏠 /notes Window 2"`)
-//! is assembled by chan-desktop when it builds the webview; the server
+//! The OS window title (a machine glyph, then `local Terminal Window 1` or
+//! `geekom / notes Window 2 [caption]`) is assembled by chan-desktop when
+//! it builds the webview; the server
 //! never sees it. So that `GET /api/windows` can show the title the user
 //! actually reads in the title bar, the desktop writes each window's title
 //! here on build / rename and removes it on destroy, and the window-list
@@ -20,7 +21,8 @@ use std::sync::{Arc, Mutex};
 /// derive: its OS title and its kind (terminal vs workspace).
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct WindowMeta {
-    /// The OS window title, e.g. `"Terminal Window 1"`.
+    /// The OS window title, e.g. `local Terminal Window 1` behind its
+    /// machine glyph.
     pub title: String,
     /// `"terminal"` | `"workspace"` -- the window's flavour, so the list
     /// can disambiguate the ephemeral-terminal rows from workspace rows.

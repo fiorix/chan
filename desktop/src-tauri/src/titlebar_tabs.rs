@@ -56,7 +56,7 @@
 //!
 //! With the title text hidden, the page is where a window in the mode is
 //! named, so it holds the window's title: the one the title bar shows, with
-//! the devserver's name and privacy mode's mask in it. The desktop sends it as
+//! the machine's name and privacy mode's mask in it. The desktop sends it as
 //! `TITLE_EVENT` when the page asks for the mode, which the page does once
 //! it listens for the event, and again on every retitle ([`title_changed`]),
 //! where the title sent is the one just set: a window does not report a new
