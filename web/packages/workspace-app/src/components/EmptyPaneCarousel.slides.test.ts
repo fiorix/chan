@@ -87,6 +87,14 @@ describe("the Search slide", () => {
     expect(canvas.props?.nodes.map((n) => n.id)).toEqual(expect.arrayContaining(["", "directory:notes"]));
   });
 
+  test("frames the spine's box in the canvas, with the root as its focal", async () => {
+    indexingCache.last = cached;
+    await render(1);
+
+    expect(canvas.props?.focalAnchor).toBe("bounds");
+    expect(canvas.props?.focalIds).toEqual([""]);
+  });
+
   test("keeps each poll's answer for the next mount", async () => {
     const fresh: IndexingStateResponse = {
       root: "/ws",

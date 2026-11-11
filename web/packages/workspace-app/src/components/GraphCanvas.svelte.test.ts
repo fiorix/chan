@@ -86,6 +86,22 @@ function withDrafts(
   return { nodes, edges };
 }
 
+/// A directory-only spine, as the Dashboard's Search slide draws it: the root,
+/// a chain three directories deep on one side with a branch off it, and a
+/// single directory on the other side.
+function spine(): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  const dirs = ["", "a", "a/b", "a/b/c", "a/d", "e"];
+  const id = (path: string): string => (path === "" ? "" : `directory:${path}`);
+  const nodes = dirs.map((path) => n.dir(path));
+  const edges = dirs
+    .filter((path) => path !== "")
+    .map((path) => {
+      const slash = path.lastIndexOf("/");
+      return n.edge(id(slash < 0 ? "" : path.slice(0, slash)), id(path), "contains");
+    });
+  return { nodes, edges };
+}
+
 const mounted: Array<Record<string, unknown>> = [];
 
 type Props = {
@@ -102,6 +118,7 @@ type Props = {
   onSetAsScope?: () => void;
   expansionFitRequest?: { nonce: number; ids: string[] } | null;
   force?: GraphForce;
+  focalAnchor?: "center" | "bottom" | "bounds";
 };
 
 function props(
@@ -544,6 +561,134 @@ describe("fitting the view", () => {
     const after = circle(api, "src/c.rs");
     runFrames(30);
     expect(circle(api, "src/c.rs").x, "the view stays where the user put it").toBeCloseTo(after.x, 0);
+  });
+
+  test("by default the focal sits 56 px above the bottom edge, centred across", () => {
+    const { api } = render(props(spine(), { focalIds: [""] }));
+    runFrames(60);
+    const root = circle(api, "");
+    expect(root.x).toBeCloseTo(canvasHost.width / 2, 0);
+    expect(root.y).toBeCloseTo(canvasHost.height - 56, 0);
+  });
+
+  test("by default a resize leaves the view where it is", () => {
+    const { api } = render(props(spine(), { focalIds: [""] }));
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(60);
+    const before = circle(api, "");
+    canvasHost.width = 900;
+    canvasHost.height = 500;
+    fireResize();
+    runFrames(90);
+    const after = circle(api, "");
+    expect(after.x).toBeCloseTo(before.x, 1);
+    expect(after.y).toBeCloseTo(before.y, 1);
+    expect(after.r).toBeCloseTo(before.r, 1);
+  });
+});
+
+describe("the bounds framing", () => {
+  const ids = spine().nodes.map((node) => node.id);
+
+  /// The union of the discs of `ids`, in canvas pixels, and the room it
+  /// leaves to each edge of the canvas.
+  function room(api: CanvasApi): { left: number; right: number; above: number; below: number } {
+    const discs = ids.map((id) => circle(api, id));
+    return {
+      left: Math.min(...discs.map((d) => d.x - d.r)),
+      right: canvasHost.width - Math.max(...discs.map((d) => d.x + d.r)),
+      above: Math.min(...discs.map((d) => d.y - d.r)),
+      below: canvasHost.height - Math.max(...discs.map((d) => d.y + d.r)),
+    };
+  }
+
+  test("frames the drawn cluster's box in the middle of the canvas", () => {
+    for (const [width, height] of [[400, 300], [300, 600], [1200, 300]] as const) {
+      canvasHost.width = width;
+      canvasHost.height = height;
+      const { api } = render(props(spine(), { focalIds: [""], focalAnchor: "bounds" }));
+      runFrames(60);
+      const r = room(api);
+      const size = `${width}x${height}`;
+      expect(r.left, `${size}: room left and right`).toBeCloseTo(r.right, 0);
+      expect(r.above, `${size}: room above and below`).toBeCloseTo(r.below, 0);
+      // The fit's zoom: the binding axis keeps only the fit's 24 px pad.
+      expect(Math.min(r.left, r.above), `${size}: the cluster fills the canvas`).toBeCloseTo(24, 0);
+      for (const c of mounted.splice(0)) unmount(c);
+    }
+  });
+
+  /// Tick the simulation on d3's timer until it rests, painting a frame per
+  /// tick, as a browser runs it; the tests drive the timer by hand.
+  function settleLayout(): void {
+    for (let i = 0; i < 400; i += 1) {
+      timerFlush();
+      runFrames(1);
+    }
+    runFrames(60);
+  }
+
+  test("keeps the box framed while the layout moves on after the fit", () => {
+    const p = props(spine(), { focalIds: [""], focalAnchor: "bounds" });
+    const { api } = render(p);
+    runFrames(60);
+    // A re-tune warms the layout with no change to the nodes, so no refit
+    // window opens; the spine grows taller as it settles.
+    p.force = { ...DEFAULT_FORCE, hierarchyYSpacing: 140 };
+    flushSync();
+    settleLayout();
+    const r = room(api);
+    expect(r.left, "room left and right").toBeCloseTo(r.right, 0);
+    expect(r.above, "room above and below").toBeCloseTo(r.below, 0);
+  });
+
+  test("frames the box again when the canvas changes size", () => {
+    const { api } = render(props(spine(), { focalIds: [""], focalAnchor: "bounds" }));
+    settleLayout();
+    canvasHost.width = 900;
+    canvasHost.height = 500;
+    fireResize();
+    runFrames(90);
+    const r = room(api);
+    expect(r.left, "room left and right").toBeCloseTo(r.right, 0);
+    expect(r.above, "room above and below").toBeCloseTo(r.below, 0);
+    expect(Math.min(r.left, r.above), "the cluster fills the new canvas").toBeCloseTo(24, 0);
+  });
+
+  test("keeps the root at the bottom of the spine, which grows upward from it", () => {
+    const { api } = render(props(spine(), { focalIds: [""], focalAnchor: "bounds" }));
+    runFrames(60);
+    const root = circle(api, "");
+    for (const id of ids.filter((x) => x !== "")) {
+      expect(circle(api, id).y, `${id} above the root`).toBeLessThan(root.y - root.r);
+    }
+    expect(circle(api, "directory:a/b/c").y, "deeper is higher").toBeLessThan(circle(api, "directory:a/b").y);
+  });
+
+  test("a user's pan stops the automatic refit", () => {
+    const p = props(spine(), { focalIds: [""], focalAnchor: "bounds", scopeKey: "indexing" });
+    const { api, canvas } = render(p);
+    runFrames(60);
+    mouse(canvas, "mousedown", 5, 5);
+    mouse(canvas, "mousemove", 605, 5);
+    mouse(canvas, "mouseup", 605, 5);
+    const panned = circle(api, "");
+
+    const grown = spine();
+    grown.nodes.push(n.dir("e/f"));
+    grown.edges.push(n.edge("directory:e", "directory:e/f", "contains"));
+    p.nodes = grown.nodes;
+    p.edges = grown.edges;
+    p.visibleNodeIds = new Set(grown.nodes.map((node) => node.id));
+    p.visibleEdges = grown.edges;
+    flushSync();
+    runFrames(90);
+    const root = circle(api, "");
+    expect(root.x, "the view stays where the user put it").toBeCloseTo(panned.x, 0);
+    expect(root.y).toBeCloseTo(panned.y, 0);
   });
 });
 

@@ -77,13 +77,20 @@
     /// the parent owns the rescope (it has access to the current
     /// selection's `path` / `isDir` and to `graphFromHere`).
     onSetAsScope?: () => void;
-    /// Where the single focal node sits in the viewport. "bottom"
-    /// (default) anchors it near the bottom edge so the cluster grows
-    /// upward from it, so the workspace-root spine reads bottom-to-top.
-    /// The Dashboard search-index graph and the main Graph tab both
-    /// anchor at the bottom; "center" centers the focal instead and is
-    /// available for callers that want it.
-    focalAnchor?: "center" | "bottom";
+    /// Where the automatic fit places the view. "bottom" (default)
+    /// anchors the single focal node near the bottom edge so the cluster
+    /// grows upward from it, so the workspace-root spine reads
+    /// bottom-to-top; the main Graph tab uses it. "center" centers the
+    /// focal instead. "bounds" anchors no node: it frames the drawn
+    /// cluster's bounding box in the middle of the canvas, with equal
+    /// room on either side of it on both axes at the fit's zoom; the
+    /// layout still pins the focal, so the root stays at the bottom of
+    /// the spine. Since no node holds it in place, the "bounds" fit
+    /// follows the layout for as long as the layout moves, not only
+    /// through a refit window, and fits again when the canvas changes
+    /// size. The Dashboard's Search slide uses "bounds". A user's pan,
+    /// zoom or drag stops the automatic fit under every value.
+    focalAnchor?: "center" | "bottom" | "bounds";
     /// d3-force tuning. Defaults to DEFAULT_FORCE (../graph/force.ts),
     /// the values the live graph ships with. Only the standalone
     /// graph-tuner playground overrides this, driving the same shape
@@ -911,6 +918,11 @@
       transform = { x: r.width / 2, y: r.height / 2, k: 1 };
       fitToContent(24);
       scheduleRefit(900);
+    } else if (focalAnchor === "bounds" && r.width > 0 && r.height > 0) {
+      // The bounds framing is relative to the canvas's size, so a new size
+      // needs a new fit; the other framings keep the view where it is.
+      // scheduleRefit leaves a view the user has taken alone.
+      scheduleRefit(300);
     }
   }
 
@@ -1365,6 +1377,16 @@
       return;
     }
     const now = performance.now();
+    // `sim.alpha()` is the authoritative "is the layout still moving"
+    // signal: d3-force stops its own timer once alpha decays past
+    // alphaMin, and node positions are fixed from then on.
+    const simRunning = sim !== null && sim.alpha() > SIM_ALPHA_MIN;
+    // The bounds framing frames every node rather than one pinned in place,
+    // so it follows the layout for as long as the layout moves, including
+    // the small warm-up a content refresh gives it; the other framings hold
+    // their pinned focal and track only during a refit window. Either stops
+    // once the user takes the view.
+    const tracksLayout = focalAnchor === "bounds" && simRunning && !userInteracted;
     // While the refit window is open, retarget every frame so the
     // view tracks the cluster as the sim spreads / contracts. Once
     // the window expires we keep easing toward the last target until
@@ -1376,7 +1398,7 @@
       } else {
         expansionRefit = null;
       }
-    } else if (now < refitUntil) {
+    } else if (now < refitUntil || tracksLayout) {
       const t = computeFit(24);
       if (t) fitTarget = t;
     }
@@ -1402,12 +1424,8 @@
     // sixty times a second is pure waste -- it is what makes the whole
     // viewport feel heavy on a large workspace. Discrete changes announce
     // themselves through `markDirty()`; the continuous sources below
-    // advance on their own schedule and so have to be polled here.
-    //
-    // `sim.alpha()` is the authoritative "is the layout still moving"
-    // signal: d3-force stops its own timer once alpha decays past
-    // alphaMin, and node positions are fixed from then on.
-    const simRunning = sim !== null && sim.alpha() > SIM_ALPHA_MIN;
+    // advance on their own schedule and so have to be polled here
+    // (`simRunning` is read at the top of the frame).
     const pulsing = hasIndexingPulse && !reduceMotion;
     if (dirty || simRunning || fitTarget !== null || pulsing) {
       paint();
@@ -1653,7 +1671,8 @@
   /// filter / depth changes; the zoom is then chosen so the farthest
   /// node still fits inside the padded viewport. Falls back to
   /// bbox-center framing for views without a focal pin (e.g.
-  /// whole-workspace).
+  /// whole-workspace) and for a caller that does not anchor the focal
+  /// (the "bounds" framing, an expansion fit).
   function computeFitForNodes(
     pad: number,
     ids: Set<string> | null,
@@ -1717,7 +1736,9 @@
   }
 
   function computeFit(pad: number): { x: number; y: number; k: number } | null {
-    return computeFitForNodes(pad, null, true);
+    // The bounds framing anchors no focal, which is the fit's bbox-center
+    // branch: the box in the middle of the canvas on both axes.
+    return computeFitForNodes(pad, null, focalAnchor !== "bounds");
   }
 
   /// Snap the transform to fit the current node set. Used at first
