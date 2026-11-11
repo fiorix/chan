@@ -298,9 +298,10 @@ impl WireguardFabric {
     /// host map the proxy refuses answers `Err` with a `WireGuard: ...`
     /// sentence that names the path, the line and the key and never a
     /// value; that row's route and any tunnel it ran are dropped and the
-    /// refusal is kept, so [`failure`](Self::failure) reads it while the
-    /// row still names `conf`. With no proxy every adopt answers the bind
-    /// failure and nothing starts.
+    /// refusal is kept, so the gateway projection's [`view`](Self::view)
+    /// answers it as `connect_refusal` while the row still names `conf`.
+    /// With no proxy every adopt answers the bind failure and nothing
+    /// starts.
     pub fn adopt(
         &self,
         gateway_id: &str,
