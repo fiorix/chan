@@ -69,7 +69,7 @@ Seven more came from the round's own checks and readings on 2026-11-11, accepted
 | [tmux windows not on their machine card][tmuxcard] | built | owner |
 | [New Window in a devserver tmux window][tmuxnew] | built | owner |
 | [a launch beside a silent desktop shows nothing][silentlaunch] | partly built | build |
-| [the Windows handoff pipe's early clients][winpipe] | not started | measure |
+| [the Windows handoff pipe's early clients][winpipe] | partly built | build |
 | [a raised minimized window may stay behind][minraise] | not started | owner |
 | [the unused-token test reads too early][tokentest] | landed | GA |
 | [a desktop upload's cancel and error paths][uploadpaths] | built | owner |
