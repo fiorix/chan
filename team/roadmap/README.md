@@ -45,6 +45,8 @@ Two more came from the fixes of the owner's Mac checks that day, found beside th
 
 The owner then closed v0.127.0 to new work ("just close off the current in-flight items and the rest moves to v128"), and the small findings of the reading and its fixes that had no row yet are collected in one: `ci.yml` without `permissions`, the gateway roles' `TEMPORARY` grant through `PUBLIC`, and the rest ([leftovers]).
 
+The owner added one more on 2026-11-11, after reading v0.127.0's centered Metrics slide on his Mac: the Dashboard's About, Workspace and Search slides sit in the middle of a large tab as the Metrics slide does, where today they start at its top ([dashslides]).
+
 | Item | State | Next |
 | --- | --- | --- |
 | [chan drives ghostty-web from outside][ghosttyng] | not started | design |
@@ -67,6 +69,7 @@ The owner then closed v0.127.0 to new work ("just close off the current in-fligh
 | [a desktop upload's cancel and error paths][uploadpaths] | not started | design |
 | [a moved tmux window may close its chan window][tmuxmove] | not started | owner |
 | [small findings of the second reading are open][leftovers] | not started | decision |
+| [other Dashboard slides sit at the top][dashslides] | not started | build |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
@@ -88,6 +91,7 @@ The owner then closed v0.127.0 to new work ("just close off the current in-fligh
 [uploadpaths]: v0.128.0/a-desktop-uploads-cancel-and-error-paths-leave-traces-and-name-local-paths.md
 [tmuxmove]: v0.128.0/moving-a-tmux-window-to-another-index-may-close-its-chan-window.md
 [leftovers]: v0.128.0/small-findings-of-the-v0127-second-reading-are-still-open.md
+[dashslides]: v0.128.0/the-dashboards-about-workspace-and-search-slides-sit-at-the-top-of-a-large-tab.md
 [reread]: done/a-second-reading-of-the-releases-merged-code-finds-small-defects.md
 [tmuxbar]: done/a-tmux-windows-title-bar-is-empty-when-tabs-sit-in-it.md
 

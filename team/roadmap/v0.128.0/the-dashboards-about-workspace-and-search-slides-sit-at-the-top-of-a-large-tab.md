@@ -1,0 +1,35 @@
+# The Dashboard's About, Workspace and Search slides sit at the top of a large tab
+
+Status: raised by the owner on 2026-11-11 and accepted for v0.128.0 the same day; not started. He read v0.127.0's centered Metrics slide on his Mac that day ("centered metrics look great", acceptance 3 of [that item](../done/the-dashboards-metrics-slide-sits-at-the-top-left-of-a-wide-window.md)) and asked for the rest of the Dashboard: "i want an item for v128 where all dashboard items are centered like that: the about, the workspace info, the search index".
+
+## What is there now
+
+Read at `fcb9388c8` (v0.127.0's record on `main`); nothing below was measured in a browser yet except the About slide's width. Paths under `web/packages/workspace-app/src/`.
+
+The carousel (`components/EmptyPaneCarousel.svelte`) shows four slides in the order Metrics, Workspace, Search, About (`DASHBOARD_SLOT_ORDER` in `state/tabs.svelte.ts`); a window without a workspace shows Metrics and About only (`dashboardSlotAvailable`). Each slide is a `.slide`: a flex column that takes the whole stage (`flex: 1`), owns its vertical scroll (`overflow-y: auto`) and places its children from the top.
+
+- **Metrics**, as v0.127.0 shipped it: the slide caps its own width and takes `margin: auto` inside the wide stage, so it sits in the middle of the stage on both axes when the stage is larger and scrolls from its first row when it is smaller. This item brings the other three slides to the same placement.
+- **About**: the stage keeps its 720 px cap (`.slide-stage`) and the carousel centers that column, so the slide is centered across the tab, but its rows (the title, the version grid, the links, Fund the work, the tagline) start at the stage's top: a tall tab shows the card in its upper part with the rest empty. The slide is also 728 px wide in its 720 px column, because its side padding adds to `width: 100%`, so its content sits 4 px right of the middle (measured in a guest during the v0.127.0 second reading; a bullet of [the open small findings](small-findings-of-the-v0127-second-reading-are-still-open.md)).
+- **Workspace**: the same 720 px column; the title and `WorkspaceInfoBody` (variant `dashboard`) start at the top. The body's height follows the workspace (the kind counts, the languages, the report, the contacts), so the slide is shorter than a large tab for a small workspace and taller than it for a large one.
+- **Search**: the stage drops its cap (`.slide-stage-wide`) and the graph host fills the slide, so the canvas spans the tab; what sits off center is what is drawn in it. The slide passes `focalAnchor="bottom"` to `GraphCanvas`, whose fit (`computeFitForNodes` in `components/GraphCanvas.svelte`) seats the workspace root 56 px above the canvas's bottom edge (`FOCAL_BOTTOM_MARGIN`) and frames the spine above it, centered on the root across. A spine whose fit is bound by its width or by the zoom cap therefore sits low in the canvas with the space above it empty, and a spine that leans to one side leaves more room on the other. The waiting, error and empty notes (`.indexing-stub`: "Loading indexing state...", "Couldn't load indexing state.", "No directories to graph yet.") are at most 360 px wide under the slide's `align-items: stretch`, so in a wide tab they sit at the slide's left edge (read from the styles, not run).
+
+## Desired contract
+
+1. **About and Workspace**: in a tab larger than the slide's content, the content (its title with everything under it) sits in the middle of the stage on both axes, as the Metrics slide does; in a tab smaller than it, it starts at the top and scrolls from its first line, as today. The About content is centered exactly in its column.
+2. **Search**: the drawn spine is framed in the middle of the canvas, its bounding box with equal room left and right and above and below at the fit's zoom; the root still reads at the bottom of the spine and the spine grows upward from it. The waiting, error and empty notes sit in the middle of the slide. Panning, zooming, dragging and selecting are unchanged, and a user's own pan or zoom still stops the automatic refit.
+3. The Metrics slide and the carousel's controls row (the dots, the arrows, the rotation toggle) do not move on any slide.
+4. A Dashboard in a narrow pane, a slide taller than its tab and a window without a workspace behave as today, apart from the centering above where there is room for it.
+
+## Boundaries
+
+- `components/EmptyPaneCarousel.svelte`: the About, Workspace and Search slide styles, and the framing the Search slide asks of the graph. `components/GraphCanvas.svelte` only to add a framing that centers the cluster's bounding box while the layout keeps the root at the bottom of the spine; the main Graph tab keeps `focalAnchor="bottom"` and its framing as they are. `components/WorkspaceInfoBody.svelte` only if its own box stops the centering: it is shared with the file browser's inspector, which must not move.
+- Prefer the Metrics slide's way, `margin: auto` on a box inside the scrolling slide, which takes only the room the stage has to spare and keeps a taller slide scrolling from its first line, over `justify-content: center`, which cuts the top of a taller slide off where it cannot be scrolled to.
+- The slides' content, widths and caps, the carousel's padding and the slide order are unchanged. The middle is the stage's, as for the Metrics slide, not the tab's; the check states the offset it reads.
+- Check 114 (`scripts/e2e/browser-smoke/checks/114-about-slide-margin.mjs`, the About card's bottom margin) has failed since v0.127.0 named the carousel's dots ("slide 3" now reads "About"), and the About slide's 4 px shift is beside it in the open small findings row. Both are on the slide this item moves, so the build repairs the check's label, runs it, and the small findings row drops those two bullets when this lands.
+
+## Acceptance
+
+1. A browser check in an isolated guest (extend `scripts/e2e/browser-smoke/checks/212-metrics-slide-centered.mjs` or add one beside it) opens a Dashboard at the same four window sizes as check 212 (900 and 1900 px wide by 520 and 1400 px tall) and reads each slide against its stage: About and Workspace (with a small workspace fixture) with equal space left and right, and above and below, when the stage is larger, and top-aligned, scrolling from the first line, when it is smaller; the Search spine's bounding box centered in the canvas within a stated tolerance (read from the painted canvas or from a test hook on the graph's transform and node positions), and its waiting or empty note centered in the slide; the Metrics slide and the controls row unmoved. Red at `fcb9388c8` for About, Workspace and Search at the large sizes, green with the fix, and a mutation of each fix red.
+2. Check 114 green with its label repaired; check 212 and the other checks that open a Dashboard pass before and after.
+3. `make web-check` and `make e2e-check` green.
+4. On chan-desktop on macOS (owner): a full-screen window's Dashboard shows the About, Workspace and Search slides in the middle of the tab, as the Metrics slide.
