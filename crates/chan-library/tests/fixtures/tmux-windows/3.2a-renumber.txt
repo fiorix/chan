@@ -1,0 +1,15 @@
+# tmux 3.2a, recorded by a tmux -CC client attached to session main (3.2a-renumber.txt)
+# listing
+@0 ae5d,80x23,0,0,0 ae5d,80x23,0,0,0 - sh
+@1 b25e,80x24,0,0,1 b25e,80x24,0,0,1 * sh
+# panes @0
+%0 1
+# panes @1
+%1 1
+# leg move-window -r -t main:
+%subscription-changed chan-pane-name $0 @0 0 %0 : 1 2 15 sh chan-v0128-desk
+%subscription-changed chan-pane-name $0 @1 1 %1 : 1 2 15 sh chan-v0128-desk
+# panes @0
+%0 1
+# panes @1
+%1 1

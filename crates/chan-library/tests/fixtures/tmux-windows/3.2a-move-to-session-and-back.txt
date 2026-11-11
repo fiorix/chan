@@ -1,0 +1,33 @@
+# tmux 3.2a, recorded by a tmux -CC client attached to session main (3.2a-move-to-session-and-back.txt)
+# listing
+@0 ae5d,80x23,0,0,0 ae5d,80x23,0,0,0 - sh
+@1 b25e,80x24,0,0,1 b25e,80x24,0,0,1 * sh
+# panes @0
+%0 1
+# panes @1
+%1 1
+# leg move-window -s main:1 -t other:5
+%unlinked-window-add @1
+%session-window-changed $1 @1
+%session-window-changed $0 @0
+%unlinked-window-close @1
+%subscription-changed chan-pane-name $0 @0 0 %0 : 1 2 15 sh chan-v0128-desk
+# panes @0
+%0 1
+# panes @1
+%1 1
+# leg output in other:5
+# panes @0
+%0 1
+# panes @1
+%1 1
+# leg move-window -s other:5 -t main:1
+%window-add @1
+%session-window-changed $0 @1
+%session-window-changed $1 @2
+%window-close @1
+%subscription-changed chan-pane-name $0 @1 1 %1 : 1 2 15 sh chan-v0128-desk
+# panes @0
+%0 1
+# panes @1
+%1 1

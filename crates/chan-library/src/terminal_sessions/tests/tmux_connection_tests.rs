@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::terminal_sessions::tmux_gate::Foreground;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MARKER: &[u8] = b"\x1bP1000p";
@@ -62,6 +63,11 @@ struct Rig {
 
 impl Rig {
     fn connected() -> Self {
+        Self::connected_to("3.8")
+    }
+
+    /// Connected to a tmux that gives its version as `version`.
+    fn connected_to(version: &str) -> Self {
         let registry = Registry::new(test_config(1 << 16, 4, 10));
         let (control, commands) = test_session_with_commands(1 << 16);
         register_session(&registry, &control);
@@ -86,13 +92,91 @@ impl Rig {
                 b"display-message -p '#{version}'\n".to_vec()
             ]
         );
-        rig.feed(VERSION_REPLY);
+        rig.feed(
+            format!("%begin 2 2 1\r\n%error 2 2 1\r\n%begin 2 3 1\r\n{version}\r\n%end 2 3 1\r\n")
+                .as_bytes(),
+        );
         let after_version = rig.inputs();
         assert!(after_version[0].starts_with(b"refresh-client -f pause-after="));
-        assert_eq!(after_version[1], b"refresh-client -f new-layouts\n");
+        let new_layouts = chan_tmux::Version::parse(version).expect("a version")
+            >= chan_tmux::Version { major: 3, minor: 8 };
+        assert_eq!(
+            after_version[1] == b"refresh-client -f new-layouts\n",
+            new_layouts,
+            "JSON layouts are asked of tmux 3.8 and later: {after_version:?}"
+        );
         rig.work();
         rig.feed(&start_replies(&after_version));
         rig
+    }
+
+    /// tmux's refusal of the next command, with `rows` as its message.
+    fn refuse(&mut self, rows: &[&[u8]]) -> Vec<u8> {
+        self.number += 1;
+        let header = format!("2 {} 1", self.number);
+        let mut out = format!("%begin {header}\r\n").into_bytes();
+        for row in rows {
+            out.extend_from_slice(row);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("%error {header}\r\n").as_bytes());
+        out
+    }
+
+    fn status(&self) -> TmuxConnectionStatus {
+        self.control
+            .tmux
+            .lock()
+            .expect("terminal tmux gate poisoned")
+            .connection()
+            .expect("connected")
+            .status()
+    }
+
+    /// Answer every command the connection writes, in the order written,
+    /// until it writes none: a window's pane list from `panes` (its rows, or
+    /// the refusal's), and a pane's capture with an empty screen. Any other
+    /// command fails the test, since no tmux answer for it was recorded.
+    fn answer(&mut self, panes: &HashMap<String, Result<Vec<String>, Vec<String>>>) {
+        loop {
+            self.work();
+            let asked = self.inputs();
+            if asked.is_empty() {
+                return;
+            }
+            for command in asked {
+                let text = String::from_utf8(command).expect("a command line");
+                let reply = if let Some(rest) = text.strip_prefix("list-panes -t ") {
+                    let window = rest.split(' ').next().unwrap_or_default();
+                    let rows = |rows: &[String]| {
+                        rows.iter()
+                            .map(|r| r.as_bytes().to_vec())
+                            .collect::<Vec<_>>()
+                    };
+                    match panes.get(window) {
+                        Some(Ok(listed)) => {
+                            let listed = rows(listed);
+                            self.reply(&listed.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                        }
+                        Some(Err(refused)) => {
+                            let refused = rows(refused);
+                            self.refuse(&refused.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                        }
+                        None => panic!("no pane list recorded for {window}: {text:?}"),
+                    }
+                } else if let Some(rest) = text.strip_prefix("display-message -p -t %") {
+                    let pane: u32 = rest
+                        .split(' ')
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .expect("a pane id");
+                    self.capture(pane, 0, 24, &[])
+                } else {
+                    panic!("the connection asked what no capture answers: {text:?}");
+                };
+                self.feed(&reply);
+            }
+        }
     }
 
     /// The display name the roster gives a page for `session`: what tmux
@@ -1642,4 +1726,222 @@ fn the_status_names_the_control_window_and_requests_go_through_the_handle() {
     assert!(registry.close(&control.id, CloseReason::Explicit));
     drop(control);
     assert!(!handle.request(TmuxRequest::Detach));
+}
+
+/// The tmux versions the window captures were recorded from: the oldest the
+/// gate connects to, the one Ubuntu 26.04 ships, and the newest.
+const CAPTURED_VERSIONS: [&str; 3] = ["3.2a", "3.6a", "3.8"];
+
+/// What tmux sent a `tmux -CC` client while another client changed the
+/// session's windows, one file per version and change under
+/// `tests/fixtures/tmux-windows/`. Each `# ` line heads a section: the rows
+/// of chan's window list at the attach and of each window's pane list
+/// there, then per step the notifications as tmux sent them and what tmux
+/// answered each window's pane list after it.
+struct Capture {
+    version: String,
+    listing: Vec<String>,
+    panes: HashMap<String, Result<Vec<String>, Vec<String>>>,
+    legs: Vec<Leg>,
+}
+
+/// One step of a capture.
+struct Leg {
+    name: String,
+    notifications: Vec<String>,
+    /// Each listed window's pane list after the step: its rows, or the
+    /// refusal's.
+    after: HashMap<String, Result<Vec<String>, Vec<String>>>,
+}
+
+impl Capture {
+    fn load(name: &str) -> Self {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tmux-windows")
+            .join(format!("{name}.txt"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let mut lines = text.lines();
+        let version = lines
+            .next()
+            .and_then(|header| header.strip_prefix("# tmux "))
+            .and_then(|header| header.split(',').next())
+            .expect("a header naming the version")
+            .to_owned();
+        let mut sections: Vec<(&str, Vec<String>)> = Vec::new();
+        for line in lines {
+            match line.strip_prefix("# ") {
+                Some(head) => sections.push((head, Vec::new())),
+                None => sections
+                    .last_mut()
+                    .expect("rows under a section")
+                    .1
+                    .push(line.to_owned()),
+            }
+        }
+        let mut capture = Capture {
+            version,
+            listing: Vec::new(),
+            panes: HashMap::new(),
+            legs: Vec::new(),
+        };
+        for (head, rows) in sections {
+            let (kind, rest) = head.split_once(' ').unwrap_or((head, ""));
+            match kind {
+                "listing" => capture.listing = rows,
+                "leg" => capture.legs.push(Leg {
+                    name: rest.to_owned(),
+                    notifications: rows,
+                    after: HashMap::new(),
+                }),
+                "panes" | "refused" => {
+                    let answer = if kind == "panes" { Ok(rows) } else { Err(rows) };
+                    match capture.legs.last_mut() {
+                        Some(leg) => leg.after.insert(rest.to_owned(), answer),
+                        None => capture.panes.insert(rest.to_owned(), answer),
+                    };
+                }
+                _ => panic!("{name}: no such section {head:?}"),
+            }
+        }
+        capture
+    }
+}
+
+/// Replay a capture through a connection: attach to its windows, then for
+/// each step feed tmux's notifications and answer what the connection asks
+/// with tmux's recorded answers. A window tmux still lists panes for after
+/// a step keeps its chan window and its pane sessions; a window tmux
+/// refused is gone with both; and no step mints a window anew. Returns the
+/// windows each step closed.
+fn replay(name: &str) -> Vec<Vec<String>> {
+    let capture = Capture::load(name);
+    let mut rig = Rig::connected_to(&capture.version);
+    let hook = RecordingHook::install(&rig.registry);
+    let listing: Vec<&[u8]> = capture.listing.iter().map(|row| row.as_bytes()).collect();
+    let listed = rig.reply(&listing);
+    rig.feed(&listed);
+    rig.answer(&capture.panes);
+    // Each listed window's chan window and pane sessions after the attach.
+    let mut shown: Vec<(String, String, Vec<String>)> = Vec::new();
+    for window in rig.status().windows {
+        let Some(Ok(rows)) = capture.panes.get(&window.id) else {
+            panic!("{name}: no pane list recorded for {}", window.id);
+        };
+        let sessions = rows
+            .iter()
+            .map(|row| {
+                let pane = row
+                    .split(' ')
+                    .next()
+                    .and_then(|id| id.strip_prefix('%'))
+                    .and_then(|n| n.parse().ok())
+                    .expect("a pane id");
+                rig.pane(pane).id.clone()
+            })
+            .collect();
+        let chan_window = window.chan_window.expect("a listed window is minted");
+        shown.push((window.id, chan_window, sessions));
+    }
+    assert_eq!(
+        shown.len(),
+        capture.listing.len(),
+        "{name}: each listed window is shown"
+    );
+    calls(&hook);
+    let mut closed = Vec::new();
+    let mut gone: HashSet<String> = HashSet::new();
+    for leg in &capture.legs {
+        let step = format!("{name}, {}", leg.name);
+        if !leg.notifications.is_empty() {
+            let lines: String = leg
+                .notifications
+                .iter()
+                .map(|line| format!("{line}\r\n"))
+                .collect();
+            rig.feed(lines.as_bytes());
+        }
+        rig.answer(&leg.after);
+        let recorded = calls(&hook);
+        let status = rig.status();
+        let mut step_closed = Vec::new();
+        for (window, chan_window, sessions) in &shown {
+            if gone.contains(window) {
+                continue;
+            }
+            let removed = recorded.contains(&format!("remove {chan_window}"));
+            let held = status
+                .windows
+                .iter()
+                .find(|w| &w.id == window)
+                .and_then(|w| w.chan_window.as_deref());
+            match leg.after.get(window) {
+                Some(Ok(_)) => {
+                    assert!(
+                        !removed && held == Some(chan_window.as_str()),
+                        "{step}: {window} lives on in tmux and keeps chan window {chan_window}: held {held:?}, {recorded:?}"
+                    );
+                    for session in sessions {
+                        assert!(
+                            rig.registry.attach(session, None).is_some(),
+                            "{step}: pane session {session} of {window} lives on"
+                        );
+                    }
+                }
+                Some(Err(_)) => {
+                    assert!(
+                        removed && held.is_none(),
+                        "{step}: {window} is gone in tmux and closes chan window {chan_window}: held {held:?}, {recorded:?}"
+                    );
+                    for session in sessions {
+                        assert!(
+                            rig.registry.attach(session, None).is_none(),
+                            "{step}: pane session {session} of {window} ended"
+                        );
+                    }
+                    gone.insert(window.clone());
+                    step_closed.push(window.clone());
+                }
+                None => panic!("{step}: no pane list recorded for {window}"),
+            }
+        }
+        assert!(
+            !recorded.iter().any(|call| call.starts_with("mint ")),
+            "{step}: no window is minted anew: {recorded:?}"
+        );
+        step_closed.sort();
+        closed.push(step_closed);
+    }
+    closed
+}
+
+/// A swap and a renumber move windows between indexes and keep each
+/// window's id; tmux reports neither.
+#[test]
+fn swapped_and_renumbered_windows_keep_their_chan_windows() {
+    for version in CAPTURED_VERSIONS {
+        for change in ["swap-window", "renumber"] {
+            assert_eq!(
+                replay(&format!("{version}-{change}")),
+                vec![Vec::<String>::new()],
+                "tmux {version}, {change}"
+            );
+        }
+    }
+}
+
+/// A window tmux kills, by name, by ending its only pane, or while it
+/// renumbers the rest, closes its chan window and ends its pane sessions;
+/// the windows beside it stay.
+#[test]
+fn a_window_tmux_kills_closes_its_chan_window_and_its_neighbours_stay() {
+    for version in CAPTURED_VERSIONS {
+        for change in ["kill-window", "kill-pane", "renumber-on-close"] {
+            assert_eq!(
+                replay(&format!("{version}-{change}")),
+                vec![vec!["@0".to_owned()]],
+                "tmux {version}, {change}"
+            );
+        }
+    }
 }

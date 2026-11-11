@@ -1,0 +1,21 @@
+# tmux 3.8, recorded by a tmux -CC client attached to session main (3.8-renumber-on-close.txt)
+# listing
+@0 {"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%0"}} {"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%0"}}  sh
+@1 {"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%1"}} {"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%1"}} - sh
+@2 {"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%2"}} {"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%2"}} * sh
+# panes @0
+%0 1
+# panes @1
+%1 1
+# panes @2
+%2 1
+# leg kill-window -t main:0 (renumber-windows on)
+%window-close @0
+%subscription-changed chan-pane-name $0 @1 0 %1 : 1 2 15 sh chan-v0128-desk
+%subscription-changed chan-pane-name $0 @2 1 %2 : 1 2 15 sh chan-v0128-desk
+# refused @0
+can't find window: @0
+# panes @1
+%1 1
+# panes @2
+%2 1

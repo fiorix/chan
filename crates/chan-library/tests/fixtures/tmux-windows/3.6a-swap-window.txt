@@ -1,0 +1,15 @@
+# tmux 3.6, recorded by a tmux -CC client attached to session main (3.6a-swap-window.txt)
+# listing
+@0 b25d,80x24,0,0,0 b25d,80x24,0,0,0 - sh
+@1 b25e,80x24,0,0,1 b25e,80x24,0,0,1 * sh
+# panes @0
+%0 1
+# panes @1
+%1 1
+# leg swap-window -s main:0 -t main:1
+%subscription-changed chan-pane-name $0 @1 0 %1 : 1 2 15 sh chan-v0128-desk
+%subscription-changed chan-pane-name $0 @0 1 %0 : 1 2 15 sh chan-v0128-desk
+# panes @0
+%0 1
+# panes @1
+%1 1
