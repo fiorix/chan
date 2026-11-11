@@ -28,7 +28,7 @@
     reportError,
     clearError,
   } from "../state/library.svelte";
-  import { rowLabel, windowRowLabel } from "../lib/windowLabel";
+  import { rowLabel, windowPrivateRowLabel, windowRowLabel } from "../lib/windowLabel";
   import { hasControlAttention, clearControlAttention } from "../state/controlAttention.svelte";
   import { hasWindowAttention } from "../state/windowAttention.svelte";
   import { hasDesktopBridge, readOnly, selfManagedWindows } from "../state/capabilities";
@@ -157,9 +157,9 @@
           class="row-name editable-label"
           type="button"
           title="Add or edit window text"
-          onclick={() => void beginLabelEdit()}>{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</button>
+          onclick={() => void beginLabelEdit()}>{privateText(windowRowLabel(w), windowPrivateRowLabel(w))}</button>
       {:else}
-        <span class="row-name">{privateText(windowRowLabel(w), rowLabel(w.kind, w.ordinal))}</span>
+        <span class="row-name">{privateText(windowRowLabel(w), windowPrivateRowLabel(w))}</span>
       {/if}
       {#if current}<span class="current-window">This window</span>{/if}
     </div>
