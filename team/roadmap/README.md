@@ -59,7 +59,7 @@ A second intake came from the owner on 2026-11-11, from a screenshot of a window
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan drives ghostty-web from outside][ghosttyng] | not started | design |
+| [chan drives ghostty-web from outside][ghosttyng] | partly built | GA |
 | [find frames run long at max scrollback][findfeed] | landed | GA |
 | [local devserver calls go through a proxy][cliproxy] | landed | GA |
 | [one WireGuard ingress per proxy node][wgnode] | built | gate |
