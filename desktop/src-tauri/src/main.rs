@@ -7186,14 +7186,16 @@ enum NewWindowRoute {
 /// The New Window route for the window `focused_label`, from the record the
 /// label resolves to (`None` when it resolves to none).
 ///
-/// A local tmux window asks tmux for a new window, which only its page can
-/// do, since the page knows which of its sessions is a pane of the
-/// connection. The connection's control window is a terminal, not a tmux
-/// window, so it takes the plain routes. A local terminal opens another
-/// standalone terminal and a local workspace window another window of its
-/// workspace; a Terminal record carries no `workspace_path`, so the kind is
-/// the branch key. A devserver window mints another window of its kind on
-/// its devserver. A label that resolves to no record, or names no
+/// A tmux window, local or a devserver's, asks tmux for a new window, which
+/// only its page can do, since the page knows which of its sessions is a
+/// pane of the connection. The page sends the request to the server that
+/// serves it, so a devserver's tmux window reaches that devserver's tmux.
+/// The connection's control window is a terminal, not a tmux window, so it
+/// takes the plain routes. A local terminal opens another standalone
+/// terminal and a local workspace window another window of its workspace; a
+/// Terminal record carries no `workspace_path`, so the kind is the branch
+/// key. Any other devserver window mints another window of its kind on its
+/// devserver. A label that resolves to no record, or names no
 /// watcher-opened window, opens a standalone terminal.
 fn new_window_route(
     focused_label: &str,
@@ -7204,8 +7206,8 @@ fn new_window_route(
         return NewWindowRoute::StandaloneTerminal;
     }
     match record {
-        Some(_) if devserver => NewWindowRoute::DevserverWindow,
         Some(r) if r.tmux.as_ref().is_some_and(|mark| !mark.control) => NewWindowRoute::TmuxWindow,
+        Some(_) if devserver => NewWindowRoute::DevserverWindow,
         Some(r) if r.kind == chan_server::WindowKind::Terminal => {
             NewWindowRoute::StandaloneTerminal
         }
@@ -13929,6 +13931,24 @@ mod tests {
         /// The route New Window takes from the window `label` of `state`.
         fn route(state: &AppState, label: &str) -> NewWindowRoute {
             new_window_route(label, focused_window_record(state, label).as_ref())
+        }
+
+        /// New Window in a tmux window on a devserver asks tmux, through the
+        /// window's page, for a new window in that tmux session, whether the
+        /// connection started in a terminal or in a workspace's terminal.
+        #[test]
+        fn new_window_in_a_devservers_tmux_window_asks_tmux() {
+            let state = feed(vec![
+                record("lib-ds", "w-term", WindowKind::Terminal, Some(false)),
+                record("lib-ds", "w-work", WindowKind::Workspace, Some(false)),
+            ]);
+            for label in ["lib-ds::w-term", "lib-ds::w-work"] {
+                assert_eq!(
+                    route(&state, label),
+                    NewWindowRoute::TmuxWindow,
+                    "New Window in the devserver's tmux window {label}"
+                );
+            }
         }
 
         /// A devserver's tmux control terminal is a terminal, not a tmux
