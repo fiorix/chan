@@ -42,7 +42,7 @@ test("unavailable process I/O is labelled and leaves gaps instead of plotting ze
     sequence: 1, elapsedMs: 1000, sampledAtMs: 1000, collectionMicros: 1,
     process: { uptimeSeconds: 1, cpuTimeMs: 1, cpuPercent: null, residentBytes: 1024, ioScope: "unavailable", readBytes: null, writtenBytes: null, readBytesPerSecond: null, writtenBytesPerSecond: null },
     network: traffic, http2: traffic, yamux: traffic, reverseConnections: traffic, transferPayload: traffic,
-    transfers: { queued: 0, running: 0, workerCapacity: 2, queueCapacity: 32, finished: 0, cancelled: 0, stalled: 0, panicked: 0, refused: 0 },
+    transfers: { queued: 0, running: 0, workerCapacity: 2, queueCapacity: 32, finished: 9, cancelled: 3, stalled: 5, panicked: 6, refused: 8 },
     gatewayTunnels: 0, tunnelDialFailures: 0, reverseListeners: 0, yamuxWaiting: 0, yamuxServing: 0, yamuxServiceCapacity: 0, yamuxStreamLimit: 256,
   };
   metrics.view = {
@@ -54,6 +54,7 @@ test("unavailable process I/O is labelled and leaves gaps instead of plotting ze
   const target = document.createElement("div"); document.body.append(target);
   mounted = mount(MetricsSlide, { target, props: { active: false } });
   await tick();
+  expect(target.textContent).toContain("9 finished · 3 cancelled · 5 stalled · 6 panicked · 8 refused");
   const cards = [...target.querySelectorAll("article")].filter((card) => card.querySelector("h3")?.textContent?.startsWith("I/O"));
   expect(cards).toHaveLength(2);
   expect(cards[0].textContent).toContain("Unavailable on this platform");
