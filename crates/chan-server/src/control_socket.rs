@@ -5574,6 +5574,28 @@ fn describe_outside_open(ack: &chan_library::OpenOutsideAck) -> String {
     message
 }
 
+/// Open `requested` in a standalone window of `host` for the desktop's handoff
+/// open-path request: the window the host reuses or mints, the resolution of
+/// [`StandaloneFilesResolver::open_frame`], so the path lands as `cs open PATH`
+/// typed in that window would. The answer is the line `cs` prints for a routed
+/// open; `Err` is the sentence to print instead.
+pub(crate) async fn open_path_for_handoff(
+    host: &chan_library::WorkspaceHost,
+    requested: &Path,
+) -> Result<String, String> {
+    if !requested.is_absolute() {
+        return Err(format!("{} is not an absolute path", requested.display()));
+    }
+    match host.open_in_standalone_window(requested).await {
+        Ok(ack) => Ok(describe_outside_open(&ack)),
+        Err(chan_library::Error::Config(_)) => Err(format!(
+            "cannot open {}: this desktop serves no standalone filesystem",
+            requested.display()
+        )),
+        Err(error) => Err(format!("cannot open {}: {error}", requested.display())),
+    }
+}
+
 /// The refusal for an escaping path with no surface to route it to.
 fn escape_guidance(path: &Path) -> String {
     format!(
@@ -5706,7 +5728,7 @@ mod program_status_tests;
 mod request_status_tests;
 
 #[cfg(all(test, unix))]
-pub(crate) use tests::FakeHost;
+pub(crate) use tests::{machine_path, standalone_host, standalone_windows, FakeHost};
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -14110,7 +14132,7 @@ position = { row = 0, col = 1 }
     /// mounts, with a window registry installed: what the handoff's open-path
     /// request reaches. The returned directory holds the library and the
     /// registry.
-    async fn standalone_host() -> (Arc<chan_library::WorkspaceHost>, tempfile::TempDir) {
+    pub(crate) async fn standalone_host() -> (Arc<chan_library::WorkspaceHost>, tempfile::TempDir) {
         let cfg = private_tempdir().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         let host = Arc::new(chan_library::WorkspaceHost::new(
@@ -14141,7 +14163,7 @@ position = { row = 0, col = 1 }
     }
 
     /// The standalone windows in `host`'s registry.
-    fn standalone_windows(host: &chan_library::WorkspaceHost) -> Vec<String> {
+    pub(crate) fn standalone_windows(host: &chan_library::WorkspaceHost) -> Vec<String> {
         host.window_registry()
             .expect("a window registry")
             .snapshot()
@@ -14169,5 +14191,188 @@ position = { row = 0, col = 1 }
             "canonicalize path: No such file or directory (os error 2)"
         );
         assert_eq!(standalone_windows(&host), Vec::<String>::new());
+    }
+
+    /// How the standalone surface, rooted at `/`, spells a machine path.
+    pub(crate) fn machine_path(path: &Path) -> String {
+        path.canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string()
+    }
+
+    /// The frame `cs open` sends for `target` from a standalone window with
+    /// no `--pane` or `--side`: [`open_path_standalone`]'s command.
+    pub(crate) fn cs_open_frame(window_id: &str, target: StandaloneOpenTarget) -> String {
+        serialize_window_command(window_id, standalone_open_command(target, None).0).unwrap()
+    }
+
+    fn path_opened(message: String) -> crate::handoff::Response {
+        crate::handoff::Response::PathOpened {
+            desktop_version: crate::handoff::CHAN_VERSION.into(),
+            message,
+        }
+    }
+
+    /// The four kinds of path each produce the window command `cs open`
+    /// produces for them in a standalone window: a directory opens the file
+    /// browser, a Markdown file the editor, a non-text file is revealed in its
+    /// directory, and a missing path is created empty and opened. With no
+    /// standalone window the first open mints one, which seeds no terminal of
+    /// its own, and the rest land in that same window.
+    #[tokio::test]
+    async fn the_handoff_open_path_lands_as_cs_open_does_in_one_standalone_window() {
+        let (host, _cfg) = standalone_host().await;
+        let files = private_tempdir().unwrap();
+        let dir = files.path().join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        let notes = files.path().join("notes.md");
+        std::fs::write(&notes, "# notes\n").unwrap();
+        let image = files.path().join("image.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\xff\xfe").unwrap();
+        let missing = files.path().join("new.md");
+        let missing_rel = format!("{}/new.md", machine_path(files.path()));
+
+        let reply = crate::handoff::answer_open_path(&host, dir.to_str().unwrap()).await;
+        let windows = standalone_windows(&host);
+        assert_eq!(
+            windows.len(),
+            1,
+            "the first open mints one window: {windows:?}"
+        );
+        let window = windows[0].clone();
+        assert!(
+            host.is_routed_mint(&window),
+            "the minted window seeds no terminal of its own"
+        );
+        assert!(
+            host.window_registry()
+                .unwrap()
+                .snapshot()
+                .iter()
+                .all(|row| row.origin.is_native()),
+            "the window is native, so the desktop's watcher opens it"
+        );
+        assert_eq!(
+            reply,
+            path_opened(format!(
+                "open request queued for {} in standalone window {window} (opening)",
+                machine_path(&dir)
+            ))
+        );
+        for (path, shown) in [
+            (&notes, machine_path(&notes)),
+            (&image, machine_path(&image)),
+            (&missing, missing_rel.clone()),
+        ] {
+            assert_eq!(
+                crate::handoff::answer_open_path(&host, path.to_str().unwrap()).await,
+                path_opened(format!(
+                    "open request queued for {shown} in standalone window {window}"
+                )),
+                "{}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            standalone_windows(&host),
+            vec![window.clone()],
+            "one window for all four"
+        );
+        assert_eq!(
+            std::fs::read(&missing).expect("the missing path was created"),
+            b"",
+            "created empty"
+        );
+        assert_eq!(
+            host.test_take_parked_window_commands(&window),
+            [
+                cs_open_frame(&window, StandaloneOpenTarget::Browser(machine_path(&dir))),
+                cs_open_frame(&window, StandaloneOpenTarget::Editor(machine_path(&notes))),
+                cs_open_frame(
+                    &window,
+                    StandaloneOpenTarget::Reveal {
+                        dir: machine_path(files.path()),
+                        select: machine_path(&image),
+                    }
+                ),
+                cs_open_frame(&window, StandaloneOpenTarget::Editor(missing_rel)),
+            ]
+        );
+    }
+
+    /// A standalone window that is already connected takes the open, and no
+    /// window is minted beside it.
+    #[tokio::test]
+    async fn the_handoff_open_path_reuses_a_connected_standalone_window() {
+        let (host, _cfg) = standalone_host().await;
+        let record = host
+            .mint_window(chan_library::windows::WindowKind::Terminal, None)
+            .unwrap();
+        let _presence = host
+            .test_connect_window_presence("/terminal", &record.window_id)
+            .expect("the terminal tenant is mounted");
+        let files = private_tempdir().unwrap();
+        let notes = files.path().join("notes.md");
+        std::fs::write(&notes, "# notes\n").unwrap();
+
+        assert_eq!(
+            crate::handoff::answer_open_path(&host, notes.to_str().unwrap()).await,
+            path_opened(format!(
+                "open request queued for {} in standalone window {}",
+                machine_path(&notes),
+                record.window_id
+            ))
+        );
+        assert_eq!(standalone_windows(&host), vec![record.window_id.clone()]);
+        assert_eq!(
+            host.test_take_parked_window_commands(&record.window_id),
+            [cs_open_frame(
+                &record.window_id,
+                StandaloneOpenTarget::Editor(machine_path(&notes))
+            )]
+        );
+    }
+
+    /// A path the surface cannot open is refused with a sentence, and leaves
+    /// no window behind: one minted for it would show empty, since it seeds
+    /// no terminal and its frame never comes. A relative path is refused
+    /// before anything is minted, and a host with no standalone filesystem
+    /// says so.
+    #[tokio::test]
+    async fn a_handoff_open_path_it_cannot_open_is_refused_and_leaves_no_window() {
+        let (host, _cfg) = standalone_host().await;
+        let files = private_tempdir().unwrap();
+        let unreachable = files.path().join("gone").join("notes.md");
+        assert_eq!(
+            crate::handoff::answer_open_path(&host, unreachable.to_str().unwrap()).await,
+            crate::handoff::Response::Error {
+                message: format!(
+                    "cannot open {}: canonicalize path: No such file or directory (os error 2)",
+                    unreachable.display()
+                )
+            }
+        );
+        assert_eq!(standalone_windows(&host), Vec::<String>::new());
+        assert_eq!(
+            crate::handoff::answer_open_path(&host, "notes.md").await,
+            crate::handoff::Response::Error {
+                message: "notes.md is not an absolute path".into()
+            }
+        );
+        assert_eq!(standalone_windows(&host), Vec::<String>::new());
+
+        let cfg = private_tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let bare = chan_library::WorkspaceHost::new(lib, crate::route_builder());
+        assert_eq!(
+            crate::handoff::answer_open_path(&bare, "/srv/notes.md").await,
+            crate::handoff::Response::Error {
+                message: "cannot open /srv/notes.md: this desktop serves no standalone filesystem"
+                    .into()
+            }
+        );
     }
 }

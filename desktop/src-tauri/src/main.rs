@@ -6075,6 +6075,9 @@ fn main() {
                                 Request::Activate { .. } => {
                                     single_instance::come_forward(&app, &state)
                                 }
+                                Request::OpenPath { path, .. } => {
+                                    serve::open_path_in_standalone_window(state, &path).await
+                                }
                             }
                         }
                     })
