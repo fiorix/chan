@@ -10,12 +10,12 @@ name: Gateway CI
 #
 # The path filter is the gateway's build input set, not gateway/ alone.
 # gateway/Cargo.toml consumes crates/chan-tunnel-{client,proto,server}
-# from the root workspace by path, the client and proto crates compile
-# crates/chan-metrics in turn and the client crates/chan-tls, and all of
-# them take their version and
-# their dependency pins from the root Cargo.toml through
-# `workspace = true`, so a change to any of them changes what this
-# workspace compiles and what its integration tests exercise.
+# and crates/chan-tls from the root workspace by path, the client and
+# proto crates compile crates/chan-metrics in turn (the client chan-tls
+# too), and all of them take their version and their dependency pins
+# from the root Cargo.toml through `workspace = true`, so a change to
+# any of them changes what this workspace compiles and what its
+# integration tests exercise.
 # scripts/check-build-matrix.py derives that closure from the manifests
 # and fails when a crate it reaches is missing from either list below,
 # which is why the two lists are identical. The rest are the shared
