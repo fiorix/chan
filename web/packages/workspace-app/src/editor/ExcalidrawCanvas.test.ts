@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
-import { mount, unmount } from "svelte";
+import { flushSync, mount, tick, unmount, type ComponentProps } from "svelte";
+// @ts-expect-error Svelte publishes no type for the reactive prop proxy used by its rune transform.
+import { proxy } from "svelte/internal/client";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import ExcalidrawCanvas, { canonicalJson, distinctIds, noteVersions, sceneDeltas } from "./ExcalidrawCanvas.svelte";
@@ -217,6 +219,61 @@ describe("inactive canvas tab hides via display:none (WKWebView island leak)", (
     );
     const shell = target.querySelector(".excalidraw-shell");
     expect(shell?.classList.contains("offscreen")).toBe(false);
+  });
+});
+
+describe("a theme switch", () => {
+  // The board takes light or dark from its controlled `theme` prop, so a
+  // switch is a re-render of the same root with the new prop. Mounted in
+  // either theme and switched twice, the board's last render carries exactly
+  // the props a fresh mount in that theme renders with, and the root is never
+  // rebuilt, so the scene the library holds survives.
+  const BOARD = JSON.stringify({ elements: [{ id: "r1", type: "rectangle", version: 1, isDeleted: false }] });
+
+  /// The props the board was last rendered with, less its callbacks.
+  const boardProps = () => JSON.parse(JSON.stringify(renderedBoard())) as Record<string, unknown>;
+
+  async function freshProps(dark: boolean): Promise<Record<string, unknown>> {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const before = renderMock.mock.calls.length;
+    const comp = mount(ExcalidrawCanvas, { target, props: { content: BOARD, dark, onSceneChange: () => {} } });
+    await vi.waitFor(() => expect(renderMock.mock.calls.length).toBeGreaterThan(before));
+    const props = boardProps();
+    unmount(comp);
+    target.remove();
+    return props;
+  }
+
+  test.each([
+    { mounted: "dark", order: [true, false, true] },
+    { mounted: "light", order: [false, true, false] },
+  ])("mounted $mounted and switched twice, each switch renders a fresh mount's props", async ({ order }) => {
+    const reference = { dark: await freshProps(true), light: await freshProps(false) };
+    expect(reference.dark.theme).toBe("dark");
+    expect(reference.light.theme).toBe("light");
+
+    const onSceneChange = vi.fn();
+    const props = proxy({ content: BOARD, dark: order[0], onSceneChange });
+    const target = document.createElement("div");
+    document.body.append(target);
+    const roots = createRootMock.mock.calls.length;
+    const unmounts = unmountMock.mock.calls.length;
+    mounted.push(mount(ExcalidrawCanvas, { target, props: props as ComponentProps<typeof ExcalidrawCanvas> }));
+    await vi.waitFor(() => expect(createRootMock.mock.calls.length).toBe(roots + 1));
+    await vi.waitFor(() => expect(boardProps()).toEqual(reference[order[0] ? "dark" : "light"]));
+
+    for (const dark of order.slice(1)) {
+      const renders = renderMock.mock.calls.length;
+      props.dark = dark;
+      flushSync();
+      await tick();
+      expect(renderMock.mock.calls.length, "the switch re-renders the board").toBeGreaterThan(renders);
+      expect(boardProps(), `after the switch to ${dark ? "dark" : "light"}`).toEqual(reference[dark ? "dark" : "light"]);
+    }
+    expect(createRootMock.mock.calls.length, "one root for the board's life").toBe(roots + 1);
+    expect(unmountMock.mock.calls.length, "the root was never torn down").toBe(unmounts);
+    expect(onSceneChange, "a switch writes nothing to the buffer").not.toHaveBeenCalled();
   });
 });
 
