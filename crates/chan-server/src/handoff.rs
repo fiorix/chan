@@ -14,7 +14,9 @@
 //! user; on Windows, the pipe's name carries the account's SID, so each
 //! account has an endpoint of its own, and the endpoint's pipe and its claim
 //! pipe grant that account alone, where the default named-pipe ACL would also
-//! grant LocalSystem and Administrators.
+//! grant LocalSystem and Administrators. Any local user can still create a
+//! pipe of the name first, so a client reads the account the pipe's server
+//! runs as before it writes, and writes nothing to another account's.
 //!
 //! INVARIANT: exactly one process owns a workspace's writes (the
 //! chan-workspace per-workspace flock). In a successful handoff the DESKTOP
@@ -1407,17 +1409,19 @@ pub enum Outcome {
     NotServed,
 }
 
-#[cfg(unix)]
+/// How long a client waits to connect: on Windows, how long it retries a busy
+/// pipe, which a listener between two instances answers.
+#[cfg(any(unix, windows))]
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const IO_TIMEOUT: Duration = Duration::from_millis(3000);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 // Updater checks may need a network round-trip on the desktop.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const UPGRADE_IO_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum EndpointError {
     NoDesktop,
     NoReply,
@@ -1433,6 +1437,61 @@ async fn connect_endpoint(socket_path: &Path, timeout: Duration) -> Option<tokio
         .await
         .ok()?
         .ok()
+}
+
+/// Shared gate for request clients and the connect-only liveness probe:
+/// open the endpoint's pipe, retrying a busy pipe until `timeout`, and refuse
+/// a pipe whose server runs as another account before anything is written to
+/// it. A pipe of this account's name is not this account's by its name alone:
+/// any local user can create one first.
+#[cfg(windows)]
+async fn connect_endpoint(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
+    let account = chan_winpipe::current_account_sid().ok()?;
+    connect_endpoint_as(socket_path, timeout, account).await
+}
+
+/// [`connect_endpoint`] for a client of `account`, so a test can stand in
+/// for a server of another account.
+#[cfg(windows)]
+async fn connect_endpoint_as(
+    socket_path: &Path,
+    timeout: Duration,
+    account: &str,
+) -> Option<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    // Win32 ERROR_PIPE_BUSY: every instance of the pipe is taken.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let client = loop {
+        match ClientOptions::new().open(socket_path) {
+            Ok(client) => break client,
+            Err(e)
+                if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // No pipe (no desktop, or one still booting), access denied
+            // (another account's pipe), or busy past the bound.
+            Err(_) => return None,
+        }
+    };
+    match chan_winpipe::server_account_sid(&client) {
+        Ok(server) if server == account => Some(client),
+        served => {
+            tracing::debug!(
+                endpoint = %socket_path.display(),
+                ?served,
+                "the handoff endpoint is not served by this account; nothing is sent to it"
+            );
+            None
+        }
+    }
 }
 
 /// Write one request line and read one reply line.
@@ -1482,7 +1541,7 @@ pub(crate) fn reply_after_write<T: serde::de::DeserializeOwned>(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn request_endpoint(
     socket_path: &Path,
     req: &Request,
@@ -1493,7 +1552,10 @@ async fn request_endpoint(
         .ok_or(EndpointError::NoDesktop)?;
     let mut payload = serde_json::to_vec(req).map_err(|_| EndpointError::NoDesktop)?;
     payload.push(b'\n');
+    #[cfg(unix)]
     let (read, mut write) = stream.into_split();
+    #[cfg(windows)]
+    let (read, mut write) = tokio::io::split(stream);
     let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
     match tokio::time::timeout(budget, io).await {
         Ok(Ok(line)) if !line.trim().is_empty() => Ok(line),
@@ -1505,8 +1567,9 @@ async fn request_endpoint(
 /// Report whether the same-user desktop endpoint accepts a local connection.
 /// The probe is connect-only: it sends no request, cannot dispatch a desktop
 /// action, and drops the connection immediately. Missing, stale, busy, or
-/// headless endpoints resolve to `false` within a short bound.
-#[cfg(unix)]
+/// headless endpoints resolve to `false` within a short bound, and so does a
+/// Windows pipe that another account serves.
+#[cfg(any(unix, windows))]
 pub async fn desktop_is_live() -> bool {
     if handoff_opt_out() || !gui_session_present() {
         return false;
@@ -1517,43 +1580,9 @@ pub async fn desktop_is_live() -> bool {
     desktop_is_live_at(&socket_path).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn desktop_is_live_at(socket_path: &Path) -> bool {
     connect_endpoint(socket_path, PROBE_TIMEOUT).await.is_some()
-}
-
-/// Windows counterpart to the connect-only Unix desktop probe. A busy pipe is
-/// retried briefly because the listener swaps pipe instances after each accept.
-#[cfg(windows)]
-pub async fn desktop_is_live() -> bool {
-    if handoff_opt_out() || !gui_session_present() {
-        return false;
-    }
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return false;
-    };
-    desktop_is_live_at(&socket_path).await
-}
-
-#[cfg(windows)]
-async fn desktop_is_live_at(socket_path: &Path) -> bool {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(250);
-    loop {
-        match ClientOptions::new().open(socket_path) {
-            Ok(_) => return true,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if std::time::Instant::now() >= deadline {
-                    return false;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(_) => return false,
-        }
-    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1570,8 +1599,9 @@ pub async fn desktop_is_live() -> bool {
 ///
 /// A short connect+IO timeout bounds the case where a stale socket
 /// file exists but nothing is accepting; the CLI must not hang on a
-/// dead desktop.
-#[cfg(unix)]
+/// dead desktop. On Windows a missing pipe (no desktop, or one still
+/// booting) is no desktop at once and a busy one is retried briefly.
+#[cfg(any(unix, windows))]
 pub async fn try_handoff(workspace_path: &Path) -> Outcome {
     let Some(socket_path) = existing_well_known_socket_path() else {
         return Outcome::NoDesktop;
@@ -1581,7 +1611,7 @@ pub async fn try_handoff(workspace_path: &Path) -> Outcome {
 
 /// The post-resolution half of [`try_handoff`], on an explicit socket path so
 /// the ownership gate is testable without steering the process environment.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
     let req = Request::OpenWorkspace {
         protocol: PROTOCOL_VERSION,
@@ -1624,90 +1654,6 @@ async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
     }
 }
 
-/// Windows: connect the well-known named pipe and round-trip one
-/// `OpenWorkspace`. A missing pipe (no desktop, or one still booting) maps to
-/// `NoDesktop` at once -- it must NOT hang the common no-desktop `chan serve`;
-/// a momentarily-busy pipe (the desktop mid accept-swap) gets a short bounded
-/// retry. Same request / timed response / parse as the unix arm.
-#[cfg(windows)]
-pub async fn try_handoff(workspace_path: &Path) -> Outcome {
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return Outcome::NoDesktop;
-    };
-    try_handoff_at(&socket_path, workspace_path).await
-}
-
-/// The post-resolution half of the Windows [`try_handoff`], on an explicit
-/// pipe name so a test can drive it against its own listener.
-#[cfg(windows)]
-async fn try_handoff_at(socket_path: &Path, workspace_path: &Path) -> Outcome {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-    let client = loop {
-        match ClientOptions::new().open(socket_path) {
-            Ok(c) => break c,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if std::time::Instant::now() >= deadline {
-                    return Outcome::NoDesktop;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            // NotFound (no desktop listening) / refused / other: fall back.
-            Err(_) => return Outcome::NoDesktop,
-        }
-    };
-
-    let req = Request::OpenWorkspace {
-        protocol: PROTOCOL_VERSION,
-        cli_version: CHAN_VERSION.into(),
-        workspace_path: workspace_path.display().to_string(),
-    };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return Outcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = tokio::io::split(client);
-    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return Outcome::NoDesktop,
-    };
-
-    match serde_json::from_str::<Response>(&line) {
-        Ok(Response::Opened { .. }) => Outcome::HandedOff,
-        Ok(Response::VersionSkew {
-            desktop_version,
-            desktop_protocol,
-        }) => Outcome::VersionSkew {
-            desktop_version,
-            desktop_protocol,
-        },
-        Ok(Response::Error { message }) => Outcome::DesktopError { message },
-        Ok(Response::UpgradeStarted { .. })
-        | Ok(Response::UpgradeChecked { .. })
-        | Ok(Response::DevserverRegistered { .. })
-        | Ok(Response::Closed { .. })
-        | Ok(Response::NotServed { .. })
-        | Ok(Response::CloseRefused { .. })
-        | Ok(Response::Devservers { .. })
-        | Ok(Response::DevserverConnectStarted { .. })
-        | Ok(Response::DevserverDisconnected { .. })
-        | Ok(Response::DevserverForgotten { .. })
-        | Ok(Response::RemoteWorkspaceServed { .. })
-        | Ok(Response::RemoteWorkspaceClosed { .. })
-        | Ok(Response::RemoteWorkspaceForgotten { .. })
-        | Ok(Response::TerminalOpened { .. })
-        | Ok(Response::Activated { .. })
-        | Err(_) => Outcome::NoDesktop,
-    }
-}
-
 #[cfg(not(any(unix, windows)))]
 pub async fn try_handoff(_workspace_path: &std::path::Path) -> Outcome {
     Outcome::NoDesktop
@@ -1723,7 +1669,7 @@ pub async fn try_handoff(_workspace_path: &std::path::Path) -> Outcome {
 /// `Outcome::NoDesktop` so the CLI falls back to the per-pid control-socket
 /// teardown, the same path it takes when no desktop is running. Mirrors
 /// `try_handoff`'s framing + timeouts.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome {
     let Some(socket_path) = existing_well_known_socket_path() else {
         return Outcome::NoDesktop;
@@ -1731,7 +1677,7 @@ pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome
     try_close_workspace_at(&socket_path, workspace_path, remove).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn try_close_workspace_at(
     socket_path: &Path,
     workspace_path: &Path,
@@ -1745,55 +1691,6 @@ async fn try_close_workspace_at(
     };
     let Ok(line) = request_endpoint(socket_path, &req, req.reply_budget()).await else {
         return Outcome::NoDesktop;
-    };
-
-    map_close_response(&line)
-}
-
-/// Windows: the same `CloseWorkspace` round-trip over the well-known named pipe,
-/// mirroring `try_handoff`'s Windows arm (a missing pipe maps to `NoDesktop` at
-/// once; a momentarily-busy pipe gets a short bounded retry).
-#[cfg(windows)]
-pub async fn try_close_workspace(workspace_path: &Path, remove: bool) -> Outcome {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return Outcome::NoDesktop;
-    };
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-    let client = loop {
-        match ClientOptions::new().open(&socket_path) {
-            Ok(c) => break c,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if std::time::Instant::now() >= deadline {
-                    return Outcome::NoDesktop;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(_) => return Outcome::NoDesktop,
-        }
-    };
-
-    let req = Request::CloseWorkspace {
-        protocol: PROTOCOL_VERSION,
-        cli_version: CHAN_VERSION.into(),
-        workspace_path: workspace_path.display().to_string(),
-        remove,
-    };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return Outcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = tokio::io::split(client);
-    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    let line = match tokio::time::timeout(req.reply_budget(), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return Outcome::NoDesktop,
     };
 
     map_close_response(&line)
@@ -1852,7 +1749,7 @@ fn map_close_response(line: &str) -> Outcome {
 /// into"). Mirrors `try_handoff`'s framing + timeouts. `name` / `script` ride
 /// along as the optional launcher label + connect script; a bearer may ride in
 /// the URL as `?t=...`.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&str>) -> Outcome {
     let Some(socket_path) = existing_well_known_socket_path() else {
         return Outcome::NoDesktop;
@@ -1860,7 +1757,7 @@ pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&s
     try_open_devserver_at(&socket_path, url, name, script).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn try_open_devserver_at(
     socket_path: &Path,
     url: &str,
@@ -1876,56 +1773,6 @@ async fn try_open_devserver_at(
     };
     let Ok(line) = request_endpoint(socket_path, &req, IO_TIMEOUT).await else {
         return Outcome::NoDesktop;
-    };
-
-    map_devserver_response(&line)
-}
-
-/// Windows: the same `OpenDevserver` round-trip over the well-known named pipe,
-/// mirroring `try_handoff`'s Windows arm (a missing pipe maps to `NoDesktop` at
-/// once; a momentarily-busy pipe gets a short bounded retry).
-#[cfg(windows)]
-pub async fn try_open_devserver(url: &str, name: Option<&str>, script: Option<&str>) -> Outcome {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return Outcome::NoDesktop;
-    };
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-    let client = loop {
-        match ClientOptions::new().open(&socket_path) {
-            Ok(c) => break c,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if std::time::Instant::now() >= deadline {
-                    return Outcome::NoDesktop;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(_) => return Outcome::NoDesktop,
-        }
-    };
-
-    let req = Request::OpenDevserver {
-        protocol: PROTOCOL_VERSION,
-        cli_version: CHAN_VERSION.into(),
-        url: url.to_string(),
-        name: name.map(str::to_string),
-        script: script.map(str::to_string),
-    };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return Outcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = tokio::io::split(client);
-    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    let line = match tokio::time::timeout(Duration::from_millis(3000), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return Outcome::NoDesktop,
     };
 
     map_devserver_response(&line)
@@ -1956,7 +1803,7 @@ pub enum DevserverControlOutcome {
 /// devserver-control verbs (`ls` / `connect` / `disconnect` / `forget`).
 /// Mirrors `try_open_devserver`'s framing and timeouts; any connect
 /// failure, stale socket, or malformed line maps to `NoDesktop`.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
     let Some(socket_path) = existing_well_known_socket_path() else {
         return DevserverControlOutcome::NoDesktop;
@@ -1964,60 +1811,13 @@ pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
     try_devserver_control_at(&socket_path, req).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn try_devserver_control_at(socket_path: &Path, req: Request) -> DevserverControlOutcome {
     let budget = req.reply_budget();
     let line = match request_endpoint(socket_path, &req, budget).await {
         Ok(line) => line,
         Err(EndpointError::NoDesktop) => return DevserverControlOutcome::NoDesktop,
         Err(EndpointError::NoReply) => return DevserverControlOutcome::NoReply { budget },
-    };
-
-    match serde_json::from_str::<Response>(line.trim()) {
-        Ok(resp) => DevserverControlOutcome::Reply(resp),
-        Err(_) => DevserverControlOutcome::NoDesktop,
-    }
-}
-
-/// Windows: the same round-trip over the well-known named pipe, with the
-/// bounded `ERROR_PIPE_BUSY` retry the other verbs use.
-#[cfg(windows)]
-pub async fn try_devserver_control(req: Request) -> DevserverControlOutcome {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return DevserverControlOutcome::NoDesktop;
-    };
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-    let client = loop {
-        match ClientOptions::new().open(&socket_path) {
-            Ok(client) => break client,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if std::time::Instant::now() >= deadline {
-                    return DevserverControlOutcome::NoDesktop;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(_) => return DevserverControlOutcome::NoDesktop,
-        }
-    };
-
-    let budget = req.reply_budget();
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return DevserverControlOutcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = tokio::io::split(client);
-    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    let line = match tokio::time::timeout(budget, io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        Ok(_) => return DevserverControlOutcome::NoDesktop,
-        Err(_) => return DevserverControlOutcome::NoReply { budget },
     };
 
     match serde_json::from_str::<Response>(line.trim()) {
@@ -2072,32 +1872,11 @@ pub enum ActivateReply {
 /// Unlike the CLI's requests this ignores `CHAN_NO_DESKTOP_HANDOFF` and the
 /// GUI-session check: the sender is itself a desktop, and one desktop per
 /// endpoint is not something automation opts out of.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
     match request_endpoint(socket_path, &activate_request(), budget).await {
         Ok(line) => map_activate_response(&line),
         Err(EndpointError::NoDesktop | EndpointError::NoReply) => ActivateReply::NoReply,
-    }
-}
-
-/// Windows: the same request over the named pipe. A busy or missing pipe is
-/// `NoReply`, which the caller retries within its own bound.
-#[cfg(windows)]
-pub async fn try_activate_at(socket_path: &Path, budget: Duration) -> ActivateReply {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    let Ok(client) = ClientOptions::new().open(socket_path) else {
-        return ActivateReply::NoReply;
-    };
-    let Ok(mut payload) = serde_json::to_vec(&activate_request()) else {
-        return ActivateReply::NoReply;
-    };
-    payload.push(b'\n');
-    let (read, mut write) = tokio::io::split(client);
-    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    match tokio::time::timeout(budget, io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => map_activate_response(&line),
-        _ => ActivateReply::NoReply,
     }
 }
 
@@ -2198,7 +1977,7 @@ pub enum UpgradeOutcome {
 /// the install in the background and returns at once (fire-and-return). Any
 /// connect failure / stale socket / read error / malformed reply maps to
 /// `UpgradeOutcome::NoDesktop` so the caller can launch a desktop and retry.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
     let Some(socket_path) = existing_well_known_socket_path() else {
         return UpgradeOutcome::NoDesktop;
@@ -2206,7 +1985,7 @@ pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
     try_upgrade_at(&socket_path, check_only).await
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome {
     let req = Request::Upgrade {
         protocol: PROTOCOL_VERSION,
@@ -2215,64 +1994,6 @@ async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome 
     };
     let Ok(line) = request_endpoint(socket_path, &req, UPGRADE_IO_TIMEOUT).await else {
         return UpgradeOutcome::NoDesktop;
-    };
-
-    map_upgrade_response(&line)
-}
-
-/// The Windows named-pipe arm of [`try_upgrade`]: the same request and
-/// reply contract over the well-known per-user pipe, with the busy-pipe
-/// retry the other Windows client verbs use.
-#[cfg(windows)]
-pub async fn try_upgrade(check_only: bool) -> UpgradeOutcome {
-    let Some(socket_path) = existing_well_known_socket_path() else {
-        return UpgradeOutcome::NoDesktop;
-    };
-    try_upgrade_at(&socket_path, check_only).await
-}
-
-/// The post-resolution half of the Windows [`try_upgrade`], on an explicit
-/// pipe name so a test can drive it against its own listener.
-#[cfg(windows)]
-async fn try_upgrade_at(socket_path: &Path, check_only: bool) -> UpgradeOutcome {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    // Win32 ERROR_PIPE_BUSY: all instances are busy; retry briefly.
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-    let client = loop {
-        match ClientOptions::new().open(socket_path) {
-            Ok(c) => break c,
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                if std::time::Instant::now() >= deadline {
-                    return UpgradeOutcome::NoDesktop;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            // NotFound (no desktop listening) / refused / other: no desktop.
-            Err(_) => return UpgradeOutcome::NoDesktop,
-        }
-    };
-
-    let req = Request::Upgrade {
-        protocol: PROTOCOL_VERSION,
-        cli_version: CHAN_VERSION.into(),
-        check_only,
-    };
-    let mut payload = match serde_json::to_vec(&req) {
-        Ok(v) => v,
-        Err(_) => return UpgradeOutcome::NoDesktop,
-    };
-    payload.push(b'\n');
-
-    let (read, mut write) = tokio::io::split(client);
-    let io = exchange_line::<Response, _, _>(read, &mut write, &payload);
-    // Same read window as the unix arm: `check_only` hits the network on the
-    // desktop side.
-    let line = match tokio::time::timeout(Duration::from_secs(15), io).await {
-        Ok(Ok(line)) if !line.trim().is_empty() => line,
-        _ => return UpgradeOutcome::NoDesktop,
     };
 
     map_upgrade_response(&line)
@@ -3146,6 +2867,25 @@ mod tests {
             well_known_socket_path().expect("windows path"),
             PathBuf::from(format!(r"\\.\pipe\chan-desktop-{sid}"))
         );
+    }
+
+    /// Every Windows client, the probe and each request, opens the endpoint
+    /// through `connect_endpoint_as`, so none writes before the check of the
+    /// server's account: the module opens a pipe as a client in that one
+    /// place.
+    #[test]
+    fn every_windows_client_opens_the_endpoint_through_the_account_check() {
+        let source = include_str!("handoff.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module");
+        assert_eq!(production.matches("ClientOptions::new()").count(), 1);
+        let (_, check) = production
+            .split_once("async fn connect_endpoint_as(")
+            .expect("the account check");
+        let (check, _) = check.split_once("\n}\n").expect("its end");
+        assert!(check.contains("ClientOptions::new()"));
+        assert!(check.contains("chan_winpipe::server_account_sid(&client)"));
     }
 
     /// Two accounts, whose user names may filter to one name, have two
@@ -4358,6 +4098,45 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(claim_endpoint_at(&pipe).is_ok());
+    }
+
+    /// A client writes nothing to an endpoint whose server runs as another
+    /// account, which the test stands in for by expecting another SID than
+    /// the listener's; the same listener, expected as this account's, is
+    /// written to and answers.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_pipe_served_by_another_account_is_never_written_to() {
+        use std::sync::{Arc, Mutex};
+
+        let pipe = test_pipe("other-account");
+        let served = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&served);
+        let _handle = start_listener(pipe.clone(), move |req| {
+            let seen = Arc::clone(&seen);
+            async move {
+                if let Request::OpenWorkspace { workspace_path, .. } = req {
+                    seen.lock().unwrap().push(workspace_path);
+                }
+                opened()
+            }
+        })
+        .unwrap();
+        assert!(
+            connect_endpoint_as(&pipe, CONNECT_TIMEOUT, "S-1-5-21-0-0-0-1")
+                .await
+                .is_none(),
+            "a server of another account is refused"
+        );
+        // A request written to the refused client would be served by now.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(served.lock().unwrap().is_empty());
+        assert!(desktop_is_live_at(&pipe).await);
+        assert!(matches!(
+            try_handoff_at(&pipe, Path::new("ours")).await,
+            Outcome::HandedOff
+        ));
+        assert_eq!(*served.lock().unwrap(), ["ours"]);
     }
 
     /// The claim pipe and the endpoint's pipe grant this account alone: owned
