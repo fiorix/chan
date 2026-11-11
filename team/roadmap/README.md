@@ -75,7 +75,7 @@ Two more came from the owner on 2026-11-11, at the start of the release's round:
 | [small findings of the second reading are open][leftovers] | not started | decision |
 | [other Dashboard slides sit at the top][dashslides] | built | owner |
 | [make clean leaves the build tools behind][makeclean] | landed | GA |
-| [basic flows have no end-to-end check][basicflows] | not started | audit |
+| [basic flows have no end-to-end check][basicflows] | partly built | build |
 
 [ghosttyng]: v0.128.0/chan-drives-ghostty-web-from-outside-through-its-private-internals.md
 [findfeed]: v0.128.0/a-ghostty-find-frame-runs-long-while-output-streams-at-the-largest-scrollback.md
