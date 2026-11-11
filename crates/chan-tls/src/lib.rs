@@ -149,11 +149,21 @@ mod platform {
                 "the system certificate store holds certificates that are not usable trust anchors; they are not trusted",
             );
         }
-        tracing::debug!(
-            system = roots.system,
-            bundled = webpki_roots::TLS_SERVER_ROOTS.len(),
-            "TLS servers are verified against the system certificate store and the bundled roots",
-        );
+        // Once per process, when the verifier is built. An absent or empty
+        // store is the one case a private CA cannot verify in, so it warns.
+        let bundled = webpki_roots::TLS_SERVER_ROOTS.len();
+        if roots.system == 0 {
+            tracing::warn!(
+                bundled,
+                "the system certificate store gave no trust anchors; TLS servers are verified against the bundled roots alone, so a private CA is not trusted",
+            );
+        } else {
+            tracing::info!(
+                system = roots.system,
+                bundled,
+                "TLS servers are verified against the system certificate store and the bundled roots",
+            );
+        }
         webpki_verifier(roots.store, provider)
     }
 
