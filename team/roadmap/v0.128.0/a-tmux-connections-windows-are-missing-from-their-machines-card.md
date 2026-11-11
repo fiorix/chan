@@ -33,9 +33,9 @@ Alex, on 2026-11-10, after reading this item: "i dont want all tmux windows on t
 The ruling supersedes contract 1 and settles contract 3:
 
 1. Each `tmux -CC` connection keeps its own card, which lists its windows and keeps the detach control on the card's title (the session), as today.
-2. The card of the machine where the connection runs (This machine for a local run, the devserver's card for a run on a devserver) lists only the connection's buried control terminal, marked as hidden as the connection's own card marks it, with a detach button on that row that detaches the connection. The connection's other windows do not move there.
+2. The card of the machine whose terminal runs the tmux client (This machine when the control terminal is a local terminal, the devserver's card when it is that devserver's), read from the control terminal's library, lists only the connection's buried control terminal, marked as hidden as the connection's own card marks it, with a detach button on that row that detaches the connection. A carrier run (`ssh -t host tmux -CC ...`) is placed the same way: its buried terminal is a terminal of a known library whether or not the tmux server is remote. The connection's other windows do not move there.
 3. The control terminal is therefore the one window listed on two cards beside All windows (the connection's and its machine's); every other window stays on the connection's card alone, and no keyed list repeats an id within itself.
-4. Contracts 2 (All windows unchanged) and 4 (privacy mode) and the boundaries stand. A connection whose machine is not known stays on its own card alone.
+4. Contracts 2 (All windows unchanged) and 4 (privacy mode) stand. The boundary on a connection whose machine is not known belonged to contract 1 (where the tmux server runs decided where the windows went) and falls with it; under this ruling the one case left alone on the connection's card is a control terminal whose library no card holds yet, until that card exists.
 
 The acceptance checks, restated:
 
