@@ -7265,7 +7265,7 @@ impl TmuxWindowHook for HostTmuxWindows {
             return;
         };
         self.notify.notify_waiters();
-        // The page keeps the label for its pane tree's window name, and a
+        // The page keeps the label for its window tab bar's title, and a
         // browser titles its tab with it; the desktop's window watcher
         // retitles the OS window from the row. A page with no socket reads
         // the row when it first needs the name, so the frame is not parked:

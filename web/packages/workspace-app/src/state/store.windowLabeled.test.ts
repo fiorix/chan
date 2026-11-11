@@ -2,7 +2,7 @@
 //
 // The `window_labeled` frame the server sends this window's socket on a
 // rename, driven through the store's frame handler: every surface keeps the
-// caption for the pane tree's window name, and only a browser retitles its
+// caption for the window tab bar's title, and only a browser retitles its
 // document.
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
