@@ -4,8 +4,9 @@
 //! only its own process's windows, so a second desktop beside the first
 //! opens a native window for every record the first already shows, attached
 //! to the same sessions. A GUI launch therefore claims the handoff endpoint
-//! (the flock beside the per-user socket; on Windows a named mutex, the pipe
-//! being created only when the listener starts) before it touches anything,
+//! (the flock beside the per-user socket; on Windows the first instance of a
+//! claim pipe beside the endpoint's, whose own pipe is created only when the
+//! listener starts) before it touches anything,
 //! and keeps the claim until its listener serves it. A launch that finds the
 //! endpoint held asks the desktop holding it to come forward over the
 //! handoff socket and exits without opening a window, starting a watcher or
@@ -16,8 +17,8 @@
 //! the log line. The CLI personalities and the default-terminal launch never
 //! reach this: they are dispatched before it in `main`.
 //!
-//! The endpoint is per user (the runtime directory on unix, the user name in
-//! the pipe's and the mutex's names on Windows), not per `CHAN_HOME`.
+//! The endpoint is per account (the runtime directory on unix, the account's
+//! SID in both pipes' names on Windows), not per `CHAN_HOME`.
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
@@ -206,7 +207,9 @@ pub(crate) fn guard() -> Option<EndpointClaim> {
     let startup = match handoff::ensure_well_known_socket_path() {
         Some(path) => check_at(&path, BOUNDS),
         None => Startup::RunWithoutListener {
-            why: "no owner-controlled runtime directory for the handoff endpoint".into(),
+            why: "no handoff endpoint for this account (no owner-controlled runtime directory \
+                  on unix, no readable account SID on Windows)"
+                .into(),
         },
     };
     report(&startup, |notice| {

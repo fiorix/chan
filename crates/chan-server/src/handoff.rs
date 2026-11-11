@@ -11,8 +11,9 @@
 //! the mcp_bridge / control_socket use): the CLI must find the desktop
 //! without knowing its pid. On unix, same-user is enforced by the socket
 //! living in a per-user runtime dir with 0600 perms and owned by the
-//! user; on Windows, by the per-user pipe name plus the default named-pipe
-//! ACL (same-user access), matching control_socket.
+//! user; on Windows, the pipe's name carries the account's SID, so each
+//! account has an endpoint of its own, and the pipe keeps the default
+//! named-pipe ACL, matching control_socket.
 //!
 //! INVARIANT: exactly one process owns a workspace's writes (the
 //! chan-workspace per-workspace flock). In a successful handoff the DESKTOP
@@ -461,27 +462,27 @@ pub fn well_known_socket_path() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        // Named pipes share one machine-global namespace, so namespace by
-        // user to avoid cross-user collision (same-user access is the
-        // default pipe ACL, matching control_socket). The name is WELL-KNOWN
-        // (per-user, not per-pid) so the CLI finds the desktop without its
-        // pid. Sanitize the username to the chars a pipe name allows.
-        let user = std::env::var("USERNAME").unwrap_or_default();
-        let user: String = user
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        let user = if user.is_empty() {
-            "default".into()
-        } else {
-            user
-        };
-        Some(PathBuf::from(format!(r"\\.\pipe\chan-desktop-{user}")))
+        // Named pipes share one namespace for the whole machine, so the name
+        // carries the account's SID, which no other account has, local or
+        // domain; a user name cut to the characters a pipe name allows can be
+        // another account's as well. The name is WELL-KNOWN (per account, not
+        // per pid) so the CLI finds the desktop without its pid. An account
+        // whose SID cannot be read has no endpoint.
+        chan_winpipe::current_account_sid()
+            .ok()
+            .map(endpoint_for_account)
     }
     #[cfg(not(any(unix, windows)))]
     {
         None
     }
+}
+
+/// The Windows handoff endpoint of the account `sid`. A SID holds no `.`, so
+/// no account's endpoint is another account's claim pipe ([`claim_pipe_name`]).
+#[cfg(any(windows, test))]
+fn endpoint_for_account(sid: &str) -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\chan-desktop-{sid}"))
 }
 
 #[cfg(unix)]
@@ -784,9 +785,7 @@ pub fn claim_endpoint_at(socket_path: &Path) -> Result<EndpointClaim, ClaimError
 }
 
 /// Create the claim pipe of the endpoint at `socket_path`: the first, and
-/// only, instance of `<endpoint>.claim`, inbound, which nothing reads. The
-/// user name in an endpoint's name keeps only `[A-Za-z0-9_-]`, so no
-/// account's endpoint is another account's claim.
+/// only, instance of `<endpoint>.claim`, inbound, which nothing reads.
 #[cfg(windows)]
 fn create_claim_pipe(
     socket_path: &Path,
@@ -798,7 +797,7 @@ fn create_claim_pipe(
         .create(claim_pipe_name(socket_path))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn claim_pipe_name(socket_path: &Path) -> std::ffi::OsString {
     let mut name = socket_path.as_os_str().to_owned();
     name.push(".claim");
@@ -3128,16 +3127,37 @@ mod tests {
         assert!(dispatched.load(Ordering::SeqCst));
     }
 
+    /// Windows resolves the endpoint in the `\\.\pipe\` namespace, named by
+    /// this account's SID and not by its user name.
     #[cfg(windows)]
     #[test]
     fn well_known_path_is_named_pipe_on_windows() {
-        // Windows resolves a per-user named pipe in the `\\.\pipe\` namespace.
-        let p = well_known_socket_path().expect("windows path");
-        let s = p.to_string_lossy();
-        assert!(
-            s.starts_with(r"\\.\pipe\chan-desktop-"),
-            "unexpected path: {s}"
+        let sid = chan_winpipe::current_account_sid().unwrap();
+        assert_eq!(
+            well_known_socket_path().expect("windows path"),
+            PathBuf::from(format!(r"\\.\pipe\chan-desktop-{sid}"))
         );
+    }
+
+    /// Two accounts, whose user names may filter to one name, have two
+    /// endpoints, and neither account's endpoint is the other's claim pipe.
+    #[test]
+    fn each_account_has_an_endpoint_of_its_own() {
+        let first = endpoint_for_account("S-1-5-21-1-2-3-1001");
+        let second = endpoint_for_account("S-1-5-21-1-2-3-1002");
+        assert_eq!(
+            first,
+            PathBuf::from(r"\\.\pipe\chan-desktop-S-1-5-21-1-2-3-1001")
+        );
+        assert_ne!(first, second);
+        for (endpoint, other) in [(&first, &second), (&second, &first)] {
+            assert_eq!(
+                claim_pipe_name(endpoint),
+                std::ffi::OsString::from(format!("{}.claim", endpoint.display()))
+            );
+            assert_ne!(claim_pipe_name(endpoint), other.as_os_str());
+            assert_ne!(claim_pipe_name(endpoint), claim_pipe_name(other));
+        }
     }
 
     #[cfg(unix)]

@@ -1176,6 +1176,7 @@ dependencies = [
  "chan-systemd",
  "chan-tunnel-client",
  "chan-tunnel-proto",
+ "chan-winpipe",
  "chan-wireguard",
  "chan-workspace",
  "chrono",
