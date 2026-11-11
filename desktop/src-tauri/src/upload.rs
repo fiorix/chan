@@ -3,9 +3,10 @@
 //! The native picker returns paths only inside Rust. Each selected regular file
 //! becomes a streaming reqwest multipart part, so neither file paths nor bytes
 //! cross webview IPC. The page is told what to call the selection, the first
-//! file's base name and the file count, through the transfer's status. The
-//! invoking origin, destination path, cookies, CSRF mirror, redirects,
-//! cancellation, and aggregate progress are validated here.
+//! file's base name and the file count, through the transfer's status, and,
+//! when the page asks for it, with the reason of a failure. The invoking
+//! origin, destination path, cookies, CSRF mirror, redirects, cancellation,
+//! and aggregate progress are validated here.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,13 +15,14 @@ use axum::body::Bytes;
 #[cfg(test)]
 use futures::TryStreamExt;
 use futures::{stream, StreamExt};
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, WebviewWindow};
 use tokio::io::AsyncReadExt;
 
 use crate::native_transfer::{
     endpoint_for_window, fetch_transfer_cap, http_client, request_headers, EndpointKind,
-    TransferCap, TransferProgress, TransferRegistration,
+    PickedFiles, TransferCap, TransferProgress, TransferRegistration, ValidatedEndpoint,
 };
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +58,46 @@ pub struct UploadedFile {
     size: u64,
 }
 
+/// How a failed upload answers the page. A page that asks for a named failure
+/// is told what was picked with the reason, once the selection is known, so a
+/// failure that ends the upload before any status poll read the selection
+/// still names its row. Any other page is told the bare reason, which is the
+/// only answer a page older than the request reads; so is a failure that
+/// comes before the transfer is registered.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum UploadFailure {
+    Reason(String),
+    Named {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        picked: Option<PickedFiles>,
+    },
+}
+
+impl From<String> for UploadFailure {
+    fn from(reason: String) -> Self {
+        Self::Reason(reason)
+    }
+}
+
+impl UploadFailure {
+    /// The answer for an upload that failed with `message`, naming what
+    /// `progress` recorded as picked when the page asked for a named failure.
+    fn after_registration(message: String, progress: &TransferProgress, named: bool) -> Self {
+        if named {
+            Self::Named {
+                message,
+                picked: progress.picked(),
+            }
+        } else {
+            Self::Reason(message)
+        }
+    }
+}
+
+/// `named_failure` is the page asking for a failure as [`UploadFailure::Named`];
+/// a page that does not send it is answered with the bare reason.
 #[tauri::command]
 pub async fn upload_files_native(
     app: AppHandle,
@@ -63,23 +105,44 @@ pub async fn upload_files_native(
     transfer_id: String,
     url: String,
     target: NativeUploadTarget,
-) -> Result<Vec<UploadedFile>, String> {
+    named_failure: Option<bool>,
+) -> Result<Vec<UploadedFile>, UploadFailure> {
     target.validate()?;
     let endpoint = endpoint_for_window(&window, &url, EndpointKind::Upload)?;
     let headers = request_headers(&window, endpoint.url(), true)?;
     let registration = TransferRegistration::new(transfer_id, None)?;
+    upload_picked(app, &target, &endpoint, headers, &registration.progress)
+        .await
+        .map_err(|message| {
+            UploadFailure::after_registration(
+                message,
+                &registration.progress,
+                named_failure == Some(true),
+            )
+        })
+}
+
+/// Raise the picker and upload what it returns, reporting through
+/// `progress`. An empty answer is a picker closed without a choice.
+async fn upload_picked(
+    app: AppHandle,
+    target: &NativeUploadTarget,
+    endpoint: &ValidatedEndpoint,
+    headers: HeaderMap,
+    progress: &Arc<TransferProgress>,
+) -> Result<Vec<UploadedFile>, String> {
     let paths = tokio::select! {
-        _ = registration.progress.cancelled() => return Err("upload cancelled".into()),
+        _ = progress.cancelled() => return Err("upload cancelled".into()),
         paths = pick_upload_paths(app, target.multiple) => paths?,
     };
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    if registration.progress.is_cancelled() {
+    if progress.is_cancelled() {
         return Err("upload cancelled".into());
     }
     let files = validate_picked_files(paths).await?;
-    let total = announce_selection(&registration.progress, &files)?;
+    let total = announce_selection(progress, &files)?;
 
     let client = http_client()?;
     // Preflight before the first POST, so an over-cap selection sends no bytes
@@ -87,24 +150,20 @@ pub async fn upload_files_native(
     // are checked: the route enforces per request, so a selection that only
     // exceeds the ceiling in aggregate must still be refused here rather than
     // uploading the files that individually fit and failing partway.
-    let cap = fetch_transfer_cap(&client, &endpoint, headers.clone()).await;
+    let cap = fetch_transfer_cap(&client, endpoint, headers.clone()).await;
     cap.check(total)?;
     for file in &files {
         cap.check(file.size)?;
     }
     let mut uploaded = Vec::with_capacity(files.len());
     for file in files {
-        if registration.progress.is_cancelled() {
+        if progress.is_cancelled() {
             return Err("upload cancelled".into());
         }
         let opened = tokio::fs::File::open(&file.path)
             .await
             .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-        let body = reqwest::Body::wrap_stream(file_stream(
-            opened,
-            Arc::clone(&registration.progress),
-            cap,
-        ));
+        let body = reqwest::Body::wrap_stream(file_stream(opened, Arc::clone(progress), cap));
         let part = reqwest::multipart::Part::stream_with_length(body, file.size)
             .file_name(file.name.clone())
             .mime_str("application/octet-stream")
@@ -122,12 +181,12 @@ pub async fn upload_files_native(
             .multipart(form)
             .send();
         let response = tokio::select! {
-            _ = registration.progress.cancelled() => return Err("upload cancelled".into()),
+            _ = progress.cancelled() => return Err("upload cancelled".into()),
             response = request => response,
         };
         let response = match response {
             Ok(response) => response,
-            Err(_error) if registration.progress.is_cancelled() => {
+            Err(_error) if progress.is_cancelled() => {
                 return Err("upload cancelled".into());
             }
             Err(error) => return Err(format!("upload request failed: {error}")),
@@ -136,7 +195,7 @@ pub async fn upload_files_native(
             return Err("upload refused an unexpected redirect".into());
         }
         if !response.status().is_success() {
-            return Err(response_error(response, &registration.progress).await);
+            return Err(response_error(response, progress).await);
         }
         uploaded.push(
             response
@@ -583,6 +642,49 @@ mod tests {
                 "total": 5,
                 "picked": { "name": "report.pdf", "count": 1 },
             }),
+        );
+    }
+
+    /// A failure answers a page that asked for a named failure with the reason
+    /// and what was picked, as the status carries it, and any other page with
+    /// the bare reason: the string a page older than the request reads.
+    #[test]
+    fn a_failure_names_the_selection_only_to_a_page_that_asks() {
+        let progress = TransferProgress::new_for_test(None);
+        let answer = |named| {
+            serde_json::to_value(UploadFailure::after_registration(
+                "upload failed: HTTP 409 Conflict".into(),
+                &progress,
+                named,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            answer(true),
+            serde_json::json!({ "message": "upload failed: HTTP 409 Conflict" }),
+            "a failure before the selection is known names nothing"
+        );
+        progress.set_picked("report.pdf", 3);
+        assert_eq!(
+            answer(true),
+            serde_json::json!({
+                "message": "upload failed: HTTP 409 Conflict",
+                "picked": { "name": "report.pdf", "count": 3 },
+            }),
+            "the base name and the count the status would carry"
+        );
+        assert_eq!(
+            answer(false),
+            serde_json::json!("upload failed: HTTP 409 Conflict"),
+            "a page that did not ask reads the bare reason"
+        );
+        assert_eq!(
+            serde_json::to_value(UploadFailure::from(
+                "native transfer id is already active".to_string()
+            ))
+            .unwrap(),
+            serde_json::json!("native transfer id is already active"),
+            "a failure before the transfer is registered is the bare reason"
         );
     }
 

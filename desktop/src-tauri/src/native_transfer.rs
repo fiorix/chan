@@ -74,6 +74,11 @@ impl TransferProgress {
         });
     }
 
+    /// The selection `set_picked` recorded, or none before it ran.
+    pub fn picked(&self) -> Option<PickedFiles> {
+        self.picked.get().cloned()
+    }
+
     pub fn add_loaded(&self, bytes: u64) {
         self.loaded.fetch_add(bytes, Ordering::Relaxed);
     }
@@ -151,7 +156,7 @@ pub fn native_transfer_status(transfer_id: String) -> Option<NativeTransferStatu
     Some(NativeTransferStatus {
         loaded: progress.loaded.load(Ordering::Relaxed),
         total: (total != UNKNOWN_TOTAL).then_some(total),
-        picked: progress.picked.get().cloned(),
+        picked: progress.picked(),
     })
 }
 
