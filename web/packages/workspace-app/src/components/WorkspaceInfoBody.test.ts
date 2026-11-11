@@ -6,10 +6,17 @@
 // calls.
 
 import { flushSync, mount, tick, unmount } from "svelte";
+import { compile } from "svelte/compiler";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { setPrivacy } from "@chan/web-shared/privacy";
 import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
+import appSource from "../App.svelte?raw";
+import bodySource from "./WorkspaceInfoBody.svelte?raw";
+import codeReportSource from "./CodeReportSection.svelte?raw";
+import fileInfoSource from "./FileInfoBody.svelte?raw";
+import languageInfoSource from "./LanguageInfoBody.svelte?raw";
+import tagInfoSource from "./TagInfoBody.svelte?raw";
 import type { GraphView, ReportPrefix } from "../api/types";
 import { graphData, invalidateGraph } from "../state/graphData.svelte";
 import { ApiError } from "../api/errors";
@@ -60,6 +67,7 @@ import {
   openGraphForContact,
   openGraphForLanguage,
   revealPathInBrowser,
+  workspace,
 } from "../state/store.svelte";
 import { openTerminalInActivePane } from "../state/tabs.svelte";
 
@@ -444,5 +452,143 @@ describe("the shared graph load", () => {
     invalidateGraph();
     await settle();
     expect(api.graphStream).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the laid-out body", () => {
+  // Vitest loads no component CSS, so these compile the body's and the code
+  // report's stylesheets with the scope hashes their mounted elements carry,
+  // and App's theme token blocks, and inject them; jsdom then cascades the
+  // real rules. jsdom lays nothing out: each test reads the rule that decides
+  // the layout, and the browser reads the layout itself.
+  const info = workspace.info;
+
+  afterEach(() => {
+    (workspace as { info: unknown }).info = info;
+    for (const el of document.head.querySelectorAll("style[data-body-css]")) el.remove();
+    delete document.documentElement.dataset.theme;
+  });
+
+  function componentCss(source: string, hash: string): string {
+    const css = compile(source, { filename: "Body.svelte", css: "external", cssHash: () => hash }).css?.code;
+    if (!css) throw new Error("no stylesheet compiled");
+    return css;
+  }
+
+  function scopeHash(el: Element | null): string {
+    const hash = [...(el?.classList ?? [])].find((c) => /^svelte-[a-z0-9]+$/.test(c));
+    if (!hash) throw new Error("no scope hash on the element");
+    return hash;
+  }
+
+  function injectCss(target: HTMLElement): void {
+    const sheets = [
+      componentCss(appSource, "svelte-app-unused"),
+      componentCss(bodySource, scopeHash(target.querySelector(".info"))),
+    ];
+    const report = target.querySelector(".code-report");
+    if (report) sheets.push(componentCss(codeReportSource, scopeHash(report)));
+    for (const css of sheets) {
+      const style = document.createElement("style");
+      style.dataset.bodyCss = "";
+      style.textContent = css;
+      document.head.append(style);
+    }
+  }
+
+  /// A computed value with each var() replaced by the custom property's
+  /// value on that element (or the fallback), recursively.
+  function resolved(el: Element, value: string, depth = 0): string {
+    if (depth > 10 || !value.includes("var(")) return value.trim();
+    const styles = getComputedStyle(el);
+    const out = value.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*((?:[^()]|\([^()]*\))*))?\)/g, (_m, name: string, fallback?: string) => {
+      return styles.getPropertyValue(name).trim() || (fallback ?? "").trim();
+    });
+    return resolved(el, out, depth + 1);
+  }
+
+  /// WCAG contrast ratio of two #rrggbb colours.
+  function contrast(a: string, b: string): number {
+    const luminance = (hex: string) => {
+      const [r, g, bl] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+      const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * lin(r!) + 0.7152 * lin(g!) + 0.0722 * lin(bl!);
+    };
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi! + 0.05) / (lo! + 0.05);
+  }
+
+  test("the root path is one left-to-right run inside a cell that clips its start", async () => {
+    (workspace as { info: unknown }).info = { root: "/work/tmp/chan-smoke-X", label: "chan-smoke-X" };
+    const target = await render({ variant: "dashboard" });
+    injectCss(target);
+    const cell = target.querySelector<HTMLElement>(".v.path")!;
+
+    // The cell runs right to left, so a path wider than it loses its start
+    // and keeps its tail, the workspace's own name, behind a leading ellipsis.
+    expect(getComputedStyle(cell).direction).toBe("rtl");
+    expect(getComputedStyle(cell).textOverflow).toBe("ellipsis");
+    // The path inside is a left-to-right isolate, so the cell's direction
+    // does not reorder it: the leading slash stays first, not moved to the
+    // end. The whole text is in it, in the source's order.
+    const isolate = cell.querySelector("bdi");
+    expect(isolate?.getAttribute("dir")).toBe("ltr");
+    expect(isolate?.textContent).toBe("/work/tmp/chan-smoke-X");
+    expect(cell.textContent).toBe(isolate?.textContent);
+  });
+
+  test("every key column on the slide fits its longest key, and all of them line up", async () => {
+    h.report = prefix;
+    const target = await render({ variant: "dashboard" });
+    await vi.waitFor(() => expect(target.querySelector(".code-report")).not.toBeNull());
+    injectCss(target);
+    const grids = [...target.querySelectorAll<HTMLElement>(".meta-grid")];
+    // The root's directory, the counts, the code report's totals and its
+    // COCOMO estimate.
+    expect(grids.map((g) => g.querySelector(".k")?.textContent)).toEqual(["directory", "files", "indexed", "effort"]);
+    expect(target.textContent).toContain("subdirectories");
+
+    const columns = grids.map((g) => getComputedStyle(g).gridTemplateColumns);
+    // The key column grows to its widest key, so "subdirectories" never
+    // runs into its value, from a floor every grid shares so their value
+    // columns start at one edge.
+    for (const c of columns) expect(c).toMatch(/^minmax\(\d+(\.\d+)?em, max-content\) 1fr$/);
+    expect(new Set(columns).size).toBe(1);
+  });
+
+  test("every inspector body's key grid takes the code report's rule", () => {
+    // The file, language and tag inspectors show the same code report under
+    // their own grids, so their key columns line up only on one rule.
+    const rule = (source: string) =>
+      componentCss(source, "svelte-body").match(/\.meta-grid\.svelte-body\s*\{[^}]*grid-template-columns:\s*([^;]+);/)?.[1];
+    const report = rule(codeReportSource);
+    expect(report).toMatch(/max-content/);
+    expect({
+      workspace: rule(bodySource),
+      file: rule(fileInfoSource),
+      language: rule(languageInfoSource),
+      tag: rule(tagInfoSource),
+    }).toEqual({ workspace: report, file: report, language: report, tag: report });
+  });
+
+  test.each(["light", "dark"] as const)("the workspace chip's label takes the theme's text colour on its card fill in the %s theme", async (theme) => {
+    document.documentElement.dataset.theme = theme;
+    const target = await render({ variant: "dashboard" });
+    injectCss(target);
+    const chip = target.querySelector<HTMLElement>(".kind-chip.workspace")!;
+    expect(chip.textContent).toBe("workspace");
+    const style = getComputedStyle(chip);
+
+    // Tokens, not literals, so the label follows the theme the way the
+    // fill already does.
+    expect(style.color).toBe("var(--text)");
+    // jsdom does not expand a shorthand that holds a var(): the fill is
+    // read from the shorthand itself.
+    expect(style.background).toBe("var(--bg-card)");
+    const color = resolved(chip, style.color);
+    const fill = resolved(chip, style.background);
+    expect(color).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(fill).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(contrast(color, fill)).toBeGreaterThanOrEqual(4.5);
   });
 });

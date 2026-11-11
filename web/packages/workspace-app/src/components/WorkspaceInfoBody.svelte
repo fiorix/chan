@@ -329,7 +329,7 @@
   </h3>
   <div class="meta-grid">
     <span class="k">directory</span>
-    <PrivateField field="workspace:root" label="workspace root path"><span class="v mono path" title={workspace.info?.root}>{workspace.info?.root ?? ""}</span></PrivateField>
+    <PrivateField field="workspace:root" label="workspace root path"><span class="v mono path" title={workspace.info?.root}><bdi dir="ltr">{workspace.info?.root ?? ""}</bdi></span></PrivateField>
   </div>
 
   {#if variant === "inspector"}
@@ -440,10 +440,9 @@
     gap: 0.4rem;
     margin-bottom: 0.4rem;
   }
-  /* Workspace kind chip: black bg, white text. Sits alongside the
-     existing doc / image / contact / view-only chips defined in
-     FileInfoBody so the inspector's per-kind cue is consistent
-     across selections. */
+  /* Workspace kind chip. Sits alongside the doc / image / contact /
+     view-only chips defined in FileInfoBody so the inspector's per-kind
+     cue is consistent across selections. */
   .kind-chip {
     color: #fff;
     text-transform: uppercase;
@@ -457,9 +456,11 @@
   }
   .kind-chip.workspace {
     /* Match the graph canvas workspace-root fill (theme.bgCard) so the
-       root chip and the root node read the same colour. */
+       root chip and the root node read the same colour. That fill is near
+       white in the light theme and near black in the dark one, so the
+       label takes the theme's text colour, as other text on a card does. */
     background: var(--bg-card);
-    color: #fff;
+    color: var(--text);
   }
   .title {
     margin: 0 0 0.5rem 0;
@@ -467,9 +468,13 @@
     font-weight: 600;
     word-break: break-word;
   }
+  /* The key column grows to the widest key ("subdirectories") from a floor
+     that holds it in the common UI faces and that every inspector body and
+     the code report share, so a body's grids start their values at one
+     edge. */
   .meta-grid {
     display: grid;
-    grid-template-columns: 6.5em 1fr;
+    grid-template-columns: minmax(7.5em, max-content) 1fr;
     gap: 2px 0.5rem;
     margin: 0.4rem 0 0.6rem 0;
     font-size: 14px;
@@ -479,6 +484,11 @@
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
+  /* A root path wider than its cell loses its start and keeps its tail, the
+     workspace's own name: the cell runs right to left, so the overflow and
+     the ellipsis fall on the left. The path inside is a left-to-right
+     isolate (the bdi), so the cell's direction does not reorder it; without
+     it the bidi algorithm moves the leading slash to the end. */
   .meta-grid .v.path {
     overflow: hidden;
     text-overflow: ellipsis;
