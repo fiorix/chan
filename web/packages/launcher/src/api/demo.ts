@@ -196,8 +196,8 @@ function seed(): Seed {
     windows: [
       terminal("w-local-term-1", "local", "Terminal Window 1", 1, "t/local-1", true),
       terminal("w-local-term-2", "local", "Terminal Window 2", 2, "t/local-2", true),
-      workspaceWindow("w-secret-1", "local", "secret Window 1", 1, "/Users/hacker/dev/my-secret-project", "w/secret", true),
-      workspaceWindow("w-secret-2", "local", "secret Window 2", 2, "/Users/hacker/dev/my-secret-project", "w/secret-2", false),
+      workspaceWindow("w-secret-1", "local", "my-secret-project Window 1", 1, "/Users/hacker/dev/my-secret-project", "w/secret", true),
+      workspaceWindow("w-secret-2", "local", "my-secret-project Window 2", 2, "/Users/hacker/dev/my-secret-project", "w/secret-2", false),
       // Auto-hidden after lima's successful connect (connected:false seeds it hidden).
       terminal("w-lima-control", LIMA_LIBRARY_ID, "Control terminal", 0, "control/lima", false, true),
       terminal("w-windows-control", WINDOWS_LIBRARY_ID, "Control terminal", 0, "t/windows-control", true, true),

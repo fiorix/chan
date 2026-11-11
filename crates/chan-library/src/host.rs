@@ -1521,7 +1521,7 @@ impl WorkspaceHost {
 
     /// Create a host whose tenants share `desktop` -- chan-desktop passes a
     /// bridge carrying the window-ops channel and the title map so
-    /// `cs window <op>` reaches the Tauri app and `cs window list` shows
+    /// `cs window <op>` reaches the Tauri app and `GET /api/windows` shows
     /// real titles. `builder` is the route layer's tenant constructor
     /// (chan-server's `RouteLayer`).
     pub fn with_desktop_bridge(

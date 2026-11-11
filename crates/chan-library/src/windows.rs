@@ -1288,10 +1288,15 @@ fn next_ordinal(
 /// root's last path component, and `Terminal Window N` for a terminal; a
 /// workspace root with no last component to name reads `Window N`. The library
 /// persists it as the row's [`WindowRecord::title`], which `cs window list`
-/// prints, and a client that names the window's machine puts the machine ahead
-/// of it with [`window_title_on_machine`], so every title a window shows ends
-/// with this one. No machine and no glyph: a library cannot tell how the
-/// client that lists its rows names it.
+/// prints with the caption after it, and chan-desktop builds a watched
+/// window's OS title from [`window_title_on_machine`], so that OS title ends
+/// with what `cs window list` prints for the window. Other names differ: the
+/// browser tab and the launcher's rows name a window by its ordinal and
+/// caption alone (`Window 1 [notes]`), a control row's title is its minting's
+/// (`Control Terminal`, where the desktop shows `Control Terminal - NAME`),
+/// and a devserver of another release lists its rows under titles in its
+/// own form. No machine and no glyph: a library cannot tell how the client
+/// that lists its rows names it.
 pub fn window_title(kind: WindowKind, ordinal: u32, workspace_path: Option<&str>) -> String {
     match (kind, workspace_name(kind, workspace_path)) {
         (_, Some(workspace)) => format!("{workspace} Window {ordinal}"),
@@ -1354,10 +1359,11 @@ fn read_store(path: &Path) -> Option<Vec<u8>> {
 /// and returned beside the readable rows so a save can write it back. A store
 /// that is not a JSON array holds no row this build can keep.
 ///
-/// Every readable row's title is composed again from its naming fields
+/// Every readable plain row's title is composed again from its naming fields
 /// ([`window_title`]), so a title another build stored in another form never
-/// reaches the window set. Each stored row is a plain window: no save writes a
-/// control or tmux-marked row, the rows whose titles are not composed.
+/// reaches the window set. A control or tmux-marked row keeps the title it
+/// carries, since its title is not composed from those fields; no save writes
+/// such a row, so only a store this build did not write holds one.
 fn read_window_rows(store_path: &Path, bytes: &[u8]) -> (Vec<PersistedWindow>, Vec<UnreadableRow>) {
     let rows: Vec<serde_json::Value> = match serde_json::from_slice(bytes) {
         Ok(rows) => rows,
@@ -1375,7 +1381,9 @@ fn read_window_rows(store_path: &Path, bytes: &[u8]) -> (Vec<PersistedWindow>, V
     for (index, value) in rows.into_iter().enumerate() {
         match PersistedWindow::deserialize(&value) {
             Ok(mut row) => {
-                row.title = window_title(row.kind, row.ordinal, row.workspace_path.as_deref());
+                if !row.control && row.tmux.is_none() {
+                    row.title = window_title(row.kind, row.ordinal, row.workspace_path.as_deref());
+                }
                 windows.push(row);
             }
             Err(error) => {
@@ -2825,6 +2833,50 @@ mod tests {
         assert!(!stored.contains('\u{2302}'), "{stored}");
         assert!(stored.contains("\"notes Window 3\""), "{stored}");
         assert!(stored.contains("\"Terminal Window 1\""), "{stored}");
+    }
+
+    /// No save writes a control or tmux-marked row, but a store this build
+    /// did not write may hold one: it keeps the title it carries, which no
+    /// naming field composes, rather than `Terminal Window 0`.
+    #[test]
+    fn a_stored_control_or_tmux_row_keeps_its_title() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("windows.json");
+        let rows = json!([
+            {
+                "window_id": "control-terminal-ds1",
+                "kind": "terminal",
+                "title": "Control Terminal",
+                "ordinal": 0,
+                "control": true,
+                "library_id": "lib-f81913a8ca0a6ff6",
+            },
+            {
+                "window_id": "w-tmux",
+                "kind": "terminal",
+                "title": "tmux -CC on this machine",
+                "ordinal": 1,
+                "tmux": { "connection": "term-1", "control": true },
+            },
+            {
+                "window_id": "w-plain",
+                "kind": "terminal",
+                "title": "\u{2302} Terminal Window 2",
+                "ordinal": 2,
+            },
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&rows).expect("encode")).expect("write store");
+        let reg = WindowRegistry::open(path);
+        let title = |id: &str| {
+            reg.snapshot()
+                .into_iter()
+                .find(|w| w.window_id == id)
+                .map(|w| w.title)
+                .expect("the row loads")
+        };
+        assert_eq!(title("control-terminal-ds1"), "Control Terminal");
+        assert_eq!(title("w-tmux"), "tmux -CC on this machine");
+        assert_eq!(title("w-plain"), "Terminal Window 2");
     }
 
     // --- persistence / assembly --------------------------------------------

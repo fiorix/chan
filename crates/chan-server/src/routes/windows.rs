@@ -38,8 +38,8 @@ pub struct WindowInfo {
     /// A session blob exists for this id.
     pub saved: bool,
     /// The real OS window title, when chan-desktop registered it (the
-    /// `<base> Window <N>` the title bar shows, or a `cs window title`
-    /// override). Absent in browser mode and for closed-but-`saved`
+    /// title the title bar shows, such as `local / chan Window 1` behind
+    /// its machine glyph). Absent in browser mode and for closed-but-`saved`
     /// rows, so the existing `{id, connected, saved}` wire shape is
     /// preserved byte-for-byte when there is no title to add.
     #[serde(skip_serializing_if = "Option::is_none")]

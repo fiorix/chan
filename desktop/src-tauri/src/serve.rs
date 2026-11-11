@@ -839,7 +839,7 @@ struct WindowSpec<'a> {
     /// workspace fetch; the file browser and editor ride the same tenant
     /// wherever it serves a filesystem); `Some("control")` is the stricter
     /// singleton control sub-mode (hidden chrome, one PTY); `None` is full
-    /// workspace mode. Also the kind `cs window list` shows.
+    /// workspace mode. Also the kind `GET /api/windows` reports.
     kind: Option<&'a str>,
     start_terminal: bool,
 }
@@ -1052,7 +1052,7 @@ fn build_workspace_window_with_completion(
     // guard by it -- it diverges from the native label for watcher windows.
     let session_owned = session_id.to_string();
     // The passed kind (`terminal` / `control`) for terminal windows, else
-    // "workspace" -- the kind `cs window list` shows.
+    // "workspace" -- the kind `GET /api/windows` reports.
     // Captured owned so the 'static main-thread closure can hold it.
     let kind_owned = kind.unwrap_or("workspace").to_string();
     let caption_owned = caption.to_string();
@@ -1071,10 +1071,10 @@ fn build_workspace_window_with_completion(
         // has none.
         let state = app_owned.state::<Arc<AppState>>();
         state.assign_window_number(&label_owned, &title_owned);
-        // A `cs window title` override (kept across the bury/reopen cycle)
-        // wins over the auto "{base} [caption]" scheme; otherwise use the
-        // default. The resolved title is registered below once the window
-        // builds, so `cs window list` shows what the title bar shows.
+        // An entry in the title overrides would win over the composed
+        // "{base} [caption]" title; nothing writes one today, so this is the
+        // composed title. It is registered below once the window builds, so
+        // `GET /api/windows` reports what the title bar shows.
         let display_title = state
             .window_title_override(&label_owned)
             .unwrap_or_else(|| compose_window_title(&title_owned, &kind_owned, &caption_owned));
@@ -1165,8 +1165,9 @@ fn build_workspace_window_with_completion(
                 // section is due a rebuild: the one menubar's on macOS,
                 // every launcher bar's off it.
                 crate::rebuild_window_menu(&app_owned);
-                // Register the OS title + kind so `cs window list` shows
-                // the same title the title bar does. The `Destroyed` arm
+                // Register the OS title + kind so `GET /api/windows` reports
+                // the title the title bar shows (`cs window list` prints the
+                // library's records, not this map). The `Destroyed` arm
                 // below drops the entry. No-op without an embedded server
                 // (there always is one in the desktop).
                 if let Some(embedded) = state.embedded.get() {
@@ -1393,11 +1394,10 @@ fn on_destroyed(app: &AppHandle, label: &str) {
     state.retarget_tickets.cancel(label);
     crate::clear_gateway_404_counts_for_window(&state.gateway_404_counts, label);
     state.release_window_number(label);
-    // Drop the registered OS title so `cs window list`
-    // stops showing one for a window that's gone. The
-    // `cs window title` override is intentionally KEPT:
-    // a best-effort reopen reuses the same label and
-    // should restore the custom title.
+    // Drop the registered OS title so `GET /api/windows`
+    // stops reporting one for a window that's gone. A
+    // title override, were one written, is KEPT: a reopen
+    // reuses the same label and would restore it.
     if let Some(embedded) = state.embedded.get() {
         embedded.window_titles().remove(label);
     }
@@ -2461,8 +2461,8 @@ mod tests {
             );
         }
         // The watcher stamps the same projection into the title map, so
-        // `GET /api/windows` and `cs window list` report the mode the window
-        // actually booted in.
+        // `GET /api/windows` reports the mode the window actually
+        // booted in.
         const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
         let sync = WIRING_RS
             .split("fn sync_title(&self, record")

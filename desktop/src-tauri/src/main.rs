@@ -137,20 +137,20 @@ pub struct AppState {
     /// window label (`titlebar_tabs.rs`). Dropped on window destroy.
     pub(crate) titlebar_windows: titlebar_tabs::TitlebarWindows,
     /// Per-live-window display number, keyed by window label, with the
-    /// base title it was assigned under. Drives the `"{title} Window
-    /// {N}"` suffix so the OS Window menu disambiguates windows that
-    /// share a base title (two windows on the same workspace, several
-    /// standalone terminals). `N` is the lowest free number among live
+    /// base title it was assigned under: the lowest free number among live
     /// windows with the SAME base title, so a number freed by a closed
-    /// window gets reused -- mirroring `Registry::next_terminal_name`'s
-    /// lowest-free `Terminal-N` scheme. Freed on window destroy; a
-    /// hidden-in-place control terminal keeps its number until destruction.
+    /// window gets reused. The build path assigns one to every window and
+    /// the destroy path frees it, but no title shows it: a watched
+    /// window's `Window N` is the library's ordinal, inside the base title
+    /// the library composes, and a control window's title has no number.
+    /// Freed on window destroy; a hidden-in-place control terminal keeps
+    /// its number until destruction.
     pub window_numbers: Mutex<HashMap<String, (String, u64)>>,
-    /// Custom window titles set via `cs window title <id> <title>`, keyed
-    /// by window label. Consulted by `build_workspace_window_with_completion`
-    /// so the override survives the bury/reopen cycle (the auto "{base} Window
-    /// {N}" scheme applies only when there's no override). Session-scoped: not
-    /// persisted across an app restart, like the display numbers.
+    /// OS-title overrides keyed by window label. The build path and the
+    /// watcher's retitle both let an entry win over the composed title, and
+    /// the destroy path keeps it so a reopen under the same label would
+    /// restore it, but nothing in this build writes an entry, so the map
+    /// stays empty and every window carries its composed title.
     pub window_title_overrides: Mutex<HashMap<String, String>>,
     pub(crate) privacy_titles: Mutex<HashMap<String, String>>,
     /// Windows hidden ("buried") by the OS close button, in bury order (most
@@ -586,8 +586,9 @@ impl AppState {
         self.privacy_titles.lock().unwrap().remove(label);
     }
 
-    /// The custom OS-title override for `label`, if any (read by
-    /// `build_workspace_window_with_completion`).
+    /// The OS-title override for `label`, if any (read by
+    /// `build_workspace_window_with_completion` and the watcher's retitle);
+    /// always `None` today, since nothing writes one.
     pub fn window_title_override(&self, label: &str) -> Option<String> {
         self.window_title_overrides
             .lock()
