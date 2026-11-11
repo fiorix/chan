@@ -1034,9 +1034,10 @@ describe("Library: tmux connection cards", () => {
     expect(controlRow.textContent).toContain("buried");
     const windowRow = localRows.find((r) => r.textContent?.includes("Terminal Window 1"))!;
     expect(windowRow.querySelector("button")).not.toBeNull();
-    // This machine lists neither the control terminals nor the tmux windows.
+    // This machine lists the control terminals its terminals ran, the local
+    // run's and the carrier's, and none of the tmux windows.
     const thisMachine = card("This machine");
-    expect(thisMachine.textContent).not.toContain("Control terminal");
+    expect(rowNames(thisMachine).filter((n) => n === "Control terminal")).toHaveLength(2);
     expect(rowNames(thisMachine)).not.toContain("logs");
     expect(thisMachine.querySelector(".section-label")?.textContent).toBe("Terminals");
     // The badge counts the rows the card shows, the unopened window included.
@@ -1044,6 +1045,109 @@ describe("Library: tmux connection cards", () => {
       c.querySelector(".machine-actions .count-badge")?.getAttribute("title");
     expect(badge(localCard)).toBe("2 windows");
     expect(badge(remoteCard)).toBe("3 windows");
+  });
+
+  /** The buried control terminal rows a machine card lists for its tmux runs. */
+  function buriedRows(c: HTMLElement): HTMLElement[] {
+    return [...c.querySelectorAll<HTMLElement>(".term-list .row")].filter((r) => r.querySelector(".row-buried"));
+  }
+
+  /** A devserver's own card, not a tmux card titled after it. */
+  function devserverCard(name: string): HTMLElement {
+    const s = [...(target?.querySelectorAll("section.machine") ?? [])].find((m) => {
+      const head = m.querySelector(".machine-header")?.textContent ?? "";
+      return head.includes(name) && !head.includes("tmux -CC");
+    });
+    if (!s) throw new Error(`no devserver card named "${name}"`);
+    return s as HTMLElement;
+  }
+
+  it("lists This machine's buried control terminals, local run and carrier, each with its connection's detach", async () => {
+    const { backend } = await import("../api/backend");
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    try {
+      mountList();
+      const rowsHere = buriedRows(card("This machine"));
+      // One row per connection, in the connections' card order; the context
+      // names the connection, so two runs on one machine read apart.
+      expect(rowsHere.map((r) => r.querySelector(".row-main .row-sub")?.textContent)).toEqual([
+        "tmux -CC on this machine (main)",
+        "tmux -CC from ssh geekom (work)",
+      ]);
+      const controlRow = rowsHere[0]!;
+      expect(controlRow.querySelector(".row-name")?.textContent).toBe("Control terminal");
+      const note = controlRow.querySelector(".row-buried")!;
+      expect(note.textContent).toBe("buried");
+      expect(note.getAttribute("title")).toContain("stays buried while the connection runs");
+      // The one control is the connection's detach; the buried row has no other.
+      const buttons = [...controlRow.querySelectorAll("button")];
+      expect(buttons).toHaveLength(1);
+      const detach = buttons[0]!;
+      expect(detach.getAttribute("aria-label")).toBe("Detach tmux -CC on this machine (main)");
+      expect(detach.dataset.deckKey).toBe("o");
+      detach.click();
+      await settle();
+      rowsHere[1]!.querySelector<HTMLButtonElement>('button[aria-label="Detach tmux -CC from ssh geekom (work)"]')!.click();
+      await settle();
+      expect(request.mock.calls).toEqual([
+        ["tm-local", { request: "detach" }],
+        ["tm-geekom", { request: "detach" }],
+      ]);
+      expect(library.error).toBeNull();
+      // The connection's card keeps its detach on the title and its control
+      // row as before: buried, with no action.
+      const own = card(LOCAL_TITLE);
+      expect(own.querySelector(`.machine-header button[aria-label="Detach ${LOCAL_TITLE}"]`)).not.toBeNull();
+      const ownControl = buriedRows(own)[0]!;
+      expect(ownControl.querySelector("button")).toBeNull();
+    } finally {
+      request.mockRestore();
+    }
+  });
+
+  it("lists a devserver run's buried control terminal on that devserver's card", async () => {
+    const { backend } = await import("../api/backend");
+    const { setMockTmuxConnections } = await import("../api/mock");
+    const prodLibrary = library.devservers.find((d) => d.label === "prod")!.library_id!;
+    const onProd = entry({ connection: "tm-prod", library_id: prodLibrary, session: { id: "$4", name: "ops" } });
+    setMockTmuxConnections([onProd], [
+      { ...row("tm-prod", "tm-prod-control", true, 0), library_id: prodLibrary },
+      { ...row("tm-prod", "tm-prod-w1", false, 1), library_id: prodLibrary },
+    ]);
+    const request = vi.spyOn(backend, "tmuxRequest").mockResolvedValue(undefined);
+    try {
+      mountList();
+      const prod = devserverCard("prod");
+      const rowsHere = buriedRows(prod);
+      expect(rowsHere).toHaveLength(1);
+      expect(rowsHere[0]!.textContent).toContain("tmux -CC on prod (ops)");
+      // The devserver's own control terminal keeps its row beside it.
+      expect(rowNames(prod).filter((n) => n === "Control terminal")).toHaveLength(2);
+      expect(buriedRows(card("This machine"))).toHaveLength(0);
+      rowsHere[0]!.querySelector<HTMLButtonElement>('button[aria-label="Detach tmux -CC on prod (ops)"]')!.click();
+      await settle();
+      expect(request).toHaveBeenCalledExactlyOnceWith("tm-prod", { request: "detach" });
+    } finally {
+      request.mockRestore();
+    }
+  });
+
+  it("masks the machine card's control terminal row in privacy mode and keeps its detach", async () => {
+    const { setPrivacy } = await import("@chan/web-shared/privacy");
+    const { setMockTmuxConnections } = await import("../api/mock");
+    const secret = entry({ connection: "tm-secret", session: { id: "$9", name: "secret-session" } });
+    setMockTmuxConnections([secret], [row("tm-secret", "tm-secret-control", true, 0)]);
+    await setPrivacy({ enabled: true });
+    try {
+      mountList();
+      flushSync();
+      const controlRow = buriedRows(card("This machine"))[0]!;
+      expect(controlRow.innerHTML).not.toContain("secret-session");
+      expect(controlRow.innerHTML).not.toContain("tmux -CC on this machine");
+      expect(controlRow.querySelector('button[data-deck-key="o"]')?.getAttribute("aria-label")).toBe("Detach tmux computer");
+    } finally {
+      await setPrivacy({ enabled: false });
+    }
   });
 
   it("asks the connection for a new window with t and detaches with o", async () => {
@@ -1055,7 +1159,10 @@ describe("Library: tmux connection cards", () => {
       expect(newWindow.dataset.deckKey).toBe("t");
       newWindow.click();
       await settle();
-      const detach = byAria(`Detach ${REMOTE_TITLE}`)!;
+      // The card title's detach, not the control terminal row's on This machine.
+      const detach = card(REMOTE_TITLE).querySelector<HTMLButtonElement>(
+        `.machine-header button[aria-label="Detach ${REMOTE_TITLE}"]`,
+      )!;
       expect(detach.dataset.deckKey).toBe("o");
       expect(detach.classList.contains("on")).toBe(true);
       detach.click();
