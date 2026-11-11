@@ -165,7 +165,7 @@ struct Schedule {
     quiet: Duration,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Walk {
     Now,
     After(Duration),
@@ -210,14 +210,27 @@ struct Demand {
 struct DemandState {
     stopped: bool,
     last_read: Option<Instant>,
+    #[cfg(test)]
+    clock: Option<Instant>,
+    #[cfg(test)]
+    steps: Option<std::sync::mpsc::Sender<Walk>>,
+}
+
+impl DemandState {
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.clock {
+            return now;
+        }
+        Instant::now()
+    }
 }
 
 impl Demand {
     fn read(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .last_read = Some(Instant::now());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_read = Some(state.now());
+        drop(state);
         self.wake.notify_all();
     }
 
@@ -233,7 +246,12 @@ impl Demand {
             if state.stopped {
                 return false;
             }
-            state = match schedule.next(Instant::now(), state.last_read, last_scan) {
+            let next = schedule.next(state.now(), state.last_read, last_scan);
+            #[cfg(test)]
+            if let Some(steps) = &state.steps {
+                let _ = steps.send(next);
+            }
+            state = match next {
                 Walk::Now => return true,
                 Walk::After(wait) => {
                     self.wake
@@ -257,7 +275,11 @@ fn walk(demand: &Demand, schedule: Schedule, mut scan: impl FnMut() -> bool) {
         if !scan() {
             break;
         }
-        last_scan = Some(Instant::now());
+        #[cfg(not(test))]
+        let finished = Instant::now();
+        #[cfg(test)]
+        let finished = demand.state.lock().unwrap_or_else(|e| e.into_inner()).now();
+        last_scan = Some(finished);
     }
 }
 
@@ -661,62 +683,76 @@ mod tests {
     fn reads_drive_the_walker_and_storage_keeps_its_last_total_while_it_rests() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("file"), b"12345").unwrap();
-        let schedule = Schedule {
-            period: Duration::from_millis(50),
-            quiet: Duration::from_millis(300),
-        };
+        let schedule = STORAGE_SCHEDULE;
         let runtime = Runtime::start_with(home.path().into(), schedule).unwrap();
-        // Peek at the cache without counting as a read.
-        let storage = || runtime.cached.lock().unwrap().storage.clone();
-        let wait_for = |what: &str, done: &dyn Fn(&Storage) -> bool| {
-            let deadline = Instant::now() + Duration::from_secs(10);
+        let (steps, observed) = std::sync::mpsc::channel();
+        let boot = Instant::now();
+        {
+            let mut state = runtime.demand.state.lock().unwrap();
+            state.clock = Some(boot);
+            state.steps = Some(steps);
+            runtime.demand.wake.notify_all();
+        }
+        // The clock moves only here. Each observation is sent with the demand
+        // lock held, so a following read cannot slip past the walker's wait.
+        let advance = |elapsed| {
+            runtime.demand.state.lock().unwrap().clock = Some(boot + elapsed);
+            runtime.demand.wake.notify_all();
+        };
+        let wait_for = |wanted: Walk| {
+            let deadline = Instant::now() + Duration::from_secs(60);
             loop {
-                let storage = storage();
-                if done(&storage) {
-                    return storage;
+                let step = observed
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|error| panic!("walker never reached {wanted:?}: {error}"));
+                if step == wanted {
+                    break;
                 }
-                assert!(Instant::now() < deadline, "{what}: {storage:?}");
-                std::thread::sleep(Duration::from_millis(10));
+                assert_ne!(
+                    step,
+                    Walk::Now,
+                    "unexpected scan while waiting for {wanted:?}"
+                );
             }
         };
-        std::thread::sleep(Duration::from_millis(500));
+        // Peek without waking the walker. A view wakes it before copying the
+        // cache, so that view may already contain the completed scan.
+        let storage = || runtime.cached.lock().unwrap().storage.clone();
+        wait_for(Walk::Rest);
         assert_eq!(storage().sampled_at_ms, None, "walked before any read");
+        assert_eq!(storage().logical_bytes, None, "pending, not zero");
         let first = runtime.view(false, None);
-        assert_eq!(first.storage.logical_bytes, None, "pending, not zero");
-        let scanned = wait_for("no scan after a read", &|s| s.sampled_at_ms.is_some());
-        assert_eq!(scanned.logical_bytes, Some(5));
-        // Reads keep the walker scanning.
-        let read_until = Instant::now() + Duration::from_millis(400);
-        while Instant::now() < read_until {
-            runtime.view(false, None);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            storage().sampled_at_ms > scanned.sampled_at_ms,
-            "no rescan while read"
-        );
-        // No reads: once the quiet period ends the walker rests and the last
-        // total stays, with its timestamp.
-        std::thread::sleep(Duration::from_millis(1500));
+        assert!(matches!(first.storage.logical_bytes, None | Some(5)));
+        wait_for(Walk::Now);
+        wait_for(Walk::After(schedule.period));
+        assert_eq!(storage().logical_bytes, Some(5));
+
+        // Renew demand before the quiet deadline. At the original deadline a
+        // scan is still due because that later read keeps the walker active.
+        advance(schedule.quiet - schedule.period);
+        wait_for(Walk::Now);
+        wait_for(Walk::After(schedule.period));
+        runtime.view(false, None);
+        std::fs::write(home.path().join("file"), b"123456").unwrap();
+        advance(schedule.quiet);
+        wait_for(Walk::Now);
+        wait_for(Walk::After(schedule.period));
+        assert_eq!(storage().logical_bytes, Some(6), "no rescan while read");
+
+        // With no further read, entering Rest follows the final cache write.
+        // A second wake at the same quiet time must rest without a scan.
+        advance(schedule.quiet * 2);
+        wait_for(Walk::Rest);
         let rested = storage();
-        std::thread::sleep(Duration::from_millis(600));
-        assert_eq!(
-            storage().sampled_at_ms,
-            rested.sampled_at_ms,
-            "walked while quiet"
-        );
-        assert_eq!(rested.logical_bytes, Some(5));
-        // A read after the quiet period restarts it.
         std::fs::write(home.path().join("more"), b"123").unwrap();
+        advance(schedule.quiet * 2);
+        wait_for(Walk::Rest);
+        assert_eq!(storage().sampled_at_ms, rested.sampled_at_ms);
+        assert_eq!(storage().logical_bytes, Some(6), "walked while quiet");
         let view = runtime.view(false, None);
-        assert_eq!(
-            view.storage.logical_bytes,
-            Some(5),
-            "last total until the scan"
-        );
-        let rescanned = wait_for("no scan after the quiet period", &|s| {
-            s.sampled_at_ms > rested.sampled_at_ms
-        });
-        assert_eq!(rescanned.logical_bytes, Some(8));
+        assert!(matches!(view.storage.logical_bytes, Some(6 | 9)));
+        wait_for(Walk::Now);
+        wait_for(Walk::After(schedule.period));
+        assert_eq!(storage().logical_bytes, Some(9));
     }
 }
