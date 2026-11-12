@@ -8,12 +8,12 @@ import { copiedText, VtCells, VtTerminal, type VtCell } from "@chan/ghostty-web-
 // rows in view and not the whole buffer. Its `getSelection` reads the
 // selected rows one at a time, a history row a few wasm calls a cell, ends
 // every row with a line break, a soft wrap included, and writes a space for
-// each wide character's spacer cell. And its own copies, on mouse release, double and
-// triple click, write the clipboard themselves, around chan's writer. Its
-// double and triple click select within one screen row, so a word or a line
-// the program soft-wrapped is cut at the wrap. Every copy of a selection reads
-// that `getSelection`: the copy chords, the menu, ghostty-web's own copies,
-// and the context menu's textarea.
+// each wide character's spacer cell. And its own copies, on mouse release,
+// double and triple click, write the clipboard themselves, around chan's
+// writer. Its double and triple click select within one screen row, so a
+// word or a line the program soft-wrapped is cut at the wrap. Every copy of a
+// selection reads that `getSelection`: the copy chords, the menu,
+// ghostty-web's own copies, and the context menu's textarea.
 //
 // This reaches the internal SelectionManager: Select all selects the history
 // and the screen, as xterm.js does; a selection's text is the binding's one
