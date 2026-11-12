@@ -18,7 +18,7 @@
 
   import { tick } from "svelte";
   import { X } from "@lucide/svelte";
-  import { SHORTCUTS } from "../state/shortcuts";
+  import { shortcutLabel } from "../state/shortcuts";
   import { captureCandidates, captureChord, keymapConflicts } from "../state/keymapAssign";
   import { allCommands, type Command } from "../state/commands";
   import {
@@ -78,8 +78,7 @@
   // label (editor / terminal chords are registry-only), else the raw id.
   function labelForId(id: string): string {
     const command = allCommands().find((c) => c.id === id);
-    if (command) return command.title;
-    return SHORTCUTS.find((s) => s.id === id)?.label ?? id;
+    return command ? command.title : shortcutLabel(id);
   }
 
   async function startCapture(e: MouseEvent): Promise<void> {

@@ -4,7 +4,7 @@ How chan runs extensions, and how to write one. This is the design and the autho
 
 ## What an extension is
 
-An extension is a local program declared by one TOML file under `<chan-home>/extensions/` (`~/.chan/extensions/` by default). chan spawns it when serving starts, the program serves an ordinary HTTP app on loopback, and chan reverse-proxies that app into a sandboxed iframe tab with an entry under Apps in the command launcher.
+An extension is a local program declared by one TOML file under `<chan-home>/extensions/` (`~/.chan/extensions/` by default). chan spawns it when serving starts, the program serves an ordinary HTTP app on loopback, and chan reverse-proxies that app into a sandboxed iframe tab with an entry under `New tab` in the command launcher.
 
 The design is a separate process behind a narrow web contract rather than a plugin ABI, for four reasons. chan stays one binary. An extension can be written in any language that can serve HTTP. It can crash without taking chan down. And it never inherits chan's API authority: all it gets is its own loopback port and a `postMessage` channel. Declaring an extension is an explicit grant to run local code as the serving user, so the declaration file is the security decision, and every file in that directory deserves the same care as a shell profile.
 
@@ -54,8 +54,8 @@ sequenceDiagram
   participant B as browser tab
   S->>E: spawn with the config directory as cwd and the inherited environment
   E-->>S: CHAN_EXTENSION_V1 line with url, token and options
-  S->>S: validate, pin 127.0.0.1, mint the capability path, list under Apps
-  B->>S: open the Apps entry: GET the capability path
+  S->>S: validate, pin 127.0.0.1, mint the capability path, list under New tab
+  B->>S: open the New tab entry: GET the capability path
   S->>E: proxied request with the token added
   E-->>S: HTML, assets and API responses
   S-->>B: response with no-store and no-referrer
@@ -92,7 +92,7 @@ All host communication is `postMessage` between the iframe and its parent. Messa
 | `chan:extension-view-state:v1`      | host->ext | The tab's visibility state                     |
 | `chan:extension-presentation:v1`    | ext->host | Enter, exit or toggle full-surface mode        |
 
-Declared commands register under Apps as `extension.<id>.<command-id>` beside the base `extension.<id>` Open command. They have no default chords and are assignable through the shortcut settings. A `singleton` extension's commands focus or create its one tab and queue delivery until that exact iframe posts `chan:extension-ready:v1`; the queue is bounded, and an overflow is reported rather than dropped silently.
+Declared commands register as `extension.<id>.<command-id>` beside the base `extension.<id>` Open command, and the launcher lists them under the extension's name while one of its tabs is focused. They have no default chords and are assignable through the shortcut settings. A `singleton` extension's commands focus or create its one tab and queue delivery until that exact iframe posts `chan:extension-ready:v1`; the queue is bounded, and an overflow is reported rather than dropped silently.
 
 ### The keyboard relay
 
@@ -108,7 +108,7 @@ The in-tree fixture is the smallest complete example: `crates/chan-server/exampl
 
 1. **Serve a loopback app.** Bind `127.0.0.1` on an ephemeral port, mint an unguessable token, and serve your UI and API from one HTTP server. Reject requests whose `t` query parameter does not match the token: the proxy appends it on every upstream request, and checking it means a stray local process cannot drive your extension.
 2. **Print the handshake.** Emit `CHAN_EXTENSION_V1={json}` on stdout, newline-terminated, before anything else you might print there, and promptly after spawn. Everything after the handshake can go to stderr.
-3. **Declare it.** Write `<chan-home>/extensions/<id>.toml` with `name`, `command`, and any `args` and `capabilities`, then restart the serving chan process. Your launcher entry appears under Apps; opening it loads the iframe tab through the capability path.
+3. **Declare it.** Write `<chan-home>/extensions/<id>.toml` with `name`, `command`, and any `args` and `capabilities`, then restart the serving chan process. Your launcher entry appears under `New tab`, named for the extension; opening it loads the iframe tab through the capability path.
 4. **Write the frontend against relative URLs.** The app is served under the capability path, so an origin-rooted `/asset.js` targets chan's tenant root, not your extension; every asset and API URL must be relative. Implement the keymap relay if you want shell shortcuts to keep working while your extension has focus, and post `chan:extension-ready:v1` when your UI can accept commands.
 5. **Drive chan through `cs`.** An extension backend that wants to act on chan (open terminals, write to them, run surveys) shells out to the `cs` control client rather than speaking any private API; `cs`'s command semantics are the contract. This is the pattern both published extensions use, and it keeps the extension honest about what the operator could do themselves.
 6. **Prove the contract in your own tests.** Assert that your handshake line parses under chan's validation rules (marker prefix, URL shape, token bounds, command id grammar), so a contract drift fails your suite instead of your users' startup.

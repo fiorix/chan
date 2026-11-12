@@ -120,6 +120,21 @@ describe("Secret masking (this terminal)", () => {
     expect([tab!.secretMasking, tab!.secretMaskingFailed, commandState(MASKING)]).toEqual([true, false, true]);
   });
 
+  test("a terminal built again seeds its choice and drops the failure of the masker it replaces", () => {
+    const [tab] = seat([terminalTab()]);
+    seedTerminalSecretMasking(tab!, true);
+    failTerminalSecretMasking(tab!);
+    privacy.enabled = true;
+    privacy.mask_terminal_secrets = true;
+
+    seedTerminalSecretMasking(tab!, false);
+    expect([tab!.secretMasking, tab!.secretMaskingFailed], "the new masker starts from the rule").toEqual([
+      false,
+      undefined,
+    ]);
+    expect(terminalSecretMaskingOn(tab!), "and Privacy mode masks it").toBe(true);
+  });
+
   test("a closed terminal reopens without its choice or its failure, for its new shell to seed", async () => {
     const [tab] = seat([terminalTab()]);
     tab!.secretMasking = true;

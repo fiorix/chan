@@ -733,9 +733,9 @@ pub struct SetBroadcastBody {
 /// does not flip the flag directly; it routes a `terminal_broadcast`
 /// window-command back to the OWNING window over `/ws`, and that window flips
 /// its tab (which re-syncs the flag + lights the sign). Lets the broadcast
-/// menu's Select All / per-row toggles act on same-group terminals in other
-/// windows, not just the local layout. 404 when no live session matches or it
-/// has no owning window (not remote-controllable).
+/// menu's `Group broadcast` and per-row toggles act on same-group terminals in
+/// other windows, not just the local layout. 404 when no live session matches
+/// or it has no owning window (not remote-controllable).
 pub async fn api_set_terminal_broadcast(
     State(state): State<Arc<AppState>>,
     AxumPath(session): AxumPath<String>,
@@ -2017,8 +2017,8 @@ pub async fn api_terminals_roster(State(state): State<Arc<AppState>>) -> Respons
 /// applies wholesale (idempotent, no delta reconciliation). Same `sessions`
 /// shape as [`RosterResponse`] so one client handler serves both the seed
 /// and the live push. Each entry's `window_live` says whether a page holds
-/// its window; the SPA leaves the members of windows no page holds out of a
-/// group Select All, since only a page can flip their broadcast.
+/// its window; the SPA leaves the members of windows no page holds out of
+/// `Group broadcast`, since only a page can flip their broadcast.
 #[derive(Debug, Serialize)]
 struct RosterFrame<'a> {
     #[serde(rename = "type")]

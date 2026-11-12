@@ -61,9 +61,9 @@ vi.mock("../api/client", () => ({
 vi.mock("../state/store.svelte", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/store.svelte")>()),
   fileOps: {
-    uploadFilesTo: vi.fn(async () => {}),
     downloadPathWithProgress: vi.fn(),
   },
+  raiseUploadPicker: vi.fn(),
   openGraphAtNode: vi.fn(),
   openGraphForContact: vi.fn(),
   openGraphForLanguage: vi.fn(),
@@ -83,6 +83,7 @@ import {
   openGraphAtNode,
   openGraphForContact,
   openGraphForLanguage,
+  raiseUploadPicker,
   revealPathInBrowser,
   workspace,
 } from "../state/store.svelte";
@@ -252,17 +253,14 @@ describe("the workspace root's actions", () => {
 
   test("upload, download and the terminal all act on the root", async () => {
     const target = await render();
-    const picker = target.querySelector<HTMLInputElement>("input[type='file']")!;
-    const pick = vi.spyOn(picker, "click").mockImplementation(() => {});
 
+    // Upload raises the picker the file browser's Upload raises for a
+    // directory, the desktop's own where there is one, and the body keeps no
+    // file input of its own.
     menu(target);
     menuItem(target, "Upload").click();
-    expect(pick).toHaveBeenCalledTimes(1);
-    const files = [new File(["x"], "x.txt")];
-    Object.defineProperty(picker, "files", { configurable: true, value: files });
-    picker.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    expect(fileOps.uploadFilesTo).toHaveBeenCalledWith("", files);
+    expect(raiseUploadPicker).toHaveBeenCalledExactlyOnceWith("");
+    expect(target.querySelector("input[type='file']")).toBeNull();
 
     menu(target);
     menuItem(target, "Download").click();
