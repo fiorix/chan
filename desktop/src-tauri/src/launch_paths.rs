@@ -376,7 +376,8 @@ mod tests {
     /// dropped from the environment whatever it holds, so no child of the
     /// desktop inherits it; only an absolute UTF-8 directory names a
     /// terminal. It mutates the process environment, so it runs in a test
-    /// process of its own.
+    /// process of its own, which starts with no carrier whatever the runner
+    /// had.
     #[test]
     fn the_boot_terminal_is_read_once_dropped_and_absolute_only() {
         if !crate::embedded::in_own_chan_home(
@@ -385,6 +386,7 @@ mod tests {
             return;
         }
         let carrier = handoff::OPEN_TERMINAL_ENV;
+        std::env::remove_var(carrier);
         let absolute = if cfg!(windows) {
             r"C:\srv\notes"
         } else {
