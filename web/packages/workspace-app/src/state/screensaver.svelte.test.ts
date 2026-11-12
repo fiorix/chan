@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 //
 // The screen lock's state machine: it loads the workspace's screensaver
-// settings, locks after `timeout_secs` without activity, stays off while
-// something pauses it, and unlocks with a PIN the server verifies or, when
-// the workspace has no PIN, with any input.
+// settings, from a read or from the answer of a write, keeps the state last
+// loaded when a read fails, locks after `timeout_secs` without activity,
+// stays off while something pauses it, and unlocks with a PIN the server
+// verifies or, when the workspace has no PIN, with any input.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ScreensaverTheme } from "./screensaver";
@@ -76,10 +77,65 @@ describe("loading the settings", () => {
     });
   });
 
-  test("a failed read leaves it unloaded", async () => {
+  test("a first read that fails leaves it unloaded, and says the read did not land", async () => {
     vi.spyOn(api, "screensaverState").mockRejectedValue(new Error("offline"));
-    await machine.loadScreensaverState();
+    await expect(machine.loadScreensaverState()).resolves.toBe(false);
     expect(machine.screensaver.loaded).toBe(false);
+  });
+
+  test("a read that lands says so", async () => {
+    vi.spyOn(api, "screensaverState").mockResolvedValue({
+      enabled: false,
+      timeout_secs: 300,
+      theme: "plain",
+      pin_set: false,
+    });
+    await expect(machine.loadScreensaverState()).resolves.toBe(true);
+  });
+
+  test("a read that fails after a load keeps the state last loaded and its countdown", async () => {
+    await load();
+    vi.spyOn(api, "screensaverState").mockRejectedValue(new Error("offline"));
+    const landed = await machine.loadScreensaverState();
+
+    expect({ ...machine.screensaver }).toEqual({
+      enabled: true,
+      timeout_secs: 60,
+      theme: "matrix",
+      pin_set: true,
+      locked: false,
+      loaded: true,
+    });
+    expect(landed).toBe(false);
+    // Still a lock: the manual lock works and the countdown runs on.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(machine.screensaver.locked).toBe(true);
+  });
+
+  test("a write's answer loads into the running lock and restarts the countdown under it", async () => {
+    await load();
+    await vi.advanceTimersByTimeAsync(50_000);
+    machine.applyScreensaverState({ enabled: true, timeout_secs: 120, theme: "plain", pin_set: false });
+
+    expect({ ...machine.screensaver }).toEqual({
+      enabled: true,
+      timeout_secs: 120,
+      theme: "plain",
+      pin_set: false,
+      locked: false,
+      loaded: true,
+    });
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(machine.screensaver.locked).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(machine.screensaver.locked).toBe(true);
+  });
+
+  test("an answer that turns the lock off stops the countdown", async () => {
+    await load();
+    machine.applyScreensaverState({ enabled: false, timeout_secs: 60, theme: "matrix", pin_set: true });
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(machine.screensaver.locked).toBe(false);
   });
 });
 

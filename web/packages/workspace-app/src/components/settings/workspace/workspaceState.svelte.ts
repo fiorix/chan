@@ -8,7 +8,7 @@
 
 import { api } from "../../../api/client";
 import type { BuildInfo, SemanticModelRegistry, SemanticState } from "../../../api/types";
-import { loadScreensaverState } from "../../../state/screensaver.svelte";
+import { applyScreensaverState } from "../../../state/screensaver.svelte";
 import type { ScreensaverTheme } from "../../../state/screensaver";
 import { workspace } from "../../../state/store.svelte";
 
@@ -224,15 +224,15 @@ export async function setSemanticModel(model: string): Promise<string | null> {
 
 // ---- screen lock -----------------------------------------------------------
 
-/// Write a screen lock setting and load it into the running lock, whose
-/// state is what the control and the index both show.
+/// Write a screen lock setting and load the state the write answers with
+/// into the running lock, whose state is what the control and the index both
+/// show. A write that landed is shown, and one that did not rejects.
 export async function patchScreenLock(body: {
   enabled?: boolean;
   timeout_secs?: number;
   theme?: ScreensaverTheme;
 }): Promise<void> {
-  await api.screensaverPatch(body);
-  await loadScreensaverState();
+  applyScreensaverState(await api.screensaverPatch(body));
 }
 
 // ---- the index's reads -----------------------------------------------------

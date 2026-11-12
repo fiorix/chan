@@ -2,8 +2,9 @@
 //
 // Settings > This workspace > Screen lock: the toggle, and while it is on the
 // inactivity timeout, the PIN controls, the theme picker with its preview and
-// a Test button. Every change is written through /api/screensaver and then
-// reloaded into the lock itself, so the running lock follows the settings.
+// a Test button. Every change is written through /api/screensaver and the
+// write's answer is loaded into the lock itself, so the running lock follows
+// the settings.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -141,6 +142,31 @@ describe("the Screen lock toggle", () => {
     expect(api.screensaverPatch).toHaveBeenCalledWith({ enabled: true });
     expect(screensaver.enabled).toBe(true);
     expect(target.querySelector('[aria-label="Inactivity timeout in seconds"]')).not.toBeNull();
+  });
+});
+
+describe("a write the server took, with no read answering after it", () => {
+  test("turning the lock on shows it on, and its settings", async () => {
+    const target = await render();
+    vi.mocked(api.screensaverState).mockRejectedValue(new Error("offline"));
+    target.querySelector<HTMLInputElement>('label.pill input[type="checkbox"]')!.click();
+    await settle();
+
+    expect(screensaver).toMatchObject({ enabled: true, loaded: true });
+    expect(target.querySelector("label.pill")?.textContent?.trim()).toBe("On");
+    expect(target.querySelector('[aria-label="Inactivity timeout in seconds"]')).not.toBeNull();
+    expect(alertText(target)).toBeNull();
+  });
+
+  test("clearing the PIN shows it cleared", async () => {
+    const target = await render({ enabled: true, pin_set: true });
+    vi.mocked(api.screensaverState).mockRejectedValue(new Error("offline"));
+    button(target, "Clear PIN").click();
+    await settle();
+
+    expect(screensaver).toMatchObject({ pin_set: false, loaded: true });
+    button(target, "Set PIN");
+    expect(alertText(target)).toBeNull();
   });
 });
 

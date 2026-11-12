@@ -69,24 +69,38 @@ export const screensaver = $state<ScreensaverState>({
 let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
 let pauseCount = 0;
 
-/// Fetch + cache the per-workspace screensaver state. Called on
-/// app boot AND after any patch (enabled/timeout/pin
-/// changes) so the singleton stays consistent with the
-/// server.
-export async function loadScreensaverState(): Promise<void> {
+/// The per-workspace settings as the server answers them: to a read of
+/// `/api/screensaver/state`, and to every write under `/api/screensaver`,
+/// which answers with the state it left.
+export type ServedScreensaverState = Pick<
+  ScreensaverState,
+  "enabled" | "timeout_secs" | "theme" | "pin_set"
+>;
+
+/// Load a state the server answered into the running lock and restart the
+/// countdown under it. A write hands its own answer here, so what the lock
+/// runs on never waits on a second request that can fail after the write
+/// landed.
+export function applyScreensaverState(served: ServedScreensaverState): void {
+  screensaver.enabled = served.enabled;
+  screensaver.timeout_secs = served.timeout_secs;
+  screensaver.theme = served.theme;
+  screensaver.pin_set = served.pin_set;
+  screensaver.loaded = true;
+  armInactivityTimer();
+}
+
+/// Read the per-workspace screensaver state into the running lock. Called
+/// on app boot and before a test of the lock. Answers whether the read
+/// landed. A read that fails changes nothing: before the first load the
+/// lock stays in its default disarmed state, and after it the lock keeps
+/// the state last loaded, which is still the best account of the server's.
+export async function loadScreensaverState(): Promise<boolean> {
   try {
-    const s = await api.screensaverState();
-    screensaver.enabled = s.enabled;
-    screensaver.timeout_secs = s.timeout_secs;
-    screensaver.theme = s.theme;
-    screensaver.pin_set = s.pin_set;
-    screensaver.loaded = true;
-    armInactivityTimer();
+    applyScreensaverState(await api.screensaverState());
+    return true;
   } catch {
-    // Server unavailable / pre-auth boot. Leave the
-    // singleton in its default disarmed state; the next
-    // bootstrap pass will retry.
-    screensaver.loaded = false;
+    return false;
   }
 }
 

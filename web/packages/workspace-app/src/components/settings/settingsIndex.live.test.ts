@@ -629,6 +629,31 @@ describe("a setting of this workspace, with the overlay closed", () => {
     expect(theme.read()).toBe("matrix");
   });
 
+  test("a screen lock write shows the state its own answer carries, with no read after it", async () => {
+    const entry = settingEntry("workspace.screenLock");
+    expect(entry.read()).toBe(false);
+    // The server takes writes and has stopped answering reads.
+    vi.mocked(api.screensaverState).mockRejectedValue(new Error("offline"));
+
+    await entry.write!(true);
+
+    expect(entry.read()).toBe(true);
+    expect(settingEntry("workspace.screenLock.theme").available()).toBe(true);
+    // The row is still a toggle, so the change can be taken back.
+    await entry.write!(false);
+    expect(entry.read()).toBe(false);
+  });
+
+  test("a refused screen lock write rejects and the row keeps the state it had", async () => {
+    const entry = settingEntry("workspace.screenLock");
+    vi.mocked(api.screensaverPatch).mockRejectedValue(new Error("workspace is read-only"));
+
+    await expect(entry.write!(true)).rejects.toThrow("workspace is read-only");
+
+    expect(entry.read()).toBe(false);
+    expect(screensaver.loaded).toBe(true);
+  });
+
   test("the PIN entry is worded as its button is, by whether a PIN is stored", () => {
     const pin = settingEntry("workspace.screenLock.pin");
     expect([pin.label, pin.read()]).toEqual(["Screen lock: Set PIN", "not set"]);
