@@ -120,3 +120,6 @@ chan-llm = { workspace = true, features = ["mcp", "test-hooks"] }
 # (`#[tokio::test(start_paused = true)]`) so the 30s reply window elapses
 # instantly; `start_paused` lives behind tokio's own `test-util` feature.
 tokio = { workspace = true, features = ["test-util"] }
+# routes/graph.rs reads back the gzip the graph route sends a client that
+# accepts it.
+flate2 = "1"

@@ -194,6 +194,7 @@ use chan_workspace::{
 };
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch};
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 /// Both tenant routers hide extension path capabilities and query bearers
@@ -2061,7 +2062,13 @@ fn router_with_extensions(
         .route("/api/resolve-link", get(api_resolve_link))
         .route("/api/headings/{*path}", get(api_headings))
         .route("/api/links", get(api_links))
-        .route("/api/graph", get(api_graph))
+        // The whole workspace's graph is megabytes of JSON that repeats its
+        // keys and paths, and a window fetches it again after every change.
+        // A client that accepts gzip is sent a small fraction of it.
+        .route(
+            "/api/graph",
+            get(api_graph).layer(CompressionLayer::new().gzip(true)),
+        )
         .route("/api/graph/languages", get(api_language_graph))
         .route("/api/fs-graph", get(api_fs_graph))
         .route("/api/inspector", get(api_inspector))

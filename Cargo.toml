@@ -160,7 +160,7 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 tokio-util = { version = "0.7", features = ["compat"] }
 toml = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "limit", "trace"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "fs", "limit", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

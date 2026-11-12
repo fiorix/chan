@@ -2355,6 +2355,90 @@ mod tests {
         assert_the_graph_is_answered_ungated(&app, "with the rebuild finished").await;
     }
 
+    /// The answer to a `GET` of `uri` from a client that sends
+    /// `accept_encoding`, when it sends one: the `Content-Encoding` the
+    /// answer carries and its body as sent.
+    async fn graph_route_answer(
+        app: &GraphRouteApp,
+        uri: &str,
+        accept_encoding: Option<&str>,
+    ) -> (Option<String>, Vec<u8>) {
+        use tower::ServiceExt;
+
+        let mut request = axum::http::Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer secret");
+        if let Some(accepted) = accept_encoding {
+            request = request.header(header::ACCEPT_ENCODING, accepted);
+        }
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        let encoding = response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|value| value.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (encoding, body.to_vec())
+    }
+
+    // The graph is megabytes on a real workspace, so a client that accepts
+    // gzip is sent it compressed, stream or not, and reads back the bytes
+    // the plain answer carries. A client that does not ask, or asks for
+    // encodings the route does not speak, is sent the plain answer.
+    #[tokio::test]
+    async fn a_graph_answer_is_gzipped_for_a_client_that_accepts_it() {
+        use std::io::Read;
+
+        let app = graph_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+
+        for uri in ["/api/graph?stream=1", "/api/graph"] {
+            let (encoding, plain) = graph_route_answer(&app, uri, None).await;
+            assert_eq!(
+                encoding, None,
+                "{uri}: an answer nobody asked to compress carries an encoding"
+            );
+            assert!(
+                plain.starts_with(b"{"),
+                "{uri}: the plain answer is not JSON"
+            );
+
+            // What a browser sends.
+            let (encoding, sent) =
+                graph_route_answer(&app, uri, Some("gzip, deflate, br, zstd")).await;
+            assert_eq!(
+                encoding.as_deref(),
+                Some("gzip"),
+                "{uri}: a client that accepts gzip is not sent gzip"
+            );
+            let mut read = Vec::new();
+            flate2::read::GzDecoder::new(sent.as_slice())
+                .read_to_end(&mut read)
+                .expect("the body sent as gzip is gzip");
+            assert_eq!(
+                String::from_utf8_lossy(&read),
+                String::from_utf8_lossy(&plain),
+                "{uri}: the gzipped answer does not read back as the plain one"
+            );
+
+            let (encoding, sent) = graph_route_answer(&app, uri, Some("br, zstd")).await;
+            assert_eq!(
+                encoding, None,
+                "{uri}: a client that does not accept gzip is sent an encoding"
+            );
+            assert_eq!(
+                sent, plain,
+                "{uri}: a client that does not accept gzip is not sent the plain answer"
+            );
+        }
+    }
+
     fn report_file(path: &str, language: &str, code: u64) -> ReportFileStats {
         ReportFileStats {
             path: path.to_string(),
