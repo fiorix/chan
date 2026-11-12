@@ -1,3 +1,16 @@
+<script module lang="ts">
+  import type { DeckPosition } from "../state/deck.svelte";
+
+  // The focus request each deck position last answered, as the `focusSeq` it
+  // stood at. It lives outside the component because a request can be made
+  // while the deck is not on screen: a row that turns the Computers screen to
+  // a card from the Gateways screen asks before this deck has mounted. The
+  // mounting deck answers what it finds unanswered, and a deck that mounts
+  // again does not answer the same request twice. Keyed by the position
+  // itself, so a position that starts over has answered nothing.
+  const answeredFocus = new WeakMap<DeckPosition, number>();
+</script>
+
 <script lang="ts" generics="T extends { key: string; label: string }">
   // A ring of cards around a vertical axis, one card in front. The layout is a
   // port of a 3D circular gallery: each card stands at `index * step` degrees,
@@ -183,13 +196,12 @@
     focusFront();
   }
 
-  // A card's own action asked for focus on the card in front (showCard). The
-  // first run only records where the count stands.
-  let seenFocusSeq: number | null = null;
+  // A card's own action asked for focus on the card in front (showCard),
+  // while this deck was on screen or before it mounted.
   $effect(() => {
     const seq = deck.focusSeq;
-    const asked = seenFocusSeq !== null && seq !== seenFocusSeq;
-    seenFocusSeq = seq;
+    const asked = seq > (answeredFocus.get(deck) ?? 0);
+    answeredFocus.set(deck, seq);
     if (asked) focusFront();
   });
 
