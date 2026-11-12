@@ -5,10 +5,12 @@
 //! during its boot. Either way the path lands as `cs open PATH` typed in a
 //! standalone window would. On macOS a file Finder opens comes as an
 //! open-file event's URL instead of an argument (`open_events`), read here by
-//! [`from_urls`] as a launch's file URIs are.
+//! [`from_urls`] as a launch's file URIs are. A desktop that a `chan-term`
+//! started comes with the terminal it asked for instead
+//! ([`take_boot_terminal`]), which its boot opens as a handed-over one.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chan_server::handoff::{self, Response};
@@ -122,6 +124,43 @@ pub(crate) async fn open_at_boot(state: Arc<AppState>, paths: &[String]) {
             other => {
                 tracing::warn!(%path, reply = ?other, "could not open a path this launch was given")
             }
+        }
+    }
+}
+
+/// The terminal a `chan-term` that started this desktop asked for
+/// ([`handoff::OPEN_TERMINAL_ENV`]): the absolute directory its shell starts
+/// in. Read and dropped before any thread starts, so no child of the desktop
+/// inherits it; a value that is no absolute UTF-8 path names no terminal and
+/// is logged.
+pub(crate) fn take_boot_terminal() -> Option<String> {
+    let value = std::env::var_os(handoff::OPEN_TERMINAL_ENV)?;
+    std::env::remove_var(handoff::OPEN_TERMINAL_ENV);
+    match value.into_string() {
+        Ok(dir) if Path::new(&dir).is_absolute() => Some(dir),
+        other => {
+            tracing::warn!(value = ?other, "ignoring a launch terminal that names no absolute directory");
+            None
+        }
+    }
+}
+
+/// Open the terminal a `chan-term` that started this desktop asked for, as
+/// the handoff's `OpenTerminal` opens one: a throwaway terminal window whose
+/// shell starts in `dir`. `true` when it opened, so the boot opens no other
+/// first window beside it.
+pub(crate) async fn open_terminal_at_boot(state: Arc<AppState>, dir: Option<&str>) -> bool {
+    let Some(dir) = dir else {
+        return false;
+    };
+    match serve::spawn_throwaway_terminal_window(state, PathBuf::from(dir)).await {
+        Ok(label) => {
+            tracing::info!(%dir, %label, "opened the terminal the launch asked for");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%dir, %error, "could not open the terminal the launch asked for");
+            false
         }
     }
 }

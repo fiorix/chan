@@ -4,18 +4,24 @@
 //! `chan-term [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold]
 //! [-e CMD ARGS... | -- CMD ARGS...]`.
 //!
-//! chan-desktop hosts the window: run as `chan-term` it parses with
-//! [`parse_or_exit`](crate::term::parse_or_exit) and opens one terminal-only
-//! window in its own process, or hands a launch that only runs the shell
-//! ([`hands_off`](crate::term::hands_off)) to the running desktop. The
-//! standalone CLI cannot host a window, so its `chan-term` (`cmd_term`) only
-//! makes that hand-off and refuses the rest.
+//! A launch that only runs the user's shell
+//! ([`hands_off`](crate::term::hands_off)) is the CLI's (`cmd_term`): it opens
+//! a terminal window of the running chan-desktop, as `chan-files` opens a path
+//! there, and chan-desktop's own `chan-term` starts the desktop with that
+//! terminal when none runs. A launch with a command, `--hold`, `--app-id` or
+//! `--title` needs a window of the process's own, so chan-desktop run as
+//! `chan-term` opens that window itself; the standalone CLI cannot, and
+//! refuses it.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{bail, Result};
-use chan_server::handoff::{self, DevserverControlOutcome, Response};
+use chan_server::handoff::{self, CliOpenTerminal, Response};
+
+use crate::opener::{self, Opening};
+use crate::Personality;
 
 /// The program name this command is reached by.
 pub const NAME: &str = "chan-term";
@@ -266,10 +272,15 @@ pub fn start_dir(launch: &TerminalLaunch) -> PathBuf {
     cwd
 }
 
-/// The standalone CLI's `chan-term`: ask the running chan-desktop for a shell
-/// window in the start directory. Everything else needs a window this process
-/// would own, which only the desktop's `chan-term` can open.
-pub(crate) async fn cmd_term(launch: TerminalLaunch) -> Result<()> {
+/// `chan-term` for a launch that runs the user's shell: a terminal window of
+/// the running chan-desktop in the start directory, which the desktop has
+/// [`opener::ANSWER_BOUND`] to open, as a path of `chan-files` does. Nothing
+/// listening is no desktop: the desktop personality starts one with the
+/// terminal, which its boot opens in place of its first window, and the
+/// standalone CLI says none is running. A launch that needs a window of its
+/// own never reaches the desktop personality here (chan-desktop opens that
+/// window itself), and the standalone CLI refuses it.
+pub(crate) async fn cmd_term(launch: TerminalLaunch, personality: Personality) -> Result<()> {
     if let Some(reason) = own_window_reason(&launch) {
         bail!(
             "{reason} needs a window of chan-term's own, which only Chan Desktop's chan-term \
@@ -296,29 +307,69 @@ pub(crate) async fn cmd_term(launch: TerminalLaunch) -> Result<()> {
             cwd.display()
         );
     };
-    match handoff::open_terminal(cwd_text).await {
-        DevserverControlOutcome::Reply(Response::TerminalOpened { .. }) => Ok(()),
-        DevserverControlOutcome::Reply(Response::Error { message }) => {
-            bail!("chan-desktop did not open a terminal in {cwd_text}: {message}")
-        }
-        DevserverControlOutcome::Reply(Response::VersionSkew {
-            desktop_version, ..
-        }) => bail!(
-            "chan-desktop did not open a terminal: it is chan {desktop_version} and this is \
-             chan {}; restart chan-desktop",
-            handoff::CHAN_VERSION
+    match ask_desktop(cwd_text).await {
+        CliOpenTerminal::Opened => Ok(()),
+        CliOpenTerminal::Refused { reply } => bail!(
+            "chan-desktop did not open a terminal in {cwd_text}: {}",
+            refusal_reason(&reply)
         ),
-        DevserverControlOutcome::Reply(other) => {
-            bail!("chan-desktop did not open a terminal in {cwd_text}: it answered {other:?}")
-        }
-        DevserverControlOutcome::NoReply { .. } => {
+        CliOpenTerminal::Silent => {
             bail!("chan-desktop did not answer for a terminal in {cwd_text}")
         }
-        DevserverControlOutcome::NoDesktop => bail!(
-            "chan-desktop is not running; start it and run {NAME} again, or install Chan \
-             Desktop, whose {NAME} opens a window of its own"
-        ),
+        CliOpenTerminal::NotListening => {
+            opener::launch_desktop(
+                NAME,
+                Opening::Terminal(cwd_text),
+                opener::when_no_desktop(personality),
+            )
+            .await
+        }
     }
+}
+
+/// One `OpenTerminal` within [`opener::ANSWER_BOUND`], asked again while a
+/// listener closes without an answer, as the openers ask for a path. Nothing
+/// listening on the first ask is no desktop; once one was heard, its going
+/// away is silence, since another may be on its way up.
+async fn ask_desktop(cwd: &str) -> CliOpenTerminal {
+    let deadline = Instant::now() + opener::ANSWER_BOUND;
+    let mut heard = false;
+    loop {
+        let budget = deadline.saturating_duration_since(Instant::now());
+        match handoff::try_open_terminal(cwd, budget).await {
+            CliOpenTerminal::NotListening if !heard => return CliOpenTerminal::NotListening,
+            CliOpenTerminal::NotListening | CliOpenTerminal::Silent => {
+                heard = true;
+                if Instant::now() + opener::ASK_AGAIN_AFTER >= deadline {
+                    return CliOpenTerminal::Silent;
+                }
+                tokio::time::sleep(opener::ASK_AGAIN_AFTER).await;
+            }
+            answered => return answered,
+        }
+    }
+}
+
+/// The sentence for a desktop's refusal line: its own message, or what a
+/// desktop of another protocol means.
+fn refusal_reason(reply: &str) -> String {
+    match serde_json::from_str::<Response>(reply) {
+        Ok(Response::Error { message }) => message,
+        Ok(Response::VersionSkew {
+            desktop_version, ..
+        }) => format!(
+            "it is chan {desktop_version} and this is chan {}; restart chan-desktop",
+            handoff::CHAN_VERSION
+        ),
+        _ => reply.to_string(),
+    }
+}
+
+/// Whether `args` (without `argv[0]`) are a `chan-term` launch that only runs
+/// the user's shell: what chan-desktop runs as the CLI rather than as a window
+/// of its own. Help, version and a usage error are not.
+pub fn is_shell_launch(args: impl IntoIterator<Item = OsString>) -> bool {
+    matches!(parse(args), Ok(Invocation::Launch(launch)) if hands_off(&launch))
 }
 
 #[cfg(test)]
@@ -607,6 +658,28 @@ mod tests {
             Some("--title"),
             "the running desktop composes its own titles"
         );
+    }
+
+    /// What chan-desktop runs as the CLI: a launch with nothing but the
+    /// shell's directory. Help, version, a usage error and a launch that
+    /// needs its own window are the desktop's to answer.
+    #[test]
+    fn a_shell_launch_is_one_with_no_per_process_contract() {
+        for shell in [&[][..], &["--dir=/tmp"], &["--dir", "notes"]] {
+            assert!(is_shell_launch(args(shell)), "{shell:?}");
+        }
+        for other in [
+            &["-e", "htop"][..],
+            &["--hold"],
+            &["--title=T"],
+            &["--app-id=a"],
+            &["--help"],
+            &["-V"],
+            &["htop"],
+            &["--foo"],
+        ] {
+            assert!(!is_shell_launch(args(other)), "{other:?}");
+        }
     }
 
     #[test]

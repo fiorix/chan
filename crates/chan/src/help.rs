@@ -931,18 +931,21 @@ runs, so it is the terminal xdg-terminal-exec opens once that entry is
 the first in xdg-terminals.list. Every option takes its value after = or
 as the next argument.
 
-A launch with a command, --hold, --app-id or --title is one window in a
-process of its own, which ends when the window closes; it exits with the
-command's status, and with 127 and no window when the command is not
-found. A launch that only runs your shell, here or in --dir, opens in
-the running chan-desktop when there is one, in a window it does not
-save, and in a window of its own otherwise.
+A launch that only runs your shell, here or in --dir, opens a terminal
+window of the running chan-desktop, one it does not save, which has 5 s
+to answer; one that does not is reported (chan-desktop did not answer).
+With no desktop running, Chan Desktop's chan-term starts it, and its
+first window is that terminal. A launch with a command, --hold, --app-id
+or --title is one window in a process of its own, which ends when the
+window closes; it exits with the command's status, and with 127 and no
+window when the command is not found.
 
-The standalone chan CLI cannot open a window, so its chan-term only asks
-a running chan-desktop for that shell window. It exits 1 with the reason
-when a launch needs a window of its own, when no desktop runs or none
-answers, with CHAN_NO_DESKTOP_HANDOFF set, and in a session with no
-display (an SSH login, or no DISPLAY or WAYLAND_DISPLAY).
+The standalone chan CLI cannot open a window or start a desktop, so its
+chan-term only asks a running chan-desktop for that shell window. It
+exits 1 with the reason when a launch needs a window of its own, when no
+desktop runs or none answers, with CHAN_NO_DESKTOP_HANDOFF set, and in a
+session with no display (an SSH login, or no DISPLAY or
+WAYLAND_DISPLAY).
 
 EXAMPLES:
   chan-term --dir ~/src

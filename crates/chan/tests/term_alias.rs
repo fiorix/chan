@@ -244,8 +244,7 @@ fn with_no_desktop_running_it_says_so() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         stderr(&output),
-        "Error: chan-desktop is not running; start it and run chan-term again, or install \
-         Chan Desktop, whose chan-term opens a window of its own\n"
+        "Error: chan-desktop is not running; start it and run chan-term again\n"
     );
 }
 

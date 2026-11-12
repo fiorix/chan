@@ -1,15 +1,16 @@
-//! A `chan-term` launch: the program name a desktop's default terminal runs,
-//! with the grammar xdg-terminal-exec drives through `chan-term.desktop`'s
-//! `X-TerminalArg*` keys (`chan::term`). One terminal-only window in its own
-//! process, with none of the launcher's boot (shims, library stores, the
-//! handoff listener, the window watcher, gateways, the update check), so a
-//! launch beside a running chan-desktop leaves it alone.
+//! A `chan-term` launch with a command, `--hold`, `--app-id` or `--title`: the
+//! program name a desktop's default terminal runs, with the grammar
+//! xdg-terminal-exec drives through `chan-term.desktop`'s `X-TerminalArg*`
+//! keys (`chan::term`). One terminal-only window in its own process, with
+//! none of the launcher's boot (shims, library stores, the handoff listener,
+//! the window watcher, gateways, the update check), so a launch beside a
+//! running chan-desktop leaves it alone: the command's exit status, the held
+//! window, the app id and the title are the process's.
 //!
-//! The exception is a launch that only runs the user's shell: a bare
-//! `chan-term` or one with `--dir` alone. With a chan-desktop already running
-//! it is handed over the handoff socket, and that desktop opens a throwaway
-//! local terminal window in the directory (never saved, so a relaunch does not
-//! restore it). With none running, it opens its own window.
+//! A launch that only runs the user's shell, a bare `chan-term` or one with
+//! `--dir` alone, never comes here: it runs as the CLI
+//! (`run_as_chan_if_requested`), which opens a throwaway terminal window of
+//! the running chan-desktop, and starts the desktop with it when none runs.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -149,30 +150,13 @@ pub(crate) struct TerminalMode {
     exit_code: Mutex<Option<i32>>,
 }
 
-/// Open the launch's window, or hand a shell-only launch to the running
-/// chan-desktop ([`chan::term::hands_off`]). Ends the process on a failure
+/// Open the launch's window in this process. Ends the process on a failure
 /// before the event loop runs; otherwise returns when the event loop ends.
 pub fn run(launch: TerminalLaunch) {
     let cwd = chan::term::start_dir(&launch);
-    if chan::term::hands_off(&launch) && hand_off(&cwd) {
-        return;
-    }
     if let Err(e) = run_window(launch, cwd) {
         fatal(1, &e);
     }
-}
-
-/// Ask a running chan-desktop to open the window. A `cwd` that is not UTF-8
-/// cannot ride the JSON request, so that launch keeps its own window.
-fn hand_off(cwd: &Path) -> bool {
-    let Some(cwd_text) = cwd.to_str() else {
-        return false;
-    };
-    let opened = tauri::async_runtime::block_on(chan_server::handoff::try_open_terminal(cwd_text));
-    if opened {
-        tracing::info!(cwd = %cwd.display(), "the running chan-desktop opened the terminal window");
-    }
-    opened
 }
 
 fn fatal(code: i32, message: &str) -> ! {
@@ -296,9 +280,10 @@ fn spawn_exit_watcher(app: tauri::AppHandle, state: Arc<AppState>, mode: Arc<Ter
     });
 }
 
-/// New Window from a `chan-term` window: another `chan-term` process with the
-/// same `--dir` and `--app-id`, which is the contract (one window per process)
-/// and what groups the windows under one class.
+/// New Window from a `chan-term` window: another `chan-term` with the same
+/// `--dir` and `--app-id`. With an app id it is a process of its own, which
+/// groups the windows under one class; without one it is a shell launch, which
+/// opens in the running chan-desktop, or starts it.
 pub(crate) fn spawn_sibling(mode: &TerminalMode) {
     let (exe, appimage) = sibling_executable();
     let args = sibling_args(&mode.cwd, mode.launch.app_id.as_deref());

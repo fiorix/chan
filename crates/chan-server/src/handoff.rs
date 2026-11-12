@@ -1853,34 +1853,108 @@ pub async fn try_devserver_control(_req: Request) -> DevserverControlOutcome {
     DevserverControlOutcome::NoDesktop
 }
 
-/// Hand a `chan-term` launch that runs the user's shell to a running
-/// same-user desktop, as an `OpenTerminal` for `cwd`. `true` only when the
-/// desktop answers `TerminalOpened`. Every other outcome is `false` and the
-/// launcher opens its own window: no desktop, an opt-out
-/// (`CHAN_NO_DESKTOP_HANDOFF`), a refusal, and a desktop that accepted the
-/// connection but did not answer within the reply budget. That last case can
-/// leave two windows if the desktop answers late; a mint takes milliseconds,
-/// so a desktop that misses the budget is more likely wedged than slow.
-pub async fn try_open_terminal(cwd: &str) -> bool {
-    if handoff_opt_out() || !gui_session_present() {
-        return false;
-    }
-    matches!(
-        open_terminal(cwd).await,
-        DevserverControlOutcome::Reply(Response::TerminalOpened { .. })
-    )
+/// The variable a `chan-term` that starts chan-desktop sets on it: the
+/// absolute directory of the terminal the launch asked for. The desktop reads
+/// and drops it at boot, opens that terminal where it would otherwise open
+/// its first window, and hands it to the desktop it finds instead when
+/// another one runs, as a launch's paths are.
+pub const OPEN_TERMINAL_ENV: &str = "CHAN_DESKTOP_OPEN_TERMINAL";
+
+/// What an `OpenTerminal` from the CLI met at the well-known endpoint, told
+/// apart as [`CliOpenPath`] tells them: only nothing listening lets the CLI
+/// start a desktop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliOpenTerminal {
+    /// The desktop opened the terminal window.
+    Opened,
+    /// It answered without opening; `reply` is its answer line.
+    Refused { reply: String },
+    /// Nothing listens on the endpoint: no desktop is running, or one has not
+    /// bound it yet.
+    NotListening,
+    /// A listener took the request and gave no answer within the budget, or
+    /// closed without one.
+    Silent,
 }
 
-/// One `OpenTerminal` for `cwd` and what came back, for a caller that says
-/// why no window opened. It reads neither the opt-out nor the GUI-session
-/// check: such a caller reads them first, to name the one that stopped it.
-pub async fn open_terminal(cwd: &str) -> DevserverControlOutcome {
-    try_devserver_control(Request::OpenTerminal {
+/// Ask the running same-user desktop for a throwaway terminal window whose
+/// shell starts in `cwd`, within `budget`, for a `chan-term` launch that runs
+/// the user's shell. The caller reads `CHAN_NO_DESKTOP_HANDOFF` and the
+/// GUI-session check first, so it can say which of them stopped it.
+#[cfg(any(unix, windows))]
+pub async fn try_open_terminal(cwd: &str, budget: Duration) -> CliOpenTerminal {
+    let Some(socket_path) = existing_well_known_socket_path() else {
+        return CliOpenTerminal::NotListening;
+    };
+    try_open_terminal_from_cli_at(&socket_path, cwd, budget).await
+}
+
+#[cfg(any(unix, windows))]
+async fn try_open_terminal_from_cli_at(
+    socket_path: &Path,
+    cwd: &str,
+    budget: Duration,
+) -> CliOpenTerminal {
+    match request_endpoint(socket_path, &open_terminal_request(cwd), budget).await {
+        Ok(line) => match serde_json::from_str::<Response>(line.trim()) {
+            Ok(Response::TerminalOpened { .. }) => CliOpenTerminal::Opened,
+            _ => CliOpenTerminal::Refused {
+                reply: line.trim().to_string(),
+            },
+        },
+        Err(EndpointError::NoDesktop) => CliOpenTerminal::NotListening,
+        Err(EndpointError::NoReply | EndpointError::Closed) => CliOpenTerminal::Silent,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_open_terminal(_cwd: &str, _budget: std::time::Duration) -> CliOpenTerminal {
+    CliOpenTerminal::NotListening
+}
+
+/// Ask the desktop serving the endpoint at `socket_path` for the terminal a
+/// launch carried ([`OPEN_TERMINAL_ENV`]). Like [`try_activate_at`] this
+/// ignores `CHAN_NO_DESKTOP_HANDOFF` and the GUI-session check: the sender is
+/// a desktop launch handing its terminal to the desktop it will not run
+/// beside. The answer reads as an `Activate`'s: an opened terminal raised its
+/// window, so the holder came forward.
+#[cfg(any(unix, windows))]
+pub async fn try_open_terminal_at(
+    socket_path: &Path,
+    cwd: &str,
+    budget: Duration,
+) -> ActivateReply {
+    match request_endpoint(socket_path, &open_terminal_request(cwd), budget).await {
+        Ok(line) => match serde_json::from_str::<Response>(line.trim()) {
+            Ok(Response::TerminalOpened { desktop_version }) => {
+                ActivateReply::Activated { desktop_version }
+            }
+            _ => ActivateReply::Refused {
+                reply: line.trim().to_string(),
+            },
+        },
+        Err(EndpointError::NoDesktop | EndpointError::NoReply | EndpointError::Closed) => {
+            ActivateReply::NoReply
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub async fn try_open_terminal_at(
+    _socket_path: &std::path::Path,
+    _cwd: &str,
+    _budget: std::time::Duration,
+) -> ActivateReply {
+    ActivateReply::NoReply
+}
+
+#[cfg(any(unix, windows))]
+fn open_terminal_request(cwd: &str) -> Request {
+    Request::OpenTerminal {
         protocol: PROTOCOL_VERSION,
         cli_version: CHAN_VERSION.into(),
         cwd: cwd.to_string(),
-    })
-    .await
+    }
 }
 
 /// What the desktop serving an endpoint answered to an `Activate`.
@@ -3904,6 +3978,74 @@ mod tests {
             try_open_path_from_cli_at(&answers, "/srv/a.md", budget).await,
             CliOpenPath::Refused {
                 reply: r#"{"status":"error","message":"not editable text"}"#.into()
+            }
+        );
+    }
+
+    /// The CLI's `OpenTerminal` tells no desktop from a silent one, as its
+    /// `OpenPath` does, and the guard's reads an opened terminal as a desktop
+    /// that came forward and every other answer as a refusal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_open_terminal_tells_no_listener_from_a_silent_one() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Duration::from_millis(300);
+        let absent = dir.path().join("absent.sock");
+        assert_eq!(
+            try_open_terminal_from_cli_at(&absent, "/srv", budget).await,
+            CliOpenTerminal::NotListening
+        );
+        assert_eq!(
+            try_open_terminal_at(&absent, "/srv", budget).await,
+            ActivateReply::NoReply
+        );
+        let silent = dir.path().join("silent.sock");
+        let _held = std::os::unix::net::UnixListener::bind(&silent).unwrap();
+        assert_eq!(
+            try_open_terminal_from_cli_at(&silent, "/srv", budget).await,
+            CliOpenTerminal::Silent
+        );
+
+        let answers = dir.path().join("answers.sock");
+        let listener = tokio::net::UnixListener::bind(&answers).unwrap();
+        let (sent, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            for reply in [
+                r#"{"status":"terminal_opened","desktop_version":"0.0.0"}"#,
+                r#"{"status":"error","message":"chan-desktop is shutting down"}"#,
+                r#"{"status":"terminal_opened","desktop_version":"9.9.9"}"#,
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                sent.send(line).unwrap();
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(
+            try_open_terminal_from_cli_at(&answers, "/srv/a b", budget).await,
+            CliOpenTerminal::Opened
+        );
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        assert_eq!(request["type"], "open_terminal");
+        assert_eq!(request["cwd"], "/srv/a b");
+        assert_eq!(
+            try_open_terminal_from_cli_at(&answers, "/srv", budget).await,
+            CliOpenTerminal::Refused {
+                reply: r#"{"status":"error","message":"chan-desktop is shutting down"}"#.into()
+            }
+        );
+        assert_eq!(
+            try_open_terminal_at(&answers, "/srv", budget).await,
+            ActivateReply::Activated {
+                desktop_version: "9.9.9".into()
             }
         );
     }

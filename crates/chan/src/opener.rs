@@ -15,10 +15,10 @@ use crate::Personality;
 /// chan-desktop launch gives the desktop it finds (`ASK_BOUND` in
 /// `desktop/src-tauri/src/single_instance.rs`), which covers a desktop
 /// whose embedded server is still starting.
-const ANSWER_BOUND: Duration = Duration::from_secs(5);
+pub(crate) const ANSWER_BOUND: Duration = Duration::from_secs(5);
 
 /// The pause before asking again a listener that closed without an answer.
-const ASK_AGAIN_AFTER: Duration = Duration::from_millis(200);
+pub(crate) const ASK_AGAIN_AFTER: Duration = Duration::from_millis(200);
 
 /// Open each of `args` (the current directory itself when there are none).
 /// In a chan terminal whose server answers, each path goes through `cs
@@ -140,7 +140,7 @@ async fn open_in_desktop(
             )),
             CliOpenPath::NotListening if index == 0 => {
                 let all: Vec<String> = paths.iter().map(|(_, path)| path.clone()).collect();
-                launch_desktop(name, &all, when_no_desktop(personality)).await?;
+                launch_desktop(name, Opening::Paths(&all), when_no_desktop(personality)).await?;
                 return Ok(failures);
             }
             CliOpenPath::NotListening | CliOpenPath::Silent => {
@@ -182,7 +182,7 @@ async fn ask_desktop(path: &str) -> CliOpenPath {
 
 /// What a command that found no desktop does.
 #[derive(Debug, PartialEq, Eq)]
-enum NoDesktop {
+pub(crate) enum NoDesktop {
     /// Start one with the paths: this binary is chan-desktop.
     Launch,
     /// Say so and fail: the standalone CLI has no desktop of its own to start.
@@ -192,7 +192,7 @@ enum NoDesktop {
 /// The desktop personality's `current_exe` is the desktop, so it can start
 /// one, as its `chan serve` does; on Windows, where a standalone window has
 /// no file surface, neither starts one.
-fn when_no_desktop(personality: Personality) -> NoDesktop {
+pub(crate) fn when_no_desktop(personality: Personality) -> NoDesktop {
     match personality {
         Personality::Desktop if cfg!(unix) => NoDesktop::Launch,
         _ => NoDesktop::Refuse,
@@ -283,12 +283,42 @@ where
     None
 }
 
-#[cfg(unix)]
-async fn launch_desktop(name: &str, paths: &[String], action: NoDesktop) -> Result<()> {
-    if action == NoDesktop::Refuse {
-        bail!(not_running(name));
+/// What a command asks the desktop it starts to open. Off unix no command
+/// starts a desktop, so there only the variant is read, for the refusal.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) enum Opening<'a> {
+    /// The paths of `chan-files` and `chan-edit`.
+    Paths(&'a [String]),
+    /// The terminal window of a `chan-term` shell, which starts in this
+    /// directory.
+    Terminal(&'a str),
+}
+
+impl Opening<'_> {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn describe(self) -> String {
+        match self {
+            Opening::Paths(paths) => paths.join(", "),
+            Opening::Terminal(dir) => format!("a terminal in {dir}"),
+        }
     }
-    let mut child = crate::desktop::spawn_desktop_gui_opening(paths)
+}
+
+#[cfg(unix)]
+pub(crate) async fn launch_desktop(
+    name: &str,
+    opening: Opening<'_>,
+    action: NoDesktop,
+) -> Result<()> {
+    if action == NoDesktop::Refuse {
+        bail!(not_running(name, opening));
+    }
+    let (paths, terminal) = match opening {
+        Opening::Paths(paths) => (paths, None),
+        Opening::Terminal(dir) => (&[][..], Some(dir)),
+    };
+    let mut child = crate::desktop::spawn_desktop_gui_opening(paths, terminal)
         .map_err(|error| anyhow::anyhow!("starting chan-desktop: {error}"))?;
     let exited = || {
         child
@@ -298,13 +328,13 @@ async fn launch_desktop(name: &str, paths: &[String], action: NoDesktop) -> Resu
     };
     match watch_launch(LAUNCH_BOUNDS, exited, handoff::desktop_is_live).await {
         Some(Started::Up) => {
-            eprintln!("started chan-desktop to open {}", paths.join(", "));
+            eprintln!("started chan-desktop to open {}", opening.describe());
             Ok(())
         }
         Some(Started::HandedOver) => {
             eprintln!(
                 "handed {} to the chan-desktop that was starting; it decides what to open",
-                paths.join(", ")
+                opening.describe()
             );
             Ok(())
         }
@@ -320,15 +350,26 @@ async fn launch_desktop(name: &str, paths: &[String], action: NoDesktop) -> Resu
 }
 
 #[cfg(not(unix))]
-async fn launch_desktop(name: &str, _paths: &[String], _action: NoDesktop) -> Result<()> {
-    bail!(not_running(name))
+pub(crate) async fn launch_desktop(
+    name: &str,
+    opening: Opening<'_>,
+    _action: NoDesktop,
+) -> Result<()> {
+    bail!(not_running(name, opening))
 }
 
-fn not_running(name: &str) -> String {
-    format!(
-        "chan-desktop is not running; start it and run {name} again, or run {name} in a chan \
-         terminal"
-    )
+/// A `chan-term` in a chan terminal still asks the desktop, so only the
+/// openers can point at one.
+fn not_running(name: &str, opening: Opening<'_>) -> String {
+    match opening {
+        Opening::Paths(_) => format!(
+            "chan-desktop is not running; start it and run {name} again, or run {name} in a \
+             chan terminal"
+        ),
+        Opening::Terminal(_) => {
+            format!("chan-desktop is not running; start it and run {name} again")
+        }
+    }
 }
 
 /// The sentence for a desktop's refusal line: its own message, or what a

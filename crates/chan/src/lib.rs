@@ -337,7 +337,7 @@ async fn run_cli(cli: cli::Cli, personality: Personality) -> Result<()> {
         Command::OpenPaths { opener, paths } => {
             opener::cmd_open_paths(opener, paths, personality).await
         }
-        Command::Term { args } => term::cmd_term(term::parse_or_exit(args)).await,
+        Command::Term { args } => term::cmd_term(term::parse_or_exit(args), personality).await,
         Command::Completions { shell } => cmd_completions(shell),
         Command::DumpSkill { args } => dump_skill(args),
         Command::Close { args, forget } => {
