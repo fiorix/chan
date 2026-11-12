@@ -34,6 +34,7 @@
     workspace,
   } from "../state/store.svelte";
   import { ensureGraphLoaded, graphData } from "../state/graphData.svelte";
+  import { uploadToEntry } from "../state/commands/browser";
   import { openTerminalInActivePane } from "../state/tabs.svelte";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import InspectorActionPill, {
@@ -84,21 +85,13 @@
     onContactNavigate?: (path: string) => void;
   } = $props();
 
-  /// Action-row plumbing (inspector variant). Mirrors FileInfoBody's
-  /// directory branch but pinned to the workspace ROOT, i.e. the
-  /// relative path is the empty string "".
-  let uploadInput = $state<HTMLInputElement | null>(null);
-
-  function triggerUpload(): void {
-    uploadInput?.click();
-  }
-
-  async function onUploadPicked(e: Event): Promise<void> {
-    const input = e.currentTarget as HTMLInputElement;
-    const files = input.files;
-    if (!files || files.length === 0) return;
-    await fileOps.uploadFilesTo("", files);
-    input.value = "";
+  /// Action-row plumbing (inspector variant): the directory inspector's
+  /// actions on the workspace root, whose relative path is the empty
+  /// string. Upload raises the picker the file browser's Upload raises for
+  /// a directory (`uploadToEntry`), which is the desktop's own picker where
+  /// there is one.
+  function uploadToRoot(): void {
+    uploadToEntry("", true);
   }
 
   function downloadSelection(): void {
@@ -140,7 +133,7 @@
     secondary: InspectorAction[];
   }>(() => {
     const secondary: InspectorAction[] = [
-      { command: "app.browser.uploadSelection", onClick: triggerUpload, title: uploadTitle },
+      { command: "app.browser.uploadSelection", onClick: uploadToRoot, title: uploadTitle },
       {
         command: "app.browser.downloadSelection",
         onClick: downloadSelection,
@@ -342,15 +335,6 @@
         secondary={actionModel.secondary}
       />
     </div>
-    <input
-      bind:this={uploadInput}
-      class="file-picker"
-      type="file"
-      multiple
-      onchange={onUploadPicked}
-      aria-hidden="true"
-      tabindex="-1"
-    />
   {/if}
 
   <!-- Folder-mode parity with FileInfoBody: same aggregate stats grid,
@@ -500,13 +484,6 @@
      owns the pill + dropdown styling itself. */
   .actions-section {
     margin: 0.6rem 0 0.2rem 0;
-  }
-  .file-picker {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
   }
   .refs,
   .info > :global(.code-report) { margin: 0.8rem 0 0 0; }
