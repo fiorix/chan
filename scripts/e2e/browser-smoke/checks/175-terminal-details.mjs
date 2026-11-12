@@ -35,7 +35,9 @@ export default {
       assert.ok(!labels.includes('Program status'));
       assert.deepEqual(await page.$$eval('.terminal-tab-menu-bubble button', buttons => {
         const row = buttons.find(button => button.querySelector('.mbtn-label')?.textContent.trim() === 'Details');
-        return [row.previousElementSibling?.getAttribute('role'), row.nextElementSibling?.getAttribute('role')];
+        // The row leads the menu that holds the tab's actions, so what stands before it is what stands before that menu.
+        const before = row.previousElementSibling ?? row.closest('[role="menu"]')?.previousElementSibling;
+        return [before?.getAttribute('role'), row.nextElementSibling?.getAttribute('role')];
       }), ['separator', 'separator']);
       await page.$$eval('.terminal-tab-menu-bubble button', buttons => buttons.find(button => button.querySelector('.mbtn-label')?.textContent.trim() === 'Details').click());
       await page.waitForSelector('.terminal-main aside.inspector.right.floating.reserve-space[aria-label="Details"]');

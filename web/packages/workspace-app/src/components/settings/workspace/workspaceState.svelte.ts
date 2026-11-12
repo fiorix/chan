@@ -4,22 +4,70 @@
 // from the launcher. Each control still loads its part when it mounts.
 //
 // Nothing pushes these values to a window, so the index asks for them again
-// once they are older than WORKSPACE_STATE_MAX_AGE_MS.
+// once they are older than WORKSPACE_STATE_MAX_AGE_MS. A read and a write of
+// one setting travel on separate requests and can answer in either order, so
+// each setting's reads are ordered against its writes: see `writeOrder`.
 
 import { api } from "../../../api/client";
 import type { BuildInfo, SemanticModelRegistry, SemanticState } from "../../../api/types";
-import { loadScreensaverState } from "../../../state/screensaver.svelte";
+import { applyScreensaverState } from "../../../state/screensaver.svelte";
 import type { ScreensaverTheme } from "../../../state/screensaver";
 import { workspace } from "../../../state/store.svelte";
 
 export const WORKSPACE_STATE_MAX_AGE_MS = 5000;
 
 /// What a write answers while an earlier write of the same setting is still
-/// on its way. A control disables itself for that long; the launcher has no
-/// such state and is told instead.
+/// on its way. A control disables itself for that long, and so does a
+/// launcher row that shows the change under way; any other caller is told
+/// instead.
 const IN_FLIGHT = "An earlier change to this setting is still in progress";
 
+/// What enabling semantic search answers when it was asked to download
+/// nothing and the selected model is not on disk.
+const MODEL_NOT_ON_DISK = "The embedding model has not been downloaded";
+
 type SemanticModel = SemanticModelRegistry["models"][number];
+
+/// Orders the reads of one setting's state against its writes. A read may
+/// apply its answer only while no write has applied an answer of its own
+/// since the read was sent: the read may have seen the state from before
+/// that answer, and must not land over it. A read answered before the write
+/// has any answer still shows, which is how a download is followed while it
+/// runs.
+function writeOrder() {
+  let answers = 0;
+  let under = 0;
+  return {
+    /// A write begins.
+    begin(): void {
+      under += 1;
+    },
+    /// The write under way has applied an answer and goes on. Called in the
+    /// turn that applies it, so no read can land between the two.
+    answered(): void {
+      answers += 1;
+    },
+    /// The write ends, in the turn that applies its last answer.
+    end(): void {
+      if (under > 0) under -= 1;
+      answers += 1;
+    },
+    /// Called as a read is sent. Its answer applies only while the returned
+    /// check holds.
+    reading(): () => boolean {
+      const sentAt = answers;
+      return () => sentAt === answers;
+    },
+    /// Whether a write is under way.
+    writing: (): boolean => under > 0,
+    /// Start over with no write under way. One left unanswered may still
+    /// end later, and a read sent before now no longer applies.
+    reset(): void {
+      under = 0;
+      answers += 1;
+    },
+  };
+}
 
 // ---- chan-reports --------------------------------------------------------
 
@@ -30,12 +78,17 @@ export const reports = $state<{
   error: string | null;
 }>({ state: null, busy: false, error: null });
 
+const reportsOrder = writeOrder();
+
 export async function loadReports(): Promise<void> {
+  const current = reportsOrder.reading();
   try {
-    reports.state = await api.reportsState();
+    const state = await api.reportsState();
+    if (!current()) return;
+    reports.state = state;
     reports.error = null;
   } catch (err) {
-    reports.error = (err as Error).message;
+    if (current()) reports.error = (err as Error).message;
   }
 }
 
@@ -46,6 +99,7 @@ export async function setReportsEnabled(next: boolean): Promise<string | null> {
   if (reports.busy) return IN_FLIGHT;
   reports.busy = true;
   reports.error = null;
+  reportsOrder.begin();
   try {
     reports.state = next ? await api.reportsEnable() : await api.reportsDisable();
     return null;
@@ -60,6 +114,7 @@ export async function setReportsEnabled(next: boolean): Promise<string | null> {
     return refusal;
   } finally {
     reports.busy = false;
+    reportsOrder.end();
   }
 }
 
@@ -95,20 +150,18 @@ async function loadBuildInfo(): Promise<void> {
   }
 }
 
+const semanticOrder = writeOrder();
+
 async function loadSemanticState(): Promise<void> {
-  try {
-    semantic.state = await api.semanticState();
-  } catch {
-    semantic.state = null;
-  }
+  const current = semanticOrder.reading();
+  const state = await api.semanticState().catch(() => null);
+  if (current()) semantic.state = state;
 }
 
 async function loadSemanticModels(): Promise<void> {
-  try {
-    semantic.models = await api.semanticModels();
-  } catch {
-    semantic.models = null;
-  }
+  const current = semanticOrder.reading();
+  const models = await api.semanticModels().catch(() => null);
+  if (current()) semantic.models = models;
 }
 
 async function refreshSemantic(): Promise<void> {
@@ -142,6 +195,19 @@ export function semanticModelLabel(model: SemanticModel): string {
   return `${model.label} - ${meta.join(" - ")}`;
 }
 
+/// The model that turning semantic search on would download first, as the
+/// registry names it, or as the server does while the registry has not been
+/// read. Null when the model is on disk, and while nothing has loaded.
+export function semanticModelToDownload(): { name: string; size: string | null } | null {
+  if (!semantic.state) return null;
+  const selected = selectedSemanticModel();
+  if (selected?.downloaded || semantic.state.model_present) return null;
+  return {
+    name: selected?.label ?? semantic.state.model_name,
+    size: selected?.size_label ?? null,
+  };
+}
+
 function semanticRefused(err: unknown): string {
   const refusal = (err as Error).message;
   semantic.error = refusal;
@@ -149,55 +215,69 @@ function semanticRefused(err: unknown): string {
 }
 
 /// Enable or disable semantic search. Enabling downloads the selected model
-/// first when it is not on disk, polling the state while it lands. Never
-/// rejects: it answers the refusal, which is also `semantic.error`, or null
-/// once the write landed.
-export async function setSemanticEnabled(next: boolean): Promise<string | null> {
+/// first when it is not on disk, polling the state while it lands; with
+/// `download` false it downloads nothing, and answers a refusal while the
+/// model is not on disk. Never rejects: it answers the refusal, which is
+/// also `semantic.error` when the server gave it, or null once the write
+/// landed.
+export async function setSemanticEnabled(
+  next: boolean,
+  { download = true }: { download?: boolean } = {},
+): Promise<string | null> {
   if (!semantic.state) return "Semantic search has not loaded";
   if (semantic.downloading || semantic.enabling) return IN_FLIGHT;
+  const onDisk = semanticModelToDownload() === null;
+  if (next && !onDisk && !download) return MODEL_NOT_ON_DISK;
   semantic.error = null;
-  if (!next) {
-    try {
-      semantic.state = await api.semanticDisable();
-      return null;
-    } catch (err) {
-      return semanticRefused(err);
-    }
-  }
-  if (selectedSemanticModel()?.downloaded || semantic.state.model_present) {
-    semantic.enabling = true;
-    try {
-      semantic.state = await api.semanticEnable();
-      return null;
-    } catch (err) {
-      return semanticRefused(err);
-    } finally {
-      semantic.enabling = false;
-    }
-  }
-  semantic.downloading = true;
-  stopSemanticPoll();
-  semanticPollTimer = setInterval(() => {
-    void refreshSemantic();
-  }, SEMANTIC_POLL_INTERVAL_MS);
+  semanticOrder.begin();
   try {
-    semantic.state = await api.semanticDownload();
-    await refreshSemantic();
-    stopSemanticPoll();
-    semantic.enabling = true;
-    try {
-      semantic.state = await api.semanticEnable();
-    } finally {
-      semantic.enabling = false;
+    if (!next) {
+      try {
+        semantic.state = await api.semanticDisable();
+        return null;
+      } catch (err) {
+        return semanticRefused(err);
+      }
     }
-    return null;
-  } catch (err) {
+    if (onDisk) {
+      semantic.enabling = true;
+      try {
+        semantic.state = await api.semanticEnable();
+        return null;
+      } catch (err) {
+        return semanticRefused(err);
+      } finally {
+        semantic.enabling = false;
+      }
+    }
+    semantic.downloading = true;
     stopSemanticPoll();
-    const refusal = semanticRefused(err);
-    await refreshSemantic();
-    return refusal;
+    semanticPollTimer = setInterval(() => {
+      void refreshSemantic();
+    }, SEMANTIC_POLL_INTERVAL_MS);
+    try {
+      semantic.state = await api.semanticDownload();
+      // A poll still on its way saw the model before it landed.
+      stopSemanticPoll();
+      semanticOrder.answered();
+      await refreshSemantic();
+      semantic.enabling = true;
+      try {
+        semantic.state = await api.semanticEnable();
+      } finally {
+        semantic.enabling = false;
+      }
+      return null;
+    } catch (err) {
+      stopSemanticPoll();
+      const refusal = semanticRefused(err);
+      await refreshSemantic();
+      return refusal;
+    } finally {
+      semantic.downloading = false;
+    }
   } finally {
-    semantic.downloading = false;
+    semanticOrder.end();
   }
 }
 
@@ -209,8 +289,10 @@ export async function setSemanticModel(model: string): Promise<string | null> {
   if (semantic.modelBusy || semantic.downloading || semantic.enabling) return IN_FLIGHT;
   semantic.modelBusy = true;
   semantic.error = null;
+  semanticOrder.begin();
   try {
     semantic.state = await api.semanticModelPatch(model);
+    semanticOrder.answered();
     await refreshSemantic();
     return null;
   } catch (err) {
@@ -219,20 +301,21 @@ export async function setSemanticModel(model: string): Promise<string | null> {
     return refusal;
   } finally {
     semantic.modelBusy = false;
+    semanticOrder.end();
   }
 }
 
 // ---- screen lock -----------------------------------------------------------
 
-/// Write a screen lock setting and load it into the running lock, whose
-/// state is what the control and the index both show.
+/// Write a screen lock setting and load the state the write answers with
+/// into the running lock, whose state is what the control and the index both
+/// show. A write that landed is shown, and one that did not rejects.
 export async function patchScreenLock(body: {
   enabled?: boolean;
   timeout_secs?: number;
   theme?: ScreensaverTheme;
 }): Promise<void> {
-  await api.screensaverPatch(body);
-  await loadScreensaverState();
+  applyScreensaverState(await api.screensaverPatch(body));
 }
 
 // ---- the index's reads -----------------------------------------------------
@@ -240,16 +323,26 @@ export async function patchScreenLock(body: {
 let loadedAt: number | null = null;
 let loading = false;
 
+function writeUnderWay(): boolean {
+  return reportsOrder.writing() || semanticOrder.writing();
+}
+
 /// Ask for the reports and semantic state when it has never been read or
 /// has aged out. Safe to call from a derived read: the request starts in a
-/// later turn and nothing is written before it answers. A write in flight
+/// later turn and nothing is written before it answers. A write under way
 /// holds it off, since its answer is the newer state.
 export function refreshWorkspaceStateIfStale(): void {
-  if (workspace.info === null || loading) return;
-  if (reports.busy || semantic.downloading || semantic.enabling || semantic.modelBusy) return;
+  if (workspace.info === null || loading || writeUnderWay()) return;
   if (loadedAt !== null && Date.now() - loadedAt < WORKSPACE_STATE_MAX_AGE_MS) return;
   loading = true;
   queueMicrotask(() => {
+    // A write that began in the turn that asked, as a press that reads the
+    // value and writes its opposite does, holds this off too. A later read
+    // asks again.
+    if (writeUnderWay()) {
+      loading = false;
+      return;
+    }
     // What the binary was built with does not change under a window.
     const semanticLoad = semantic.buildInfo ? refreshSemantic() : loadSemantic();
     void Promise.all([loadReports(), semanticLoad]).finally(() => {
@@ -261,6 +354,8 @@ export function refreshWorkspaceStateIfStale(): void {
 
 export function resetWorkspaceStateForTests(): void {
   stopSemanticPoll();
+  reportsOrder.reset();
+  semanticOrder.reset();
   loadedAt = null;
   loading = false;
   Object.assign(reports, { state: null, busy: false, error: null });

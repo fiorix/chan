@@ -811,7 +811,7 @@
   /// it, each through the command's own function: Download, and Export to
   /// PDF on Markdown.
   const draftActions = $derived<{ main: InspectorAction; secondary: InspectorAction[] }>({
-    main: { command: "app.editor.download", onClick: () => downloadFile(tab) },
+    main: { command: "app.editor.download", onClick: () => void downloadFile(tab) },
     secondary: isMarkdown(tab.path)
       ? [{ command: "app.editor.exportPdf", onClick: () => void exportFileToPdf(tab) }]
       : [],
@@ -1267,12 +1267,15 @@
     <!-- Tab menu bubble. Anchored to the tab title in the pane's
          tab strip; rendered here so it has direct access to the
          live Wysiwyg ref + selVer signal that drives the
-         formatting buttons' "on" states. -->
+         formatting buttons' "on" states. The body menu holds action
+         rows alone and is a menu. The tab menu also holds the Name
+         field and the page width slider, which a menu cannot, so it is
+         a dialog with its action rows in menus inside. -->
     <div
       class="tab-menu-bubble"
-      role="menu"
+      role={tabMenu.source === "body" ? "menu" : "dialog"}
       tabindex="-1"
-      aria-label="tab menu"
+      aria-label={tabMenu.source === "body" ? "editor menu" : "tab menu"}
       use:portal
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
@@ -1388,12 +1391,14 @@
       {:else}
       <div class="action-list">
         {#if isDraftEditorTab}
-          <button class="mbtn" role="menuitem" type="button" onclick={doSaveDraftToWorkspace}>
-            <span class="mbtn-icon">
-              <Save size={18} strokeWidth={1.75} aria-hidden="true" />
-            </span>
-            <span class="mbtn-label">{commandTitle("app.draft.save")}</span>
-          </button>
+          <div class="menu-rows" role="menu" aria-label="draft actions">
+            <button class="mbtn" role="menuitem" type="button" onclick={doSaveDraftToWorkspace}>
+              <span class="mbtn-icon">
+                <Save size={18} strokeWidth={1.75} aria-hidden="true" />
+              </span>
+              <span class="mbtn-label">{commandTitle("app.draft.save")}</span>
+            </button>
+          </div>
         {:else}
           <!-- Editable Name input, like the Terminal tab's. Commits
                on Enter/blur via fileOps.renameInPlace which handles
@@ -1440,6 +1445,7 @@
           </div>
         {/if}
         <div class="msep" role="separator"></div>
+        <div class="menu-rows" role="menu" aria-label="tab actions">
         {#if tabHasOutline(tab)}
           <button
             class="mbtn"
@@ -1543,6 +1549,7 @@
           <span class="mbtn-label">{commandTitle("app.tab.close")}</span>
           <span class="mbtn-chord">{closeTabMenuChordLabel()}</span>
         </button>
+        </div>
       </div>
       {/if}
     </div>
@@ -2027,6 +2034,12 @@
     display: flex;
     flex-direction: column;
     padding-top: 4px;
+  }
+  /* A run of action rows inside the tab menu's dialog: a menu of its own
+     that lays its rows out as the list around it does. */
+  .menu-rows {
+    display: flex;
+    flex-direction: column;
   }
   .mbtn {
     display: flex;

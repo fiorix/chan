@@ -103,10 +103,10 @@ export default {
       await shell(["upload", DIR]);
       await wait("Boolean(document.querySelector('.app-statusbar'))", "the pill");
       if (await read("Boolean(document.querySelector('.app-statusbar.collapsed'))")) await click(".app-statusbar .collapse");
-      await wait("Boolean(document.querySelector('[aria-label=\"show file transfers\"]'))", "the Transfers launcher");
+      await wait("Boolean(document.querySelector('[aria-label=\"Show transfers\"]'))", "the Transfers launcher");
       await wait("document.querySelector('[aria-label=\"status message\"]') === null", "the upload confirmation to clear", 15_000);
       const sections = await read("Array.from(document.querySelectorAll('.app-statusbar .row .section')).map((section) => section.getAttribute('aria-label'))");
-      assert.deepEqual(sections, ["show file transfers"], `the pill holds the Transfers launcher alone: ${JSON.stringify(sections)}`);
+      assert.deepEqual(sections, ["Show transfers"], `the pill holds the Transfers launcher alone: ${JSON.stringify(sections)}`);
     }
     async function pillGone() {
       // The upload's own confirmation clears itself; the closed sections do not come back.

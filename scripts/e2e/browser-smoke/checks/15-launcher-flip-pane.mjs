@@ -78,7 +78,7 @@ export default {
       paneId,
     );
     const sideB = await paneState(page, paneId);
-    if (!sideB.title.startsWith("Flip to side A")) {
+    if (!sideB.title.startsWith("Flip pane to side A")) {
       throw new Error(`unexpected B-side toggle title: ${sideB.title}`);
     }
     if (JSON.stringify(sideB.tabs) !== JSON.stringify(["Dashboard"])) {
@@ -91,7 +91,7 @@ export default {
     await toA.settled("launcher pane to A");
     await toA.assertSettled("launcher pane to A");
     const sideA = await paneState(page, paneId);
-    if (sideA.cardSide !== "A" || !sideA.title.startsWith("Flip to side B")) {
+    if (sideA.cardSide !== "A" || !sideA.title.startsWith("Flip pane to side B")) {
       throw new Error(`pane did not return to side A: ${JSON.stringify(sideA)}`);
     }
     await ctx.shot("side-a-ready");
@@ -118,7 +118,7 @@ export default {
     if (flipped.cardSide !== "B") {
       throw new Error(`pane card still shows side ${flipped.cardSide}, expected B`);
     }
-    if (!flipped.title.startsWith("Flip to side A")) {
+    if (!flipped.title.startsWith("Flip pane to side A")) {
       throw new Error(`unexpected flipped toggle title: ${flipped.title}`);
     }
     if (JSON.stringify(flipped.tabs) !== JSON.stringify(sideB.tabs)) {

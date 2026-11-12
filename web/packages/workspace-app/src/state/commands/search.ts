@@ -37,13 +37,14 @@ registerCommands([
     run: () => void rebuildIndex(),
   },
   {
-    // Listed last in the Workspace section: it is a view choice of the
-    // search overlay, where the rows above act on the workspace.
+    // Listed last in the Workspace section, on an order past every other
+    // row's: it is a view choice of the search overlay, where the rows above
+    // act on the workspace.
     id: "app.search.details",
     title: "Details (search)",
     category: "Search",
     scope: "workspace",
-    order: 8,
+    order: 9,
     kind: "toggle",
     requirement: "workspace",
     keywords: ["Show Details", "Hide Details", "search", "inspector", "preview", "panel"],

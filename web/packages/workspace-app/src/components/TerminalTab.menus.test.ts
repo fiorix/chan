@@ -291,7 +291,7 @@ describe("the body menu", () => {
     expect(masking()).toBe(false);
   });
 
-  test("the toggle flips masking for this terminal only and saves nothing", async () => {
+  test("the toggle flips this terminal's check, from the row and from the command, and saves nothing", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     const { target } = await attached();
     await openBodyMenu(target);
@@ -644,7 +644,7 @@ describe("the menus' roles", () => {
   });
 });
 
-test("the optional privacy override changes a running terminal and restores its choice", async () => {
+test("the optional privacy override checks a running terminal's row, and its own choice shows again without it", async () => {
   const { target } = await attached({ secret_masking: false });
   await openBodyMenu(target);
   expect(masking()).toBe(false);

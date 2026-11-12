@@ -35,8 +35,11 @@ import { isMarkdown } from "../fileTypes";
 import { editorCommandsFor } from "../mountedEditors";
 import {
   activeFileTab,
+  flushTabEdits,
   forceReloadFromDisk,
+  isDirty,
   openTerminalInActivePane,
+  saveDraftEdits,
   saveDraftTabToWorkspace,
   setTabHighlightTrailingWhitespace,
   setTabInspectorOpen,
@@ -45,6 +48,7 @@ import {
   setTabSyntaxHighlight,
   tabHasOutline,
   tabHasStyleToolbar,
+  tabLabel,
   type FileTab,
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
@@ -111,14 +115,37 @@ export async function duplicateFile(tab: FileTab): Promise<void> {
   await fileOps.duplicateFile(tab.path);
 }
 
-/// Download the tab's file as the server holds it, a draft's too: the
+/// Whether the server holds what the tab's editor shows, saving it first
+/// where it does not. A download and an export read the server's copy,
+/// which trails the editor by the autosave's delay and for as long as a save
+/// keeps failing, so each asks this before it reads. The mounted editor
+/// commits the input it buffers, and a tab that then holds unsaved text is
+/// saved. A tab level with the server answers `true` itself, with no
+/// promise to wait on, so its action starts inside the gesture that asked.
+/// A save that fails leaves its reason on the status line (`saveDraftEdits`)
+/// and so does a commit that throws, and either answers no: the action is
+/// refused rather than run on the older text.
+function serverHoldsEditorText(tab: FileTab): boolean | Promise<boolean> {
+  try {
+    flushTabEdits([tab]);
+  } catch (err) {
+    notify(`${tabLabel(tab)} was not saved because its editor could not commit its input (${(err as Error).message}).`);
+    return false;
+  }
+  return isDirty(tab) ? saveDraftEdits(tab) : true;
+}
+
+/// Download the tab's file as the editor shows it, a draft's too: the
 /// desktop's Downloads folder with the transfer bubble's progress, the
 /// browser's own download elsewhere. A standalone window's draft is a file
 /// of the machine and downloads as one. A workspace's is asked for by its
 /// draft identity.
-export function downloadFile(tab: FileTab): void {
-  if (!isDraftClientPath(tab.path)) {
-    fileOps.downloadPathWithProgress(tab.path, false);
+export async function downloadFile(tab: FileTab): Promise<void> {
+  const path = tab.path;
+  const held = serverHoldsEditorText(tab);
+  if (held !== true && !(await held)) return;
+  if (!isDraftClientPath(path)) {
+    fileOps.downloadPathWithProgress(path, false);
     return;
   }
   // The desktop's transfer record keeps a download's path in session
@@ -126,18 +153,21 @@ export function downloadFile(tab: FileTab): void {
   // path is never stored. So the desktop downloads one with no source to
   // retry from, and the browser's own download keeps no record at all.
   if (isTauriDesktop()) {
-    const url = new URL(api.downloadUrl(tab.path), window.location.href).toString();
-    void runDesktopDownload(url, basename(tab.path)).catch(() => {});
+    const url = new URL(api.downloadUrl(path), window.location.href).toString();
+    void runDesktopDownload(url, basename(path)).catch(() => {});
     return;
   }
-  fileOps.downloadPath(tab.path, false);
+  fileOps.downloadPath(path, false);
 }
 
-/// Render the tab's Markdown file to PDF as the server holds it, a draft's
+/// Render the tab's Markdown file to PDF as the editor shows it, a draft's
 /// too; exportPathToPdf reports progress and failure on the status line.
 export async function exportFileToPdf(tab: FileTab): Promise<void> {
-  if (!isMarkdown(tab.path)) return;
-  await exportPathToPdf(tab.path);
+  const path = tab.path;
+  if (!isMarkdown(path)) return;
+  const held = serverHoldsEditorText(tab);
+  if (held !== true && !(await held)) return;
+  await exportPathToPdf(path);
 }
 
 /// Open workspace search on the text selected in the tab's editor, capped

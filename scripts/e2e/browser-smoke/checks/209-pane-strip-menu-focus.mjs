@@ -76,16 +76,18 @@ async function clickStretchOutsideMenu(page) {
   await page.mouse.click(point.x, point.y);
 }
 
-async function commands(page) {
+/// Click the pane menu's Command launcher row, then close the launcher with
+/// Escape; answers whether the menu and the launcher both closed.
+async function launcherRow(page) {
   const point = await page.evaluate(() => {
     const row = [...document.querySelectorAll(".hamburger-menu button")].find(
-      (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "Commands",
+      (button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "Command launcher",
     );
     if (!row) return null;
     const r = row.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   });
-  if (!point) throw new Error("the pane menu has no Commands row");
+  if (!point) throw new Error("the pane menu has no Command launcher row");
   await page.mouse.click(point.x, point.y);
   await page.waitForSelector(LAUNCHER, { visible: true, timeout: 10_000 });
   const menuClosed = await page.waitForSelector(MENU, { hidden: true, timeout: 10_000 }).then(() => true, () => false);
@@ -119,8 +121,8 @@ async function terminalArm(page, file, engine, arm, action, otherPane = false) {
     const host = await centreOf(page, `${TERMINAL} .terminal-host`);
     await page.mouse.click(host.x, host.y);
     closed = await page.waitForSelector(MENU, { hidden: true, timeout: 2_000 }).then(() => true, () => false);
-  } else if (action === "commands") {
-    closed = await commands(page);
+  } else if (action === "launcher") {
+    closed = await launcherRow(page);
   } else if (action === "left") {
     await clickStretchOutsideMenu(page);
     closed = await page.waitForSelector(MENU, { hidden: true, timeout: 2_000 }).then(() => true, () => false);
@@ -163,7 +165,7 @@ async function terminalWindow(ctx, dir, engine, failures) {
     await openTerminal(page, engine);
     const file = join(dir, `${engine}.bytes`);
     await startRecorder(page, file);
-    for (const action of ["control", "escape", "outside", "commands", "left"]) {
+    for (const action of ["control", "escape", "outside", "launcher", "left"]) {
       const result = await terminalArm(page, file, engine, `${engine}-${action}`, action);
       results.push(result);
       checkTerminal(result, failures);
@@ -227,10 +229,10 @@ async function emptyWindow(ctx, failures) {
     if (escape.opened !== "welcome" || !escape.closed || escape.focus !== "welcome") failures.push(`${escape.arm}: ${JSON.stringify(escape)}`);
     await page.mouse.click(welcome.x, welcome.y);
     await openStretch(page);
-    const commandsOpened = await focusOf(page);
-    const commandsClosed = await commands(page);
-    const commandsFocus = await focusOf(page);
-    const command = { arm: "empty-commands", engine: null, opened: commandsOpened, closed: commandsClosed, focus: commandsFocus, pty: null };
+    const launcherOpened = await focusOf(page);
+    const launcherClosed = await launcherRow(page);
+    const launcherFocus = await focusOf(page);
+    const command = { arm: "empty-launcher", engine: null, opened: launcherOpened, closed: launcherClosed, focus: launcherFocus, pty: null };
     results.push(command);
     if (command.opened !== "welcome" || !command.closed || command.focus !== "welcome") failures.push(`${command.arm}: ${JSON.stringify(command)}`);
     await page.mouse.click(welcome.x, welcome.y);

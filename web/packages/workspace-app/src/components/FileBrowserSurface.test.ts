@@ -56,7 +56,16 @@ import {
   tree,
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
-import { layout, paneSide, type BrowserTab, type LeafNode } from "../state/tabs.svelte";
+import {
+  activeBrowserTab,
+  closeTab,
+  layout,
+  paneSide,
+  reopenClosedTab,
+  selectTabInPane,
+  type BrowserTab,
+  type LeafNode,
+} from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 
 class TestResizeObserver {
@@ -227,6 +236,12 @@ afterEach(async () => {
   if (pathPromptState.open) resolvePathPrompt(null);
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
+  // Every test seats a tab under one id, and a tab's view switches last as
+  // long as a layout holds the tab: close them all, so the next test's tab
+  // is a new one.
+  layout.nodes = { [PANE]: { kind: "leaf", id: PANE, tabs: [], activeTabId: null } };
+  layout.rootId = PANE;
+  layout.activePaneId = PANE;
   await settle(2);
   uninstallDemoWorkspace();
   timers.release();
@@ -641,18 +656,103 @@ describe("the menu's toggles and their commands", () => {
     expect(checked(left.title)).toBe("true");
   });
 
-  test("a surface shown again starts from the defaults", async () => {
-    const tab = seat(browserTab());
-    await render({ variant: "tab", tab });
-    commandById("app.browser.hiddenFiles")!.run();
-    commandById("app.browser.selectMultiple")!.run();
+});
+
+// The three switches are a tab's own for as long as the tab is open. A pane
+// draws one surface for whichever of its tabs is active, so the surface goes
+// with every tab switch and the switches must not go with it.
+describe("a tab's switches", () => {
+  const HIDDEN = "app.browser.hiddenFiles";
+  const MULTIPLE = "app.browser.selectMultiple";
+  const KEYS = "app.browser.keyboardHelp";
+
+  function names(target: HTMLElement): string[] {
+    return [...target.querySelectorAll('[role="option"] .name')].map((el) => el.textContent!.trim());
+  }
+
+  /// What the active file browser tab's three switches read, as the catalog
+  /// reports them: hidden files, select multiple, key list.
+  function switches(): Array<string | boolean | null> {
+    return [HIDDEN, MULTIPLE, KEYS].map((id) => commandState(id));
+  }
+
+  /// A pane holding two file browser tabs and a terminal, the first tab
+  /// shown, with a dot entry in the workspace to list or hide.
+  async function paneOfTabs(): Promise<{ target: HTMLElement; pane: LeafNode }> {
+    seat(browserTab());
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs.push(browserTab({ id: "fb-2", title: "Files 2" }), terminalTab({ id: "term-1" }));
+    tree.entries.push({ path: ".cache", is_dir: true, mtime: null, size: 0 });
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Pane, { target, props: { pane } }));
     await settle();
-    expect(commandState("app.browser.hiddenFiles")).toBe(false);
+    return { target, pane };
+  }
+
+  async function show(pane: LeafNode, id: string): Promise<void> {
+    selectTabInPane(pane.id, id);
+    await settle();
+  }
+
+  test("last while the pane shows its other tabs, each tab keeping its own", async () => {
+    const { target, pane } = await paneOfTabs();
+    expect([switches(), names(target)]).toEqual([[true, false, false], [".cache", "notes", "README.md"]]);
+    commandById(HIDDEN)!.run();
+    commandById(KEYS)!.run();
+    await settle();
+    expect([switches(), names(target)]).toEqual([[false, false, true], ["notes", "README.md"]]);
+
+    await show(pane, "fb-2");
+    expect([switches(), names(target)], "the second tab reads its own").toEqual([
+      [true, false, false],
+      [".cache", "notes", "README.md"],
+    ]);
+    commandById(MULTIPLE)!.run();
+    await settle();
+
+    await show(pane, "fb-1");
+    expect([switches(), names(target)], "back on the first").toEqual([[false, false, true], ["notes", "README.md"]]);
+    expect(target.querySelector(".keyboard-help"), "its key list is shown again").not.toBeNull();
+
+    await show(pane, "term-1");
+    expect(target.querySelector(".browser"), "no surface is drawn").toBeNull();
+    await show(pane, "fb-2");
+    expect(switches(), "the second, after a tab that is no file browser").toEqual([true, true, false]);
+    expect(target.querySelector(".selection-mode")).not.toBeNull();
+  });
+
+  test("go when the tab closes, shown or not, and a reopened tab starts from the defaults", async () => {
+    const { pane } = await paneOfTabs();
+    commandById(HIDDEN)!.run();
+    await show(pane, "fb-2");
+    commandById(MULTIPLE)!.run();
+    await settle();
+
+    // The first tab closes in the background, the second while shown.
+    await closeTab(pane.id, "fb-1");
+    await closeTab(pane.id, "fb-2");
+    await settle();
+    expect(pane.tabs.map((tab) => tab.id)).toEqual(["term-1"]);
+
+    expect(reopenClosedTab()).toBe(true);
+    await settle();
+    expect([activeBrowserTab()?.id, switches()]).toEqual(["fb-2", [true, false, false]]);
+    expect(reopenClosedTab()).toBe(true);
+    await settle();
+    expect([activeBrowserTab()?.id, switches()]).toEqual(["fb-1", [true, false, false]]);
+  });
+
+  test("a dock's last as long as the dock is shown", async () => {
+    const target = await render({ variant: "dock", side: "left" });
+    target.querySelector<HTMLButtonElement>(".keyboard-status")!.click();
+    await settle();
+    expect(target.querySelector(".keyboard-help")).not.toBeNull();
 
     for (const app of mounted.splice(0)) unmount(app);
     await settle(2);
-    expect(commandState("app.browser.hiddenFiles")).toBe(true);
-    expect(commandState("app.browser.selectMultiple")).toBe(false);
+    const again = await render({ variant: "dock", side: "left" });
+    expect(again.querySelector(".keyboard-help"), "a dock shown again starts from the defaults").toBeNull();
   });
 });
 

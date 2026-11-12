@@ -349,11 +349,18 @@ function settingRow(
   const write = spec.write;
   if (spec.kind === "toggle" && write) {
     row.kind = "toggle";
-    row.value = stateValue(typeof current === "boolean" ? current : null);
-    // A value that has not loaded cannot be flipped.
-    if (typeof current === "boolean") {
+    // A change still under way reads in place of the value.
+    const progress = spec.progress?.() ?? null;
+    row.value = progress ?? stateValue(typeof current === "boolean" ? current : null);
+    // A value that has not loaded cannot be flipped, nor one that is changing.
+    if (typeof current === "boolean" && progress === null) {
+      // The row writes the opposite of the value it shows. A write that
+      // raises a question puts it on the card each time it is chosen, and
+      // the answer runs the write the question carries.
+      const question = spec.confirm?.(!current) ?? null;
+      if (question) row.confirm = () => question;
       row.after = "stay";
-      row.run = () => write(spec.read() !== true);
+      row.run = question ? question.write : () => write(!current);
     } else {
       row.disabled = true;
     }

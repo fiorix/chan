@@ -155,7 +155,7 @@ async function copyScrollback(page) {
     for (const button of buttons) {
       const label = await button.evaluate((element) => element.textContent?.trim());
       labels.push(label);
-      if (label === "Copy Scrollback") {
+      if (label === "Copy scrollback") {
         await button.click();
         return await poll("the terminal's copied scrollback", async () => {
           const text = await page.evaluate(() => navigator.clipboard.readText());
@@ -163,7 +163,7 @@ async function copyScrollback(page) {
         }, 10_000);
       }
     }
-    throw new Error(`the terminal menu has no Copy Scrollback: ${JSON.stringify(labels)}`);
+    throw new Error(`the terminal menu has no Copy scrollback: ${JSON.stringify(labels)}`);
   } finally {
     await Promise.all(buttons.map((button) => button.dispose()));
   }

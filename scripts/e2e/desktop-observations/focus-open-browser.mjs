@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // One Chrome, kept open for a whole run of focus-open.sh, that makes a
 // launcher's and a window deck's gestures the way a person at a browser
-// does: a pointer click on a row's button, the deck raised by its shortcut
-// and its rows clicked. It reads one command per line on stdin and answers
-// each with one JSON line on stdout, so the shell driver can read X and the
-// devserver between two gestures. It judges nothing.
+// does: a pointer click on a row's button, the deck raised by its shortcut,
+// its rows clicked and an object's page opened with Right. It reads one
+// command per line on stdin and answers each with one JSON line on stdout,
+// so the shell driver can read X and the devserver between two gestures. It
+// judges nothing.
 //
 //   launcher <url>              open the launcher page; answers its page
 //                               number, which `deck` takes
@@ -21,12 +22,22 @@
 //   deck <page> <step>|<step>   raise that page's command deck and take the
 //                               steps in order: a step that is the title
 //                               of a row on show is clicked; any other
-//                               text is typed as a filter and the single
-//                               row left is clicked. `title::path::filter`
-//                               selects exactly one row by title and full
-//                               breadcrumb; filter defaults to title. A last step of `?`
-//                               clicks nothing: the rows then on show are
-//                               answered as `shown` and the deck is closed
+//                               text is typed as a query and the single
+//                               row left is clicked. A click runs the row:
+//                               a window's first action, a new window of a
+//                               workspace, the action an action row names.
+//                               `title::subtitle::query` selects exactly
+//                               one row by title and the whole second line
+//                               the deck prints under it; query defaults
+//                               to title. `>step` opens the row's page with
+//                               Right in place of the click; the steps
+//                               after it are read from that page as it
+//                               stands and never typed, so an action it
+//                               does not list is answered as not offered.
+//                               `@scope` presses that orb of the rail. A
+//                               last step of `?` clicks nothing: the rows
+//                               then on show are answered as `shown` and
+//                               the deck is closed
 //   pages                       every page of the browser, its URL masked
 //   ready <page>                that page's terminal document and app mount
 //   requests                    terminal and window-list request outcomes,
@@ -41,13 +52,18 @@
 // page explicitly lacks or disables an action is an answer (`ok: false`,
 // `notOffered: true`). Instrument errors use `error` or `threw` instead.
 //
-// The selectors are the components' own, read at 3508b079f:
+// The selectors are the components' own:
 // web/packages/launcher/src/components/Library.svelte (.ws-card, .ws-head
 // .row-name, button.chevron, .ws-windows .row), WindowRow.svelte (the
 // buttons' title and aria-label), and
 // web/packages/web-shared/src/components/CommandDeck.svelte (the dialog,
-// its combobox and its rows), raised with Ctrl+Alt+K as the smoke's
-// check 80 does.
+// its combobox, its rows with their title, subtitle, path and value, the
+// rail's orbs and the crumbs), raised with Ctrl+Alt+K as the smoke's
+// check 80 does. The rows and their words are the Computers tree's,
+// web/packages/web-shared/src/command-deck/computers.ts: a list of many
+// objects names a window and prints its workspace under it, a typed query
+// also lists each action as `<verb> <object>`, and an object's own page
+// lists its actions by their card labels (`Show window`).
 //
 // Needs CHROME_BIN and puppeteer-core under the browser smoke's
 // node_modules; OBS_SMOKE_DIR names the smoke's directory when this runs
@@ -190,24 +206,65 @@ async function clickButtonOf(page, row, wanted) {
   return { ok: false, notOffered: true, absent: wanted, buttons: await buttonsOf(row) };
 }
 
+// A row as the deck prints it. `subtitle` is the second line of a row that
+// has one: a window's workspace, or the reason a row cannot run. `path` is
+// the breadcrumb a ranked list prints under a row with no subtitle. `value`
+// is the right column's state, `hidden` on a hidden window's own row.
 const deckRows = (page) =>
   page.$$eval(DECK_ROW, (rows) =>
     rows.map((r) => ({
       title: r.querySelector(".deck-result-title")?.textContent?.trim() ?? "",
+      subtitle: r.querySelector(".deck-result-subtitle")?.textContent?.trim() ?? "",
       path: r.querySelector(".deck-result-path")?.textContent?.trim() ?? "",
+      value: r.querySelector(".deck-result-value")?.textContent?.trim() ?? "",
       disabled: r.disabled === true,
     })),
   );
 
 async function clickDeckRow(page, index) {
   const row = (await page.$$(DECK_ROW))[index];
+  // A list longer than its panel scrolls, and the pointer reaches only the
+  // rows inside the panel.
+  await row.evaluate((r) => r.scrollIntoView({ block: "nearest" }));
   const box = await row.boundingBox();
   if (!box) throw new Error("a deck row is not on screen");
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 }
 
+// Open the page of the row at `index`: the arrow keys move the selection one
+// row a press, and Right opens the selected row's page without running it.
+async function openDeckRowPage(page, index, title) {
+  const selected = () =>
+    page.$$eval(DECK_ROW, (rows) => rows.findIndex((r) => r.getAttribute("aria-selected") === "true"));
+  let at = await selected();
+  if (at < 0) throw new Error("the deck has no selected row to move from");
+  for (; at < index; at++) await page.keyboard.press("ArrowDown");
+  for (; at > index; at--) await page.keyboard.press("ArrowUp");
+  if ((await selected()) !== index) throw new Error(`the arrow keys did not reach the row of ${title}`);
+  await page.keyboard.press("ArrowRight");
+  // The crumbs end with the name of the page the deck stands on.
+  await page.waitForFunction(
+    (deck, name) => [...document.querySelectorAll(`${deck} .deck-crumb`)].at(-1)?.textContent?.trim() === name,
+    { timeout: 5_000 },
+    DECK,
+    title,
+  );
+}
+
+// Dismiss the deck: Esc leaves a page one level at a time and closes it at
+// the root.
+async function closeDeck(page) {
+  for (let i = 0; i < 6 && (await page.$(DECK)); i++) {
+    await page.keyboard.press("Escape");
+    await wait(200);
+  }
+}
+
 async function deck(page, steps) {
   await page.bringToFront();
+  // The shortcut toggles the deck, so one an earlier gesture or a failed
+  // step left open is dismissed first.
+  await closeDeck(page);
   await page.keyboard.down("Control");
   await page.keyboard.down("Alt");
   await page.keyboard.press("KeyK");
@@ -218,57 +275,97 @@ async function deck(page, steps) {
   } catch {
     return { ok: false, error: "the command deck did not open" };
   }
+  // A deck dismissed with a query typed opens on that query again. The
+  // steps read the root as it lists with none.
+  await wait(200);
+  if (await page.$eval(DECK_INPUT, (input) => input.value !== "")) {
+    await page.focus(DECK_INPUT);
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyA");
+    await page.keyboard.up("Control");
+    await page.keyboard.press("Backspace");
+  }
   const done = [];
   const list = steps.at(-1) === "?";
   if (list) steps = steps.slice(0, -1);
+  // Whether the deck stands on an object's page, opened by an earlier step.
+  let onPage = false;
   for (const step of steps) {
-    const parts = step.split("::");
-    if (parts.length !== 1 && parts.length !== 2 && parts.length !== 3) {
-      return { ok: false, error: "an exact deck step needs title::path::filter", done, failedAt: step };
+    if (step.startsWith("@")) {
+      const orb = await page.$(`${DECK} button.deck-scope[title="${step.slice(1)}"]:not(:disabled)`);
+      if (!orb) {
+        const offered = await page.$$eval(`${DECK} button.deck-scope:not(:disabled)`, (orbs) => orbs.map((o) => o.getAttribute("title") ?? ""));
+        await closeDeck(page);
+        return { ok: false, error: `the deck's rail has no ${step.slice(1)} orb to press`, done, failedAt: step, scopes: offered };
+      }
+      const box = await orb.boundingBox();
+      if (!box) throw new Error("a rail orb is not on screen");
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await page.waitForSelector(`${DECK} button.deck-scope[title="${step.slice(1)}"][aria-pressed="true"]`, { timeout: 5_000 });
+      done.push({ step, scope: step.slice(1) });
+      onPage = false;
+      continue;
     }
-    const [title, path, filter = title] = parts;
-    if (!title || (parts.length > 1 && (!path || !filter))) {
-      return { ok: false, error: "an exact deck step has an empty title, path or filter", done, failedAt: step };
+    const opens = step.startsWith(">");
+    const parts = (opens ? step.slice(1) : step).split("::");
+    if (parts.length !== 1 && parts.length !== 2 && parts.length !== 3) {
+      await closeDeck(page);
+      return { ok: false, error: "an exact deck step needs title::subtitle::query", done, failedAt: step };
+    }
+    const [title, subtitle, query = title] = parts;
+    if (!title || (parts.length > 1 && (!subtitle || !query))) {
+      await closeDeck(page);
+      return { ok: false, error: "an exact deck step has an empty title, subtitle or query", done, failedAt: step };
     }
     const exact = parts.length > 1;
+    const named = (rows) => rows.map((r, i) => (r.title === title && (!exact || r.subtitle === subtitle) ? i : -1)).filter((i) => i >= 0);
     await wait(400);
     let rows = await deckRows(page);
-    let matches = rows.map((r, i) => (r.title === title && (!exact || r.path === path) ? i : -1)).filter((i) => i >= 0);
+    let matches = named(rows);
     let at = matches.length === 1 ? matches[0] : -1;
+    if (at < 0 && onPage) {
+      // An object's page lists its actions whole, so one it does not list is
+      // not offered on that object.
+      await closeDeck(page);
+      if (matches.length === 0) return { ok: false, notOffered: true, done, failedAt: step, offered: rows.slice(0, 12) };
+      return { ok: false, error: `the page lists ${matches.length} rows named ${step}`, done, failedAt: step, offered: rows.slice(0, 12) };
+    }
     if (at < 0) {
-      // Not a title on show: a filter. It must leave one row, or one row
+      // Not a title on show: a query. It must leave one row, or one row
       // whose title is the text itself.
-      await page.type(DECK_INPUT, filter);
+      await page.type(DECK_INPUT, query);
       await wait(600);
       rows = await deckRows(page);
-      matches = rows.map((r, i) => (r.title === title && (!exact || r.path === path) ? i : -1)).filter((i) => i >= 0);
+      matches = named(rows);
       if (matches.length === 1) {
         at = matches[0];
       } else if (!exact && rows.length === 1) {
         at = 0;
       } else {
-        await page.keyboard.press("Escape");
+        await closeDeck(page);
         if (!exact && rows.length === 0) return { ok: false, notOffered: true, done, failedAt: step, offered: [] };
-        return { ok: false, error: `the filter for ${step} found ${matches.length} exact rows among ${rows.length} visible rows`, done, failedAt: step, offered: rows.slice(0, 12) };
+        return { ok: false, error: `the query for ${step} found ${matches.length} exact rows among ${rows.length} visible rows`, done, failedAt: step, offered: rows.slice(0, 12) };
       }
     }
     if (rows[at].disabled) {
-      await page.keyboard.press("Escape");
+      await closeDeck(page);
       if (exact) return { ok: false, error: `the exact deck row ${step} is disabled`, done, failedAt: step, offered: rows.slice(0, 12) };
       return { ok: false, notOffered: true, done, failedAt: step, disabled: true, offered: rows.slice(0, 12) };
     }
     done.push({ step, took: rows[at] });
-    await clickDeckRow(page, at);
+    if (opens) {
+      await openDeckRowPage(page, at, title);
+      onPage = true;
+    } else {
+      await clickDeckRow(page, at);
+    }
   }
   if (!list) return { ok: true, done };
   // A listing: what the deck offers here, then the deck closed again. A
   // gesture's deck is left alone, since its action may still be running.
   await wait(600);
   const shown = (await page.$(DECK)) ? (await deckRows(page)).slice(0, 30) : [];
-  for (let i = 0; i < 4 && (await page.$(DECK)); i++) {
-    await page.keyboard.press("Escape");
-    await wait(200);
-  }
+  await closeDeck(page);
   return { ok: true, done, shown };
 }
 

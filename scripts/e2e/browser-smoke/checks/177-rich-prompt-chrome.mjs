@@ -1,12 +1,12 @@
 // The Rich Prompt's chrome on a phone. At 390 by 844 with a touch screen
 // emulated, the card opens from the terminal menu; its close button lies on
 // the screen and a tap hides the card, whose draft is there when it opens
-// again; the menu's Show Style Toolbar row floats the toolbar over the text
-// area with the first row below it; the source toggle swaps the card to source
-// and back with no scroller or paint of the source editor's own; and a bold
-// tapped on the toolbar reaches the text the card sends. The card's first
-// message starts `cat` into a workspace file, which is how the check reads
-// what the card sends; either terminal backend serves.
+// again; the menu's Rich Prompt style toolbar row floats the toolbar over the
+// text area with the first row below it; the source toggle swaps the card to
+// source and back with no scroller or paint of the source editor's own; and a
+// bold tapped on the toolbar reaches the text the card sends. The card's
+// first message starts `cat` into a workspace file, which is how the check
+// reads what the card sends; either terminal backend serves.
 
 import assert from "node:assert/strict";
 import { readFileSync, rmSync } from "node:fs";
@@ -25,14 +25,15 @@ function rectOf(page, selector) {
   });
 }
 
-/// Open the terminal's menu, as a long press does, and tap the row named
-/// once the row is at rest. The menu pops in, scaling up from its top-left
-/// corner, and is placed again a frame after it mounts, so a row's box read
-/// early lies above the row's place a few frames later: a tap aimed from
-/// that box and landing late, as on a busy machine, reaches the row above,
-/// which closes the menu without the named row's command. At rest is no
-/// animation running or waiting to start in the menu, and the row's box the
-/// same on two frames in a row.
+/// Open the terminal's menu, as a long press does, and tap the toggle row
+/// named, which must read off, once the row is at rest. A toggle's row is
+/// named for what it shows and carries a check while that is on. The menu
+/// pops in, scaling up from its top-left corner, and is placed again a frame
+/// after it mounts, so a row's box read early lies above the row's place a
+/// few frames later: a tap aimed from that box and landing late, as on a busy
+/// machine, reaches the row above, which closes the menu without the named
+/// row's command. At rest is no animation running or waiting to start in the
+/// menu, and the row's box the same on two frames in a row.
 async function tapMenuRow(page, label) {
   await page.$eval(".terminal-tab.active", (el) => el.dispatchEvent(new MouseEvent("contextmenu", {
     bubbles: true, cancelable: true, clientX: 40, clientY: 160,
@@ -41,7 +42,7 @@ async function tapMenuRow(page, label) {
   await page.evaluate(() => { delete window.__check177RowBox; });
   await page.waitForFunction((label) => {
     const menu = document.querySelector(".terminal-tab-menu-bubble");
-    const row = [...document.querySelectorAll("button.mbtn")]
+    const row = [...document.querySelectorAll('button.mbtn[role="menuitemcheckbox"][aria-checked="false"]')]
       .find((b) => b.querySelector(".mbtn-label")?.textContent?.trim() === label);
     if (!menu) return false;
     // A missing row is the assertion's to report, below.
@@ -56,9 +57,9 @@ async function tapMenuRow(page, label) {
     window.__check177RowBox = box;
     return still;
   }, { timeout: 10_000, polling: "raf" }, label);
-  const row = (await page.evaluateHandle((label) => [...document.querySelectorAll("button.mbtn")]
+  const row = (await page.evaluateHandle((label) => [...document.querySelectorAll('button.mbtn[role="menuitemcheckbox"][aria-checked="false"]')]
     .find((b) => b.querySelector(".mbtn-label")?.textContent?.trim() === label) ?? null, label)).asElement();
-  assert.ok(row, `the terminal menu has a "${label}" row`);
+  assert.ok(row, `the terminal menu has a "${label}" row that reads off`);
   await row.tap();
   await page.waitForFunction(() => !document.querySelector("button.mbtn"), { timeout: 10_000 });
 }
@@ -114,7 +115,7 @@ export default {
       await sleep(2500);
 
       // The card opens from the terminal menu; its first message starts `cat`.
-      await tapMenuRow(page, "Show Rich Prompt");
+      await tapMenuRow(page, "Rich Prompt");
       await page.waitForSelector(`${CARD} .cm-content`, { visible: true, timeout: 15_000 });
       await typeInCard(page, `cat > ${sentPath}`);
       await tapControl(page, `${CARD} .rp-primary`);
@@ -132,14 +133,14 @@ export default {
       await typeInCard(page, "kept draft");
       await tapControl(page, `${CARD} button[aria-label="Close Rich Prompt"]`);
       await page.waitForFunction((card) => !document.querySelector(card), { timeout: 10_000 }, CARD);
-      await tapMenuRow(page, "Show Rich Prompt");
+      await tapMenuRow(page, "Rich Prompt");
       await page.waitForSelector(`${CARD} .cm-content`, { visible: true, timeout: 15_000 });
       await page.waitForFunction((card) => document.querySelector(`${card} .cm-content`)?.textContent?.includes("kept draft"),
         { timeout: 10_000 }, CARD);
 
       // The toolbar row floats the toolbar over the text area, the first row
       // below it.
-      await tapMenuRow(page, "Show Style Toolbar");
+      await tapMenuRow(page, "Rich Prompt style toolbar");
       await page.waitForSelector(TOOLBAR, { visible: true, timeout: 10_000 });
       // The first row moves down with a short padding transition; read it
       // once it has settled.

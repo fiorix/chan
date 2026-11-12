@@ -21,6 +21,19 @@ async function row(page, surface, name) {
   return null;
 }
 
+/// The open file browser menu's left dock row while its check reads `docked`.
+/// The row is named for the dock and its check says whether the dock is open.
+async function leftDockRow(page, docked) {
+  for (const button of await page.$$('button[role="menuitemcheckbox"]')) {
+    const row = await button.evaluate((node) => ({
+      label: node.querySelector(".menu-row-label")?.textContent?.trim(),
+      checked: node.getAttribute("aria-checked"),
+    }));
+    if (row.label === "Left file browser dock" && row.checked === String(docked)) return button;
+  }
+  return null;
+}
+
 /// The row in `surface` whose hover title names `path`, excluding its optional kind note.
 async function rowAt(page, surface, path) {
   await page.waitForSelector(surface, { visible: true, timeout: 15_000 });
@@ -340,12 +353,7 @@ export default {
         await page.$eval(TAB, (listing) => listing.closest('[role="presentation"]').dispatchEvent(new MouseEvent("contextmenu", {
           bubbles: true, cancelable: true, clientX: 200, clientY: 200,
         })));
-        const stick = await waitFor("Stick to left menu action", 10_000, async () => {
-          for (const button of await page.$$("button[role=menuitem]")) {
-            if ((await button.evaluate((node) => node.textContent?.trim())) === "Stick to left") return button;
-          }
-          return null;
-        });
+        const stick = await waitFor("the unchecked Left file browser dock menu row", 10_000, () => leftDockRow(page, false));
         await stick.click();
         openedLeftDock = true;
       }
@@ -434,12 +442,7 @@ export default {
             await page.$eval(DOCK, (listing) => listing.closest('[role="presentation"]').dispatchEvent(new MouseEvent("contextmenu", {
               bubbles: true, cancelable: true, clientX: 200, clientY: 200,
             })));
-            const unstick = await waitFor("Unstick left menu action", 10_000, async () => {
-              for (const button of await page.$$("button[role=menuitem]")) {
-                if ((await button.evaluate((node) => node.textContent?.trim())) === "Unstick left") return button;
-              }
-              return null;
-            });
+            const unstick = await waitFor("the checked Left file browser dock menu row", 10_000, () => leftDockRow(page, true));
             await unstick.click();
             await waitFor("left dock restored in config and DOM", 15_000, () => dockState(false));
           }

@@ -781,6 +781,9 @@
     }
     if (entry.recent) noteCommandRun(entry.recent);
     if (entry.after === "stay") {
+      // A row that asked first has its answer: the card gives way to the
+      // list, where the row shows the change.
+      if (launcherDraft.operation?.kind === "confirm") launcherDraft.operation = null;
       await runInPlace(entry, item);
       return;
     }

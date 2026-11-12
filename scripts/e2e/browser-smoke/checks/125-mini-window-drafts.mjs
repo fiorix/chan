@@ -44,13 +44,19 @@ async function richPromptChord(page) {
     buttons.map((b) => [
       b.querySelector(".mbtn-label")?.textContent?.trim() ?? "",
       b.querySelector(".mbtn-chord")?.textContent?.trim() ?? "",
+      b.getAttribute("role"),
+      b.getAttribute("aria-checked"),
     ]));
   // Close it with a press on the terminal outside it. Escape would reach the
   // focused terminal, which takes the key before the menu's window listener.
   await page.mouse.click(terminal.left + 24, terminal.top + 24);
   await page.waitForSelector(TERMINAL_MENU, { hidden: true, timeout: 10_000 });
-  const row = rows.find(([label]) => label === "Show Rich Prompt");
-  if (!row) throw new Error(`the terminal menu has no Show Rich Prompt row: ${JSON.stringify(rows)}`);
+  // The row is a toggle: its name, with a check while the composer is open.
+  const row = rows.find(([label, , role]) => label === "Rich Prompt" && role === "menuitemcheckbox");
+  if (!row) throw new Error(`the terminal menu has no Rich Prompt toggle row: ${JSON.stringify(rows)}`);
+  if (row[3] !== "false") {
+    throw new Error(`the Rich Prompt row is checked with no composer open: ${JSON.stringify(row)}`);
+  }
   const parts = row[1].split("+");
   const letter = parts.pop();
   const modifiers = parts.map((part) => MODIFIER_KEYS[part]);

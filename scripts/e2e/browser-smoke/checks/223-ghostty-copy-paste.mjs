@@ -21,7 +21,7 @@
 //                 copies on release.
 //   chord      -- Ctrl+Shift+C over that selection.
 //   menu       -- the body menu's Copy row over that selection.
-//   scrollback -- the body menu's Copy Scrollback: the prompt and the command.
+//   scrollback -- the body menu's Copy scrollback: the prompt and the command.
 //   word       -- a double click on WORD's first row: the whole of WORD.
 //   line       -- a triple click on the command's second row: the prompt and
 //                 the command.
@@ -267,7 +267,7 @@ export default {
       await ctx.shot("223-selected");
       expectCopy("chord", await copied(page, () => chord(page, "KeyC")), command);
       expectCopy("menu", await copied(page, () => menuRow(page, first, "Copy")), command);
-      expectCopy("scrollback", await copied(page, () => menuRow(page, first, "Copy Scrollback")), line);
+      expectCopy("scrollback", await copied(page, () => menuRow(page, first, "Copy scrollback")), line);
       const inWord = await cellCentre(a.term, start + 3, 0);
       expectCopy("word", await copied(page, () => page.mouse.click(inWord.x, inWord.y, { count: 2 })), word);
       await ctx.shot("223-word");

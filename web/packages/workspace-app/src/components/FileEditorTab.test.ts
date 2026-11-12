@@ -259,12 +259,16 @@ function bubble(): HTMLElement | null {
   return document.body.querySelector<HTMLElement>(".tab-menu-bubble");
 }
 
+/// The open menu's separators, fields and action rows in the order they
+/// show, whichever of them sit inside one of the tab menu's own menus.
+function menuParts(): Element[] {
+  return [...(bubble()?.querySelectorAll(".action-list :is(.msep, .name-row, .page-width-row, .mbtn)") ?? [])];
+}
+
 /// The menu's rows in order: "---" for a separator, "Name" for the name row,
 /// "Page width" for the slider row, else the button's label.
 function menuRows(): string[] {
-  const list = bubble()?.querySelector(".action-list");
-  if (!list) return [];
-  return [...list.children].map((el) => {
+  return menuParts().map((el) => {
     if (el.getAttribute("role") === "separator") return "---";
     if (el.classList.contains("name-row")) return "Name";
     if (el.classList.contains("page-width-row")) return "Page width";
@@ -897,9 +901,7 @@ describe("where a menu row's words come from", () => {
 
   /// The visible words of every row of the open menu, in order.
   function menuLabels(): string[] {
-    const list = bubble()?.querySelector(".action-list");
-    if (!list) return [];
-    return [...list.children]
+    return menuParts()
       .filter((el) => el.getAttribute("role") !== "separator")
       .map((el) =>
         (el.querySelector(".mbtn-label, .name-label, .page-width-label")?.textContent ?? "").trim(),
@@ -1133,6 +1135,48 @@ describe("a menu row and its command", () => {
     expect(vi.mocked(exportPathToPdf).mock.calls).toEqual([[path], [path]]);
   });
 
+  // The two actions read the server's copy, which trails the editor by the
+  // autosave's delay and for as long as a save keeps failing.
+  test("a draft's Details actions save what was typed before they send the draft, and send nothing when the save fails", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, inspectorOpen: true }));
+    const { target } = await render(tab);
+    const seen: string[] = [];
+    let refusal: Error | null = null;
+    vi.spyOn(api, "write").mockImplementation(async (_path, content) => {
+      seen.push(`write ${content.split("\n")[0]}`);
+      if (refusal) throw refusal;
+      return { mtime: 200, mtime_ns: "200" };
+    });
+    vi.spyOn(fileOps, "downloadPath").mockImplementation(() => void seen.push("download"));
+    vi.mocked(exportPathToPdf).mockImplementation(async () => void seen.push("export"));
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    const type = async (text: string): Promise<void> => {
+      editorView(target).dispatch({ changes: { from: 0, insert: text } });
+      await settle(1);
+    };
+
+    await type("one ");
+    details.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    await vi.waitFor(() => expect(seen).toEqual(["write one # Plan", "download"]));
+
+    seen.splice(0);
+    await type("two ");
+    details.querySelector<HTMLButtonElement>(".pill-caret")!.click();
+    flushSync();
+    details.querySelector<HTMLButtonElement>(".action-menu-item")!.click();
+    await vi.waitFor(() => expect(seen).toEqual(["write two one # Plan", "export"]));
+
+    seen.splice(0);
+    refusal = new Error("no space left on device");
+    await type("three ");
+    details.querySelector<HTMLButtonElement>(".pill-main")!.click();
+    await vi.waitFor(() =>
+      expect(ui.status).toMatch(/was not saved because the save request failed \(no space left on device\)\.$/),
+    );
+    expect(seen, "the save was tried and nothing was sent").toEqual(["write three two one # Plan"]);
+  });
+
   test("a workspace draft that is not Markdown offers Download alone", async () => {
     const tab = seat(
       fileTab({ path: draftPath("untitled-1", "data.json"), fileKind: "text", mode: "source", content: "{}", saved: "{}", inspectorOpen: true }),
@@ -1145,10 +1189,29 @@ describe("a menu row and its command", () => {
   });
 });
 
-// A menu role is true inside a menu. Both of the editor's menus are menus,
-// so every action row of either is a menu item, and a row with a check a
-// menu item checkbox.
+// A menu role is true inside a menu, and a menu holds items alone. The body
+// menu is a menu of action rows. The tab menu also holds the Name field and
+// the page width slider, so it is a dialog, and its action rows sit in menus
+// inside it. Every action row of either is a menu item, and a row with a
+// check a menu item checkbox.
 describe("the menus' roles", () => {
+  /// The menus inside the open tab menu, each as its name and the roles of
+  /// what it holds.
+  function innerMenus(): Array<[string | null, Array<string | null>]> {
+    return [...bubble()!.querySelectorAll<HTMLElement>('[role="menu"]')].map((menu) => [
+      menu.getAttribute("aria-label"),
+      [...menu.children].map((child) => child.getAttribute("role")),
+    ]);
+  }
+
+  /// The labels of the open menu's items that no menu holds.
+  function itemsOutsideAMenu(): string[] {
+    const root = bubble()!;
+    return [...root.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemcheckbox"]')]
+      .filter((item) => item.closest('[role="menu"]') === null)
+      .map((item) => item.querySelector(".mbtn-label")?.textContent?.trim() ?? "");
+  }
+
   /// Every button of the open menu, as its label and its role.
   function buttonRoles(): Array<[string, string | null]> {
     return [...bubble()!.querySelectorAll<HTMLButtonElement>("button")].map((button) => [
@@ -1190,12 +1253,67 @@ describe("the menus' roles", () => {
     );
   });
 
+  test("the body menu holds no field, and every item of it is the menu's own", async () => {
+    await openFullBodyMenu();
+
+    expect(bubble()!.querySelectorAll("input")).toHaveLength(0);
+    expect(itemsOutsideAMenu()).toEqual([]);
+  });
+
+  test("the tab menu is a dialog that holds its two fields, with its action rows in a menu of items alone", async () => {
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+    const dialog = bubble()!;
+
+    expect([dialog.getAttribute("role"), dialog.getAttribute("aria-label")]).toEqual(["dialog", "tab menu"]);
+    expect(innerMenus()).toEqual([
+      [
+        "tab actions",
+        [
+          "menuitemcheckbox",
+          "menuitemcheckbox",
+          "menuitemcheckbox",
+          "separator",
+          "menuitem",
+          "menuitem",
+          "menuitem",
+          "menuitem",
+          "separator",
+          "menuitem",
+          "menuitem",
+        ],
+      ],
+    ]);
+    expect(itemsOutsideAMenu()).toEqual([]);
+    // The Name field and the page width slider, neither inside a menu.
+    const fields = [...dialog.querySelectorAll("input")];
+    expect(fields.map((field) => field.getAttribute("aria-label"))).toEqual([
+      "file path",
+      settingEntry("editor.pageWidth").label,
+    ]);
+    expect(fields.filter((field) => field.closest('[role="menu"]') !== null)).toEqual([]);
+  });
+
+  test("a draft's tab menu holds Save draft in a menu of its own, before the slider", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    await openMenu(tab);
+
+    expect(bubble()!.getAttribute("role")).toBe("dialog");
+    expect(innerMenus().map(([name]) => name)).toEqual(["draft actions", "tab actions"]);
+    expect(innerMenus()[0]![1]).toEqual(["menuitem"]);
+    const held = innerMenus().flatMap(([, roles]) => roles);
+    expect(held.filter((role) => !["menuitem", "menuitemcheckbox", "separator"].includes(role ?? ""))).toEqual([]);
+    expect(itemsOutsideAMenu()).toEqual([]);
+    expect(menuRows().slice(0, 3)).toEqual([commandById("app.draft.save")!.title, "---", "Page width"]);
+  });
+
   test("every action row of the tab menu is a menu item, a view row a checkbox", async () => {
     const tab = seat(fileTab());
     await render(tab);
     await openMenu(tab);
 
-    expect(bubble()!.getAttribute("role")).toBe("menu");
     expect(buttonRoles()).toEqual([
       ["Outline", "menuitemcheckbox"],
       ["Details", "menuitemcheckbox"],

@@ -195,6 +195,23 @@ describe("the overlay renders exactly the index, section by section", () => {
     expect(ids).not.toContain("global.paneStrip");
   });
 
+  test("file browser, in a window with no workspace, offers no dock: the window mirrors none", async () => {
+    const ids = await expectCovered("browser");
+    expect(ids).toEqual(["browser.vim", "browser.bodyTheme"]);
+  });
+
+  test("file browser, in a workspace window, offers both docks", async () => {
+    workspace.info = demoWorkspaceInfo(
+      {
+        metadata: { workspaceRoot: "/ws", label: "ws", generatedAt: 1, fileCount: 0, textCount: 0 },
+        files: [],
+      },
+      settingsPreferences(),
+    );
+    const ids = await expectCovered("browser");
+    expect(ids).toEqual(["browser.leftDock", "browser.rightDock", "browser.vim", "browser.bodyTheme"]);
+  });
+
   test("a window with no workspace has no This workspace section, and the index offers none of it", async () => {
     const { target } = await openSettings("Global");
     const tabs = [...target.querySelectorAll(".section-tab")].map(text);

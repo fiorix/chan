@@ -1,4 +1,4 @@
-// "Graph from here" on a directory must come up showing that directory's
+// "New graph here" on a directory must come up showing that directory's
 // files. Three legs, each reading the stat line of the tab it opened:
 //
 //   1. a directory with files among its immediate children, which must
@@ -151,13 +151,13 @@ async function graphFromRow(page, scope, relPath) {
   await page.waitForSelector('[role="menu"][aria-label="File actions"]', { visible: true, timeout: 15_000 });
   const clicked = await page.evaluate(() => {
     const button = [...document.querySelectorAll('[role="menu"][aria-label="File actions"] [role="menuitem"]')].find(
-      (candidate) => candidate.querySelector(".menu-row-label")?.textContent?.trim() === "New Graph",
+      (candidate) => candidate.querySelector(".menu-row-label")?.textContent?.trim() === "New graph here",
     );
     if (!(button instanceof HTMLElement)) return false;
     button.click();
     return true;
   });
-  if (!clicked) throw new Error(`row menu "New Graph" vanished: ${relPath}`);
+  if (!clicked) throw new Error(`row menu "New graph here" vanished: ${relPath}`);
 }
 
 export default {
@@ -280,7 +280,7 @@ export default {
     const deepMinNodes = deepShape.childDirs + deepShape.filesAtShallowest + 2;
     if (deep.visibleNodes < deepMinNodes) {
       throw new Error(
-        `"Graph from here" on ${DEEP} came up without its files: ` +
+        `"New graph here" on ${DEEP} came up without its files: ` +
           `${JSON.stringify(evidence)} (expected >= ${deepMinNodes} nodes)`,
       );
     }
@@ -293,7 +293,7 @@ export default {
     const minEdges = spine.directFiles + 1;
     if (fromHere.visibleNodes < minNodes || fromHere.visibleEdges < minEdges) {
       throw new Error(
-        `"Graph from here" on ${DIR} came up without its files: ` +
+        `"New graph here" on ${DIR} came up without its files: ` +
           `${JSON.stringify(evidence)} (expected >= ${minNodes} nodes, >= ${minEdges} edges)`,
       );
     }
