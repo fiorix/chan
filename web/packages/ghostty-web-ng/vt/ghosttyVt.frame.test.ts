@@ -181,6 +181,56 @@ describe("the frame reader's rows", () => {
     }
   });
 
+  test("a row's style ids name its own page's styles", async () => {
+    // The core keeps rows in pages, each with styles of its own, so a style
+    // id names a style of the page its row is on. Lines that take two styles
+    // in one order fill a page until the cursor's row is the next page's
+    // first; a line written there takes them in the other order, so the same
+    // ids name the other styles than in the rows above it on the screen.
+    const { vt, exports } = await core();
+    const t = vt.createTerminal(80, 24, { scrollbackLimit: 100_000 });
+    const handle = (t as unknown as Internals).handle;
+    const buf = exports.ghostty_wasm_alloc(64);
+    const P = LAYOUT.GhosttyPoint.fields;
+    const C = LAYOUT.GhosttyPointCoordinate.fields;
+    /// The page node and the style id of the first cell of screen row `y`.
+    const ref = (y: number) => {
+      const view = new DataView(exports.memory.buffer);
+      view.setInt32(buf + P.tag, ABI.GhosttyPointTag.ACTIVE, true);
+      view.setUint16(buf + P.value + C.x, 0, true);
+      view.setUint32(buf + P.value + C.y, y, true);
+      expect(exports.ghostty_terminal_grid_ref(handle, buf, buf + 32)).toBe(ABI.GhosttyResult.SUCCESS);
+      expect(exports.ghostty_grid_ref_cell(buf + 32, buf + 48)).toBe(ABI.GhosttyResult.SUCCESS);
+      const after = new DataView(exports.memory.buffer);
+      const raw = after.getBigUint64(buf + 48, true);
+      const [lsb, width] = CELL_BITS.style_id;
+      return {
+        node: after.getUint32(buf + 32 + LAYOUT.GhosttyGridRef.fields.node, true),
+        styleId: Number((raw >> BigInt(lsb)) & ((1n << BigInt(width)) - 1n)),
+      };
+    };
+    t.write("\x1b[24;1H");
+    const first = ref(23).node;
+    for (let i = 0; ref(23).node === first; i++) {
+      expect(i, "a new page within 100,000 lines").toBeLessThan(100_000);
+      t.write(`\x1b[1;31mA${i}\x1b[0m \x1b[3;32mB\x1b[0m\r\n`);
+    }
+    t.write("\x1b[3;32mB\x1b[0m \x1b[1;31mA\x1b[0m");
+    const top = ref(0);
+    const bottom = ref(23);
+    expect(bottom.node, "the screen's last row is on another page").not.toBe(top.node);
+    expect(bottom.styleId, "the same id on both pages").toBe(top.styleId);
+    const view = new VtCells();
+    const flags: number[] = [];
+    for (let y = 0; y < t.rows; y++) {
+      expect(t.readRow(y, view)).toBe(true);
+      flags.push(view.at(0)!.flags);
+      expect(cellsOf(view), `row ${y}`).toEqual(coreRow(exports, handle, y));
+    }
+    expect(flags[0], "bold on the first page").toBe(VtFlag.BOLD);
+    expect(flags[23], "italic on the second").toBe(VtFlag.ITALIC);
+  });
+
   test("a row reads the same from the history as it read on the screen", async () => {
     const { vt } = await core();
     const t = vt.createTerminal(80, 12, { palette: [0, 0xaa0000] });
