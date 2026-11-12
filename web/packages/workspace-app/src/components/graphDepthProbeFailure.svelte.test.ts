@@ -256,9 +256,11 @@ describe("a depth probe whose request fails", () => {
   });
 });
 
+// The filesystem graph of the whole workspace probes the root. The semantic
+// graph reads its depth range from the tree it loaded and probes nothing.
 describe("the workspace-scope probe", () => {
   test("a failure is asked for once, not in a loop", async () => {
-    render(graphTab({ mode: "semantic", scopeId: "workspace" }));
+    render(graphTab({ scopeId: "workspace" }));
     await settle();
 
     const asked = dirProbes("");
@@ -266,7 +268,7 @@ describe("the workspace-scope probe", () => {
   });
 
   test("a reload retries it, once", async () => {
-    render(graphTab({ mode: "semantic", scopeId: "workspace" }));
+    render(graphTab({ scopeId: "workspace" }));
     await settle();
     expect(dirProbes("").length).toBe(1);
 
@@ -275,5 +277,10 @@ describe("the workspace-scope probe", () => {
 
     expect(dirProbes("").length, "a reload asks exactly once more").toBe(2);
   });
-});
 
+  test("the semantic graph asks for none", async () => {
+    render(graphTab({ mode: "semantic", scopeId: "workspace" }));
+    await settle();
+    expect(dirProbes("").length).toBe(0);
+  });
+});

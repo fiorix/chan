@@ -191,7 +191,7 @@ describe("a file node", () => {
     expect(paneTabs().find((t): t is FileTab => t.kind === "file")?.path).toBe("notes/a.md");
   });
 
-  test("Graph from here opens a new semantic tab on its directory, preselected", async () => {
+  test("Graph from here opens the same graph in a new tab, with the file selected", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select(A);
 
@@ -200,11 +200,12 @@ describe("a file node", () => {
     const [spawned] = newGraphTabs(tab.id);
     expect(spawned).toMatchObject({
       mode: "semantic",
-      scopeId: "dir:notes",
+      scopeId: "workspace",
       depth: 1,
       pendingSelectId: "notes/a.md",
+      expanded: { "": true },
     });
-    expect(tab.scopeId, "the tab it came from keeps its scope").toBe("workspace");
+    expect(canvas.props!.selectedId, "the tab it came from keeps its selection").toBe(A);
   });
 
   test("Graph from here on a root-level file opens the workspace", async () => {
@@ -213,7 +214,7 @@ describe("a file node", () => {
 
     (await inspectorButton(target, "Graph from here")).click();
     await settle();
-    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace" });
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace", pendingSelectId: README });
   });
 });
 
@@ -231,31 +232,67 @@ describe("a file the editor cannot open", () => {
   });
 });
 
-describe("the scope breadcrumb", () => {
-  test("a directory scope pins its files in graph order", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes", depth: 2 }));
-    expect(canvas.props!.focalIds).toEqual([A, D]);
-  });
+describe("the breadcrumb", () => {
+  const crumbsOf = (target: HTMLElement) =>
+    [...target.querySelectorAll<HTMLElement>(".scope-crumbs .crumb")].map(
+      (c) => [c.textContent?.trim(), c.classList.contains("current")] as const,
+    );
 
-  test("lists the scope's ancestors, and a crumb re-scopes this tab in place", async () => {
+  test("lists the selected file's path, and a step selects that directory in this tab", async () => {
     const { tab, target } = await mountGraphPanel(
       GraphPanel,
       layout,
-      graphTab({ scopeId: "file:notes/deep/d.md", depth: 2, inspectorOpen: true }),
+      graphTab({ pendingSelectId: "notes/deep/d.md", inspectorOpen: true }),
     );
-    const crumbs = [...target.querySelectorAll<HTMLElement>(".scope-crumbs .crumb")];
-    expect(crumbs.map((c) => [c.textContent?.trim(), c.classList.contains("current")])).toEqual([
+    expect(crumbsOf(target)).toEqual([
       ["workspace", false],
       ["notes", false],
       ["deep", false],
       ["d.md", true],
     ]);
 
-    crumbs[1]!.click();
+    target.querySelectorAll<HTMLElement>(".scope-crumbs .crumb")[1]!.click();
+    await settle();
+    expect(canvas.props!.selectedId).toBe(NOTES);
+    expect(crumbsOf(target)).toEqual([
+      ["workspace", false],
+      ["notes", true],
+    ]);
+    expect(tab.scopeId).toBe("workspace");
+    expect(canvas.props!.scopeKey, "the same graph, the same view").toBe("semantic:workspace");
+    expect(newGraphTabs(tab.id), "no new tab").toEqual([]);
+  });
+
+  test("with a tag selected is the workspace alone, which selects the workspace's node", async () => {
+    const { target } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ pendingSelectId: "#t", inspectorOpen: true }),
+    );
+    expect(crumbsOf(target)).toEqual([["workspace", false]]);
+
+    target.querySelector<HTMLElement>(".scope-crumbs .crumb")!.click();
+    await settle();
+    expect(canvas.props!.selectedId).toBe("");
+    expect(crumbsOf(target)).toEqual([["workspace", true]]);
+  });
+
+  test("in the filesystem graph lists the scope's path, and a step re-scopes this tab in place", async () => {
+    const { tab, target } = await mountGraphPanel(
+      GraphPanel,
+      layout,
+      graphTab({ scopeId: "dir:notes/deep", mode: "filesystem", inspectorOpen: true }),
+    );
+    expect(crumbsOf(target)).toEqual([
+      ["workspace", false],
+      ["notes", false],
+      ["deep", true],
+    ]);
+
+    target.querySelectorAll<HTMLElement>(".scope-crumbs .crumb")[1]!.click();
     await settle();
     expect(tab.scopeId).toBe("dir:notes");
     expect(tab.depth).toBe(1);
-    expect(canvas.props!.scopeKey).toBe("semantic:dir:notes");
     expect(newGraphTabs(tab.id), "no new tab").toEqual([]);
   });
 });
@@ -274,17 +311,18 @@ describe("a directory node", () => {
     expect(browserSelection.path).toBe("notes/deep");
   });
 
-  test("Graph from here re-roots a new tab at the directory itself", async () => {
+  test("Graph from here opens the same graph in a new tab, the directory selected and opened", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
-    await select(NOTES);
+    await select("directory:notes/deep");
 
     (await inspectorButton(target, "Graph from here")).click();
     await settle();
     expect(newGraphTabs(tab.id)[0]).toMatchObject({
       mode: "semantic",
-      scopeId: "dir:notes",
+      scopeId: "workspace",
       depth: 1,
-      pendingSelectId: "notes",
+      pendingSelectId: "notes/deep",
+      expanded: { "": true, notes: true, "notes/deep": true },
     });
   });
 
@@ -298,7 +336,12 @@ describe("a directory node", () => {
 
     (await inspectorButton(target, "Graph from here")).click();
     await settle();
-    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "dir:notes" });
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({
+      mode: "semantic",
+      scopeId: "workspace",
+      pendingSelectId: "notes",
+      expanded: { "": true, notes: true },
+    });
 
     (await inspectorButton(target, "Open")).click();
     await settle();
@@ -324,25 +367,28 @@ describe("a directory node", () => {
 });
 
 describe("a mention node", () => {
-  test("Graph from here opens the contact's lens when the mention names a contact file", async () => {
+  test("Graph from here opens the graph on the contact's file when the mention names one", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select("@@alice");
 
     (await inspectorButton(target, "Graph from here")).click();
     await settle();
-    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "contact:Contacts/alice.md" });
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({
+      scopeId: "workspace",
+      pendingSelectId: "Contacts/alice.md",
+    });
   });
 
-  test("Graph from here opens the mention's own lens otherwise", async () => {
+  test("Graph from here opens the graph on the mention itself otherwise", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select("@@bob");
 
     (await inspectorButton(target, "Graph from here")).click();
     await settle();
-    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "mention:@@bob" });
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "workspace", pendingSelectId: "@@bob" });
   });
 
-  test("its kind chip opens a mention lens and a tag's opens a tag lens", async () => {
+  test("its kind chip opens the graph on the mention, and a tag's on the tag", async () => {
     const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "workspace" }));
     await select("@@bob");
     target.querySelector<HTMLButtonElement>(".inspector .head button.kind-chip")!.click();
@@ -351,7 +397,10 @@ describe("a mention node", () => {
     target.querySelector<HTMLButtonElement>(".inspector .head button.kind-chip")!.click();
     await settle();
 
-    expect(newGraphTabs(tab.id).map((t) => t.scopeId)).toEqual(["mention:@@bob", "tag:#t"]);
+    expect(newGraphTabs(tab.id).map((t) => [t.scopeId, t.pendingSelectId])).toEqual([
+      ["workspace", "@@bob"],
+      ["workspace", "#t"],
+    ]);
   });
 });
 
@@ -364,15 +413,22 @@ describe("the menu's scope row", () => {
     return row;
   }
 
-  const cases: Array<[string, string, string, string]> = [
-    ["workspace", "Workspace", "lucide-hard-drive", ""],
-    ["dir:notes", "notes", "lucide-folder", NOTES],
-    ["file:notes/a.md", "notes/a.md", "lucide-file-text", A],
-    ["tag:#t", "#t", "lucide-hash", "#t"],
+  // The one graph is the workspace whatever is selected; the filesystem
+  // graph names the scope it was opened on.
+  const cases: Array<[string, Partial<GraphTab>, string, string, string]> = [
+    ["the graph", { pendingSelectId: "#t" }, "Workspace", "lucide-hard-drive", ""],
+    ["a filesystem graph of notes/", { scopeId: "dir:notes", mode: "filesystem" }, "notes", "lucide-folder", "notes"],
+    [
+      "a filesystem graph of a file",
+      { scopeId: "file:notes/a.md", mode: "filesystem" },
+      "notes/a.md",
+      "lucide-file-text",
+      "notes/a.md",
+    ],
   ];
-  for (const [scopeId, text, icon, node] of cases) {
-    test(`on ${scopeId} names the scope and selects its node into the inspector`, async () => {
-      const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId }));
+  for (const [name, over, text, icon, node] of cases) {
+    test(`on ${name} names what it is on and selects that node into the inspector`, async () => {
+      const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab(over));
       const row = await scopeRow(tab);
 
       expect(row.textContent?.trim()).toBe(text);
@@ -432,7 +488,7 @@ describe("a folder node's inspector", () => {
 });
 
 describe("a language node", () => {
-  test("shows the language inspector, and its Graph from here opens the language's lens", async () => {
+  test("shows the language inspector, and its Graph from here opens the graph on the language", async () => {
     graphServer.languageDetail = {
       language: "rust",
       files: 1,
@@ -456,7 +512,9 @@ describe("a language node", () => {
       .find((b) => b.textContent?.trim() === "Graph from here")!
       .click();
     await settle();
-    expect(newGraphTabs(tab.id).map((t) => t.scopeId)).toEqual(["language:rust"]);
+    expect(newGraphTabs(tab.id).map((t) => [t.scopeId, t.pendingSelectId])).toEqual([
+      ["workspace", "language:rust"],
+    ]);
   });
 
   test("a directory row of its detail opens that directory's graph", async () => {
@@ -479,7 +537,11 @@ describe("a language node", () => {
 
     target.querySelector<HTMLButtonElement>(".inspector .dir-row .dir-name")!.click();
     await settle();
-    expect(newGraphTabs(tab.id)[0]).toMatchObject({ scopeId: "dir:src/core", pendingSelectId: "src/core" });
+    expect(newGraphTabs(tab.id)[0]).toMatchObject({
+      scopeId: "workspace",
+      pendingSelectId: "src/core",
+      expanded: { "": true, src: true, "src/core": true },
+    });
   });
 });
 

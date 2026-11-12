@@ -79,18 +79,17 @@
     onSetAsScope?: () => void;
     /// Where the automatic fit places the view. "bottom" (default) anchors
     /// the single focal node near the bottom edge so the cluster grows upward
-    /// from it, so the workspace-root spine reads bottom-to-top; the graph
-    /// tab's workspace, directory and file scopes use it. "center" centers
+    /// from it, so the workspace-root spine reads bottom-to-top. "center" centers
     /// the focal instead. "bounds" anchors no node: it frames the drawn
     /// cluster's bounding box in the middle of the canvas, with equal room on
     /// either side of it on both axes at the fit's zoom; the layout still
     /// pins the focal, so the root stays at the bottom of the spine. Since no
     /// node holds it in place, the "bounds" fit follows the layout for as
-    /// long as the layout moves, not only through a refit window, and fits
-    /// again when the canvas changes size. The Dashboard's Search slide and
-    /// the graph tab's tag, mention, contact and language lenses use
-    /// "bounds". A user's pan, zoom or drag stops the automatic fit under
-    /// every value.
+    /// long as the layout moves, not only through a refit window. The
+    /// Dashboard's Search slide uses "bounds"; the graph tab pins the
+    /// workspace's node and takes the default. Under every value the view
+    /// fits again when the canvas changes size, and a user's pan, zoom or
+    /// drag stops the automatic fit.
     focalAnchor?: "center" | "bottom" | "bounds";
     /// d3-force tuning. Defaults to DEFAULT_FORCE (../graph/force.ts),
     /// the values the live graph ships with. Only the standalone
@@ -156,6 +155,11 @@
     /// for non-hierarchical nodes.
     depth: number;
     parentId: string | null;
+    /// The deepest `depth` among the hierarchical nodes this node is linked
+    /// to in the working set, or -1 when it has none. Read for the
+    /// non-hierarchical kinds only: `force.metaLift` seats them that many
+    /// bands above it.
+    linkedDepth: number;
     /// Per-directory indexing status surfaced by the Dashboard
     /// indexing slide. When set on a `folder` node the
     /// paint pass overrides the standard folder fill with the
@@ -695,7 +699,7 @@
       } else {
         const fresh: DNode = {
           id: n.id, label: n.label, kind, missing, draft,
-          isFocal, radius, depth, parentId, indexState,
+          isFocal, radius, depth, parentId, linkedDepth: -1, indexState,
         };
         newById.set(n.id, fresh);
         added.push(fresh);
@@ -704,11 +708,28 @@
     for (const [id, n] of nodeById) {
       if (!newById.has(id)) removed.push(n);
     }
+    // A tag, mention or language node has no depth of its own; it takes its
+    // band from the files it is linked to.
+    for (const n of newById.values()) {
+      n.linkedDepth = -1;
+      if (n.depth >= 0) continue;
+      const linked = adjacency.get(n.id);
+      if (!linked) continue;
+      for (const id of linked) {
+        const other = newById.get(id);
+        if (other && other.depth > n.linkedDepth) n.linkedDepth = other.depth;
+      }
+    }
     // Seed fresh node positions near a visible neighbour so they
     // grow out of the cluster on a depth-bump rather than popping
     // in from the origin and being yanked across the canvas by
-    // the spring forces.
+    // the spring forces. A node with a band starts at its band's height:
+    // one seeded below its parent would have to pass through it to reach
+    // its band, and the link spring that keeps the two apart holds it on
+    // the far side instead, most firmly below a pinned root.
     for (const a of added) {
+      const band = yBand(a);
+      const bandY = band < 0 ? null : -band * force.hierarchyYSpacing;
       const adj = adjacency.get(a.id);
       let anchor: DNode | null = null;
       if (adj) {
@@ -722,13 +743,14 @@
       }
       if (anchor) {
         a.x = anchor.x! + (Math.random() - 0.5) * 40;
-        a.y = anchor.y! + (Math.random() - 0.5) * 40;
+        a.y = (bandY ?? anchor.y!) + (Math.random() - 0.5) * 40;
       } else {
         // No anchor available (first run or fully disconnected
-        // component): drop into a 600x600 box around origin and
-        // let the sim settle it.
+        // component): spread across a 600-wide box around the origin, at
+        // the band's height or anywhere in the box's for a node with no
+        // band, and let the sim settle it.
         a.x = (Math.random() - 0.5) * 600;
-        a.y = (Math.random() - 0.5) * 600;
+        a.y = bandY === null ? (Math.random() - 0.5) * 600 : bandY + (Math.random() - 0.5) * 40;
       }
     }
     // Pin focal nodes. Single-focus scopes stay centered at origin;
@@ -833,12 +855,13 @@
       .force(
         "y",
         forceY<DNode>((d) => {
-          if (d.depth < 0) return 0;
+          const band = yBand(d);
+          if (band < 0) return 0;
           // Negative pull so deeper nodes rise ABOVE their
           // ancestors; the workspace root (depth 0) anchors the bottom.
-          return -d.depth * force.hierarchyYSpacing;
+          return -band * force.hierarchyYSpacing;
         }).strength((d) =>
-          d.depth < 0 ? force.centerStrength : force.hierarchyYStrength,
+          yBand(d) < 0 ? force.centerStrength : force.hierarchyYStrength,
         ),
       )
       .force("parentX", parentXForce(force.parentXStrength))
@@ -849,6 +872,18 @@
       // just needs to mutate positions. No-op on tick keeps us from
       // doing per-tick work twice (rAF + tick callback).
       .on("tick", () => {});
+  }
+
+  /// The depth band a node is pulled to, or -1 for a node on the weak pull
+  /// toward the center. A hierarchical node's band is its depth. With
+  /// `force.metaLift` set, a tag, mention or language node sits that many
+  /// bands above the deepest file it is linked to, so it reads as growing
+  /// out of the tree; one linked to no file, or any of them with the lift
+  /// at 0, floats.
+  function yBand(d: DNode): number {
+    if (d.depth >= 0) return d.depth;
+    if (force.metaLift <= 0 || d.linkedDepth < 0) return -1;
+    return d.linkedDepth + force.metaLift;
   }
 
   /// Parent-anchored X force. Each hierarchical node (depth >= 0)
@@ -919,10 +954,11 @@
       transform = { x: r.width / 2, y: r.height / 2, k: 1 };
       fitToContent(24);
       scheduleRefit(900);
-    } else if (focalAnchor === "bounds" && r.width > 0 && r.height > 0) {
-      // The bounds framing is relative to the canvas's size, so a new size
-      // needs a new fit; the other framings keep the view where it is.
-      // scheduleRefit leaves a view the user has taken alone.
+    } else if (r.width > 0 && r.height > 0) {
+      // Every framing places the view relative to the canvas's size (the
+      // box in its middle, the focal at its bottom edge or its center), so
+      // a new size needs a new fit. scheduleRefit leaves a view the user
+      // has taken alone.
       scheduleRefit(300);
     }
   }

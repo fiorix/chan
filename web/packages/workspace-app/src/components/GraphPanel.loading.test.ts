@@ -135,17 +135,38 @@ describe("app.graph.reload", () => {
 });
 
 describe("what reloads the graph", () => {
-  test("a scope, depth or mode change does", async () => {
+  test("a selection or a depth change does not: both choose from what is loaded", async () => {
     const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
-    for (const change of [
-      () => (tab.scopeId = "dir:notes"),
-      () => (tab.depth = 2),
-      () => (tab.mode = "language"),
-    ]) {
-      const before = loads();
+    // Each load of the panel fetches the spine once. The inspector a
+    // selection opens reads the window's shared graph, a stream of its own.
+    const spines = () => graphServer.fsGraphCalls.length;
+    const before = spines();
+    expect(before, "the first load").toBe(1);
+
+    canvas.props!.onSelect("#t");
+    await settle();
+    tab.depth = 2;
+    await settle();
+    canvas.props!.onSelect("directory:notes");
+    await settle();
+    expect(spines()).toBe(before);
+  });
+
+  test("a mode change does", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab());
+    const before = loads();
+    tab.mode = "language";
+    await settle();
+    expect(loads()).toBeGreaterThan(before);
+  });
+
+  test("in the filesystem graph, a scope or depth change does", async () => {
+    const { tab } = await mountGraphPanel(GraphPanel, layout, graphTab({ mode: "filesystem" }));
+    for (const change of [() => (tab.scopeId = "dir:notes"), () => (tab.depth = 2)]) {
+      const before = graphServer.fsGraphCalls.length;
       change();
       await settle();
-      expect(loads(), change.toString()).toBeGreaterThan(before);
+      expect(graphServer.fsGraphCalls.length, change.toString()).toBeGreaterThan(before);
     }
   });
 
@@ -216,8 +237,11 @@ describe("while the workspace index is not ready", () => {
   });
 
   test("an empty graph explains why", async () => {
+    // The graph draws the tree from disk before the index answers, so it is
+    // empty only over a workspace with nothing in it.
     graphServer.view = { nodes: [], edges: [] };
-    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "tag:#t" }));
+    graphServer.fs = { nodes: [], edges: [] };
+    const { target } = await mountGraphPanel(GraphPanel, layout, graphTab());
     const placeholder = () => target.querySelector(".canvas .placeholder")?.textContent?.trim();
 
     expect(placeholder()).toBe("data being indexed, hang tight...");
@@ -295,10 +319,25 @@ describe("watching the directories it shows", () => {
     expect(fbTreeInstance(id)).toBeNull();
   });
 
-  test("a change inside the scope reloads it; one outside does not", async () => {
-    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes" }));
+  test("a change anywhere in the workspace reloads the graph, whatever is selected", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ pendingSelectId: "notes" }));
     // The reload is debounced; run every timer a change schedules, however
-    // long its delay, so "no reload" is judged after any reload would land.
+    // long its delay.
+    vi.useFakeTimers();
+    try {
+      const before = graphServer.graphStreamCalls;
+      graphReloadSignal.paths = ["src/other.rs"];
+      graphReloadSignal.nonce += 1;
+      await vi.runAllTimersAsync();
+      expect(graphServer.graphStreamCalls).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("in the filesystem graph, a change inside the scope reloads it; one outside does not", async () => {
+    await mountGraphPanel(GraphPanel, layout, graphTab({ scopeId: "dir:notes", mode: "filesystem" }));
+    // So "no reload" is judged after any reload would land.
     vi.useFakeTimers();
     try {
       const change = async (paths: string[]) => {
@@ -307,11 +346,11 @@ describe("watching the directories it shows", () => {
         await vi.runAllTimersAsync();
       };
 
-      const before = graphServer.graphStreamCalls;
+      const before = graphServer.fsGraphCalls.length;
       await change(["src/other.rs"]);
-      expect(graphServer.graphStreamCalls, "src is not in dir:notes").toBe(before);
+      expect(graphServer.fsGraphCalls.length, "src is not in dir:notes").toBe(before);
       await change(["notes/new.md"]);
-      expect(graphServer.graphStreamCalls).toBe(before + 1);
+      expect(graphServer.fsGraphCalls.length).toBeGreaterThan(before);
     } finally {
       vi.useRealTimers();
     }

@@ -148,24 +148,24 @@ describe("a graph tab moved to another pane", () => {
     expect(tab.inspectorOpen).toBe(true);
   });
 
-  test("keeps a lens's selection and its pinned node", async () => {
-    const { second } = await renderSplit(
-      graphTab({
-        id: "lens",
-        title: "mention=@@alice",
-        scopeId: "mention:@@alice",
-        pendingSelectId: "@@alice",
-      }),
+  test("keeps what the selection revealed, the tree it opened and its hops", async () => {
+    const { first, second } = await renderSplit(
+      graphTab({ id: "lens", title: "path=workspace", pendingSelectId: "@@alice", depth: 2 }),
+    );
+    const source = first.tabs[0] as GraphTab;
+    source.expanded = { "": true, notes: true };
+    await settle();
+    const shown = [...canvas.all[0]!.visibleNodeIds].sort();
+    expect(shown, "alice's notes, and c.md under the opened notes/").toEqual(
+      ["", "@@alice", "@@bob", "directory:notes", "notes/a.md", "notes/b.md", "notes/c.md"].sort(),
     );
 
     const { tab, moved } = await moveAcross(second);
-    expect(moved.scopeKey).toBe("semantic:mention:@@alice");
-    expect(moved.focalIds).toEqual(["@@alice"]);
-    expect([...moved.visibleNodeIds].sort()).toEqual(
-      ["", "@@alice", "directory:notes", "notes/a.md", "notes/b.md"].sort(),
-    );
     expect(moved.selectedId).toBe("@@alice");
-    expect(tabLabel(tab)).toBe("mention=@@alice");
+    expect(moved.focalIds).toEqual([""]);
+    expect([...moved.visibleNodeIds].sort()).toEqual(shown);
+    expect(tab.depth).toBe(2);
+    expect(tab.expanded).toEqual({ "": true, notes: true });
   });
 
   test("keeps Details closed when it was closed", async () => {

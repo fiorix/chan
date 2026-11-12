@@ -37,6 +37,23 @@ function tab(overrides: Partial<GraphTab>): GraphTab {
 }
 
 describe("graph link serialization", () => {
+  it("carries the opened directories and a selection of the workspace's own node", () => {
+    const t = tab({
+      expanded: { "": true, notes: true, "notes/a, b": true },
+      // The root's node id is the empty string.
+      selectedNodeId: "",
+    });
+    const parsed = parseGraphLink(graphLinkFor(t));
+    expect(parsed?.expanded).toEqual({ "": true, notes: true, "notes/a, b": true });
+    expect(parsed?.selectedNodeId).toBe("");
+  });
+
+  it("reads a link with no opened directories as the root's own level, and no selection as none", () => {
+    const parsed = parseGraphLink(`${GRAPH_LINK_PREFIX}s=workspace`);
+    expect(parsed?.expanded).toEqual({ "": true });
+    expect(parsed?.selectedNodeId).toBeNull();
+  });
+
   it("round-trips a directory-scoped graph with a selected node", () => {
     const t = tab({
       mode: "semantic",

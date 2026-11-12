@@ -31,6 +31,7 @@ import {
 import { stripTrailingWhitespaceText } from "../editor/tools";
 import { parseSlidesSpec } from "../editor/slides";
 import { forgetLinkKinds } from "../editor/widgets/wikilink";
+import { openedForPath, selectionOfScope } from "../graph/selectionView";
 import { uiConfirm } from "./confirm.svelte";
 import { windowCaps } from "./windowCaps";
 import { filesContext } from "./fileContext.svelte";
@@ -2072,10 +2073,29 @@ function placeMovedTerminal(p: LeafNode, tab: TerminalTab, snapshot: SerTab | un
 }
 
 export type OpenGraphOptions = Partial<
-  Pick<GraphTab, "mode" | "scopeId" | "depth" | "pendingSelectId" | "title" | "filters">
+  Pick<GraphTab, "mode" | "scopeId" | "depth" | "expanded" | "pendingSelectId" | "title" | "filters">
 > & {
   side?: PaneSide;
 };
+
+/// The semantic graph is one graph of the whole workspace: a tag, a
+/// mention, a contact, a language, a file or a directory is a selection in
+/// it. A scope id of the shapes tabs once carried (`dir:`, `file:`, `tag:`,
+/// `mention:`, `contact:`, `language:`) therefore reads as the workspace
+/// with that node selected, and a directory scope's path opened. A
+/// selection the caller names wins over the one the scope implies.
+function oneGraphOf(
+  scopeId: string,
+  select: string | null,
+  expanded: Record<string, boolean>,
+): { select: string | null; expanded: Record<string, boolean> } {
+  const scoped = selectionOfScope(scopeId);
+  if (!scoped) return { select, expanded };
+  return {
+    select: select ?? scoped.select,
+    expanded: scoped.dir === null ? expanded : { ...openedForPath(scoped.dir), ...expanded },
+  };
+}
 
 export const DEFAULT_GRAPH_FILTERS: GraphFilters = {
   link: true,
@@ -2097,9 +2117,14 @@ export function openGraphInPane(paneId: string, opts: OpenGraphOptions = {}): Gr
   const side = opts.side ?? paneSide(p);
   const tabs = mutablePaneTabs(p, side);
   const mode = opts.mode ?? "semantic";
-  const scopeId = opts.scopeId ?? "workspace";
+  const semantic = mode === "semantic";
+  const expanded = { ...opts.expanded, "": true };
+  const one = semantic
+    ? oneGraphOf(opts.scopeId ?? "workspace", opts.pendingSelectId ?? null, expanded)
+    : { select: opts.pendingSelectId ?? null, expanded };
+  const scopeId = semantic ? "workspace" : (opts.scopeId ?? "workspace");
   // No dedup on spawn. Each invocation creates a fresh graph tab with
-  // its own scope, filters, and pending selection so the user can
+  // its own selection, filters and opened directories so the user can
   // compare two views side-by-side. Callers that want "activate the
   // existing one" can find it on `pane.tabs` and set `activeTabId`.
   const tab: GraphTab = {
@@ -2109,18 +2134,15 @@ export function openGraphInPane(paneId: string, opts: OpenGraphOptions = {}): Gr
     mode,
     scopeId,
     depth: opts.depth ?? 1,
-    expanded: { "": true },
+    expanded: one.expanded,
     filters: opts.filters ? { ...opts.filters } : { ...DEFAULT_GRAPH_FILTERS },
     inspectorOpen: false,
-    // A semantic workspace graph (no lens) opens focused on the
-    // workspace-root node (id "", the server's directory_node_id("")), so
-    // focus-on-select spotlights the root neighbourhood and the inspector
-    // opens on it through the same pending-selection path the lenses use.
-    // Lens opens pass their own focal node, which the ?? preserves;
-    // filesystem / language modes have no root focus.
-    pendingSelectId:
-      opts.pendingSelectId ??
-      (scopeId === "workspace" && mode === "semantic" ? "" : null),
+    // The semantic graph opens on a node: the one the caller names, or the
+    // workspace's own (id "", the server's directory_node_id("")), so
+    // focus-on-select spotlights it and the inspector opens on it through
+    // the pending-selection path. Filesystem and language modes have no
+    // root focus.
+    pendingSelectId: one.select ?? (semantic ? "" : null),
   };
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
@@ -5339,16 +5361,10 @@ export function paneModeOpenGraph(ctx?: SpawnContext): void {
   if (!p || p.kind !== "leaf") return;
   const side = paneSide(p);
   const tabs = mutablePaneTabs(p, side);
+  // The one graph, on the context's node: a file selected, a directory
+  // selected and opened, or the workspace's own node.
   const mode: GraphTab["mode"] = "semantic";
-  let scopeId = "workspace";
-  let pendingSelectId: string | null = null;
-  if (ctx?.file) {
-    scopeId = `file:${ctx.file}`;
-    pendingSelectId = ctx.file;
-  } else if (ctx?.dir) {
-    scopeId = `dir:${ctx.dir}`;
-    pendingSelectId = ctx.dir;
-  }
+  const scopeId = "workspace";
   const tab: GraphTab = {
     kind: "graph",
     id: id("graph"),
@@ -5356,10 +5372,10 @@ export function paneModeOpenGraph(ctx?: SpawnContext): void {
     mode,
     scopeId,
     depth: 1,
-    expanded: { "": true },
+    expanded: ctx?.file ? { "": true } : openedForPath(ctx?.dir ?? ""),
     filters: { ...DEFAULT_GRAPH_FILTERS },
     inspectorOpen: false,
-    pendingSelectId,
+    pendingSelectId: ctx?.file ?? ctx?.dir ?? "",
   };
   tabs.push(tab);
   setPaneActiveTabId(p, tab.id, side);
@@ -7352,7 +7368,10 @@ export function graphLinkFor(tab: GraphTab): string {
     tab.mode === "filesystem" ? "f" : tab.mode === "language" ? "l" : "s",
   );
   params.set("f", encodeGraphTabFilters(tab.filters));
-  if (tab.selectedNodeId) params.set("n", tab.selectedNodeId);
+  if (tab.selectedNodeId != null) params.set("n", tab.selectedNodeId);
+  // One `e` per opened directory: a directory's depth is the tree's
+  // state, so a link without it would open on a closed tree.
+  for (const dir of graphExpandedList(tab.expanded)) params.append("e", dir);
   return `${GRAPH_LINK_PREFIX}${params.toString()}`;
 }
 
@@ -7362,6 +7381,7 @@ export type ParsedGraphLink = {
   depth: number;
   filters: GraphFilters;
   selectedNodeId: string | null;
+  expanded: Record<string, boolean>;
 };
 
 /// Parse a `chan://graph?...` link back into the fields needed to open a
@@ -7393,6 +7413,7 @@ export function parseGraphLink(link: string): ParsedGraphLink | null {
     depth: Number.isFinite(depth) && depth > 0 ? depth : 1,
     filters: decodeGraphTabFilters(params.get("f") ?? undefined),
     selectedNodeId: params.get("n"),
+    expanded: graphExpandedFromList(params.getAll("e")),
   };
 }
 
@@ -7497,10 +7518,12 @@ function serializeTab(
       ...(graphExpandedList(t.expanded).length
         ? { ge: graphExpandedList(t.expanded) }
         : {}),
-      ...(t.pendingSelectId ? { gp: t.pendingSelectId } : {}),
+      // The workspace's own node has the id "", so both are written
+      // whenever they are set, not whenever they are truthy.
+      ...(t.pendingSelectId != null ? { gp: t.pendingSelectId } : {}),
       // Persist the live selection so reload restores both the selected
       // node and the selection-driven tab title before data reloads.
-      ...(t.selectedNodeId ? { gn: t.selectedNodeId } : {}),
+      ...(t.selectedNodeId != null ? { gn: t.selectedNodeId } : {}),
       ...(t.selectedNodeLabel ? { gnl: t.selectedNodeLabel } : {}),
       ...(t.inspectorWidth && t.inspectorWidth > 0
         ? { iw: Math.round(t.inspectorWidth) }
@@ -7672,13 +7695,21 @@ export function serializeLayout(opts: SerializeLayoutOptions = {}): SerNode | nu
 
 function restoreGraphTabFromSer(sertab: SerTab): GraphTab {
   const mode = restoreGraphMode(sertab.gm);
-  const scopeId = sertab.gs || "workspace";
   // Prefer `gn` (persisted live selection) as the post-restore
   // seed so the user lands on the same focal node. The graph
   // load consumes `pendingSelectId` once; `selectedNodeId`
   // stays so the tab title remains selection-driven.
   const selectedNodeId = typeof sertab.gn === "string" ? sertab.gn : null;
   const selectedNodeLabel = typeof sertab.gnl === "string" ? sertab.gnl : null;
+  const saved = {
+    select: sertab.gp ?? selectedNodeId,
+    expanded: graphExpandedFromList(sertab.ge),
+  };
+  // A semantic tab saved with a scope of its own reads as the one graph
+  // with that scope's node selected.
+  const semantic = mode === "semantic";
+  const one = semantic ? oneGraphOf(sertab.gs || "workspace", saved.select, saved.expanded) : saved;
+  const scopeId = semantic ? "workspace" : sertab.gs || "workspace";
   return {
     kind: "graph",
     id: id("graph"),
@@ -7686,10 +7717,10 @@ function restoreGraphTabFromSer(sertab: SerTab): GraphTab {
     mode,
     scopeId,
     depth: Number.isFinite(sertab.gd) ? Math.max(0, Number(sertab.gd)) : 1,
-    expanded: graphExpandedFromList(sertab.ge),
+    expanded: one.expanded,
     filters: decodeGraphTabFilters(sertab.gf),
     inspectorOpen: sertab.gi === 1,
-    pendingSelectId: sertab.gp ?? selectedNodeId,
+    pendingSelectId: one.select,
     selectedNodeId,
     selectedNodeLabel,
     ...(typeof sertab.iw === "number" && sertab.iw > 0

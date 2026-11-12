@@ -1879,23 +1879,45 @@ describe("pane state", () => {
     expect(activePane().activeTabId).toBe(browser.id);
   });
 
-  test("a semantic workspace graph opens focused on the root node", () => {
+  test("the semantic graph opens on a node: the one named, or the workspace's own", () => {
     resetLayout([]);
-    // Root node id is "" (server directory_node_id("")): seeding it as the
-    // pending selection makes load() select it + open the inspector, so a
-    // non-lens graph never opens with nothing selected.
-    expect(openGraphInActivePane({ scopeId: "workspace" }).pendingSelectId).toBe("");
+    // The workspace's node id is "" (server directory_node_id("")): as the
+    // pending selection it makes load() select it and open the inspector.
     expect(openGraphInActivePane({}).pendingSelectId).toBe("");
-    // Lens opens keep their own focal node.
-    expect(
-      openGraphInActivePane({ scopeId: "mention:@@Alice", pendingSelectId: "@@Alice" })
-        .pendingSelectId,
-    ).toBe("@@Alice");
-    // Non-workspace scope and non-semantic modes get no auto-root focus.
-    expect(openGraphInActivePane({ scopeId: "dir:notes" }).pendingSelectId).toBeNull();
+    expect(openGraphInActivePane({ scopeId: "workspace" }).pendingSelectId).toBe("");
+    expect(openGraphInActivePane({ pendingSelectId: "@@Alice" }).pendingSelectId).toBe("@@Alice");
+    // The filesystem and language modes get no root focus.
     expect(
       openGraphInActivePane({ mode: "language", scopeId: "workspace" }).pendingSelectId,
     ).toBeNull();
+    expect(
+      openGraphInActivePane({ mode: "filesystem", scopeId: "workspace" }).pendingSelectId,
+    ).toBeNull();
+  });
+
+  test("a semantic scope of the old shapes opens as the workspace with its node selected", () => {
+    resetLayout([]);
+    expect(openGraphInActivePane({ scopeId: "mention:@@Alice" })).toMatchObject({
+      scopeId: "workspace",
+      title: "path=workspace",
+      pendingSelectId: "@@Alice",
+      expanded: { "": true },
+    });
+    expect(openGraphInActivePane({ scopeId: "language:Rust" }).pendingSelectId).toBe("language:Rust");
+    expect(openGraphInActivePane({ scopeId: "dir:notes/sub" })).toMatchObject({
+      scopeId: "workspace",
+      pendingSelectId: "notes/sub",
+      expanded: { "": true, notes: true, "notes/sub": true },
+    });
+    // A selection the caller names wins over the one the scope implies.
+    expect(
+      openGraphInActivePane({ scopeId: "tag:#t", pendingSelectId: "notes/a.md" }).pendingSelectId,
+    ).toBe("notes/a.md");
+    // The filesystem graph is scoped still.
+    expect(openGraphInActivePane({ mode: "filesystem", scopeId: "dir:notes" })).toMatchObject({
+      scopeId: "dir:notes",
+      expanded: { "": true },
+    });
   });
 
   test("round-trips graph and file browser tab state", async () => {
@@ -2406,8 +2428,8 @@ describe("pane state", () => {
     resetLayout([f]);
 
     // Context with file + parent dir: terminal cwd = parent dir,
-    // browser inspector pops, graph scopes to file:* with the file
-    // pre-selected so its inspector opens on mount.
+    // browser inspector pops, the graph opens with the file selected so
+    // its inspector opens on mount.
     enterPaneMode();
     paneModeOpenTerminal({ dir: "notes/sub", file: "notes/sub/a.md" });
     paneModeOpenBrowser({ dir: "notes/sub", file: "notes/sub/a.md" });
@@ -2425,12 +2447,13 @@ describe("pane state", () => {
     }
     expect(graph?.kind).toBe("graph");
     if (graph?.kind === "graph") {
-      expect(graph.scopeId).toBe("file:notes/sub/a.md");
+      expect(graph.scopeId).toBe("workspace");
       expect(graph.pendingSelectId).toBe("notes/sub/a.md");
+      expect(graph.expanded).toEqual({ "": true });
     }
   });
 
-  test("paneModeOpenGraph with a dir-only context scopes to dir:*", () => {
+  test("paneModeOpenGraph with a dir-only context selects that directory, opened", () => {
     const f = fileTab({ id: "f", path: "notes/x.md" });
     resetLayout([f]);
 
@@ -2441,9 +2464,10 @@ describe("pane state", () => {
     const graph = activePane().tabs.find((t) => t.kind === "graph");
     expect(graph?.kind).toBe("graph");
     if (graph?.kind === "graph") {
-      expect(graph.scopeId).toBe("dir:notes");
+      expect(graph.scopeId).toBe("workspace");
       // The dir is itself the pre-selected node so the inspector pops on mount.
       expect(graph.pendingSelectId).toBe("notes");
+      expect(graph.expanded).toEqual({ "": true, notes: true });
     }
   });
 
@@ -2463,7 +2487,7 @@ describe("pane state", () => {
     expect(graph?.kind).toBe("graph");
     if (graph?.kind === "graph") {
       expect(graph.scopeId).toBe("workspace");
-      expect(graph.pendingSelectId).toBeNull();
+      expect(graph.pendingSelectId, "the workspace's own node").toBe("");
     }
   });
 
@@ -2503,7 +2527,7 @@ describe("pane state", () => {
       const graph = live.tabs.find((t) => t.kind === "graph");
       expect(graph?.kind).toBe("graph");
       if (graph?.kind === "graph") {
-        expect(graph.scopeId).toBe("file:notes/x.md");
+        expect(graph.scopeId).toBe("workspace");
         expect(graph.pendingSelectId).toBe("notes/x.md");
       }
     }

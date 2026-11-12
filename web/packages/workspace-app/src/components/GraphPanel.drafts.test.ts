@@ -392,10 +392,21 @@ describe("what the drafts leave as it was", () => {
     expect(withDrafts.focal).toEqual(without.focal);
   });
 
+  // The semantic graph is the whole workspace whatever is selected, so the
+  // drafts hang from its root under every selection.
+  const selections: Array<[string, Partial<GraphTab>]> = [
+    ["a directory", { pendingSelectId: "notes", expanded: { "": true, notes: true } }],
+    ["a file", { pendingSelectId: A }],
+    ["a tag", { pendingSelectId: "#t" }],
+  ];
+  test.each(selections)("with %s selected, the drafts are drawn as they are with the root selected", async (_name, over) => {
+    listed([row("untitled"), row("sketch")]);
+    await refreshDrafts();
+    await mountGraphPanel(GraphPanel, layout, graphTab(over));
+    expect(draftNodes().length, "the group and two drafts").toBe(3);
+  });
+
   const elsewhere: Array<[string, Partial<GraphTab>]> = [
-    ["a directory's graph", { scopeId: "dir:notes", expanded: { "": true, notes: true } }],
-    ["a file's graph", { scopeId: `file:${A}` }],
-    ["a tag's lens", { scopeId: "tag:#t" }],
     ["the filesystem graph of the workspace", { scopeId: "workspace", mode: "filesystem", expanded: { "": true, notes: true, src: true } }],
     ["the language graph", { scopeId: "workspace", mode: "language" }],
   ];
