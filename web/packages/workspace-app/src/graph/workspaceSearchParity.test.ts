@@ -15,6 +15,13 @@
 //     every node with its directories up to the root;
 //   - depth 0: the node alone, with its directories;
 //   - the relationships are every one the graph holds between those nodes.
+//
+// The two sides differ in one place, on purpose: the graph's selection also
+// walks a symlink to its target and a file to its other names (the `symlink`
+// and `hardlink` edges, graph/selectionView), which come from a walk of the
+// filesystem, and the search has no such relationship to walk (its
+// `WorkspaceRelationshipKind`). The golden therefore holds neither edge, and
+// the first test below fails when one is added to it.
 
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
@@ -91,6 +98,12 @@ function shown(seed: string, depth: number): Set<string> {
 }
 
 describe("the graph and the workspace search show the same for a node", () => {
+  // Only the graph walks these; a golden holding one would hold the two
+  // sides to answers they are meant to differ on.
+  test("the golden holds no symlink or hardlink edge", () => {
+    expect(graph.edges.filter((e) => e.kind === "symlink" || e.kind === "hardlink")).toEqual([]);
+  });
+
   test("the golden pins all 18 kind x depth cases", () => {
     expect(expected.cases.length).toBe(18);
     expect(new Set(expected.cases.map((c) => `${c.kind}:${c.depth}`)).size).toBe(18);

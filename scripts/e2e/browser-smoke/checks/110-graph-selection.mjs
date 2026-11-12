@@ -4,13 +4,14 @@
 // nodes it shows and no error placeholder is drawn.
 //
 // Once its layout settles, the graph is framed from its root: every node the
-// status line counts is painted inside the canvas, and the workspace's node
-// sits halfway across, near the bottom edge, read from the node discs the
-// canvas paints (lib/graph-discs.mjs). A resize of the page refits it the
-// same way. Engine: headless Chrome through puppeteer-core.
+// status line counts is painted inside the canvas, beside the workspace's
+// drafts, which it does not count, and nothing else is, and the workspace's
+// node sits halfway across, near the bottom edge, read from the node discs
+// the canvas paints (lib/graph-discs.mjs). A resize of the page refits it
+// the same way. Engine: headless Chrome through puppeteer-core.
 
 import { fileRow, navigateFiles, selectFile, showFiles } from "../lib/files.mjs";
-import { rootedFailures, steadyGraphDiscs, traceGraphDiscs, untraceGraphDiscs } from "../lib/graph-discs.mjs";
+import { draftDiscs, rootedFailures, steadyGraphDiscs, traceGraphDiscs, untraceGraphDiscs } from "../lib/graph-discs.mjs";
 
 const GRAPH = ".graph-tab";
 
@@ -104,7 +105,8 @@ async function openAndRead(ctx, page) {
   }
   const framed = await steadyGraphDiscs(page, GRAPH);
   await ctx.shot("graph-tag-selected");
-  const failures = rootedFailures(framed, details.visibleNodes);
+  const drafts = await draftDiscs(page, new URL(ctx.serverUrl).searchParams.get("t") ?? "");
+  const failures = rootedFailures(framed, details.visibleNodes, drafts);
   if (failures.length) {
     throw new Error(`the graph opened on the tag is not framed from its root: ${failures.join("; ")}; ${JSON.stringify(framed)}`);
   }
@@ -121,11 +123,11 @@ async function openAndRead(ctx, page) {
   } finally {
     await page.setViewport(before);
   }
-  const resizedFailures = rootedFailures(resized, details.visibleNodes);
+  const resizedFailures = rootedFailures(resized, details.visibleNodes, drafts);
   if (resized.canvas[0] === framed.canvas[0]) resizedFailures.push(`the canvas kept its width ${framed.canvas[0]} through the resize`);
   if (resizedFailures.length) {
     throw new Error(`the graph opened on the tag is not framed from its root after a resize to ${size.width}x${size.height}: ${resizedFailures.join("; ")}; ${JSON.stringify(resized)}`);
   }
   console.log(`[smoke]   graph on ${TAG} framed ${JSON.stringify(framed)}; after the resize ${JSON.stringify(resized)}`);
-  return { selected: TAG, ...details, framed, resized };
+  return { selected: TAG, ...details, drafts, framed, resized };
 }

@@ -104,15 +104,33 @@ export async function steadyGraphDiscs(page, hostSelector, { gap = 600, timeoutM
   }
 }
 
+/// The discs a graph paints that its status line does not count: the
+/// workspace's drafts, which it hangs from the workspace's node as a Drafts
+/// group and one node per listed draft name (graph/draftNodes), and none when
+/// the workspace has no draft. Read from the list the page draws them from.
+export async function draftDiscs(page, token) {
+  const names = await page.evaluate(async (bearer) => {
+    const response = await fetch("/api/drafts", { headers: bearer ? { authorization: `Bearer ${bearer}` } : {} });
+    if (!response.ok) return null;
+    const body = await response.json();
+    return new Set((body.drafts ?? []).map((draft) => draft.name)).size;
+  }, token);
+  if (names === null) throw new Error("the drafts list did not answer");
+  return names > 0 ? names + 1 : 0;
+}
+
 /// Failures of a rooted graph: a disc for each of the `expected` nodes the
-/// status line counts, every disc inside the canvas, and one of them on the
-/// root's seat, halfway across and `ROOT_BOTTOM_MARGIN` above the bottom
-/// edge, within `tolerance` device pixels. The workspace's drafts are drawn
-/// and not counted, so more discs than `expected` is not a failure.
-export function rootedFailures(read, expected, tolerance = 3) {
+/// status line counts and each of the `drafts` discs it does not (see
+/// `draftDiscs`) and no other, every disc inside the canvas, and one of them
+/// on the root's seat, halfway across and `ROOT_BOTTOM_MARGIN` above the
+/// bottom edge, within `tolerance` device pixels.
+export function rootedFailures(read, expected, drafts, tolerance = 3) {
   if (!read.room || !read.rootOff) return [`nothing framed: ${JSON.stringify(read)}`];
+  if (!Number.isInteger(drafts)) throw new Error(`rootedFailures needs the draft disc count, got ${drafts}`);
   const failures = [];
-  if (read.count < expected) failures.push(`${read.count} discs painted for ${expected} counted nodes`);
+  if (read.count !== expected + drafts) {
+    failures.push(`${read.count} discs painted for ${expected} counted nodes and ${drafts} draft discs`);
+  }
   for (const [side, px] of Object.entries(read.room)) {
     if (px < 0) failures.push(`a node is ${-px} px past the canvas's ${side === "left" || side === "right" ? side : side === "above" ? "top" : "bottom"} edge`);
   }

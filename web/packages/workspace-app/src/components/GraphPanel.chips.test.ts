@@ -382,4 +382,51 @@ describe("the semantic graph's filesystem spine", () => {
     await mountGraphPanel(GraphPanel, layout, workspaceTab());
     expect(hardlinkPairs()).toEqual([]);
   });
+
+  /// Files that share the server's opaque link group, spread over the
+  /// spine's pages two nodes at a time.
+  function serveGroup(paths: string[], grouped: string[]): void {
+    graphServer.view = { nodes: [], edges: [] };
+    const dirs = [...new Set(paths.map((p) => p.split("/").slice(0, -1).join("/")).filter(Boolean))];
+    graphServer.fs = {
+      nodes: [
+        fsg.dir(""),
+        ...dirs.map(fsg.dir),
+        ...paths.map((p) => ({
+          ...fsg.file(p),
+          ...(grouped.includes(p) ? { link_group: "0123456789abcdef" } : {}),
+        })),
+      ],
+      edges: [
+        ...dirs.map((d) => fsg.contains("", d)),
+        ...paths.map((p) => fsg.contains(p.split("/").slice(0, -1).join("/"), p)),
+      ],
+    };
+    graphServer.fsPageSize = 2;
+  }
+
+  test("joins every pair of a group of three", async () => {
+    serveGroup(["a.md", "b.md", "c.md"], ["a.md", "b.md", "c.md"]);
+    await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    expect(graphServer.fsGraphCalls.some((call) => call.cursor), "the group spans pages").toBe(true);
+    expect(hardlinkPairs().sort()).toEqual(["a.md>b.md", "a.md>c.md", "b.md>c.md"]);
+  });
+
+  test("draws nothing for a group with one loaded path", async () => {
+    serveGroup(["a.md", "b.md"], ["a.md"]);
+    await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    expect(hardlinkPairs()).toEqual([]);
+  });
+
+  test("joins a file the spine loads once its directory is opened", async () => {
+    serveGroup(["a.md", "notes/b.md"], ["a.md", "notes/b.md"]);
+    await mountGraphPanel(GraphPanel, layout, workspaceTab({ expanded: { "": true } }));
+    expect(hardlinkPairs(), "notes/ is closed and its file not loaded").toEqual([]);
+
+    canvas.props!.onSelect("directory:notes");
+    await settle(2);
+    canvas.props!.onSetAsScope();
+    await settle();
+    expect(hardlinkPairs()).toEqual(["a.md>notes/b.md"]);
+  });
 });
