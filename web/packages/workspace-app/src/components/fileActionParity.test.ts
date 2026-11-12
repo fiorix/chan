@@ -12,8 +12,8 @@ import { fileOps } from "../state/store.svelte";
 // context menu (FileTree) render the SAME applicable non-destructive
 // actions for the same entry, because both consume
 // state/fileActions' classifyFileActions. Labels and handlers are
-// surface-local; the destructive + path-mutation rows (Copy Path,
-// Rename / Move, Delete) and ordinary-file replacement exist only in
+// surface-local; the destructive + path-mutation rows (Copy path,
+// Rename or move, Delete) and ordinary-file replacement exist only in
 // the tree's separate policy. An inspector that allows no upload, as the
 // Search slide's does, leaves out only its Upload row.
 // Store and api modules are mocked; the classifier and kind
@@ -131,7 +131,11 @@ vi.mock("../state/imageZoom", () => ({ openImageZoom: vi.fn() }));
 vi.mock("../state/videoViewer", () => ({ openVideoViewer: vi.fn() }));
 vi.mock("../state/audioViewer", () => ({ AUDIO_UNSUPPORTED_MESSAGE: "unsupported" }));
 vi.mock("../state/notify.svelte", () => ({ notify: vi.fn() }));
-vi.mock("../state/shortcuts", () => ({ chordFor: () => null }));
+vi.mock("../state/shortcuts", () => ({ chordFor: () => null, SHORTCUTS: [] }));
+// The tree words its rows by the file browser's commands, which register as
+// the tree imports them. The rest of the catalog reads the whole store, which
+// this file replaces, so it is left unloaded.
+vi.mock("../state/commands/install", () => ({}));
 vi.mock("./menuClamp", () => ({ clampMenu: () => ({}) }));
 vi.mock("./portal", () => ({ portal: () => ({}) }));
 
@@ -230,7 +234,7 @@ describe("inspector vs tree menu action parity", () => {
 
     const tree = await mountTreeMenu("demo.mp4");
     const menuLabels = treeMenuLabels(tree);
-    for (const label of ["View Video", "Download", "New Terminal", "New Graph"]) {
+    for (const label of ["View", "Download", "New terminal here", "New graph here"]) {
       expect(menuLabels).toContain(label);
     }
   });
@@ -250,7 +254,14 @@ describe("inspector vs tree menu action parity", () => {
 
     const tree = await mountTreeMenu("a.md");
     const menuLabels = treeMenuLabels(tree);
-    for (const label of ["Open", "Open in File Browser", "Download", "New Terminal", "Export to PDF", "New Graph"]) {
+    for (const label of [
+      "Open",
+      "Open in new file browser",
+      "Download",
+      "New terminal here",
+      "Export to PDF",
+      "New graph here",
+    ]) {
       expect(menuLabels).toContain(label);
     }
   });
@@ -264,7 +275,7 @@ describe("inspector vs tree menu action parity", () => {
     const tree = await mountTreeMenu("bundle.zip");
     const menuLabels = treeMenuLabels(tree);
     expect(menuLabels).toContain("Download");
-    expect(menuLabels).toContain("New Graph");
+    expect(menuLabels).toContain("New graph here");
     expect(menuLabels).not.toContain("Open");
     expect(menuLabels.some((l) => l.startsWith("View"))).toBe(false);
   });
@@ -277,15 +288,15 @@ describe("inspector vs tree menu action parity", () => {
 
     // The collapse applies to the SHARED classifier rows only. The
     // tree intentionally retains its separate policy for drafts:
-    // New File or Directory, Copy Path, Rename / Move, and Delete
+    // New file or directory, Copy path, Rename or move, and Delete
     // still render here and keep their own confirmation flow.
     const tree = await mountTreeMenu(".Drafts");
     const menuLabels = treeMenuLabels(tree);
-    expect(menuLabels).toContain("New Terminal");
+    expect(menuLabels).toContain("New terminal here");
     expect(menuLabels).not.toContain("Upload");
     expect(menuLabels).not.toContain("Download");
-    expect(menuLabels).not.toContain("New Graph");
-    for (const label of ["New File or Directory", "Copy Path", "Rename / Move", "Delete"]) {
+    expect(menuLabels).not.toContain("New graph here");
+    for (const label of ["New file or directory", "Copy path", "Rename or move", "Delete"]) {
       expect(menuLabels).toContain(label);
     }
   });
@@ -315,8 +326,8 @@ describe("destructive-action separation", () => {
     const tree = await mountTreeMenu("a.md");
     const menuLabels = treeMenuLabels(tree);
     expect(menuLabels).toContain("Delete");
-    expect(menuLabels).toContain("Rename / Move");
-    expect(menuLabels).toContain("Copy Path");
+    expect(menuLabels).toContain("Rename or move");
+    expect(menuLabels).toContain("Copy path");
   });
 
   test("the inspector never renders destructive actions", async () => {
@@ -345,12 +356,12 @@ describe("plain-directory parity", () => {
     const tree = await mountTreeMenu("docs");
     const menuLabels = treeMenuLabels(tree);
     for (const label of [
-      "Open in File Browser",
-      "New File or Directory",
+      "Open in new file browser",
+      "New file or directory",
       "Upload",
       "Download",
-      "New Terminal",
-      "New Graph",
+      "New terminal here",
+      "New graph here",
     ]) {
       expect(menuLabels).toContain(label);
     }

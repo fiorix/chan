@@ -110,7 +110,7 @@ describe("how a command is named", () => {
   });
 
   test("a title is sentence case: one capital to open it, proper names aside", () => {
-    const PROPER = /\b(Hybrid Nav|Rich Prompt|Inspector|PIN)\b/g;
+    const PROPER = /\b(Hybrid Nav|Rich Prompt|Inspector|PIN|PDF)\b/g;
     for (const { id, title } of allCommands()) {
       expect(title[0], id).toBe(title[0]!.toUpperCase());
       const rest = title.replace(PROPER, "").replace(/\bside [AB]\b/, "").slice(1);

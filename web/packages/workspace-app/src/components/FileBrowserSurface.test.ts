@@ -4,6 +4,10 @@
 // own menu (the hamburger, opened by the tab strip or dock body) and the
 // tree's row menu it hosts are driven here the way a
 // user reaches them; Pane is mounted for the one hop it owns, the Flip.
+//
+// The menu types no action's words itself: each row is held to the title of
+// the catalog command it runs, to the settings entry it flips, to the shortcut
+// table's label for the launcher, or to a named exemption.
 
 import { mount, tick, unmount, type ComponentProps } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -22,13 +26,16 @@ vi.mock("../state/windowCaps", async (importOriginal) => ({
   },
 }));
 
-import { setBrowserVim } from "../state/browserKeys.svelte";
+import { browserKeys, setBrowserVim } from "../state/browserKeys.svelte";
 import { api } from "../api/client";
 import FileBrowserSurface from "./FileBrowserSurface.svelte";
 import Pane from "./Pane.svelte";
+import { settingEntry } from "./settings/settingsIndex";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
-import { chordFor } from "../state/shortcuts";
+import { browserBindings } from "../state/browserKeymap";
+import { commandById, commandState } from "../state/commands";
+import { chordFor, SHORTCUTS } from "../state/shortcuts";
 import {
   browserSelection,
   fbTreeInstance,
@@ -40,6 +47,7 @@ import {
   refreshTree,
   resolvePathPrompt,
   refreshWorkspace,
+  tree,
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, paneSide, type BrowserTab, type LeafNode } from "../state/tabs.svelte";
@@ -103,22 +111,60 @@ function menu(): HTMLElement | null {
   return document.body.querySelector<HTMLElement>(".hamburger-menu");
 }
 
-/// The menu's rows in order: a separator, or the row's visible text.
+function rowLabel(row: Element): string {
+  return (row.querySelector(".menu-row-label")?.textContent ?? "").trim();
+}
+
+/// The menu's rows in order: a separator, or the row's label.
 function menuRows(): string[] {
   const list = menu();
   if (!list) return [];
-  return [...list.children].map((li) =>
-    li.getAttribute("role") === "separator" ? "---" : (li.textContent ?? "").replace(/\s+/g, " ").trim(),
-  );
+  return [...list.children].map((li) => (li.getAttribute("role") === "separator" ? "---" : rowLabel(li)));
 }
 
 function menuButton(label: string): HTMLButtonElement {
-  const button = [...(menu()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((b) =>
-    (b.textContent ?? "").includes(label),
+  const button = [...(menu()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+    (b) => rowLabel(b) === label,
   );
   if (!button) throw new Error(`no menu row ${label}`);
   return button;
 }
+
+function menuChord(label: string): string {
+  return menuButton(label).querySelector(".chord")?.textContent ?? "";
+}
+
+/// Where a menu row takes its words: the title of a catalog command, the
+/// label of a settings entry, the shortcut table's label for a chord the
+/// catalog does not list, or words of its own with the reason it has them.
+type Words =
+  | { command: string }
+  | { setting: string }
+  | { shortcut: string }
+  | { own: string; because: string };
+
+function title(id: string): string {
+  const command = commandById(id);
+  if (!command) throw new Error(`no catalog command ${id}`);
+  return command.title;
+}
+
+function wordsOf(source: Words | "---"): string {
+  if (source === "---") return source;
+  if ("command" in source) return title(source.command);
+  if ("setting" in source) return settingEntry(source.setting).label;
+  if ("shortcut" in source) {
+    const shortcut = SHORTCUTS.find((candidate) => candidate.id === source.shortcut);
+    if (!shortcut) throw new Error(`no shortcut ${source.shortcut}`);
+    return shortcut.label;
+  }
+  return source.own;
+}
+
+const SELECTION_ACTIONS: Words = {
+  own: "Selection actions",
+  because: "opens the tree's row menu, whose rows are the catalog commands; a launcher row would list them twice",
+};
 
 async function openFromTabStrip(tab: BrowserTab): Promise<void> {
   openTabMenu(tab.id, { left: 40, top: 30, right: 40, bottom: 30 });
@@ -180,10 +226,15 @@ describe("the tab variant", () => {
     await render({ variant: "tab", tab });
     await openFromTabStrip(tab);
     expect(menuRows()).toEqual([
-      "New file or directory", "Upload files", "Selection actions Shift+F10", "Select multiple F8", "---",
-      "Show hidden files", "Vim keyboard navigation", "Keyboard shortcuts", "---", "Workspace details",
-      "Stick to left", "Stick to right", `Close ${chordFor("app.tab.close") ?? ""}`.trim(),
+      "New file or directory", "Upload", "Selection actions", "Select multiple", "---",
+      "Hidden files", "Keyboard navigation: Vim navigation", "Keyboard shortcuts (file browser)", "---",
+      "Workspace details", "Left file browser dock", "Right file browser dock", "Close tab", "---",
+      "Command launcher",
     ]);
+    expect(menuChord("Selection actions")).toBe("Shift+F10");
+    expect(menuChord("Select multiple")).toBe("F8");
+    expect(menuChord("Close tab")).toBe(chordFor("app.tab.close") ?? "");
+    expect(menuChord("Command launcher")).toBe(chordFor("app.launcher.toggle") ?? "");
   });
 
   test("Close closes the menu and hands the close to the host", async () => {
@@ -192,26 +243,51 @@ describe("the tab variant", () => {
     await render({ variant: "tab", tab, onClose });
     await openFromTabStrip(tab);
 
-    menuButton("Close").click();
+    menuButton("Close tab").click();
     await settle();
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(menu()).toBeNull();
   });
 
-  test("the stick toggles dock the browser to a side and read back as unstick", async () => {
+  test("Flip pane sits before Close tab where the host can flip, and flips through it", async () => {
+    const tab = seat(browserTab());
+    const onFlip = vi.fn();
+    await render({ variant: "tab", tab, onFlip });
+    await openFromTabStrip(tab);
+
+    const rows = menuRows();
+    expect(rows.slice(rows.indexOf("Right file browser dock") + 1)).toEqual([
+      "Flip pane", "Close tab", "---", "Command launcher",
+    ]);
+    expect(menuChord("Flip pane")).toBe(chordFor("app.pane.flip") ?? "");
+
+    menuButton("Flip pane").click();
+    await settle();
+    expect(onFlip).toHaveBeenCalledTimes(1);
+    expect(menu()).toBeNull();
+  });
+
+  test("a dock row docks the browser to its side and shows a check while it is docked", async () => {
     const tab = seat(browserTab());
     await render({ variant: "tab", tab });
 
     await openFromTabStrip(tab);
-    menuButton("Stick to left").click();
+    expect(menuButton("Left file browser dock").getAttribute("aria-checked")).toBe("false");
+    menuButton("Left file browser dock").click();
     await settle();
     expect(browserSidePanes.left).toBe(true);
     expect(menu(), "the toggle closes the menu").toBeNull();
 
     closeTabMenu();
     await openFromTabStrip(tab);
-    expect(menuRows()).toContain("Unstick left");
-    menuButton("Stick to right").click();
+    const left = menuButton("Left file browser dock");
+    expect(left.getAttribute("role")).toBe("menuitemcheckbox");
+    expect(left.getAttribute("aria-checked")).toBe("true");
+    expect(left.querySelector(".lucide-check"), "a docked side draws its check").not.toBeNull();
+    const right = menuButton("Right file browser dock");
+    expect(right.getAttribute("aria-checked")).toBe("false");
+    expect(right.querySelector(".lucide-check")).toBeNull();
+    right.click();
     await settle();
     expect(browserSidePanes.right).toBe(true);
   });
@@ -242,12 +318,278 @@ describe("the tab variant", () => {
     expect(row, "the tree listed the workspace").toBeDefined();
     row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     await settle();
-    const flip = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
-      (b) => b.querySelector(".menu-row-label")?.textContent === "Flip",
+    const flip = [...document.body.querySelectorAll<HTMLButtonElement>(".ctx button")].find(
+      (b) => b.querySelector(".menu-row-label")?.textContent === "Flip pane",
     );
     expect(flip).toBeDefined();
     flip!.click();
     expect(onFlip).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the menu's words", () => {
+  const HEAD: (Words | "---")[] = [
+    { command: "app.browser.newFsEntry" },
+    { command: "app.browser.uploadSelection" },
+    SELECTION_ACTIONS,
+    { command: "app.browser.selectMultiple" },
+    "---",
+  ];
+  const KEYS: (Words | "---")[] = [
+    { setting: "browser.vim" },
+    { command: "app.browser.keyboardHelp" },
+    "---",
+  ];
+  const DOCKS: Words[] = [
+    { command: "app.browser.showWorkspaceInfo" },
+    { command: "app.browser.toggleLeftDock" },
+    { command: "app.browser.toggleRightDock" },
+  ];
+  const LAUNCHER: (Words | "---")[] = ["---", { shortcut: "app.launcher.toggle" }];
+
+  test("every row of a tab's menu is a command's title, a setting's label, the launcher's shortcut label or a named exemption", async () => {
+    const tab = seat(browserTab());
+    await render({ variant: "tab", tab, onFlip: vi.fn() });
+    await openFromTabStrip(tab);
+
+    expect(menuRows()).toEqual(
+      [
+        ...HEAD,
+        { command: "app.browser.hiddenFiles" },
+        ...KEYS,
+        ...DOCKS,
+        { command: "app.pane.flip" },
+        { command: "app.tab.close" },
+        ...LAUNCHER,
+      ].map(wordsOf),
+    );
+  });
+
+  test("every row of a dock's menu is held the same way", async () => {
+    const target = await render({ variant: "dock", side: "left" });
+    target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await settle();
+
+    expect(menuRows()).toEqual(
+      [...HEAD, ...KEYS, { command: "app.browser.openInBrowser" }, ...DOCKS, ...LAUNCHER].map(wordsOf),
+    );
+  });
+
+  test("the toolbar's New button is named by the command it runs", async () => {
+    const target = await render({ variant: "tab", tab: seat(browserTab()) });
+    const button = target.querySelector<HTMLButtonElement>(".new-button")!;
+
+    expect(button.getAttribute("aria-label")).toBe(title("app.browser.newFsEntry"));
+    expect(button.title).toBe(title("app.browser.newFsEntry"));
+  });
+
+  test("the key list words a key by the command it runs, and the rest by what the key does", async () => {
+    // The keys that run a catalog command. Every other key moves the cursor
+    // or the selection, which the catalog does not list.
+    const commands: Record<string, string> = {
+      open: "app.browser.open",
+      rename: "app.browser.renameSelection",
+      copy: "app.browser.copySelection",
+      cut: "app.browser.cutSelection",
+      paste: "app.browser.pasteSelection",
+      delete: "app.browser.deleteSelection",
+      selectMode: "app.browser.selectMultiple",
+    };
+    const own: Record<string, string> = {
+      previous: "Previous", next: "Next", parent: "Parent", child: "Child", first: "First", last: "Last",
+      pagePrevious: "Page previous", pageNext: "Page next", menu: wordsOf(SELECTION_ACTIONS), preview: "Preview",
+      filter: "Filter", toggle: "Toggle", selectAll: "Select all", clear: "Clear",
+    };
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    await openFromTabStrip(tab);
+    menuButton(title("app.browser.keyboardHelp")).click();
+    await settle();
+
+    const listed = [...target.querySelectorAll(".keyboard-help dt")].map((dt) => dt.textContent);
+    expect(listed).toEqual(
+      Object.keys(browserBindings).map((key) => (commands[key] ? title(commands[key]) : own[key])),
+    );
+  });
+});
+
+describe("the menu's toggles and their commands", () => {
+  function checked(label: string): string | null {
+    const row = menuButton(label);
+    expect(row.getAttribute("role"), label).toBe("menuitemcheckbox");
+    expect(row.querySelector(".lucide-check") !== null, `${label} draws its check only while on`).toBe(
+      row.getAttribute("aria-checked") === "true",
+    );
+    return row.getAttribute("aria-checked");
+  }
+
+  function names(target: HTMLElement): string[] {
+    return [...target.querySelectorAll('[role="option"] .name')].map((el) => el.textContent!.trim());
+  }
+
+  test("Select multiple: the row and the command flip one switch, and each shows the other's change", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const command = commandById("app.browser.selectMultiple")!;
+    expect(commandState(command.id)).toBe(false);
+
+    await openFromTabStrip(tab);
+    expect(checked(command.title)).toBe("false");
+    menuButton(command.title).click();
+    await settle();
+    expect(commandState(command.id)).toBe(true);
+    expect(target.querySelector(".selection-mode"), "the footer says rows are being marked").not.toBeNull();
+
+    closeTabMenu();
+    await openFromTabStrip(tab);
+    expect(checked(command.title)).toBe("true");
+    command.run();
+    await settle();
+    expect(checked(command.title)).toBe("false");
+    expect(target.querySelector(".selection-mode")).toBeNull();
+  });
+
+  test("Hidden files: the row and the command hide and list the dot entries", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    tree.entries.push({ path: ".cache", is_dir: true, mtime: null, size: 0 });
+    await settle();
+    const command = commandById("app.browser.hiddenFiles")!;
+    expect(commandState(command.id)).toBe(true);
+    expect(names(target)).toEqual([".cache", "notes", "README.md"]);
+
+    await openFromTabStrip(tab);
+    expect(checked(command.title)).toBe("true");
+    menuButton(command.title).click();
+    await settle();
+    expect(commandState(command.id)).toBe(false);
+    expect(names(target)).toEqual(["notes", "README.md"]);
+
+    command.run();
+    await settle();
+    expect(names(target)).toEqual([".cache", "notes", "README.md"]);
+    closeTabMenu();
+    await openFromTabStrip(tab);
+    expect(checked(command.title)).toBe("true");
+  });
+
+  test("Keyboard shortcuts: the row and the command show and hide the key list", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    const command = commandById("app.browser.keyboardHelp")!;
+
+    await openFromTabStrip(tab);
+    expect(checked(command.title)).toBe("false");
+    menuButton(command.title).click();
+    await settle();
+    expect(commandState(command.id)).toBe(true);
+    expect(target.querySelector(".keyboard-help")).not.toBeNull();
+
+    closeTabMenu();
+    await openFromTabStrip(tab);
+    expect(checked(command.title)).toBe("true");
+    command.run();
+    await settle();
+    expect(target.querySelector(".keyboard-help")).toBeNull();
+    expect(checked(command.title)).toBe("false");
+  });
+
+  test("the Vim row reads and flips the settings entry it is worded from", async () => {
+    const tab = seat(browserTab());
+    await render({ variant: "tab", tab });
+    const vim = settingEntry("browser.vim");
+
+    await openFromTabStrip(tab);
+    expect(checked(vim.label)).toBe("false");
+    menuButton(vim.label).click();
+    await settle();
+    expect(vim.read()).toBe(true);
+    expect(browserKeys.vim).toBe(true);
+
+    closeTabMenu();
+    await openFromTabStrip(tab);
+    expect(checked(vim.label)).toBe("true");
+    expect(menuChord(title("app.browser.selectMultiple")), "the marking key follows the keymap").toBe("v");
+  });
+
+  test("a dock row is checked by the state its command reports", async () => {
+    const tab = seat(browserTab());
+    await render({ variant: "tab", tab });
+    const left = commandById("app.browser.toggleLeftDock")!;
+
+    await openFromTabStrip(tab);
+    expect(checked(left.title)).toBe("false");
+    left.run();
+    await settle();
+    expect(checked(left.title)).toBe("true");
+  });
+
+  test("a surface shown again starts from the defaults", async () => {
+    const tab = seat(browserTab());
+    await render({ variant: "tab", tab });
+    commandById("app.browser.hiddenFiles")!.run();
+    commandById("app.browser.selectMultiple")!.run();
+    await settle();
+    expect(commandState("app.browser.hiddenFiles")).toBe(false);
+
+    for (const app of mounted.splice(0)) unmount(app);
+    await settle(2);
+    expect(commandState("app.browser.hiddenFiles")).toBe(true);
+    expect(commandState("app.browser.selectMultiple")).toBe(false);
+  });
+});
+
+describe("the launcher from the menu", () => {
+  test("the launcher row closes the menu and asks for the launcher with the keyboard back on the list", async () => {
+    const tab = seat(browserTab());
+    const target = await render({ variant: "tab", tab });
+    // What held the keyboard as the launcher was asked for is what the
+    // launcher hands it back to when it closes.
+    const heldAtOpen: (Element | null)[] = [];
+    const onCommand = (e: Event): void => {
+      if ((e as CustomEvent).detail?.name === "app.launcher.toggle") heldAtOpen.push(document.activeElement);
+    };
+    window.addEventListener("chan:command", onCommand);
+    try {
+      await openFromTabStrip(tab);
+      menuButton(wordsOf({ shortcut: "app.launcher.toggle" })).click();
+      await settle();
+    } finally {
+      window.removeEventListener("chan:command", onCommand);
+    }
+
+    expect(heldAtOpen).toEqual([target.querySelector('[role="listbox"]')]);
+    expect(menu()).toBeNull();
+  });
+});
+
+describe("the launcher's Open", () => {
+  function open(): void {
+    commandById("app.browser.open")!.run();
+  }
+
+  test("enters the selected directory, as Enter does", async () => {
+    const tab = seat(browserTab({ selected: "notes" }));
+    await render({ variant: "tab", tab });
+    expect(tab.directory).toBe("");
+
+    open();
+    await settle();
+    expect(tab.directory).toBe("notes");
+  });
+
+  test("is answered by the active file browser tab alone", async () => {
+    const tab = seat(browserTab({ selected: "notes" }));
+    await render({ variant: "tab", tab });
+    // Another tab takes the pane: the surface is still mounted here, and the
+    // launcher is no longer aimed at it.
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs.push({ kind: "browser", id: "fb-2", title: "Files 2", inspectorOpen: false });
+    pane.activeTabId = "fb-2";
+
+    open();
+    await settle();
+    expect(tab.directory).toBe("");
   });
 });
 
@@ -314,7 +656,7 @@ describe("graphs from the browser", () => {
     await settle();
     const labels = [...document.body.querySelectorAll(".ctx .menu-row-label")].map((el) => el.textContent);
     expect(labels).toContain("Delete");
-    expect(labels).not.toContain("New Graph");
+    expect(labels).not.toContain("New graph here");
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
     const readme = [...target.querySelectorAll<HTMLElement>("[role='treeitem'], [role='option']")].find(
@@ -343,16 +685,16 @@ describe("the tree's row menu", () => {
     );
   }
 
-  test("a directory row offers one New File or Directory entry, which opens the file-or-directory prompt there", async () => {
+  test("a directory row offers one New file or directory entry, which opens the file-or-directory prompt there", async () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab, onFlip: vi.fn() });
     const rows = await rowMenu(target, "notes");
-    expect(rows.filter((r) => /^New (File|Directory)/.test(r)), "no separate New File or New Directory").toEqual([
-      "New File or Directory",
+    expect(rows.filter((r) => /^New (file|directory)/.test(r)), "no separate New file or New directory").toEqual([
+      "New file or directory",
     ]);
 
     const entry = [...document.body.querySelectorAll<HTMLButtonElement>(".ctx > button")].find(
-      (b) => b.textContent?.trim() === "New File or Directory",
+      (b) => b.textContent?.trim() === "New file or directory",
     );
     entry!.click();
     await settle();
@@ -362,13 +704,13 @@ describe("the tree's row menu", () => {
     expect(document.body.querySelector(".ctx"), "the menu closed").toBeNull();
   });
 
-  test("a file row has no create entry, and Flip is the last row after a separator", async () => {
+  test("a file row has no create entry, and Flip pane and the launcher close the menu after a separator", async () => {
     const tab = seat(browserTab());
     const target = await render({ variant: "tab", tab, onFlip: vi.fn() });
     const rows = await rowMenu(target, "README.md");
     expect(document.body.querySelector(".ctx")!.parentElement, "portaled to the page body").toBe(document.body);
-    expect(rows.some((r) => /^New (File|Directory)/.test(r))).toBe(false);
-    expect(rows.slice(-2)).toEqual(["---", "Flip"]);
+    expect(rows.some((r) => /^New (file|directory)/.test(r))).toBe(false);
+    expect(rows.slice(-3)).toEqual(["---", "Flip pane", "Command launcher"]);
   });
 });
 
@@ -388,17 +730,21 @@ describe("the dock variant", () => {
     expect(menu()!.style.top).toBe("80px");
   });
 
-  test("offers Open in File Browser before the stick toggles, and no Close", async () => {
+  test("offers Open in new file browser before the dock rows, and no Flip pane or Close tab", async () => {
     const target = await render({ variant: "dock", side: "left" });
     target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     await settle();
 
     const rows = menuRows();
-    expect(rows.slice(-4)).toEqual(["Open in File Browser", "Workspace details", "Stick to left", "Stick to right"]);
-    expect(rows.some((row) => row.startsWith("Close"))).toBe(false);
+    expect(rows.slice(-6)).toEqual([
+      "Open in new file browser", "Workspace details", "Left file browser dock", "Right file browser dock", "---",
+      "Command launcher",
+    ]);
+    expect(rows).not.toContain("Close tab");
+    expect(rows).not.toContain("Flip pane");
   });
 
-  test("Open in File Browser opens a tab in the selection's directory", async () => {
+  test("Open in new file browser opens a tab in the selection's directory", async () => {
     seat(browserTab({ id: "existing" }));
     const target = await render({ variant: "dock", side: "left" });
     target.querySelector<HTMLElement>('[role="tree"]')!.focus();
@@ -406,7 +752,7 @@ describe("the dock variant", () => {
     target.querySelector(".browser")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
     await settle();
 
-    menuButton("Open in File Browser").click();
+    menuButton("Open in new file browser").click();
     await settle();
     const tabs = (layout.nodes[layout.activePaneId] as LeafNode).tabs;
     const opened = tabs.find((t) => t.kind === "browser" && t.id !== "existing") as BrowserTab;
@@ -439,9 +785,9 @@ describe("the dock variant", () => {
     );
     row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     await settle();
-    const labels = [...document.body.querySelectorAll(".menu-row-label")].map((el) => el.textContent);
+    const labels = [...document.body.querySelectorAll(".ctx .menu-row-label")].map((el) => el.textContent);
     expect(labels).toContain("Delete");
-    expect(labels).not.toContain("Flip");
+    expect(labels).not.toContain("Flip pane");
   });
 });
 
@@ -461,8 +807,8 @@ describe("a Files tab inside a pane", () => {
     expect(row, "the pane's browser listed the workspace").toBeDefined();
     row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     await settle();
-    const flip = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
-      (b) => b.querySelector(".menu-row-label")?.textContent === "Flip",
+    const flip = [...document.body.querySelectorAll<HTMLButtonElement>(".ctx button")].find(
+      (b) => b.querySelector(".menu-row-label")?.textContent === "Flip pane",
     );
     flip!.click();
     await settle();

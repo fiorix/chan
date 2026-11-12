@@ -3,7 +3,7 @@
 // One policy, two renderers: each surface maps the returned action
 // identifiers to its own handlers and labels, so applicability can
 // never drift between the inspector pill/dropdown and the right-click
-// menu. Destructive and path-mutation rows (Copy Path, Rename / Move,
+// menu. Destructive and path-mutation rows (Copy path, Rename or move,
 // Delete) are NOT actions in this model; they belong to FileTree's
 // separate policy and confirmation flow, and this module never emits
 // them.
@@ -20,7 +20,7 @@ export type FileActionId =
   /// browser (the inspector's directory "Open" routes the same way).
   | "open"
   /// Reveal the entry in a file browser (inspector: "Show file";
-  /// tree: "Open in File Browser").
+  /// tree: "Open in new file browser").
   | "showFile"
   /// View an image (zoom), video, audio, or PDF in its viewer.
   | "viewMedia"
